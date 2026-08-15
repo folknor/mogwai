@@ -68,6 +68,25 @@ name; the venue models neither trailing state nor order linkage. No order book
 exists: orders never interact, so self-trade within one account is impossible
 rather than prevented, and every fill is judged only against the tape.
 
+Live pacing is owned by the boatyard. A river is deterministic checkpointed
+water keyed by symbol and its resolved bundle digest. A boat is one positioned
+cursor, one OS pacing thread, one clock and one broadcast ring on that river.
+A passenger owns an uncloneable ticket for one websocket connection. The first
+passenger places the boat at the river's fixed warmup origin; later passengers
+with the same speed join it mid-stream. Speed is quantized to micro-multiples
+in the sharing key. Duration is passenger-local and is therefore not in that
+key. At most one boat sits on a river, and a differing speed is refused loudly.
+The last ticket removes the seat, cancels the worker and joins it away from the
+registry mutex. Rivers and their bounded checkpoint sets remain for process
+life so later history does not depend on eviction timing.
+
+Each boat has its own settlement watermark and its own ring. Market water is
+exogenous: orders never move it and there is no queue competition. Fifty agents
+submitting the same buy against the same water receive the same fill without
+changing one another's result. Generator-level havoc belongs to river identity
+and cannot mutate a seated boat; transport havoc remains a property of what a
+passenger sees.
+
 An instrument is a bundle of knobs, not one fixed shape. Two classes are
 selectable: a spot currency pair, and a cash-settled continuous future with a
 contract multiplier, whole-contract quantities on the order path AND on the
@@ -77,7 +96,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 17; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 18; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,

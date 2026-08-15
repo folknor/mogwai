@@ -9,7 +9,12 @@
 
 use std::sync::{Arc, atomic::Ordering};
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
@@ -25,6 +30,14 @@ use crate::admission::{ExecLanes, Reservation};
 use crate::config::{Config, sim_duration_from_millis, sim_now_ns, window_until_ns};
 use crate::run::Run;
 use crate::source;
+
+#[derive(Deserialize)]
+pub(crate) struct DivergenceRequest {
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(flatten)]
+    divergence: Divergence,
+}
 
 /// What one order-entry command came to. Every variant that carries frames also
 /// carries the reservation those frames were produced under: there is no path
@@ -216,10 +229,11 @@ pub(crate) async fn process_order_cmd(
     run: &Arc<Run>,
     lanes: &ExecLanes,
     socket_symbol: &mogwai_protocol::Symbol,
+    sim: SimClock,
 ) -> OrderOutcome {
     // Sampled at entry for the boundary rejections below: they return before
     // any price synthesis, so entry-time is when they logically occur.
-    let ts = sim_now_ns(state.sim());
+    let ts = sim_now_ns(sim);
     if let Some(outcome) = boundary_outcome(&order_cmd, lanes, ts) {
         return outcome;
     }
@@ -282,19 +296,19 @@ pub(crate) async fn process_order_cmd(
     let class = CommandClass::of(&order_cmd);
     let act_ms = class.map_or(0, |class| run.act_ms(class));
     if act_ms > 0 {
-        tokio::time::sleep(state.sim().wall_duration(sim_duration_from_millis(act_ms))).await;
+        tokio::time::sleep(sim.wall_duration(sim_duration_from_millis(act_ms))).await;
     }
     // Re-sampled BEFORE the reading, not after the act sleep only in name: the
     // reading is "the last print at or before the venue ACTED", so
     // handing it the entry-time `ts` would judge a delayed submit against the
     // tape as it was when the command arrived - the exact staleness the act
     // delay is placed above the reading to avoid.
-    let ts = sim_now_ns(state.sim());
+    let ts = sim_now_ns(sim);
     let (order_cmd, market_px) = market_reading(order_cmd, state, ts, socket_symbol).await;
     // Re-sample after the market-price synthesis, which for a price-less MARKET
     // order may block ~100 ms on the checkpoint mutex and seek (S16). The
     // synthesis-failure reject and the engine events below all occur now.
-    let ts = sim_now_ns(state.sim());
+    let ts = sim_now_ns(sim);
     // A MARKET order still price-less after the stamp, for a symbol this venue
     // DOES list, means market price synthesis failed (most likely the task
     // itself died).
@@ -436,27 +450,31 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
         status: "ok",
         oms_type: state.run.oms_type,
         run_seed: state.run.seeds.run,
-        fault: state.run.tape.fault().map(|fault| match fault {
-            mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NoOpenExposure {
-                from_ns,
-            }) => HealthFault {
-                kind: "arrival.no_open_exposure",
-                clock_ns: from_ns,
-            },
-            mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::IntensityCeiling {
-                clock_ns,
-                ..
-            }) => HealthFault {
-                kind: "arrival.intensity_ceiling",
-                clock_ns,
-            },
-            mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NonFiniteState {
-                clock_ns,
-            }) => HealthFault {
-                kind: "arrival.non_finite_state",
-                clock_ns,
-            },
-        }),
+        fault: state
+            .run
+            .boatyard
+            .boat_for_symbol(&state.run.boot_symbol)
+            .and_then(|boat| boat.tape.fault())
+            .map(|fault| match fault {
+                mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NoOpenExposure {
+                    from_ns,
+                }) => HealthFault {
+                    kind: "arrival.no_open_exposure",
+                    clock_ns: from_ns,
+                },
+                mogwai_data::TickFault::Arrival(
+                    mogwai_data::ArrivalRefusal::IntensityCeiling { clock_ns, .. },
+                ) => HealthFault {
+                    kind: "arrival.intensity_ceiling",
+                    clock_ns,
+                },
+                mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NonFiniteState {
+                    clock_ns,
+                }) => HealthFault {
+                    kind: "arrival.non_finite_state",
+                    clock_ns,
+                },
+            }),
     })
 }
 
@@ -471,8 +489,9 @@ impl AppState {
 /// divert it onto.
 pub(crate) async fn arm_divergence(
     State(state): State<AppState>,
-    Json(div): Json<Divergence>,
+    Json(request): Json<DivergenceRequest>,
 ) -> impl IntoResponse {
+    let div = request.divergence;
     // Reject an invalid control payload before anything is stored. A typo must
     // be a no-op.
     if let Err(err) = validate_divergence(&div) {
@@ -530,19 +549,39 @@ pub(crate) async fn arm_divergence(
             children_mult,
             duration_ms,
         } => {
-            if run
-                .tape
-                .arm_flow_surge(
-                    sim_now_ns(state.sim()),
-                    duration_ms,
-                    rate_mult,
-                    children_mult,
-                )
-                .is_err()
-            {
+            let symbol = if let Some(symbol) = request.symbol.as_deref() {
+                symbol
+            } else {
+                let seated = run.boatyard.seated_symbols();
+                if !seated.is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "generator divergence requires symbol; seated boats: {}",
+                            seated.join(", ")
+                        ),
+                    );
+                }
+                run.boot_symbol.as_ref()
+            };
+            if run.boatyard.boat_for_symbol(symbol).is_some() {
                 return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "tape control unavailable".to_owned(),
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "river {symbol} has a seated boat; place a boat whose sharing key carries generator havoc"
+                    ),
+                );
+            }
+            if !state.rivers.arm_flow_surge(
+                symbol,
+                sim_now_ns(state.sim()),
+                duration_ms,
+                rate_mult,
+                children_mult,
+            ) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("symbol {symbol} has no configured shape"),
                 );
             }
         }
@@ -576,14 +615,38 @@ pub(crate) async fn arm_divergence(
             // and `now_ns() < 0` is never true so the dark and data-stall
             // guards are off. There is no backlog to replay because gated
             // frames are dropped.
+            // The generator half is decided BEFORE anything is lifted: a
+            // refused control must be a no-op, and returning here after the
+            // stores below would leave the transport windows cleared under a
+            // `400` that says nothing happened.
+            let clearing: Vec<String> = match request.symbol.as_deref() {
+                Some(symbol) => {
+                    if run.boatyard.boat_for_symbol(symbol).is_some() {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "river {symbol} has a seated boat; generator controls cannot mutate live water"
+                            ),
+                        );
+                    }
+                    vec![symbol.to_owned()]
+                }
+                // Unqualified, this clears every river whose water exists and
+                // carries no boat. A seated river is SKIPPED rather than
+                // refused: the transport half of this control is run-wide and
+                // must stay reachable while a boat is sitting.
+                None => state
+                    .rivers
+                    .materialized_symbols()
+                    .into_iter()
+                    .filter(|symbol| run.boatyard.boat_for_symbol(symbol).is_none())
+                    .collect(),
+            };
             run.delay_ms.store(0, Ordering::Relaxed);
             run.dark_until_ns.store(0, Ordering::Relaxed);
             run.stall_until_ns.store(0, Ordering::Relaxed);
-            if run.tape.clear_flow_surge().is_err() {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "tape control unavailable".to_owned(),
-                );
+            for symbol in clearing {
+                state.rivers.clear_flow_surge(&symbol);
             }
             run.engine.lock().await.clear_fee_surcharge();
             // All six `CommandLatency` fields go with them. This clears what the
@@ -666,18 +729,44 @@ pub(crate) async fn account(State(state): State<AppState>) -> Json<AccountState>
     Json(engine.account_snapshot(ts))
 }
 
-pub(crate) async fn clock(State(state): State<AppState>) -> Json<ServerClock> {
+#[derive(Default, Deserialize)]
+pub(crate) struct ClockQuery {
+    #[serde(default)]
+    symbol: Option<String>,
+}
+
+pub(crate) async fn clock(
+    Query(query): Query<ClockQuery>,
+    State(state): State<AppState>,
+) -> Json<ServerClock> {
     // Publish the tape boundary alongside the affine map so a client can guard
     // its own warmup against `data_origin_ns` rather than issuing a doomed
     // off-tape fetch. `server_now_ns` is sampled here so the client gets sim-now
     // and the floor from one round trip, without reading its own (skewable) wall
     // clock. `data_origin_ns` is the fixed floor; the horizon is echoed so
     // the client can report the floor in its own terms.
+    //
+    // `?symbol=` answers for that river's boat, of which there is at most one.
+    // For a boat, `server_now_ns` is the sim instant of the last tick it
+    // PUBLISHED rather than the affine map evaluated at the wall: a boat placed
+    // mid-run is deliberately behind its own clock's projection, and a client
+    // pacing against a projection the feed has not reached would ask for water
+    // that has not been delivered. With no boat the two coincide.
+    let boat = query
+        .symbol
+        .as_deref()
+        .and_then(|symbol| state.run.boatyard.boat_for_symbol(symbol));
+    let sim = boat.as_ref().map_or_else(|| state.sim(), |boat| boat.sim);
+    let server_now_ns = boat.as_ref().map_or_else(
+        || sim_now_ns(sim),
+        |boat| boat.published_ns.load(Ordering::Acquire),
+    );
     Json(ServerClock {
-        sim: state.sim(),
-        server_now_ns: sim_now_ns(state.sim()),
+        sim,
+        server_now_ns,
         data_origin_ns: state.run.data_origin_ns(),
         warmup_ns: state.run.warmup_ns,
+        boat_clock: boat.is_some(),
     })
 }
 
@@ -1083,18 +1172,12 @@ pub(crate) fn resolve_socket_symbol(
             "requested symbol {echoed} is not a legal symbol; symbols are 1 to 32 characters of ASCII letters, digits, dot, dash or underscore"
         ));
     }
-    if requested == bound.as_ref() {
-        return Ok(Arc::clone(bound));
-    }
-    // A configured non-boot symbol has history but no paced boat yet. The
-    // fallback names the boat this socket can bind rather than claiming that
-    // the configured river is unserved.
-    Err(unserved_symbol_refusal(requested, profiles).unwrap_or_else(|| {
-        let echoed: String = requested.chars().take(MAX_ECHOED_SYMBOL).collect();
-        format!(
-            "requested symbol {echoed} is configured but is not the river this run booted; this run serves {bound}"
-        )
-    }))
+    profiles
+        .get(requested)
+        .map(|profile| Arc::clone(&profile.def.symbol))
+        .ok_or_else(|| {
+            unserved_symbol_refusal(requested, profiles).expect("absent profile has refusal")
+        })
 }
 
 /// Refuse a history start outside the tape that exists now.
@@ -1215,15 +1298,12 @@ mod history_admission_tests {
     }
 
     #[test]
-    fn a_configured_but_unbooted_socket_symbol_names_the_bound_river() {
+    fn a_configured_non_boot_socket_symbol_resolves_its_river() {
         let profiles = refusal_profiles(&["MNQ", "BTCUSDT"]);
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
-        let refusal = resolve_socket_symbol(Some("BTCUSDT"), &bound, &profiles)
-            .expect_err("configured is not the boot river");
-        assert_eq!(
-            refusal,
-            "requested symbol BTCUSDT is configured but is not the river this run booted; this run serves MNQ"
-        );
+        let resolved = resolve_socket_symbol(Some("BTCUSDT"), &bound, &profiles)
+            .expect("configured river is servable");
+        assert_eq!(resolved.as_ref(), "BTCUSDT");
     }
 
     #[test]

@@ -13,11 +13,7 @@ use mogwai_protocol::{CommandClass, InstrumentDef, RunSeeds, SimClock, Symbol};
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
-use crate::{
-    admission::ExecLanes,
-    source,
-    tape::{Tape, TapeSpawn},
-};
+use crate::{admission::ExecLanes, boatyard::Boatyard, source};
 
 pub(crate) struct Run {
     /// The shape this run placed its one paced boat on. Every configured shape
@@ -30,7 +26,8 @@ pub(crate) struct Run {
     pub(crate) oms_type: mogwai_protocol::OmsType,
     pub(crate) engine: AsyncMutex<Engine>,
     pub(crate) seeds: RunSeeds,
-    pub(crate) tape: Arc<Tape>,
+    pub(crate) boatyard: Arc<Boatyard>,
+    boot_ticket: Mutex<Option<crate::boatyard::Ticket>>,
     /// The run clock. Owned HERE rather than beside the router state: a run has
     /// one clock, and a second copy in the HTTP state is a second thing that
     /// could be re-anchored independently of the tape it dates.
@@ -78,7 +75,6 @@ impl Run {
         warmup_ns: u64,
         run_duration_ns: Option<u64>,
         seeds: RunSeeds,
-        speed: f64,
         fanout_depth: usize,
         zero_speed_stall_ms: u64,
         oms_type: mogwai_protocol::OmsType,
@@ -86,17 +82,12 @@ impl Run {
         account_id: mogwai_protocol::AccountId,
         fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
     ) -> Arc<Self> {
-        let symbol = std::sync::Arc::clone(&instrument.symbol);
-        let tape = Tape::start(
-            symbol.to_string(),
-            TapeSpawn {
-                rivers: Arc::clone(&rivers),
-                sim,
-                speed,
-                fanout_depth,
-                zero_speed_stall_ms,
-                fault_tx,
-            },
+        let boatyard = Boatyard::new(
+            Arc::clone(&rivers),
+            fanout_depth,
+            zero_speed_stall_ms,
+            fault_tx,
+            started_ns,
         );
         let (complete_tx, _) = watch::channel(None);
         let mut engine = Engine::build(EngineConfig {
@@ -115,7 +106,8 @@ impl Run {
             rivers,
             oms_type,
             seeds,
-            tape,
+            boatyard,
+            boot_ticket: Mutex::new(None),
             sim,
             started_ns,
             deadline_ns: run_duration_ns.map(|duration| started_ns.saturating_add(duration)),
@@ -133,6 +125,13 @@ impl Run {
             lanes: Mutex::new(Vec::new()),
             next_lane_id: AtomicU64::new(0),
         })
+    }
+
+    pub(crate) fn retain_boot_ticket(&self, ticket: crate::boatyard::Ticket) {
+        *self
+            .boot_ticket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ticket);
     }
 
     /// Make `symbol` tradable on this run's engine: register the def and install
@@ -280,7 +279,6 @@ mod tests {
             warmup_ns,
             run_duration_ns,
             RunSeeds::from_run_seed(42),
-            0.0,
             8,
             1,
             mogwai_protocol::OmsType::Netting,
@@ -297,7 +295,6 @@ mod tests {
         assert_eq!(run.data_origin_ns(), source::TAPE_ORIGIN_NS);
         assert_eq!(run.started_ns, 1_000);
         assert_eq!(run.warmup_ns, 400);
-        run.tape.stop_for_test();
     }
 
     #[test]
@@ -307,10 +304,8 @@ mod tests {
         // its duration must still get its whole declared duration.
         let bounded = run(1_000_000, 999_000, Some(30));
         assert_eq!(bounded.deadline_ns, Some(1_000_030));
-        bounded.tape.stop_for_test();
 
         let indefinite = run(1_000, 0, None);
         assert_eq!(indefinite.deadline_ns, None);
-        indefinite.tape.stop_for_test();
     }
 }

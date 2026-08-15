@@ -12,6 +12,7 @@ use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol};
 use rust_decimal::Decimal;
 use std::{
     collections::HashMap,
+    hash::{Hash, Hasher},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -83,6 +84,12 @@ impl InstrumentProfiles {
     }
     pub fn get(&self, symbol: &str) -> Option<&InstrumentProfile> {
         self.by_symbol.get(symbol)
+    }
+    /// Every configured profile, in unspecified order. For the callers that
+    /// pre-derive something per profile at construction; anything a human or a
+    /// test reads sorts through `served_symbols` instead.
+    pub fn iter(&self) -> impl Iterator<Item = &InstrumentProfile> {
+        self.by_symbol.values()
     }
     /// Every symbol this run can synthesize, sorted, for refusal messages that
     /// must name what IS servable. Sorted because a refusal body is read by a
@@ -166,14 +173,129 @@ const MAX_EXTEND_TICKS: usize = 1 << 30;
 const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 1_335_079_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RiverKey(Symbol);
+pub(crate) struct RiverKey {
+    symbol: Symbol,
+    bundle: u64,
+}
 impl RiverKey {
-    pub(crate) fn for_symbol(symbol: &Symbol) -> Self {
-        Self(Arc::clone(symbol))
+    pub(crate) fn resolve(profile: &InstrumentProfile, identity: TapeIdentity) -> Self {
+        let mut digest = std::collections::hash_map::DefaultHasher::new();
+        let hash_f64 = |value: f64, digest: &mut std::collections::hash_map::DefaultHasher| {
+            value.to_bits().hash(digest);
+        };
+        profile.def.symbol.hash(&mut digest);
+        identity
+            .seeds
+            .tape_for(&profile.def.symbol)
+            .hash(&mut digest);
+        serde_json::to_string(&identity.regime)
+            .expect("MarketRegime serializes")
+            .hash(&mut digest);
+        // Canonical field sequence. Keep it explicit: neither Debug output nor
+        // map order is an identity contract.
+        serde_json::to_string(&profile.def)
+            .expect("InstrumentDef serializes")
+            .hash(&mut digest);
+        let scalars = &profile.scalars;
+        scalars.symbol.hash(&mut digest);
+        scalars.modal_tick.hash(&mut digest);
+        scalars.price_decimals.hash(&mut digest);
+        for value in [
+            scalars.mean_event_duration_s,
+            scalars.children_mean,
+            scalars.children_single_frac,
+            scalars.levels_mean,
+            scalars.size_round_frac,
+            scalars.size_log_sigma,
+            scalars.vol_scalar,
+            scalars.trade_displacement_ticks.ticks(),
+        ] {
+            hash_f64(value, &mut digest);
+        }
+        scalars.start_price.hash(&mut digest);
+        scalars.latent_size_median.hash(&mut digest);
+        scalars.quoted_width.ticks().get().hash(&mut digest);
+        scalars.top_sizes.bid.hash(&mut digest);
+        scalars.top_sizes.ask.hash(&mut digest);
+        match scalars.arrival {
+            None => 0_u8.hash(&mut digest),
+            Some(mogwai_data::ArrivalConfig::EventMarkov {
+                quiet_share,
+                switch_rate,
+                rate_ratio,
+            }) => {
+                1_u8.hash(&mut digest);
+                for value in [quiet_share, switch_rate, rate_ratio] {
+                    hash_f64(value, &mut digest);
+                }
+            }
+            Some(mogwai_data::ArrivalConfig::WallMmpp {
+                occupancy,
+                rate_ratio,
+                tau_s,
+            }) => {
+                2_u8.hash(&mut digest);
+                for value in [occupancy, rate_ratio, tau_s] {
+                    hash_f64(value, &mut digest);
+                }
+            }
+            Some(mogwai_data::ArrivalConfig::LogOuCox { sigma_y, tau_s }) => {
+                3_u8.hash(&mut digest);
+                for value in [sigma_y, tau_s] {
+                    hash_f64(value, &mut digest);
+                }
+            }
+            Some(mogwai_data::ArrivalConfig::SelfExciting { phi, tau_s }) => {
+                4_u8.hash(&mut digest);
+                for value in [phi, tau_s] {
+                    hash_f64(value, &mut digest);
+                }
+            }
+            Some(mogwai_data::ArrivalConfig::ShotNoise { m, k, tau_s }) => {
+                5_u8.hash(&mut digest);
+                for value in [m, k, tau_s] {
+                    hash_f64(value, &mut digest);
+                }
+            }
+        }
+        for value in profile
+            .session
+            .intensity_hour
+            .into_iter()
+            .chain(profile.session.vol_hour)
+            .chain(profile.session.dow_weight)
+        {
+            hash_f64(value, &mut digest);
+        }
+        if let Some(calendar) = &profile.calendar {
+            calendar.utc_offset_minutes.hash(&mut digest);
+            for window in &calendar.open_windows {
+                window.start_minute.hash(&mut digest);
+                window.end_minute.hash(&mut digest);
+            }
+            calendar.settlement_minute_of_day.hash(&mut digest);
+        } else {
+            0_u8.hash(&mut digest);
+        }
+        Self {
+            symbol: Arc::clone(&profile.def.symbol),
+            bundle: digest.finish(),
+        }
     }
-    #[expect(dead_code, reason = "piece 9 widens and inspects the river key")]
     pub(crate) fn symbol(&self) -> &str {
-        &self.0
+        &self.symbol
+    }
+    pub(crate) fn bundle_digest(&self) -> u64 {
+        self.bundle
+    }
+    /// A key naming a river no configured profile resolves to, so a test can
+    /// force the placement path to fail without a second venue.
+    #[cfg(test)]
+    pub(crate) fn with_unresolvable_bundle(&self) -> Self {
+        Self {
+            symbol: Arc::clone(&self.symbol),
+            bundle: self.bundle ^ 0x5fd0_e9a5_1c37_b2e1,
+        }
     }
 }
 
@@ -190,6 +312,11 @@ pub(crate) struct River {
 pub(crate) struct Rivers {
     identity: TapeIdentity,
     profiles: Arc<InstrumentProfiles>,
+    /// Resolved once per configured profile at construction. `resolve` walks
+    /// the whole knob bundle and serializes two values, while river resolution
+    /// happens on every history read, every mark read and every placement, so
+    /// re-deriving it per lookup would put a digest on the serving hot path.
+    keys: HashMap<Symbol, RiverKey>,
     rivers: Mutex<HashMap<RiverKey, Arc<River>>>,
 }
 
@@ -202,6 +329,19 @@ fn locked(index: &Mutex<CheckpointIndex>) -> std::sync::MutexGuard<'_, Checkpoin
 pub(crate) enum History {
     Unconfigured,
     Source(Box<dyn TickSource>),
+}
+
+struct BoatCursor {
+    first: Option<TickEvent>,
+    source: GeneratedSource,
+}
+impl TickSource for BoatCursor {
+    fn next_tick(&mut self) -> Option<TickEvent> {
+        self.first.take().or_else(|| self.source.next_tick())
+    }
+    fn fault(&self) -> Option<mogwai_data::TickFault> {
+        self.source.fault()
+    }
 }
 
 /// Test-only convenience: the `Option` shape the in-crate tests assert on,
@@ -221,9 +361,19 @@ pub(crate) fn build_history_source(
 
 impl Rivers {
     pub(crate) fn new(identity: TapeIdentity, profiles: Arc<InstrumentProfiles>) -> Arc<Self> {
+        let keys = profiles
+            .iter()
+            .map(|profile| {
+                (
+                    Arc::clone(&profile.def.symbol),
+                    RiverKey::resolve(profile, identity),
+                )
+            })
+            .collect();
         Arc::new(Self {
             identity,
             profiles,
+            keys,
             rivers: Mutex::new(HashMap::new()),
         })
     }
@@ -237,9 +387,29 @@ impl Rivers {
     pub(crate) fn identity(&self) -> TapeIdentity {
         self.identity
     }
-    fn river(&self, symbol: &str) -> Option<Arc<River>> {
-        let profile = self.profiles.get(symbol)?;
-        let key = RiverKey::for_symbol(&profile.def.symbol);
+    /// The sole configured-profile lookup in river resolution. Piece 13 makes
+    /// this function return the default shape for an absent symbol; the rest
+    /// of the boatyard already operates on resolved profiles and keys.
+    pub(crate) fn resolve_profile(&self, symbol: &str) -> Option<&InstrumentProfile> {
+        self.profiles.get(symbol)
+    }
+    /// The key for a profile this registry was built from. Cached, so this is
+    /// a lookup rather than a digest; a profile from anywhere else is resolved
+    /// the long way rather than silently mis-keyed.
+    pub(crate) fn resolve_key(&self, profile: &InstrumentProfile) -> RiverKey {
+        self.keys
+            .get(&profile.def.symbol)
+            .cloned()
+            .unwrap_or_else(|| RiverKey::resolve(profile, self.identity))
+    }
+    fn river(&self, key: &RiverKey) -> Option<Arc<River>> {
+        let profile = self.resolve_profile(key.symbol())?;
+        // A key naming a bundle this run does not serve resolves to no river.
+        // The comparison is against the CACHED key, so it costs a hash lookup.
+        if self.keys.get(&profile.def.symbol) != Some(key) {
+            return None;
+        }
+        let symbol = key.symbol();
         // Derived inside the closure, not ahead of the lock: `river` is called
         // once per live tick and the seed is read once per river lifetime.
         let mut materialized: Option<u64> = None;
@@ -249,7 +419,7 @@ impl Rivers {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Creation under the registry mutex makes concurrent first readers
         // share exactly one chain.
-        let river = Arc::clone(rivers.entry(key).or_insert_with(|| {
+        let river = Arc::clone(rivers.entry(key.clone()).or_insert_with(|| {
             materialized = Some(self.identity.seeds.tape_for(symbol));
             Arc::new(River {
                 checkpoints: Mutex::new(CheckpointIndex::new(
@@ -265,32 +435,19 @@ impl Rivers {
         // this closure body would run it inside the registry critical section
         // that every first reader of every symbol contends on.
         if let Some(tape_seed) = materialized {
-            tracing::info!(symbol, tape_seed, "river materialized");
+            tracing::info!(
+                symbol,
+                tape_seed,
+                bundle = key.bundle_digest(),
+                "river materialized"
+            );
         }
         Some(river)
     }
     #[cfg(test)]
     pub(crate) fn river_handle_for_test(&self, symbol: &str) -> Option<Arc<River>> {
-        self.river(symbol)
-    }
-
-    pub(crate) fn next_live_tick(
-        &self,
-        symbol: &str,
-    ) -> Option<(Option<TickEvent>, Option<mogwai_data::TickFault>)> {
-        let river = self.river(symbol)?;
-        let mut index = locked(&river.checkpoints);
-        let tick = index.next_tick();
-        let fault = tick.is_none().then(|| index.fault()).flatten();
-        Some((tick, fault))
-    }
-
-    pub(crate) fn activate_live(&self, symbol: &str) -> bool {
-        let Some(river) = self.river(symbol) else {
-            return false;
-        };
-        locked(&river.checkpoints).activate_live();
-        true
+        let profile = self.resolve_profile(symbol)?;
+        self.river(&self.resolve_key(profile))
     }
 
     pub(crate) fn arm_flow_surge(
@@ -301,15 +458,33 @@ impl Rivers {
         rate_mult: f64,
         children_mult: f64,
     ) -> bool {
-        let Some(river) = self.river(symbol) else {
+        let Some(profile) = self.resolve_profile(symbol) else {
+            return false;
+        };
+        let Some(river) = self.river(&self.resolve_key(profile)) else {
             return false;
         };
         locked(&river.checkpoints).arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
         true
     }
 
+    /// The symbols whose water actually exists right now. A control that means
+    /// "everything" iterates THESE rather than the configured set, so clearing
+    /// never materializes a chain nothing has asked for.
+    pub(crate) fn materialized_symbols(&self) -> Vec<String> {
+        self.rivers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .map(|key| key.symbol().to_owned())
+            .collect()
+    }
+
     pub(crate) fn clear_flow_surge(&self, symbol: &str) -> bool {
-        let Some(river) = self.river(symbol) else {
+        let Some(profile) = self.resolve_profile(symbol) else {
+            return false;
+        };
+        let Some(river) = self.river(&self.resolve_key(profile)) else {
             return false;
         };
         locked(&river.checkpoints).clear_flow_surge();
@@ -339,7 +514,11 @@ impl Rivers {
         start: Option<u64>,
     ) -> anyhow::Result<History> {
         let target = start.unwrap_or(TAPE_ORIGIN_NS);
-        let Some(river) = self.river(symbol) else {
+        let Some(profile) = self.resolve_profile(symbol) else {
+            return Ok(History::Unconfigured);
+        };
+        let key = self.resolve_key(profile);
+        let Some(river) = self.river(&key) else {
             return Ok(History::Unconfigured);
         };
         reach_river(&river, target)?;
@@ -350,6 +529,25 @@ impl Rivers {
             vec![Box::new(positioned)],
             start,
         ))))
+    }
+
+    pub(crate) fn place_cursor(
+        &self,
+        key: &RiverKey,
+        origin_ns: u64,
+    ) -> anyhow::Result<Box<dyn TickSource + Send>> {
+        let river = self
+            .river(key)
+            .ok_or_else(|| anyhow::anyhow!("river {} is not configured", key.symbol()))?;
+        reach_river(&river, origin_ns)?;
+        let mut positioned = locked(&river.checkpoints)
+            .try_source_at_or_before(origin_ns)
+            .ok_or_else(|| anyhow::anyhow!("river {} cannot reach {origin_ns}", key.symbol()))?;
+        let first = positioned.seek_to(origin_ns);
+        Ok(Box::new(BoatCursor {
+            first,
+            source: positioned,
+        }))
     }
 
     /// Generate and HOLD every instant up to `target_ns` on this river, so that
@@ -366,8 +564,11 @@ impl Rivers {
     /// river: doing so would multiply time-to-readiness by the number of
     /// configured shapes for a capability most runs never touch.
     pub(crate) fn ensure_reach(&self, symbol: &str, target_ns: u64) -> anyhow::Result<usize> {
+        let profile = self
+            .resolve_profile(symbol)
+            .ok_or_else(|| anyhow::anyhow!("symbol {symbol} has no configured shape"))?;
         let river = self
-            .river(symbol)
+            .river(&self.resolve_key(profile))
             .ok_or_else(|| anyhow::anyhow!("symbol {symbol} has no configured shape"))?;
         reach_river(&river, target_ns)
     }
@@ -389,13 +590,8 @@ fn reach_river_within(river: &River, target_ns: u64, ceiling: usize) -> anyhow::
     loop {
         let (walked, frontier_ns, checkpoints) = {
             let mut guard = locked(&river.checkpoints);
-            let extended = guard.extend_toward_unless_live(target_ns);
+            let extended = guard.extend_toward(target_ns);
             (extended, guard.frontier_ns(), guard.checkpoint_count())
-        };
-        let Some(walked) = walked else {
-            // The paced worker owns this river's lead. Not an error: report what
-            // is already reachable and let positioning refuse if it is short.
-            return Ok(checkpoints);
         };
         walked_total = walked_total.saturating_add(walked);
         anyhow::ensure!(
@@ -440,7 +636,10 @@ impl Rivers {
         symbol: &str,
         ts: u64,
     ) -> anyhow::Result<Option<Decimal>> {
-        let Some(river) = self.river(symbol) else {
+        let Some(profile) = self.resolve_profile(symbol) else {
+            return Ok(None);
+        };
+        let Some(river) = self.river(&self.resolve_key(profile)) else {
             return Ok(None);
         };
         reach_river(&river, ts)?;
@@ -513,49 +712,68 @@ mod river_tests {
     }
 
     #[test]
-    fn the_live_river_is_not_extended_by_a_reader() {
+    fn a_boat_placed_after_a_history_read_still_starts_at_the_river_origin() {
         let rivers = crate::fills::test_rivers();
-        let river = rivers.river_handle_for_test("BTCUSDT").unwrap();
-        let before = locked(&river.checkpoints).frontier_ns();
-        assert!(rivers.activate_live("BTCUSDT"));
-        assert!(
-            rivers
-                .history_source("BTCUSDT", Some(before.saturating_add(86_400_000_000_000)))
-                .is_err()
+        rivers.ensure_reach("BTCUSDT", 3_600_000_000_000).unwrap();
+        let profile = rivers.resolve_profile("BTCUSDT").unwrap();
+        let key = rivers.resolve_key(profile);
+        let mut cursor = rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap();
+        let mut history = match rivers
+            .history_source("BTCUSDT", Some(TAPE_ORIGIN_NS))
+            .unwrap()
+        {
+            History::Source(source) => source,
+            History::Unconfigured => panic!("configured"),
+        };
+        assert_eq!(
+            cursor.next_tick().unwrap().ts_event(),
+            history.next_tick().unwrap().ts_event()
         );
-        assert_eq!(locked(&river.checkpoints).frontier_ns(), before);
     }
 
-    /// The race the sequential test above CANNOT catch, and the reason
-    /// `extend_toward_unless_live` exists rather than an `is_live` accessor a
-    /// caller consults before extending.
     #[test]
-    fn activation_racing_a_cold_reach_never_moves_the_live_frontier() {
-        for _ in 0..16 {
-            let rivers = crate::fills::test_rivers();
-            let river = rivers.river_handle_for_test("BTCUSDT").unwrap();
-            let reader = {
-                let rivers = Arc::clone(&rivers);
-                std::thread::spawn(move || {
-                    // Either verdict is legal; what may never happen is a walk
-                    // that lands AFTER the activation.
-                    drop(rivers.history_source("BTCUSDT", Some(3_600_000_000_000)));
-                })
-            };
-            let activator = {
-                let rivers = Arc::clone(&rivers);
-                let river = Arc::clone(&river);
-                std::thread::spawn(move || {
-                    assert!(rivers.activate_live("BTCUSDT"));
-                    locked(&river.checkpoints).frontier_ns()
-                })
-            };
-            reader.join().unwrap();
-            let at_activation = activator.join().unwrap();
-            // Whether the reader won the race or lost it, nothing may have
-            // extended the frontier AFTER the paced worker took the lead.
-            assert_eq!(locked(&river.checkpoints).frontier_ns(), at_activation);
+    fn a_wound_down_boat_leaves_its_river_extendable() {
+        let rivers = crate::fills::test_rivers();
+        let profile = rivers.resolve_profile("BTCUSDT").unwrap();
+        let key = rivers.resolve_key(profile);
+        drop(rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap());
+        let before = locked(&rivers.river(&key).unwrap().checkpoints).frontier_ns();
+        rivers
+            .ensure_reach("BTCUSDT", before.saturating_add(60_000_000_000))
+            .unwrap();
+        assert!(
+            locked(&rivers.river(&key).unwrap().checkpoints).frontier_ns()
+                >= before.saturating_add(60_000_000_000)
+        );
+    }
+
+    #[test]
+    fn a_placed_cursor_yields_every_row_at_the_origin_instant() {
+        let rivers = crate::fills::test_rivers();
+        let profile = rivers.resolve_profile("BTCUSDT").unwrap();
+        let key = rivers.resolve_key(profile);
+        let mut expected = match rivers.history_source("BTCUSDT", None).unwrap() {
+            History::Source(source) => source,
+            History::Unconfigured => panic!("configured"),
+        };
+        let first = expected.next_tick().unwrap();
+        let instant = first.ts_event();
+        let mut count = 1;
+        while expected
+            .next_tick()
+            .is_some_and(|tick| tick.ts_event() == instant)
+        {
+            count += 1;
         }
+        let mut cursor = rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap();
+        let mut actual = 0;
+        while cursor
+            .next_tick()
+            .is_some_and(|tick| tick.ts_event() == instant)
+        {
+            actual += 1;
+        }
+        assert_eq!(actual, count);
     }
 
     /// A river nothing warmed answers an instant a long way from the origin.

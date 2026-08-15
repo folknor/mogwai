@@ -1,8 +1,9 @@
 # mogwai havoc
 
-Havoc is armed against the one run, not against an account or subscription.
+Transport and engine havoc is armed against the one run, not against an account
+or subscription.
 Order-path divergences operate on the run ledger; data-path divergences operate
-on the run's single tape and its connected sockets. Admission and execution
+on the selected river or on connected sockets. Admission and execution
 lanes remain connection-local memory bounds. Order-path arms apply only to
 client-originated orders. Venue-originated maintenance, including forced
 liquidation, bypasses them and leaves them armed for the next matching client
@@ -20,15 +21,15 @@ suppresses a connection's output wholesale; `StallData` suppresses market data
 only, so a server heartbeat still arrives and a stalled feed stays
 distinguishable from a dead venue.
 
-`FlowSurge { rate_mult, children_mult, duration_ms }` acts on the live tape at
-parent boundaries. It divides parent gaps and increases sweep size for an
-absolute simulated-time window. It mutates the run's canonical checkpointed
-tape, so the subscribed feed, history reads, volatility readings and trigger
-scans all observe the same prints, and a later replay of the surged span
-reproduces it rather than the clean tape the venue would otherwise have drawn.
-A control request is applied synchronously, so a `202` means the surge is armed;
-if the tape worker has stopped the arm is refused with `503` instead of being
-accepted and dropped.
+Generator havoc is river-scoped. The control payload accepts an optional
+`symbol`. `FlowSurge { rate_mult, children_mult, duration_ms }` on an unboated
+river mutates its checkpointed water at parent boundaries and is visible to
+history and every later passenger. A generator arm on a seated river is
+refused with `400` and names the alternative: place a boat whose sharing key
+carries the havoc. An arm without a symbol is also refused while any boat is
+seated, naming those rivers. Mid-run mutation of shared live water is not
+supported. Transport controls such as `GoDark`, `StallData`, `DelayAcks` and
+`CommandLatency` remain runtime-armable and run-wide.
 `LiquidityDrought` remains the inverse rate control: it stretches parent gaps
 while leaving sweep shape unchanged.
 

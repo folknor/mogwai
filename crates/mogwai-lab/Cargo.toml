@@ -42,6 +42,12 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2-zli
 nix = { version = "0.31.3", default-features = false }
 hotpath = { workspace = true, optional = true }
 
+# Examples only. `ring_sizing` allocates one shipped per-boat broadcast ring to
+# measure its eager resident cost; the LIBRARY stays runtime-free, which is why
+# this is not a dependency.
+[dev-dependencies]
+tokio.workspace = true
+
 # Mirrors mogwai-data's two-level indirection; see the note there. `hotpath`
 # also forwards to mogwai-data's own feature, because a projection profile that
 # stopped at the crate boundary would attribute the whole parent walk to one

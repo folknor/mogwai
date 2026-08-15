@@ -69,10 +69,6 @@ pub struct CheckpointIndex {
     /// same budget as the from-origin cap, so every legitimate target (warmup,
     /// live sim-now, a poll's modest per-step delta) sits far inside it.
     max_extend: usize,
-    /// Once the paced worker owns the lead, readers may clone it but never
-    /// extend it. Otherwise a history request just ahead of the feed steals
-    /// ticks the worker has not published.
-    live: bool,
 }
 
 impl CheckpointIndex {
@@ -142,7 +138,6 @@ impl CheckpointIndex {
             since_snapshot: 0,
             k,
             max_extend,
-            live: false,
         }
     }
 
@@ -192,13 +187,6 @@ impl CheckpointIndex {
             }
         }
         walked
-    }
-
-    /// Walk toward `target`, unless the paced worker owns the lead.
-    /// The check and extension share one mutable borrow so a reader cannot
-    /// observe a cold index and then extend it after live activation.
-    pub fn extend_toward_unless_live(&mut self, target: u64) -> Option<usize> {
-        (!self.live).then(|| self.extend_toward(target))
     }
 
     /// Halve the snapshot count once it exceeds `MAX_CHECKPOINTS` by dropping
@@ -269,9 +257,7 @@ impl CheckpointIndex {
         target: u64,
         back: usize,
     ) -> Option<(GeneratedSource, bool)> {
-        if !self.live {
-            self.extend_toward(target);
-        }
+        self.extend_toward(target);
         if self.lead.clock_ns() < target {
             return None;
         }
@@ -330,12 +316,6 @@ impl CheckpointIndex {
     #[must_use]
     pub fn frontier_ns(&self) -> u64 {
         self.lead.clock_ns()
-    }
-
-    /// Transfer frontier advancement from warmup/history positioning to the
-    /// paced worker. Idempotent so startup validation may call it once only.
-    pub fn activate_live(&mut self) {
-        self.live = true;
     }
 
     /// Snapshots retained as `FlowSurge` control boundaries, origin included.

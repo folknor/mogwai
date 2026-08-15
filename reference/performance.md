@@ -8,6 +8,16 @@ Numbers measured through `brokkr mogwai` carry their result UUID, so any claim
 here can be re-derived - `brokkr results <uuid>` and `brokkr sidecar <uuid>`.
 Numbers from the criterion harnesses do not, and are pinned by commit instead.
 
+## Per-boat ring sizing, 2026-08-15
+
+Piece 9 reduced the shipped per-boat `fanout_depth` to 1,048,576, the smallest
+power of two already measured to hold the protocol-8 worst p99.9 wall-second
+frame work. On host `bygg`, `brokkr mogwai ring_sizing --alloc 3 --force`
+reported `ring_resident_bytes=42213376` for one eagerly allocated Tokio
+broadcast ring. The tree was intentionally dirty because the implementation
+was not to be committed, so brokkr correctly stored no durable results row;
+the benchmark's stderr counter is the measurement record for this landing.
+
 ## History admission gate, 2026-08-15
 
 The server now admits at most four concurrent whole-page history syntheses,

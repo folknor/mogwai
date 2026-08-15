@@ -18,7 +18,6 @@
 //! only a sweep pass ever walks the span a trigger is waiting on.
 
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -27,6 +26,9 @@ use mogwai_engine::ScanResult;
 use mogwai_protocol::{AdmissionSubject, ServerMessage};
 
 use crate::{admission::ExecLanes, config::sim_now_ns, fills, run::Run, source::Rivers};
+
+#[cfg(test)]
+use std::collections::HashMap;
 
 /// Wall floor under the converted sweep interval. Under an accelerated clock
 /// `wall_duration` shrinks linearly while the per-pass fixed cost (checkpoint
@@ -48,11 +50,18 @@ pub(crate) struct FillSweep {
 /// order revision in phase three, which is what makes the off-lock gap safe.
 pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let sim = sweep.run.sim;
-        let mut last_swept_ns = sim_now_ns(sim);
         let mut completion = sweep.run.completion();
-        loop {
-            let wall = sim
+        // Labelled because the per-boat body below breaks on completion: an
+        // unlabelled break there would leave only the boat loop and the
+        // sweeper would keep walking a completed run forever.
+        'passes: loop {
+            // The interval is SIMULATED milliseconds, so it is converted
+            // through a clock before it becomes a wall sleep. The venue clock
+            // and not a boat's: this pass is run-wide, every boat on it shares
+            // the configured speed, and a boatless venue must still tick.
+            let wall = sweep
+                .run
+                .sim
                 .wall_duration(crate::config::sim_duration_from_millis(sweep.interval_ms))
                 .max(MIN_SWEEP_WALL);
             // A completed run stops walking the tape at once rather than one
@@ -61,25 +70,28 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             // fill nobody is listening for.
             tokio::select! {
                 () = tokio::time::sleep(wall) => {}
-                _ = completion.changed() => break,
+                _ = completion.changed() => break 'passes,
             }
-            // Sampled ONCE for the pass, so every order is judged against the
-            // same instant no matter how long the walks take.
-            let to_ns = sim_now_ns(sim);
-            let scans = { sweep.run.engine.lock().await.pending_scans() };
-            let mut groups: HashMap<String, Vec<_>> = HashMap::new();
-            for scan in scans {
-                groups
-                    .entry(scan.symbol.to_string())
-                    .or_default()
-                    .push(scan);
-            }
-            let mut results = Vec::new();
-            for (symbol, scans) in groups {
+            // One acquisition, so the scans and the mark symbols this pass
+            // works from are the same engine state.
+            let (scans, mark_symbols) = {
+                let engine = sweep.run.engine.lock().await;
+                (engine.pending_scans(), engine.futures_mark_symbols())
+            };
+            for boat in sweep.run.boatyard.boats() {
+                let symbol = boat.symbol().to_owned();
+                let to_ns = sim_now_ns(boat.sim);
+                let boat_scans: Vec<_> = scans
+                    .iter()
+                    .filter(|scan| scan.symbol.as_ref() == symbol)
+                    .cloned()
+                    .collect();
+                let mut results = Vec::new();
                 let rivers = Arc::clone(&sweep.rivers);
-                let scans_for_walk = scans.clone();
+                let scans_for_walk = boat_scans.clone();
+                let walk_symbol = symbol.clone();
                 let walked = tokio::task::spawn_blocking(move || {
-                    fills::scan_triggers(&symbol, &scans_for_walk, to_ns, &rivers)
+                    fills::scan_triggers(&walk_symbol, &scans_for_walk, to_ns, &rivers)
                 })
                 .await
                 .ok()
@@ -89,7 +101,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // nothing advances: an unreachable span is not a span
                 // nothing triggered in.
                 if let Some(walk) = walked {
-                    results.extend(scans.into_iter().zip(walk.hits).map(|(scan, hit)| {
+                    results.extend(boat_scans.into_iter().zip(walk.hits).map(|(scan, hit)| {
                         ScanResult {
                             client_order_id: scan.client_order_id,
                             from_ns: scan.from_ns,
@@ -99,52 +111,62 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         }
                     }));
                 }
+                let last_swept_ns = boat
+                    .last_swept_ns
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let symbols: Vec<_> = mark_symbols
+                    .iter()
+                    .filter(|candidate| candidate.as_ref() == symbol)
+                    .cloned()
+                    .collect();
+                let settlements: Vec<_> = symbols
+                    .iter()
+                    .filter_map(|symbol| {
+                        sweep
+                            .rivers
+                            .profiles()
+                            .get(symbol)
+                            .and_then(|profile| profile.calendar.as_ref())
+                            .map(|calendar| {
+                                (symbol, calendar.settlement_instants(last_swept_ns, to_ns))
+                            })
+                    })
+                    .flat_map(|(symbol, instants)| {
+                        instants
+                            .into_iter()
+                            .map(move |instant| (Arc::clone(symbol), instant))
+                    })
+                    .collect();
+                let rivers = Arc::clone(&sweep.rivers);
+                let reads =
+                    run_blocking(move || read_marks(&symbols, &settlements, to_ns, &rivers));
+                let reads = tokio::select! {
+                    reads = reads => reads.flatten(),
+                    _ = completion.changed() => break 'passes,
+                };
+                let frontier = frontier_after(last_swept_ns, to_ns, reads.is_some());
+                boat.last_swept_ns
+                    .store(frontier, std::sync::atomic::Ordering::Release);
+                let Some((marks, settlement_marks)) = reads else {
+                    // The reading task died, or one of this span's settlement
+                    // instants had no readable price. Abandoning the whole pass is
+                    // the only safe response either way: the scan results are
+                    // re-derivable (the engine still holds every pending scan at
+                    // its unadvanced `from_ns`), while the settlement instants this
+                    // interval crossed exist nowhere but in the span
+                    // `last_swept_ns..to_ns`.
+                    continue;
+                };
+                let mut engine = sweep.run.engine.lock().await;
+                let (events, emitted, originated) =
+                    apply_engine_pass(&mut engine, &results, settlement_marks, &marks, to_ns);
+                let shape = engine.book_shape();
+                drop(engine);
+                if events.is_empty() {
+                    continue;
+                }
+                deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
             }
-            let symbols = { sweep.run.engine.lock().await.futures_mark_symbols() };
-            let settlements: Vec<_> = symbols
-                .iter()
-                .filter_map(|symbol| {
-                    sweep
-                        .rivers
-                        .profiles()
-                        .get(symbol)
-                        .and_then(|profile| profile.calendar.as_ref())
-                        .map(|calendar| {
-                            (symbol, calendar.settlement_instants(last_swept_ns, to_ns))
-                        })
-                })
-                .flat_map(|(symbol, instants)| {
-                    instants
-                        .into_iter()
-                        .map(move |instant| (std::sync::Arc::clone(symbol), instant))
-                })
-                .collect();
-            let rivers = Arc::clone(&sweep.rivers);
-            let reads = run_blocking(move || read_marks(&symbols, &settlements, to_ns, &rivers));
-            let reads = tokio::select! {
-                reads = reads => reads.flatten(),
-                _ = completion.changed() => break,
-            };
-            last_swept_ns = frontier_after(last_swept_ns, to_ns, reads.is_some());
-            let Some((marks, settlement_marks)) = reads else {
-                // The reading task died, or one of this span's settlement
-                // instants had no readable price. Abandoning the whole pass is
-                // the only safe response either way: the scan results are
-                // re-derivable (the engine still holds every pending scan at
-                // its unadvanced `from_ns`), while the settlement instants this
-                // interval crossed exist nowhere but in the span
-                // `last_swept_ns..to_ns`.
-                continue;
-            };
-            let mut engine = sweep.run.engine.lock().await;
-            let (events, emitted, originated) =
-                apply_engine_pass(&mut engine, &results, settlement_marks, &marks, to_ns);
-            let shape = engine.book_shape();
-            drop(engine);
-            if events.is_empty() {
-                continue;
-            }
-            deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
         }
     })
 }

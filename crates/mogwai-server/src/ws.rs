@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The one run-wide websocket feed and command socket.
+//! A websocket passenger on one boat, plus its run-wide command ledger.
 
 use std::{sync::Arc, time::Instant};
 
@@ -19,6 +19,7 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::{
     admission::{CloseSpec, ExecLanes, FrameClass, HeldFrame, Outbound, OutboundFrame},
+    boatyard::{BoardRefusal, BoardRequest, Ticket},
     config::{build_admission_limits, sim_duration_from_millis, sim_now_ns},
     http::{AppState, OrderOutcome, process_order_cmd, resolve_socket_symbol},
 };
@@ -44,6 +45,20 @@ pub(crate) struct SocketQuery {
     /// predates this carrier sends.
     #[serde(default)]
     symbol: Option<String>,
+    /// Absent means the venue's configured `speed`. Finite and non-negative,
+    /// quantized to micro-multiples in the sharing key, so `100` and
+    /// `100.0000001` board the same boat. A speed differing from the one the
+    /// river's sitting boat carries is REFUSED before the 101, naming that
+    /// speed; it never places a second boat on the same water.
+    #[serde(default)]
+    speed: Option<f64>,
+    /// Absent means indefinite. SIMULATED milliseconds, measured on the boat's
+    /// clock from this passenger's boarding instant and not from boot. A
+    /// duration is a property of the passenger, so passengers with different
+    /// durations still share one boat; each announces `RunComplete` and closes
+    /// at its own deadline, and the boat winds down when the last one leaves.
+    #[serde(default)]
+    duration_ms: Option<u64>,
 }
 
 /// What one connection is bound to, decided before the upgrade completes and
@@ -52,9 +67,11 @@ pub(crate) struct SocketQuery {
 /// One field today. It exists as a struct rather than a bare `Symbol` because
 /// boat placement and the per-boat clock attach here, and because every
 /// downstream signature then changes exactly once.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct SocketSession {
     pub(crate) symbol: mogwai_protocol::Symbol,
+    pub(crate) ticket: Ticket,
+    pub(crate) duration_ms: Option<u64>,
 }
 
 /// Bind one socket to one river, or refuse before the 101.
@@ -82,7 +99,29 @@ pub(crate) async fn ws_upgrade(
     if !state.run.ensure_instrument(&symbol).await {
         return (StatusCode::BAD_REQUEST, "symbol has no configured shape").into_response();
     }
-    let session = SocketSession { symbol };
+    let speed = query.speed.unwrap_or(state.cfg.speed);
+    if !speed.is_finite() || speed < 0.0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "speed must be finite and non-negative",
+        )
+            .into_response();
+    }
+    let profile = state
+        .rivers
+        .resolve_profile(&symbol)
+        .expect("resolved socket profile");
+    let river = state.rivers.resolve_key(profile);
+    let ticket = match state.run.boatyard.board(&BoardRequest { river, speed }).await {
+        Ok(ticket) => ticket,
+        Err(BoardRefusal::SpeedInUse { sitting_speed }) => return (StatusCode::BAD_REQUEST, format!("river {symbol} already has a boat at speed {sitting_speed}; request that speed or wait for its passengers to leave")).into_response(),
+        Err(BoardRefusal::Placement(err)) => return (StatusCode::BAD_REQUEST, format!("could not place boat for {symbol}: {err}")).into_response(),
+    };
+    let session = SocketSession {
+        symbol,
+        ticket,
+        duration_ms: query.duration_ms,
+    };
     ws.max_message_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
         .max_frame_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
         .on_upgrade(move |socket| handle_socket(socket, state, session))
@@ -112,10 +151,11 @@ async fn dispatch_command(
     cmd: ClientMessage,
     state: &AppState,
     lanes: &ExecLanes,
-    session: &SocketSession,
+    symbol: &mogwai_protocol::Symbol,
+    sim: mogwai_protocol::SimClock,
 ) {
     let class = CommandClass::of(&cmd);
-    match process_order_cmd(cmd, state, &state.run, lanes, &session.symbol).await {
+    match process_order_cmd(cmd, state, &state.run, lanes, symbol, sim).await {
         OrderOutcome::Produced {
             events,
             reservation,
@@ -136,7 +176,8 @@ fn spawn_command_dispatcher(
     mut commands: mpsc::Receiver<QueuedCommand>,
     state: AppState,
     lanes: ExecLanes,
-    session: SocketSession,
+    symbol: mogwai_protocol::Symbol,
+    sim: mogwai_protocol::SimClock,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The permit's scope is the correctness property: the process-wide
@@ -146,7 +187,7 @@ fn spawn_command_dispatcher(
         // than left to a destructure binding whose lifetime an underscore
         // pattern would silently end early.
         while let Some(queued) = commands.recv().await {
-            dispatch_command(queued.cmd, &state, &lanes, &session).await;
+            dispatch_command(queued.cmd, &state, &lanes, &symbol, sim).await;
             drop(queued.global_slot);
         }
     })
@@ -194,6 +235,7 @@ async fn run_writer(
     mut prio_rx: mpsc::UnboundedReceiver<Outbound>,
     mut out_rx: mpsc::Receiver<Outbound>,
     state: AppState,
+    sim: mogwai_protocol::SimClock,
 ) {
     let mut priority_open = true;
     let mut held_open = true;
@@ -215,7 +257,7 @@ async fn run_writer(
                 break;
             }
             Outbound::Frame(frame) => {
-                let now = sim_now_ns(state.sim());
+                let now = sim_now_ns(sim);
                 // A terminal announcement outranks every armed window: see
                 // `FrameClass`. Everything else is gated - `GoDark` wholesale,
                 // `StallData` on market data alone.
@@ -258,20 +300,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
     let (prio_tx, prio_rx) = mpsc::unbounded_channel();
     let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
     let (command_tx, command_rx) = mpsc::channel(state.cfg.pending_command_acts);
-    let dispatcher =
-        spawn_command_dispatcher(command_rx, state.clone(), lanes.clone(), session.clone());
-    let writer = tokio::spawn(run_writer(sink, prio_rx, out_rx, state.clone()));
+    let boat_sim = session.ticket.boat().sim;
+    let dispatcher = spawn_command_dispatcher(
+        command_rx,
+        state.clone(),
+        lanes.clone(),
+        Arc::clone(&session.symbol),
+        boat_sim,
+    );
+    let writer = tokio::spawn(run_writer(sink, prio_rx, out_rx, state.clone(), boat_sim));
     // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for
     // as long as this connection lives.
     let lane_id = state.run.bind_lanes(lanes.clone());
-    let pump = spawn_exec_pump(held_rx, Arc::clone(&state.run), state.sim(), out_tx.clone());
+    let pump = spawn_exec_pump(held_rx, Arc::clone(&state.run), boat_sim, out_tx.clone());
     let feed = {
-        // Resolution admits only the run tape's river today. Piece 9 replaces
-        // this expression with a boatyard lookup keyed by the session.
-        let (mut tape, snapshot) = state.run.tape.subscribe_with_snapshot();
+        // This connection's own boat, and its own ring: a busy river cannot
+        // lag a passenger subscribed to a quiet one, and a lag here is a
+        // property of the water this socket asked for.
+        let (mut tape, snapshot) = session.ticket.boat().tape.subscribe_with_snapshot();
         let out_tx = out_tx.clone();
-        let feed_state = state.clone();
         // The ONE diagnostic this feed can ever emit is `FeedLagged`, and it is
         // emitted precisely when the connection is already drowning in market
         // data. Reserving the priority-lane capacity for it up front, and
@@ -349,7 +397,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
                                     slot,
                                     ServerMessage::FeedLagged {
                                         skipped,
-                                        sim_now_ns: sim_now_ns(feed_state.sim()),
+                                        sim_now_ns: sim_now_ns(boat_sim),
                                     },
                                 ));
                             } else {
@@ -376,16 +424,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
     let heartbeat = (state.cfg.server_heartbeat_ms > 0).then(|| {
         let out_tx = out_tx.clone();
         let beat_state = state.clone();
-        let period = beat_state
-            .sim()
-            .wall_duration(sim_duration_from_millis(beat_state.cfg.server_heartbeat_ms));
+        let period =
+            boat_sim.wall_duration(sim_duration_from_millis(beat_state.cfg.server_heartbeat_ms));
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(period).await;
                 let frame = OutboundFrame {
                     payload: Arc::from(
                         serde_json::to_string(&ServerMessage::Heartbeat {
-                            ts_event: sim_now_ns(beat_state.sim()),
+                            ts_event: sim_now_ns(boat_sim),
                         })
                         .expect("Heartbeat serializes"),
                     ),
@@ -401,6 +448,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
     });
     let mut completion = state.run.completion();
     let already_complete = current_completion(&mut completion);
+    let duration = session
+        .duration_ms
+        .map(|ms| tokio::time::sleep(boat_sim.wall_duration(sim_duration_from_millis(ms))));
+    tokio::pin!(duration);
     if let Some((sim_now_ns, elapsed_ns)) = already_complete {
         drop(
             out_tx
@@ -437,6 +488,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
                     }
                     break;
                 }
+                () = async { if let Some(timer) = duration.as_mut().as_pin_mut() { timer.await } }, if duration.is_some() => {
+                    let elapsed_ns = session.duration_ms.unwrap_or(0).saturating_mul(1_000_000);
+                    let now = sim_now_ns(boat_sim);
+                    drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&ServerMessage::RunComplete { sim_now_ns: now, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
+                    drop(out_tx.send(Outbound::Close(CloseSpec { code: 1000, reason: "passenger duration complete".into() })).await);
+                    break;
+                }
                 message = stream.next() => match message {
                     Some(Ok(Message::Close(_)) | Err(_)) | None => break,
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
@@ -450,16 +508,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
                                 drop(send_admission(&lanes, ServerMessage::AdmissionRejected {
                                     subject,
                                     reason: "venue command capacity exhausted".into(),
-                                    ts_event: sim_now_ns(state.sim()),
+                                    ts_event: sim_now_ns(boat_sim),
                                 }));
                             }
                         }
-                        Err(err) => { drop(send_admission(&lanes, ServerMessage::ProtocolError { reason: truncate_reason(format!("invalid client frame: {err}")), ts_event: sim_now_ns(state.sim()) })); }
+                        Err(err) => { drop(send_admission(&lanes, ServerMessage::ProtocolError { reason: truncate_reason(format!("invalid client frame: {err}")), ts_event: sim_now_ns(boat_sim) })); }
                     },
                     Some(Ok(Message::Binary(_))) => {
                         drop(send_admission(&lanes, ServerMessage::ProtocolError {
                             reason: "binary client frames are unsupported; send JSON text".into(),
-                            ts_event: sim_now_ns(state.sim()),
+                            ts_event: sim_now_ns(boat_sim),
                         }));
                     }
                     Some(Ok(_)) => {}

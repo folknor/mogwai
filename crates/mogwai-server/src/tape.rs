@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The one process-owned paced tape and its bounded broadcast fanout.
+//! One boat-owned paced tape and its bounded broadcast fanout.
 
-use crate::{config::now_ns, source};
+use crate::config::now_ns;
 use mogwai_data::TickFault;
 use mogwai_protocol::SimClock;
 use std::{
@@ -27,64 +27,36 @@ pub(crate) struct Tape {
     last_quote: Mutex<Option<TapeFrame>>,
     cancel: Arc<AtomicBool>,
     alive: AtomicBool,
-    symbol: String,
-    rivers: Arc<source::Rivers>,
     fault: Mutex<Option<TickFault>>,
 }
 pub(crate) struct TapeSpawn {
-    pub(crate) rivers: Arc<source::Rivers>,
     pub(crate) sim: SimClock,
     pub(crate) speed: f64,
     pub(crate) fanout_depth: usize,
     pub(crate) zero_speed_stall_ms: u64,
     pub(crate) fault_tx: mpsc::Sender<TickFault>,
+    pub(crate) published_ns: Arc<std::sync::atomic::AtomicU64>,
 }
 impl Tape {
-    pub(crate) fn start(symbol: String, spawn: TapeSpawn) -> Arc<Self> {
-        assert!(
-            spawn.rivers.activate_live(&symbol),
-            "validated run symbol must own a tape index"
-        );
+    pub(crate) fn start(
+        mut cursor: Box<dyn mogwai_data::TickSource + Send>,
+        spawn: TapeSpawn,
+    ) -> (Arc<Self>, thread::JoinHandle<()>) {
         let (tx, _) = broadcast::channel(spawn.fanout_depth);
         let tape = Arc::new(Self {
             tx,
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
-            symbol: symbol.clone(),
-            rivers: Arc::clone(&spawn.rivers),
             fault: Mutex::new(None),
         });
         let worker = Arc::clone(&tape);
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let wall_anchor = now_ns();
             let instant_anchor = Instant::now();
-            // A POSITIONABILITY PROBE, and its target is the tape ORIGIN rather
-            // than the simulated now. The worker owns the canonical lead once
-            // `activate_live` has run, and a live index refuses to extend for a
-            // reader - so probing at the simulated now asks whether the frontier
-            // already covers an instant the worker itself has not yet reached.
-            // Whether it does is an accident of how far past `run_start_ns` the
-            // warmup walk happened to overshoot, which for a zero-warmup venue
-            // is not at all: the probe then refused on every boot, the worker
-            // returned before publishing a single frame, and the venue served an
-            // empty tape and exited 0. The origin is checkpoint zero and is
-            // always reachable, so a refusal here means what the message says.
-            if !matches!(
-                spawn.rivers.history_source(&symbol, None),
-                Ok(source::History::Source(_))
-            ) {
-                tracing::error!(symbol, "tape source could not be positioned");
-                worker.alive.store(false, Ordering::Release);
-                return;
-            }
             while !worker.cancel.load(Ordering::Relaxed) {
-                let Some((tick, fault)) = spawn.rivers.next_live_tick(&symbol) else {
-                    tracing::error!(symbol, "canonical tape source disappeared");
-                    break;
-                };
-                let Some(tick) = tick else {
-                    if let Some(fault) = fault {
+                let Some(tick) = cursor.next_tick() else {
+                    if let Some(fault) = cursor.fault() {
                         *worker
                             .fault
                             .lock()
@@ -105,6 +77,7 @@ impl Tape {
                     break;
                 }
                 let ts_event = tick.ts_event();
+                spawn.published_ns.store(ts_event, Ordering::Release);
                 let is_quote = matches!(tick, mogwai_data::TickEvent::Quote(_));
                 let event = match tick {
                     mogwai_data::TickEvent::Trade(trade) => {
@@ -125,7 +98,7 @@ impl Tape {
             }
             worker.alive.store(false, Ordering::Release);
         });
-        tape
+        (tape, handle)
     }
     pub(crate) fn subscribe_with_snapshot(
         &self,
@@ -156,45 +129,21 @@ impl Tape {
             drop(self.tx.send(frame));
         }
     }
-    pub(crate) fn arm_flow_surge(
-        &self,
-        start_ns: u64,
-        duration_ms: u64,
-        rate_mult: f64,
-        children_mult: f64,
-    ) -> Result<(), ()> {
-        if !self.alive.load(Ordering::Acquire) {
-            return Err(());
-        }
-        self.rivers
-            .arm_flow_surge(
-                &self.symbol,
-                start_ns,
-                duration_ms,
-                rate_mult,
-                children_mult,
-            )
-            .then_some(())
-            .ok_or(())
-    }
-    pub(crate) fn clear_flow_surge(&self) -> Result<(), ()> {
-        if !self.alive.load(Ordering::Acquire) {
-            return Err(());
-        }
-        self.rivers
-            .clear_flow_surge(&self.symbol)
-            .then_some(())
-            .ok_or(())
-    }
     pub(crate) fn fault(&self) -> Option<TickFault> {
         *self
             .fault
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+    pub(crate) fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+    /// False once the pacing thread has left its loop. The one observable a
+    /// wind-down test can assert on without reaching into the worker handle
+    /// the ticket's drop already took.
     #[cfg(test)]
-    pub(crate) fn stop_for_test(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+    pub(crate) fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 }
 
@@ -277,8 +226,6 @@ mod snapshot_tests {
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
-            symbol: "BTCUSDT".to_owned(),
-            rivers: crate::fills::test_rivers(),
             fault: Mutex::new(None),
         });
         tape.publish(
@@ -331,8 +278,6 @@ mod snapshot_tests {
             last_quote: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             alive: AtomicBool::new(true),
-            symbol: "BTCUSDT".to_owned(),
-            rivers: crate::fills::test_rivers(),
             fault: Mutex::new(None),
         };
         tape.publish(
@@ -355,21 +300,5 @@ mod snapshot_tests {
         assert_eq!(snapshot.payload.as_ref(), "quote");
         assert_eq!(trade.payload.as_ref(), "trade");
         assert!(snapshot.ts_event <= trade.ts_event);
-    }
-
-    #[test]
-    fn a_stopped_tape_refuses_flow_controls() {
-        let (tx, _) = broadcast::channel(1);
-        let tape = Tape {
-            tx,
-            last_quote: Mutex::new(None),
-            cancel: Arc::new(AtomicBool::new(true)),
-            alive: AtomicBool::new(false),
-            symbol: "BTCUSDT".to_owned(),
-            rivers: crate::fills::test_rivers(),
-            fault: Mutex::new(None),
-        };
-        assert!(tape.arm_flow_surge(0, 1, 2.0, 2.0).is_err());
-        assert!(tape.clear_flow_surge().is_err());
     }
 }

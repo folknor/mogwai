@@ -187,7 +187,8 @@ entry per knob it sets - `fitted`, `derived` or `declared` with a rationale -
 and boot refuses a preset that leaves any knob undeclared. `mogwai presets`
 lists them; `mogwai presets MNQ` prints one with its provenance.
 
-The replay and admission settings remain run-wide: `fanout_depth`,
+The replay and admission settings remain run-wide defaults. `fanout_depth` is
+applied to each boat's own ring; the remaining settings are run-wide:
 `zero_speed_stall_ms`, `exec_held_budget_bytes`, `admission_lane_frames`,
 `pending_command_acts`, and `global_pending_command_acts`.
 `pending_command_acts` bounds one socket's sequential command queue;
@@ -215,9 +216,17 @@ the default holds only 0.114 wall seconds - longer than the 0.030 the previous
 262,144 default held, but still far short of a wall second, so a surge-exposed
 run should size this deliberately rather than inherit it.
 `reference/performance.md` records the measurement under its protocol 8 section.
+
 The fingerprint retains `mean_trade_notional` under its honest name for corpus
 comparison; it is derived from the latent median, reference price, contract
 multiplier, and lognormal shape and never feeds the sampler.
+
+Websocket requests accept `?symbol=`, `?speed=` and `?duration_ms=`. An absent
+speed uses the configured default. Speed is finite and non-negative and is
+quantized to micro-multiples, so `100` and `100.0000001` share. One river can
+carry one boat: a different quantized speed receives a `400` naming the speed
+already seated. Duration is simulated milliseconds from boarding and belongs
+to the passenger, not the boat, so passengers with different durations share.
 
 Generator admission is based on mechanism constraints: positive finite values,
 grid representability, coherent sweep probabilities, size units compatible with

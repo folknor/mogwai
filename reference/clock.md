@@ -16,6 +16,12 @@ paces delivery to `sim.wall_ns(ts)`.
 
 `warmup_ns` is the materialized simulated interval before `run_start_ns`.
 `data_origin_ns` is its earliest servable instant, always `TAPE_ORIGIN_NS`.
-`/clock` reports both the clock and the current simulated time. A process is
+`/clock` reports both the clock and the current simulated time. It takes an
+optional `?symbol=`, and answers for that river's boat: a boat carries its own
+clock, anchored at ITS placement, and `server_now_ns` is then the sim instant of
+the last tick that boat published rather than the affine map read at the wall.
+With no symbol, or for a river carrying no boat, the venue clock answers
+instead and `boat_clock` is `false`, so a caller cannot mistake the fallback for
+a boat's own time. A process is
 not restarted in place: launchers create a new run and obtain a new readiness
 record with a fresh (or configured) seed.

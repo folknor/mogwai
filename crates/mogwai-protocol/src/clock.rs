@@ -125,6 +125,14 @@ pub struct ServerClock {
     /// nanoseconds. The whole span is servable, not merely permitted: it is
     /// materialized at boot and held for the life of the process.
     pub warmup_ns: u64,
+    /// True when this answer belongs to a placed boat, false when it is the
+    /// venue clock served as a fallback because the named river carries no
+    /// boat (or because no river was named). The two are not interchangeable -
+    /// a boat's clock is anchored at ITS placement - so the fallback is
+    /// labelled rather than left to look like a boat's answer. Defaulted on
+    /// decode so a payload predating the boatyard still parses.
+    #[serde(default)]
+    pub boat_clock: bool,
 }
 
 /// API-boundary guard for `SimClock`, mirroring `validate_conn_havoc` /
@@ -288,12 +296,13 @@ mod tests {
             server_now_ns: 1_900_000_799_000_000_000,
             data_origin_ns: 1_899_913_600_000_000_000,
             warmup_ns: 86_400_000_000_000,
+            boat_clock: true,
         };
 
         let json = serde_json::to_string(&clock).unwrap();
         assert_eq!(
             json,
-            r#"{"sim":{"sim_epoch_ns":1900000000000000000,"wall_anchor_ns":1782000000000000000,"speed":120.0},"server_now_ns":1900000799000000000,"data_origin_ns":1899913600000000000,"warmup_ns":86400000000000}"#,
+            r#"{"sim":{"sim_epoch_ns":1900000000000000000,"wall_anchor_ns":1782000000000000000,"speed":120.0},"server_now_ns":1900000799000000000,"data_origin_ns":1899913600000000000,"warmup_ns":86400000000000,"boat_clock":true}"#,
             "the /clock snapshot's byte form is a wire contract"
         );
         let decoded: ServerClock = serde_json::from_str(&json).unwrap();

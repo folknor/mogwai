@@ -465,6 +465,8 @@ pub(crate) async fn fetch_clock_or_identity(
             server_now_ns: 0,
             data_origin_ns: 0,
             warmup_ns: 0,
+            // A synthesized fallback is not a boat's answer either.
+            boat_clock: false,
         },
         false,
     )

@@ -12,6 +12,7 @@
 compile_error!("mogwai-server requires a Unix target");
 
 mod admission;
+mod boatyard;
 pub mod config;
 mod fills;
 mod http;

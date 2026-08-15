@@ -277,6 +277,11 @@ package = "mogwai-lab"
 example = "screen_projection_bench"
 features = ["hotpath"]
 
+[mogwai.targets.ring_sizing]
+package = "mogwai-lab"
+example = "ring_sizing"
+features = ["hotpath"]
+
 [mogwai.targets.stage_a_batch]
 package = "mogwai-lab"
 example = "stage_a_batch_bench"

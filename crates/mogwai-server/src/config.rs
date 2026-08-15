@@ -17,6 +17,17 @@ use rust_decimal::Decimal;
 use crate::admission::AdmissionLimits;
 use crate::source;
 
+/// The shipped fanout ring depth, PER BOAT since piece 9 gave each boat its own
+/// `broadcast::Sender`. Protocol 8 measured 1,048,576 as the smallest power of
+/// two holding its worst p99.9 wall-second of frame work; the later 4,194,304
+/// run-wide value was a sizing defect already mispriced at one boat, since a
+/// tokio broadcast ring is eagerly allocated at roughly 40 bytes per slot and
+/// that depth costs on the order of 170 MB - per boat, once boats are plural.
+///
+/// Public so the `ring_sizing` benchmark measures the depth that SHIPS rather
+/// than a copy of it that can drift.
+pub const DEFAULT_FANOUT_DEPTH: usize = 1_048_576;
+
 /// Replay/runtime configuration, loaded from a TOML config file at startup
 /// (see `load`); never from ambient environment variables.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -131,6 +142,7 @@ pub struct Config {
     /// UNLIKE every neighbouring count knob, `0` is NOT "unbounded" here:
     /// `broadcast::channel(0)` panics, so `validate()` rejects it at load.
     pub(crate) fanout_depth: usize,
+    // (see `DEFAULT_FANOUT_DEPTH` for the shipped value and its derivation)
     /// How long a `speed = 0` tape parks waiting for ring headroom before
     /// giving up on its slowest subscriber and letting that subscriber lag.
     /// Only consulted when `speed == 0.0`, where the throttle moves from the
@@ -212,34 +224,11 @@ impl Default for Config {
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
             warmup_ns: 86_400_000_000_000,
-            // The protocol-10 sizing, RETAINED at protocol 11 as a reviewed
-            // policy exception. The standing resize formula proposed
-            // 16,777,216 from the measured 1.014x frame-rate ratio, and the
-            // proposal was rejected: unlike the pure refusal ceilings, the
-            // fanout ring is EAGERLY ALLOCATED state proportional to this
-            // depth, and the existing depth still holds about 0.466 wall
-            // seconds at the protocol-11 worst measured p99.9 rate against
-            // the 0.114s the protocol-10 resize was justified over. A
-            // surge-exposed run should still size this deliberately rather
-            // than inherit the default.
-            //
-            // The rejected capacity also fails
-            // a_banded_limit_fills_from_the_run_sweep 5 of 5 against 5 of 5
-            // here, which was recorded for nine days as the rejected depth
-            // "deterministically breaking the accept-before-fill invariant".
-            // That reading is FALSE, measured 2026-08-15: the accept arrives
-            // first, correctly attributed and correctly stamped, and the fill
-            // TIES it because both are emitted in one engine batch. The order
-            // never rests. Raising the depth perturbs boot timing, at speed
-            // 100 a small wall shift is a large sim shift, and the test's
-            // fixed 2.01 of price headroom goes stale, so its limit is
-            // marketable on arrival and fills as a Taker. Ordering,
-            // attribution and stamping are all intact under a capacity chosen
-            // to break them; the depth is a timing perturbation and not a
-            // participant. Do not re-derive a serving defect from this test
-            // failing - it reports an ordering violation for a premise
-            // failure, which is its own defect, tracked in notes/todo.md.
-            fanout_depth: 4_194_304,
+            // One ring PER BOAT. Protocol 8 measured 1,048,576 as the smallest
+            // power of two holding its worst p99.9 wall-second frame work.
+            // Keeping the later 4,194,304 run-wide allocation per boat would
+            // multiply roughly 170 to 270 MiB of eager state by boat count.
+            fanout_depth: DEFAULT_FANOUT_DEPTH,
             zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
@@ -1480,7 +1469,7 @@ mod tests {
     /// not slip through as bookkeeping.
     #[test]
     fn the_fanout_default_carries_the_protocol_11_exception() {
-        assert_eq!(Config::default().fanout_depth, 4_194_304);
+        assert_eq!(Config::default().fanout_depth, 1_048_576);
     }
 
     #[test]

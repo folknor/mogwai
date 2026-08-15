@@ -105,21 +105,18 @@ below (piece 4, piece 13) still resolve:
    keeps a boot symbol, and that is the landed state (the top-level
    `symbol` key; warmup initializes the boot river at boot). Piece 7 has
    since landed the other half: rivers now materialize per request off a
-   keyed registry rather than off `INDEX`/`BOOT`. What survives is piece
-   6's half - the `/ws` symbol carrier is still boot-symbol-only.
+   keyed registry rather than off `INDEX`/`BOOT`. Piece 6 has since landed
+   too: the `/ws` symbol carrier is no longer boot-symbol-only.
 
 SLICE 2 - many boats on many rivers. Piece 7 landed 2026-08-15 (the keyed
 `Rivers` registry replacing `RunIndex`/`BOOT`, plural instrument profiles,
-lazy engine registration); detail is git history, not this file.
+lazy engine registration); detail is git history, not this file. Pieces 6
+and 9 (the `/ws` symbol carrier, taken wholesale, and the boatyard - sharing
+key, placement/join/wind-down, and its open mechanics) have also landed
+2026-08-15; detail is git history, not this file. Numbering is left as it
+was assigned so the cross-references below (piece 10, piece 13) still
+resolve:
 
-6. The `/ws` symbol carrier - a NEW mechanism, not a modification: no
-   subscribe path exists, its absence is byte-level pinned, and admission
-   tickets derive from it.
-9. The boatyard: sharing key (resolved bundle + speed + generator-level
-   havoc), first subscriber places, later ones join where the boat is,
-   empty boat winds down - bundled with its open mechanics (idle-river
-   retirement, pacing threads vs one scheduler, per-boat rings vs one
-   filtered ring at the current `fanout_depth`).
 10. One clock per boat: every run-level singleton assuming one now -
     engine event stamps, `/clock`, `AccountState` timestamps,
     `run_duration_ns` completion, derived `sim_epoch_ns`. None hard, all
@@ -140,8 +137,9 @@ CROSS-CUTTING:
 14. The durable prose: every decision above owes `reference/` and `docs/`
     writing WITH the code, per the standing item below.
 
-Piece 4 (and the guard question inside 13) is a decision before code; the
-highest-risk pieces are 6 and 9 with 10. Broadarrow's item 4
+Piece 4 (and the guard question inside 13) is a decision before code; pieces
+6 and 9 were the highest-risk and have landed, leaving 10 as the next.
+Broadarrow's item 4
 (consuming the multi-instrument venue) is excluded - it is theirs, and
 their build breaking loudly when piece 13 lands is the designed handoff.
 
@@ -318,13 +316,28 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   An earlier draft of this bullet argued from that second kind that mid-stream
   placement was hazardous in general. That was arguing from a tape model the
   segment sampler is replacing, and it does not generalize.
-  STILL OPEN under this design, mechanics rather than concept: whether anything
-  retires an idle river beyond the empty-boat rule, N pacing threads against one
-  multiplexing scheduler, and one ring per boat against one shared ring with
-  filtering - the last matters because N rings at the current `fanout_depth` is
-  N times an already-large eager allocation. Passenger IDENTITY, and the
-  teardown race it implies, is NOT open: the owner ruled the existing code
-  already answers it.
+  LANDED in piece 9, narrowing this design in two owner-adjudicated ways: one
+  boat per river, with a loud refusal on a differing sharing key rather than a
+  second boat (a subscriber naming a sitting river's speed differently is a
+  400 naming the sitting speed); and runtime generator-level havoc (`VolStorm`,
+  `FlowSurge`, `LiquidityDrought`) REFUSED on a river carrying a seated boat,
+  in favor of forking the river at PLACEMENT - the design already said
+  generator havoc forks the river, and this landing makes the sharing key, not
+  a runtime mutation of shared water, the sole carrier of that fork. Also
+  landed: one OS pacing thread and one resized ring per boat; no river
+  eviction; and ticket-owned last-passenger teardown. Both narrowings are
+  reversible: distinct-speed cohabitation by keying seats by boat and adding
+  per-boat temporal ownership of orders and marks to the engine (the real
+  prerequisite); mid-run generator havoc on shared water by replaying
+  immutable control history from a boundary at or before every live cursor,
+  never by mutating the lead. See the history ledger for the adjudication's
+  full grounds; the spec that recorded it is retired.
+  OPEN, and created by that landing: the fill sweeper now iterates over BOATS,
+  so a resting order on a river whose boat wound down is no longer swept until
+  someone boards that river again. It cannot be swept without a boat - there is
+  no clock to sample a `to_ns` from - so the honest fixes are either to keep the
+  venue clock as the sweep instant for boatless rivers or to refuse to leave
+  orders resting on a river nobody is carrying. Neither is piece 9's.
 
 - SYMBOL RESOLUTION IS TOTAL, AND THE DEFAULT PRESET IS THE SHAPE CONTRACT.
   Settled 2026-08-15. A requested symbol resolves in three steps and step three
@@ -432,8 +445,13 @@ their build breaking loudly when piece 13 lands is the designed handoff.
      identity. But the record also carries `data_origin_ns`, `run_start_ns` and
      `warmup_ns`, and with one clock per boat those are properties of a RIVER
      rather than of the venue, so the schema question is wider than the one
-     field. Unresolved knock-on: `run_seed` plus config reproduces a VENUE,
-     while a specific river's path also depends on when its boat was placed.
+     field. The knock-on this raised - that a specific river's path might also
+     depend on when its boat was placed, so `run_seed` plus config would
+     reproduce a venue but not a river - is CLOSED by piece 9's fixed
+     placement origin: a boat is always placed at the river's origin, never at
+     sim-now-at-placement, so a boat's path is a pure function of its key and
+     the run seed regardless of when it boards. Piece 12 inherits the schema
+     question above, not the knock-on.
 
 - GATE the hand-maintained tape-version prose the way the artifact binding
   blocks are gated. Surfaced by the bug-hunt loop on 2026-08-14: when

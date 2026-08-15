@@ -379,5 +379,5 @@ than scheduler throughput.
 A full run requires a clean tree before reading any input and re-attests
 it immediately before serializing, exactly as `arrival-control` does. The
 command lands no generator change and moves no tape byte: the run records
-the live `TAPE_PROTOCOL_VERSION` (16 since the shipped BTCUSDT preset replaced
-the retired built-in default bundle) in the artifact's binding block.
+the live `TAPE_PROTOCOL_VERSION` (18 after boat placement moved to an
+independent cursor at the fixed river origin) in the artifact's binding block.

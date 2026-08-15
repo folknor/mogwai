@@ -70,21 +70,21 @@ async fn ws_upgrade_refuses_an_unserved_symbol_with_400() {
 
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn a_ws_upgrade_for_a_configured_non_boot_symbol_is_refused_naming_the_boat() {
+async fn a_ws_upgrade_for_a_configured_non_boot_symbol_is_served() {
     let venue = spawn(&["--config", &two_symbols_config()]);
-    let error = tokio_tungstenite::connect_async(venue.ws_url_for("MNQ"))
+    let (mut socket, response) = tokio_tungstenite::connect_async(venue.ws_url_for("MNQ"))
         .await
-        .expect_err("non-boot river has no boat");
-    match error {
-        tokio_tungstenite::tungstenite::Error::Http(response) => {
-            assert_eq!(response.status(), 400);
-            let body = response.body().as_ref().expect("refusal body");
-            let body = String::from_utf8_lossy(body);
-            assert!(body.contains("configured but is not the river this run booted"));
-            assert!(body.contains("BTCUSDT"));
+        .expect("configured non-boot river places a boat");
+    assert_eq!(response.status(), 101);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while let Ok(Some(Ok(Message::Text(frame)))) =
+        tokio::time::timeout_at(deadline, socket.next()).await
+    {
+        if frame.contains("MNQ") {
+            return;
         }
-        other => panic!("expected HTTP refusal, got {other}"),
     }
+    panic!("configured non-boot river produced no named market frame");
 }
 
 #[tokio::test]
@@ -1134,4 +1134,165 @@ async fn websocket_rejects_messages_over_the_protocol_ceiling() {
             Some(Ok(_)) => {}
         }
     }
+}
+
+/// One `POST /control/divergence`, returning the status code AND the body,
+/// because a refusal that must NAME something is only half asserted by its
+/// status.
+fn post_divergence_body(base: &str, body: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let authority = base.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(authority).expect("connect");
+    let request = format!(
+        "POST /control/divergence HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).expect("send");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read");
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("a status line");
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    (status, body)
+}
+
+/// Generator havoc forks the river, so it belongs to the sharing key at
+/// placement and may not mutate water a boat is already sitting on. The boot
+/// river always carries the boot boat, so this is the refusal an operator sees.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_generator_arm_on_a_boated_river_is_refused_naming_the_forking_alternative() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let symbol = venue.record.symbol.clone();
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        &format!(
+            r#"{{"type":"FlowSurge","symbol":"{symbol}","rate_mult":2.0,"children_mult":2.0,"duration_ms":1000}}"#
+        ),
+    );
+    assert_eq!(
+        status, 400,
+        "a seated river refuses a generator arm: {body}"
+    );
+    assert!(
+        body.contains(&*symbol),
+        "the refusal names the river: {body}"
+    );
+    assert!(
+        body.contains("sharing key"),
+        "the refusal names the forking alternative: {body}"
+    );
+}
+
+/// Unqualified, a generator arm does NOT fan out over every river. It is
+/// refused while any boat is seated, and the refusal names those rivers.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_generator_arm_with_no_symbol_is_refused_naming_the_boated_rivers() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"type":"FlowSurge","rate_mult":2.0,"children_mult":2.0,"duration_ms":1000}"#,
+    );
+    assert_eq!(
+        status, 400,
+        "an unqualified generator arm is refused: {body}"
+    );
+    assert!(
+        body.contains(&*venue.record.symbol),
+        "the refusal names the seated river: {body}"
+    );
+}
+
+/// A river with no boat takes the arm: nothing straddles it, so history and
+/// every later passenger see the same surged water.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_generator_arm_on_an_unboated_river_is_accepted() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"type":"FlowSurge","symbol":"MNQ","rate_mult":2.0,"children_mult":2.0,"duration_ms":1000}"#,
+    );
+    assert_eq!(status, 202, "an unboated river accepts the arm: {body}");
+}
+
+/// `/clock` answers for the named river's boat, and LABELS the venue-clock
+/// fallback so a caller cannot read it as a boat's own time.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn clock_answers_per_boat_when_a_symbol_is_named() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    let (status, boated) = http_get(
+        &venue.http_base(),
+        &format!("/clock?symbol={}", venue.record.symbol),
+    );
+    assert_eq!(status, 200, "the boot river answers: {boated}");
+    let boated: mogwai_protocol::ServerClock = serde_json::from_str(&boated).unwrap();
+    assert!(boated.boat_clock, "the boot river carries a boat");
+
+    let (status, unboated) = http_get(&venue.http_base(), "/clock?symbol=MNQ");
+    assert_eq!(status, 200, "an unboated river still answers: {unboated}");
+    let unboated: mogwai_protocol::ServerClock = serde_json::from_str(&unboated).unwrap();
+    assert!(
+        !unboated.boat_clock,
+        "the venue-clock fallback is labelled as such"
+    );
+
+    let (status, unnamed) = http_get(&venue.http_base(), "/clock");
+    assert_eq!(status, 200, "an unnamed clock still answers: {unnamed}");
+    let unnamed: mogwai_protocol::ServerClock = serde_json::from_str(&unnamed).unwrap();
+    assert!(!unnamed.boat_clock, "no symbol names no boat");
+}
+
+/// A duration is a property of the PASSENGER. One passenger's deadline closes
+/// its own socket and leaves the boat carrying everyone else.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut staying, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("the indefinite passenger boards");
+    let (mut leaving, _) = tokio_tungstenite::connect_async(format!(
+        "{}?symbol={}&duration_ms=1500",
+        venue.ws_url(),
+        venue.record.symbol
+    ))
+    .await
+    .expect("the bounded passenger boards the same boat");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut announced = false;
+    loop {
+        let message = tokio::time::timeout_at(deadline, leaving.next())
+            .await
+            .expect("the bounded passenger closes before the deadline");
+        match message {
+            Some(Ok(Message::Text(text))) => announced |= text.contains("RunComplete"),
+            Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+            Some(Ok(_)) => {}
+        }
+    }
+    assert!(
+        announced,
+        "the bounded passenger announced its completion before closing"
+    );
+
+    // The boat is still carrying the other passenger, so frames keep arriving
+    // on a socket that asked for no duration at all.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, staying.next()).await {
+        if matches!(message, Message::Text(_)) {
+            return;
+        }
+    }
+    panic!("one passenger's deadline wound down the boat under another");
 }

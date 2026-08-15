@@ -247,7 +247,6 @@ async fn serve_async(
         cfg.warmup_ns,
         run_duration_ns,
         seeds,
-        cfg.speed,
         cfg.fanout_depth,
         cfg.zero_speed_stall_ms,
         cfg.oms_type,
@@ -257,6 +256,19 @@ async fn serve_async(
             .map_err(|err| anyhow::anyhow!("account_id: {err}"))?,
         fault_tx,
     );
+    let boot_profile = rivers
+        .resolve_profile(&instrument.symbol)
+        .expect("validated boot profile");
+    let boot_river = rivers.resolve_key(boot_profile);
+    let boot_ticket = run
+        .boatyard
+        .board(&crate::boatyard::BoardRequest {
+            river: boot_river,
+            speed: cfg.speed,
+        })
+        .await
+        .map_err(|refusal| anyhow::anyhow!("could not place boot boat: {refusal:?}"))?;
+    run.retain_boot_ticket(boot_ticket);
     tracing::info!(
         account_id = cfg.account_id.trim(),
         "run ledger account fixed"
