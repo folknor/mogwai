@@ -1077,6 +1077,103 @@ fn a_policy_preset_resolves_by_name_and_an_unknown_one_is_refused() {
         body.contains("apex-nonesuch-50k") && body.contains("intraday-trail"),
         "the refusal names what was asked for and what exists: {body}"
     );
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-402","balances":{"USD":"50000"},
+            "policy_preset":"static-drawdown"}"#,
+    );
+    assert_eq!(status, 201, "the static ruleset resolves: {body}");
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-402");
+    assert_eq!(status, 200, "the static account answers: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        value["risk"]["overall_threshold"], "45000",
+        "a 5,000 static floor off a 50k open: {body}"
+    );
+    assert_eq!(
+        value["risk"]["max_position"],
+        serde_json::Value::Null,
+        "static-drawdown does not cap size: {body}"
+    );
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-403","balances":{"USD":"50000"},
+            "policy_preset":"intraday-trail-sized"}"#,
+    );
+    assert_eq!(status, 201, "the sized ruleset resolves: {body}");
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-403");
+    assert_eq!(status, 200, "the sized account answers: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        value["risk"]["max_position"], "10",
+        "the sized ruleset publishes its cap: {body}"
+    );
+}
+
+/// An order that would take the book past the policy's position cap is refused
+/// at entry, by name. The firm would not have taken it, so the venue must not
+/// either - flattening after the fact would be the wrong story.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn an_oversized_submit_is_refused_by_the_position_cap() {
+    // MNQ settles in USD, so a USD-policed account can hold it. The default
+    // tape is a spot pair that would credit a second currency and be refused
+    // for that reason first.
+    let venue = spawn(&["--config", &mnq_preset_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-600","balances":{"USD":"1000000"},
+            "policy":{"currency":"USD","max_position":{"quantity":"10"}}}"#,
+    );
+    assert_eq!(status, 201, "the capped account opens: {body}");
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-600",
+        venue.ws_url_for(&venue.symbol)
+    ))
+    .await
+    .expect("bind the capped account");
+
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"TOO-BIG","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"11","price":"1","time_in_force":"Gtc"}}"#,
+        venue.symbol
+    );
+    socket
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("send the oversized order");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<ServerMessage>(&text) {
+            Ok(ServerMessage::OrderRejected { reason, .. }) => {
+                assert!(
+                    reason.contains("may not carry more than 10"),
+                    "the refusal names the cap: {reason}"
+                );
+                return;
+            }
+            Ok(ServerMessage::OrderAccepted { .. }) => {
+                panic!("an oversized submit must not be accepted")
+            }
+            Ok(ServerMessage::AdmissionRejected {
+                subject, reason, ..
+            }) => panic!("the venue refused admission for {subject:?}: {reason}"),
+            Ok(ServerMessage::ProtocolError { reason, .. }) => {
+                panic!("the venue read the submit as malformed: {reason}")
+            }
+            _ => {}
+        }
+    }
+    panic!("no position-cap OrderRejected arrived");
 }
 
 /// A blackout armed on one account does not blind another.

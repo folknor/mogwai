@@ -43,6 +43,9 @@ const NANOS_PER_MINUTE: u64 = 60 * 1_000_000_000;
 #[derive(Debug)]
 pub(crate) struct RiskLedger {
     policy: AccountPolicy,
+    /// Equity at construction. The static overall drawdown measures from this
+    /// and never updates: a peak that is given back does not raise this floor.
+    opening_equity: Decimal,
     /// Ratcheted high-water mark. Starts at the opening equity, so an account
     /// that only ever loses still has a meaningful floor.
     peak_equity: Decimal,
@@ -69,6 +72,7 @@ pub(crate) enum Verdict {
 impl RiskLedger {
     pub(crate) fn new(policy: AccountPolicy, opening_equity: Decimal, now_ns: u64) -> Self {
         Self {
+            opening_equity,
             peak_equity: opening_equity,
             day_open_equity: opening_equity,
             day_index: day_index(now_ns, policy.reset_minute_utc),
@@ -89,6 +93,12 @@ impl RiskLedger {
     pub(crate) fn is_locked(&self) -> bool {
         self.locked
             || matches!(&self.breach, Some(breach) if breach.action == BreachAction::Terminate)
+    }
+
+    /// The position cap, if the policy sets one. Refused at entry, not
+    /// evaluated on the mark: an oversized submit is a client error.
+    pub(crate) fn max_position(&self) -> Option<Decimal> {
+        self.policy.max_position.as_ref().map(|cap| cap.quantity)
     }
 
     /// Fold one equity reading in, and say what it costs.
@@ -141,6 +151,18 @@ impl RiskLedger {
                 return self.fire(
                     BreachedRule::DailyLossLimit,
                     daily.on_breach,
+                    equity,
+                    threshold,
+                    now_ns,
+                );
+            }
+        }
+        if let Some(overall) = &self.policy.overall_drawdown {
+            let threshold = self.opening_equity - overall.amount;
+            if equity < threshold {
+                return self.fire(
+                    BreachedRule::OverallDrawdown,
+                    overall.on_breach,
                     equity,
                     threshold,
                     now_ns,
@@ -204,6 +226,17 @@ impl RiskLedger {
                 .daily_loss_limit
                 .as_ref()
                 .map(|daily| equity - (self.day_open_equity - daily.amount)),
+            overall_threshold: self
+                .policy
+                .overall_drawdown
+                .as_ref()
+                .map(|overall| self.opening_equity - overall.amount),
+            overall_remaining: self
+                .policy
+                .overall_drawdown
+                .as_ref()
+                .map(|overall| equity - (self.opening_equity - overall.amount)),
+            max_position: self.policy.max_position.as_ref().map(|cap| cap.quantity),
             breached: self.breach.clone(),
         }
     }
@@ -254,6 +287,7 @@ mod tests {
             daily_loss_limit: None,
             reset_minute_utc: 0,
             currency: Some("USD".to_owned()),
+            ..AccountPolicy::default()
         }
     }
 
@@ -319,6 +353,7 @@ mod tests {
             }),
             reset_minute_utc: 0,
             currency: Some("USD".to_owned()),
+            ..AccountPolicy::default()
         };
         let mut ledger = RiskLedger::new(policy, 50_000.into(), 0);
         let Verdict::Breached(breach) = ledger.observe(49_499.into(), 1) else {
@@ -353,6 +388,7 @@ mod tests {
             daily_loss_limit: None,
             reset_minute_utc: 0,
             currency: Some("USD".to_owned()),
+            ..AccountPolicy::default()
         };
         let mut ledger = RiskLedger::new(policy, 50_000.into(), 0);
         assert_eq!(ledger.observe(60_000.into(), 1), Verdict::Clear);
@@ -368,5 +404,35 @@ mod tests {
         let mut ledger = RiskLedger::new(AccountPolicy::default(), 50_000.into(), 0);
         assert_eq!(ledger.observe(Decimal::ZERO, 1), Verdict::Clear);
         assert!(!ledger.is_locked());
+    }
+
+    /// A static overall floor does not follow a peak. Up 3,000 and back to
+    /// open still has the full 5,000 of room; the trail would have spent 3,000
+    /// of a same-sized budget on that same path.
+    #[test]
+    fn an_overall_drawdown_does_not_ratchet() {
+        let policy = AccountPolicy {
+            overall_drawdown: Some(mogwai_protocol::risk::OverallDrawdown {
+                amount: Decimal::from(5_000),
+                on_breach: BreachAction::Terminate,
+            }),
+            reset_minute_utc: 0,
+            currency: Some("USD".to_owned()),
+            ..AccountPolicy::default()
+        };
+        let mut ledger = RiskLedger::new(policy, 50_000.into(), 0);
+        assert_eq!(ledger.observe(53_000.into(), 1), Verdict::Clear);
+        let state = ledger.state(50_000.into());
+        assert_eq!(state.overall_threshold, Some(45_000.into()));
+        assert_eq!(
+            state.overall_remaining,
+            Some(5_000.into()),
+            "a peak that was given back spent nothing of a static floor"
+        );
+        let Verdict::Breached(breach) = ledger.observe(44_999.into(), 2) else {
+            panic!("crossing the opening-less-amount floor breaches");
+        };
+        assert_eq!(breach.rule, BreachedRule::OverallDrawdown);
+        assert_eq!(breach.action, BreachAction::Terminate);
     }
 }

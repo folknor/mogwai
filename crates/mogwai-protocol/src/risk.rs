@@ -88,6 +88,37 @@ pub struct DailyLossLimit {
     pub on_breach: BreachAction,
 }
 
+/// A static overall drawdown: a floor measured from OPENING equity that never
+/// ratchets and never resets.
+///
+/// This is the other common funded-account form. A trailing rule follows the
+/// account up; this one does not. Two accounts advertising "10 percent
+/// drawdown" are different experiments if one trails and one does not, and a
+/// forward test that only models the trail tests the wrong account for the
+/// static programme.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverallDrawdown {
+    /// How far below the opening equity the floor sits.
+    pub amount: Decimal,
+    #[serde(default = "terminate")]
+    pub on_breach: BreachAction,
+}
+
+/// A hard cap on how large a position this account may carry, in the
+/// instrument's own size unit.
+///
+/// An account is on at most one river, so one number is enough: it is a
+/// contract count on a future, a share count on an equity, a base-unit size
+/// on a perp. The venue REFUSES an order that would put the book over the
+/// cap - the largest |qty| it can reach given worst-case fill order of the
+/// working book, reduce-only excluded - rather than flattening after the fact.
+/// Under netting that is the worse extreme net; under hedging, the larger
+/// side. Sizing past the firm is a client error, not a liquidation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaxPosition {
+    pub quantity: Decimal,
+}
+
 /// The rules an account is enforced under. Every field is optional, and an
 /// account naming none is unpoliced - which is the default account's policy and
 /// the behaviour every client had before this existed.
@@ -98,6 +129,11 @@ pub struct AccountPolicy {
     pub trailing_drawdown: Option<TrailingDrawdown>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_loss_limit: Option<DailyLossLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overall_drawdown: Option<OverallDrawdown>,
+    /// Refused at entry rather than flattened after the fact. See `MaxPosition`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_position: Option<MaxPosition>,
     /// Minute of the UTC day at which the daily budget resets, if a daily limit
     /// is set.
     ///
@@ -145,7 +181,10 @@ fn default_reset_minute() -> u32 {
 impl AccountPolicy {
     /// Whether this policy asks the venue to enforce anything at all.
     pub fn is_unpoliced(&self) -> bool {
-        self.trailing_drawdown.is_none() && self.daily_loss_limit.is_none()
+        self.trailing_drawdown.is_none()
+            && self.daily_loss_limit.is_none()
+            && self.overall_drawdown.is_none()
+            && self.max_position.is_none()
     }
 
     /// `Err` naming the first unusable field. Validated where the policy enters
@@ -161,6 +200,16 @@ impl AccountPolicy {
             && daily.amount <= Decimal::ZERO
         {
             return Err("daily_loss_limit.amount must be positive".to_owned());
+        }
+        if let Some(overall) = &self.overall_drawdown
+            && overall.amount <= Decimal::ZERO
+        {
+            return Err("overall_drawdown.amount must be positive".to_owned());
+        }
+        if let Some(max_position) = &self.max_position
+            && max_position.quantity <= Decimal::ZERO
+        {
+            return Err("max_position.quantity must be positive".to_owned());
         }
         if self.reset_minute_utc >= 24 * 60 {
             return Err("reset_minute_utc must be a minute of the day, 0 to 1439".to_owned());
@@ -201,6 +250,16 @@ pub struct RiskState {
     /// How much more may be lost today before the daily limit is breached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_remaining: Option<Decimal>,
+    /// The static overall floor, if an overall drawdown is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overall_threshold: Option<Decimal>,
+    /// How far equity may fall before the overall floor is breached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overall_remaining: Option<Decimal>,
+    /// The position cap, if one is set. Published so the evaluator can see
+    /// the size the run was allowed, which fills alone cannot reconstruct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_position: Option<Decimal>,
     /// Set once a rule has fired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breached: Option<Breach>,
@@ -223,10 +282,17 @@ pub struct Breach {
 pub enum BreachedRule {
     TrailingDrawdown,
     DailyLossLimit,
+    OverallDrawdown,
 }
 
 /// The names this build ships a policy under.
-pub const SHIPPED_POLICIES: &[&str] = &["intraday-trail", "eod-trail", "daily-limit-only"];
+pub const SHIPPED_POLICIES: &[&str] = &[
+    "intraday-trail",
+    "eod-trail",
+    "daily-limit-only",
+    "static-drawdown",
+    "intraday-trail-sized",
+];
 
 /// A policy this build ships, by name.
 ///
@@ -239,7 +305,7 @@ pub const SHIPPED_POLICIES: &[&str] = &["intraday-trail", "eod-trail", "daily-li
 /// is a runtime path and why a name an operator registers SHADOWS a shipped one.
 ///
 /// Built in code rather than parsed from embedded text, so this crate needs no
-/// TOML dependency to state three constants.
+/// TOML dependency to state a handful of constants.
 #[must_use]
 pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
     let usd = || Some("USD".to_owned());
@@ -256,6 +322,8 @@ pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
                 amount: Decimal::from(1_000),
                 on_breach: BreachAction::LockUntilReset,
             }),
+            overall_drawdown: None,
+            max_position: None,
             reset_minute_utc: default_reset_minute(),
         }),
         "eod-trail" => Some(AccountPolicy {
@@ -267,6 +335,8 @@ pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
                 on_breach: BreachAction::Terminate,
             }),
             daily_loss_limit: None,
+            overall_drawdown: None,
+            max_position: None,
             reset_minute_utc: default_reset_minute(),
         }),
         "daily-limit-only" => Some(AccountPolicy {
@@ -275,6 +345,47 @@ pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
             daily_loss_limit: Some(DailyLossLimit {
                 amount: Decimal::from(500),
                 on_breach: BreachAction::LockUntilReset,
+            }),
+            overall_drawdown: None,
+            max_position: None,
+            reset_minute_utc: default_reset_minute(),
+        }),
+        // The static form: a floor measured from opening equity that never
+        // follows the account up. 5,000 off a 50k start is the 10 percent
+        // overall many forex programmes advertise, with a 2,500 daily lock.
+        "static-drawdown" => Some(AccountPolicy {
+            currency: usd(),
+            trailing_drawdown: None,
+            daily_loss_limit: Some(DailyLossLimit {
+                amount: Decimal::from(2_500),
+                on_breach: BreachAction::LockUntilReset,
+            }),
+            overall_drawdown: Some(OverallDrawdown {
+                amount: Decimal::from(5_000),
+                on_breach: BreachAction::Terminate,
+            }),
+            max_position: None,
+            reset_minute_utc: default_reset_minute(),
+        }),
+        // The sized form: the hard intraday trail plus a 10-contract cap, which
+        // is the typical 50k micros evaluation size. Without the cap a
+        // strategy can pass the dollar rules at a size no firm would have
+        // let it carry.
+        "intraday-trail-sized" => Some(AccountPolicy {
+            currency: usd(),
+            trailing_drawdown: Some(TrailingDrawdown {
+                amount: Decimal::from(2_000),
+                basis: TrailingBasis::PeakEquity,
+                lock_at_equity: None,
+                on_breach: BreachAction::Terminate,
+            }),
+            daily_loss_limit: Some(DailyLossLimit {
+                amount: Decimal::from(1_000),
+                on_breach: BreachAction::LockUntilReset,
+            }),
+            overall_drawdown: None,
+            max_position: Some(MaxPosition {
+                quantity: Decimal::from(10),
             }),
             reset_minute_utc: default_reset_minute(),
         }),
@@ -334,5 +445,23 @@ mod tests {
             BreachAction::LockUntilReset,
             "a daily limit lifts at the next session"
         );
+    }
+
+    /// Every shipped name resolves, validates, and is policed. A name that
+    /// does not is a broken binary, not a client error.
+    #[test]
+    fn every_shipped_policy_is_usable() {
+        for name in SHIPPED_POLICIES {
+            let policy = shipped_policy(name).expect(name);
+            assert!(!policy.is_unpoliced(), "{name} must enforce something");
+            policy.validate().expect(name);
+        }
+        let static_dd = shipped_policy("static-drawdown").expect("static");
+        assert_eq!(
+            static_dd.overall_drawdown.expect("set").amount,
+            Decimal::from(5_000)
+        );
+        let sized = shipped_policy("intraday-trail-sized").expect("sized");
+        assert_eq!(sized.max_position.expect("set").quantity, Decimal::from(10));
     }
 }

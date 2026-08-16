@@ -159,10 +159,15 @@ labelled:
 - `future` with `underlying`, `settlement_currency`, `multiplier` and
   `asset_class`. Whole contracts only.
 - `perpetual`, the same fields plus `funding_interval_ns` (eight hours by
-  default) and `funding_rate`, the fraction of notional the LONG pays the SHORT
-  each interval. Negative reverses the direction, which is what a market
-  trading below spot produces. Sizing may be FRACTIONAL, unlike a listed
-  future, because that is what crypto perpetuals actually do.
+  default) and `funding_rate`, the zero-premium INTEREST a LONG pays a SHORT
+  each interval. Negative reverses the direction. Optional `index_symbol`
+  names another symbol whose last mark is the INDEX; when that mark is
+  available the live rate is `clamp(interest + (mark - index) / index,
+  +/- funding_clamp)`. `funding_clamp` of zero (the default) means no cap.
+  Absent an index mark the premium is zero and the rate is exactly
+  `funding_rate`, which is also what a perp-only venue produces: reading an
+  index never spends a river nobody asked for. Sizing may be FRACTIONAL,
+  unlike a listed future, because that is what crypto perpetuals actually do.
 - `inverse`, coin-margined: `settlement_currency` is what moves and
   `quote_currency` is what the contract is priced in. The two must differ.
 
@@ -195,6 +200,48 @@ accepts a bare word - but a nautilus `AccountId` cannot be constructed from one,
 so a venue reporting `MOGWAI` boots cleanly, serves happily, and is rejected by
 its consumer with an error naming neither this file nor this key. Refusing at
 load costs a line.
+
+## Account policies
+
+A connecting client may name a RISK POLICY, which the venue ENFORCES. This is
+a risk-policy layer, not a funded-account feature: a live venue has the same
+machinery. A rule is a triple - what it measures, on what basis, and what it
+does on breach - and two breach actions cover the known cases:
+`lock_until_reset` flattens and refuses to open until the next reset,
+`terminate` flattens and ends the account.
+
+The policy is POSTed on `POST /accounts` as `policy` (inline knobs) or
+`policy_preset` (a name). Resolution is total and three-step, like a symbol:
+inline knobs win; otherwise a name registered under `[account_policies]` in
+this file, or one this build ships, with registered shadowing shipped;
+otherwise unpoliced. A name nobody has is an error rather than a silent fall
+to unpoliced.
+
+This build ships five illustrative shapes, not any firm's terms:
+
+- `intraday-trail` - 2,000 trailing on peak equity, 1,000 daily lock
+- `eod-trail` - 2,000 trailing on end-of-day balance, lock at 50,000
+- `daily-limit-only` - 500 daily lock, no trail
+- `static-drawdown` - 5,000 overall floor from opening equity that never
+  ratchets, 2,500 daily lock
+- `intraday-trail-sized` - the hard trail plus a 10-contract position cap
+
+Register your own under `[account_policies.<name>]` with the same knobs a
+client can POST: `currency` (required whenever any rule is set),
+`trailing_drawdown` (`amount`, `basis` of `peak_equity` or `end_of_day_balance`,
+optional `lock_at_equity`, `on_breach`), `daily_loss_limit` (`amount`,
+`on_breach`), `overall_drawdown` (`amount`, `on_breach`), `max_position`
+(`quantity`), and `reset_minute_utc` (default 1320, 22:00 UTC).
+
+`max_position` is refused at order entry rather than flattened after the fact.
+It is the largest position the book can carry after this order, given worst-case
+fill order of the working book: under netting, the worse extreme net; under
+hedging, the larger of the two sides. Working orders count; reduce-only does
+not, because a reduce-only leave cannot grow a side.
+
+`GET /account` publishes the thresholds, remaining budgets, the position cap
+and any breach for the EVALUATOR. A strategy that ended flat having spent most
+of its budget is a different result from one that never came close.
 
 ## The instrument class
 

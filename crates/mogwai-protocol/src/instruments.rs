@@ -115,10 +115,24 @@ pub enum InstrumentClass {
         /// How often funding is exchanged, in nanoseconds. Eight hours is the
         /// near-universal convention.
         funding_interval_ns: u64,
-        /// Fraction of notional the LONG pays the SHORT each interval. Negative
-        /// reverses the direction, which is what a market trading below spot
-        /// produces and is not an error.
+        /// Zero-premium INTEREST: the rate a long pays a short when the mark
+        /// sits on the index, and the whole rate when no index mark is
+        /// available. Negative reverses the direction. A real venue computes
+        /// the live rate as this plus the mark-versus-index premium, clamped.
         funding_rate: Decimal,
+        /// Symbol whose last mark is the INDEX this perpetual funds against.
+        ///
+        /// Absent, or present but not yet priced, the premium is zero and the
+        /// rate is exactly `funding_rate` - today's constant-rate behaviour,
+        /// which is also what a perp-only venue produces because reading an
+        /// index must never spend a river nobody asked for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index_symbol: Option<String>,
+        /// Absolute cap on the computed rate per interval. Zero means no cap,
+        /// so a configured interest with no index is bit-identical to the
+        /// constant rate this field used to be.
+        #[serde(default)]
+        funding_clamp: Decimal,
     },
     /// A coin-margined (inverse) contract: notional is quoted in `quote_currency`
     /// but margin and P and L settle in the BASE asset.
@@ -265,16 +279,60 @@ impl InstrumentClass {
         matches!(self, Self::Inverse { .. })
     }
 
-    /// The funding interval and rate, for a class that exchanges funding.
+    /// The funding terms, for a class that exchanges funding.
     #[must_use]
-    pub fn funding(&self) -> Option<(u64, Decimal)> {
+    pub fn funding(&self) -> Option<FundingTerms> {
         match self {
             Self::Perpetual {
                 funding_interval_ns,
                 funding_rate,
+                index_symbol,
+                funding_clamp,
                 ..
-            } => Some((*funding_interval_ns, *funding_rate)),
+            } => Some(FundingTerms {
+                interval_ns: *funding_interval_ns,
+                interest: *funding_rate,
+                index_symbol: index_symbol.clone(),
+                clamp: *funding_clamp,
+            }),
             _ => None,
+        }
+    }
+}
+
+/// How a perpetual exchanges funding: the clock, the interest, and the
+/// optional mark-versus-index premium.
+///
+/// THE RATE IS COMPUTED, not configured. A real venue pays
+/// `clamp(interest + (mark - index) / index, +/- clamp)`. `interest` is
+/// `funding_rate` on the class, the zero-premium term. When no index mark is
+/// available the premium is zero and the rate collapses to that term, which is
+/// why existing configs that state only a rate keep their previous P and L.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingTerms {
+    pub interval_ns: u64,
+    pub interest: Decimal,
+    pub index_symbol: Option<String>,
+    pub clamp: Decimal,
+}
+
+impl FundingTerms {
+    /// The rate a long pays a short at these marks.
+    ///
+    /// `index` absent or zero leaves the premium at zero: a missing index is
+    /// not a market event, it is a tape that was never asked for, and inventing
+    /// a basis against nothing would move cash for a reason nobody configured.
+    #[must_use]
+    pub fn rate(&self, mark: Decimal, index: Option<Decimal>) -> Decimal {
+        let premium = match index {
+            Some(index) if !index.is_zero() => (mark - index) / index,
+            _ => Decimal::ZERO,
+        };
+        let raw = self.interest + premium;
+        if self.clamp.is_zero() {
+            raw
+        } else {
+            raw.clamp(-self.clamp, self.clamp)
         }
     }
 }
@@ -548,10 +606,17 @@ mod tests {
             asset_class: WireAssetClass::Cryptocurrency,
             funding_interval_ns: 8 * 3_600 * 1_000_000_000,
             funding_rate: Decimal::new(1, 4),
+            index_symbol: None,
+            funding_clamp: Decimal::ZERO,
         };
         assert_eq!(
             perp.funding(),
-            Some((8 * 3_600 * 1_000_000_000, Decimal::new(1, 4)))
+            Some(FundingTerms {
+                interval_ns: 8 * 3_600 * 1_000_000_000,
+                interest: Decimal::new(1, 4),
+                index_symbol: None,
+                clamp: Decimal::ZERO,
+            })
         );
         assert!(perp.is_future(), "a perpetual posts margin like any future");
         assert_eq!(
@@ -561,6 +626,35 @@ mod tests {
             }
             .funding(),
             None
+        );
+    }
+
+    /// A real venue pays interest plus the mark-versus-index premium. No index
+    /// is a zero premium, not a refusal: a perp-only venue has no spot tape to
+    /// read and must keep the configured rate.
+    #[test]
+    fn funding_rate_is_interest_plus_clamped_premium() {
+        let terms = FundingTerms {
+            interval_ns: 1,
+            interest: Decimal::new(1, 4),
+            index_symbol: Some("BTCUSDT".into()),
+            clamp: Decimal::new(5, 3),
+        };
+        assert_eq!(
+            terms.rate(Decimal::from(60_000), None),
+            Decimal::new(1, 4),
+            "no index mark: the rate is the configured interest"
+        );
+        // Mark 0.1 percent above the index: premium 0.001 plus interest 0.0001,
+        // under the 0.005 cap.
+        assert_eq!(
+            terms.rate(Decimal::from(60_060), Some(Decimal::from(60_000))),
+            Decimal::new(11, 4)
+        );
+        // A 10 percent basis would be 0.1001 unclamped; the cap holds it.
+        assert_eq!(
+            terms.rate(Decimal::from(66_000), Some(Decimal::from(60_000))),
+            Decimal::new(5, 3)
         );
     }
 

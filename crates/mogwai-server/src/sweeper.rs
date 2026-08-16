@@ -226,9 +226,37 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let last_swept_ns = boat
                     .last_swept_ns
                     .load(std::sync::atomic::Ordering::Acquire);
+                // This boat's own symbol, plus its funding index if that
+                // river already exists. Reading an index must never spend a
+                // river nobody asked for: `last_trade_at_or_before`
+                // materializes, so an unmaterialized index is left unread
+                // and the rate stays at the configured interest.
+                //
+                // The materialized list is only consulted when this boat
+                // actually names an index: it takes a mutex and allocates
+                // every river, and every non-perp would otherwise pay that
+                // on every pass.
+                let index = sweep
+                    .rivers
+                    .resolve_profile(&symbol)
+                    .ok()
+                    .and_then(|profile| profile.def.class.funding())
+                    .and_then(|terms| terms.index_symbol)
+                    .filter(|index| {
+                        sweep
+                            .rivers
+                            .materialized_symbols()
+                            .iter()
+                            .any(|existing| existing == index)
+                    });
                 let symbols: Vec<_> = mark_symbols
                     .iter()
-                    .filter(|candidate| candidate.as_ref() == symbol)
+                    .filter(|candidate| {
+                        candidate.as_ref() == symbol
+                            || index
+                                .as_ref()
+                                .is_some_and(|index| candidate.as_ref() == index)
+                    })
                     .cloned()
                     .collect();
                 // Whether THIS boat's river crossed a session close in the span
@@ -243,8 +271,13 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     .and_then(|profile| profile.calendar.clone())
                     .filter(|calendar| calendar.is_open(last_swept_ns) && !calendar.is_open(to_ns))
                     .map(|_| mogwai_protocol::Symbol::from(symbol.as_str()));
-                let settlements: Vec<_> = symbols
-                    .iter()
+                // Settlements belong to THIS boat's instrument, never to a
+                // funding index. `read_marks` fails the whole pass if any
+                // settlement instant is unpriceable, and an index can carry a
+                // calendar the account holds nothing in; walking that list
+                // would stall the perp boat on a symbol it is not trading.
+                let boat_key = mogwai_protocol::Symbol::from(symbol.as_str());
+                let settlements: Vec<_> = std::iter::once(&boat_key)
                     .filter_map(|symbol| {
                         // Resolved, not configured-only: a symbol nobody
                         // configured is served on a bundle that may carry a
@@ -1010,6 +1043,7 @@ mod tests {
                 daily_loss_limit: None,
                 reset_minute_utc: 0,
                 currency: Some("USD".to_owned()),
+                ..mogwai_protocol::risk::AccountPolicy::default()
             },
         )
         .expect("a fresh account opens");

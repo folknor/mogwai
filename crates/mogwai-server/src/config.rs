@@ -1073,7 +1073,9 @@ pub(crate) enum ConfiguredClass {
     /// A perpetual swap. `funding_interval_ns` and `funding_rate` are what make
     /// it one rather than a future; the eight-hour default is the near-universal
     /// convention, and a zero rate is legal and means a venue where longs and
-    /// shorts happen to be balanced.
+    /// shorts happen to be balanced. `index_symbol` names the mark this
+    /// perpetual funds against; absent, the rate stays at `funding_rate`.
+    /// `funding_clamp` caps the computed rate; zero means no cap.
     Perpetual {
         underlying: String,
         settlement_currency: String,
@@ -1083,6 +1085,10 @@ pub(crate) enum ConfiguredClass {
         funding_interval_ns: u64,
         #[serde(default)]
         funding_rate: Decimal,
+        #[serde(default)]
+        index_symbol: Option<String>,
+        #[serde(default)]
+        funding_clamp: Decimal,
     },
     /// A coin-margined contract: quoted in `quote_currency`, settled in
     /// `settlement_currency`. The two must differ, or it is a linear contract
@@ -1199,6 +1205,8 @@ impl ConfiguredInstrument {
                     asset_class,
                     funding_interval_ns,
                     funding_rate,
+                    index_symbol,
+                    funding_clamp,
                 } => InstrumentClass::Perpetual {
                     underlying: underlying.clone(),
                     settlement_currency: settlement_currency.clone(),
@@ -1206,6 +1214,8 @@ impl ConfiguredInstrument {
                     asset_class: *asset_class,
                     funding_interval_ns: *funding_interval_ns,
                     funding_rate: *funding_rate,
+                    index_symbol: index_symbol.clone(),
+                    funding_clamp: *funding_clamp,
                 },
                 ConfiguredClass::Inverse {
                     underlying,
@@ -1658,6 +1668,8 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             multiplier,
             funding_interval_ns,
             funding_rate,
+            index_symbol,
+            funding_clamp,
             ..
         } => {
             validate_derivative(def, underlying, settlement_currency, *multiplier, false)?;
@@ -1677,6 +1689,26 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
                     "instrument {} funding_rate must be within +/-1 (100 percent per interval)",
                     def.symbol
                 );
+            }
+            if *funding_clamp < Decimal::ZERO || *funding_clamp > Decimal::ONE {
+                anyhow::bail!(
+                    "instrument {} funding_clamp must be in 0..=1; zero means no cap",
+                    def.symbol
+                );
+            }
+            if let Some(index) = index_symbol {
+                if index.trim().is_empty() {
+                    anyhow::bail!(
+                        "instrument {} index_symbol must be a non-empty symbol if set",
+                        def.symbol
+                    );
+                }
+                if mogwai_protocol::validate_wire_symbol(index).is_err() {
+                    anyhow::bail!(
+                        "instrument {} index_symbol {index} is not a legal symbol",
+                        def.symbol
+                    );
+                }
             }
         }
         InstrumentClass::Inverse {

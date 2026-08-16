@@ -645,6 +645,15 @@ impl Engine {
                 symbols.push(Symbol::clone(symbol));
             }
         }
+        // A perpetual that funds against another symbol needs that symbol
+        // priced, even when the account does not hold it. The sweeper still
+        // refuses to MATERIALIZE a river nobody asked for; this only names
+        // what to read if the index river already exists.
+        for def in self.instruments.values() {
+            if let Some(index) = def.class.funding().and_then(|terms| terms.index_symbol) {
+                symbols.push(index.into());
+            }
+        }
         symbols.sort();
         symbols.dedup();
         symbols
@@ -1327,16 +1336,20 @@ impl Engine {
             let Some(def) = self.instruments.get(&symbol) else {
                 continue;
             };
-            let Some((interval_ns, rate)) = def.class.funding() else {
+            let Some(terms) = def.class.funding() else {
                 continue;
             };
-            if interval_ns == 0 {
+            if terms.interval_ns == 0 {
                 continue;
             }
-            let instants = funding_instants(from_ns, to_ns, interval_ns);
+            let instants = funding_instants(from_ns, to_ns, terms.interval_ns);
             if instants == 0 {
                 continue;
             }
+            let index = terms
+                .index_symbol
+                .as_ref()
+                .and_then(|index| self.last_marks.get(index.as_str()).copied());
             let currency = def.class.settlement_currency().to_owned();
             let def = def.clone();
             let mut owed = Decimal::ZERO;
@@ -1353,9 +1366,11 @@ impl Engine {
                 let Some(notional) = def.notional(position.qty, position.mark_px) else {
                     continue;
                 };
-                // A LONG pays, so the sign follows the position: a positive rate
-                // debits a long and credits a short by the same amount, which is
-                // what makes funding a transfer rather than a fee.
+                // THE RATE IS COMPUTED at this mark against the index, if any.
+                // A LONG pays a positive rate, so the sign follows the
+                // position: the same amount debits a long and credits a short,
+                // which is what makes funding a transfer rather than a fee.
+                let rate = terms.rate(position.mark_px, index);
                 let Some(payment) = notional
                     .checked_mul(rate)
                     .and_then(|per| per.checked_mul(Decimal::from(instants)))
@@ -1788,6 +1803,75 @@ impl Engine {
     // `&mut self` only for the saturation warning bookkeeping in `snapshot`.
     pub fn account_snapshot(&mut self, ts: u64) -> AccountState {
         self.snapshot(ts)
+    }
+
+    /// How large a position in `symbol` this account can carry if `additional`
+    /// (already signed: buy positive, sell negative) joins the live book.
+    ///
+    /// THE CAP IS A SIZE, NOT A NET. A long ten plus a working sell ten plus
+    /// an incoming buy ten can reach twenty long if the buy fills first; summing
+    /// the signed quantities would call that ten and let it through. The number
+    /// returned is the largest |qty| the book can reach given worst-case fill
+    /// order of the working book and this submit.
+    ///
+    /// Under netting the positions collapse to one qty, so that largest is the
+    /// worse of the two extreme nets: every buy fills first, or every sell
+    /// fills first. A flip through a long ten to a short five never holds more
+    /// than ten, and is not refused on that account. Under hedging the sides
+    /// coexist, so the same inputs are the larger of the two sides rather than
+    /// a net that cancelled them.
+    ///
+    /// Reduce-only working orders are left out, because they cannot grow a
+    /// side. WHAT THE EXCLUSION ACTUALLY GUARDS is the OVERSIZED reduce-only
+    /// leave: a reduce-only no larger than the side it sits against only ever
+    /// moves an extreme toward zero, which never wins the max, so counting it
+    /// would change no answer. A reduce-only may rest for more than the
+    /// position - it is clamped at the FILL, not at rest - and counting that
+    /// one would invent a short it can never open, refusing an order over a
+    /// size the book cannot reach.
+    #[must_use]
+    pub fn projected_qty(&self, symbol: &str, additional: Decimal) -> Decimal {
+        let (mut buys, mut sells) = (Decimal::ZERO, Decimal::ZERO);
+        if additional > Decimal::ZERO {
+            buys += additional;
+        } else {
+            sells += -additional;
+        }
+        for order in &self.open.orders {
+            if order.submit.symbol.as_ref() != symbol || order.submit.reduce_only {
+                continue;
+            }
+            match order.submit.side {
+                mogwai_protocol::Side::Buy => buys += order.leaves_qty,
+                mogwai_protocol::Side::Sell => sells += order.leaves_qty,
+            }
+        }
+        match self.oms_type {
+            mogwai_protocol::OmsType::Netting => {
+                let net: Decimal = self
+                    .account
+                    .positions
+                    .iter()
+                    .filter(|((position_symbol, _), _)| position_symbol.as_ref() == symbol)
+                    .map(|(_, position)| position.qty)
+                    .sum();
+                (net + buys).abs().max((net - sells).abs())
+            }
+            mogwai_protocol::OmsType::Hedging => {
+                let (mut long, mut short) = (Decimal::ZERO, Decimal::ZERO);
+                for ((position_symbol, _), position) in &self.account.positions {
+                    if position_symbol.as_ref() != symbol {
+                        continue;
+                    }
+                    if position.qty > Decimal::ZERO {
+                        long += position.qty;
+                    } else {
+                        short += -position.qty;
+                    }
+                }
+                (long + buys).max(short + sells)
+            }
+        }
     }
 
     pub fn positions(&self) -> Vec<Position> {
@@ -6145,6 +6229,14 @@ mod tests {
     const EIGHT_HOURS_NS: u64 = 8 * 3_600 * 1_000_000_000;
 
     fn perpetual(rate: Decimal) -> InstrumentDef {
+        perpetual_against(rate, None, Decimal::ZERO)
+    }
+
+    fn perpetual_against(
+        rate: Decimal,
+        index_symbol: Option<&str>,
+        clamp: Decimal,
+    ) -> InstrumentDef {
         InstrumentDef {
             symbol: "BTCUSDT.P".into(),
             class: InstrumentClass::Perpetual {
@@ -6154,6 +6246,8 @@ mod tests {
                 asset_class: WireAssetClass::Cryptocurrency,
                 funding_interval_ns: EIGHT_HOURS_NS,
                 funding_rate: rate,
+                index_symbol: index_symbol.map(str::to_owned),
+                funding_clamp: clamp,
             },
             price_precision: 2,
             size_precision: 0,
@@ -6259,6 +6353,223 @@ mod tests {
         let first = funding_instants(0, EIGHT_HOURS_NS, EIGHT_HOURS_NS);
         let second = funding_instants(EIGHT_HOURS_NS, 2 * EIGHT_HOURS_NS, EIGHT_HOURS_NS);
         assert_eq!(first + second, 2);
+    }
+
+    /// A mark above the index makes the long pay MORE than the configured
+    /// interest. That is the whole point of basis-responsive funding: a
+    /// perpetual trading rich of spot transfers cash from long to short.
+    #[test]
+    fn a_rich_mark_raises_the_funding_a_long_pays() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![perpetual_against(
+                Decimal::ZERO,
+                Some("BTCUSDT"),
+                Decimal::ONE,
+            )],
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(100_000))]),
+            fill_seed: 0,
+        });
+        e.set_margin_policy(
+            "BTCUSDT.P".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: BreachAction::Refuse,
+                basis: MarginBasis::PerContract,
+            },
+        );
+        e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "P1",
+                Side::Buy,
+                "BTCUSDT.P",
+                10,
+                Some(Decimal::from(50_000)),
+            )),
+            1,
+        );
+        e.mark(
+            &[
+                ("BTCUSDT.P".into(), Decimal::from(60_600)),
+                ("BTCUSDT".into(), Decimal::from(60_000)),
+            ],
+            2,
+        );
+        let before = *e.account.balances.get("USDT").expect("funded");
+        e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+        let after = *e.account.balances.get("USDT").expect("funded");
+        // 10 contracts at 60,600 is 606,000 of notional; 1 percent premium is
+        // 6,060. Interest is zero, so that is the whole payment.
+        assert_eq!(before - after, Decimal::from(6_060));
+    }
+
+    /// No index mark means the configured interest, even when the class NAMES
+    /// an index. A missing tape is not a basis.
+    #[test]
+    fn a_named_index_without_a_mark_keeps_the_interest() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![perpetual_against(
+                Decimal::new(1, 4),
+                Some("BTCUSDT"),
+                Decimal::ZERO,
+            )],
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(100_000))]),
+            fill_seed: 0,
+        });
+        e.set_margin_policy(
+            "BTCUSDT.P".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: BreachAction::Refuse,
+                basis: MarginBasis::PerContract,
+            },
+        );
+        e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "P1",
+                Side::Buy,
+                "BTCUSDT.P",
+                10,
+                Some(Decimal::from(50_000)),
+            )),
+            1,
+        );
+        e.mark(&[("BTCUSDT.P".into(), Decimal::from(60_000))], 2);
+        let before = *e.account.balances.get("USDT").expect("funded");
+        e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+        let after = *e.account.balances.get("USDT").expect("funded");
+        assert_eq!(
+            before - after,
+            Decimal::from(60),
+            "no index mark: 10 * 60,000 * 0.0001"
+        );
+    }
+
+    fn rest_limit(engine: &mut Engine, order: SubmitOrder, last_px: i64, ts: u64) {
+        let out = engine.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            ts,
+            Some(MarketReading {
+                last_px: Decimal::from(last_px),
+                ts_ns: ts,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            matches!(out.first(), Some(ServerMessage::OrderAccepted { .. })),
+            "the limit must rest, got {out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "a marketable rest would not pin the working book: {out:?}"
+        );
+    }
+
+    /// A working buy of ten plus an incoming buy of one is eleven. A projection
+    /// that ignored `self.open.orders` would answer one and the integration
+    /// test, which submits against a flat book, would not notice.
+    #[test]
+    fn projected_qty_counts_working_orders() {
+        let mut e = funded(1_000_000);
+        let mut rest = order_with("W1", Side::Buy, "BTCUSDT", 10, Some(Decimal::from(90)));
+        rest.order_type = OrderType::Limit;
+        rest_limit(&mut e, rest, 100, 1);
+        assert_eq!(e.projected_qty("BTCUSDT", Decimal::ONE), Decimal::from(11));
+    }
+
+    /// A reduce-only leave cannot grow a side, so it is not a sell for the
+    /// projection's purposes.
+    ///
+    /// THE LEAVE IS OVERSIZED ON PURPOSE - thirty against a long ten - because
+    /// that is the only shape in which the exclusion changes an answer. A
+    /// reduce-only within the position only moves the `net - sells` extreme
+    /// toward zero, which never wins the max, so a test using ten would pass
+    /// against a projection that counted reduce-only orders and would guard
+    /// nothing. Resting for more than the position is legal: reduce-only is
+    /// clamped at the FILL, not at rest.
+    #[test]
+    fn projected_qty_ignores_reduce_only_working_orders() {
+        let mut e = funded(1_000_000);
+        e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "P1",
+                Side::Buy,
+                "BTCUSDT",
+                10,
+                Some(Decimal::from(100)),
+            )),
+            1,
+        );
+        let mut ro = order_with("RO", Side::Sell, "BTCUSDT", 30, Some(Decimal::from(110)));
+        ro.order_type = OrderType::Limit;
+        ro.reduce_only = true;
+        rest_limit(&mut e, ro, 100, 2);
+        assert_eq!(
+            e.projected_qty("BTCUSDT", Decimal::ZERO),
+            Decimal::from(10),
+            "counting the leave would project a short twenty the book cannot reach"
+        );
+    }
+
+    /// Long ten, working sell ten, incoming buy ten: the buy can fill first
+    /// and the book is then twenty long. Netting those three to ten is the
+    /// signed-sum hole.
+    #[test]
+    fn projected_qty_does_not_net_an_opposing_working_order() {
+        let mut e = funded(1_000_000);
+        e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "P1",
+                Side::Buy,
+                "BTCUSDT",
+                10,
+                Some(Decimal::from(100)),
+            )),
+            1,
+        );
+        let mut sell = order_with("S1", Side::Sell, "BTCUSDT", 10, Some(Decimal::from(110)));
+        sell.order_type = OrderType::Limit;
+        rest_limit(&mut e, sell, 100, 2);
+        assert_eq!(
+            e.projected_qty("BTCUSDT", Decimal::from(10)),
+            Decimal::from(20)
+        );
+    }
+
+    /// A netting flip never holds more than the open side, so a sell of
+    /// fifteen against a long ten projects ten, not fifteen.
+    #[test]
+    fn projected_qty_allows_a_netting_flip_inside_the_open_side() {
+        let mut e = funded(1_000_000);
+        e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "P1",
+                Side::Buy,
+                "BTCUSDT",
+                10,
+                Some(Decimal::from(100)),
+            )),
+            1,
+        );
+        assert_eq!(
+            e.projected_qty("BTCUSDT", Decimal::from(-15)),
+            Decimal::from(10)
+        );
+    }
+
+    /// Under hedging the sides coexist, so a long ten and a short ten plus an
+    /// incoming buy ten is twenty, not a net of ten.
+    #[test]
+    fn projected_qty_on_a_hedged_book_is_the_larger_side() {
+        let mut e = futures_engine(200_000, BreachAction::Refuse);
+        e.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        fill_future(&mut e, "L", Side::Buy, 10, 21_000);
+        fill_future(&mut e, "S", Side::Sell, 10, 21_000);
+        assert_eq!(e.projected_qty("MNQ", Decimal::from(10)), Decimal::from(20));
     }
 
     /// A NOTIONAL margin basis is what makes a leveraged account expressible:

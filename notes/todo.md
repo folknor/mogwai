@@ -692,13 +692,17 @@ required eventually, since both modes must be supported.
   equity account could not sell at all, and the maintenance walk read a
   notional-basis fraction as a per-contract amount. See `docs/config.md`.
   STILL OPEN ON THIS AXIS, none blocking:
-  a perpetual's funding rate is a CONSTANT rather than something that responds to
-  the mark-versus-index basis, which is what a real venue computes it from;
   funding is paid on the fill sweeper's cadence so an instant is honoured on the
   pass that crosses it rather than at the instant itself; and nothing has been
   FITTED for any of the new classes, so a symbol configured as one is served the
   default tape wearing a different shape - the intake sequence is what makes a
   preset honest, and none has been run for equity, perps or inverse.
+  LANDED 2026-08-16: the funding rate responds to the mark-versus-index basis
+  when the class names an `index_symbol` whose river is already materialized;
+  otherwise the configured `funding_rate` is the whole rate. Also landed: a
+  static overall drawdown and a max-position cap on the risk policy, with two
+  new shipped rulesets (`static-drawdown`, `intraday-trail-sized`) that use
+  them. See `docs/config.md`.
   THE RISK STATE IS PUBLISHED, and the reason is EVALUATION rather than
   strategy consumption. Ruled 2026-08-16. A real trader reads its remaining
   drawdown off the firm's dashboard; mogwai presents no dashboard, so if the

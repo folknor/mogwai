@@ -78,7 +78,14 @@ breach action is what spans both worlds: `lock_until_reset` flattens and refuses
 to open until the next reset, `terminate` flattens and ends the account. A
 trailing drawdown ratchets on intraday peak equity including unrealized, or on
 end-of-day balance only, which is the single largest difference between two
-accounts advertising the same number. THE ACCOUNT DEFINES ITS OWN DAY: the reset
+accounts advertising the same number. A static overall drawdown measures from
+opening equity and never ratchets, which is the other common funded-account
+form. A max-position cap is refused at entry: it is the largest |qty| the book
+can reach after this order, given worst-case fill order of the working book
+(worse extreme net under netting, larger side under hedging). Working orders
+count; reduce-only does not. An oversized submit is a client error rather than
+a liquidation.
+THE ACCOUNT DEFINES ITS OWN DAY: the reset
 is a minute of the UTC day named by the policy, not the instrument's calendar,
 and it fires whenever sim time crosses it.
 
@@ -186,7 +193,13 @@ ledger.
   spot, so a perpetual without it reports P and L that is wrong by construction.
   Funding is paid on notional AT THE MARK, on instants that sit on multiples of
   the interval from the unix epoch - a property of the clock, so the schedule
-  cannot depend on when a run booted or how the sweep passes were cut.
+  cannot depend on when a run booted or how the sweep passes were cut. The
+  configured `funding_rate` is the zero-premium INTEREST. When the class names
+  an `index_symbol` and that symbol already has a last mark, the live rate is
+  `clamp(interest + (mark - index) / index, +/- funding_clamp)`. No index mark
+  means a zero premium: reading an index never spends a river nobody asked for,
+  so a perp-only venue keeps the configured rate. An instant is still honoured
+  on the sweep pass that crosses it rather than at the instant itself.
 - `Inverse` is coin-margined: quoted in one currency, settled in another. Value
   is `multiplier * qty / price` rather than `multiplier * qty * price`, so P and
   L is non-linear and a long is not the mirror of a short. `InstrumentDef`

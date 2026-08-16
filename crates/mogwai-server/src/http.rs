@@ -388,6 +388,55 @@ pub(crate) async fn process_order_cmd(
     if let ClientMessage::SubmitOrder(order) = &order_cmd {
         let _configured = run.ensure_instrument(passenger, &order.symbol).await;
     }
+    // A POSITION CAP is refused here, by name, before the act delay. An
+    // oversized submit is a client error: the firm would not have taken the
+    // order, so the venue must not either. Reduce-only never grows the book
+    // and is left alone.
+    //
+    // The risk guard is dropped BEFORE the engine await: holding a
+    // `std::sync::Mutex` across `.await` makes this future `!Send`, and the
+    // socket task has to be Send.
+    let position_cap = passenger
+        .risk
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .max_position();
+    if let ClientMessage::SubmitOrder(order) = &order_cmd
+        && !order.reduce_only
+        && let Some(cap) = position_cap
+    {
+        let additional = match order.side {
+            mogwai_protocol::Side::Buy => order.quantity,
+            mogwai_protocol::Side::Sell => -order.quantity,
+        };
+        let projected = passenger
+            .engine
+            .lock()
+            .await
+            .projected_qty(&order.symbol, additional);
+        if projected > cap {
+            let Some(reservation) = lanes.try_reserve_boundary() else {
+                return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+                    subject: admission_subject(&order_cmd),
+                    reason: "execution output admission budget exhausted".into(),
+                    ts_event: ts,
+                });
+            };
+            return OrderOutcome::Refused {
+                events: vec![ServerMessage::OrderRejected {
+                    client_order_id: order.client_order_id.clone(),
+                    reason: truncate_reason(format!(
+                        "account {account} may not carry more than {cap} of {symbol}; this order \
+                         would take the book to {projected}",
+                        account = passenger.account_id.as_str(),
+                        symbol = order.symbol,
+                    )),
+                    ts_event: ts,
+                }],
+                reservation,
+            };
+        }
+    }
     // The venue's ACT delay sits BETWEEN the protocol boundary and the market
     // price stamp. After the boundary, because a malformed command is refused
     // by the protocol and a refusal is not a venue act - and the same reason

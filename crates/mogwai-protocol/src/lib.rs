@@ -34,7 +34,7 @@ pub use havoc::{
     validate_conn_havoc, validate_divergence, validate_market_regime,
 };
 pub use instruments::{
-    InstrumentClass, InstrumentDef, OmsType, WireAssetClass, default_instruments,
+    FundingTerms, InstrumentClass, InstrumentDef, OmsType, WireAssetClass, default_instruments,
 };
 pub use messages::{
     ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,
