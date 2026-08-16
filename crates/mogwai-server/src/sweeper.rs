@@ -113,7 +113,11 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             for (index, passenger) in seated.iter().enumerate() {
                 let engine = passenger.engine.lock().await;
                 scans.extend(engine.pending_scans().into_iter().map(|scan| (index, scan)));
-                mark_symbols.extend(engine.futures_mark_symbols());
+                // Valuation symbols, not just the margin ones: a policed
+                // account holding a spot asset needs that pair priced to state
+                // its equity at all, and nothing else in the pass would ask for
+                // it.
+                mark_symbols.extend(engine.valuation_symbols());
             }
             mark_symbols.sort();
             mark_symbols.dedup();
@@ -514,8 +518,7 @@ fn enforce_policy(
         // nothing for a feature it does not use.
         return (emitted, originated);
     };
-    let snapshot = engine.account_snapshot(to_ns);
-    let Some(equity) = crate::risk::equity_in(&snapshot, &currency) else {
+    let Some(equity) = crate::risk::equity_in(engine, &currency) else {
         // The account holds value this policy cannot express. Order entry
         // refuses what would create that state, so reaching here means an
         // account acquired it another way - a venue-originated liquidation

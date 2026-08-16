@@ -275,16 +275,16 @@ pub(crate) async fn process_order_cmd(
             reservation,
         };
     }
-    // A POLICED ACCOUNT HOLDS ONE CURRENCY, refused here rather than discovered
-    // as a mis-valued threshold later.
+    // A POLICED ACCOUNT TRADES ONLY WHAT ITS POLICY CAN VALUE, refused here
+    // rather than discovered as a mis-valued threshold later.
     //
-    // Equity is computed in the policy's currency and the venue has no exchange
-    // rate. A SPOT fill credits the base asset as a currency balance and debits
-    // the quote, so one buy leaves the account holding two currencies and its
-    // equity unstateable; futures move only the settlement currency. So a
-    // policed account trades shapes settling in its own currency, which today
-    // means futures, and asking for anything else is a client error with a
-    // reason that says why.
+    // Equity is stated in the policy's currency, and the venue prices an asset
+    // only through an instrument that QUOTES it in that currency. A future
+    // settling in it qualifies, and so does a spot pair quoted in it - buying
+    // BTC on BTCUSDT under a USDT policy leaves a BTC balance the BTCUSDT mark
+    // can value. What does not qualify is a shape that would leave a holding
+    // nothing prices in the policy currency, and asking for one is a client
+    // error with a reason that says why.
     if let ClientMessage::SubmitOrder(order) = &order_cmd
         && let Some(currency) = passenger
             .risk
@@ -1056,7 +1056,7 @@ pub(crate) async fn account(
         .map(str::to_owned)
         .or_else(|| sole_currency(&account));
     let equity = currency
-        .and_then(|currency| crate::risk::equity_in(&account, &currency))
+        .and_then(|currency| crate::risk::equity_in(&engine, &currency))
         .unwrap_or_default();
     let risk = ledger.state(equity);
     drop(ledger);
@@ -1074,14 +1074,16 @@ pub(crate) struct AccountQuery {
     account: Option<String>,
 }
 
-/// Whether trading this shape moves ONE currency, and that one is `currency`.
+/// Whether an account measured in `currency` can state what trading this shape
+/// leaves it holding.
 ///
-/// A future settles in one currency and its fills touch no other. A SPOT pair
-/// touches two by construction - the base is credited as a balance and the
-/// quote debited - so no spot shape can satisfy this whatever currency is
-/// named.
+/// A FUTURE settling in `currency` moves only that currency and carries its own
+/// unrealized, so it always qualifies. A SPOT pair leaves the base asset in the
+/// ledger as a balance, which is valuable exactly when this pair QUOTES it in
+/// `currency` - that pair's own mark is the price. Anything else would leave a
+/// holding nothing prices.
 fn settles_only_in(def: &InstrumentDef, currency: &str) -> bool {
-    def.class.settlement_currency() == currency && def.class.base_currency().is_none()
+    def.class.settlement_currency() == currency
 }
 
 /// The one currency an account holds, or `None` if it holds none or several.

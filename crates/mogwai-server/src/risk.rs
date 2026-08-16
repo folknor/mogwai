@@ -199,41 +199,21 @@ impl RiskLedger {
     }
 }
 
-/// Account equity IN ONE CURRENCY: that currency's balance plus the unrealized
-/// on positions, which futures carry in their settlement currency.
+/// Account equity IN ONE CURRENCY, answered by the engine because only it knows
+/// which instrument prices which asset.
 ///
 /// ONE CURRENCY AND NEVER A SUM ACROSS THEM. An earlier version summed every
 /// balance total, which silently valued one unit of any asset at one unit of
 /// any other - and that is not an exotic case, it is the DEFAULT one: a spot
 /// fill credits the base asset as a currency balance, so buying one BTC at
-/// 60,000 leaves `BTC: 1` beside `USDT: -60,000` and the sum reads as a 59,999
-/// loss on a trade that changed nothing. The venue has no exchange rate and no
-/// live spot mark to build one from, so the balances it cannot value are not
-/// approximated here; a policed account is prevented from acquiring them at
-/// order entry instead.
+/// 60,000 leaves `BTC: 1` beside `USDT: -60,000` and the sum read a 59,999 loss
+/// on a trade that changed nothing.
 ///
-/// `None` when the account holds value this policy cannot express, which is the
-/// caller's signal to refuse rather than to enforce against a wrong number.
-pub(crate) fn equity_in(
-    account: &mogwai_protocol::AccountState,
-    currency: &str,
-) -> Option<Decimal> {
-    let mut equity = Decimal::ZERO;
-    for balance in &account.balances {
-        if balance.currency == currency {
-            equity = equity.checked_add(balance.total)?;
-        } else if !balance.total.is_zero() {
-            // A holding in a currency the policy does not name. Refusing to
-            // guess is the whole point: enforcing a threshold against a number
-            // that ignores part of the account would be worse than not
-            // enforcing at all, because it would look enforced.
-            return None;
-        }
-    }
-    for position in &account.positions {
-        equity = equity.checked_add(position.unrealized_pnl)?;
-    }
-    Some(equity)
+/// `None` when the account holds something nothing prices in `currency`, which
+/// is the caller's signal to refuse rather than to enforce against a wrong
+/// number.
+pub(crate) fn equity_in(engine: &mogwai_engine::Engine, currency: &str) -> Option<Decimal> {
+    engine.valuation_in(currency)
 }
 
 /// Which reset period a sim instant falls in.

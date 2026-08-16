@@ -902,23 +902,23 @@ fn an_unenforceable_policy_is_refused_at_the_boundary() {
     );
 }
 
-/// A policed account may not acquire a currency its policy cannot value, and
-/// is told so at ORDER ENTRY rather than after the fill has already made its
-/// equity unstateable.
+/// A policed SPOT account trades and is valued: the base asset it ends up
+/// holding is priced by the pair that quotes it.
 ///
-/// This is what confines a policed account to one settlement currency, which
-/// today means futures: a spot fill credits the base asset as a currency
-/// balance and debits the quote, so one buy leaves two currencies and no rate
-/// to combine them with.
+/// This is what the default tape shape needs. A spot fill credits the base as a
+/// currency balance and debits the quote, so an account holding BTC is worth
+/// nothing statable until BTCUSDT is marked - and its equity must NOT collapse
+/// by the notional it just spent, which is what a naive sum of balances
+/// reported before the valuation landed.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn a_policed_account_is_refused_a_shape_it_cannot_be_valued_in() {
+async fn a_policed_spot_account_is_valued_at_the_marked_price() {
     let venue = spawn(&["--config", &fast_config()]);
     let (status, body) = http_post_json(
         &venue.http_base(),
         "/accounts",
-        r#"{"account_id":"WYRD-204","balances":{"USDT":"50000"},
-            "policy":{"currency":"USDT","daily_loss_limit":{"amount":"500"}}}"#,
+        r#"{"account_id":"WYRD-204","balances":{"USDT":"5000000"},
+            "policy":{"currency":"USDT","trailing_drawdown":{"amount":"1000000"}}}"#,
     );
     assert_eq!(status, 201, "the policed account opens: {body}");
 
@@ -935,24 +935,24 @@ async fn a_policed_account_is_refused_a_shape_it_cannot_be_valued_in() {
         .await
         .expect("submit a spot order");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let message = tokio::time::timeout_at(deadline, socket.next())
-            .await
-            .expect("the submit is answered")
-            .expect("the socket stays open")
-            .expect("a well-formed frame");
-        if let Message::Text(text) = message
-            && let Ok(ServerMessage::OrderRejected { reason, .. }) =
-                serde_json::from_str::<ServerMessage>(&text)
-        {
-            assert!(
-                reason.contains("policed") && reason.contains("another currency"),
-                "the refusal says why a policed account cannot trade this shape: {reason}"
-            );
-            return;
-        }
-    }
+    // Let the fill book and at least one sweep pass mark the pair.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-204");
+    assert_eq!(status, 200, "the account answers: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let equity: f64 = value["risk"]["equity"]
+        .as_str()
+        .expect("equity is reported")
+        .parse()
+        .expect("equity parses");
+    assert!(
+        equity > 4_000_000.0,
+        "buying an asset must not read as spending its notional: {body}"
+    );
+    assert!(
+        value["risk"]["breached"].is_null(),
+        "a purchase is not a drawdown breach: {body}"
+    );
 }
 
 /// An unpoliced account is enforced against nothing, which is what every client

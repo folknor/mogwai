@@ -357,6 +357,11 @@ pub struct Engine {
     venue_order_seq: u64,
     trade_seq: u64,
     position_seq: u64,
+    /// The last price each symbol was marked at, kept for every class rather
+    /// than only the ones that post margin. This is what lets a SPOT holding be
+    /// valued: the base asset sits in the ledger as a currency balance and the
+    /// pair that quotes it is the only thing that can price it.
+    last_marks: HashMap<Symbol, Decimal>,
     liquidation_seq: u64,
     warned: Warned,
     fill_seed: u64,
@@ -492,6 +497,89 @@ impl Engine {
         symbols
     }
 
+    /// Every symbol this account needs a price for in order to state its worth.
+    ///
+    /// A superset of `futures_mark_symbols`: that answers "what must be marked
+    /// to run the margin ledger", this answers "what must be priced to VALUE the
+    /// account". The difference is SPOT. A spot fill credits the base asset as a
+    /// currency balance, so an account holding BTC is worth nothing statable
+    /// until something prices BTC, and the instrument that prices it is the pair
+    /// whose base it is.
+    ///
+    /// Derived from the BALANCES rather than from the positions, because the
+    /// balance is what the account actually holds: a position may be closed
+    /// while the asset it was opened with is still sitting in the ledger.
+    pub fn valuation_symbols(&self) -> Vec<Symbol> {
+        let mut symbols = self.futures_mark_symbols();
+        for (symbol, def) in &self.instruments {
+            let Some(base) = def.class.base_currency() else {
+                continue;
+            };
+            if self
+                .account
+                .balances
+                .get(base)
+                .is_some_and(|held| !held.is_zero())
+            {
+                symbols.push(Symbol::clone(symbol));
+            }
+        }
+        symbols.sort();
+        symbols.dedup();
+        symbols
+    }
+
+    /// What this account is worth, stated in `currency`.
+    ///
+    /// The balance in `currency`, plus every OTHER currency balance valued at
+    /// the last price of an instrument quoting it in `currency`, plus the
+    /// unrealized on positions - which futures carry in their settlement
+    /// currency.
+    ///
+    /// `None` when the account holds something nothing prices in `currency`.
+    /// Refusing to answer is the point: a risk threshold judged against a number
+    /// that silently omitted part of the account would look enforced while
+    /// enforcing the wrong thing.
+    ///
+    /// A LAST MARK, NOT A LIVE QUOTE. The value is only as fresh as the last
+    /// `mark` this engine saw, which the fill sweeper drives once per pass, so
+    /// this inherits exactly the staleness the margin ledger already runs on.
+    pub fn valuation_in(&self, currency: &str) -> Option<Decimal> {
+        let mut total = self
+            .account
+            .balances
+            .get(currency)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        for (held_currency, amount) in &self.account.balances {
+            if held_currency == currency || amount.is_zero() {
+                continue;
+            }
+            let price = self.instruments.iter().find_map(|(symbol, def)| {
+                (def.class.base_currency() == Some(held_currency.as_str())
+                    && def.class.settlement_currency() == currency)
+                    .then(|| self.last_marks.get(symbol).copied())
+                    .flatten()
+            })?;
+            total = total.checked_add(amount.checked_mul(price)?)?;
+        }
+        for ((symbol, _), position) in &self.account.positions {
+            let Some(def) = self.instruments.get(symbol) else {
+                continue;
+            };
+            if !def.class.is_future() || def.class.settlement_currency() != currency {
+                continue;
+            }
+            let unrealized = position
+                .mark_px
+                .checked_sub(position.avg_px)?
+                .checked_mul(position.qty)?
+                .checked_mul(def.class.multiplier())?;
+            total = total.checked_add(unrealized)?;
+        }
+        Some(total)
+    }
+
     #[must_use]
     pub fn unrealized_pnl(&self, symbol: &str) -> Decimal {
         let Some(def) = self
@@ -522,6 +610,13 @@ impl Engine {
 
     pub fn mark(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
         let mut moved = false;
+        // Recorded for EVERY class, before the futures-only position update
+        // below. A spot pair posts no margin and holds no marked position, so
+        // nothing else here would remember its price - and without it the base
+        // asset sitting in the ledger cannot be valued.
+        for (symbol, mark) in marks {
+            self.last_marks.insert(Symbol::clone(symbol), *mark);
+        }
         for (symbol, mark) in marks {
             for position in
                 self.account
@@ -929,6 +1024,7 @@ impl Engine {
             venue_order_seq: 0,
             trade_seq: 0,
             position_seq: 0,
+            last_marks: HashMap::new(),
             liquidation_seq: 0,
             warned: Warned::default(),
             fill_seed: config.fill_seed,

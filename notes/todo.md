@@ -1181,44 +1181,41 @@ required eventually, since both modes must be supported.
   NOT THE SAME as tightening `SWEEP_INTERVAL_NS`, which would buy resolution
   everywhere at a cost the fill golden's own item already describes.
 
-- A POLICED ACCOUNT IS CONFINED TO ONE SETTLEMENT CURRENCY, which today means
-  FUTURES ONLY. Landed 2026-08-16 as the honest response to a defect, and it is
-  a real limit on what can be forward tested under enforcement rather than a
-  tidy-up.
-  THE MECHANISM. A SPOT fill credits the base asset as a CURRENCY BALANCE and
-  debits the quote - `apply_fill` in `mogwai-engine/src/account.rs` - so buying
-  one BTC at 60,000 leaves the ledger holding `BTC: 1` beside
-  `USDT: -60,000`. Equity therefore cannot be stated without valuing the base,
-  and the venue has no exchange rate and no live spot mark to build one from:
-  `Engine::mark` refreshes only FUTURES positions, so a spot position's
-  `mark_px` is never advanced past its fill price. A future moves only its
-  settlement currency and carries its own unrealized, which is why it works.
-  THE DEFECT THIS REPLACED, recorded because the wrong version shipped for one
-  commit: equity summed every balance total, which values one unit of any asset
-  at one unit of any other. On the DEFAULT preset shape - BTCUSDT spot - that
-  reads a 59,999 loss on a purchase that changed nothing, so a trailing
-  drawdown would fire on the first buy. It was not an exotic case; it was the
-  common one.
-  WHAT SHIPPED INSTEAD. `AccountPolicy` must name the `currency` its thresholds
-  are stated in whenever it sets a rule, `equity_in` computes in that currency
-  alone and returns `None` rather than guessing when the account holds anything
-  else, and an order that would open a second currency is refused AT ENTRY by
-  name. So the failure is a client error at submit rather than a mis-valued
-  threshold hours later.
-  WHAT IT COSTS: no spot instrument can be forward tested under an enforced
-  risk policy. Since the designated default tape is a spot shape and crypto
-  spot is a whole session class the preset set means to cover, that is a real
-  hole rather than a corner.
-  WHAT CLOSING IT NEEDS is a way to value a non-settlement holding: either
-  marking spot positions on the tape the way futures are marked, which the mark
-  path already almost does and which would let equity be quote balance plus
-  base at mark; or an explicit rate surface, which is a bigger idea and buys
-  cross-currency accounts too. The first is much cheaper and covers the case
-  that exists. Neither is started.
-  RELATED, and it points the same way: the ledger-generality ruling above wants
-  shares, leverage and funding payments, and every one of those needs a holding
-  valued in a currency it is not denominated in. Whatever closes this closes
-  part of that.
+- ACCOUNT VALUATION: what a holding is worth in the currency its policy is
+  stated in. LARGELY CLOSED 2026-08-16, with the residue stated at the end.
+  THE MECHANISM, worth keeping because it is not obvious: a SPOT fill credits
+  the base asset as a CURRENCY BALANCE and debits the quote - `apply_fill` in
+  `mogwai-engine/src/account.rs` - so buying one BTC at 60,000 leaves the ledger
+  holding `BTC: 1` beside `USDT: -60,000`. Equity cannot be stated without
+  valuing the base. A future moves only its settlement currency and carries its
+  own unrealized, which is why futures never had the problem.
+  THE DEFECT, recorded because the wrong version shipped for one commit: equity
+  summed every balance total, valuing one unit of any asset at one unit of any
+  other. On the DEFAULT preset shape - BTCUSDT spot - that reads a 59,999 loss
+  on a purchase that changed nothing, so a trailing drawdown fired on the first
+  buy. Not an exotic case; the common one.
+  WHAT LANDED. `Engine` keeps a LAST MARK per symbol for every class rather than
+  only the ones posting margin, `valuation_symbols` asks the sweeper to price
+  every pair whose base the account holds, and `valuation_in` answers what the
+  account is worth in one currency: that currency's balance, plus each other
+  balance valued through an instrument quoting it in that currency, plus the
+  unrealized on futures settling in it. A policy must NAME its currency; an
+  order whose shape would leave a holding nothing prices is refused at ENTRY by
+  name; and an account that reaches an unvaluable state some other way is warned
+  about and NOT enforced, on the grounds that enforcing against a wrong number
+  is worse than not enforcing because it looks enforced.
+  SO A POLICED SPOT ACCOUNT WORKS, which the default tape shape needed.
+  THE RESIDUE, none of it blocking:
+  - ONE HOP ONLY. An asset is valued through an instrument quoting it DIRECTLY
+    in the policy currency. Hold ETH under a USD policy with only ETHUSDT and
+    BTCUSD listed and nothing prices it, so the account is unvaluable rather
+    than valued through a chain. A rate surface would fix it and buys
+    cross-currency accounts too; nothing needs it yet.
+  - THE MARK IS AS STALE AS THE LAST SWEEP, inherited from the margin ledger
+    rather than new, and the same gap the mark-cadence item above describes.
+  - THE LEDGER-GENERALITY RULING still wants shares, leverage and funding
+    payments. Every one needs a holding valued in a currency it is not
+    denominated in, so this machinery is the part of that which now exists.
 
 - THE ORDER-TYPE SURFACE IS COMPLETE, NOT CURATED. Ruled by the owner
   2026-08-16: mogwai is an exchange, so there is no axis on which it limits

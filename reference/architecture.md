@@ -45,15 +45,21 @@ The thresholds, the ratcheted peak and the remaining budget are PUBLISHED on
 no dashboard, so a run that ended flat having spent most of its budget would be
 indistinguishable from one that never came close.
 
-A POLICED ACCOUNT HOLDS ONE CURRENCY, which today means it trades futures. The
-policy names the currency its thresholds are stated in, equity is computed in
-that currency alone, and an order that would open a second one is refused at
-entry by name. A spot fill credits the base asset as a currency balance and
-debits the quote, so a spot account holds two currencies from its first fill and
-its equity cannot be stated: the venue has no exchange rate, and `Engine::mark`
-refreshes only futures positions, so a spot position carries no live mark to
-build one from. No spot instrument can therefore be forward tested under an
-enforced policy.
+A POLICY NAMES THE CURRENCY its thresholds are stated in, and the account is
+VALUED in it. A spot fill credits the base asset as a currency balance and
+debits the quote, so an account trading spot holds an asset that has to be
+priced before its equity means anything. The engine keeps a last mark per
+symbol for every class, the sweeper prices every pair whose base the account
+holds, and `Engine::valuation_in` sums that currency's balance, each other
+balance valued through an instrument quoting it in that currency, and the
+unrealized on futures settling in it. An order whose shape would leave a holding
+nothing prices is refused at entry by name, and an account that reaches an
+unvaluable state some other way is warned about and left unenforced rather than
+judged against a wrong number.
+
+Valuation is ONE HOP: an asset is priced only through an instrument quoting it
+directly in the policy currency, never through a chain. There is no rate
+surface.
 
 KNOWN FIDELITY GAP: the policy is evaluated on the fill sweeper's mark cadence,
 not per tape tick. At a real venue the ratchet is effectively tick-by-tick, so a
