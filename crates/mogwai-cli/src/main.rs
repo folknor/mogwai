@@ -149,7 +149,9 @@ fn main() -> anyhow::Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("unknown preset {name}"))?;
                 print!("{document}");
             } else {
-                println!("MNQ\nMES\nBTCUSDT");
+                for name in config::preset_names() {
+                    println!("{name}");
+                }
             }
             Ok(())
         }
