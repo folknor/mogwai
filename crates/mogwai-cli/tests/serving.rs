@@ -14,7 +14,7 @@ use common::{
     tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ServerMessage, TradeTick};
+use mogwai_protocol::{LiquiditySide, ServerMessage, TradeTick};
 use tokio_tungstenite::tungstenite::Message;
 
 /// A config whose boot river is named ONLY by `[instrument] preset`, with no
@@ -741,6 +741,13 @@ async fn an_armed_divergence_reaches_every_connection() {
 /// order, against the reading it arrived with, so nothing else ever walks the
 /// span its trigger waits on, and the venue would be accepting orders it can
 /// never execute.
+///
+/// ITS PREMISE IS NOT ENFORCED BY CONSTRUCTION and is asserted rather than
+/// assumed: the limit is placed 2.01 below the last historical print, and if
+/// the market falls that far between reading the anchor and the submit landing
+/// the order is marketable on arrival and never rests at all. That is a lost
+/// bet on sim-time drift, not a defect in the sweep, and the liquidity side on
+/// the fill is what tells the two apart.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_banded_limit_fills_from_the_run_sweep() {
@@ -785,15 +792,47 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
         match serde_json::from_str::<ServerMessage>(&text) {
             Ok(ServerMessage::OrderAccepted { ts_event, .. }) => accepted_ts = Some(ts_event),
             Ok(ServerMessage::OrderFilled(fill)) => {
+                assert_eq!(fill.client_order_id, "BAND-1");
+                // The LIQUIDITY SIDE, not the timestamp, is what names the case.
+                // A swept fill is a Maker fill; a limit that was already
+                // marketable when the submit landed fills as a Taker in the
+                // accept's own engine batch. The premise this test rests on is
+                // that the 2.01 of headroom read off the anchor print survives
+                // the sim time between reading it and the submit landing, and at
+                // speed 100 a small wall shift is a large sim shift - so the
+                // premise really does lose sometimes. When it does, this says
+                // the order never rested, which is the truth, instead of blaming
+                // publication order and sending a reader hunting a serving
+                // defect that is not there.
+                assert_eq!(
+                    fill.liquidity_side,
+                    LiquiditySide::Maker,
+                    "the limit was marketable on arrival and took liquidity, so \
+                     it never rested for the sweep to find - the market moved \
+                     more than the 2.01 of headroom between the anchor read and \
+                     the submit, not a sweep or ordering defect"
+                );
                 assert!(
                     accepted_ts.is_some_and(|accepted| fill.ts_event > accepted),
                     "a banded limit must rest before the sweep fills it"
                 );
-                assert_eq!(fill.client_order_id, "BAND-1");
                 return;
             }
             Ok(ServerMessage::OrderRejected { reason, .. }) => {
                 panic!("the banded limit was rejected: {reason}")
+            }
+            // Named rather than swallowed by a wildcard: each of these three
+            // says the venue never got a chance to do what the test is asking
+            // about, and under a wildcard the test would instead die on the
+            // 60-second deadline blaming the sweep.
+            Ok(ServerMessage::AdmissionRejected {
+                subject, reason, ..
+            }) => panic!("the venue refused admission for {subject:?}: {reason}"),
+            Ok(ServerMessage::ProtocolError { reason, .. }) => {
+                panic!("the venue read the submit as malformed: {reason}")
+            }
+            Ok(ServerMessage::FeedLagged { skipped, .. }) => {
+                panic!("this socket dropped {skipped} frames, so the fill may never arrive")
             }
             _ => {}
         }

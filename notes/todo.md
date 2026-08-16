@@ -484,29 +484,6 @@ consumer surface landed was the designed handoff.
   section 17 amendment through review, not an edit, so it is recorded
   here rather than taken.
 
-- DE-FRAGILIZE `a_banded_limit_fills_from_the_run_sweep`, which bets a fixed
-  2.01 of price headroom against sim-time drift and misreports the failure
-  when it loses. The old fanout-capacity "accept-before-fill" item that stood
-  here is CLOSED as FALSE, diagnosed 2026-08-15; what the venue actually does
-  is recorded at the `fanout_depth` default in `mogwai-server/src/config.rs`,
-  which is where it belongs.
-  The test anchors on the last historical print, submits a buy limit 2.01
-  below it, and requires the order to REST and be swept. Nothing enforces the
-  premise: when the market falls 2.01 between the anchor read and the submit
-  landing, the limit is marketable on arrival, fills as a Taker in the
-  accept's own engine batch, and the strict `fill.ts_event > accepted_ts`
-  fails on a TIE. The message then blames ordering, which is what sent a
-  reader hunting a serving defect for nine days. At speed 100 a small wall
-  shift is a large sim shift, so this is reachable by any timing perturbation.
-  Three fixes, none taken: assert the premise directly (a swept fill is
-  `Maker`, an immediate one `Taker`, so the liquidity side names the case
-  exactly); re-read the anchor immediately before submitting; or widen the
-  offset beyond plausible drift. The first is the honest one - it turns a
-  wrong answer into a clear statement that the order never rested.
-  Its wildcard match arm also swallows every frame it does not name,
-  including `AdmissionRejected`, `ProtocolError` and `FeedLagged`, so a
-  refusal or a lag is invisible to it.
-
 - TWO STRUCTURAL OBSERVATIONS from that diagnosis, neither with a known
   reproduction, both worth a decision before the serving path grows.
   (a) PUBLICATION ORDER IS NOT MUTATION ORDER. `dispatch_command` releases the
@@ -1080,6 +1057,53 @@ The third is worth a look from this side regardless of the ask: an armed
 `GoDark` swallowing the startup query means a client can never complete boot,
 which may be correct-by-design (it is a blackout) or may be an arm that is
 too broad to be useful.
+
+### Let the launcher name the boot symbol (broadarrow, 2026-08-16)
+
+`LaunchSpec` carries `binary`, `config`, `duration`, `ready_timeout` and
+`stderr`, and `mogwai serve` takes `--config`, `--duration` and `--launcher-pid`.
+Neither carries a SYMBOL, so the boot river is whatever the config file's
+top-level `symbol` key names, or the BTCUSDT default when it names none.
+
+That is a real cost under one-venue-per-run, which is the topology the end state
+actually uses. The boot river is the one exception to placement on demand: it is
+materialized BEFORE the readiness line and boarded at the configured speed, and
+the run retains that ticket for process life. So a launcher that wants symbol X
+gets this sequence today:
+
+1. the venue synthesizes a full `warmup_ns` of tape for the BOOT river - the
+   expensive part of boot, paid before readiness, for a river nobody will trade;
+2. that river keeps a boat, a pacing thread and a fill-sweeper slot alive for the
+   whole run;
+3. X's river is then materialized COLD, on demand, when the consumer first polls
+   or binds it - so the warmup synthesis that actually matters happens at first
+   read rather than before ready, inside the consumer's boot path.
+
+Two rivers where one was wanted, and the eagerly-warmed one is the wrong one.
+Resource cost is explicitly not a design input for this project, granted - but
+LATENCY TO FIRST BAR is, and so is which river is warm when a strategy starts.
+Multiply by a few hundred concurrent one-venue-per-run instances and it is the
+whole boot cost, doubled and misdirected.
+
+THE ASK: a `LaunchSpec.symbol` rendering as `serve --symbol <SYM>`, overriding
+the config's boot symbol exactly as `duration` already overrides
+`run_duration_ns`. The precedent is the point - this is the same shape as a knob
+that already exists, for the same reason: a launcher knows something the config
+file cannot, because one config serves many runs.
+
+The second benefit is arguably larger than the first: it moves the FUNDING
+refusal to venue boot. Today a config funding only USDT boots happily and then
+refuses `MNQ` at first bind or poll, because only CONFIGURED shapes are
+funding-checked at boot while the presets and the fallback are merely recorded as
+barred. With the boot symbol supplied at launch, a venue that cannot serve the
+one symbol its run exists for fails to start - a far better failure than starting
+and then refusing the only thing anyone wanted.
+
+broadarrow cannot do this from its side without authoring or rewriting the
+operator's venue config, which is exactly the re-parse its design refuses: it
+passes `[launch].config` through untouched on purpose. Until the flag exists the
+workaround is that every venue config must name its run's symbol, which means a
+config per symbol rather than a config per venue shape.
 
 ### Be an exchange: the instrument, order and account surface (broadarrow, 2026-08-16)
 
