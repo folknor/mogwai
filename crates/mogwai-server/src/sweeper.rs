@@ -241,6 +241,20 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         to_ns,
                         boat.sim,
                     );
+                    // The account's own rules, judged against the equity this
+                    // pass just produced. HERE rather than after delivery,
+                    // because a breach flattens - and a client must not be told
+                    // its position is open in one batch and gone in the next
+                    // when both describe the same instant.
+                    let mut events = events;
+                    let (emitted, originated) = enforce_policy(
+                        passenger,
+                        &mut engine,
+                        &mut events,
+                        to_ns,
+                        emitted,
+                        originated,
+                    );
                     let shape = engine.book_shape();
                     drop(engine);
                     if events.is_empty() {
@@ -471,6 +485,50 @@ fn deliver(
     for id in closed {
         run.release_lanes(id);
     }
+}
+
+/// Judge one account against its own policy, and act if a rule fired.
+///
+/// Returns the possibly-grown admission counts, because a flatten produces
+/// venue-originated orders and fills that the delivery reservation has to cover.
+///
+/// A BREACH FLATTENS AND THEN LOCKS. Flattening is the enforcement: the whole
+/// point is that a strategy which would have been liquidated actually is. The
+/// lock is what the breach action decides - until the next reset for a daily
+/// limit, forever for a trailing drawdown - and it is read by the order-entry
+/// gate rather than here.
+fn enforce_policy(
+    passenger: &crate::run::Passenger,
+    engine: &mut mogwai_engine::Engine,
+    events: &mut Vec<ServerMessage>,
+    to_ns: u64,
+    emitted: usize,
+    originated: usize,
+) -> (usize, usize) {
+    let equity = {
+        let snapshot = engine.account_snapshot(to_ns);
+        crate::risk::equity_of(&snapshot)
+    };
+    let verdict = passenger
+        .risk
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .observe(equity, to_ns);
+    let crate::risk::Verdict::Breached(breach) = verdict else {
+        return (emitted, originated);
+    };
+    tracing::warn!(
+        account = %passenger.account_id.as_str(),
+        rule = ?breach.rule,
+        action = ?breach.action,
+        equity = %breach.equity,
+        threshold = %breach.threshold,
+        "an account breached its risk policy",
+    );
+    let flattened = engine.liquidate_all(to_ns);
+    let added = flattened.events.len();
+    events.extend(flattened.events);
+    (emitted + added, originated + flattened.originated_orders)
 }
 
 fn refuse(

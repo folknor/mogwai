@@ -275,6 +275,41 @@ pub(crate) async fn process_order_cmd(
             reservation,
         };
     }
+    // A LOCKED ACCOUNT OPENS NOTHING. This is the other half of enforcement: the
+    // breach flattened the book, and this is what stops the strategy putting it
+    // straight back on. Placed with the other client-error refusals and BEFORE
+    // the act delay and market reading, because a locked account's order needs
+    // no price to be refused.
+    //
+    // Cancels and queries are deliberately still served: a locked client must
+    // still be able to see and tidy its own book, and refusing a query would
+    // make a locked account indistinguishable from a broken one.
+    if let ClientMessage::SubmitOrder(order) = &order_cmd
+        && passenger
+            .risk
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_locked()
+    {
+        let Some(reservation) = lanes.try_reserve_boundary() else {
+            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+                subject: admission_subject(&order_cmd),
+                reason: "execution output admission budget exhausted".into(),
+                ts_event: ts,
+            });
+        };
+        return OrderOutcome::Refused {
+            events: vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id.clone(),
+                reason: truncate_reason(format!(
+                    "account {account} breached its risk policy and may not open a position",
+                    account = passenger.account_id.as_str()
+                )),
+                ts_event: ts,
+            }],
+            reservation,
+        };
+    }
     // Register the symbol lazily, BEFORE the act delay and any market reading.
     // A `false` here means no profile resolves the symbol; fall through rather
     // than short-circuit, so an unconfigured symbol still meets the engine's
@@ -908,6 +943,11 @@ pub(crate) struct AccountSnapshot {
     clock: ClockAxis,
     #[serde(flatten)]
     account: AccountState,
+    /// What the venue is enforcing against this account right now. A sibling
+    /// rather than part of `AccountState`, because that type is also the PUSHED
+    /// frame's payload and risk state is an evaluator's concern rather than
+    /// something every fill should carry.
+    risk: mogwai_protocol::risk::RiskState,
 }
 
 /// Which axis a timestamp lives on. The sibling of `ServerClock::boat_clock`,
@@ -956,9 +996,21 @@ pub(crate) async fn account(
     };
     let ts = sim_now_ns(state.venue_sim());
     let mut engine = passenger.engine.lock().await;
+    let account = engine.account_snapshot(ts);
+    // Published for the EVALUATOR, not for the strategy. A real trader reads
+    // its remaining drawdown off the firm's dashboard; mogwai presents none, so
+    // a run that ended flat having spent 90 percent of its budget would be
+    // indistinguishable from one that never came close.
+    let risk = crate::risk::equity_of(&account);
+    let risk = passenger
+        .risk
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state(risk);
     Json(AccountSnapshot {
         clock: ClockAxis::Venue,
-        account: engine.account_snapshot(ts),
+        account,
+        risk,
     })
     .into_response()
 }
@@ -990,6 +1042,10 @@ pub(crate) struct OpenAccountRequest {
     /// is what makes a 25k experiment and a 100k experiment runnable on one
     /// venue.
     balances: std::collections::HashMap<String, rust_decimal::Decimal>,
+    /// The rules the venue ENFORCES against this account. Absent means
+    /// unpoliced, which is what every account had before policies existed.
+    #[serde(default)]
+    policy: mogwai_protocol::risk::AccountPolicy,
 }
 
 pub(crate) async fn open_account(
@@ -1015,9 +1071,18 @@ pub(crate) async fn open_account(
             "an account must open with at least one funded currency".to_owned(),
         );
     }
-    match state.run.open_account(&account_id, request.balances) {
+    // Validated where the policy ENTERS the venue, so a nonsense rule is a
+    // refused request rather than an account that behaves strangely hours in.
+    if let Err(error) = request.policy.validate() {
+        return (StatusCode::BAD_REQUEST, error);
+    }
+    let policed = !request.policy.is_unpoliced();
+    match state
+        .run
+        .open_account(&account_id, request.balances, request.policy)
+    {
         Ok(()) => {
-            tracing::info!(account = %account_id.as_str(), "opened an account");
+            tracing::info!(account = %account_id.as_str(), policed, "opened an account");
             (StatusCode::CREATED, String::new())
         }
         Err(refusal) => (StatusCode::CONFLICT, refusal.to_string()),

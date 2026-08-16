@@ -729,6 +729,81 @@ impl Engine {
         originated
     }
 
+    /// Close every open position and cancel every resting order, as the venue
+    /// rather than as the client.
+    ///
+    /// This is what enforcing an ACCOUNT POLICY does on breach: a strategy that
+    /// would have been liquidated must actually be liquidated, or the forward
+    /// claim is worth nothing. It is the same close the margin ledger performs
+    /// under `BreachAction::Liquidate` - reduce-only IOC market orders at the
+    /// mark, judged against the configured liquidation band - applied to the
+    /// whole book instead of to one breached symbol.
+    ///
+    /// RESTING ORDERS GO FIRST. A flatten that left them would leave the
+    /// account able to re-open the position it was just closed out of, through
+    /// a trigger nobody is watching.
+    pub fn liquidate_all(&mut self, ts: u64) -> MarkOutcome {
+        let mut events = Vec::new();
+        let resting: Vec<String> = self
+            .open
+            .iter()
+            .map(|order| order.submit.client_order_id.clone())
+            .collect();
+        for client_order_id in resting {
+            events.extend(self.on_cancel(client_order_id, ts));
+        }
+        let positions: Vec<_> = self
+            .account
+            .positions
+            .iter()
+            .filter(|(_, state)| !state.qty.is_zero())
+            .map(|((symbol, position_id), state)| {
+                (
+                    Symbol::clone(symbol),
+                    position_id.clone(),
+                    state.qty,
+                    state.mark_px,
+                )
+            })
+            .collect();
+        let mut originated = 0;
+        for (symbol, position_id, qty, mark) in positions {
+            self.liquidation_seq = self.liquidation_seq.saturating_add(1);
+            let order = SubmitOrder {
+                client_order_id: format!("RISK-{}-{}", symbol, self.liquidation_seq),
+                symbol,
+                position_id,
+                side: if qty > Decimal::ZERO {
+                    Side::Sell
+                } else {
+                    Side::Buy
+                },
+                order_type: OrderType::Market,
+                quantity: qty.abs(),
+                price: Some(mark),
+                trigger_price: None,
+                time_in_force: TimeInForce::Ioc,
+                reduce_only: true,
+                post_only: false,
+            };
+            events.extend(self.on_submit_from(
+                order,
+                ts,
+                Some(MarketReading {
+                    last_px: mark,
+                    ts_ns: ts,
+                    band_ticks: self.liquidation_band_ticks,
+                }),
+                false,
+            ));
+            originated += 1;
+        }
+        MarkOutcome {
+            events,
+            originated_orders: originated,
+        }
+    }
+
     pub fn settle(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
         let mut settled = false;
         for (symbol, settle_px) in marks {

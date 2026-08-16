@@ -21,6 +21,37 @@ That exists for the ephemeral single-client venue, where making the one client
 name an id would be ceremony; it is not a venue-wide account every connection
 shares.
 
+An account may carry a RISK POLICY, which the venue ENFORCES rather than
+reports. This is a risk-policy layer and not a funded-account feature: a live
+venue has the same machinery, where an operator sets a daily loss limit that
+behaves like a liquidation except that it lifts at the next session. A rule is a
+triple - what it measures, on what basis, and what it does on breach - and the
+breach action is what spans both worlds: `lock_until_reset` flattens and refuses
+to open until the next reset, `terminate` flattens and ends the account. A
+trailing drawdown ratchets on intraday peak equity including unrealized, or on
+end-of-day balance only, which is the single largest difference between two
+accounts advertising the same number. THE ACCOUNT DEFINES ITS OWN DAY: the reset
+is a minute of the UTC day named by the policy, not the instrument's calendar,
+and it fires whenever sim time crosses it.
+
+A breach FLATTENS - cancel every resting order, then close every position as
+reduce-only IOC market orders at the mark, judged against the configured
+liquidation band - and then locks. Enforcement without the flatten would be a
+report; the flatten is what makes a forward claim mean anything, because a
+strategy that would have been liquidated actually is.
+
+The thresholds, the ratcheted peak and the remaining budget are PUBLISHED on
+`GET /account` for the EVALUATOR rather than for the strategy. mogwai presents
+no dashboard, so a run that ended flat having spent most of its budget would be
+indistinguishable from one that never came close.
+
+KNOWN FIDELITY GAP: the policy is evaluated on the fill sweeper's mark cadence,
+not per tape tick. At a real venue the ratchet is effectively tick-by-tick, so a
+spike lasting a fraction of a sweep interval still spends budget; here such a
+spike is invisible and the account keeps room it should have lost. The gap is
+one of resolution and never of direction - every peak that IS seen ratchets
+exactly as it should - so enforcement is lenient rather than wrong.
+
 Symbol resolution is total over wire-legal labels. Configured profiles are
 held directly and other profiles are memoized without a cap. The permanent,
 expensive checkpoint chains are capped instead: creation of the 257th river is
@@ -40,9 +71,11 @@ having been new so re-binding never resets a live configuration.
 
 The server exposes `/health`, `/account`, `/accounts`, `/instruments`, `/clock`,
 `/trades`, `/quotes`, `/control/divergence`, and `/ws`. `POST /accounts` opens
-an account on terms the client states - an id and its opening balances - and is
-OPTIONAL: account resolution is total, so a connection that never calls it is
-served under the default account. Structured account config goes over HTTP for
+an account on terms the client states - an id, its opening balances, and
+optionally the risk policy the venue enforces against it - and is OPTIONAL:
+account resolution is total, so a connection that never calls it is served under
+the default account, unpoliced. A policy the venue cannot enforce is refused
+where it enters rather than hours later. Structured account config goes over HTTP for
 the same reason a divergence does, and only the id crosses the socket upgrade.
 Re-opening an account that already exists is a `409` rather than a reset,
 because an account outlives its connections and the request cannot be told

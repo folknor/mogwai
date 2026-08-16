@@ -100,6 +100,15 @@ impl HavocWindow {
 pub(crate) struct Passenger {
     pub(crate) account_id: mogwai_protocol::AccountId,
     pub(crate) engine: AsyncMutex<Engine>,
+    /// The rules this account is enforced under, and what enforcing them has
+    /// cost so far.
+    ///
+    /// A separate lock from the engine because it is read on paths that must
+    /// not take the engine lock - the order-entry gate asks only "is this
+    /// account locked" - and because the two are updated at different moments:
+    /// the engine books a fill, and the risk ledger judges the equity that fill
+    /// produced.
+    pub(crate) risk: Mutex<crate::risk::RiskLedger>,
 }
 
 impl std::fmt::Debug for Passenger {
@@ -310,9 +319,17 @@ impl Run {
         });
         engine.set_oms_type(self.template.oms_type);
         engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
+        let opening = opening_equity(&self.template.opening_balances);
         let seated = Arc::new(Passenger {
             account_id: account_id.clone(),
             engine: AsyncMutex::new(engine),
+            // Unpoliced: an account nobody stated rules for is enforced against
+            // nothing, which is what every client had before policies existed.
+            risk: Mutex::new(crate::risk::RiskLedger::new(
+                mogwai_protocol::risk::AccountPolicy::default(),
+                opening,
+                self.started_ns,
+            )),
         });
         passengers.insert(account_id.as_str().to_owned(), Arc::clone(&seated));
         seated
@@ -342,6 +359,7 @@ impl Run {
         &self,
         account_id: &mogwai_protocol::AccountId,
         balances: std::collections::HashMap<String, Decimal>,
+        policy: mogwai_protocol::risk::AccountPolicy,
     ) -> Result<(), AccountRefusal> {
         let mut passengers = self
             .passengers
@@ -350,6 +368,7 @@ impl Run {
         if passengers.contains_key(account_id.as_str()) {
             return Err(AccountRefusal::AlreadyOpen);
         }
+        let opening = opening_equity(&balances);
         let mut engine = Engine::build(EngineConfig {
             account_id: account_id.clone(),
             instruments: Vec::new(),
@@ -363,6 +382,15 @@ impl Run {
             Arc::new(Passenger {
                 account_id: account_id.clone(),
                 engine: AsyncMutex::new(engine),
+                // Anchored at the OPENING balance rather than at the first
+                // observed equity: a trailing floor is stated relative to what
+                // the account started with, and anchoring it at the first mark
+                // would silently forgive whatever was lost before it.
+                risk: Mutex::new(crate::risk::RiskLedger::new(
+                    policy,
+                    opening,
+                    self.started_ns,
+                )),
             }),
         );
         Ok(())
@@ -608,6 +636,14 @@ impl Run {
             CommandClass::Cancel => self.cancel_ack_ms.load(Ordering::Relaxed),
         }
     }
+}
+
+/// Equity at open, before anything is marked: the funded balances summed.
+/// Positions cannot exist yet, so there is no unrealized half.
+fn opening_equity(balances: &std::collections::HashMap<String, Decimal>) -> Decimal {
+    balances.values().fold(Decimal::ZERO, |sum, total| {
+        sum.checked_add(*total).unwrap_or(sum)
+    })
 }
 
 /// Why an account could not be opened on the terms asked for.

@@ -813,6 +813,94 @@ fn an_account_that_is_already_open_is_not_reset() {
     );
 }
 
+/// A policed account publishes what it is being enforced against, so a run can
+/// be JUDGED afterwards.
+///
+/// The audience is the EVALUATOR, not the strategy: mogwai presents no
+/// dashboard, so a run that ended flat having spent most of its drawdown budget
+/// is indistinguishable from one that never came close unless these numbers are
+/// on the wire.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_policed_account_publishes_its_remaining_budget() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-200","balances":{"USDT":"50000"},
+            "policy":{"trailing_drawdown":{"amount":"2000"},
+                      "daily_loss_limit":{"amount":"500"}}}"#,
+    );
+    assert_eq!(status, 201, "the policed account opens: {body}");
+
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-200");
+    assert_eq!(status, 200, "the account answers: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let risk = &value["risk"];
+    assert_eq!(
+        risk["peak_equity"], "50000",
+        "the high-water mark starts at the opening balance: {body}"
+    );
+    assert_eq!(
+        risk["trailing_threshold"], "48000",
+        "the floor is the peak less the allowance: {body}"
+    );
+    assert_eq!(
+        risk["trailing_remaining"], "2000",
+        "nothing is spent before anything trades: {body}"
+    );
+    assert_eq!(
+        risk["daily_remaining"], "500",
+        "the daily budget starts whole: {body}"
+    );
+    assert!(risk["breached"].is_null(), "nothing has fired yet: {body}");
+}
+
+/// A policy the venue cannot enforce is refused where it ENTERS, not hours
+/// later. A nonsense rule that booted fine and then behaved strangely would be
+/// the worst of both.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn an_unenforceable_policy_is_refused_at_the_boundary() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-201","balances":{"USDT":"50000"},
+            "policy":{"trailing_drawdown":{"amount":"0"}}}"#,
+    );
+    assert_eq!(status, 400, "a zero drawdown is refused: {body}");
+    assert!(
+        body.contains("trailing_drawdown.amount"),
+        "the refusal names the field: {body}"
+    );
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-202","balances":{"USDT":"50000"},
+            "policy":{"reset_minute_utc":1440}}"#,
+    );
+    assert_eq!(status, 400, "a reset outside the day is refused: {body}");
+}
+
+/// An unpoliced account is enforced against nothing, which is what every client
+/// had before policies existed and what the default account still gets.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn an_account_naming_no_policy_is_unpoliced() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_get(&venue.http_base(), "/account");
+    assert_eq!(status, 200, "the default account answers: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let risk = &value["risk"];
+    assert!(
+        risk["trailing_threshold"].is_null() && risk["daily_remaining"].is_null(),
+        "an unpoliced account states no thresholds: {body}"
+    );
+    assert!(risk["breached"].is_null(), "nothing to breach: {body}");
+}
+
 /// The 2026-08-02 defect, stated positively. A divergence armed over the
 /// control plane used to be diverted onto an auto-created account slot and
 /// never reached the market-data socket. With one run there is no other slot to

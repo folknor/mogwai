@@ -887,13 +887,39 @@ required eventually, since both modes must be supported.
   rather than a reset: an account outlives its connections, so the request
   cannot be told apart from a reconnecting client re-sending its config, and
   the reset reading would silently wipe a position book.
-  STILL OPEN FROM THE ACCOUNT-POLICY DESIGN, none of it blocking: there is no
-  RISK POLICY, so nothing is enforced and nothing is published - no daily loss
-  limit, no trailing drawdown, no peak equity, no breach action; policy PRESETS
-  and their runtime registration do not exist, so step two of account
-  resolution is absent and only steps one and three work; a second socket
-  presenting a seated id does NOT evict the first; and nothing freezes or
-  resumes an account on disconnect. See the account-policy item above.
+  THE RISK POLICY LANDED, 2026-08-16. `POST /accounts` carries an optional
+  `policy`; `mogwai_protocol::risk` is the wire type and
+  `mogwai-server/src/risk.rs` the evaluator. A rule is the TRIPLE the design
+  named - measure, basis, breach action - with `lock_until_reset` and
+  `terminate` as the two actions, a trailing drawdown ratcheting on either
+  intraday peak equity or end-of-day balance with an optional lock level, and a
+  daily loss limit measured from the day's opening equity. The account defines
+  its own day as a minute of the UTC day, not the instrument's calendar. A
+  breach FLATTENS through `Engine::liquidate_all` - resting orders cancelled
+  first, then positions closed reduce-only at the mark against the configured
+  liquidation band - and then locks; a locked account is refused at order entry
+  by name, while its cancels and queries are still served so it can tidy its
+  own book. Thresholds, the ratcheted peak and remaining budget publish on
+  `GET /account` for the evaluator.
+  TWO GAPS TO KNOW, both recorded in the code that has them.
+  EVALUATED ON THE MARK, NOT PER TICK, which contradicts the ruling above. A
+  spike entirely between two sweeps is invisible and the account keeps room it
+  should have lost. The gap is resolution and never direction - every peak that
+  IS seen ratchets correctly - so enforcement is lenient rather than wrong.
+  Closing it means evaluating in the tape thread, which cannot take the engine
+  lock, so it wants the equity inputs published out of the engine rather than
+  read from it.
+  EQUITY SUMS CURRENCIES WITHOUT CONVERSION, exact for every shipped shape
+  (all settle in one currency) and wrong for an account funded in two at once.
+  A rate has no source in the venue, and inventing one would make a threshold
+  mean something nobody stated.
+  STILL OPEN FROM THE ACCOUNT-POLICY DESIGN, none of it blocking: policy
+  PRESETS and their runtime registration do not exist, so step two of account
+  resolution is absent and only steps one and three work - a client states its
+  rules inline or gets none; a terminating breach does not yet END THE VENUE in
+  the ephemeral mode; a second socket presenting a seated id does NOT evict the
+  first; and nothing freezes or resumes an account on disconnect. See the
+  account-policy item above.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an
