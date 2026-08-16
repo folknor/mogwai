@@ -401,7 +401,7 @@ pub(crate) async fn process_order_cmd(
     // before `boundary_outcome`, which contradicted this paragraph and delayed
     // refusals that are not acts.
     let class = CommandClass::of(&order_cmd);
-    let act_ms = class.map_or(0, |class| run.act_ms(class));
+    let act_ms = class.map_or(0, |class| passenger.act_ms(class));
     if act_ms > 0 {
         tokio::time::sleep(sim.wall_duration(sim_duration_from_millis(act_ms))).await;
     }
@@ -716,7 +716,9 @@ pub(crate) async fn arm_divergence(
     // as a degenerate fill downstream.
     match div {
         Divergence::DelayAcks { ms } => {
-            run.delay_ms.store(ms, Ordering::Relaxed);
+            for passenger in targeted(run, request.account.as_deref()) {
+                passenger.delay_ms.store(ms, Ordering::Relaxed);
+            }
         }
         // STORE-not-merge, like every other server-owned window: one arm
         // REPLACES all six values, so an omitted field is armed as zero rather
@@ -729,12 +731,26 @@ pub(crate) async fn arm_divergence(
             modify_ack_ms,
             cancel_ack_ms,
         } => {
-            run.submit_act_ms.store(submit_act_ms, Ordering::Relaxed);
-            run.modify_act_ms.store(modify_act_ms, Ordering::Relaxed);
-            run.cancel_act_ms.store(cancel_act_ms, Ordering::Relaxed);
-            run.submit_ack_ms.store(submit_ack_ms, Ordering::Relaxed);
-            run.modify_ack_ms.store(modify_ack_ms, Ordering::Relaxed);
-            run.cancel_ack_ms.store(cancel_ack_ms, Ordering::Relaxed);
+            for passenger in targeted(run, request.account.as_deref()) {
+                passenger
+                    .submit_act_ms
+                    .store(submit_act_ms, Ordering::Relaxed);
+                passenger
+                    .modify_act_ms
+                    .store(modify_act_ms, Ordering::Relaxed);
+                passenger
+                    .cancel_act_ms
+                    .store(cancel_act_ms, Ordering::Relaxed);
+                passenger
+                    .submit_ack_ms
+                    .store(submit_ack_ms, Ordering::Relaxed);
+                passenger
+                    .modify_ack_ms
+                    .store(modify_ack_ms, Ordering::Relaxed);
+                passenger
+                    .cancel_ack_ms
+                    .store(cancel_ack_ms, Ordering::Relaxed);
+            }
         }
         // GoDark/StallData windows are STORE-not-extend (S18): each arm replaces
         // the whole armed span under one lock, so re-arming with a SMALLER `ms`
@@ -925,14 +941,19 @@ pub(crate) async fn arm_divergence(
                     .filter(|symbol| run.boatyard.boat_for_symbol(symbol).is_none())
                     .collect(),
             };
-            run.delay_ms.store(0, Ordering::Relaxed);
-            // Every account's transport windows, whatever the request named: a
+            // EVERY account's transport arms, whatever the request named: a
             // clear is an operator saying "stop everything", and clearing only
             // one account's would leave a blackout armed somewhere the request
-            // did not mention.
+            // never mentioned.
+            //
+            // That covers all six `CommandLatency` fields too. It clears what
+            // the venue will do to commands it has NOT started acting on, and
+            // lifts an ack window off frames already queued (the pump reads that
+            // one per event at dequeue). It does NOT reach into an act delay
+            // already being served: that command's sleep was read once, at
+            // detach, and a venue that has begun acting does not un-begin.
             for passenger in run.passengers() {
-                passenger.dark.clear();
-                passenger.stall.clear();
+                passenger.clear_transport_havoc();
             }
             for symbol in clearing {
                 state.rivers.clear_flow_surge(&symbol);
@@ -940,18 +961,6 @@ pub(crate) async fn arm_divergence(
             for passenger in run.passengers() {
                 passenger.engine.lock().await.clear_fee_surcharge();
             }
-            // All six `CommandLatency` fields go with them. This clears what the
-            // venue will do to commands it has NOT started acting on yet, and it
-            // lifts an ack window off frames already queued (the pump reads that
-            // one per event at dequeue). It does NOT reach into an act delay
-            // already being served: that command's sleep was read once, at
-            // detach, and a venue that has begun acting does not un-begin.
-            run.submit_act_ms.store(0, Ordering::Relaxed);
-            run.modify_act_ms.store(0, Ordering::Relaxed);
-            run.cancel_act_ms.store(0, Ordering::Relaxed);
-            run.submit_ack_ms.store(0, Ordering::Relaxed);
-            run.modify_ack_ms.store(0, Ordering::Relaxed);
-            run.cancel_ack_ms.store(0, Ordering::Relaxed);
         }
         // Server-ownership contract (pins B.4 / E.11): `DelayAcks`, `GoDark`,
         // `StallData`, and `ClearDivergences` are server-owned controls with no

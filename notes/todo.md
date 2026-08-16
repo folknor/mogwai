@@ -927,20 +927,19 @@ required eventually, since both modes must be supported.
   deliberately does not on a shared exchange, where one subagent breaching must
   not take down the batch. The account count is what distinguishes the modes at
   runtime.
-  TRANSPORT HAVOC RIDES THE PASSENGER, 2026-08-16. `GoDark` and `StallData`
-  windows moved from the run onto the account, and `/control/divergence` takes
-  an optional `account` naming whose view to corrupt; absent still means every
-  account, which is what an operator on a single-account venue wants and what
-  every existing scenario file already writes. A clear still clears everyone,
-  since a clear is an operator saying stop everything. Generator arms are
-  untouched: they change the WATER, which belongs to the river and reaches
-  everyone reading it whatever account they trade.
+  ALL TRANSPORT HAVOC RIDES THE PASSENGER, 2026-08-16. `GoDark`, `StallData`,
+  `DelayAcks` and every `CommandLatency` field moved from the run onto the
+  account, and `/control/divergence` takes an optional `account` naming whose
+  view to corrupt; absent still means every account, which is what an operator
+  on a single-account venue wants and what every existing scenario file already
+  writes. A clear still clears everyone, since a clear is an operator saying
+  stop everything. Generator arms are untouched: they change the WATER, which
+  belongs to the river and reaches everyone reading it whatever account they
+  trade. The water/view test the design named is now the actual code structure.
   STILL OPEN, none of it blocking: nothing FREEZES an unattended account, so an
   account whose connection drops is simply not marked until someone returns -
   the intended behaviour, but untested and not stated anywhere a consumer reads;
-  there is no TTL collecting an account nobody reclaims; and the ack/act latency
-  knobs (`DelayAcks`, `CommandLatency`) are still run-wide, which is the same
-  defect family as the blackout was and now has the same fix available.
+  and there is no TTL collecting an account nobody reclaims.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an

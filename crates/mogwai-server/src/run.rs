@@ -118,6 +118,55 @@ pub(crate) struct Passenger {
     /// blacked out every other subagent on the exchange.
     pub(crate) dark: HavocWindow,
     pub(crate) stall: HavocWindow,
+    /// Per-account ACK and ACT latency, the rest of the transport-havoc family.
+    ///
+    /// Same reasoning as the windows above: these change when one connection
+    /// hears about its own commands, so a scenario slowing one subagent's acks
+    /// must not slow the batch. `delay_ms` holds outbound execution output;
+    /// the act pair delays the venue ACTING and the ack pair delays it SAYING
+    /// what it did.
+    pub(crate) delay_ms: AtomicU64,
+    pub(crate) submit_act_ms: AtomicU64,
+    pub(crate) modify_act_ms: AtomicU64,
+    pub(crate) cancel_act_ms: AtomicU64,
+    pub(crate) submit_ack_ms: AtomicU64,
+    pub(crate) modify_ack_ms: AtomicU64,
+    pub(crate) cancel_ack_ms: AtomicU64,
+}
+
+impl Passenger {
+    pub(crate) fn act_ms(&self, class: CommandClass) -> u64 {
+        match class {
+            CommandClass::Submit => self.submit_act_ms.load(Ordering::Relaxed),
+            CommandClass::Modify => self.modify_act_ms.load(Ordering::Relaxed),
+            CommandClass::Cancel => self.cancel_act_ms.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn ack_ms(&self, class: CommandClass) -> u64 {
+        match class {
+            CommandClass::Submit => self.submit_ack_ms.load(Ordering::Relaxed),
+            CommandClass::Modify => self.modify_ack_ms.load(Ordering::Relaxed),
+            CommandClass::Cancel => self.cancel_ack_ms.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Clear every transport arm this account carries.
+    pub(crate) fn clear_transport_havoc(&self) {
+        self.dark.clear();
+        self.stall.clear();
+        for knob in [
+            &self.delay_ms,
+            &self.submit_act_ms,
+            &self.modify_act_ms,
+            &self.cancel_act_ms,
+            &self.submit_ack_ms,
+            &self.modify_ack_ms,
+            &self.cancel_ack_ms,
+        ] {
+            knob.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 impl std::fmt::Debug for Passenger {
@@ -195,13 +244,6 @@ pub(crate) struct Run {
     /// Uniform servable sim span before `started_ns`. The boot river is
     /// materialized before readiness; other rivers materialize it on first read.
     pub(crate) warmup_ns: u64,
-    pub(crate) delay_ms: AtomicU64,
-    pub(crate) submit_act_ms: AtomicU64,
-    pub(crate) modify_act_ms: AtomicU64,
-    pub(crate) cancel_act_ms: AtomicU64,
-    pub(crate) submit_ack_ms: AtomicU64,
-    pub(crate) modify_ack_ms: AtomicU64,
-    pub(crate) cancel_ack_ms: AtomicU64,
     complete_tx: watch::Sender<Option<(u64, u64)>>,
     /// Every live connection's outbound lanes, so venue-ORIGINATED output - a
     /// trigger fill nobody commanded - reaches the connection it belongs to.
@@ -294,13 +336,6 @@ impl Run {
             started_ns,
             deadline_ns: run_duration_ns.map(|duration| started_ns.saturating_add(duration)),
             warmup_ns,
-            delay_ms: AtomicU64::new(0),
-            submit_act_ms: AtomicU64::new(0),
-            modify_act_ms: AtomicU64::new(0),
-            cancel_act_ms: AtomicU64::new(0),
-            submit_ack_ms: AtomicU64::new(0),
-            modify_ack_ms: AtomicU64::new(0),
-            cancel_ack_ms: AtomicU64::new(0),
             complete_tx,
             lanes: Mutex::new(Vec::new()),
             order_owners: Mutex::new(std::collections::HashMap::new()),
@@ -348,6 +383,13 @@ impl Run {
             )),
             dark: HavocWindow::new(),
             stall: HavocWindow::new(),
+            delay_ms: AtomicU64::new(0),
+            submit_act_ms: AtomicU64::new(0),
+            modify_act_ms: AtomicU64::new(0),
+            cancel_act_ms: AtomicU64::new(0),
+            submit_ack_ms: AtomicU64::new(0),
+            modify_ack_ms: AtomicU64::new(0),
+            cancel_ack_ms: AtomicU64::new(0),
         });
         passengers.insert(account_id.as_str().to_owned(), Arc::clone(&seated));
         seated
@@ -490,6 +532,13 @@ impl Run {
                 )),
                 dark: HavocWindow::new(),
                 stall: HavocWindow::new(),
+                delay_ms: AtomicU64::new(0),
+                submit_act_ms: AtomicU64::new(0),
+                modify_act_ms: AtomicU64::new(0),
+                cancel_act_ms: AtomicU64::new(0),
+                submit_ack_ms: AtomicU64::new(0),
+                modify_ack_ms: AtomicU64::new(0),
+                cancel_ack_ms: AtomicU64::new(0),
             }),
         );
         Ok(())
@@ -760,21 +809,6 @@ impl Run {
 
     pub(crate) fn completion(&self) -> watch::Receiver<Option<(u64, u64)>> {
         self.complete_tx.subscribe()
-    }
-
-    pub(crate) fn act_ms(&self, class: CommandClass) -> u64 {
-        match class {
-            CommandClass::Submit => self.submit_act_ms.load(Ordering::Relaxed),
-            CommandClass::Modify => self.modify_act_ms.load(Ordering::Relaxed),
-            CommandClass::Cancel => self.cancel_act_ms.load(Ordering::Relaxed),
-        }
-    }
-    pub(crate) fn ack_ms(&self, class: CommandClass) -> u64 {
-        match class {
-            CommandClass::Submit => self.submit_ack_ms.load(Ordering::Relaxed),
-            CommandClass::Modify => self.modify_ack_ms.load(Ordering::Relaxed),
-            CommandClass::Cancel => self.cancel_ack_ms.load(Ordering::Relaxed),
-        }
     }
 }
 

@@ -260,7 +260,7 @@ fn current_completion(
 
 pub(crate) fn spawn_exec_pump(
     mut exec_rx: mpsc::UnboundedReceiver<HeldFrame>,
-    run: Arc<crate::run::Run>,
+    passenger: Arc<crate::run::Passenger>,
     sim: mogwai_protocol::SimClock,
     out: mpsc::Sender<Outbound>,
 ) -> tokio::task::JoinHandle<()> {
@@ -271,10 +271,10 @@ pub(crate) fn spawn_exec_pump(
             frame,
         }) = exec_rx.recv().await
         {
-            let delay = run
+            let delay = passenger
                 .delay_ms
                 .load(std::sync::atomic::Ordering::Relaxed)
-                .saturating_add(class.map_or(0, |class| run.ack_ms(class)));
+                .saturating_add(class.map_or(0, |class| passenger.ack_ms(class)));
             if delay > 0 {
                 let hold = sim.wall_duration(sim_duration_from_millis(delay));
                 let remaining = hold.saturating_sub(arrived.elapsed());
@@ -375,7 +375,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
     let lane_id = state
         .run
         .bind_lanes(lanes.clone(), session.passenger.account_id.as_str());
-    let pump = spawn_exec_pump(held_rx, Arc::clone(&state.run), boat_sim, out_tx.clone());
+    let pump = spawn_exec_pump(
+        held_rx,
+        Arc::clone(&session.passenger),
+        boat_sim,
+        out_tx.clone(),
+    );
     let feed = {
         // This connection's own boat, and its own ring: a busy river cannot
         // lag a passenger subscribed to a quiet one, and a lag here is a
