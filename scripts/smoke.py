@@ -359,13 +359,24 @@ def check_common(venue: Venue) -> None:
     warm = venue.http(f"/trades?symbol={venue.symbol}&start={floor}&limit=20")
     assert warm, "the earliest servable instant returned no trades"
 
+    unconfigured = venue.http(
+        f"/trades?symbol=NOT-A-SYMBOL&start={floor}&limit=5"
+    )
+    assert unconfigured, "an unconfigured symbol returned no synthesized history"
+    advertised = venue.http("/instruments")
+    assert any(row["symbol"] == "NOT-A-SYMBOL" for row in advertised), (
+        "a history-materialized symbol was not advertised by /instruments"
+    )
+    unconfigured_ws = WsClient(venue.addr, "NOT-A-SYMBOL")
     try:
-        venue.http(f"/trades?symbol=NOT-A-SYMBOL&start={floor}&limit=5")
-        raise AssertionError("an unserved history symbol was served instead of refused")
-    except urllib.error.HTTPError as err:
-        assert err.code == 400, (
-            f"an unserved history symbol must be a 400, got {err.code}"
+        frame = unconfigured_ws.until(
+            lambda candidate: candidate.get("type") in ("Trade", "Quote")
         )
+        assert frame and frame["symbol"] == "NOT-A-SYMBOL", (
+            f"unconfigured socket delivered the wrong label: {frame}"
+        )
+    finally:
+        unconfigured_ws.close()
 
     # And the two boundaries are refused by name rather than served short.
     for start, label in (
@@ -380,15 +391,16 @@ def check_common(venue: Venue) -> None:
 
 
 def check_seed_logs(venue: Venue) -> None:
-    """The run root and its one materialized river are independently logged."""
+    """The run root and each materialized river are independently logged."""
     seed_lines = [line for line in venue.stderr_lines if "run seeds fixed" in line]
     assert len(seed_lines) == 1, f"expected one run-seed line, got {seed_lines}"
     assert "run_seed" in seed_lines[0] and "fill_seed" in seed_lines[0], seed_lines[0]
     assert "tape_seed" not in seed_lines[0], seed_lines[0]
 
     river_lines = [line for line in venue.stderr_lines if "river materialized" in line]
-    assert len(river_lines) == 1, f"expected one materialized river, got {river_lines}"
-    assert venue.symbol in river_lines[0] and "tape_seed" in river_lines[0], river_lines[0]
+    assert len(river_lines) >= 2, f"expected boot and history rivers, got {river_lines}"
+    assert any(venue.symbol in line and "tape_seed" in line for line in river_lines), river_lines
+    assert any("NOT-A-SYMBOL" in line and "tape_seed" in line for line in river_lines), river_lines
 
 
 # --------------------------------------------------------------------------

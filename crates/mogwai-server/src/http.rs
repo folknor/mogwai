@@ -316,13 +316,15 @@ pub(crate) async fn process_order_cmd(
     // Reject it here with the honest story - the client correctly sent no price
     // (nautilus never stamps a market order), so letting the engine's "submit
     // price required" fire would blame the client for the venue's own synthesis
-    // failure. An UNCONFIGURED symbol is deliberately left price-less: the
-    // engine checks instrument existence before the price, so its "unknown
-    // instrument" rejection tells that story unaltered.
+    // failure. A symbol the resolver REFUSES - illegal, funding-barred, or one
+    // whose resolved shape does not validate - is deliberately left price-less:
+    // the engine checks instrument existence before the price, so its "unknown
+    // instrument" rejection tells that story unaltered. Resolution is otherwise
+    // total, so "does the venue list it" is now "did the resolve succeed".
     if let ClientMessage::SubmitOrder(order) = &order_cmd
         && order.order_type == OrderType::Market
         && order.price.is_none()
-        && state.rivers.profiles().get(&order.symbol).is_some()
+        && state.rivers.resolve_profile(&order.symbol).is_ok()
     {
         tracing::warn!(
             symbol = %order.symbol,
@@ -346,12 +348,16 @@ pub(crate) async fn process_order_cmd(
         };
     }
     if let ClientMessage::SubmitOrder(order) = &order_cmd
+        // The RESOLVED shape's calendar, not the configured map's: a symbol
+        // nobody configured is served on a resolved bundle whose tape is
+        // generated with that calendar, so its orders owe the same
+        // session-closed refusal.
         && let Some(calendar) = state
             .rivers
-            .profiles()
-            .get(&order.symbol)
-            .and_then(|profile| profile.calendar.as_ref())
-        && reject_while_closed(calendar, ts, order, market_px)
+            .resolve_profile(&order.symbol)
+            .ok()
+            .and_then(|profile| profile.calendar.clone())
+        && reject_while_closed(&calendar, ts, order, market_px)
     {
         let Some(reservation) = lanes.try_reserve_boundary() else {
             return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
@@ -813,7 +819,7 @@ pub(crate) async fn arm_divergence(
 ///
 /// Websocket upgrades place paced boats on demand for any served symbol.
 pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
-    Json(state.rivers.profiles().instrument_defs())
+    Json(state.rivers.instrument_defs())
 }
 
 /// The HTTP shape of a PULLED account snapshot.
@@ -1012,8 +1018,14 @@ pub(crate) async fn trades(
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
-    if let Some(body) = unserved_symbol_refusal(&symbol, rivers.profiles()) {
-        return Err((StatusCode::BAD_REQUEST, body));
+    // Resolution is total, so the only history refusals left are shape-class
+    // ones - an illegal label, an invalid or funding-barred shape, an exhausted
+    // river cap - and they are decided HERE so each is a 400 naming its reason
+    // rather than a 500 raised out of the synthesis task below. Materializing
+    // here also means the poll advertises through `/instruments`, which is the
+    // same event as spending the river.
+    if let Err(error) = rivers.materialize(&symbol) {
+        return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
     // The ceiling is the NAMED RIVER's now, not the venue's.
     let river_now = state.river_now(&symbol).await.ns;
@@ -1102,8 +1114,14 @@ pub(crate) async fn quotes(
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
-    if let Some(body) = unserved_symbol_refusal(&symbol, rivers.profiles()) {
-        return Err((StatusCode::BAD_REQUEST, body));
+    // Resolution is total, so the only history refusals left are shape-class
+    // ones - an illegal label, an invalid or funding-barred shape, an exhausted
+    // river cap - and they are decided HERE so each is a 400 naming its reason
+    // rather than a 500 raised out of the synthesis task below. Materializing
+    // here also means the poll advertises through `/instruments`, which is the
+    // same event as spending the river.
+    if let Err(error) = rivers.materialize(&symbol) {
+        return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
     // The ceiling is the NAMED RIVER's now, not the venue's.
     let river_now = state.river_now(&symbol).await.ns;
@@ -1230,21 +1248,6 @@ fn admit_history(
     })
 }
 
-/// The ONE unknown-symbol decision every request-carried symbol makes.
-///
-/// Three callers: `/trades`, `/quotes` and - through `resolve_socket_symbol` -
-/// the `/ws` upgrade. One spelling, because two spellings of "unserved" would
-/// be two behaviours. The log line still says "history" for the reason the
-/// body text is unchanged: the landed refusal transcript does not move.
-///
-/// `Some(body)` is a `400`. The predicate is `InstrumentProfiles::get` - the
-/// exact lookup `bounded_trades` and `bounded_quotes` perform three frames
-/// down - hoisted so the miss is a named refusal instead of an empty `200`
-/// the caller cannot tell from "no trades happened". That is the same
-/// principle as `history_start_refusal` below, applied to the other
-/// parameter, and it is why the guard must never be a case-insensitive or
-/// otherwise looser comparison: a guard that admits what the synthesis
-/// misses restores the silent empty page.
 /// A caller-supplied symbol cut to what any log line or body may echo.
 fn truncated_symbol(symbol: &str) -> String {
     symbol.chars().take(MAX_ECHOED_SYMBOL).collect()
@@ -1260,21 +1263,6 @@ fn history_failure_body(symbol: &str, start: Option<u64>, end: Option<u64>) -> S
     }
 }
 
-pub(crate) fn unserved_symbol_refusal(
-    symbol: &str,
-    profiles: &source::InstrumentProfiles,
-) -> Option<String> {
-    if profiles.get(symbol).is_some() {
-        return None;
-    }
-    let echoed: String = symbol.chars().take(MAX_ECHOED_SYMBOL).collect();
-    tracing::warn!(symbol = %echoed, "refusing unserved history symbol");
-    let served = profiles.served_symbols().join(", ");
-    Some(format!(
-        "requested symbol {echoed} is not served by this run; this run serves {served}"
-    ))
-}
-
 /// How much of a caller-supplied symbol any refusal body, log line or reject
 /// reason may echo.
 ///
@@ -1286,12 +1274,14 @@ pub(crate) fn unserved_symbol_refusal(
 /// and the bound-symbol order refusal echo under the same rule.
 const MAX_ECHOED_SYMBOL: usize = 64;
 
-/// The symbol one `/ws` upgrade binds to, or the refusal body explaining why
-/// this run cannot serve it.
+/// The symbol one `/ws` upgrade binds to, or the refusal body for a request
+/// that is not a legal symbol at all.
 ///
-/// Configured symbols resolve to keyed rivers. A websocket still needs the one
-/// paced boat placed at boot, so a configured non-boot river is refused here
-/// until the boatyard can place a live tape for it.
+/// WIRE LEGALITY IS THE ONLY GATE HERE. Resolution is total, so this function
+/// no longer asks whether anybody configured the label; the shape refusals -
+/// an invalid resolved shape, a funding-barred one, an exhausted river cap -
+/// belong to `Run::ensure_instrument` and the boatyard, which is where the
+/// resource is actually spent.
 ///
 /// Takes `bound: &Symbol` and not `&Run` deliberately: it reads exactly
 /// `run.boot_symbol`, and taking the whole run would make the unit tests
@@ -1303,15 +1293,14 @@ const MAX_ECHOED_SYMBOL: usize = 64;
 /// The needs-no-encoding framing belongs to the client-side caller of
 /// `validate_wire_symbol`, which builds a URL by concatenation.
 ///
-/// The comparison against `bound` is EXACT and case-sensitive, matching
-/// `unserved_symbol_refusal`. A case-folding `/ws` would let `?symbol=mnq`
-/// bind a socket whose own history fetches for that string are refused - two
-/// behaviours under one wording. If case-insensitive request symbols are ever
-/// wanted, both surfaces change together, deliberately.
+/// The comparison against `bound` is EXACT and case-sensitive, and so is
+/// resolution: `mnq` is a DIFFERENT label from `MNQ` and therefore a different
+/// river, even though `[symbols.*]` overlays match case-insensitively. That is
+/// the symbol-as-a-label model applied consistently; a case-folding `/ws` would
+/// bind a socket under one label whose history fetches name another.
 pub(crate) fn resolve_socket_symbol(
     requested: Option<&str>,
     bound: &mogwai_protocol::Symbol,
-    profiles: &source::InstrumentProfiles,
 ) -> Result<mogwai_protocol::Symbol, String> {
     let Some(requested) = requested else {
         return Ok(Arc::clone(bound));
@@ -1322,12 +1311,7 @@ pub(crate) fn resolve_socket_symbol(
             "requested symbol {echoed} is not a legal symbol; symbols are 1 to 32 characters of ASCII letters, digits, dot, dash or underscore"
         ));
     }
-    profiles
-        .get(requested)
-        .map(|profile| Arc::clone(&profile.def.symbol))
-        .ok_or_else(|| {
-            unserved_symbol_refusal(requested, profiles).expect("absent profile has refusal")
-        })
+    Ok(Arc::from(requested))
 }
 
 /// Refuse a history start outside the tape that exists now.
@@ -1401,113 +1385,76 @@ mod history_admission_tests {
         )
     }
 
+    /// Re-anchored by piece 13: `configured_symbols` is no longer "what this
+    /// run can serve" (resolution is total) but "what an operator named", and
+    /// it is still sorted because refusal and diagnostic bodies read it.
     #[test]
-    fn history_symbol_refusal_uses_the_synthesis_lookup() {
-        let profiles = refusal_profiles(&["BTCUSDT"]);
-        assert!(unserved_symbol_refusal("BTCUSDT", &profiles).is_none());
-
-        let body = unserved_symbol_refusal("NOT-A-SYMBOL", &profiles)
-            .expect("an unserved symbol must be refused");
-        assert!(body.contains("NOT-A-SYMBOL"));
-        assert!(body.contains("BTCUSDT"));
+    fn configured_symbols_are_sorted_and_case_exact() {
+        let profiles = refusal_profiles(&["MNQ", "BTCUSDT"]);
+        assert_eq!(profiles.configured_symbols(), ["BTCUSDT", "MNQ"]);
+        assert!(profiles.configured("BTCUSDT").is_some());
         assert!(
-            unserved_symbol_refusal("btcusdt", &profiles).is_some(),
-            "the guard must stay as case-exact as synthesis"
+            profiles.configured("btcusdt").is_none(),
+            "the configured map stays as case-exact as synthesis"
         );
-        assert_eq!(profiles.served_symbols(), ["BTCUSDT"]);
     }
 
     #[test]
     fn an_absent_socket_symbol_binds_the_boot_symbol() {
-        let profiles = refusal_profiles(&["MNQ"]);
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
         assert_eq!(
-            resolve_socket_symbol(None, &bound, &profiles).expect("default symbol"),
+            resolve_socket_symbol(None, &bound).expect("default symbol"),
             bound
         );
     }
 
     #[test]
     fn a_socket_symbol_matching_the_boot_symbol_binds_it() {
-        let profiles = refusal_profiles(&["MNQ"]);
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
         assert_eq!(
-            resolve_socket_symbol(Some("MNQ"), &bound, &profiles).expect("matching symbol"),
+            resolve_socket_symbol(Some("MNQ"), &bound).expect("matching symbol"),
             bound
         );
     }
 
     #[test]
-    fn a_miscased_socket_symbol_is_refused_like_history() {
-        let profiles = refusal_profiles(&["MNQ"]);
+    fn a_miscased_socket_symbol_is_a_distinct_resolved_label() {
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
-        let refusal = resolve_socket_symbol(Some("mnq"), &bound, &profiles)
-            .expect_err("request lookup is case exact");
-        assert_eq!(
-            refusal,
-            unserved_symbol_refusal("mnq", &profiles).expect("history refusal")
-        );
+        let resolved = resolve_socket_symbol(Some("mnq"), &bound).unwrap();
+        assert_eq!(resolved.as_ref(), "mnq");
     }
 
     #[test]
     fn a_configured_non_boot_socket_symbol_resolves_its_river() {
-        let profiles = refusal_profiles(&["MNQ", "BTCUSDT"]);
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
-        let resolved = resolve_socket_symbol(Some("BTCUSDT"), &bound, &profiles)
-            .expect("configured river is servable");
+        let resolved =
+            resolve_socket_symbol(Some("BTCUSDT"), &bound).expect("configured river is servable");
         assert_eq!(resolved.as_ref(), "BTCUSDT");
     }
 
     #[test]
-    fn an_unserved_socket_symbol_is_refused_in_the_history_wording() {
-        let profiles = refusal_profiles(&["MNQ"]);
+    fn an_unconfigured_socket_symbol_resolves_under_its_label() {
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
-        let refusal =
-            resolve_socket_symbol(Some("MES"), &bound, &profiles).expect_err("unserved symbol");
-        assert_eq!(
-            refusal,
-            unserved_symbol_refusal("MES", &profiles).expect("shared refusal")
-        );
+        let resolved = resolve_socket_symbol(Some("MES"), &bound).unwrap();
+        assert_eq!(resolved.as_ref(), "MES");
     }
 
     #[test]
-    fn an_illegal_socket_symbol_is_refused_before_the_unserved_check() {
-        let profiles = refusal_profiles(&["MNQ"]);
+    fn an_illegal_socket_symbol_is_refused() {
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
-        let refusal =
-            resolve_socket_symbol(Some("MN Q"), &bound, &profiles).expect_err("illegal symbol");
+        let refusal = resolve_socket_symbol(Some("MN Q"), &bound).expect_err("illegal symbol");
         assert!(refusal.contains("is not a legal symbol"), "{refusal}");
-        assert!(!refusal.contains("is not served"), "{refusal}");
-    }
-
-    #[test]
-    fn an_absurd_socket_symbol_is_truncated_in_the_refusal() {
-        let profiles = refusal_profiles(&["MNQ"]);
-        let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
-        let refusal = resolve_socket_symbol(Some(&"X".repeat(4096)), &bound, &profiles)
-            .expect_err("absurd symbol");
-        assert!(refusal.contains(&"X".repeat(64)), "{refusal}");
-        assert!(!refusal.contains(&"X".repeat(65)), "{refusal}");
-    }
-
-    #[test]
-    fn served_symbols_are_sorted_for_deterministic_refusals() {
-        let profiles = refusal_profiles(&["MNQ", "BTCUSDT"]);
-        assert_eq!(profiles.served_symbols(), ["BTCUSDT", "MNQ"]);
     }
 
     /// The refusal echoes the request, so the echo is capped: an unbounded
     /// query string must not become an unbounded response body or log line.
     #[test]
-    fn a_refusal_truncates_an_absurd_requested_symbol() {
-        let profiles = refusal_profiles(&["BTCUSDT"]);
-        let body = unserved_symbol_refusal(&"X".repeat(4096), &profiles)
-            .expect("an unserved symbol must be refused");
-        assert!(body.contains(&"X".repeat(64)), "the echo survives: {body}");
-        assert!(
-            !body.contains(&"X".repeat(65)),
-            "the echo is capped: {body}"
-        );
+    fn an_absurd_socket_symbol_is_truncated_in_the_refusal() {
+        let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
+        let refusal =
+            resolve_socket_symbol(Some(&"X".repeat(4096)), &bound).expect_err("absurd symbol");
+        assert!(refusal.contains(&"X".repeat(64)), "the echo survives");
+        assert!(!refusal.contains(&"X".repeat(65)), "the echo is capped");
     }
 
     /// The bound is only real if the slot outlives the RESPONSE, not the
@@ -1607,9 +1554,7 @@ pub(crate) fn bounded_trades(
         return Ok(Vec::new());
     }
 
-    let source::History::Source(mut merged) = rivers.history_source(symbol, start)? else {
-        return Ok(Vec::new());
-    };
+    let mut merged = rivers.history_source(symbol, start)?;
     let mut out = Vec::new();
 
     while let Some(tick) = merged.next_tick() {
@@ -1641,9 +1586,7 @@ pub(crate) fn bounded_quotes(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let source::History::Source(mut merged) = rivers.history_source(symbol, start)? else {
-        return Ok(Vec::new());
-    };
+    let mut merged = rivers.history_source(symbol, start)?;
     let mut out = Vec::new();
     while let Some(tick) = merged.next_tick() {
         if let Some(end) = end
@@ -1700,12 +1643,9 @@ mod calendar_tests {
     fn bounded_quotes_reproduce_the_live_quote_sequence() {
         let profiles = generated_profiles();
         let history = bounded_quotes("BTCUSDT", Some(0), None, 100, &profiles).unwrap();
-        let source::History::Source(mut live) = profiles
+        let mut live = profiles
             .history_source("BTCUSDT", Some(source::TAPE_ORIGIN_NS))
-            .expect("live source")
-        else {
-            panic!("BTCUSDT is configured");
-        };
+            .expect("live source");
         let mut live_quotes = Vec::new();
         while live_quotes.len() < history.len() {
             if let TickEvent::Quote(quote) = live.next_tick().unwrap() {

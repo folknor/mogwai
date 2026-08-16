@@ -81,6 +81,9 @@ visible without you having to diff two TOML files.
 A preset is a named knob bundle, not an admission record. Every symbol is
 servable: an unmatched symbol resolves through the BTCUSDT default under its
 own name. Presets improve a symbol's tape; they do not authorize the symbol.
+Requested labels are case-exact river identities. Preset names and
+`[symbols.*]` overlay keys are matched case-insensitively, so `mnq` may select
+the MNQ knobs while remaining a different river and label from `MNQ`.
 
 ## What the shipped presets are
 

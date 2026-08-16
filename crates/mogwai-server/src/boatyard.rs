@@ -373,7 +373,7 @@ mod tests {
 
     fn yard() -> (Arc<Boatyard>, RiverKey) {
         let rivers = crate::fills::test_rivers();
-        let key = rivers.resolve_key(rivers.resolve_profile("BTCUSDT").unwrap());
+        let key = rivers.resolve_key(&rivers.resolve_profile("BTCUSDT").unwrap());
         let (fault_tx, _fault_rx) = mpsc::channel();
         (
             Boatyard::new(rivers, 64, 10, fault_tx, crate::source::TAPE_ORIGIN_NS),
@@ -381,10 +381,14 @@ mod tests {
         )
     }
 
+    /// RE-ANCHORED by piece 13: `resolve_profile("SECOND")` still succeeds, but
+    /// no longer because "SECOND" is configured - resolution is total now, so
+    /// this only pins that the two labels key two DISTINCT rivers. It is not a
+    /// live guard on configured-only lookup and must not be read as one.
     fn two_symbol_yard() -> (Arc<Boatyard>, RiverKey, RiverKey) {
         let rivers = crate::fills::test_rivers_with_a_second_symbol();
-        let first = rivers.resolve_key(rivers.resolve_profile("BTCUSDT").unwrap());
-        let second = rivers.resolve_key(rivers.resolve_profile("SECOND").unwrap());
+        let first = rivers.resolve_key(&rivers.resolve_profile("BTCUSDT").unwrap());
+        let second = rivers.resolve_key(&rivers.resolve_profile("SECOND").unwrap());
         let (fault_tx, _fault_rx) = mpsc::channel();
         (
             Boatyard::new(

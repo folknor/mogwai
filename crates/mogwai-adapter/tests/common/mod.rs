@@ -72,6 +72,10 @@ pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
 pub struct StubState {
     /// Optional body served by `/instruments`; absent uses BTCUSDT spot.
     pub instruments_body: Mutex<Option<String>>,
+    /// Body served by `/instruments` once at least one `/ws` upgrade has
+    /// happened. Models the venue registering a symbol AT BIND, which is why a
+    /// client can only learn an unconfigured symbol's shape after binding it.
+    pub instruments_after_bind: Mutex<Option<String>>,
     /// Number of `POST /control/divergence` requests served.
     pub control_hits: AtomicUsize,
     /// Raw bodies of each `/control/divergence` POST (for round-trip asserts).
@@ -235,12 +239,24 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             None => respond_json(stream, "200 OK", "[]").await,
         }
     } else if path.starts_with("/instruments") {
-        let body = state
-            .instruments_body
+        // The real venue REGISTERS a symbol when a socket binds it, so its
+        // `/instruments` answer grows across a bind. Model that rather than a
+        // fixed body, or a client's post-bind reseed reads the same list twice
+        // and the test cannot tell a barrier from a no-op.
+        let after_bind = state
+            .instruments_after_bind
             .lock()
-            .expect("instruments body mutex")
+            .expect("post-bind instruments mutex")
             .clone()
-            .unwrap_or_else(|| INSTRUMENTS_JSON.to_string());
+            .filter(|_| state.ws_hits.load(Ordering::Relaxed) > 0);
+        let body = after_bind.unwrap_or_else(|| {
+            state
+                .instruments_body
+                .lock()
+                .expect("instruments body mutex")
+                .clone()
+                .unwrap_or_else(|| INSTRUMENTS_JSON.to_string())
+        });
         respond_json(stream, "200 OK", &body).await;
     } else if path.starts_with("/trades") {
         state.trades_hits.fetch_add(1, Ordering::Relaxed);

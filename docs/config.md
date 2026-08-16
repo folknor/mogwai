@@ -138,6 +138,12 @@ nautilus hardcodes both on a `FuturesContract`. Tick value is not configurable:
 it is `price_increment * multiplier`, so a config cannot contradict itself.
 `[balances]` must fund the class's settlement currency, which is the quote for
 spot and `settlement_currency` for a future.
+Configured shapes and the default fallback are checked at boot. Every embedded
+preset is also resolved then; a reachable preset whose currency is absent is
+recorded as funding-barred and refused when a socket bind or a history request
+selects it. The refusal names the symbol and the currency to add to
+`[balances]`, and it arrives before any trading, so a runtime funds rejection
+still means depletion and only depletion.
 
 ## Margin, fees and the calendar
 

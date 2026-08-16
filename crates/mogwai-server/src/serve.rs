@@ -193,7 +193,7 @@ async fn serve_async(
     // correctness problem (`FeedLagged` closes the socket with WS 1011), not a
     // tuning one. A missing profile is not fatal here: the run has already been
     // validated against the instrument set, so this only skips the advice.
-    if let Some(profile) = profiles.get(&instrument.symbol) {
+    if let Some(profile) = profiles.configured(&instrument.symbol) {
         let projected_ticks =
             cfg.warmup_ns as f64 / 1_000_000_000.0 / profile.scalars.mean_event_duration_s
                 * profile.scalars.children_mean;
@@ -259,7 +259,7 @@ async fn serve_async(
     let boot_profile = rivers
         .resolve_profile(&instrument.symbol)
         .expect("validated boot profile");
-    let boot_river = rivers.resolve_key(boot_profile);
+    let boot_river = rivers.resolve_key(&boot_profile);
     let boot_ticket = run
         .boatyard
         .board(&crate::boatyard::BoardRequest {

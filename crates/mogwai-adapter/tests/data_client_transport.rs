@@ -537,13 +537,15 @@ async fn trade_history_does_not_advance_past_a_full_same_nanosecond_page() {
     );
 }
 
-/// One run is one instrument, so a subscribe for any other symbol can never be
-/// served. It is refused LOCALLY and loudly rather than recorded as a
-/// subscription that silently never delivers - silence here would be the
-/// misbinding defect this lifecycle exists to remove, in a new place.
+/// The SEEDED SET IS NOT AN ADMISSION LIST. The venue resolves any wire-legal
+/// symbol and registers it at bind, so a label absent from the connect-time
+/// seed is routinely one this run will serve; the guard that refused it here
+/// refused exactly the sessions piece 13 exists to support. The bound-symbol
+/// check is the surviving local gate and is pinned by
+/// `subscribe_refuses_an_instrument_outside_the_bound_symbol`.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn a_subscribe_for_another_instrument_is_refused_locally() {
+async fn a_subscribe_for_an_instrument_absent_from_the_seeded_set_is_accepted() {
     let state = Arc::new(StubState::default());
     let base_url = bound_stub(Arc::clone(&state)).await;
     let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
@@ -560,7 +562,7 @@ async fn a_subscribe_for_another_instrument_is_refused_locally() {
         nautilus_model::identifiers::Symbol::from("ETHUSDT"),
         *mogwai_adapter::MOGWAI_VENUE,
     );
-    let err = client
+    client
         .subscribe_trades(SubscribeTrades::new(
             other,
             Some(ClientId::from("MOGWAI-DATA")),
@@ -570,13 +572,9 @@ async fn a_subscribe_for_another_instrument_is_refused_locally() {
             None,
             None,
         ))
-        .expect_err("a symbol this run does not serve must be refused");
-    let message = err.to_string();
-    assert!(message.contains("ETHUSDT"), "{message}");
-    assert!(message.contains("BTCUSDT"), "{message}");
+        .expect("the seeded set is not an admission list");
 
-    // The run's own instrument is still accepted, so the refusal is a check and
-    // not a blanket failure.
+    // The initially seeded instrument remains accepted too.
     client
         .subscribe_trades(SubscribeTrades::new(
             instrument_id(),
@@ -588,6 +586,74 @@ async fn a_subscribe_for_another_instrument_is_refused_locally() {
             None,
         ))
         .expect("the run's own instrument subscribes");
+}
+
+/// THE POST-BIND RESEED, and the frame that depends on it.
+///
+/// A client bound to a label nobody configured cannot have its def in the
+/// connect-time seed: BINDING is what registers the symbol server-side, so only
+/// a read AFTER the socket is up can carry it. Without that reseed
+/// `handle_market_message` finds no def and drops every frame for the symbol,
+/// silently - which is what this test bites on: delete the reseed and the trade
+/// below never arrives.
+///
+/// The readiness barrier around it is not separately observable here: the stub
+/// pushes its trade at upgrade, but the pump is a task on this same
+/// current-thread runtime and does not run until the test awaits, by which
+/// point connect has returned either way. What the barrier buys is the case the
+/// pump DOES get scheduled mid-connect; it is cheap, and the ordering it
+/// enforces is the one this test's delivery depends on.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_frame_for_an_unconfigured_symbol_survives_the_post_bind_reseed() {
+    const AFTER_BIND: &str = r#"[{"symbol":"BTCUSDT","class":{"class":"spot","base":"BTC","quote":"USDT"},"price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"},{"symbol":"ETHUSDT","class":{"class":"spot","base":"ETH","quote":"USDT"},"price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"}]"#;
+
+    let state = Arc::new(StubState::default());
+    *state
+        .instruments_after_bind
+        .lock()
+        .expect("post-bind instruments mutex") = Some(AFTER_BIND.to_string());
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(r#"{"type":"Trade","symbol":"ETHUSDT","price":"200.00","size":"1","aggressor":"Seller","ts_event":11}"#.to_string());
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    client
+        .connect()
+        .await
+        .expect("connect binds and reseeds behind the barrier");
+
+    let unconfigured = nautilus_model::identifiers::InstrumentId::new(
+        nautilus_model::identifiers::Symbol::from("ETHUSDT"),
+        *mogwai_adapter::MOGWAI_VENUE,
+    );
+    client
+        .subscribe_trades(SubscribeTrades::new(
+            unconfigured,
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .expect("an unconfigured label subscribes");
+
+    match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
+        DataEvent::Data(Data::Trade(trade)) => {
+            assert_eq!(trade.instrument_id, unconfigured);
+            assert_eq!(trade.price, Price::from("200.00"));
+            assert_eq!(trade.ts_event, UnixNanos::from(11));
+        }
+        other => panic!("the first frame was black-holed: {other:?}"),
+    }
 }
 
 /// A failed history fetch must still RESOLVE the nautilus request.

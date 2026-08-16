@@ -13,12 +13,11 @@ use rust_decimal::Decimal;
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 
 pub fn fingerprint() -> &'static Fingerprint {
-    static FP: OnceLock<Fingerprint> = OnceLock::new();
-    FP.get_or_init(Fingerprint::from_repo_json)
+    Fingerprint::repo()
 }
 
 /// Fixed epoch of every generated tape. The run proper begins one configured
@@ -58,9 +57,10 @@ impl InstrumentProfile {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct InstrumentProfiles {
-    by_symbol: HashMap<Symbol, InstrumentProfile>,
+    cfg: Option<Arc<crate::config::Config>>,
+    configured: HashMap<Symbol, Arc<InstrumentProfile>>,
     /// The symbol of the FIRST profile handed to `from_profiles`, which
     /// `build_instrument_profiles` sweeps from the config's boot shape. Kept
     /// because the boot shape is not recoverable from the map: the config's
@@ -69,39 +69,135 @@ pub struct InstrumentProfiles {
     /// resolves a shape whose symbol is MNQ, and looking up BTCUSDT would then
     /// refuse a config that boots perfectly well.
     boot: Option<Symbol>,
+    /// Shapes resolved for symbols nobody configured, memoized under the EXACT
+    /// requested label. Uncapped on purpose: a profile is two small structs,
+    /// and the capped resource is the RIVER, charged in `Rivers`.
+    resolved: Mutex<HashMap<Symbol, Arc<InstrumentProfile>>>,
+    /// Settlement currencies reachable from this run's closed shape set that
+    /// its `[balances]` table does not fund. Computed once at boot; a request
+    /// landing on one is refused at bind rather than left to a fill-time funds
+    /// rejection an operator could have fixed.
+    funding_barred: std::collections::HashSet<String>,
 }
+
+/// Why a symbol has no shape. Distinct from `MaterializeRefusal`, which is the
+/// layer below: this one is decided from the config alone.
+#[derive(Debug)]
+pub enum ResolveRefusal {
+    IllegalSymbol(String),
+    Invalid(anyhow::Error),
+    FundingBarred { symbol: String, currency: String },
+}
+impl std::fmt::Display for ResolveRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IllegalSymbol(reason) => write!(f, "illegal symbol: {reason}"),
+            Self::Invalid(error) => write!(f, "invalid resolved shape: {error:#}"),
+            // The `[balances]` key that would fund the shape IS the currency
+            // code, so the message names it once and says where to put it.
+            Self::FundingBarred { symbol, currency } => write!(
+                f,
+                "symbol {symbol} resolves to a shape settling in {currency}, which this run does not fund; add {currency} to [balances]"
+            ),
+        }
+    }
+}
+impl std::error::Error for ResolveRefusal {}
 impl InstrumentProfiles {
     pub fn from_profiles(profiles: Vec<InstrumentProfile>) -> Self {
         Self {
+            cfg: None,
             boot: profiles
                 .first()
                 .map(|profile| std::sync::Arc::clone(&profile.def.symbol)),
-            by_symbol: profiles
+            configured: profiles
                 .into_iter()
-                .map(|profile| (std::sync::Arc::clone(&profile.def.symbol), profile))
+                .map(|profile| (Arc::clone(&profile.def.symbol), Arc::new(profile)))
                 .collect(),
+            resolved: Mutex::new(HashMap::new()),
+            funding_barred: std::collections::HashSet::new(),
         }
     }
-    pub fn get(&self, symbol: &str) -> Option<&InstrumentProfile> {
-        self.by_symbol.get(symbol)
+    /// The TOTAL resolver: the same configured shapes, plus the config needed
+    /// to resolve a label nobody configured. `from_profiles` stays non-total on
+    /// purpose, so a test rig does not silently acquire client-driven
+    /// resolution it was never written against.
+    pub(crate) fn from_config(
+        cfg: Arc<crate::config::Config>,
+        profiles: Vec<InstrumentProfile>,
+        funding_barred: std::collections::HashSet<String>,
+    ) -> Self {
+        let mut value = Self::from_profiles(profiles);
+        value.cfg = Some(cfg);
+        value.funding_barred = funding_barred;
+        value
+    }
+    pub fn configured(&self, symbol: &str) -> Option<Arc<InstrumentProfile>> {
+        self.configured.get(symbol).cloned()
+    }
+    /// The shape this run serves under `symbol`, resolving and memoizing one
+    /// for a label nobody configured.
+    ///
+    /// A configured symbol answers without consulting the funding-barred set:
+    /// boot already refused a configured shape it cannot fund, so a hit there
+    /// is by construction fundable.
+    ///
+    /// The memo check, the TOML merge and the insertion all happen under ONE
+    /// acquisition, so two concurrent callers on the same label cannot each
+    /// retain a different `Arc` - `Arc::ptr_eq` is a property the river keying
+    /// and the tests both rely on.
+    pub(crate) fn resolve(&self, symbol: &str) -> Result<Arc<InstrumentProfile>, ResolveRefusal> {
+        if let Some(profile) = self.configured(symbol) {
+            return Ok(profile);
+        }
+        mogwai_protocol::validate_wire_symbol(symbol)
+            .map_err(|reason| ResolveRefusal::IllegalSymbol(reason.to_owned()))?;
+        let mut resolved = self
+            .resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(profile) = resolved.get(symbol) {
+            return Ok(Arc::clone(profile));
+        }
+        let cfg = self.cfg.as_ref().ok_or_else(|| {
+            ResolveRefusal::Invalid(anyhow::anyhow!(
+                "this resolver was built from profiles alone and serves only configured symbols"
+            ))
+        })?;
+        let profile =
+            crate::config::profile_for(cfg, Some(symbol)).map_err(ResolveRefusal::Invalid)?;
+        let currency = profile.def.class.settlement_currency();
+        if self.funding_barred.contains(currency) {
+            return Err(ResolveRefusal::FundingBarred {
+                symbol: symbol.to_owned(),
+                currency: currency.to_owned(),
+            });
+        }
+        let profile = Arc::new(profile);
+        resolved.insert(Arc::clone(&profile.def.symbol), Arc::clone(&profile));
+        Ok(profile)
     }
     /// Every configured profile, in unspecified order. For the callers that
     /// pre-derive something per profile at construction; anything a human or a
-    /// test reads sorts through `served_symbols` instead.
+    /// test reads sorts through `configured_symbols` instead.
     pub fn iter(&self) -> impl Iterator<Item = &InstrumentProfile> {
-        self.by_symbol.values()
+        self.configured.values().map(AsRef::as_ref)
     }
-    /// Every symbol this run can synthesize, sorted, for refusal messages that
-    /// must name what IS servable. Sorted because a refusal body is read by a
-    /// human and diffed by a test; `HashMap` order is neither.
-    pub fn served_symbols(&self) -> Vec<&str> {
-        let mut symbols: Vec<_> = self.by_symbol.keys().map(|symbol| &**symbol).collect();
+    /// Every symbol an operator configured, sorted. NOT "every symbol this run
+    /// can serve" - resolution is total, so that set is every wire-legal
+    /// string. Sorted because a human reads it and a test diffs it; `HashMap`
+    /// order is neither.
+    pub fn configured_symbols(&self) -> Vec<&str> {
+        let mut symbols: Vec<_> = self.configured.keys().map(|symbol| &**symbol).collect();
         symbols.sort_unstable();
         symbols
     }
+    /// The CONFIGURED defs alone. `/instruments` answers from
+    /// `Rivers::instrument_defs`, which unions these with what has actually
+    /// materialized.
     pub fn instrument_defs(&self) -> Vec<InstrumentDef> {
         let mut defs: Vec<_> = self
-            .by_symbol
+            .configured
             .values()
             .map(|profile| profile.def.clone())
             .collect();
@@ -119,7 +215,7 @@ impl InstrumentProfiles {
         let named = symbol
             .or(self.boot.as_deref())
             .unwrap_or(crate::config::DEFAULT_PRESET);
-        self.get(named)
+        self.configured(named)
             .map(|profile| profile.def.clone())
             .ok_or_else(|| anyhow::anyhow!("boot symbol {named} has no configured shape"))
     }
@@ -129,7 +225,7 @@ fn generator(label: &str, profile: &InstrumentProfile, identity: TapeIdentity) -
         profile.scalars.clone(),
         identity.seeds.tape_for(label),
         TAPE_ORIGIN_NS,
-        fingerprint(),
+        Fingerprint::repo(),
         &profile.session,
         identity.regime,
         SizeGrid::from_def(&profile.def),
@@ -153,6 +249,18 @@ fn generator(label: &str, profile: &InstrumentProfile, identity: TapeIdentity) -
 /// `MAX_CHECKPOINTS` cap still bounds retained generator clones; exceptionally
 /// long runs coarsen the grid as documented by `CheckpointIndex`.
 pub(crate) const CHECKPOINT_K: usize = 8_192;
+/// How many distinct rivers one run may MATERIALIZE.
+///
+/// The expensive resource is the river - a permanent checkpoint chain, and on a
+/// bind a boat and its paced task - not the profile memo, which is two small
+/// structs and stays uncapped. Charged where the river is created, so a history
+/// poll and a socket bind spend the same budget, and there is NO eviction: an
+/// evicted river would resurrect at a different position, which is a worse lie
+/// than a refusal. Exhaustion by 256 genuinely materialized rivers is an
+/// operational contract, not a hole: this venue serves the owner's own agents,
+/// one consumer population per run, and mounts no defence against a client that
+/// spends the budget deliberately.
+pub(crate) const MAX_MATERIALIZED_RIVERS: usize = 256;
 
 /// Runaway backstop on a SINGLE extension while one river lock is held.
 /// This retains the original one-billion-tick safety purpose: a nonsensical
@@ -316,7 +424,7 @@ pub(crate) struct Rivers {
     /// the whole knob bundle and serializes two values, while river resolution
     /// happens on every history read, every mark read and every placement, so
     /// re-deriving it per lookup would put a digest on the serving hot path.
-    keys: HashMap<Symbol, RiverKey>,
+    keys: Mutex<HashMap<Symbol, RiverKey>>,
     rivers: Mutex<HashMap<RiverKey, Arc<River>>>,
 }
 
@@ -326,11 +434,44 @@ fn locked(index: &Mutex<CheckpointIndex>) -> std::sync::MutexGuard<'_, Checkpoin
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub(crate) enum History {
-    Unconfigured,
-    Source(Box<dyn TickSource>),
+/// Why a river could not be produced. One layer below `ResolveRefusal`: these
+/// arise only on the paths that actually SPEND the capped resource.
+#[derive(Debug)]
+pub(crate) enum MaterializeRefusal {
+    Resolve(ResolveRefusal),
+    CapacityExhausted {
+        cap: usize,
+        count: usize,
+    },
+    KeyMismatch {
+        symbol: String,
+    },
+    /// The river exists but could not be walked to the requested instant. A
+    /// synthesis failure, not a configuration one.
+    Reach(anyhow::Error),
 }
-
+impl std::fmt::Display for MaterializeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolve(error) => error.fmt(f),
+            Self::CapacityExhausted { cap, count } => write!(
+                f,
+                "this run has materialized {count} rivers and its cap is {cap}; no further symbol can be served"
+            ),
+            Self::KeyMismatch { symbol } => write!(
+                f,
+                "the river key passed for symbol {symbol} is not the key this run resolved for it"
+            ),
+            Self::Reach(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+impl std::error::Error for MaterializeRefusal {}
+impl From<ResolveRefusal> for MaterializeRefusal {
+    fn from(value: ResolveRefusal) -> Self {
+        Self::Resolve(value)
+    }
+}
 struct BoatCursor {
     first: Option<TickEvent>,
     source: GeneratedSource,
@@ -345,18 +486,14 @@ impl TickSource for BoatCursor {
 }
 
 /// Test-only convenience: the `Option` shape the in-crate tests assert on,
-/// collapsing "no such symbol" and "the reach failed" the way no production
-/// caller may.
+/// collapsing every materialization refusal the way no production caller may.
 #[cfg(test)]
 pub(crate) fn build_history_source(
     symbol: &str,
     start: Option<u64>,
     rivers: &Rivers,
 ) -> Option<Box<dyn TickSource>> {
-    match rivers.history_source(symbol, start).ok()? {
-        History::Source(source) => Some(source),
-        History::Unconfigured => None,
-    }
+    rivers.history_source(symbol, start).ok()
 }
 
 impl Rivers {
@@ -373,10 +510,15 @@ impl Rivers {
         Arc::new(Self {
             identity,
             profiles,
-            keys,
+            keys: Mutex::new(keys),
             rivers: Mutex::new(HashMap::new()),
         })
     }
+    /// The CONFIGURED profiles behind this registry. Test-only since piece 13:
+    /// every serving path resolves through `resolve_profile`, and a production
+    /// caller reaching past it for the configured map is exactly the
+    /// configured-only lookup this landing deleted.
+    #[cfg(test)]
     pub(crate) fn profiles(&self) -> &InstrumentProfiles {
         &self.profiles
     }
@@ -390,24 +532,35 @@ impl Rivers {
     /// The sole configured-profile lookup in river resolution. Piece 13 makes
     /// this function return the default shape for an absent symbol; the rest
     /// of the boatyard already operates on resolved profiles and keys.
-    pub(crate) fn resolve_profile(&self, symbol: &str) -> Option<&InstrumentProfile> {
-        self.profiles.get(symbol)
+    pub(crate) fn resolve_profile(
+        &self,
+        symbol: &str,
+    ) -> Result<Arc<InstrumentProfile>, ResolveRefusal> {
+        self.profiles.resolve(symbol)
     }
     /// The key for a profile this registry was built from. Cached, so this is
     /// a lookup rather than a digest; a profile from anywhere else is resolved
     /// the long way rather than silently mis-keyed.
     pub(crate) fn resolve_key(&self, profile: &InstrumentProfile) -> RiverKey {
-        self.keys
-            .get(&profile.def.symbol)
-            .cloned()
-            .unwrap_or_else(|| RiverKey::resolve(profile, self.identity))
+        let mut keys = self
+            .keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(key) = keys.get(&profile.def.symbol) {
+            return key.clone();
+        }
+        let key = RiverKey::resolve(profile, self.identity);
+        keys.insert(Arc::clone(&profile.def.symbol), key.clone());
+        key
     }
-    fn river(&self, key: &RiverKey) -> Option<Arc<River>> {
+    fn river(&self, key: &RiverKey) -> Result<Arc<River>, MaterializeRefusal> {
         let profile = self.resolve_profile(key.symbol())?;
         // A key naming a bundle this run does not serve resolves to no river.
         // The comparison is against the CACHED key, so it costs a hash lookup.
-        if self.keys.get(&profile.def.symbol) != Some(key) {
-            return None;
+        if self.resolve_key(&profile) != *key {
+            return Err(MaterializeRefusal::KeyMismatch {
+                symbol: key.symbol().to_owned(),
+            });
         }
         let symbol = key.symbol();
         // Derived inside the closure, not ahead of the lock: `river` is called
@@ -419,11 +572,20 @@ impl Rivers {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Creation under the registry mutex makes concurrent first readers
         // share exactly one chain.
+        if let Some(river) = rivers.get(key) {
+            return Ok(Arc::clone(river));
+        }
+        if rivers.len() >= MAX_MATERIALIZED_RIVERS {
+            return Err(MaterializeRefusal::CapacityExhausted {
+                cap: MAX_MATERIALIZED_RIVERS,
+                count: rivers.len(),
+            });
+        }
         let river = Arc::clone(rivers.entry(key.clone()).or_insert_with(|| {
             materialized = Some(self.identity.seeds.tape_for(symbol));
             Arc::new(River {
                 checkpoints: Mutex::new(CheckpointIndex::new(
-                    generator(symbol, profile, self.identity),
+                    generator(symbol, &profile, self.identity),
                     CHECKPOINT_K,
                     MAX_EXTEND_TICKS,
                 )),
@@ -442,12 +604,12 @@ impl Rivers {
                 "river materialized"
             );
         }
-        Some(river)
+        Ok(river)
     }
     #[cfg(test)]
     pub(crate) fn river_handle_for_test(&self, symbol: &str) -> Option<Arc<River>> {
-        let profile = self.resolve_profile(symbol)?;
-        self.river(&self.resolve_key(profile))
+        let profile = self.resolve_profile(symbol).ok()?;
+        self.river(&self.resolve_key(&profile)).ok()
     }
 
     pub(crate) fn arm_flow_surge(
@@ -458,10 +620,10 @@ impl Rivers {
         rate_mult: f64,
         children_mult: f64,
     ) -> bool {
-        let Some(profile) = self.resolve_profile(symbol) else {
+        let Ok(profile) = self.resolve_profile(symbol) else {
             return false;
         };
-        let Some(river) = self.river(&self.resolve_key(profile)) else {
+        let Ok(river) = self.river(&self.resolve_key(&profile)) else {
             return false;
         };
         locked(&river.checkpoints).arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
@@ -480,11 +642,33 @@ impl Rivers {
             .collect()
     }
 
+    /// What `/instruments` answers: the CONFIGURED shapes unioned with every
+    /// shape this run has MATERIALIZED a river for, sorted by symbol.
+    ///
+    /// Materialized, not merely resolved. Resolution is total, so a memo-shaped
+    /// list would advertise labels nothing had registered; a river is spent by
+    /// a socket bind AND by a history poll alike, so the list grows exactly
+    /// when the capped resource does.
+    pub(crate) fn instrument_defs(&self) -> Vec<InstrumentDef> {
+        let mut defs = self.profiles.instrument_defs();
+        let advertised: std::collections::HashSet<String> =
+            defs.iter().map(|def| def.symbol.to_string()).collect();
+        for symbol in self.materialized_symbols() {
+            if !advertised.contains(&symbol)
+                && let Ok(profile) = self.resolve_profile(&symbol)
+            {
+                defs.push(profile.def.clone());
+            }
+        }
+        defs.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        defs
+    }
+
     pub(crate) fn clear_flow_surge(&self, symbol: &str) -> bool {
-        let Some(profile) = self.resolve_profile(symbol) else {
+        let Ok(profile) = self.resolve_profile(symbol) else {
             return false;
         };
-        let Some(river) = self.river(&self.resolve_key(profile)) else {
+        let Ok(river) = self.river(&self.resolve_key(&profile)) else {
             return false;
         };
         locked(&river.checkpoints).clear_flow_surge();
@@ -512,23 +696,33 @@ impl Rivers {
         &self,
         symbol: &str,
         start: Option<u64>,
-    ) -> anyhow::Result<History> {
+    ) -> Result<Box<dyn TickSource>, MaterializeRefusal> {
         let target = start.unwrap_or(TAPE_ORIGIN_NS);
-        let Some(profile) = self.resolve_profile(symbol) else {
-            return Ok(History::Unconfigured);
-        };
-        let key = self.resolve_key(profile);
-        let Some(river) = self.river(&key) else {
-            return Ok(History::Unconfigured);
-        };
-        reach_river(&river, target)?;
+        let profile = self.resolve_profile(symbol)?;
+        let key = self.resolve_key(&profile);
+        let river = self.river(&key)?;
+        reach_river(&river, target).map_err(MaterializeRefusal::Reach)?;
         let Some(positioned) = locked(&river.checkpoints).try_source_at_or_before(target) else {
-            anyhow::bail!("river {symbol} cannot reach {target}");
+            return Err(MaterializeRefusal::Reach(anyhow::anyhow!(
+                "river {symbol} cannot reach {target}"
+            )));
         };
-        Ok(History::Source(Box::new(MergeSource::starting_at(
+        Ok(Box::new(MergeSource::starting_at(
             vec![Box::new(positioned)],
             start,
-        ))))
+        )))
+    }
+
+    /// Materialize the river for `symbol` and answer nothing but whether it
+    /// could be. The pre-check the history handlers run so a cap exhaustion or
+    /// a barred shape is a 400 naming its reason rather than a 500 raised out
+    /// of the synthesis task - and so a history poll ADVERTISES the shape it
+    /// just spent a river on, which is the same event.
+    pub(crate) fn materialize(&self, symbol: &str) -> Result<(), MaterializeRefusal> {
+        let profile = self.resolve_profile(symbol)?;
+        let key = self.resolve_key(&profile);
+        self.river(&key)?;
+        Ok(())
     }
 
     pub(crate) fn place_cursor(
@@ -536,9 +730,7 @@ impl Rivers {
         key: &RiverKey,
         origin_ns: u64,
     ) -> anyhow::Result<Box<dyn TickSource + Send>> {
-        let river = self
-            .river(key)
-            .ok_or_else(|| anyhow::anyhow!("river {} is not configured", key.symbol()))?;
+        let river = self.river(key).map_err(anyhow::Error::new)?;
         reach_river(&river, origin_ns)?;
         let mut positioned = locked(&river.checkpoints)
             .try_source_at_or_before(origin_ns)
@@ -564,12 +756,10 @@ impl Rivers {
     /// river: doing so would multiply time-to-readiness by the number of
     /// configured shapes for a capability most runs never touch.
     pub(crate) fn ensure_reach(&self, symbol: &str, target_ns: u64) -> anyhow::Result<usize> {
-        let profile = self
-            .resolve_profile(symbol)
-            .ok_or_else(|| anyhow::anyhow!("symbol {symbol} has no configured shape"))?;
+        let profile = self.resolve_profile(symbol).map_err(anyhow::Error::new)?;
         let river = self
-            .river(&self.resolve_key(profile))
-            .ok_or_else(|| anyhow::anyhow!("symbol {symbol} has no configured shape"))?;
+            .river(&self.resolve_key(&profile))
+            .map_err(anyhow::Error::new)?;
         reach_river(&river, target_ns)
     }
 }
@@ -636,10 +826,10 @@ impl Rivers {
         symbol: &str,
         ts: u64,
     ) -> anyhow::Result<Option<Decimal>> {
-        let Some(profile) = self.resolve_profile(symbol) else {
+        let Ok(profile) = self.resolve_profile(symbol) else {
             return Ok(None);
         };
-        let Some(river) = self.river(&self.resolve_key(profile)) else {
+        let Ok(river) = self.river(&self.resolve_key(&profile)) else {
             return Ok(None);
         };
         reach_river(&river, ts)?;
@@ -691,6 +881,153 @@ impl Rivers {
 mod river_tests {
     use super::*;
 
+    fn total_rivers() -> Arc<Rivers> {
+        let profiles = Arc::new(
+            crate::config::build_instrument_profiles(&crate::config::Config::default()).unwrap(),
+        );
+        Rivers::new(
+            TapeIdentity {
+                seeds: RunSeeds::from_run_seed(7),
+                regime: None,
+            },
+            profiles,
+        )
+    }
+
+    /// The widened `RiverKey`. A symbol nobody configured keys a river of its
+    /// OWN - distinct from the default preset's, whose bundle it borrows, and
+    /// distinct from a second unconfigured label sharing that same bundle. That
+    /// falls out of the profile being resolved UNDER THE REQUESTED LABEL, which
+    /// is why the label is never normalized on the way in.
+    #[test]
+    fn an_unconfigured_symbol_keys_its_own_river() {
+        let rivers = total_rivers();
+        let default = rivers.resolve_key(
+            &rivers
+                .resolve_profile(crate::config::DEFAULT_PRESET)
+                .unwrap(),
+        );
+        let foobar = rivers.resolve_key(&rivers.resolve_profile("FOOBAR").unwrap());
+        let other = rivers.resolve_key(&rivers.resolve_profile("BARFOO").unwrap());
+        assert_ne!(foobar, default);
+        assert_ne!(foobar, other);
+        // And exact case: `foobar` is a different label, so a different river.
+        let miscased = rivers.resolve_key(&rivers.resolve_profile("foobar").unwrap());
+        assert_ne!(foobar, miscased);
+    }
+
+    #[test]
+    fn resolving_the_same_symbol_twice_returns_one_river() {
+        let rivers = total_rivers();
+        let first = rivers.river_handle_for_test("FOOBAR").expect("first river");
+        let second = rivers
+            .river_handle_for_test("FOOBAR")
+            .expect("second river");
+        assert!(Arc::ptr_eq(&first, &second), "one chain per label");
+        assert_eq!(rivers.materialized_symbols().len(), 1);
+    }
+
+    /// The advertised set is the MATERIALIZED set (adjudication ruling 3): a
+    /// resolve that spent no river must not advertise, and a history poll must.
+    #[test]
+    fn only_materialized_shapes_are_advertised() {
+        let rivers = total_rivers();
+        rivers.resolve_profile("FOOBAR").expect("resolves");
+        assert!(
+            rivers
+                .instrument_defs()
+                .iter()
+                .all(|def| def.symbol.as_ref() != "FOOBAR"),
+            "a memo hit that materialized nothing must not advertise"
+        );
+        rivers.history_source("FOOBAR", None).expect("history poll");
+        assert!(
+            rivers
+                .instrument_defs()
+                .iter()
+                .any(|def| def.symbol.as_ref() == "FOOBAR"),
+            "a poll materializes, and the materialized set is what is advertised"
+        );
+    }
+
+    /// The cap is a BOUND, not merely an error: concurrent racers at the
+    /// boundary must not push the river map past it between the check and the
+    /// insert.
+    #[test]
+    fn concurrent_materialization_at_the_cap_boundary_holds_the_bound() {
+        let rivers = total_rivers();
+        for index in 0..MAX_MATERIALIZED_RIVERS - 1 {
+            rivers.materialize(&format!("S{index}")).unwrap();
+        }
+        let threads: Vec<_> = (0..8)
+            .map(|index| {
+                let rivers = Arc::clone(&rivers);
+                std::thread::spawn(move || rivers.materialize(&format!("RACER{index}")))
+            })
+            .collect();
+        let outcomes: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+            1,
+            "exactly one racer may take the last slot"
+        );
+        assert_eq!(rivers.materialized_symbols().len(), MAX_MATERIALIZED_RIVERS);
+    }
+
+    #[test]
+    fn resolve_is_total_over_wire_legal_symbols_and_memoizes() {
+        let rivers = total_rivers();
+        let first = rivers.resolve_profile("FOOBAR").unwrap();
+        let second = rivers.resolve_profile("FOOBAR").unwrap();
+        assert_eq!(first.def.symbol.as_ref(), "FOOBAR");
+        assert_eq!(first.def.class.settlement_currency(), "USDT");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(rivers.resolve_profile("not legal!").is_err());
+    }
+
+    #[test]
+    fn concurrent_resolves_of_one_symbol_share_a_profile() {
+        let rivers = total_rivers();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let rivers = Arc::clone(&rivers);
+                std::thread::spawn(move || rivers.resolve_profile("FOOBAR").unwrap())
+            })
+            .collect();
+        let profiles: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(
+            profiles
+                .iter()
+                .all(|profile| Arc::ptr_eq(&profiles[0], profile))
+        );
+    }
+
+    #[test]
+    fn materialization_refuses_past_the_cap_without_exceeding_it() {
+        let rivers = total_rivers();
+        for index in 0..MAX_MATERIALIZED_RIVERS {
+            rivers.history_source(&format!("S{index}"), None).unwrap();
+        }
+        let error = match rivers.history_source("OVER_CAP", None) {
+            Ok(_) => panic!("the 257th river materialized"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            MaterializeRefusal::CapacityExhausted {
+                cap: MAX_MATERIALIZED_RIVERS,
+                count: MAX_MATERIALIZED_RIVERS
+            }
+        ));
+        assert_eq!(rivers.materialized_symbols().len(), MAX_MATERIALIZED_RIVERS);
+    }
+
     #[test]
     fn concurrent_first_readers_share_one_river() {
         let rivers = crate::fills::test_rivers();
@@ -716,15 +1053,11 @@ mod river_tests {
         let rivers = crate::fills::test_rivers();
         rivers.ensure_reach("BTCUSDT", 3_600_000_000_000).unwrap();
         let profile = rivers.resolve_profile("BTCUSDT").unwrap();
-        let key = rivers.resolve_key(profile);
+        let key = rivers.resolve_key(&profile);
         let mut cursor = rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap();
-        let mut history = match rivers
+        let mut history = rivers
             .history_source("BTCUSDT", Some(TAPE_ORIGIN_NS))
-            .unwrap()
-        {
-            History::Source(source) => source,
-            History::Unconfigured => panic!("configured"),
-        };
+            .unwrap();
         assert_eq!(
             cursor.next_tick().unwrap().ts_event(),
             history.next_tick().unwrap().ts_event()
@@ -735,7 +1068,7 @@ mod river_tests {
     fn a_wound_down_boat_leaves_its_river_extendable() {
         let rivers = crate::fills::test_rivers();
         let profile = rivers.resolve_profile("BTCUSDT").unwrap();
-        let key = rivers.resolve_key(profile);
+        let key = rivers.resolve_key(&profile);
         drop(rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap());
         let before = locked(&rivers.river(&key).unwrap().checkpoints).frontier_ns();
         rivers
@@ -751,11 +1084,8 @@ mod river_tests {
     fn a_placed_cursor_yields_every_row_at_the_origin_instant() {
         let rivers = crate::fills::test_rivers();
         let profile = rivers.resolve_profile("BTCUSDT").unwrap();
-        let key = rivers.resolve_key(profile);
-        let mut expected = match rivers.history_source("BTCUSDT", None).unwrap() {
-            History::Source(source) => source,
-            History::Unconfigured => panic!("configured"),
-        };
+        let key = rivers.resolve_key(&profile);
+        let mut expected = rivers.history_source("BTCUSDT", None).unwrap();
         let first = expected.next_tick().unwrap();
         let instant = first.ts_event();
         let mut count = 1;
@@ -793,12 +1123,9 @@ mod river_tests {
             .ensure_reach("BTCUSDT", 3_600_000_000_000)
             .expect("a cold river materializes on demand");
         assert!(reached > 0, "the walk retained checkpoints");
-        assert!(matches!(
-            rivers
-                .history_source("BTCUSDT", Some(3_600_000_000_000))
-                .expect("cold history"),
-            History::Source(_)
-        ));
+        rivers
+            .history_source("BTCUSDT", Some(3_600_000_000_000))
+            .expect("cold history");
     }
 
     /// A second configured shape is realized under its OWN def, on its OWN
@@ -812,12 +1139,9 @@ mod river_tests {
             !Arc::ptr_eq(&boot, &second),
             "one chain per configured shape"
         );
-        let History::Source(mut boot_source) = rivers
+        let mut boot_source = rivers
             .history_source("BTCUSDT", Some(TAPE_ORIGIN_NS))
-            .expect("boot river history")
-        else {
-            panic!("the boot symbol is configured");
-        };
+            .expect("boot river history");
         let boot_prints: Vec<_> = std::iter::from_fn(|| boot_source.next_tick())
             .filter_map(|tick| match tick {
                 TickEvent::Trade(trade) => Some((trade.ts_event, trade.price)),
@@ -826,12 +1150,9 @@ mod river_tests {
             .take(32)
             .collect();
         assert_eq!(boot_prints.len(), 32, "the boot river prints");
-        let History::Source(mut second_source) = rivers
+        let mut second_source = rivers
             .history_source("SECOND", Some(TAPE_ORIGIN_NS))
-            .expect("second river history")
-        else {
-            panic!("the second symbol is configured");
-        };
+            .expect("second river history");
         let second_prints: Vec<_> = std::iter::from_fn(|| second_source.next_tick())
             .filter_map(|tick| match tick {
                 TickEvent::Trade(trade) => {

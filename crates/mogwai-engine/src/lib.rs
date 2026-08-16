@@ -2387,8 +2387,16 @@ mod tests {
             ClientMessage::SubmitOrder(mnq_order("F-2", Side::Buy, 1, 20_000)),
             3,
         );
-        assert!(
-            matches!(rejected.first(), Some(ServerMessage::OrderRejected { reason, .. }) if reason.contains("margin breach"))
+        // The refusal NAMES ITS CURRENCY. A consumer reads a margin breach as a
+        // funds outcome, and every neighbouring funds rejection carries its
+        // unit; one that does not leaves the reader guessing which leg is
+        // short in a multi-currency account.
+        let Some(ServerMessage::OrderRejected { reason, .. }) = rejected.first() else {
+            panic!("{rejected:?}");
+        };
+        assert_eq!(
+            reason,
+            "margin breach: account equity below maintenance requirement in USD"
         );
         let mut reduce = mnq_order("F-3", Side::Sell, 1, 20_000);
         reduce.reduce_only = true;

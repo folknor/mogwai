@@ -81,11 +81,13 @@ fn instruments_reports_every_configured_shape() {
     );
 }
 
+/// Piece 13: the upgrade refuses an ILLEGAL symbol, not an unconfigured one.
+/// `a_run_serves_a_symbol_nobody_configured` covers the served half.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn ws_upgrade_refuses_an_unserved_symbol_with_400() {
+async fn ws_upgrade_refuses_an_illegal_symbol_with_400() {
     let venue = spawn(&["--config", &fast_config()]);
-    let error = tokio_tungstenite::connect_async(venue.ws_url_for("NOT-A-SYMBOL-HERE"))
+    let error = tokio_tungstenite::connect_async(venue.ws_url_for("NOT%20A%20SYMBOL"))
         .await
         .expect_err("the HTTP upgrade must be refused");
     match error {
@@ -415,23 +417,33 @@ fn trades_after_sim_now_are_refused_with_400() {
     assert_eq!(status, 200, "a future end is clamped, not refused: {body}");
 }
 
+/// Piece 13 REPLACED the unserved-symbol refusal on history: the only symbol a
+/// history read refuses now is one that is not a legal symbol at all. A label
+/// nobody configured, and a miscased one, are both served - under their own
+/// label, on their own river.
 #[test]
 #[ignore = "binds a loopback listener"]
-fn history_for_an_unserved_symbol_is_refused_with_400() {
+fn history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one() {
     let venue = spawn(&["--config", &fast_config()]);
     for endpoint in ["trades", "quotes"] {
         let (status, body) = http_get(
             &venue.http_base(),
+            &format!("/{endpoint}?symbol=NOT%20A%20SYMBOL&start=0&limit=5"),
+        );
+        assert_eq!(status, 400, "an illegal symbol is refused: {body}");
+        assert!(
+            body.contains("illegal symbol"),
+            "the refusal says what is wrong: {body}"
+        );
+
+        let (status, body) = http_get(
+            &venue.http_base(),
             &format!("/{endpoint}?symbol=NOT-A-SYMBOL&start=0&limit=5"),
         );
-        assert_eq!(status, 400, "an unserved symbol is refused: {body}");
+        assert_eq!(status, 200, "an unconfigured symbol is served: {body}");
         assert!(
             body.contains("NOT-A-SYMBOL"),
-            "the refusal names the request: {body}"
-        );
-        assert!(
-            body.contains(&venue.symbol),
-            "the refusal names the served symbol: {body}"
+            "the rows wear the requested label: {body}"
         );
     }
 
@@ -441,7 +453,11 @@ fn history_for_an_unserved_symbol_is_refused_with_400() {
             &venue.http_base(),
             &format!("/trades?symbol={lowercase}&start=0&limit=5"),
         );
-        assert_eq!(status, 400, "history symbol matching is case-exact: {body}");
+        assert_eq!(status, 200, "a miscased label is its own river: {body}");
+        assert!(
+            body.contains(&lowercase),
+            "and it is served under that label, not folded: {body}"
+        );
     }
 
     let (status, body) = http_get(
@@ -450,7 +466,7 @@ fn history_for_an_unserved_symbol_is_refused_with_400() {
     );
     assert_eq!(
         status, 200,
-        "the run's served symbol remains servable: {body}"
+        "the run's boot symbol remains servable: {body}"
     );
 }
 

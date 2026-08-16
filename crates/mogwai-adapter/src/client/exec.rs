@@ -890,10 +890,22 @@ impl ExecutionClient for MogwaiExecutionClient {
         // already called concurrently from the HTTP order-dispatch tasks, so
         // moving the WS drain's calls onto the pump task adds no new sharing.
         let (deliver_tx, deliver_rx) = unbounded_channel::<HavocDelivery>();
+        // The delivery barrier. The venue attaches this socket to the live tape
+        // at upgrade, so frames can arrive before the post-bind reseed below has
+        // read `/instruments` - and a frame naming an instrument the cache has
+        // not got is DROPPED, not retried. The reader still enqueues; the pump
+        // holds its FIRST delivery until the reseed says go, so nothing reaches
+        // a handler before the def it needs is resident. Held, not dropped: the
+        // frames are real tape.
+        let (delivery_ready, pump_ready) = tokio::sync::watch::channel(false);
         let pump_ctx = self.exec_context();
         let pump_handle = spawn_latency_pump(deliver_rx, move |msg| {
             let ctx = pump_ctx.clone();
+            let mut pump_ready = pump_ready.clone();
             async move {
+                // An `Err` means connect dropped the sender - the barrier will
+                // never open, so deliver rather than wedge the pump.
+                drop(pump_ready.wait_for(|open| *open).await);
                 handle_exec_message(msg, &ctx);
             }
         });
@@ -953,6 +965,32 @@ impl ExecutionClient for MogwaiExecutionClient {
             self.retire_connected_flag();
             self.ws_cmd = None;
             return Err(err);
+        }
+        // The post-bind reseed. Binding is what REGISTERS an unconfigured symbol
+        // server-side, so the pre-dial seed above cannot have carried its def;
+        // only a read after the socket is up can. The pre-dial seed and the
+        // account snapshot keep their order deliberately - the snapshot resolves
+        // against configured defs and must stay ahead of the socket.
+        if let Err(err) = seed_instruments(
+            &self.http,
+            &self.http_quota,
+            &http_base_url,
+            &self.instruments,
+        )
+        .await
+        {
+            // Same teardown as a timed-out connect: leave nothing running that
+            // a retry would race, and never leave the barrier shut on a live
+            // pump.
+            abort_tasks(&self.task_handles);
+            self.retire_connected_flag();
+            self.ws_cmd = None;
+            return Err(err);
+        }
+        if delivery_ready.send(true).is_err() {
+            // No receiver: the pump task is already gone, so there is nothing
+            // held behind the barrier to release.
+            tracing::debug!("released the delivery barrier with no pump listening");
         }
         self.core.set_connected();
         Ok(())

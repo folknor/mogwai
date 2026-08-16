@@ -335,10 +335,10 @@ pub fn profile_from_config(path: &Path) -> LabResult<mogwai_server::source::Inst
     let def = profiles
         .boot_symbol_def(cfg.boot_symbol())
         .map_err(|e| LabError::refusal(format!("resolving boot shape: {e}")))?;
-    Ok(profiles
-        .get(&def.symbol)
-        .expect("just listed this symbol")
-        .clone())
+    Ok((*profiles
+        .configured(&def.symbol)
+        .expect("just listed this symbol"))
+    .clone())
 }
 
 #[cfg(test)]

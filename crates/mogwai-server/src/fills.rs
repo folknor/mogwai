@@ -163,8 +163,14 @@ impl MarketReadingCache {
 /// The sweep paths have nothing useful to do with a synthesis failure - they
 /// leave their frontier unadvanced and retry next pass - but "nothing useful to
 /// do" must not become silence, which is the failure mode the river registry
-/// exists to delete. An unconfigured symbol is the ordinary `None` and needs no
-/// log; a genuine `Err` is logged at `warn` naming the symbol.
+/// exists to delete.
+///
+/// Exactly ONE refusal is quiet: a FUNDING-BARRED shape is a standing
+/// configuration state for the whole run, already refused loudly at every bind,
+/// so warning about it once per sweep pass is noise and nothing else. Every
+/// other refusal - an illegal symbol reaching the sweep, a resolved shape that
+/// does not validate, an exhausted river cap, a key mismatch, a blown reach -
+/// is logged at `warn` naming the symbol.
 fn history_or_warn(
     rivers: &source::Rivers,
     symbol: &str,
@@ -172,8 +178,10 @@ fn history_or_warn(
     what: &'static str,
 ) -> Option<Box<dyn mogwai_data::TickSource>> {
     match rivers.history_source(symbol, Some(start)) {
-        Ok(source::History::Source(source)) => Some(source),
-        Ok(source::History::Unconfigured) => None,
+        Ok(source) => Some(source),
+        Err(source::MaterializeRefusal::Resolve(source::ResolveRefusal::FundingBarred {
+            ..
+        })) => None,
         Err(error) => {
             tracing::warn!(symbol, %error, "{what}");
             None
@@ -293,9 +301,12 @@ pub(crate) fn read_market(
         "market reading could not read its river",
     )?;
     let reading = mogwai_data::vol_reading(source.as_mut(), from_ns, ts, SWEEP_DRAIN_BUDGET)?;
+    // Resolved, not configured-only: this reading is taken for whatever symbol
+    // a boat is serving, and after piece 13 that need not be one an operator
+    // named. A configured-only lookup would silently drop the reading.
     let increment = rivers
-        .profiles()
-        .get(symbol)?
+        .resolve_profile(symbol)
+        .ok()?
         .def
         .price_increment
         .to_f64()?;
@@ -397,13 +408,9 @@ mod tests {
     }
 
     fn tape(start: u64) -> Box<dyn TickSource> {
-        let source::History::Source(tape) = profiles()
+        profiles()
             .history_source("BTCUSDT", Some(start))
             .expect("history")
-        else {
-            panic!("configured deterministic BTC tape")
-        };
-        tape
     }
 
     fn trades(start: u64, count: usize) -> Vec<(u64, Decimal)> {
@@ -569,7 +576,14 @@ mod tests {
         // Both configured shapes answer, and each answers from its OWN chain -
         // the fixture's second symbol is fully resolvable, so a pass here means
         // the registry really keyed a river rather than a lookup vacuously
-        // succeeding. A symbol no profile resolves still answers nothing.
+        // succeeding.
+        //
+        // RE-ANCHORED by piece 13: the last assertion no longer pins "an
+        // unconfigured symbol is unservable" - it is servable now. This fixture
+        // is built through `from_profiles`, which carries NO config, so the
+        // resolver here is deliberately non-total and refuses. What is pinned
+        // is that a test rig does not silently acquire client-driven
+        // resolution; the total path is exercised in `source.rs`.
         let rivers = super::test_rivers_with_a_second_symbol();
         assert!(source::build_history_source("BTCUSDT", Some(TEST_ORIGIN), &rivers).is_some());
         assert!(
@@ -699,7 +713,7 @@ mod tests {
         let profiles = profiles();
         let increment = profiles
             .profiles()
-            .get("BTCUSDT")
+            .configured("BTCUSDT")
             .expect("BTCUSDT profile")
             .def
             .price_increment;

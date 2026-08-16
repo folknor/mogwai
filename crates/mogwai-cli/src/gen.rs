@@ -551,10 +551,10 @@ fn profile_from_config(
     }
     let profiles = mogwai_server::config::build_instrument_profiles(&cfg)?;
     let def = profiles.boot_symbol_def(cfg.boot_symbol())?;
-    Ok(profiles
-        .get(&def.symbol)
-        .expect("just listed this symbol")
-        .clone())
+    Ok((*profiles
+        .configured(&def.symbol)
+        .expect("just listed this symbol"))
+    .clone())
 }
 
 /// Every symbol resolves through the shipped preset registry. An unmatched
@@ -973,7 +973,7 @@ mod tests {
             mogwai_server::config::profile_for_symbol("BTCUSDT")
                 .expect("BTCUSDT preset must resolve"),
         ]);
-        let profile = profiles.get("BTCUSDT").expect("BTCUSDT profile");
+        let profile = profiles.configured("BTCUSDT").expect("BTCUSDT profile");
         let mut direct_source = mogwai_data::GeneratedSource::new_with_session_profile(
             profile.scalars.clone(),
             DEFAULT_GEN_SEED,

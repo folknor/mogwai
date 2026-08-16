@@ -162,31 +162,13 @@ impl MogwaiDataClient {
         // the venue serves one run's one tape and pushes it unbidden, so there
         // is no frame to send: this table only gates which arriving ticks are
         // forwarded to the message bus.
-        // The venue serves exactly one instrument and pushes its tape unbidden,
-        // so a subscribe for any OTHER symbol can never be satisfied. Refuse it
-        // here, loudly and locally, rather than recording a subscription that
-        // will silently never deliver: silence is precisely the misbinding
-        // defect this lifecycle exists to remove. An empty instrument cache
-        // means the client has not connected yet and has nothing to check
-        // against, so it defers rather than guessing.
-        {
-            let instruments = self
-                .instruments
-                .lock()
-                .map_err(|_| anyhow::anyhow!("instrument mutex poisoned"))?;
-            if !instruments.is_empty() && !instruments.contains_key(&symbol) {
-                let served: Vec<&str> = instruments.keys().map(AsRef::as_ref).collect();
-                tracing::error!(
-                    %symbol,
-                    served = ?served,
-                    "refusing a subscription for an instrument this run does not serve"
-                );
-                anyhow::bail!(
-                    "this venue run serves {served:?}, not {symbol}; \
-                     one run is one instrument and cannot be asked for another"
-                );
-            }
-        }
+        //
+        // THE SEEDED INSTRUMENT SET IS NOT AN ADMISSION LIST. The venue resolves
+        // any wire-legal symbol and registers it on BIND, so a symbol absent
+        // from the seed is routinely one this run will serve; refusing on the
+        // seed refused exactly the sessions piece 13 exists to support. The
+        // bound-symbol check above stays, because a subscription for a symbol
+        // this connection did not bind genuinely can never be delivered.
         {
             let mut subs = self
                 .subs
@@ -423,6 +405,15 @@ impl DataClient for MogwaiDataClient {
         // paces delivery off-loop. Spawn and track the pump before the reader so
         // stop() aborts it alongside the connection task.
         let (deliver_tx, deliver_rx) = unbounded_channel::<HavocDelivery>();
+        // The delivery barrier. The venue attaches this socket to the live tape
+        // at upgrade, so trade and quote frames can arrive before the post-bind
+        // reseed below has read `/instruments` - and `instrument_def` BLACK-HOLES
+        // a frame whose def is missing. The reader still enqueues; the pump holds
+        // its FIRST delivery until the reseed says go, so nothing reaches a
+        // handler before the def it needs is resident. Holding rather than
+        // dropping is the point: those frames are real tape.
+        let (delivery_ready, pump_ready) = tokio::sync::watch::channel(false);
+        let reseed_sink = sink.clone();
         let pump_handle = spawn_latency_pump(deliver_rx, move |msg| {
             let sink = sink.clone();
             let instruments = Arc::clone(&instruments);
@@ -430,7 +421,11 @@ impl DataClient for MogwaiDataClient {
             let subs = Arc::clone(&subs);
             let quote_delivery = Arc::clone(&quote_delivery);
             let bars = Arc::clone(&bars);
+            let mut pump_ready = pump_ready.clone();
             async move {
+                // An `Err` means connect dropped the sender - the barrier will
+                // never open, so deliver rather than wedge the pump.
+                drop(pump_ready.wait_for(|open| *open).await);
                 handle_market_message(
                     msg,
                     &sink,
@@ -504,6 +499,32 @@ impl DataClient for MogwaiDataClient {
             abort_tasks(&self.task_handles);
             self.retire_connected_flag();
             return Err(err);
+        }
+        // The post-bind reseed. Binding is what REGISTERS an unconfigured symbol
+        // server-side, so the pre-dial seed cannot have carried its def; only a
+        // read after the socket is up can. `cache_instruments` overwrites by key
+        // and re-emitting an unchanged def is idempotent at the nautilus cache,
+        // so this costs one HTTP round trip and changes nothing for a run whose
+        // symbols were all configured.
+        if let Err(err) = seed_instruments(
+            &self.http,
+            &self.http_quota,
+            &http_base_url,
+            &self.instruments,
+        )
+        .await
+        {
+            // Same teardown as a timed-out connect: leave nothing running that a
+            // retry would race, and never leave the barrier shut on a live pump.
+            abort_tasks(&self.task_handles);
+            self.retire_connected_flag();
+            return Err(err);
+        }
+        emit_seeded_instruments(&reseed_sink, &self.instruments, sim);
+        if delivery_ready.send(true).is_err() {
+            // No receiver: the pump task is already gone, so there is nothing
+            // held behind the barrier to release.
+            tracing::debug!("released the delivery barrier with no pump listening");
         }
         Ok(())
     }

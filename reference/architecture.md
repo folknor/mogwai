@@ -2,8 +2,15 @@
 
 Mogwai is a one-run fake venue. A direct launcher starts one foreground process
 and receives a versioned readiness record as one JSON line on the child's stdout.
-The process binds one endpoint and owns an open set of configured instruments,
+The process binds one endpoint and owns an open set of resolved instruments,
 generated river tapes, and one engine ledger.
+
+Symbol resolution is total over wire-legal labels. Configured profiles are
+held directly and other profiles are memoized without a cap. The permanent,
+expensive checkpoint chains are capped instead: creation of the 257th river is
+refused atomically, with no eviction. A `RiverKey` includes the exact requested
+label, its per-label tape seed, and the resolved bundle digest, so two labels
+wearing the same default shape still own independent water.
 
 The server exposes `/health`, `/account`, `/instruments`, `/clock`, `/trades`,
 `/quotes`, `/control/divergence`, and `/ws`. Order entry is WebSocket-only: the
@@ -17,13 +24,14 @@ messages are capped at `MAX_CLIENT_MESSAGE_BYTES`, 64 KiB, so a dependency
 default no longer sets the venue's memory bound; an oversized frame ends the
 connection. A WebSocket names its one river with the optional, case-exact
 `symbol` query parameter on the upgrade. The key is known before any tasks or
-bytes exist, an unserved river can be refused as HTTP 400 rather than an
+bytes exist, a refusal - an illegal label, a shape that does not validate, a
+funding-barred one, or an exhausted river cap - is an HTTP 400 rather than an
 ambiguous WebSocket close, and one connection still owns exactly one replay. A
 frame carrier would permit multiple replays and create an unbound interval
 before the first frame. The query carrier is the seam where river-keyed state,
 boat placement, and per-boat clocks attach. `handle_socket` resolves the query
 symbol, ensures its instrument exists, resolves its `RiverKey`, and boards a
-boat on that river. Every configured shape owns a lazily created checkpoint
+boat on that river. Every resolved shape owns a lazily created checkpoint
 chain, keyed and locked independently, and is servable through history. Clients
 do not send subscribe frames or an account identity. The bounded fanout
 ring remains; a lagging client receives

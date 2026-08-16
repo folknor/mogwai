@@ -23,11 +23,17 @@ The WebSocket endpoint is `GET /ws?symbol=<symbol>`. The query parameter is
 optional; omitting it binds the socket to the run's boot symbol for compatibility
 with older clients. A socket owns exactly one river. A supplied symbol is 1 to
 32 ASCII letters, digits, dot, dash, or underscore, and matching is case exact.
-Malformed or unserved symbols are refused with HTTP 400 before the upgrade.
-Any configured symbol is accepted. The first passenger places its river's boat
+Malformed symbols are refused with HTTP 400 before the upgrade. Every legal
+symbol is resolved. The first passenger places its river's boat
 and later passengers at the same speed share it.
 A client names that river from its own configuration; the readiness record does
 not supply one.
+
+`GET /instruments` reports the configured shapes plus every river materialized
+so far. A socket bind or history poll materializes a river and grows the list.
+A run retains at most 256 materialized rivers and never evicts them. This is an
+operational bound for trusted clients belonging to the run's owner, not a
+hostile-client defence.
 
 The history endpoints `GET /trades` and `GET /quotes` are bounded by the named
 river's now. For a seated river that is the last instant its boat published;

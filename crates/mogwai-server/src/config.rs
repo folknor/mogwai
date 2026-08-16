@@ -7,7 +7,7 @@
 //! server (the HTTP routes, the websocket replay) only ever reads back
 //! through `AppState`/`SimClock`, never mutates.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
 
@@ -522,6 +522,24 @@ fn validate_speed(cfg: &Config) -> anyhow::Result<()> {
 /// calendar claim about an unfitted symbol, settles in the funded USDT default,
 /// and was fitted from trade-level archives.
 pub const DEFAULT_PRESET: &str = "BTCUSDT";
+/// The shape an arbitrary unconfigured label resolves to under this config.
+///
+/// NO PROBE LABEL. Resolving the fallback under some sentinel string needs that
+/// string to be wire-ILLEGAL to be collision-proof, and a wire-illegal symbol
+/// does not survive `profile_from_configured`, which enforces `MAX_SYMBOL_LEN`
+/// on the resolved def. A wire-legal sentinel would instead be nameable by a
+/// client and shadowable by a `[symbols.*]` key, which is the collision the
+/// sentinel existed to prevent.
+///
+/// `None` is exact and needs neither. `bundle_name` picks a bundle from the
+/// symbol only when the symbol NAMES A PRESET, and `overlays_for` attaches a
+/// `[symbols.*]` table only when one matches - so for a label that is neither,
+/// resolution is `[instrument]` over the operator's preset or `DEFAULT_PRESET`,
+/// which is precisely what `None` resolves. The symbol the shape ends up
+/// wearing does not enter the settlement currency.
+fn unconfigured_fallback_shape(cfg: &Config) -> anyhow::Result<source::InstrumentProfile> {
+    profile_for(cfg, None)
+}
 
 /// The shipped presets. The one spelling of the registry: name, text.
 const PRESETS: [(&str, &str); 3] = [
@@ -1072,7 +1090,38 @@ pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::Instrum
             .with_context(|| format!("configured symbol {named} cannot be funded"))?;
         resolved.push(profile);
     }
-    Ok(source::InstrumentProfiles::from_profiles(resolved))
+    // The reachable shape set is CLOSED at boot and wider than the configured
+    // one: client-driven resolution can select any shipped preset by name, plus
+    // the default bundle under the `[instrument]` overlay. Boot RESOLVES all of
+    // them and records the unfundable ones; it does not refuse over them, since
+    // that would force a BTCUSDT-only operator to fund USD forever. A request
+    // landing on a barred shape is refused at bind instead.
+    //
+    // Empty balances mean funds checks are OFF for the whole run (see
+    // `refuse_unfunded_settlement`), so nothing can be barred either - barring
+    // there would refuse binds for a currency the engine never charges.
+    let mut funding_barred = std::collections::HashSet::new();
+    if !cfg.balances.is_empty() {
+        let reachable = preset_names()
+            .into_iter()
+            .map(|name| {
+                profile_for(cfg, Some(name))
+                    .with_context(|| format!("reachable preset shape {name} is invalid"))
+            })
+            .chain([unconfigured_fallback_shape(cfg)
+                .context("the unconfigured fallback shape is invalid")]);
+        for profile in reachable {
+            let currency = profile?.def.class.settlement_currency().to_owned();
+            if !cfg.balances.contains_key(&currency) {
+                funding_barred.insert(currency);
+            }
+        }
+    }
+    Ok(source::InstrumentProfiles::from_config(
+        Arc::new(cfg.clone()),
+        resolved,
+        funding_barred,
+    ))
 }
 
 fn validate_symbol_keys(cfg: &Config) -> anyhow::Result<()> {
@@ -1206,8 +1255,7 @@ pub fn profile_from_preset(name: &str) -> anyhow::Result<source::InstrumentProfi
     let configured: ConfiguredInstrument = merged
         .try_into()
         .with_context(|| format!("preset {name} does not deserialize as an instrument"))?;
-    let fp = mogwai_data::Fingerprint::from_repo_json();
-    profile_from_configured(&configured, &fp)
+    profile_from_configured(&configured, mogwai_data::Fingerprint::repo())
 }
 
 /// The profile a symbol resolves to without an operator overlay. Total over
@@ -1241,8 +1289,7 @@ fn profile_from_merged(merged: toml::Table) -> anyhow::Result<source::Instrument
     let configured: ConfiguredInstrument = merged
         .try_into()
         .context("the resolved [instrument] table is not a valid instrument")?;
-    let fp = mogwai_data::Fingerprint::from_repo_json();
-    profile_from_configured(&configured, &fp)
+    profile_from_configured(&configured, mogwai_data::Fingerprint::repo())
 }
 
 fn validate_instrument_options(
@@ -1934,9 +1981,32 @@ mod tests {
     }
 
     #[test]
+    fn an_unfunded_preset_shape_is_barred_not_refused() {
+        let profiles =
+            build_instrument_profiles(&Config::default()).expect("USDT-only boot succeeds");
+        let error = profiles.resolve("MNQ").expect_err("USD preset is barred");
+        assert!(
+            matches!(error, source::ResolveRefusal::FundingBarred { ref currency, .. } if currency == "USD")
+        );
+    }
+
+    #[test]
+    fn funding_every_preset_bars_nothing() {
+        let mut cfg = Config::default();
+        cfg.balances.insert("USD".to_owned(), Decimal::ONE);
+        let profiles = build_instrument_profiles(&cfg).unwrap();
+        for symbol in preset_names() {
+            profiles.resolve(symbol).unwrap();
+        }
+        profiles.resolve("FOOBAR").unwrap();
+    }
+
+    #[test]
     fn a_no_config_run_serves_the_default_preset() {
         let profiles = build_instrument_profiles(&Config::default()).unwrap();
-        let resolved = profiles.get(DEFAULT_PRESET).expect("one default profile");
+        let resolved = profiles
+            .configured(DEFAULT_PRESET)
+            .expect("one default profile");
         let preset = profile_from_preset(DEFAULT_PRESET).unwrap();
         assert_eq!(resolved.def, preset.def);
         assert_eq!(

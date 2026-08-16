@@ -88,17 +88,17 @@ pub(crate) async fn ws_upgrade(
     Query(query): Query<SocketQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    let symbol = match resolve_socket_symbol(
-        query.symbol.as_deref(),
-        &state.run.boot_symbol,
-        state.rivers.profiles(),
-    ) {
+    let symbol = match resolve_socket_symbol(query.symbol.as_deref(), &state.run.boot_symbol) {
         Ok(symbol) => symbol,
         Err(body) => return (StatusCode::BAD_REQUEST, body).into_response(),
     };
-    if !state.run.ensure_instrument(&symbol).await {
-        return (StatusCode::BAD_REQUEST, "symbol has no configured shape").into_response();
-    }
+    // The bind-time shape refusal: an invalid resolved shape or a
+    // funding-barred one is a CONFIGURATION error, named here and before any
+    // trading, rather than surfacing later as a fill-time funds rejection.
+    let profile = match state.run.ensure_instrument(&symbol).await {
+        Ok(profile) => profile,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
     let speed = query.speed.unwrap_or(state.cfg.speed);
     if !speed.is_finite() || speed < 0.0 {
         return (
@@ -107,11 +107,7 @@ pub(crate) async fn ws_upgrade(
         )
             .into_response();
     }
-    let profile = state
-        .rivers
-        .resolve_profile(&symbol)
-        .expect("resolved socket profile");
-    let river = state.rivers.resolve_key(profile);
+    let river = state.rivers.resolve_key(&profile);
     let ticket = match state.run.boatyard.board(&BoardRequest { river, speed }).await {
         Ok(ticket) => ticket,
         Err(BoardRefusal::SpeedInUse { sitting_speed }) => return (StatusCode::BAD_REQUEST, format!("river {symbol} already has a boat at speed {sitting_speed}; request that speed or wait for its passengers to leave")).into_response(),

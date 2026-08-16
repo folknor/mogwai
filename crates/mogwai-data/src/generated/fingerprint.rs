@@ -11,6 +11,7 @@
 use mogwai_protocol::decimal_to_f64;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::sync::OnceLock;
 
 use super::consts::{
     GARCH_SIGMA_CAP, LATENT_SIZE_MIN_RATIO, SESSION_SHARE_SUM, SESSION_SUM_TOL,
@@ -28,6 +29,12 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
+    #[must_use]
+    pub fn repo() -> &'static Self {
+        static FINGERPRINT: OnceLock<Fingerprint> = OnceLock::new();
+        FINGERPRINT.get_or_init(Self::from_repo_json)
+    }
+
     #[must_use]
     pub fn from_repo_json() -> Self {
         let bytes = include_str!(concat!(

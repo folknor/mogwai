@@ -166,11 +166,15 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let settlements: Vec<_> = symbols
                     .iter()
                     .filter_map(|symbol| {
+                        // Resolved, not configured-only: a symbol nobody
+                        // configured is served on a bundle that may carry a
+                        // calendar, and its settlements are as real as a
+                        // configured shape's.
                         sweep
                             .rivers
-                            .profiles()
-                            .get(symbol)
-                            .and_then(|profile| profile.calendar.as_ref())
+                            .resolve_profile(symbol)
+                            .ok()
+                            .and_then(|profile| profile.calendar.clone())
                             .map(|calendar| {
                                 (symbol, calendar.settlement_instants(last_swept_ns, to_ns))
                             })

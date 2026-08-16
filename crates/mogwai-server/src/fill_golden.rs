@@ -259,7 +259,7 @@ fn golden_path() -> PathBuf {
 fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cell> {
     let def = profiles
         .profiles()
-        .get(SYMBOL)
+        .configured(SYMBOL)
         .expect("resolved BTCUSDT profile exists")
         .def
         .clone();
@@ -299,11 +299,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
             // no order is ever marketable on arrival either way.
             let market = fills::read_last(SYMBOL, ts, profiles)
                 .or_else(|| {
-                    let crate::source::History::Source(mut tape) =
-                        profiles.history_source(SYMBOL, Some(ORIGIN)).ok()?
-                    else {
-                        return None;
-                    };
+                    let mut tape = profiles.history_source(SYMBOL, Some(ORIGIN)).ok()?;
                     // The tape's first PRINT, not its first FRAME. Protocol 7
                     // opens every parent burst with a quote, so reading one tick
                     // and giving up on a non-trade returned None for the

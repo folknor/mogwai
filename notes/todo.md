@@ -82,58 +82,23 @@ the settled premises it records (always accelerated, no restart, single-
 instrument strategies, one MOGWAI venue, resource cost shapes nothing) are
 this design's mogwai-side constraints and still hold unchanged.
 
-## Landing the grand design: fourteen pieces
+## Landing the grand design
 
-Counted 2026-08-15 from the settled-design items below, EXCLUDING tape
-realism (the segment-sampler and preset-fitting track, which is separate).
-A piece is a unit one agent could own or one coherent landing, with its
-decisions. The detail for each lives in the design bullets under Open
-issues; this is the inventory, not the spec.
-
-SLICE 1 - symbol selects the preset, still one symbol per run. Pieces 1
-through 3 and 5 landed (preset selection by symbol lookup with BTCUSDT the
-designated default, config overlays split from the boot symbol,
-`InstrumentDef` derived with the second default knob bundle deleted, and
-`/trades`/`/quotes` refusing an unserved symbol with a 400 naming the served
-symbol); their detail is git history, not this file. Piece 8 (seed
-derivation gains a symbol dimension) has also landed 2026-08-15; detail is
-git history. Numbering is left as it was assigned so the cross-references
-below (piece 4, piece 13) still resolve:
-
-4. RULED AND CONSUMED. The boot-ordering decision - warmup moves, or a boot
-   symbol survives slice 1 - was ruled by the owner 2026-08-15: slice 1
-   keeps a boot symbol, and that is the landed state (the top-level
-   `symbol` key; warmup initializes the boot river at boot). Piece 7 has
-   since landed the other half: rivers now materialize per request off a
-   keyed registry rather than off `INDEX`/`BOOT`. Piece 6 has since landed
-   too: the `/ws` symbol carrier is no longer boot-symbol-only.
-
-SLICE 2 - many boats on many rivers - is now wholly landed. Piece 7 (the
-keyed `Rivers` registry replacing `RunIndex`/`BOOT`, plural instrument
-profiles, lazy engine registration), pieces 6 and 9 (the `/ws` symbol
-carrier, taken wholesale, and the boatyard - sharing key, placement/join/
-wind-down, and its open mechanics), pieces 10 and 11 (one clock per boat,
-then fill-path de-singling moving `MarketReadingCache` onto the boat), and
-piece 12 (`ReadyRecord` version 6 describing the venue, naming no symbol,
-retaining the shared tape origin, placement origin and servable warmup
-span) all landed between 2026-08-15 and 2026-08-16; their detail is git
-history, not this file. Numbering is left as it was assigned so the
-cross-reference below (piece 13) still resolves.
-
-CROSS-CUTTING, still open:
-
-13. The consumer surface as one landing: `/instruments` returns the
-    resolved configuration, the adapter's subscription guard resolves with
-    the unconfigured-symbol-session question, and the runtime funds
-    rejection names its currency.
-14. The durable prose: every decision above owes `reference/` and `docs/`
-    writing WITH the code, per the standing item below.
-
-Piece 4 (and the guard question inside 13) is ruled and consumed; slices 1
-and 2 are both fully landed, leaving 13 and 14 as the remaining work.
-Broadarrow's item 4
-(consuming the multi-instrument venue) is excluded - it is theirs, and
-their build breaking loudly when piece 13 lands is the designed handoff.
+Counted 2026-08-15 as a fourteen-piece inventory, EXCLUDING tape realism
+(the segment-sampler and preset-fitting track, which is separate). All
+fourteen pieces are now landed: preset selection by symbol lookup, config
+overlays split from the boot symbol, the derived `InstrumentDef`, the
+keyed `Rivers` registry replacing `RunIndex`/`BOOT`, the `/ws` symbol
+carrier, the boatyard (sharing key, placement/join/wind-down), one clock
+per boat, the seed's symbol dimension, the venue-scoped readiness record,
+and last the consumer surface - `/instruments` as configured-plus-
+materialized, the adapter's unconfigured-symbol session, and the funding
+and funds-rejection wording it forced - landed 2026-08-16. Piece 14, the
+durable prose owed by each of the above, rode with every landing rather
+than closing as a separate step. Detail is git history, not this file.
+Broadarrow's item 4 (consuming the multi-instrument venue) was excluded
+throughout - it is theirs, and their build breaking loudly when the
+consumer surface landed was the designed handoff.
 
 ## Open issues
 
@@ -367,27 +332,29 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   moves the currency, grid and class of every unmatched symbol, and therefore
   what the funding check below demands of the ledger.
 
-- FUNDING: CLOSED, and it stays a BOOT check. Settled 2026-08-15; this was open
-  question 1. The set of reachable shapes IS closed at boot - every shape the
-  operator explicitly configured, plus the default tape preset - so the set of
-  currencies the venue can ever require is known before the first connection.
+- FUNDING: CLOSED, with boot checks plus bind refusal. Amended 2026-08-16 after
+  total resolution made every embedded preset client-reachable. The set of
+  shapes is still closed at boot: configured shapes, every embedded preset,
+  and the default bundle under the instrument overlay.
   An arbitrary symbol does not open that set, because it contributes no
   currency.
-  So: a shape whose settlement or quote currency has NO LEDGER LINE is a
-  CONFIGURATION ERROR and refuses at BOOT. A funds rejection at RUNTIME then
-  means DEPLETION and only depletion. Collapsing the two would make a typo look
+  Configured shapes and the default bundle retain the existing boot refusal.
+  Other embedded preset shapes are resolved at boot and marked FUNDING-BARRED
+  when their currency has no ledger line; a request selecting one refuses at
+  bind as a configuration error naming the symbol, currency, and `[balances]`
+  key. A funds rejection on a served shape then means DEPLETION and only
+  depletion. Collapsing the two would make a typo look
   like a trading outcome and waste an agent's whole run, which is the reason to
   keep them apart.
-  Two dead ends recorded so they are not re-walked. The concern that this had to
-  move to order time came from believing the currency set was runtime-discovered;
-  it is not. And "the operator will just see it on their first order" is wrong
+  The concern that this had to move to order time came from believing the
+  currency set was runtime-discovered; it is not. And "the operator will just
+  see it on their first order" is wrong
   for the mismatch case: an unfunded currency is knowable with no order at all,
   and only genuine depletion needs an order to discover. A user funds their
   ledger deliberately - nobody sets it to zero - so the case worth catching is
   incongruence, not absence.
-  ONE LINE TO CONFIRM WHEN IN THERE, not a decision: that the runtime funds
-  rejection NAMES THE CURRENCY, so a depletion reads as "no USD" rather than
-  "insufficient balance".
+  Confirmed: every runtime funds rejection names the currency, including the
+  neighboring margin-breach refusal.
 
 - EVERY DECISION IN THIS BLOCK OWES `reference/` AND `docs/` PROSE, and that is
   not a tidy-up at the end. These notes carry no truth guarantee and nothing
@@ -401,38 +368,28 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   with the code that implements each decision, not in a documentation pass
   afterwards.
 
-- `/instruments` RETURNS THE RESOLVED CONFIGURATION. Settled 2026-08-15. Not the
-  servable set, which is unbounded and cannot be enumerated; not the presets;
-  not the materialized rivers. It reports the shapes THE OPERATOR CONFIGURED for
-  this venue, resolved through preset inheritance and overrides. Finite, known
-  at boot, honest, and it gives nautilus's `request_instruments` and
-  `subscribe_instruments` a real answer where an unbounded set has none.
-  The framing that made this hard was treating the answer as a claim about what
-  is SERVABLE. It is a claim about what is CONFIGURED. A symbol that is servable
-  but unconfigured is a property of the generator, not an omission from the
-  endpoint, and a client only ever uses the entry it cares about.
-  WHAT THE CONSUMERS ACTUALLY DO, which is why this fits. `mogwai-adapter`
-  already wants a lookup rather than a list: `fetch_instruments` GETs the list
-  and `cache_instruments` immediately folds it into a
-  `HashMap<Symbol, InstrumentDef>`, everything downstream calls
-  `instrument_def(instruments, symbol)`, and `ensure_instrument` is
-  check-cache-else-refetch-everything-else-error. It fetches a list only because
-  that is the endpoint that exists. `scripts/smoke.py` asserts the list has
-  exactly one entry matching the readiness symbol, and both assertions die with
-  this model. broadarrow's `run_prep::mogwai_facts` refuses anything but exactly
-  one, by their design.
-  ADAPTER CHANGE THIS FORCES, ours: `client/data.rs` refuses a subscription when
-  the symbol is absent from its seeded set, listing what is served. That guard
-  is right for a typo and wrong for a servable-but-unconfigured symbol, where
-  the adapter would refuse on a venue's behalf that would happily serve.
-
-- STILL OPEN, surfaced 2026-08-15 and not yet answered.
-  1. IS SUBSCRIBING TO AN UNCONFIGURED SYMBOL A SUPPORTED SESSION, or merely a
-     property of the tape machinery nobody exercises? If supported, the adapter
-     guard above must go and a client needs a way to resolve an unlisted
-     symbol's shape. If not, "accept any string" is true of the generator and
-     not of a client session, which is coherent but must be STATED so the two
-     do not read as contradictory.
+- `/instruments` RETURNS THE RESOLVED CONFIGURATION. Settled 2026-08-15,
+  AMENDED 2026-08-16 by the owner's delegated ruling that subscribing to an
+  unconfigured symbol is a supported client session, not merely a property
+  of the generator. Not the servable set, which is unbounded and cannot be
+  enumerated; not the presets. It reports the shapes THE OPERATOR CONFIGURED
+  for this venue UNIONED WITH every shape a socket bind or a history poll
+  has MATERIALIZED so far this run - a resolve that materializes nothing
+  does not advertise. That still gives nautilus's `request_instruments` and
+  `subscribe_instruments` a real, finite-per-instant answer; it grows
+  exactly when the capped river resource is spent, which `docs/cli.md`
+  states in those terms.
+  LANDED: the adapter's `client/data.rs` no longer refuses a subscription
+  for a symbol absent from its seeded set - that guard was right for a typo
+  and wrong for a servable-but-unconfigured symbol, where the adapter would
+  refuse on the venue's behalf what the venue would happily serve. Both
+  clients instead reseed from `/instruments` after their socket binds,
+  behind a readiness barrier that holds inbound delivery until the reseed
+  completes, so no frame can reach a handler before the def it needs is
+  cached. Socket and history resolution on the server are correspondingly
+  TOTAL: an unconfigured symbol resolves to the default bundle wearing the
+  requested label, and the `RiverKey` widens to that label in the same
+  change, which is what makes sharing sound under it. Detail is git history.
 
 - GATE the hand-maintained tape-version prose the way the artifact binding
   blocks are gated. Surfaced by the bug-hunt loop on 2026-08-14: when

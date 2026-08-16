@@ -1094,7 +1094,10 @@ impl Engine {
         };
 
         if !order.reduce_only && self.margin_breached.contains(&order.symbol) {
-            return Err("margin breach: account equity below maintenance requirement".into());
+            let currency = instrument.class.settlement_currency();
+            return Err(format!(
+                "margin breach: account equity below maintenance requirement in {currency}"
+            ));
         }
 
         if order.quantity <= Decimal::ZERO {

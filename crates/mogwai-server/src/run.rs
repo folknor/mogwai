@@ -221,15 +221,16 @@ impl Run {
     /// longer has a copy - and the installs are guarded on the registration
     /// having been NEW, so re-binding a symbol a client is already trading never
     /// resets its configuration.
-    pub(crate) async fn ensure_instrument(&self, symbol: &str) -> bool {
-        let Some(profile) = self.rivers.profiles().get(symbol).cloned() else {
-            return false;
-        };
+    pub(crate) async fn ensure_instrument(
+        &self,
+        symbol: &str,
+    ) -> Result<Arc<crate::source::InstrumentProfile>, crate::source::ResolveRefusal> {
+        let profile = self.rivers.resolve_profile(symbol)?;
         let mut engine = self.engine.lock().await;
         if !engine.ensure_instrument(profile.def.clone()) {
-            return true;
+            return Ok(profile);
         }
-        if let Some(margin) = profile.margin {
+        if let Some(margin) = profile.margin.clone() {
             engine.set_margin_policy(
                 Arc::clone(&profile.def.symbol),
                 mogwai_engine::MarginPolicy {
@@ -244,7 +245,7 @@ impl Run {
                 },
             );
         }
-        if let Some(fees) = profile.fees {
+        if let Some(fees) = profile.fees.clone() {
             let convert = |rate: crate::config::FeeRate| match rate {
                 crate::config::FeeRate::BasisPoints { rate } => {
                     mogwai_engine::FeeRate::BasisPoints { rate }
@@ -261,7 +262,7 @@ impl Run {
                 },
             );
         }
-        true
+        Ok(profile)
     }
 
     /// Enrol one connection's lanes for venue-originated output. The returned
