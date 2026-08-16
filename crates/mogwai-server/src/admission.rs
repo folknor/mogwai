@@ -364,12 +364,24 @@ pub(crate) struct HeldFrame {
 /// hid the two lanes behind one channel. Every method is non-blocking.
 #[derive(Clone)]
 pub(crate) struct ExecLanes {
+    /// This connection's identity, minted at construction rather than at
+    /// `Run::bind_lanes`. It is what makes an order attributable to the socket
+    /// that submitted it: `process_order_cmd` receives the lanes and nothing
+    /// else that identifies the connection, so an id living only in the run's
+    /// bound-lane table would be unreachable from the one place that knows an
+    /// order was just accepted. Clones share the id, which is the point - the
+    /// dispatcher, the reader and the fault task are all the same passenger.
+    id: u64,
     held_tx: mpsc::UnboundedSender<HeldFrame>,
     held_budget: ByteBudget,
     prio_tx: mpsc::UnboundedSender<Outbound>,
     prio_budget: FrameBudget,
     promise_budget: FrameBudget,
 }
+
+/// Mints `ExecLanes::id`. Monotonic and never reused within a process, so a
+/// retired connection's id cannot alias a later one and misdirect its fills.
+static NEXT_LANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// The receiving halves of a detached `ExecLanes`, kept alive by its owner.
 /// Sending into a lane whose receiver was never created returns `Err` and would
@@ -390,12 +402,18 @@ impl ExecLanes {
         limits: AdmissionLimits,
     ) -> Self {
         Self {
+            id: NEXT_LANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             held_tx,
             prio_tx,
             held_budget: ByteBudget::new(limits.held_budget_bytes),
             prio_budget: FrameBudget::new(limits.lane_frames),
             promise_budget: FrameBudget::new(limits.promise_tickets),
         }
+    }
+
+    /// The connection this outbound machinery belongs to.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     /// Lanes with no socket behind them, for tests. Budgets are the

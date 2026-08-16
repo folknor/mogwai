@@ -160,6 +160,12 @@ async fn dispatch_command(
             events,
             reservation,
         } => {
+            // Before the batch leaves: whatever it accepted is now owned by THIS
+            // connection, and whatever it ended is owned by nobody. Recorded
+            // here rather than inside `process_order_cmd` because this is the
+            // one place that holds both the produced events and the lanes whose
+            // id names the submitter.
+            state.run.track_ownership(&events, lanes.id());
             drop(lanes.submit_produced(reservation, Instant::now(), class, events));
         }
         OrderOutcome::NotAdmitted(frame) | OrderOutcome::Diagnostic(frame) => {

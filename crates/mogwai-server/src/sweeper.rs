@@ -364,7 +364,7 @@ fn apply_engine_pass_on_clock(
     (events, emitted, originated)
 }
 
-/// Hand one executed batch to every connection currently open on the run.
+/// Hand one executed batch to the connections it belongs to.
 ///
 /// Execution is run-scoped; DELIVERY stays per connection, because `ExecLanes`
 /// is per connection. A connection whose reservation is refused gets the
@@ -373,6 +373,20 @@ fn apply_engine_pass_on_clock(
 /// client's byte budget does not get to decide whether the market traded
 /// through a price, and making it decide is what would wedge a book permanently
 /// once a batch outgrew the fixed per-connection budget.
+///
+/// ATTRIBUTED, not broadcast. An order-scoped frame reaches only the connection
+/// that submitted the order; everything else - the account snapshot, anything
+/// the venue says about itself - still reaches all of them. This used to
+/// broadcast unconditionally, so a socket received `OrderFilled` for orders
+/// another socket placed. That was invisible while one connection per venue was
+/// the only shape, and it is the first of the three channels through which
+/// passengers can currently observe one another.
+///
+/// The reservation is taken against the UNFILTERED batch size, so a connection
+/// reserves for frames it may not receive. Over-reserving is the safe direction:
+/// sizing per connection would mean walking the ownership table once per lane
+/// before knowing what to reserve, and a refusal costs the client only a
+/// requery.
 fn deliver(
     run: &Arc<Run>,
     shape: &mogwai_protocol::sizing::BookShape,
@@ -383,7 +397,23 @@ fn deliver(
 ) {
     let subject = (!events.is_empty()).then_some(AdmissionSubject::Frame);
     let mut closed = Vec::new();
+    // Resolved once for the batch rather than once per lane: the lookup takes
+    // the run's ownership mutex, and a batch crossing N connections would
+    // otherwise take it N times for the same answers.
+    let owners: Vec<Option<u64>> = events
+        .iter()
+        .map(|event| crate::run::addressed_order(event).and_then(|id| run.order_owner(id)))
+        .collect();
     for (id, lane) in run.bound_lanes() {
+        let mine: Vec<ServerMessage> = events
+            .iter()
+            .zip(&owners)
+            .filter(|(_, owner)| owner.is_none_or(|owner| owner == id))
+            .map(|(event, _)| event.clone())
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
         let Some(reservation) = lane.reserve_swept(shape, emitted, originated) else {
             if refuse(&lane, subject.clone(), ts).is_err() {
                 closed.push(id);
@@ -391,12 +421,18 @@ fn deliver(
             continue;
         };
         if lane
-            .submit_produced(reservation, Instant::now(), None, events.to_vec())
+            .submit_produced(reservation, Instant::now(), None, mine)
             .is_err()
         {
             closed.push(id);
         }
     }
+    // The batch's own terminal frames retire their ownership claims. Done after
+    // the fanout, not before: the resolution above still needs the table to
+    // answer for the fill that ends an order. Retire-only, never claim - a
+    // sweep-produced order is one the VENUE originated (a liquidation), which
+    // no connection submitted and which therefore stays unattributed.
+    run.retire_terminal(events);
     // A lane whose receiver is gone is a connection that is already tearing
     // down; retiring it here means a wedged socket cannot make every later pass
     // pay for it.
@@ -438,6 +474,65 @@ mod tests {
         SubmitOrder, TimeInForce, WireAssetClass,
     };
     use rust_decimal::Decimal;
+
+    /// A fill on one connection's order must not reach another connection.
+    ///
+    /// The whole point of the attribution in `deliver`: before it, every bound
+    /// lane received every sweep-produced frame, so a passenger was told about
+    /// orders it never placed. Reverting the filter makes the second assertion
+    /// fail - the unrelated connection receives the fill.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_swept_fill_reaches_only_the_connection_that_submitted_the_order() {
+        let run = crate::run::test_run();
+        let (mine, mut my_rx) = ExecLanes::detached();
+        let (theirs, mut their_rx) = ExecLanes::detached();
+        run.bind_lanes(mine.clone());
+        run.bind_lanes(theirs.clone());
+        let order: mogwai_protocol::VenueOrderId = "V-1".into();
+        run.claim_order(order.clone(), mine.id());
+
+        // A PARTIAL fill, so the batch does not also retire the claim it is
+        // being attributed by; the assertion is about delivery, not cleanup.
+        let events = vec![ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+            client_order_id: "C-1".into(),
+            venue_order_id: order,
+            trade_id: "T-1".into(),
+            symbol: mogwai_protocol::Symbol::from("BTCUSDT"),
+            position_id: None,
+            side: Side::Buy,
+            last_qty: Decimal::ONE,
+            last_px: Decimal::from(100),
+            leaves_qty: Decimal::ONE,
+            commission: Decimal::ZERO,
+            commission_currency: "USDT".into(),
+            liquidity_side: mogwai_protocol::LiquiditySide::Taker,
+            ts_event: 1,
+        })];
+        deliver(
+            &run,
+            &mogwai_protocol::sizing::BookShape {
+                balances: 1,
+                positions: 1,
+                margins: 1,
+                open_orders: 1,
+                closed_orders: 1,
+                recorded_fills: 1,
+            },
+            &events,
+            1,
+            0,
+            1,
+        );
+
+        assert!(
+            my_rx.held_rx.try_recv().is_ok(),
+            "the submitting connection must receive its own fill"
+        );
+        assert!(
+            their_rx.held_rx.try_recv().is_err(),
+            "a connection that submitted nothing must not learn about another's fill"
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_market_walk_does_not_occupy_the_runtime_worker() {

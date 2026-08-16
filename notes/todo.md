@@ -58,9 +58,14 @@ tape identity matter more than any single run.
 WHAT MOGWAI MUST BECOME for this to work, which is what the items below
 build:
 
-1. SERVE ANY SYMBOL, symbol-as-label, total resolution, many boats on many
-   rivers - the settled-design items below. The venue must never be the
-   reason a dealt strategy cannot be forward tested.
+1. SERVE ANY SYMBOL, symbol-as-label, total resolution, many rivers at once.
+   The venue must never be the reason a dealt strategy cannot be forward tested.
+   LANDED 2026-08-15/16. A second clause - MANY PASSENGERS ON ONE RIVER, meaning
+   N traders each with its own account, ledger and view of one deterministic
+   tape - belongs to the SHARED-EXCHANGE mode only, is not needed by the default
+   per-run mode, and has not landed: the venue still holds one ledger for the
+   whole process and fans every fill out to every connection.
+   See "An exchange serves many accounts and many tape windows" below.
 2. REALISTIC TAPES ACROSS SESSION CLASSES. The wyrd doctrine holds session
    structure to be the one non-fractal thing bars do not normalize away, so
    a session-bound thesis forward-tested against the wrong session class
@@ -78,9 +83,19 @@ build:
    acquisition is never the bottleneck; fitting effort is.
 
 The 200-agent end-state paragraph in the PROBLEM STATEMENTS block below and
-the settled premises it records (always accelerated, no restart, single-
-instrument strategies, one MOGWAI venue, resource cost shapes nothing) are
-this design's mogwai-side constraints and still hold unchanged.
+the settled premises it records (always accelerated, single-instrument
+strategies, one MOGWAI venue, resource cost shapes nothing) are this design's
+mogwai-side constraints. TWO OF THEM MOVED ON 2026-08-16 - the venue's scope
+and what "no restart" implies - and the amendment is recorded in that block
+rather than here.
+
+THE VENUE'S SCOPE, stated here because everything above reads differently
+without it. A venue is scoped to an ORCHESTRATOR'S BATCH, not to one run: the
+orchestrator starts one `mogwai serve`, takes the bound address, and hands it
+to its 20-50 subagents, each connecting with its OWN ACCOUNT and asking for
+whatever tape its strategy needs. A consumer given no address spawns its own
+ephemeral transient venue - the dev, CI and fallback path. Both shapes are
+supported; the shared exchange is the primary one.
 
 ## Landing the grand design
 
@@ -99,6 +114,15 @@ than closing as a separate step. Detail is git history, not this file.
 Broadarrow's item 4 (consuming the multi-instrument venue) was excluded
 throughout - it is theirs, and their build breaking loudly when the
 consumer surface landed was the designed handoff.
+
+THE INVENTORY IS COMPLETE FOR THE DEFAULT MODE, and that is the claim to read it
+as making (clarified 2026-08-16). The one-venue-per-run rewrite had removed symbol
+and ACCOUNT from the request under one premise, and had made tape PLACEMENT a run
+property; undoing symbol alone leaves a venue serving N tapes to ONE account at
+ONE placement. That is exactly right for a venue owned by one run, which is the
+default. It is not enough for the optional SHARED-EXCHANGE mode, where those two
+axes are still open - see the section named below. Neither is urgent; both are
+required eventually, since both modes must be supported.
 
 ## Open issues
 
@@ -217,83 +241,142 @@ consumer surface landed was the designed handoff.
   strategy-search end state, so this is the sole remaining blocker rather than
   one ask among many. See the consumer-context section below.
 
-- THE RIVER AND THE BOAT: how N tapes are shared. SETTLED with the owner
-  2026-08-15; this was open question 1 and is now the design. The metaphor is
-  the owner's and is kept because it makes the distinction that the earlier
-  drafts kept losing.
+- THE RIVER AND THE PASSENGER: how one tape serves N traders. SETTLED with the
+  owner 2026-08-15, and CORRECTED 2026-08-16 after the metaphor was found to
+  have been misapplied in this file - see the noun correction below, which
+  supersedes every "boat" in the earlier drafts of this bullet.
   A RIVER is a deterministic path, fully determined by seed, symbol and the
   resolved knob bundle INCLUDING COMPOSITION. It exists whether or not anyone is
-  on it. A BOAT is a materialization of a river, and it has a POSITION. Mogwai
-  is neither - it is the BOATYARD, running many boats on many rivers.
-  SHARING. The first subscriber places a boat. Every later subscriber whose
-  request resolves to the same sharing key JUMPS INTO THAT BOAT rather than
-  launching another. When the boat empties it is wound down.
-  THE SHARING KEY is the river identity PLUS speed PLUS generator-level havoc.
-  Speed is not part of river identity - it changes pacing, never a single value -
-  but one boat paces once, so a speed-1 and a speed-100 subscriber cannot share
-  despite seeing identical water. Composition is IN the key: two agents asking
-  for MNQ want different rivers if one wants the Asia loop and the other wants
-  post-lunch, so the key is the resolved bundle and never the symbol string.
-  PASSENGERS CANNOT SEE EACH OTHER, and the reason sharing is sound at all is
-  that NOBODY'S WAKE CHANGES THE RIVER. The tape is EXOGENOUS - generated, never
-  order-driven. This is load-bearing and easy to destroy by accident: if mogwai
-  ever modelled market impact, passengers would become visible to one another
-  through the water and sharing would break instantly. The visible consequence,
-  which is a CONTRACT rather than a limitation: there is no queue competition,
-  so fifty agents submitting the same buy at the same instant all get the same
-  fill and their aggregate moves nothing. Believed already explicit elsewhere;
-  VERIFY against the tree rather than from memory before relying on that.
+  on it. A PASSENGER is one connected trader: its own account, its own ledger,
+  its own orders, its own view of the river. Mogwai is the EXCHANGE, serving
+  many passengers across many rivers.
+  THE BOAT IS NOT A DOMAIN NOUN. It is a shared cursor - one position on a
+  river, one clock, one pacing thread, one materialization of the tape - and its
+  only purpose is amortization: generate and pace once rather than N times.
+  Semantically it is void, because the tape is deterministic and exogenous, so
+  two passengers at the same sim-time on the same river see identical water
+  whether or not they share a hull. Nothing a client can measure reveals whether
+  it has company. Keep the boat in `boatyard.rs` and out of any durable prose:
+  every place this file previously reasoned about which passengers may share a
+  boat was reasoning about a cache as though it carried meaning.
+  RIVER IDENTITY is the resolved knob bundle plus the seed plus GENERATOR-level
+  havoc - everything that mutates the water. Composition is IN it: two agents
+  asking for MNQ want different rivers if one wants the Asia loop and the other
+  wants post-lunch, so the identity is the resolved bundle and never the symbol
+  string. Speed is NOT in it, and never was: it changes delivery cadence, never
+  a single generated value. Speed is a property of the shared-cursor cache key,
+  which is why a passenger asking for a speed nobody is serving is a CACHE MISS
+  and must never be a refusal.
+  THE TWO PROPERTIES A PASSENGER IS OWED, and they are distinct - one holds
+  today and one does not.
+  NON-INTERFERENCE: no passenger's orders can affect another's. The tape moves
+  as it moves; order flow does not feed back into it. HOLDS TODAY, because the
+  tape is EXOGENOUS - generated, never order-driven. This is load-bearing and
+  easy to destroy by accident: if mogwai ever modelled market impact, passengers
+  would reach one another through the water and nothing else in this design
+  would save it. The consequence is a CONTRACT rather than a limitation: there
+  is no queue competition, so fifty agents submitting the same buy at the same
+  instant all get the same fill and their aggregate moves nothing.
+  INVISIBILITY: no passenger can observe that another exists. DOES NOT HOLD
+  TODAY, and it is a defect against the end state rather than a property to
+  document. Verified in this checkout on 2026-08-16, three channels: the fill
+  sweeper walks `run.bound_lanes()` with no submitting-connection filter, so
+  every connection receives `OrderFilled` for orders it never submitted; the
+  engine holds ONE `account_id` and ONE `Account` for the whole process, so one
+  passenger's fills move another's balance and net position and `GET /account`
+  shows it; and the order-query surface answers over the same unscoped book.
+  Non-interference does not imply invisibility, and conflating them is what let
+  this stand - the water is clean while the ledger and the mailbox are common.
+  Under the default per-run mode this costs nothing, since one connection has no
+  second account to be confused with, so the defect is latent rather than
+  harmful today.
   HAVOC SPLITS ALONG THE SAME LINE. `VolStorm`, `FlowSurge` and
   `LiquidityDrought` reach the generator, so they FORK THE RIVER - that agent
-  needs its own water, not merely its own boat. Drop, duplicate, reorder and
+  needs its own water, not merely its own view. Drop, duplicate, reorder and
   latency are applied at the socket, so they are the passenger's own EYESIGHT:
-  same river, same boat, blurry glasses, no isolation needed. Since forward
+  same river, same water, blurry glasses, no isolation needed. Since forward
   testers overwhelmingly want transport havoc, sharing is the common case rather
   than the exotic one.
-  ONE CLOCK PER BOAT, not one per run. A boat launches at its river's origin and
-  walks forward; it never seeks. The objection that a client would see two
+  ONE CLOCK PER RIVER, not one per run. A cursor launches at its river's origin
+  and walks forward; it never seeks. The objection that a client would see two
   symbols at different simulated times is void, because STRATEGIES ARE
   SINGLE-INSTRUMENT by settled premise, so no observer ever holds two clocks.
   This also deletes the catch-up burst a late-anchored worker performs against
   an already-advancing clock.
-  WHERE THE BOAT IS PLACED. A client may ask for a DURATION or for infinite, and
-  MAY NOT ask for a start or end time. If a matching river is already running,
-  the subscriber joins the boat WHERE IT IS. If none is, a boat is placed at the
-  river's origin.
-  WHETHER JOINING MID-STREAM IS SANE IS A PROPERTY OF THE COMPOSITION, not a
-  venue rule, and it is the user's choice. A looping session footprint - Asia,
-  10:30 to lunch, post-lunch to close, BTCUSD Monday to Friday on infinite loop -
-  is HOMOGENEOUS by construction, so every point in the loop is the same kind of
-  moment and joining anywhere is fine. These are what get requested
-  overwhelmingly, and the segment-sampler track is what builds them. A
-  full-calendar linear tape with real overnight structure and NY-open bursts is
-  NOT homogeneous, and nobody joins one mid-stream; they request a fresh river.
-  An earlier draft of this bullet argued from that second kind that mid-stream
-  placement was hazardous in general. That was arguing from a tape model the
-  segment sampler is replacing, and it does not generalize.
+  WHERE A PASSENGER IS PLACED. A client may ask for a DURATION or for infinite,
+  and MAY NOT ask for a start or end time. Where it enters the tape is the PHASE
+  question ruled open below; the interim posture is that every passenger gets
+  its own river from the origin.
+  THE COMPOSITION IS PART OF THE REQUEST AND PART OF THE KEY. A request naming
+  only a symbol and a duration - "give me MNQ, speed 60, for 30 minutes" - does
+  not say WHICH THIRTY MINUTES of what tape, so it leaves the venue to choose
+  the composition on the client's behalf. The answerable form names what the
+  water is: the tape resolved from the MNQ PRESET, looping the Asia footprint
+  from 8pm EST to London open, at speed 60, for 30 days. Duration stays OUTSIDE
+  the key: it is how long you ride, not what you ride.
+  WHETHER JOINING MID-TAPE IS SANE IS A PROPERTY OF THE COMPOSITION, not a
+  venue rule. A looping session footprint - Asia, 10:30 to lunch, post-lunch to
+  close, BTCUSD Monday to Friday on infinite loop - is the shape where joining
+  anywhere is fine. These are what get requested overwhelmingly, and the
+  segment-sampler track is what builds them. A full-calendar linear tape with
+  real overnight structure and NY-open bursts is not, and nobody joins one
+  mid-tape; they request a fresh river. An earlier draft of this bullet argued
+  from that second kind that mid-tape placement was hazardous in general. That
+  was arguing from a tape model the segment sampler is replacing, and it does
+  not generalize.
+  WHAT MAKES A LOOP JOINABLE IS PHASE-OVER-PERIOD, NOT HOMOGENEITY, and this is
+  worth stating because "homogeneous" overstates it. A loop is not homogeneous
+  instant by instant: join halfway through an Asia session and your first
+  session is truncated. It is joinable when the LOOP PERIOD IS SMALL RELATIVE TO
+  THE RIDE - thirty days of a one-day loop makes the entry phase a rounding
+  error, thirty minutes of a one-week loop makes it the whole experiment. That
+  ratio is computable from things the venue already holds, since the sampler
+  DECLARES the footprint's period and the request carries the duration, so the
+  venue never needs to know that an NY-open burst matters to a strategy. The
+  non-looping tape is the degenerate case rather than a special rule: infinite
+  period, ratio zero, never joinable.
+  OPEN, AND DELIBERATELY NOT ANSWERED (owner, 2026-08-16). Whose call phase is -
+  the user's as a request knob, the venue's from the ratio, or the
+  COMPOSITION'S, declared by whoever authored the footprint and therefore
+  knows what it is for - cannot be settled until the tapes mature enough for
+  the question to have a real answer. Until then the interim posture is ONE
+  RIVER PER PASSENGER: no mid-tape joining, no sharing, no threshold anybody
+  has to defend.
+  THIS DOES NOT PARK THE PASSENGER WORK, and the distinction is the useful one
+  to carry: SHARING IS AN OPTIMIZATION, THE PASSENGER IS THE MODEL. A
+  per-passenger ledger, the fill filter, per-passenger transport havoc and the
+  order-query scoping are identical work whether a river carries one passenger
+  or fifty. All of it can land under the interim posture and none of it depends
+  on how phase is eventually ruled.
   LANDED in piece 9, narrowing this design in two owner-adjudicated ways: one
-  boat per river, with a loud refusal on a differing sharing key rather than a
-  second boat (a subscriber naming a sitting river's speed differently is a
+  shared cursor per river, with a loud refusal on a differing key rather than a
+  second cursor (a subscriber naming a sitting river's speed differently is a
   400 naming the sitting speed); and runtime generator-level havoc (`VolStorm`,
-  `FlowSurge`, `LiquidityDrought`) REFUSED on a river carrying a seated boat,
+  `FlowSurge`, `LiquidityDrought`) REFUSED on a river carrying a seated cursor,
   in favor of forking the river at PLACEMENT - the design already said
-  generator havoc forks the river, and this landing makes the sharing key, not
+  generator havoc forks the river, and this landing makes river identity, not
   a runtime mutation of shared water, the sole carrier of that fork. Also
-  landed: one OS pacing thread and one resized ring per boat; no river
+  landed: one OS pacing thread and one resized ring per cursor; no river
   eviction; and ticket-owned last-passenger teardown. Both narrowings are
-  reversible: distinct-speed cohabitation by keying seats by boat and adding
-  per-boat temporal ownership of orders and marks to the engine (the real
+  reversible: distinct-speed cohabitation by keying seats by cursor and adding
+  per-cursor temporal ownership of orders and marks to the engine (the real
   prerequisite); mid-run generator havoc on shared water by replaying
   immutable control history from a boundary at or before every live cursor,
   never by mutating the lead. See the history ledger for the adjudication's
   full grounds; the spec that recorded it is retired.
-  OPEN, and created by that landing: the fill sweeper now iterates over BOATS,
-  so a resting order on a river whose boat wound down is no longer swept until
-  someone boards that river again. It cannot be swept without a boat - there is
-  no clock to sample a `to_ns` from - so the honest fixes are either to keep the
-  venue clock as the sweep instant for boatless rivers or to refuse to leave
-  orders resting on a river nobody is carrying. Neither is piece 9's, and piece
-  10 (below) left it explicitly untouched too.
+  THE SPEED REFUSAL IS AN ARTIFACT, not a semantic, and it is recorded here so
+  nobody later defends it as intended behaviour. It exists because a cache was
+  promoted to a concept: sharing one cursor forces everyone served from it onto
+  one cadence, and the refusal is that constraint surfacing on the wire. Speed
+  mutates no generated value, so a passenger asking for an unserved speed is
+  asking for a second cursor on the same water. The end state serves it.
+  OPEN, and created by that landing: the fill sweeper now iterates over seated
+  CURSORS, so a resting order on a river whose cursor wound down is no longer
+  swept until someone connects to that river again. It cannot be swept without
+  one - there is no clock to sample a `to_ns` from - so the honest fixes are
+  either to keep the venue clock as the sweep instant for unseated rivers or to
+  refuse to leave orders resting on a river nobody is reading. Neither is piece
+  9's, and piece 10 (below) left it explicitly untouched too.
   LANDED in piece 10, 2026-08-16: every remaining run-level singleton that
   assumed one notion of now - engine event stamps, `/clock`, the history
   ceilings on `/trades` and `/quotes`, the pulled `/account` snapshot, the
@@ -332,8 +415,291 @@ consumer surface landed was the designed handoff.
   moves the currency, grid and class of every unmatched symbol, and therefore
   what the funding check below demands of the ledger.
 
-- FUNDING: CLOSED, with boot checks plus bind refusal. Amended 2026-08-16 after
-  total resolution made every embedded preset client-reachable. The set of
+- THE PASSENGER CARRIES AN ACCOUNT POLICY, AND MOGWAI ENFORCES IT. Ruled by the
+  owner 2026-08-16, and it supersedes the funding item below: the venue-level
+  `[balances]` seed DIES, and a connecting client must NAME its account. This is
+  the largest consequence of the passenger becoming an object, and it is a much
+  bigger surface than "add an opening balance to the request".
+  WHAT A CLIENT MUST NAME, at minimum: its ACCOUNT ID, its starting balance, its
+  daily loss limit, its autoliquidation threshold, and its DRAWDOWN MECHANICS -
+  which variant, and how the number is computed.
+  THE ACCOUNT ID IS THE CLIENT'S, NOT MINTED, and the reason is RECONNECTION.
+  Ruled 2026-08-16 after minting per connection was considered and refused. From
+  the venue's side a reconnect is a socket it was serving going away and a new
+  socket arriving that claims to be the same client, and the venue CANNOT
+  distinguish the two causes: a dropped socket the adapter redialed - which the
+  adapter does today, and which an armed `GoDark` produces deliberately - or a
+  client process that died and restarted against a still-running venue, which is
+  exactly what broadarrow's restart run stages. If the id were born with the
+  socket, case one would silently open a NEW account with a fresh balance, no
+  positions and a reset peak equity, so a hiccup would wipe a run's P and L. A
+  stable client-supplied id is what makes a returning socket a continuation.
+  This is also what the restart run and the `go_live` restart de-duplication
+  scenarios already assume: the account outlives the connection.
+  A DEFAULT ID SURVIVES, and its scope is stated so it is not mistaken for the
+  old venue-wide account: it exists for the EPHEMERAL TRANSIENT instance where
+  exactly one client ever connects, which is the default per-run mode. One
+  connection has nobody to collide with, so making it name an id would be
+  ceremony. `DEFAULT_ACCOUNT_ID = "MOGWAI-001"` and the `ISSUER-NUMBER`
+  validation carry over; what dies is the assumption that the config's id is THE
+  account rather than a default for the unnamed case.
+  AN ACCOUNT IS ON AT MOST ONE RIVER, ENFORCED BY EVICTION. Ruled 2026-08-16. A
+  second socket presenting an id that is already seated KILLS THE INCUMBENT and
+  then proceeds under the ledger-reset knob above - resuming the frozen account
+  or starting it clean. This unifies reconnection and account-stealing into one
+  mechanism, which is correct because the venue cannot distinguish them anyway:
+  a second connection claiming an id IS a reconnect from the venue's side.
+  The consequence worth stating: a trailing drawdown is therefore always
+  computed over ONE instrument, and no ledger ever spans two rivers.
+  ON RESUME, POSITIONS OFF THE JOINED RIVER ARE FLATTENED. The edge is a
+  returning socket that names a DIFFERENT symbol than the frozen account was
+  trading: carrying the old position forward would leave the account holding
+  something the new session can neither see nor close. Flattening at resume is
+  the ruling.
+  ACCOUNT RESOLUTION IS TOTAL, EXACTLY LIKE SYMBOL RESOLUTION. Ruled 2026-08-16
+  to close the hole the two rulings above left between them - if balances only
+  ever come from the client, even the ephemeral client must POST before it can
+  trade, and the default id buys it nothing. Three steps, and step three never
+  fails:
+  1. Knobs the client explicitly named win.
+  2. Otherwise a POLICY PRESET whose name matches supplies the shape - the
+     `apex-50k` case, asking for it by name and getting its rules with nothing
+     else said.
+  3. Otherwise the DESIGNATED DEFAULT ACCOUNT PRESET supplies the shape, under
+     whatever account id was requested.
+  So POSTING IS OPTIONAL rather than mandatory: a client that names nothing gets
+  the default policy under the default id, and the ephemeral case is
+  ceremony-free as intended.
+  IT INHERITS THE SAME CONSEQUENCE the default tape preset carries, and it
+  belongs wherever the designation is made: the default account preset stops
+  being merely what you get when you do not pick and becomes the CONTRACT FOR
+  EVERY UNNAMED ACCOUNT. Swapping it silently moves the opening balance and the
+  risk rules of every run that did not name one.
+  THE TWO DEFAULTS ARE COUPLED BY CURRENCY, which is not obvious and will bite
+  whoever designates either one alone. The default TAPE preset fixes the
+  settlement currency of every unmatched symbol; the default ACCOUNT preset
+  fixes what an unnamed account is funded in. If they disagree, the wholly
+  unnamed request - default symbol shape, default account - fails its own
+  connect-time funding check, which is the one path that must never fail.
+  Designating either is therefore a joint decision.
+  THE TARGET IS PROP-FIRM FIDELITY. Funded-account rules are what a real
+  deployment of these strategies has to survive, so a forward test that ignores
+  them tests a different account than the one the strategy will trade. The
+  variants that must be expressible, because they are exactly what firms
+  advertise and differ on:
+  - WHAT RATCHETS THE TRAILING THRESHOLD: intraday PEAK EQUITY including
+    unrealized, which is the harsh and common form, or END-OF-DAY BALANCE only,
+    which is much softer because an intraday spike that is given back never
+    counts.
+  - WHETHER THE TRAIL STOPS. Many firms trail only until the threshold reaches
+    the starting balance plus a buffer and then LOCK it there; others trail for
+    the life of the account.
+  - THE DAILY LOSS LIMIT, a separate non-ratcheting floor measured from the
+    day's opening equity and reset each session - not the same mechanism as the
+    trailing drawdown and not derivable from it.
+  - WHAT A DAY IS. THE ACCOUNT POLICY DEFINES IT, not the instrument. Ruled
+    2026-08-16. A prop firm's reset is its own instant - 17:00 or 18:00 ET
+    typically - and is a property of the account rather than of whatever is
+    being traded, so it does not come from `[instrument.calendar]` even though
+    that carries a settlement minute and real open windows.
+    THE APPARENT COMPLICATION RESOLVES ITSELF. The policy names an instant on
+    the tape's civil clock and the reset fires whenever SIM TIME CROSSES IT; a
+    one-session loop crosses it once per loop, a multi-day loop as often as it
+    contains it. No rule about loops is needed.
+    THE EDGE THAT DOES NOT RESOLVE ITSELF, flagged rather than solved: a
+    footprint that NEVER CONTAINS the named instant. An Asia-only loop, 8pm to
+    3am ET, under a 17:00 ET reset never crosses it, so the daily budget never
+    resets and a daily limit silently becomes a run-lifetime limit.
+  THE MECHANIC WORTH RECORDING, because it is the case that motivated the
+  ruling and it is not obvious: a passenger can end a day up 3,000 dollars and
+  still have SPENT 700 dollars of drawdown budget. On a 50k account with a 2k
+  trailing drawdown the threshold starts at 48k; if intraday equity peaks at
+  53.7k the threshold ratchets to 51.7k; closing at 53.0k leaves 1.3k of room
+  rather than 2k. The budget was spent on a peak that was touched and not held.
+  Nothing about that is expressible without keeping PEAK EQUITY as durable
+  per-passenger state, which is the point.
+  DERIVED STATE THIS IMPLIES, per passenger, evolving on every mark: peak
+  equity, day-open equity, and the current threshold. That sits directly beside
+  the mark-to-market the futures margin ledger already performs, so the natural
+  home is the same place - but it is per PASSENGER, where today's margin ledger
+  is per process.
+  PEAK EQUITY TRACKS EVERY TICK, not the sweeper's cadence. Ruled 2026-08-16.
+  The ratchet is effectively tick-by-tick at a real venue, so a spike lasting
+  200 ms still spends budget; sampled at the sweeper's sim-second cadence that
+  spike is invisible and the account keeps room it should have lost, which is
+  the difference between a run being liquidated and not. The cost objection
+  raised against this was WRONG and is recorded so it is not raised again: an
+  account holds ONE position, because strategies are single-instrument and an
+  account is on at most one river, so per-tick marking is one multiply per tick
+  rather than a walk over a book.
+  ENFORCEMENT, not reporting. The venue flattens and locks a passenger that
+  breaches, because a strategy that would have been liquidated must actually be
+  liquidated or the forward claim is worth nothing.
+  THIS IS A RISK-POLICY LAYER, NOT A PROP-FIRM FEATURE, and reading it the other
+  way would build the wrong thing. A LIVE account has the same machinery: on
+  Tradovate an operator sets "if I lose 200 dollars today, allow no further
+  positions", which behaves exactly like a liquidation except that it lifts at
+  the next session. A prop firm is that engine with stricter numbers and less
+  forgiving breach actions, so there is ONE mechanism here and not two.
+  A RULE IS THEREFORE A TRIPLE: what it measures, on what basis, and WHAT IT
+  DOES ON BREACH. The breach action is the parameter that spans both worlds, and
+  two values cover the known cases:
+  - FLATTEN AND LOCK UNTIL THE NEXT SESSION BOUNDARY - Tradovate's daily loss
+    limit, and most firms' daily limit. The passenger stays connected and
+    unable to open, and resumes with a fresh daily budget.
+  - FLATTEN AND TERMINATE - the prop trailing-drawdown breach, where the
+    account is dead and there is no tomorrow.
+  The existing `breach_action = "liquidate"` on the futures margin ledger is a
+  third instance of the same triple, which is evidence the abstraction is right;
+  reconciling the two liquidation paths means expressing margin breach as one
+  more rule rather than keeping a parallel mechanism with its own arithmetic.
+  A breach that TERMINATES gives a run an outcome that is neither a completed
+  duration nor a venue fault, and it must reach the client as such on the wire.
+  IN THE EPHEMERAL MODE A TERMINATING BREACH ENDS THE VENUE, since the run's one
+  account is dead and there is nothing left to serve - the same "no client, no
+  job" rule that governs disconnection. The terminal frame carries the final
+  state, so nothing is lost by not staying up for a post-mortem pull.
+  ACCOUNT POLICIES ARE PRESETS, and the argument is the instrument preset's
+  argument unchanged: a named bundle of knobs a user could set by hand, carrying
+  no authority and conferring no status. There are on the order of 300 prop
+  firms, the large ones ship several account sizes with different trailing
+  bases, and they change the rules without notice.
+  SO REGISTRATION MUST BE A RUNTIME PATH, and this is the part that is NOT a
+  copy of the instrument preset machinery. Instrument presets are COMPILED IN -
+  `include_str!` against a fixed table in `config.rs` - so an operator can
+  override a symbol's knobs in config but cannot add a NAMED preset without
+  rebuilding the binary. For account policies that shape is wrong by
+  construction, because nobody can track 300 firms in a release cycle. The
+  shipped policies are embedded defaults; a user registers its own through a
+  directory or config section read at boot, and a user-registered name shadows a
+  shipped one.
+  HOW A CLIENT NAMES IT: over the JSON HTTP CONTROL PLANE, following the
+  precedent `POST /control/divergence` already sets - structured config goes
+  over HTTP and is validated at its boundary, while `/ws` carries the streaming
+  session. The owner has no preference on mechanism; this is the shape that
+  fits. An account and its policy are a nested document that cannot go in a
+  query string - `SocketQuery` is three scalar fields under
+  `deny_unknown_fields` - so the account is POSTed and the socket carries only
+  the ID, which the existing query string holds unchanged.
+  A NOTE THAT COMES FREE: `arm_divergence`'s own comment today says a divergence
+  "is armed against the RUN, so it reaches every open connection: there is no
+  account to divert it onto." Once accounts exist that sentence stops being
+  true, and transport havoc gains the target it was missing - the per-passenger
+  havoc scoping recorded elsewhere in this file needs no separate mechanism.
+
+  WHAT HAPPENS WHILE NOBODY IS CONNECTED. Ruled 2026-08-16, and it splits by
+  mode because the two modes can do different things.
+  MOGWAI'S JOB IS SERVING A CLIENT, so an unattended account is NOT kept
+  running. Orders do not rest, the position does not mark, and the risk policy
+  cannot liquidate somebody who is not there. This is a DELIBERATE DEPARTURE
+  from a real venue, where being away is no defense against liquidation, and it
+  is the right one here: mogwai exists to exercise a client's live path, not to
+  simulate an account nobody is trading. The consequence to state in any claim
+  is that a run spanning a disconnect has a GAP IN ITS RISK HISTORY.
+  IN THE EPHEMERAL MODE THE QUESTION IS MOOT: the venue is owned by the run, so
+  a client that goes away takes the venue with it and there is nothing left to
+  resume.
+  IN THE DURABLE `mogwai serve` MODE THE ACCOUNT FREEZES AND IS RESUMABLE by a
+  client returning with the same id. That is what makes the two owed restart
+  runs work at all - broadarrow's realized-PnL baseline leg and the `go_live`
+  restart de-duplication both require the book to outlive the worker - and it
+  means one subagent of fifty dying to a hiccup does not lose its work.
+  A TTL BOUNDS IT, because a frozen account nobody reclaims is state with no
+  lifecycle. Collected after a configured span; the span is a venue knob.
+  THIS MUST BE LOUD, and stdout is the stated place. `serve` already emits ONE
+  JSON READINESS LINE that the shipped launcher parses, so the persistence
+  policy belongs as a FIELD IN THE READINESS RECORD rather than as a free-text
+  log line a human has to notice: a launcher can then surface it and a consumer
+  can assert on it. That is a `ReadyRecord::VERSION` bump. Pair it with a config
+  key that opts out, so an operator wanting clean-slate reconnects says so
+  explicitly and the record reports which way it is set.
+  THE ACCOUNT ID IS A BEARER TOKEN under this, and the note is deliberate rather
+  than an oversight: anyone who knows an id can claim that account. On a
+  loopback venue serving one orchestrator's subagents that is acceptable and no
+  auth is worth building, but it should be written down rather than assumed.
+  NOT ANSWERED HERE: whether a HAVOC-INDUCED disconnect behaves differently. The
+  venue does know the difference, since it armed the blackout itself and can
+  infer the client is alive and merely blinded, and an argument exists that
+  `GoDark` is toothless if the world stops while it is armed. Left open
+  deliberately - the freeze-and-resume answer above covers it adequately for now
+  and nothing is blocked on refining it.
+
+  THE CONSUMER BREAKS, DELIBERATELY. Ruled 2026-08-16. broadarrow sets no
+  `account_type`, inherits `MOGWAI-001` and POSTs no account, so every part of
+  this lands as a breaking change on their side, including a run that can now
+  end by LIQUIDATION rather than by duration or fault. No compatible default is
+  built to keep an unchanged consumer working. This is the same handoff as the
+  `/instruments` widening: a loud break is the designed signal, and a silent
+  compatibility shim would hide from them that the account they are trading is
+  no longer the one they thought.
+
+  THE LEDGER REBUILD IS GENERAL, ruled 2026-08-16 in the same sitting. The
+  account policy above is not the only thing the one-ledger-per-process model
+  blocks, and since it forces a ledger rewrite anyway, the rewrite is scoped to
+  what an exchange's ledger has to hold rather than to what spot and futures
+  need today. THE TAPE SIDE IS A NON-ISSUE and should not be confused for the
+  work: any symbol already gets a tape, so AAPL is a tape labelled AAPL. Every
+  gap is in the LEDGER.
+  WHAT IT MUST HOLD:
+  - SHARES, not a currency balance. Modelling equity as `Spot { base: "AAPL",
+    quote: "USD" }` puts AAPL in the ledger as MONEY, on the same footing as
+    USD. That is right for crypto spot, where you genuinely hold the base
+    asset, and wrong for equity. Downstream of it: share and round-lot
+    conventions, settlement periods, short-sale locate or borrow.
+  - LEVERAGE OUTSIDE FUTURES. Margin is per-contract on `Future` only, so a
+    currency pair cannot post collateral and a forex strategy's position sizing
+    - the part most likely to be wrong in a way that costs money - cannot be
+    exercised. What is wanted is a genuine leveraged margin account: notional
+    against posted collateral at a ratio. Forex, crypto margin, perpetuals and
+    Reg-T equity margin all need the same one.
+  - RECURRING FUNDING PAYMENTS. A perpetual pays funding between long and short
+    at intervals, and mogwai has no mechanism for a periodic cash flow at all.
+    A strategy holding a perp across funding instants has real cash movement the
+    venue cannot produce, so its forward P and L is wrong by construction
+    rather than by approximation. Inverse and coin-margined arithmetic rides
+    with this.
+  OPTIONS ARE OUT, on the owner's stated ground that they are not understood
+  well enough to specify. Recorded as an exclusion rather than an oversight, and
+  flagged as REVISITABLE for the same reason the order-type exclusions were
+  reversed: "the owner does not need it" stopped being the scoping rule when
+  mogwai went public. It stands until someone who understands them argues it.
+  THE RISK STATE IS PUBLISHED, and the reason is EVALUATION rather than
+  strategy consumption. Ruled 2026-08-16. A real trader reads its remaining
+  drawdown off the firm's dashboard; mogwai presents no dashboard, so if the
+  numbers are not on the wire nobody can judge the run afterwards - a strategy
+  that ended flat having spent 90 percent of its trailing budget is a different
+  result from one that never came close, and the two are indistinguishable from
+  fills alone. Publish peak equity, the current threshold, remaining budget and
+  the day's remaining loss allowance.
+  THIS IS NOT `FeedLagged`-SHAPED, which is worth stating because it looks like
+  it at first. That item is blocked because a signal must reach a RUNNING
+  STRATEGY and nautilus has no typed channel for it. Risk state is for the
+  EVALUATOR, so it needs no nautilus event type at all: `/account` is already an
+  HTTP pull the consumer can poll directly. Mogwai can close this alone, and it
+  does not owe broadarrow a nautilus-side change to do it.
+  WHAT THAT LEAVES OPEN, and it is a smaller question: whether a strategy should
+  ALSO be able to see its own budget in order to size against it. A strategy
+  knows its own policy, since it named it at connect, so it can in principle
+  derive peak and threshold from its own fills and marks - which means blind
+  trading is workable and the venue publishing to the evaluator is not a
+  half-measure. Decide it when a strategy actually wants it.
+  INSTRUMENT PRESETS COULD GAIN THE SAME RUNTIME REGISTRATION, and the argument
+  for it is identical - the compile-time table is only defensible while there
+  are three of them. NOT RELEVANT NOW, recorded 2026-08-16 so the symmetry is
+  not rediscovered later: it is not a precondition of anything above, and the
+  account-policy path can land first and set the pattern.
+
+- FUNDING: was CLOSED, REOPENED 2026-08-16 by the account-policy ruling above -
+  the boot-checks-plus-bind-refusal design below assumed a venue-level
+  `[balances]`, which is being deleted. What survives is the SHAPE half: the set
+  of shapes is still closed at boot, so a symbol still contributes no currency
+  and a request whose named balances do not cover its shape's currency is still
+  knowable without an order. What moves is WHERE: from a boot check against
+  operator config to a CONNECT-TIME check against what the client named, which
+  makes it a bad REQUEST rather than a bad configuration. The
+  mismatch-versus-depletion distinction below is unaffected and still the
+  reason to keep the two refusals apart. The original text follows.
+  The set of
   shapes is still closed at boot: configured shapes, every embedded preset,
   and the default bundle under the instrument overlay.
   An arbitrary symbol does not open that set, because it contributes no
@@ -360,10 +726,13 @@ consumer surface landed was the designed handoff.
   not a tidy-up at the end. These notes carry no truth guarantee and nothing
   durable may cite them, so a design that lands with its reasoning only here
   leaves a user blind to it: the symbol being a label rather than an identity,
-  the three-step resolution and its total third step, the sharing key and what
-  forks a river, one clock per boat, the exogeneity that makes sharing sound and
-  the no-queue-competition contract that follows, and the boot-versus-runtime
-  split on funding. `docs/presets.md` and `docs/config.md` are where a user
+  the three-step resolution and its total third step, river identity and what
+  forks a river, one clock per river, the exogeneity that gives passengers
+  non-interference and the no-queue-competition contract that follows, and the
+  boot-versus-runtime split on funding. Durable prose states RIVER and
+  PASSENGER and never the boat, which is a cache with no semantics; the two
+  properties a passenger is owed are stated separately, since only one of them
+  holds today. `docs/presets.md` and `docs/config.md` are where a user
   looks; `reference/architecture.md` is where the why belongs. Write the prose
   with the code that implements each decision, not in a documentation pass
   afterwards.
@@ -470,11 +839,20 @@ consumer surface landed was the designed handoff.
   connection's stream before B's. LATENT - the test above was its only cited
   evidence and does not in fact show it, so nothing currently demonstrates the
   window is reachable.
-  (b) SWEEP BATCHES REACH EVERY BOUND LANE with no submitting-connection
-  ownership check, so a socket receives `OrderFilled` for orders another
-  connection submitted. Intentional under the one-ledger multi-connection
-  model, undocumented, and a consumer keying on "my fills arrive here" will be
-  wrong. Decide whether it is a contract to state or a filter to add.
+  (b) SWEEP BATCHES REACHED EVERY BOUND LANE with no submitting-connection
+  ownership check, so a socket received `OrderFilled` for orders another
+  connection submitted. Was recorded as a decision - contract to state, or
+  filter to add - and DECIDED 2026-08-16 as a filter, since a passenger must be
+  unable to observe that another exists.
+  LANDED 2026-08-16: `ExecLanes` carries its own minted id, the run keys live
+  orders to the connection that submitted them, and `deliver` attributes each
+  order-scoped frame rather than broadcasting it. Venue-wide frames still reach
+  every lane, and an unattributed order - one the VENUE originated, such as a
+  margin liquidation - still reaches all of them, which is the conservative
+  direction: a stray frame is the defect being closed, a MISSING fill would be
+  worse. TWO OF THE THREE CHANNELS REMAIN OPEN, and both need the passenger
+  object rather than a filter: the single process-wide ledger, and the unscoped
+  order-query surface. See the river-and-passenger item above.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an
@@ -531,6 +909,38 @@ consumer surface landed was the designed handoff.
   tapes carrying no cross-instrument correlation is correct rather than a defect.
   There is ONE `MOGWAI` venue, not one per asset class.
 
+  AMENDED 2026-08-16 with the owner. Three of the premises above now read
+  differently, and they are amended rather than rewritten because what changed
+  and when is worth keeping.
+
+  A VENUE IS SCOPED TO ONE RUN BY DEFAULT, AND TO AN ORCHESTRATOR'S BATCH IN A
+  SECOND MODE. The per-run instance every premise above assumes is unchanged and
+  remains the default: a consumer given no address spawns its own venue and owns
+  it. What is added is an optional shared exchange - one `mogwai serve` whose
+  address an orchestrator hands to its subagents, each connecting with its OWN
+  ACCOUNT - motivated by amortizing tape generation across a batch. "One MOGWAI
+  venue, not one per asset class" survives either way, and is strengthened in the
+  second mode: one venue across asset classes AND across the batch's agents.
+
+  NO RESTART AND NO RESUME survives for the PROCESS in both modes and is
+  unchanged: a venue is never restarted in place. "Reproducing a path means a
+  fresh instance with the same seed and config" stays exactly right for the
+  default mode. In the shared mode it becomes "requesting the same WINDOW on the
+  same tape", which is why placement has to become a request parameter THERE and
+  can stay config here.
+
+  WARMUP GENERATED EAGERLY AT BOOT is already only half true - non-boot rivers
+  materialize on first read - and would go fully wrong under the shared mode's
+  per-window placement, where a request for `[T1, T2]` needs materialization from
+  `T1 - warmup_ns` and cannot be served by whatever one span was generated at
+  boot. In the default mode, eager-at-boot is correct and is what you want, since
+  the boot river IS the run's river. Warmup stays DECLARED CONFIG in both.
+  `MAX_HISTORY_SEEK_TICKS` staying dead is unaffected.
+
+  SINGLE-INSTRUMENT STRATEGIES is untouched, and note it does not imply a
+  single-instrument VENUE: one strategy trades one symbol, while the exchange
+  serving those strategies serves many.
+
   THE SUFFICIENCY CLAIM HAS NO EVIDENCE AND IS NOT MEANT TO. Two review passes
   have now flagged that, correctly as a matter of fact and beside the point as a
   matter of genre: the first paragraph says outright that this is a claim rather
@@ -568,8 +978,19 @@ consumer surface landed was the designed handoff.
   The end state they served: on the order of 200 agents running concurrently,
   each developing a strategy through broadarrow - backtest, optimize, Monte
   Carlo - and then FORWARD TESTING it against mogwai. Whether that many
-  instances fit on the machine is explicitly not a design input; resource cost
-  does not shape any decision in these documents.
+  fit on the machine is explicitly not a design input; resource cost does not
+  shape any decision in these documents.
+
+  READ "INSTANCES" CAREFULLY HERE (amended 2026-08-16). In the DEFAULT mode 200
+  agents really does mean 200 venue processes, and the exclusion says plainly
+  that whether they fit is not a design input. The SHARED mode exists to make
+  that number smaller by amortizing tape generation, and there the agents are
+  CONNECTIONS on a handful of exchanges rather than processes. The exclusion
+  holds in both readings - it was always about not letting cost shape the design,
+  and the shared mode is cost motivating a second mode rather than bending the
+  first one. Note the two counts the axes must scale in differ accordingly:
+  processes per machine in the default mode, connections per venue in the shared
+  one.
 
   WHO DECIDES: the repository owner, on every product and architecture question
   in every one of these documents. There is one user, and the operator of the
@@ -629,9 +1050,9 @@ consumer surface landed was the designed handoff.
   untriggered conditional from an inert market remainder, a stop that
   triggers on TOUCH rather than THROUGH, reduce-only and post-only as wire
   flags enforced at fill time, and the adapter's `wire_order_type` no longer
-  refuses the two types. Trailing stops and two-leg brackets remain refused
-  by name, and stay refused - the user ruled them out rather than deferred
-  them.
+  refuses the two types. Trailing stops and two-leg brackets remained refused
+  by name under a ruling that they were excluded rather than deferred; that
+  ruling is REVERSED 2026-08-16 by the order-type completeness ruling below.
 
   RAISED IN REVIEW AND RULED ON, recorded so they are not raised a third time.
   (a) Three documents each partly re-scope the realism gate - cadence
@@ -675,12 +1096,44 @@ consumer surface landed was the designed handoff.
   socket-level demonstration is ever wanted, design it on the divergence
   window's own clock rather than wall arrival order.
 
-- GTD / `expire_time` on the wire, with a time-driven expiry pass on the
-  sweeper. Refused today for limits and conditionals alike - the conditional-
-  order-type landing carried a GTC-only rule for stops for exactly this
-  reason, and closing the gap needs a wire expiry field plus an expiry pass
-  that has nothing to do with triggers, so it is its own item rather than
-  bundled with anything else that touches order lifecycle.
+- THE ORDER-TYPE SURFACE IS COMPLETE, NOT CURATED. Ruled by the owner
+  2026-08-16: mogwai is an exchange, so there is no axis on which it limits
+  order-type support. An exchange serves the types that go with the instruments
+  it lists, and a shape mogwai refuses is a strategy family that has NO forward
+  test anywhere - not a worse one, none - because the forward leg is the only
+  place execution behaviour can be validated at all.
+  TWO PRIOR RULINGS ARE REVERSED, and WHAT CHANGED IS THE AUDIENCE, not the
+  argument - recorded precisely, because the earlier rulings were correct when
+  made and reading them as mistakes would teach the wrong lesson. (a) Trailing
+  stops and two-leg brackets were excluded rather than deferred. (b)
+  `MarketIfTouched` was dead unless re-argued, on broadarrow's evidence that
+  TradingView rejects the offset-absent exit-at-activation shape. Both rested on
+  the owner not needing the shape, which was a sufficient reason while the
+  owner was the only user. MOGWAI IS NOW PUBLIC, and others might. The scoping
+  rule that replaces "what does the owner need" is the definitional one already
+  stated for instrument classes: an exchange serves the order types that go with
+  the instruments it lists, and the venue's surface is not sized against any
+  particular consumer's current catalog.
+  WHAT THIS PULLS IN: `MarketIfTouched`, `LimitIfTouched`, `MarketToLimit`,
+  `TrailingStopMarket`, ORDER LISTS with real linkage (OCO and OTO), and the
+  `Day` and `Gtd` time-in-force values. `Day` is not trivia - it is the DEFAULT
+  on equity venues, so an equity surface offering only Gtc, Ioc and Fok is not
+  an equity surface.
+  MOST OF IT IS TRIGGER VARIANTS on machinery that already exists: the fill
+  sweep walks prints against per-order trigger prices, and the `Resting` state
+  machine already distinguishes a live limit from an untriggered conditional.
+  `TrailingStopMarket` is a per-order high-water mark plus an offset, which is
+  the SAME ratchet the account-policy trailing drawdown needs, so the two share
+  a mechanism if they are built in either order.
+  ORDER LISTS ARE THE STRUCTURAL ONE. mogwai models no linkage between orders at
+  all, so a genuine bracket where one fill cancels its sibling cannot exist.
+  broadarrow works around it with two independent reduce-only legs plus
+  stale-cancel reconciliation, which real venues also permit - but that is a
+  workaround for a missing primitive, not the primitive.
+  ABSORBS the former standalone GTD item, whose content follows: `Gtd` needs an
+  `expire_time` on the wire plus a time-driven expiry pass on the sweeper that
+  has nothing to do with triggers. The conditional-order-type landing carried a
+  GTC-only rule for stops for exactly this reason.
 
 - A trigger-act latency havoc arm, if a scenario ever needs a trigger fired
   later than the sweep interval already allows. Deliberately not built with
@@ -966,6 +1419,11 @@ lands there.
 
 ### The `RejectNextCancel` ask, stated as a MOGWAI-repo item
 
+ACCEPTED 2026-08-16, as a no-brainer rather than a considered fork: it is one
+arm parallel to `RejectNextSubmit` on machinery that already exists, and it is
+the only way a consumer's real live-path defect becomes testable anywhere.
+Queued as a discrete implementation task.
+
 Their acknowledgement-sequencing landing (2026-08-12) closed a real live-path
 defect: a rejected cancel with its replacement already published leaves two live
 orders where the script rests one. NOTHING AT ANY VENUE CAN CURRENTLY PROVOKE
@@ -1034,6 +1492,185 @@ operator's venue config, which is exactly the re-parse its design refuses: it
 passes `[launch].config` through untouched on purpose. Until the flag exists the
 workaround is that every venue config must name its run's symbol, which means a
 config per symbol rather than a config per venue shape.
+
+RETRACTED SAME DAY, and kept only for the narrow case it still covers. The above
+argues from a one-venue-per-run topology that is the FALLBACK rather than the
+main path - see the next section. On a shared exchange serving N symbols on
+demand, the venue should not eagerly warm any particular river at all, so the
+boot river is vestigial rather than mis-pointed, and the requirement is that
+materialization is demand-driven per (symbol, window). The observation still
+holds for the ephemeral spawn path, where a venue really does know its one symbol
+up front.
+
+### An exchange serves many accounts and many tape windows (broadarrow, 2026-08-16)
+
+TWO MODES, BOTH REQUIRED. Settled with the owner 2026-08-16. Read the priority
+carefully, because an earlier draft of this very section had it backwards.
+
+THE DEFAULT MODE IS THE PER-RUN VENUE, and it is what the grand-design section
+above already describes. A consumer given no address spawns its own ephemeral
+transient venue, owns it for the run, and takes it down with the worker. N
+subagents means N venue processes, each with one river, one passenger and one
+ledger. MOGWAI ALREADY SERVES THIS MODE CORRECTLY - the single-ledger engine and
+the one-cursor-per-river boatyard are exactly right for it, and nothing in this
+section is a defect against it. Note the invisibility defect is latent here for
+the same reason: with one passenger there is nobody to be visible to.
+
+THE SECOND MODE IS THE SHARED EXCHANGE, and it exists for PERFORMANCE. An
+orchestrator runs one `mogwai serve`, takes the bound address, and hands it to its
+subagents; each connects with its own account and asks for whatever tape its
+strategy needs. The motivation is amortization: tape generation is the expensive
+part, and under the default mode a batch of agents pays for N generations of what
+are often identical or near-identical tapes. One river per distinct tape identity
+with N cheap passengers reading it collapses that. The owner's day-to-day intent
+is to run this mode; it is currently THEORETICAL and its performance case is
+unmeasured.
+
+NOTE THIS IS COST MOTIVATING A SECOND MODE, NOT COST SHAPING THE MODEL, which is
+why it does not conflict with the standing premise that resource cost shapes no
+decision here. The venue's semantics are identical either way; what differs is
+how many processes carry them.
+
+Everything below is what the SECOND mode needs and the first does not. None of it
+blocks the default mode, so none of it is urgent - but both modes must be
+supported, so none of it is optional either.
+
+WHAT LANDED AND WHAT DID NOT. The open-instrument landing (2026-08-15/16) moved
+SYMBOL from a run property back to a request parameter, and that half is done -
+one venue genuinely serves N tapes now. But the earlier one-venue-per-run rewrite
+had removed BOTH symbol and account from the request, under the single premise
+"one venue is one run is one ledger". Symbol was undone. ACCOUNT WAS NOT, and
+neither was tape PLACEMENT. Verified in this checkout, not inferred from the docs.
+
+#### The two nouns, restated - because the current ones are wrong
+
+This is one axis, not several, and it is easiest to state as a correction to the
+boatyard's vocabulary. Settled with the owner 2026-08-16 by worked example, and
+CORRECTED the same day: an earlier draft of this subsection made the boat the
+per-connection noun, which is the same conflation running the other way. There
+are two nouns and the boat is not one of them.
+
+A RIVER IS A TAPE, and it is shared. Its identity is EVERYTHING THAT MUTATES THE
+WATER: the symbol or preset, the session or window shape, the loop shape, the
+seed, the resolved bundle, the market regime, GENERATOR havoc, and the tape
+protocol version. Any two requests agreeing on all of that get one river. Speed
+is NOT in this list - it changes delivery cadence and no generated value.
+
+A PASSENGER IS ONE CONNECTED TRADER: its own account, its own ledger, its own
+orders, its own view. Never shared, one per connection. Passengers on a river
+owe each other two things - NON-INTERFERENCE, which exogeneity already gives,
+and INVISIBILITY, which the venue does not give today.
+
+THE BOAT IS AN IMPLEMENTATION CACHE and belongs in `boatyard.rs` rather than in
+any statement of the model. It is a shared cursor keyed by (river, speed), and
+its whole purpose is to generate and pace one river once rather than N times.
+It carries no semantics: nothing a passenger can observe depends on whether it
+is served from a cursor of its own or one it shares.
+
+Two things are passenger-local and therefore do NOT split a river: DURATION, and
+TRANSPORT havoc (`GoDark`, `DelayAcks`, `StallData`, `CommandLatency`), which
+corrupt what one connection RECEIVES rather than what the generator produces.
+
+THE WORKED EXAMPLE, kept because it settles every case that confused this
+consumer. Banana asks for MNQ asia session looped 30 days at x60, clean, and a
+river is spawned. Coconut asks for the same thing looped 100 days - identical
+river identity, since duration mutates nothing - so Coconut is a second
+PASSENGER on Banana's river, with its own account and ledger, seeing the water
+from wherever the river has already reached. Whether the venue serves the two of
+them from one cursor or two is an amortization question with no observable
+consequence. Kiwi asks for BTCUSDT.P Mon-Fri looped at x20 with a generator
+havoc knob armed; Pear asks for that same tape clean. Those are TWO rivers, not
+one, because generator havoc changes the water. Three rivers, four passengers.
+
+WHY THE CURRENT MODEL CANNOT BE PATCHED INTO THIS. The passenger has no object
+to hang an account on. In the tree a passenger is a `u32` refcount
+(`Seat.passengers`) and a `Ticket` of two shared handles; every piece of state
+one would expect it to own - the ledger, the position book, the order book, the
+outbound fill stream - is either on the shared cursor or on the process-wide
+`Engine`, which holds one `account_id` and one `Account`. So the work is to make
+the passenger exist as a thing, not to add `?account=` to a query struct. That
+is also why this is a single axis: the account is not adjacent to any existing
+noun, it is the missing one.
+
+A NAMED WINDOW ALWAYS GETS ITS OWN RIVER, even against an identical request
+already running, because the first requester is by then some N of sim-time ahead
+and a window means being served from its start. Sharing therefore only happens
+for the unnamed-window form - a preset plus a duration - which is exactly the
+request that says "wherever you are is fine".
+
+SPEED IS SERVED, NOT REFUSED. Today a socket asking for a speed the seated
+cursor does not carry gets a `400` before the 101. That refusal is the shared
+cursor showing through onto the wire, not a statement about the model: speed
+does not change the generated WATER, only its delivery cadence, so a passenger
+asking for an unserved speed is asking for a second cursor on the SAME river.
+An earlier draft called this "speed splits the river", which overstated it -
+river identity never contained speed, and two cadences over one river share the
+whole checkpoint chain underneath.
+
+#### What that costs, measured against this checkout
+
+THE PASSENGER SIDE. `SocketQuery` is exactly `symbol`, `speed`, `duration_ms` under
+`deny_unknown_fields`, so `?account=` is not ignored - it is a hard `400` that
+refuses the connection outright. `SocketSession` carries no account. `Engine`
+holds one `account_id` and one `Account`, with one balances map and one positions
+map for the whole process. So N subagents on one exchange today share one balance
+and one position book, and every subagent's fills move every other subagent's
+net. For broadarrow that is not merely untidy: an account move it cannot
+attribute to one of its own strategies is exactly what the per-bar attribution
+guard HALTS on, so the shared exchange currently fails closed rather than
+producing wrong numbers. That is the right failure and it costs nothing today,
+since the default mode never reaches it - one connection per venue has no second
+account to be confused with.
+
+FUNDING IS NAMED BY THE CLIENT. Recorded here as the consumer-side view; the
+ruling and its full surface are in the account-policy item above. `[balances]`
+seeds the one ledger today and is being deleted outright rather than converted
+into a per-passenger template: a connecting client names its own opening
+balance, and with it a whole ACCOUNT POLICY - daily loss limit, autoliquidation
+threshold and trailing-drawdown mechanics - which the venue ENFORCES. A strategy
+sized for a 25k account and one sized for 100k are different experiments, and
+under prop-firm rules so are two 50k accounts trailing on different bases.
+
+THE RIVER SIDE. Every cursor is placed at the fixed `run_start_ns` origin and one
+river carries at most one - `SocketQuery`'s own doc says it "never places a
+second boat on the same water". `duration_ms` is length-from-connecting rather
+than a window, so there is no wire for naming a start and an end at all. That is the
+half most strategies will actually use, since a named window is what makes a
+forward-test claim bindable to something reproducible.
+
+ONE CONSTRAINT TO DESIGN FOR UP FRONT. A strategy needs warmup BEFORE its
+requested start, so `[T1, T2]` really asks for materialization from
+`T1 - warmup_ns`, and that floor must sit at or above `TAPE_ORIGIN_NS`. A window
+requested too near the tape origin cannot carry its own warmup. Better as a named
+refusal at request time than as a short warmup nobody notices.
+
+THE REPRODUCIBILITY ARGUMENT IS THE STRONGEST ONE FOR NAMED WINDOWS, stronger
+than resource sharing. With an explicit window a run is a pure function of
+`(seed, config, symbol, start, end)` - no boarding instant, no wall-clock input
+anywhere. Under placement-at-a-fixed-origin-whenever-you-board, reproducing a run
+means reproducing WHEN IT CONNECTED, so "a run is a pure function of (seed,
+config)" is true of the tape but not of what any client actually saw. Named
+windows also make replication pairs exact instead of approximate: deal both
+halves the same window and they trade identical water by construction, so the
+paired comparison is not confounded by two different draws.
+
+#### Transport havoc stops being a scoping problem
+
+An earlier draft of this section asked for transport havoc to gain an account or
+connection scope, on the grounds that `GoDark`, `DelayAcks`, `StallData` and
+`CommandLatency` are run-wide today, so one subagent arming a blackout would
+black out every other subagent on the exchange. That is a real defect today and
+it needs no separate design: those windows corrupt what one connection RECEIVES
+rather than what the generator produces, so under the model above they simply
+RIDE THE PASSENGER. Passenger-local by construction, river untouched, nothing to
+scope. Note this is the same defect family as the fill fanout - a per-connection
+concern implemented process-wide because no per-connection object exists to hold
+it - so both close with the passenger rather than with two separate mechanisms.
+
+Which is the useful test for any future havoc knob, and worth stating once:
+ask whether it changes the WATER or the VIEW. Water changes go into river
+identity, so clients wanting different answers get different rivers. View
+changes ride the passenger, and leave the river shareable.
 
 ### Be an exchange: the instrument, order and account surface (broadarrow, 2026-08-16)
 
@@ -1131,6 +1768,11 @@ DEFAULT on equity venues, so an equity surface that only offers Gtc, Ioc and Fok
 is not an equity surface. `Gtd` is common enough across all four classes to
 belong beside it.
 
+ALL OF THIS IS ACCEPTED, 2026-08-16, by the order-type completeness ruling in
+the open-issues section: the venue serves the full surface and curates nothing.
+This subsection's inventory stands as the gap list; what it no longer needs is
+its justification, which the ruling supplies.
+
 #### Account types
 
 One funds-checked cash ledger plus per-contract futures margin is two points in
@@ -1146,6 +1788,12 @@ never set `account_type` at all, so a nautilus `CashAccount` silently discards
 the margin rows mogwai already reports correctly on futures. That is our defect,
 not yours, and it is worth stating here only so the two halves are not confused
 for one.
+
+ACCEPTED 2026-08-16: the ledger rebuild forced by the per-passenger account
+policy is scoped to hold shares, leverage and recurring funding payments, so
+this subsection and the instrument-class one above are answered together. See
+the account-policy item in the open-issues section for the scope and for the one
+exclusion, options.
 
 ### Trailing stops block a whole dealt exit family (broadarrow, 2026-08-16)
 
@@ -1186,9 +1834,16 @@ The ask, in preference order:
    named permanent exclusion, so the pipeline can drop trailing doctrines from
    the dealt catalog rather than discovering the halt per run.
 
+GRANTED AS OPTION 1, 2026-08-16, under the order-type completeness ruling. The
+ratchet is also the mechanism the account-policy trailing drawdown needs, so the
+two share a high-water-mark implementation whichever lands first.
+
 Not asked for: `MarketIfTouched`. TradingView rejects the offset-absent
 exit-at-activation shape as invalid Pine, so broadarrow retired that build and
 refuses the shape statically at preflight. Nothing on either side wants MIT.
+SERVED ANYWAY, per the same ruling: the venue's surface is not sized against a
+consumer's catalog, and mogwai is public now, so a shape this consumer cannot
+emit is still a shape another might. Their preflight refusal is theirs to keep.
 
 ### Runs owed against MOGWAI, all stageable today
 
@@ -1279,8 +1934,10 @@ cannot be attributed.
   rest an MIT faithfully) - and their position was that the protocol owes no
   order-type growth beyond Market and Limit. SUPERSEDED as of 2026-08-02: that
   was a consumer's preference, and mogwai is a nautilus adapter whose owed
-  surface follows what nautilus expresses. MarketIfTouched specifically stays
-  dead unless re-argued. The standing consequence for them is now RESOLVED: the
+  surface follows what nautilus expresses. MarketIfTouched specifically stayed
+  dead unless re-argued; RE-ARGUED AND SERVED as of 2026-08-16 under the
+  order-type completeness ruling, mogwai being public now. The standing
+  consequence for them is now RESOLVED: the
   venue serves `StopMarket` and `StopLimit` first class (`reference/
   architecture.md`), so a strategy whose protective leg is a stop-MARKET is
   forward-testable on MOGWAI. Nothing left to build here; their pre-deployment

@@ -130,13 +130,26 @@ pub(crate) struct Run {
     pub(crate) stall: HavocWindow,
     complete_tx: watch::Sender<Option<(u64, u64)>>,
     /// Every live connection's outbound lanes, so venue-ORIGINATED output - a
-    /// trigger fill nobody commanded - reaches all of them. This is what
-    /// `AccountSlot::session_lanes` was, moved to the one thing that now owns
-    /// execution: with a single ledger there is exactly one broadcast target,
-    /// and a fill booked into it is a fact about the run, not about whichever
-    /// socket happened to submit the order.
+    /// trigger fill nobody commanded - reaches the connection it belongs to.
+    ///
+    /// This was a BROADCAST target: the argument was that with a single ledger a
+    /// fill is a fact about the run rather than about whichever socket submitted
+    /// the order. That is true of the ledger and false of the client, which is
+    /// told about orders it never placed. Delivery is now ATTRIBUTED through
+    /// `order_owners` below; the table stays a list of every live connection
+    /// because venue-wide frames (the account snapshot, a venue fault) still go
+    /// to all of them.
     lanes: Mutex<Vec<(u64, ExecLanes)>>,
-    next_lane_id: AtomicU64,
+    /// Which connection submitted each live order, so a sweep-produced fill goes
+    /// to the passenger that owns it and to nobody else.
+    ///
+    /// Keyed by `VenueOrderId` because that is what every sweep-produced frame
+    /// carries; the value is `ExecLanes::id`. An order absent from this table -
+    /// one submitted before this landed, or by a connection already retired - is
+    /// delivered to EVERY lane, which is the old behaviour and the conservative
+    /// direction to fail in: a passenger seeing a stray frame is the defect this
+    /// closes, but a passenger MISSING its own fill would be a worse one.
+    order_owners: Mutex<std::collections::HashMap<mogwai_protocol::VenueOrderId, u64>>,
 }
 
 impl Run {
@@ -201,7 +214,7 @@ impl Run {
             stall: HavocWindow::new(),
             complete_tx,
             lanes: Mutex::new(Vec::new()),
-            next_lane_id: AtomicU64::new(0),
+            order_owners: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -269,14 +282,85 @@ impl Run {
     /// Enrol one connection's lanes for venue-originated output. The returned
     /// id is what `release_lanes` retires, so a reconnecting client cannot
     /// retire the lanes of the connection that replaced it.
+    ///
+    /// The id is the LANES' OWN, minted when they were constructed rather than
+    /// here. That is what lets `process_order_cmd` - which is handed the lanes
+    /// and nothing else naming the connection - record who owns an order it just
+    /// saw accepted.
     pub(crate) fn bind_lanes(&self, lanes: ExecLanes) -> u64 {
-        let id = self.next_lane_id.fetch_add(1, Ordering::Relaxed);
+        let id = lanes.id();
         self.locked_lanes().push((id, lanes));
         id
     }
 
     pub(crate) fn release_lanes(&self, id: u64) {
         self.locked_lanes().retain(|(bound, _)| *bound != id);
+        // The orders this connection owned outlive it in the engine, but their
+        // ownership record must not: an id is never reused, so a stale entry
+        // would address nobody and its fills would reach nobody. Dropping the
+        // claim returns those orders to the unattributed set, which is
+        // delivered to every lane - the same conservative direction the
+        // ownership lookup fails in.
+        self.order_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, owner| *owner != id);
+    }
+
+    /// Record that `owner` submitted `venue_order_id`.
+    pub(crate) fn claim_order(&self, venue_order_id: mogwai_protocol::VenueOrderId, owner: u64) {
+        self.order_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(venue_order_id, owner);
+    }
+
+    /// Forget a terminal order's ownership. Called on the frames that END an
+    /// order, so the table tracks LIVE orders rather than growing for the life
+    /// of the process.
+    pub(crate) fn forget_order(&self, venue_order_id: &mogwai_protocol::VenueOrderId) {
+        self.order_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(venue_order_id);
+    }
+
+    /// Who submitted `venue_order_id`, or `None` for an order nobody claimed.
+    pub(crate) fn order_owner(
+        &self,
+        venue_order_id: &mogwai_protocol::VenueOrderId,
+    ) -> Option<u64> {
+        self.order_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(venue_order_id)
+            .copied()
+    }
+
+    /// Claim every order a just-produced batch accepted, and forget every one it
+    /// ended. Called wherever a batch is produced - the command dispatcher and
+    /// the fill sweeper - so the table follows the orders rather than the call
+    /// site.
+    pub(crate) fn track_ownership(&self, events: &[mogwai_protocol::ServerMessage], owner: u64) {
+        for event in events {
+            if let mogwai_protocol::ServerMessage::OrderAccepted { venue_order_id, .. } = event {
+                self.claim_order(venue_order_id.clone(), owner);
+            }
+        }
+        self.retire_terminal(events);
+    }
+
+    /// Retire the ownership claims a batch's terminal frames end, claiming
+    /// nothing. This is what the SWEEPER uses: an order appearing in a
+    /// sweep-produced batch was originated by the VENUE - a margin liquidation -
+    /// so there is no submitting connection to attribute it to, and inventing
+    /// one would address the frame to a lane that never asked for it.
+    pub(crate) fn retire_terminal(&self, events: &[mogwai_protocol::ServerMessage]) {
+        for event in events {
+            if let Some(ended) = terminates_order(event) {
+                self.forget_order(ended);
+            }
+        }
     }
 
     /// The lanes to deliver one venue-originated batch to. Cloned out under the
@@ -327,6 +411,46 @@ impl Run {
             CommandClass::Modify => self.modify_ack_ms.load(Ordering::Relaxed),
             CommandClass::Cancel => self.cancel_ack_ms.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// The order a frame is ABOUT, for connection attribution. `None` means the
+/// frame is not order-scoped - a venue fault, a completion, the account
+/// snapshot - and belongs to every connection.
+///
+/// The two `Option<VenueOrderId>` rejections are addressed only when the venue
+/// recognized the order: a rejection naming an id the venue never issued cannot
+/// be attributed, so it goes to everyone. That is right rather than merely
+/// conservative, because the only connection that could care is the one that
+/// asked, and it is in that set.
+pub(crate) fn addressed_order(
+    event: &mogwai_protocol::ServerMessage,
+) -> Option<&mogwai_protocol::VenueOrderId> {
+    use mogwai_protocol::ServerMessage as M;
+    match event {
+        M::OrderAccepted { venue_order_id, .. }
+        | M::OrderTriggered { venue_order_id, .. }
+        | M::OrderCanceled { venue_order_id, .. }
+        | M::OrderUpdated { venue_order_id, .. } => Some(venue_order_id),
+        M::OrderModifyRejected { venue_order_id, .. }
+        | M::OrderCancelRejected { venue_order_id, .. } => venue_order_id.as_ref(),
+        M::OrderFilled(fill) => Some(&fill.venue_order_id),
+        _ => None,
+    }
+}
+
+/// The order a frame ENDS, if it ends one. A fill ends an order only when it
+/// leaves nothing resting, which is why this is not folded into
+/// `addressed_order`: a PARTIAL fill addresses an order that is still live, and
+/// forgetting its owner there would send the remainder's fill to everyone.
+fn terminates_order(
+    event: &mogwai_protocol::ServerMessage,
+) -> Option<&mogwai_protocol::VenueOrderId> {
+    use mogwai_protocol::ServerMessage as M;
+    match event {
+        M::OrderCanceled { venue_order_id, .. } => Some(venue_order_id),
+        M::OrderFilled(fill) if fill.leaves_qty <= Decimal::ZERO => Some(&fill.venue_order_id),
+        _ => None,
     }
 }
 
@@ -402,11 +526,19 @@ mod havoc_window_tests {
     }
 }
 
+/// A run over the BTCUSDT preset, for tests in this crate that need one to hang
+/// connections off. Lives outside the test module so the sweeper's delivery
+/// tests can reach it; there is nothing run-specific in what they assert.
+#[cfg(test)]
+pub(crate) fn test_run() -> Arc<Run> {
+    tests::run(1_000, 400, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn run(started_ns: u64, warmup_ns: u64, run_duration_ns: Option<u64>) -> Arc<Run> {
+    pub(super) fn run(started_ns: u64, warmup_ns: u64, run_duration_ns: Option<u64>) -> Arc<Run> {
         let profiles = Arc::new(source::InstrumentProfiles::from_profiles(vec![
             crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
         ]));
