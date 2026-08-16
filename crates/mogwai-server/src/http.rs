@@ -442,13 +442,79 @@ pub(crate) struct Health {
     /// record, so a launcher can hand it to its clients and they can check they
     /// are still talking to the venue they were given.
     run_seed: u64,
+    /// A FAULTED TAPE ON ANY SEATED RIVER, not merely on the boot one.
+    ///
+    /// This used to read `boat_for_symbol(boot_symbol)` and report that one
+    /// boat's tape fault, which was exactly right when a run had one paced
+    /// tape. Under the open instrument set a run seats a boat per keyed river,
+    /// every one owns its own tape and can fault independently, and the boot
+    /// river is the one a strategy under test is LEAST likely to have bound -
+    /// so a client whose own arrival draw refused was reading a healthy
+    /// `/health`. That is not cosmetic: a launcher and an orchestrator poll
+    /// this to decide whether a fire-and-forget run is worth keeping, and a
+    /// fault that never reaches the poll gets the run scored healthy and its
+    /// output silently trusted.
+    ///
+    /// ONE OPTIONAL OBJECT, N BOATS, so the choice is which boat answers. It is
+    /// the faulted river with the smallest SYMBOL, which keeps the field
+    /// deterministic across polls (reporting whichever the registry iterated
+    /// first would not be), keeps the wire shape every existing consumer
+    /// already reads, and still answers "is ANY river faulted" - the question a
+    /// fleet poller actually has. `symbol` says which river it is, so the
+    /// narrowing costs no information about the fault that is reported; what it
+    /// does not report is a SECOND simultaneous fault, which changes no
+    /// decision, because one faulted river already condemns the run.
+    ///
+    /// Separate from the venue's terminal fault shutdown path: this is what a
+    /// poller can see BEFORE a run dies, not when it dies.
     fault: Option<HealthFault>,
 }
 
 #[derive(Serialize)]
 struct HealthFault {
+    /// The river that faulted. Absent from this field's earlier shape because
+    /// only the boot river was ever reported.
+    symbol: String,
     kind: &'static str,
     clock_ns: u64,
+}
+
+/// Which faulted river `/health` reports, given every seated river that has
+/// one. Split out from the handler so the SELECTION is testable without a
+/// boatyard: forcing a real arrival refusal on a chosen river is far more
+/// machinery than the rule deserves, and the rule - smallest symbol wins,
+/// whatever order the registry iterated in - is the whole of what could
+/// regress.
+fn health_fault(
+    faults: impl IntoIterator<Item = (String, mogwai_data::TickFault)>,
+) -> Option<HealthFault> {
+    let (symbol, fault) = faults
+        .into_iter()
+        .min_by(|(left, _), (right, _)| left.cmp(right))?;
+    Some(match fault {
+        mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NoOpenExposure {
+            from_ns,
+        }) => HealthFault {
+            symbol,
+            kind: "arrival.no_open_exposure",
+            clock_ns: from_ns,
+        },
+        mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::IntensityCeiling {
+            clock_ns,
+            ..
+        }) => HealthFault {
+            symbol,
+            kind: "arrival.intensity_ceiling",
+            clock_ns,
+        },
+        mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NonFiniteState {
+            clock_ns,
+        }) => HealthFault {
+            symbol,
+            kind: "arrival.non_finite_state",
+            clock_ns,
+        },
+    })
 }
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
@@ -456,31 +522,10 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
         status: "ok",
         oms_type: state.run.oms_type,
         run_seed: state.run.seeds.run,
-        fault: state
-            .run
-            .boatyard
-            .boat_for_symbol(&state.run.boot_symbol)
-            .and_then(|boat| boat.tape.fault())
-            .map(|fault| match fault {
-                mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NoOpenExposure {
-                    from_ns,
-                }) => HealthFault {
-                    kind: "arrival.no_open_exposure",
-                    clock_ns: from_ns,
-                },
-                mogwai_data::TickFault::Arrival(
-                    mogwai_data::ArrivalRefusal::IntensityCeiling { clock_ns, .. },
-                ) => HealthFault {
-                    kind: "arrival.intensity_ceiling",
-                    clock_ns,
-                },
-                mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NonFiniteState {
-                    clock_ns,
-                }) => HealthFault {
-                    kind: "arrival.non_finite_state",
-                    clock_ns,
-                },
-            }),
+        fault: health_fault(state.run.boatyard.boats().into_iter().filter_map(|boat| {
+            let fault = boat.tape.fault()?;
+            Some((boat.symbol().to_owned(), fault))
+        })),
     })
 }
 
@@ -1341,6 +1386,49 @@ fn history_start_refusal(start: Option<u64>, data_origin: u64, river_now: u64) -
             "requested start {start} exceeds this river's now {river_now} - what its boat has published, or venue sim-now if it carries none; the tape cannot serve past the clock"
         )
     })
+}
+
+#[cfg(test)]
+mod health_fault_tests {
+    use super::*;
+    use mogwai_data::{ArrivalRefusal, TickFault};
+
+    fn refusal(clock_ns: u64) -> TickFault {
+        TickFault::Arrival(ArrivalRefusal::NonFiniteState { clock_ns })
+    }
+
+    /// A fault on a NON-BOOT river reaches the poll. The handler used to read
+    /// one boat - the boot river's - so a client bound to any other river got a
+    /// healthy answer while its own tape was stuck, and a fire-and-forget run
+    /// was scored keepable on the strength of a river nobody was using.
+    #[test]
+    fn a_fault_on_any_seated_river_is_reported() {
+        let reported = health_fault([("NOT-THE-BOOT-RIVER".to_owned(), refusal(77))])
+            .expect("a faulted river is reported");
+        assert_eq!(reported.symbol, "NOT-THE-BOOT-RIVER");
+        assert_eq!(reported.kind, "arrival.non_finite_state");
+        assert_eq!(reported.clock_ns, 77);
+        assert!(health_fault([]).is_none(), "an unfaulted run reports none");
+    }
+
+    /// One optional object, N boats: which one answers may not depend on the
+    /// order the registry happened to iterate, or a fleet poller watching a
+    /// faulted run sees the field flicker between rivers across polls.
+    #[test]
+    fn the_reported_river_does_not_depend_on_iteration_order() {
+        let faults = [
+            ("MNQ".to_owned(), refusal(2)),
+            ("BTCUSDT".to_owned(), refusal(1)),
+            ("MES".to_owned(), refusal(3)),
+        ];
+        let forward = health_fault(faults.clone()).expect("faulted");
+        let mut reversed = faults;
+        reversed.reverse();
+        let backward = health_fault(reversed).expect("faulted");
+        assert_eq!(forward.symbol, "BTCUSDT");
+        assert_eq!(backward.symbol, forward.symbol);
+        assert_eq!(backward.clock_ns, forward.clock_ns);
+    }
 }
 
 #[cfg(test)]

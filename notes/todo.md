@@ -102,34 +102,6 @@ consumer surface landed was the designed handoff.
 
 ## Open issues
 
-- `/health` REPORTS ONLY THE BOOT RIVER'S TAPE FAULT, so under the open
-  instrument set a tape fault is invisible on every other river. Found
-  2026-08-16 auditing the durable docs against the code, not by a failure.
-  The handler builds its `fault` field from
-  `boatyard.boat_for_symbol(&run.boot_symbol)` and reads `boat.tape.fault()`
-  on that one boat; a grep for `fault()` confirms this is the ONLY consumer of
-  a boat's tape fault anywhere in the server. That was exactly right when a run
-  had one paced tape. It is now a leftover: a run seats a boat per keyed river,
-  every one of them owns its own tape and can fault independently, and a client
-  bound to a non-boot symbol whose arrival draw refuses gets a healthy `/health`
-  while its own tape is stuck.
-  WHY IT IS NOT MERELY COSMETIC: `/health` is what a launcher and an
-  orchestrator poll to decide whether a run is worth keeping, and the ecosystem
-  runs many fire-and-forget instances precisely so a bad path can be discarded
-  cheaply. A per-river fault that never reaches the poll defeats that: the run
-  is scored as healthy and its output silently trusted. The boot river always
-  holds a boat for process life, so the ONE river guaranteed to be reported is
-  also the one a strategy under test is least likely to have bound.
-  WHAT THE SHAPE OF THE FIX HAS TO DECIDE, and why this is parked rather than
-  patched: `fault` is a single optional object on the response, and there are
-  now N boats. Reporting the first faulted boat makes the field
-  nondeterministic across polls; reporting a map changes the wire shape for
-  every existing consumer; reporting only the boat the caller asks about needs
-  a `?symbol=` the endpoint does not have and would leave a fleet poller with
-  no way to ask "is ANY river faulted". Note also that the venue's terminal
-  fault shutdown path is separate from this field, so a decision here does not
-  change when a run dies - only what a poller can see before it does.
-
 - NAUTILUS HAS NO CHANNEL FOR A DECLARED FEED GAP, so mogwai's `FeedLagged`
   can only reach a host as a log line. CROSS-REPO, and written for a reader who
   has not seen the bug loop.
@@ -503,35 +475,6 @@ consumer surface landed was the designed handoff.
   connection submitted. Intentional under the one-ledger multi-connection
   model, undocumented, and a consumer keying on "my fills arrive here" will be
   wrong. Decide whether it is a contract to state or a filter to add.
-
-- STATE IN `reference/` what acceleration costs a client that stops reading.
-  Small doc task, NOT a defect and NOT a measurement - an earlier version of
-  this bullet called it an unbounded venue coherence gap, which overstated it.
-  THE VENUE IS COHERENT. Once live, no reader can advance the canonical lead
-  past the tape worker (`checkpoint.rs`), so published tape, history, sweeps and
-  market readings are one deterministic realization. The worker does advance the
-  lead before pacing and publishing, but during that pace it is sleeping until
-  THAT TICK's own wall deadline, so the unpublished tick is in the FUTURE of
-  sim-now, and market readings are filtered to `<= sim-now`. The engine cannot
-  price from it. That window cannot bite.
-  So the only way a client sees a market older than the one it is filled against
-  is that it HAS NOT DRAINED ITS SOCKET. Everything the engine can price from was
-  already published; unread frames are the client's own backlog. Every real venue
-  behaves this way, and `FeedLagged` is the signal for it.
-  WHAT IS ACTUALLY WORTH WRITING DOWN is the acceleration multiplier: at speed
-  100, every 10 ms the consumer spends NOT reading - aggregating bars, evaluating
-  a strategy - is a simulated SECOND of tape it never saw. Forward tests are
-  always accelerated by standing ruling, so an accelerated run is systematically
-  further behind the tape than a real one would be, in proportion to the speed
-  factor and to how long the consumer thinks between reads. That is a property of
-  accelerating past the consumer, not a venue defect, and a reader of forward
-  results should know it.
-  Under N instruments it is the consumer's read budget that splits N ways, which
-  is the honest way to state the multi-instrument consequence.
-  NO MEASUREMENT IS OWED. The source already says the backlog is unbounded, and a
-  number for one host on one day would change nothing. The trigger that would
-  give a measurement a decision to serve: a forward result somebody doubts, where
-  the question becomes whether that specific run was valid.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an

@@ -256,8 +256,10 @@ impl Boatyard {
     /// FAILED placement re-reads to `None` and answers boatless truthfully. A
     /// river with no slot at all returns immediately.
     ///
-    /// `boat_for_symbol` keeps the non-blocking form for `health`, which must
-    /// never block on a placement.
+    /// `boat_for_symbol` keeps the non-blocking form for the callers that must
+    /// never block on a placement - the history routes' materialization
+    /// pre-check, and `health`, which reads the whole seated set through
+    /// `boats` on the same non-blocking terms.
     pub(crate) async fn boat_for_symbol_awaiting_placement(
         &self,
         symbol: &str,

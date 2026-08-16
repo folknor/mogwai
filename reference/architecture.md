@@ -128,6 +128,16 @@ of the boat about to be seated, which is the look-ahead per-boat clocks exist
 to remove. `/health` keeps the non-blocking form, because it must never block
 on a placement.
 
+`/health`'s tape fault reads EVERY seated river on those same non-blocking
+terms, not the boot river alone. It read only the boot river until 2026-08-16,
+which was right when a run had one paced tape and became a hole under the open
+instrument set: a client bound to any other river got a healthy answer while
+its own tape was stuck, and the boot river is the one a strategy under test is
+least likely to have bound. One optional object over N boats forces a choice,
+and it is the faulted river with the smallest symbol - deterministic across
+polls, unchanged in wire shape, and enough to answer whether any river faulted.
+`docs/cli.md` states what a poller should do with it.
+
 The venue also retains a wall-to-sim reference, but it is not a seated boat's
 clock. It bounds history for a boatless river, drives the venue deadline, and
 stamps the venue-scoped pulled account ledger. A seated river instead answers

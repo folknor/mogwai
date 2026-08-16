@@ -27,6 +27,35 @@ deadline task, the fill sweeper and the trailing-volatility window keep
 working: `/clock` reports speed `1.0` for a firehose run. A non-zero speed
 paces delivery to `sim.wall_ns(ts)`.
 
+## What acceleration costs a consumer that stops reading
+
+The venue is COHERENT. Once live, no reader can advance the canonical lead past
+the tape worker, so published tape, history, sweeps and market readings are one
+deterministic realization. The worker does advance the lead before pacing and
+publishing, but during that pace it sleeps until THAT tick's own wall deadline,
+so the unpublished tick lies in the future of sim-now and market readings are
+filtered to at-or-before sim-now. The engine cannot price from it, and that
+window cannot bite.
+
+So the only way a client sees a market older than the one it is filled against
+is that it HAS NOT DRAINED ITS SOCKET. Everything the engine can price from was
+published already; unread frames are the client's own backlog, every real venue
+behaves this way, and `FeedLagged` is the signal for it.
+
+What is worth knowing is the ACCELERATION MULTIPLIER. At speed 100, every 10 ms
+a consumer spends not reading - aggregating bars, evaluating a strategy - is a
+simulated SECOND of tape it never saw. Forward tests always run accelerated, so
+an accelerated run is systematically further behind the tape than a real one
+would be, in proportion to the speed factor and to how long the consumer thinks
+between reads. That is a property of accelerating past the consumer, not a
+venue defect, and a reader of forward results should know it. Under N
+instruments it is the consumer's read budget that splits N ways.
+
+No measurement is owed here: the backlog is unbounded by construction, and a
+number for one host on one day would change no decision. What would give a
+measurement a decision to serve is a specific forward result somebody doubts,
+where the question becomes whether that run was valid.
+
 `warmup_ns` is the uniform servable simulated interval before `run_start_ns`.
 The boot river is materialized before readiness and every other river on first
 read. `run_start_ns` is every boat's placement origin, so per-boat clocks vary

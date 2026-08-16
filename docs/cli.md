@@ -168,6 +168,26 @@ nautilus adapter does this through `MogwaiDataClientConfig::for_run` /
 refuse - terminally, logging `venue identity mismatch` - when the address is
 serving a different run.
 
+## Whether a run is worth keeping
+
+`GET /health` carries an optional `fault` object, present when a SEATED
+RIVER's tape has faulted. It names the river in `symbol`, the refusal in
+`kind`, and the simulated instant in `clock_ns`.
+
+A run seats a boat per river and every boat owns its own tape, so rivers fault
+independently. The field reports the faulted river with the smallest symbol,
+which makes it stable across polls of the same run and still answers the
+question a fleet poller has - is ANY river faulted. It does not enumerate a
+second simultaneous fault, because one faulted river already condemns the run:
+a poller that sees this field at all should discard the run rather than trust
+its output. A run is fire-and-forget, so discarding one is cheap and
+reproducing it means a fresh instance with the same seed and config.
+
+Absence of the field is not a promise that the venue is healthy in every other
+sense - it reports tape faults, not consumer-side backlog - and a faulted run
+may also die on its own terminal-fault path, which is separate. What the field
+buys is seeing the fault BEFORE that.
+
 Two outcomes are deliberately NOT a mismatch, and they are reported as different
 things because they are different things. A probe that gets no usable answer -
 the request failed, or returned an error status, or returned something that is
