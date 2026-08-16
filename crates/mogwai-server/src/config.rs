@@ -1048,10 +1048,21 @@ pub(crate) enum ConfiguredClass {
     },
     /// A share, held as a position and paid for in `currency`. NOT a spot pair
     /// with the ticker as its base: see `InstrumentClass::Equity`.
+    /// `lot_size` is the round lot an order must be a multiple of, `borrowable`
+    /// the shares this account may be short (absent means the venue models no
+    /// borrow constraint, `0` states a hard-to-borrow name), and
+    /// `settlement_ns` the span sale proceeds are held unsettled for - a fixed
+    /// sim span rather than N sessions.
     Equity {
         currency: String,
         #[serde(default = "one")]
         multiplier: Decimal,
+        #[serde(default = "one")]
+        lot_size: Decimal,
+        #[serde(default)]
+        borrowable: Option<Decimal>,
+        #[serde(default)]
+        settlement_ns: u64,
     },
     Future {
         underlying: String,
@@ -1171,9 +1182,15 @@ impl ConfiguredInstrument {
                 ConfiguredClass::Equity {
                     currency,
                     multiplier,
+                    lot_size,
+                    borrowable,
+                    settlement_ns,
                 } => InstrumentClass::Equity {
                     currency: currency.clone(),
                     multiplier: *multiplier,
+                    lot_size: *lot_size,
+                    borrowable: *borrowable,
+                    settlement_ns: *settlement_ns,
                 },
                 ConfiguredClass::Perpetual {
                     underlying,
@@ -1593,6 +1610,9 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
         InstrumentClass::Equity {
             currency,
             multiplier,
+            lot_size,
+            borrowable,
+            settlement_ns: _,
         } => {
             if currency.trim().is_empty() || currency.len() > mogwai_protocol::MAX_CURRENCY_LEN {
                 anyhow::bail!("instrument {} equity currency is invalid", def.symbol);
@@ -1600,6 +1620,24 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             if *multiplier <= Decimal::ZERO || multiplier.scale() > 9 {
                 anyhow::bail!(
                     "instrument {} multiplier must be positive with scale <= 9",
+                    def.symbol
+                );
+            }
+            // A lot is a whole number of shares, and a zero or fractional one
+            // would make every order either unrepresentable or unconstrained.
+            if *lot_size <= Decimal::ZERO || lot_size.fract() != Decimal::ZERO {
+                anyhow::bail!(
+                    "instrument {} lot_size must be a positive whole number of shares",
+                    def.symbol
+                );
+            }
+            // A NEGATIVE borrow is not a smaller one, it is a nonsense: the
+            // field states how many shares may be shorted, and zero already
+            // says none.
+            if borrowable.is_some_and(|shares| shares < Decimal::ZERO) {
+                anyhow::bail!(
+                    "instrument {} borrowable must not be negative; state 0 for a name that \
+                     cannot be borrowed at all",
                     def.symbol
                 );
             }

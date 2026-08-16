@@ -82,16 +82,24 @@ held off the newly joined river is retired, per the standing ruling.
 frozen account has no simulated clock. Zero (never) is the default, and the
 setting rides the readiness record - `ReadyRecord::VERSION` is 8.
 
-## 5. Equity is a class with no equity conventions
+## 5. Equity is a class with no equity conventions - LANDED 2026-08-16
 
-`InstrumentClass::Equity` holds shares as a position and pays cash, which is the
-part that was structurally wrong before. What it still has none of: a SETTLEMENT
-PERIOD, a short-sale LOCATE or BORROW, and any round-lot rule beyond whole
-shares.
+All four now exist on the class: `lot_size` (a rule about what may be SUBMITTED,
+with `size_increment` still one share so a partial fill's odd-lot remainder stays
+representable), `borrowable` (the locate - absent means no borrow market is
+modelled, `0` is hard-to-borrow), `settlement_ns` (proceeds credited at once and
+held as `locked` until the span runs), and the CASH-VERSUS-MARGIN distinction: an
+equity with no margin policy pays full notional and may not short at any price,
+while one with `basis = "notional"` is Reg-T - posts the fraction, borrows the
+rest, and is measured on its position's market value.
 
-A cash-versus-margin account distinction also does not exist, and it is what
-decides what an equity account may even do. `MarginBasis::Notional` is the
-mechanism; nothing wires Reg-T semantics onto it.
+TWO LIVE DEFECTS CAME OUT OF IT, both fixed here. A funded equity account could
+not SELL at all: the sell path fell through to the spot branch, asked for a base
+currency an equity does not have, and refused closing a long with a message about
+the futures margin ledger. And the maintenance walk multiplied
+`maintenance_per_contract` by a contract count, which read a notional-basis
+FRACTION as a per-contract amount - so a leveraged account could not breach at
+any price.
 
 ## 6. A perpetual's funding rate is a constant
 

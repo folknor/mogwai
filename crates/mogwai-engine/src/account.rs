@@ -28,6 +28,24 @@ pub(crate) enum Reservation {
 pub(crate) struct Account {
     pub(crate) balances: HashMap<String, Decimal>,
     pub(crate) positions: HashMap<(Symbol, Option<String>), PositionState>,
+    /// Sale proceeds credited but NOT YET SETTLED, each with the instant it
+    /// becomes spendable.
+    ///
+    /// This is what a `T+N` convention actually is: the money is yours the
+    /// moment the trade prints, and you cannot use it to buy anything until
+    /// settlement. It rides `balances` as a full credit and is subtracted by
+    /// `free_balance`, so it appears on the wire as `locked` - which is exactly
+    /// what it is, and needs no new balance field for a consumer to understand.
+    pub(crate) unsettled: Vec<UnsettledCredit>,
+}
+
+/// One sale's proceeds waiting out its settlement period.
+#[derive(Debug, Clone)]
+pub(crate) struct UnsettledCredit {
+    pub(crate) currency: String,
+    pub(crate) amount: Decimal,
+    /// Sim instant this becomes spendable. Released by the sweeper's pass.
+    pub(crate) settles_at_ns: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -275,13 +293,15 @@ impl Engine {
             mogwai_protocol::InstrumentClass::Equity { .. }
         ) {
             let currency = instrument.class.settlement_currency().to_owned();
+            let settlement_ns = instrument.class.settlement_ns();
             let mut clipped = false;
             let notional = mul_clamped(
                 mul_clamped(fill.last_qty, fill.last_px, &mut clipped),
                 instrument.class.multiplier(),
                 &mut clipped,
             );
-            let total = self.account.balances.entry(currency).or_default();
+            let proceeds = sub_clamped(notional, fill.commission, &mut clipped);
+            let total = self.account.balances.entry(currency.clone()).or_default();
             *total = match fill.side {
                 Side::Buy => sub_clamped(
                     *total,
@@ -294,6 +314,17 @@ impl Engine {
                     &mut clipped,
                 ),
             };
+            // THE SETTLEMENT PERIOD. A sale's proceeds are credited above and
+            // held unspendable until the instrument's period has run - which is
+            // the whole of what `T+N` means to a strategy, and is invisible to
+            // one that never tries to spend the money before it lands.
+            if fill.side == Side::Sell && settlement_ns > 0 && proceeds > Decimal::ZERO {
+                self.account.unsettled.push(UnsettledCredit {
+                    currency,
+                    amount: proceeds,
+                    settles_at_ns: fill.ts_event.saturating_add(settlement_ns),
+                });
+            }
             if clipped {
                 self.warn_saturated(&fill.symbol);
             }
@@ -432,6 +463,19 @@ impl Engine {
     /// `validate_submit` and `on_modify` compare an order's requirement
     /// against, and it matches the `free` the snapshot reports for the same
     /// currency (both derive from `locked_balances` with clamped arithmetic).
+    /// The account's NET quantity in one symbol, across every position key. The
+    /// number a short-sale check is against: under hedging two legs of opposite
+    /// sign are one net exposure to the borrow desk.
+    pub(crate) fn net_position(&self, symbol: &str) -> Decimal {
+        self.account
+            .positions
+            .iter()
+            .filter(|((position_symbol, _), _)| position_symbol.as_ref() == symbol)
+            .fold(Decimal::ZERO, |sum, (_, state)| {
+                sum.saturating_add(state.qty)
+            })
+    }
+
     pub(crate) fn free_balance(&self, currency: &str) -> Decimal {
         let total = *self
             .account
@@ -440,14 +484,28 @@ impl Engine {
             .unwrap_or(&Decimal::ZERO);
         let mut clipped = false;
         let mut locked = *self.order_locked.get(currency).unwrap_or(&Decimal::ZERO);
+        // Unsettled sale proceeds are HELD, not absent: the account owns them
+        // and cannot spend them until their instant.
+        for credit in self
+            .account
+            .unsettled
+            .iter()
+            .filter(|credit| credit.currency == currency)
+        {
+            locked = add_clamped(locked, credit.amount, &mut clipped);
+        }
         for ((symbol, _), position) in &self.account.positions {
             let Some(policy) = self.margin.get(symbol) else {
                 continue;
             };
+            // MARKED, not merely a future. An equity carrying a margin policy is
+            // a Reg-T margin account and posts maintenance collateral exactly as
+            // a future does; a SPOT symbol carrying one still moves no number,
+            // which is what the class check is here for.
             let Some(instrument) = self
                 .instruments
                 .get(symbol)
-                .filter(|instrument| instrument.class.is_future())
+                .filter(|instrument| instrument.class.is_marked())
             else {
                 continue;
             };
@@ -499,6 +557,32 @@ impl Engine {
                 None => Reservation::None,
             };
         }
+        // AN EQUITY IS A CASH ACCOUNT OR A MARGIN ACCOUNT, and the margin policy
+        // is which. A cash account commits the whole notional on a buy, the way
+        // a spot buy does, and reserves nothing on a sell because it can only
+        // ever sell shares it already holds. A MARGIN account commits the
+        // Reg-T initial requirement on either side - and on a sell, only for the
+        // portion the account is not already long, since selling what you hold
+        // is not a short.
+        if instrument.class.is_equity() {
+            let policy = self.margin.get(&submit.symbol);
+            let price = submit.price.unwrap_or_default();
+            return match (submit.side, policy) {
+                (Side::Buy, Some(policy)) => {
+                    Reservation::Settlement(policy.initial(instrument, leaves, price))
+                }
+                (Side::Buy, None) => Reservation::Settlement(mul_clamped(leaves, price, clipped)),
+                (Side::Sell, Some(policy)) => {
+                    let uncovered = leaves - self.net_position(&submit.symbol).max(Decimal::ZERO);
+                    if uncovered <= Decimal::ZERO {
+                        Reservation::None
+                    } else {
+                        Reservation::Settlement(policy.initial(instrument, uncovered, price))
+                    }
+                }
+                (Side::Sell, None) => Reservation::None,
+            };
+        }
         match submit.side {
             // One order's `leaves * price` is representable (submit and modify
             // both `checked_mul` the full notional), but the SUM across all
@@ -528,16 +612,26 @@ impl Engine {
             let Some(instrument) = self.instruments.get(symbol) else {
                 continue;
             };
-            // Only a future posts maintenance collateral. The class is checked
-            // here for the same reason `order_reservation` checks it: a margin
-            // policy attached to a spot symbol must move no number.
-            if !instrument.class.is_future() {
+            // Only a MARKED class posts maintenance collateral - futures,
+            // perpetuals, inverses, and an equity whose margin policy makes it a
+            // Reg-T margin account. The class is checked here for the same
+            // reason `order_reservation` checks it: a margin policy attached to
+            // a spot symbol must move no number.
+            if !instrument.class.is_marked() {
                 continue;
             }
             let currency = instrument.class.settlement_currency().to_owned();
             let reserve = policy.maintenance(instrument, position.qty, position.mark_px);
             let total = locked.entry(currency).or_default();
             *total = total.saturating_add(reserve);
+        }
+
+        // Unsettled sale proceeds, so the `locked` a client reads is the same
+        // number `free_balance` subtracts. A wire snapshot that disagreed with
+        // the venue's own funds check would be the worst of both.
+        for credit in &self.account.unsettled {
+            let total = locked.entry(credit.currency.clone()).or_default();
+            *total = total.saturating_add(credit.amount);
         }
 
         (locked, clipped_currencies)

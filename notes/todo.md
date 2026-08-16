@@ -686,9 +686,13 @@ required eventually, since both modes must be supported.
   generation path so `TAPE_PROTOCOL_VERSION` went to 19 and the Stage A manifest
   was re-blessed, though the change provably moves no existing tape (a future at
   increment 1 lands on the integral grid it had, spot at 1e-8 on `spot()`).
-  STILL OPEN ON THIS AXIS, none blocking: an equity has no SETTLEMENT PERIOD, no
-  short-sale locate or borrow, and no round-lot rule beyond whole shares; a
-  perpetual's funding rate is a CONSTANT rather than something that responds to
+  THE EQUITY CONVENTIONS LANDED 2026-08-16: `lot_size`, `borrowable` and
+  `settlement_ns` on the class, plus the cash-versus-margin distinction wired
+  onto `MarginBasis::Notional` as Reg-T. Two live defects went with it - a funded
+  equity account could not sell at all, and the maintenance walk read a
+  notional-basis fraction as a per-contract amount. See `docs/config.md`.
+  STILL OPEN ON THIS AXIS, none blocking:
+  a perpetual's funding rate is a CONSTANT rather than something that responds to
   the mark-versus-index basis, which is what a real venue computes it from;
   funding is paid on the fill sweeper's cadence so an instant is honoured on the
   pass that crosses it rather than at the instant itself; and nothing has been

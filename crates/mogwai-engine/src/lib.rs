@@ -885,6 +885,37 @@ impl Engine {
         margins
     }
 
+    /// What one symbol's position contributes to the collateral the maintenance
+    /// test measures, ON TOP OF the settlement cash balance.
+    ///
+    /// The split is the one `valuation_in` makes, and for the same reason. A
+    /// DERIVATIVE's cash never moved when it opened, so only the gain since
+    /// entry is outstanding: unrealized. An EQUITY's cash moved by the whole
+    /// notional, so what is outstanding is the shares' MARKET VALUE - and
+    /// counting only its unrealized would read a margin buy as an account that
+    /// spent the money and received nothing, breaching it on the spot.
+    fn collateral_contribution(&self, symbol: &str) -> Decimal {
+        let Some(def) = self.instruments.get(symbol) else {
+            return Decimal::ZERO;
+        };
+        if !def.class.is_equity() {
+            return self.unrealized_pnl(symbol);
+        }
+        let qty = self.net_position(symbol);
+        let mark = self
+            .account
+            .positions
+            .iter()
+            .find(|((position_symbol, _), _)| position_symbol.as_ref() == symbol)
+            .map_or(Decimal::ZERO, |(_, position)| position.mark_px);
+        def.notional(qty, mark)
+            .unwrap_or(if qty.is_sign_negative() {
+                Decimal::MIN
+            } else {
+                Decimal::MAX
+            })
+    }
+
     fn apply_margin_breaches(
         &mut self,
         marks: &[(Symbol, Decimal)],
@@ -922,7 +953,7 @@ impl Engine {
                 })
                 .collect();
             let unrealized = settled_symbols.iter().fold(Decimal::ZERO, |sum, other| {
-                sum.saturating_add(self.unrealized_pnl(other))
+                sum.saturating_add(self.collateral_contribution(other))
             });
             let maintenance = self
                 .account
@@ -932,9 +963,14 @@ impl Engine {
                     let other_policy = self.margin.get(other)?;
                     let other_def = self.instruments.get(other)?;
                     (other_def.class.settlement_currency() == currency).then(|| {
-                        other_policy
-                            .maintenance_per_contract
-                            .saturating_mul(position.qty.abs())
+                        // THROUGH THE POLICY, which is what honours `basis`. A
+                        // NOTIONAL policy states its maintenance as a FRACTION,
+                        // so multiplying it by a contract count read a 40
+                        // percent requirement on two contracts as eighty cents -
+                        // a leveraged account that could never breach. The
+                        // per-contract case is unchanged, since that is exactly
+                        // what `maintenance` computes for it.
+                        other_policy.maintenance(other_def, position.qty, position.mark_px)
                     })
                 })
                 .fold(Decimal::ZERO, Decimal::saturating_add);
@@ -1148,6 +1184,23 @@ impl Engine {
             events.extend(self.close_at_mark(&position_symbol, position_id, qty, mark, ts));
         }
         events
+    }
+
+    /// Release every sale credit whose settlement instant the venue has now
+    /// reached, making the money spendable.
+    ///
+    /// Driven by the sweep pass rather than by a timer, for the same reason
+    /// expiry is: the instants are on the simulated clock, and the sweeper is
+    /// what advances the venue's notion of now. Returns whether anything moved,
+    /// so the caller can decide whether the pass owes a snapshot - a released
+    /// credit changes `free` and `locked` without changing `total`, which a
+    /// client watching its buying power very much notices.
+    pub fn release_settled_cash(&mut self, now_ns: u64) -> bool {
+        let before = self.account.unsettled.len();
+        self.account
+            .unsettled
+            .retain(|credit| credit.settles_at_ns > now_ns);
+        before != self.account.unsettled.len()
     }
 
     /// Cancel every resting order on a symbol NOBODY IS READING.
@@ -1444,6 +1497,7 @@ impl Engine {
             account: Account {
                 balances: config.balances,
                 positions: HashMap::new(),
+                unsettled: Vec::new(),
             },
             instruments,
             seen_client_order_ids: HashMap::new(),
@@ -5214,6 +5268,264 @@ mod tests {
         assert!(validate_submit_order(&stop).is_err());
     }
 
+    // --- Equity conventions --------------------------------------------------
+
+    struct Shares {
+        cash: i64,
+        margin: Option<MarginPolicy>,
+        borrowable: Option<Decimal>,
+        lot_size: Decimal,
+        settlement_ns: u64,
+    }
+
+    impl Default for Shares {
+        fn default() -> Self {
+            Self {
+                cash: 10_000,
+                margin: None,
+                borrowable: None,
+                lot_size: Decimal::ONE,
+                settlement_ns: 0,
+            }
+        }
+    }
+
+    /// One US-listed share at 100, on an account holding `cash` dollars.
+    fn equity_engine(shape: &Shares) -> Engine {
+        let def = InstrumentDef {
+            symbol: "AAPL".into(),
+            class: InstrumentClass::Equity {
+                currency: "USD".into(),
+                multiplier: Decimal::ONE,
+                lot_size: shape.lot_size,
+                borrowable: shape.borrowable,
+                settlement_ns: shape.settlement_ns,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::ONE,
+        };
+        let mut engine = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![def],
+            balances: HashMap::from([("USD".to_string(), Decimal::from(shape.cash))]),
+            fill_seed: 7,
+        });
+        if let Some(policy) = shape.margin {
+            engine.set_margin_policy("AAPL".into(), policy);
+        }
+        engine
+    }
+
+    fn reg_t() -> MarginPolicy {
+        MarginPolicy {
+            // Reg-T: half the notional to open, a quarter to hold.
+            initial_per_contract: Decimal::new(5, 1),
+            maintenance_per_contract: Decimal::new(25, 2),
+            breach_action: BreachAction::Refuse,
+            basis: MarginBasis::Notional,
+        }
+    }
+
+    fn share_order(id: &str, side: Side, qty: i64) -> SubmitOrder {
+        let mut order = order_with(id, side, "AAPL", qty, Some(Decimal::from(100)));
+        order.order_type = OrderType::Market;
+        order
+    }
+
+    fn trade(engine: &mut Engine, order: SubmitOrder, ts: u64) -> Vec<ServerMessage> {
+        engine.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            ts,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: ts,
+                band_ticks: 0,
+            }),
+        )
+    }
+
+    /// The defect this suite starts from: a funded equity account could not SELL
+    /// at all. The sell path fell through to the spot branch, which asks for the
+    /// base currency an equity does not have, so closing a long was refused with
+    /// a message about the futures margin ledger.
+    #[test]
+    fn a_cash_equity_account_can_buy_and_then_sell_what_it_holds() {
+        let mut e = equity_engine(&Shares::default());
+        let bought = trade(&mut e, share_order("BUY", Side::Buy, 50), 1);
+        assert!(
+            bought
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "the buy fills: {bought:?}"
+        );
+        let sold = trade(&mut e, share_order("SELL", Side::Sell, 50), 2);
+        assert!(
+            sold.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "and the shares can be sold again: {sold:?}"
+        );
+        assert_eq!(
+            balance(&e.snapshot(3), "USD").total,
+            Decimal::from(10_000),
+            "round-tripping at one price leaves the cash where it started"
+        );
+    }
+
+    /// SHORTING IS A MARGIN ACTIVITY, which is the cash-versus-margin
+    /// distinction the class had no way to express.
+    #[test]
+    fn a_cash_equity_account_cannot_sell_short() {
+        let mut e = equity_engine(&Shares::default());
+        let out = trade(&mut e, share_order("SHORT", Side::Sell, 10), 1);
+        assert!(
+            reject_reason(&out).contains("cash equity account cannot sell"),
+            "refused by name rather than as a funding shortfall: {out:?}"
+        );
+    }
+
+    /// With a margin policy the same account CAN short - up to its locate.
+    #[test]
+    fn a_margin_equity_account_shorts_within_its_borrow_and_no_further() {
+        let mut e = equity_engine(&Shares {
+            margin: Some(reg_t()),
+            borrowable: Some(Decimal::from(20)),
+            ..Shares::default()
+        });
+        let out = trade(&mut e, share_order("SHORT", Side::Sell, 20), 1);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "a short inside the borrow fills: {out:?}"
+        );
+        let refused = trade(&mut e, share_order("MORE", Side::Sell, 5), 2);
+        assert!(
+            reject_reason(&refused).contains("no shares to borrow"),
+            "and one beyond it is refused by name: {refused:?}"
+        );
+    }
+
+    /// A name nobody will lend is expressible, and is not the same thing as an
+    /// account that cannot afford the trade.
+    #[test]
+    fn a_hard_to_borrow_name_refuses_every_short() {
+        let mut e = equity_engine(&Shares {
+            margin: Some(reg_t()),
+            borrowable: Some(Decimal::ZERO),
+            ..Shares::default()
+        });
+        let out = trade(&mut e, share_order("SHORT", Side::Sell, 1), 1);
+        assert!(
+            reject_reason(&out).contains("no shares to borrow"),
+            "{out:?}"
+        );
+    }
+
+    /// REG-T: a margin account posts a fraction of the notional and borrows the
+    /// rest, so it can hold more stock than it has cash. A cash account, given
+    /// the same money, cannot.
+    #[test]
+    fn a_margin_account_buys_on_leverage_where_a_cash_account_cannot() {
+        // 150 shares at 100 is 15,000 of stock against 10,000 of cash.
+        let mut cash = equity_engine(&Shares::default());
+        let refused = trade(&mut cash, share_order("BUY", Side::Buy, 150), 1);
+        assert!(
+            reject_reason(&refused).contains("insufficient USD"),
+            "a cash account pays the whole notional: {refused:?}"
+        );
+
+        let mut margin = equity_engine(&Shares {
+            margin: Some(reg_t()),
+            ..Shares::default()
+        });
+        let out = trade(&mut margin, share_order("BUY", Side::Buy, 150), 1);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "the same account on margin posts 7,500 and borrows the rest: {out:?}"
+        );
+        let state = margin.snapshot(2);
+        assert_eq!(
+            balance(&state, "USD").total,
+            Decimal::from(-5_000),
+            "the negative cash IS the margin loan"
+        );
+        assert_eq!(
+            margin.valuation_in("USD"),
+            Some(Decimal::from(10_000)),
+            "and the account is still worth what it was: the shares are the other side of the loan"
+        );
+    }
+
+    /// THE ROUND LOT, which is a rule about what may be submitted rather than
+    /// about what the size grid can represent.
+    #[test]
+    fn a_lot_size_refuses_an_order_that_is_not_a_whole_number_of_lots() {
+        let mut e = equity_engine(&Shares {
+            lot_size: Decimal::from(100),
+            cash: 1_000_000,
+            ..Shares::default()
+        });
+        let out = trade(&mut e, share_order("ODD", Side::Buy, 150), 1);
+        assert!(
+            reject_reason(&out).contains("multiple of the 100-share lot"),
+            "{out:?}"
+        );
+        let round = trade(&mut e, share_order("ROUND", Side::Buy, 200), 2);
+        assert!(
+            round
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "a whole number of lots is served: {round:?}"
+        );
+    }
+
+    /// THE SETTLEMENT PERIOD: the money is yours the moment the trade prints and
+    /// you cannot spend it until it settles.
+    #[test]
+    fn sale_proceeds_are_held_unsettled_until_their_instant() {
+        const DAY: u64 = 24 * 60 * 60 * 1_000_000_000;
+        let mut e = equity_engine(&Shares {
+            settlement_ns: 2 * DAY,
+            ..Shares::default()
+        });
+        trade(&mut e, share_order("BUY", Side::Buy, 50), 1);
+        trade(&mut e, share_order("SELL", Side::Sell, 50), 2);
+
+        let state = e.snapshot(3);
+        let usd = balance(&state, "USD");
+        assert_eq!(
+            usd.total,
+            Decimal::from(10_000),
+            "the proceeds are credited at once - they are the account's money"
+        );
+        assert_eq!(
+            usd.locked,
+            Decimal::from(5_000),
+            "and held unsettled: T+2 has not run"
+        );
+        assert_eq!(usd.free, Decimal::from(5_000));
+
+        // Spending it before it settles is refused, which is the whole point.
+        let early = trade(&mut e, share_order("EARLY", Side::Buy, 80), 4);
+        assert!(
+            reject_reason(&early).contains("insufficient USD"),
+            "unsettled cash cannot be spent: {early:?}"
+        );
+
+        assert!(
+            !e.release_settled_cash(2 * DAY),
+            "nothing settles before the instant"
+        );
+        assert!(e.release_settled_cash(2 * DAY + 3), "and settles at it");
+        assert_eq!(
+            balance(&e.snapshot(5), "USD").free,
+            Decimal::from(10_000),
+            "the money is spendable once it has settled"
+        );
+    }
+
     // --- Rivers nobody is reading --------------------------------------------
 
     /// The gap this closes: a resting order on a river with no cursor cannot
@@ -5991,6 +6303,38 @@ mod tests {
             fixed.initial(&def, Decimal::ONE, Decimal::ONE),
             fixed.initial(&def, Decimal::ONE, Decimal::from(9_999)),
             "a per-contract requirement ignores the price, which is what CME publishes"
+        );
+    }
+
+    /// A notional-basis policy states its maintenance as a FRACTION, and the
+    /// breach walk multiplied that fraction by a CONTRACT COUNT - reading a 25
+    /// percent requirement on 150 shares as 37 dollars and 50 cents, so a
+    /// leveraged account could not breach at any price. The walk now asks the
+    /// policy, which is what honours the basis.
+    #[test]
+    fn a_notional_maintenance_requirement_is_measured_against_the_position_value() {
+        let mut e = equity_engine(&Shares {
+            margin: Some(MarginPolicy {
+                initial_per_contract: Decimal::new(5, 1),
+                maintenance_per_contract: Decimal::new(25, 2),
+                breach_action: BreachAction::Refuse,
+                basis: MarginBasis::Notional,
+            }),
+            ..Shares::default()
+        });
+        trade(&mut e, share_order("BUY", Side::Buy, 150), 1);
+        // Cash is -5,000 against 150 shares. At 50 the stock is worth 7,500, so
+        // the account holds 2,500 against a maintenance requirement of 1,875 and
+        // is fine; at 40 it holds 1,000 against 1,500 and is not.
+        e.mark(&[(Symbol::from("AAPL"), Decimal::from(50))], 2);
+        assert!(
+            !e.margin_breached.contains(&Symbol::from("AAPL")),
+            "an account above its maintenance requirement is not breached"
+        );
+        e.mark(&[(Symbol::from("AAPL"), Decimal::from(40))], 3);
+        assert!(
+            e.margin_breached.contains(&Symbol::from("AAPL")),
+            "and one below it is"
         );
     }
 

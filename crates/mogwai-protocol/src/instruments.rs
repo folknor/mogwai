@@ -58,6 +58,40 @@ pub enum InstrumentClass {
         /// present so the notional arithmetic is uniform across classes rather
         /// than special-cased here.
         multiplier: Decimal,
+        /// The ROUND LOT: orders must be a multiple of this many shares.
+        ///
+        /// Separate from `size_increment`, which stays at one share, and the
+        /// separation is the point: a lot rule governs what may be SUBMITTED,
+        /// while a partial fill legitimately leaves an odd-lot remainder that
+        /// the size grid still has to represent. One means odd lots are
+        /// accepted, which is what every retail-facing venue does today.
+        #[serde(default = "one_share")]
+        lot_size: Decimal,
+        /// How many shares this account may be SHORT, or `None` for a venue
+        /// that models no borrow constraint.
+        ///
+        /// A short sale needs a LOCATE at a real venue, and its absence is why
+        /// a name goes hard-to-borrow. `Some(0)` states exactly that; `None`
+        /// states that the venue is not modelling the borrow market, which is
+        /// the honest default for a synthetic tape with no lending desk behind
+        /// it. Either way a CASH equity account - one with no margin policy -
+        /// cannot short at all, because shorting is a margin activity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowable: Option<Decimal>,
+        /// How long sale proceeds take to SETTLE, in simulated nanoseconds.
+        ///
+        /// Cash from a sale is credited immediately and held UNSETTLED until
+        /// this span has passed, which is what a `T+N` convention buys a
+        /// strategy: the money is yours and you cannot spend it yet. It appears
+        /// as `locked` on the balance row, because that is exactly what it is.
+        ///
+        /// A FIXED SIM SPAN rather than N business days, and the simplification
+        /// is stated rather than hidden: a real `T+2` counts sessions, so a
+        /// weekend stretches it. Expressing it in nanoseconds keeps it on the
+        /// one clock everything else here is on, and a preset that wants the
+        /// session-counted form owes a calendar-aware successor.
+        #[serde(default)]
+        settlement_ns: u64,
     },
     Future {
         underlying: String,
@@ -105,7 +139,51 @@ pub enum InstrumentClass {
     },
 }
 
+/// One share per lot: odd lots accepted, which is what every retail-facing
+/// venue does.
+fn one_share() -> Decimal {
+    Decimal::ONE
+}
+
 impl InstrumentClass {
+    /// The round lot an order's quantity must be a multiple of. One for
+    /// everything that is not an equity stating otherwise.
+    #[must_use]
+    pub fn lot_size(&self) -> Decimal {
+        match self {
+            Self::Equity { lot_size, .. } => *lot_size,
+            _ => Decimal::ONE,
+        }
+    }
+
+    /// How many units this account may be SHORT, or `None` where the venue
+    /// models no borrow constraint. Only an equity states one.
+    #[must_use]
+    pub fn borrowable(&self) -> Option<Decimal> {
+        match self {
+            Self::Equity { borrowable, .. } => *borrowable,
+            _ => None,
+        }
+    }
+
+    /// How long sale proceeds take to settle, in simulated nanoseconds. Zero
+    /// everywhere but an equity that states a period.
+    #[must_use]
+    pub fn settlement_ns(&self) -> u64 {
+        match self {
+            Self::Equity { settlement_ns, .. } => *settlement_ns,
+            _ => 0,
+        }
+    }
+
+    /// Whether holding this is a SHARE rather than a claim on cash - the class
+    /// whose position is the asset itself and whose cash leg is the full
+    /// notional on both sides.
+    #[must_use]
+    pub const fn is_equity(&self) -> bool {
+        matches!(self, Self::Equity { .. })
+    }
+
     #[must_use]
     pub fn settlement_currency(&self) -> &str {
         match self {
@@ -448,6 +526,9 @@ mod tests {
         let equity = InstrumentClass::Equity {
             currency: "USD".into(),
             multiplier: Decimal::ONE,
+            lot_size: Decimal::ONE,
+            borrowable: None,
+            settlement_ns: 0,
         };
         assert_eq!(equity.base_currency(), None);
         assert_eq!(equity.settlement_currency(), "USD");

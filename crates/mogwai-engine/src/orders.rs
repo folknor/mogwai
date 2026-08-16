@@ -1655,6 +1655,17 @@ impl Engine {
             return Err("quantity violates size increment".into());
         }
 
+        // THE ROUND LOT, which is a rule about what may be SUBMITTED and not
+        // about what the grid can represent. A partial fill legitimately leaves
+        // an odd-lot remainder, so the size increment stays at one share and the
+        // lot rule sits here, where an order is judged.
+        let lot = instrument.class.lot_size();
+        if lot > Decimal::ONE && !on_increment(order.quantity, lot) {
+            return Err(format!(
+                "quantity must be a multiple of the {lot}-share lot"
+            ));
+        }
+
         match order.order_type {
             OrderType::Market if order.price.is_none() => {
                 return Err("submit price required".into());
@@ -1749,6 +1760,63 @@ impl Engine {
                 }
                 return Ok(());
             }
+            if instrument.class.is_equity() {
+                let currency = instrument.class.settlement_currency();
+                let commission =
+                    self.maximum_commission(order, order.quantity, price, ts, apply_divergences);
+                let policy = self.margin.get(&order.symbol);
+                let required = match order.side {
+                    // A cash account pays the whole notional; a margin account
+                    // posts the Reg-T initial requirement and borrows the rest.
+                    Side::Buy => match policy {
+                        Some(policy) => policy.initial(instrument, order.quantity, price),
+                        None => notional,
+                    },
+                    Side::Sell => {
+                        // How short this order would leave the account. Selling
+                        // shares you hold is not a short and needs neither a
+                        // borrow nor collateral.
+                        let short = (self.net_position(&order.symbol) - order.quantity)
+                            .min(Decimal::ZERO)
+                            .abs();
+                        if short.is_zero() {
+                            Decimal::ZERO
+                        } else {
+                            // SHORTING IS A MARGIN ACTIVITY. A cash account
+                            // cannot do it at any price, which is the whole
+                            // cash-versus-margin distinction and not a funding
+                            // question - so it is refused by NAME rather than
+                            // as an insufficient balance.
+                            let Some(policy) = policy else {
+                                return Err(format!(
+                                    "a cash equity account cannot sell {symbol} short; shorting \
+                                     needs a margin account, which is a margin policy on this \
+                                     symbol",
+                                    symbol = order.symbol
+                                ));
+                            };
+                            // THE LOCATE. A venue that states a borrow has a
+                            // finite one, and a name it states as zero cannot be
+                            // shorted at all.
+                            if let Some(borrowable) = instrument.class.borrowable()
+                                && short > borrowable
+                            {
+                                return Err(format!(
+                                    "no shares to borrow: {symbol} allows a short of {borrowable} \
+                                     and this order would leave {short}",
+                                    symbol = order.symbol
+                                ));
+                            }
+                            policy.initial(instrument, short, price)
+                        }
+                    }
+                };
+                let required = required.saturating_add(commission);
+                if self.free_balance(currency) < required {
+                    return Err(format!("insufficient {currency} balance"));
+                }
+                return Ok(());
+            }
             if order.side == Side::Sell {
                 let currency = instrument.class.settlement_currency();
                 let commission =
@@ -1838,7 +1906,25 @@ impl Engine {
             }
             return Ok(());
         }
-        let (required, released) = if instrument.class.is_future() {
+        // A MARGINED EQUITY posts the Reg-T requirement rather than the whole
+        // notional, exactly as a future posts its bond, and BORROWS the rest -
+        // which is what makes the settlement balance go negative on a margin
+        // buy and is the loan itself. A cash equity falls through to the
+        // notional branch below, where it belongs.
+        let (required, released) = if instrument.class.is_equity()
+            && let Some(policy) = self.margin.get(&order.symbol)
+        {
+            if order.reduce_only {
+                (commission, policy.maintenance(instrument, qty, fill_px))
+            } else {
+                (
+                    policy
+                        .initial(instrument, qty, fill_px)
+                        .saturating_add(commission),
+                    Decimal::ZERO,
+                )
+            }
+        } else if instrument.class.is_future() {
             let policy = self
                 .margin
                 .get(&order.symbol)

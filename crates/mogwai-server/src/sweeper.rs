@@ -506,6 +506,10 @@ fn apply_engine_pass_on_clock(
         originated += settled.originated_orders;
         events.extend(settled.events);
     }
+    // Sale proceeds whose settlement period has run. Before the mark, so the
+    // pass's single snapshot reports the freed cash rather than reporting it one
+    // pass late.
+    let settled_cash = engine.release_settled_cash(to_ns);
     let marked = engine.mark_over(marks, extremes, to_ns);
     // Time-driven expiry, which has nothing to do with triggers: a Gtd limit
     // nothing ever approached must still stop resting at its instant, and a Day
@@ -534,6 +538,12 @@ fn apply_engine_pass_on_clock(
             index += 1;
             keep
         });
+    } else if settled_cash {
+        // Cash settling moves `free` and `locked` without moving `total` and
+        // without producing an order event, so it is the one transition that
+        // owes a snapshot nothing else in the pass would have taken. A client
+        // watching its buying power is watching exactly this.
+        events.push(ServerMessage::AccountState(engine.account_snapshot(to_ns)));
     }
     (events, emitted, originated)
 }

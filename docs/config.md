@@ -238,6 +238,48 @@ selects it. The refusal names the symbol and the currency to add to
 `[balances]`, and it arrives before any trading, so a runtime funds rejection
 still means depletion and only depletion.
 
+### Equity, and the conventions that go with it
+
+`kind = "equity"` takes `currency` and an optional `multiplier` (one share per
+contract, on every venue that lists shares). A share is a POSITION and never a
+currency balance: buying it debits the whole notional and credits shares, which
+is what makes short sales, settlement periods and round lots expressible at all.
+
+Three optional keys carry the conventions:
+
+```toml
+[symbols.AAPL.class]
+kind = "equity"
+currency = "USD"
+lot_size = "100"          # orders must be a whole number of lots
+borrowable = "50000"      # shares this account may be short; 0 is hard-to-borrow
+settlement_ns = 172800000000000   # T+2, held unsettled for two days of sim time
+```
+
+`lot_size` (default `1`, meaning odd lots are accepted) governs what may be
+SUBMITTED. It is deliberately not `size_increment`, which stays at one share:
+a partial fill legitimately leaves an odd-lot remainder that the grid still has
+to represent.
+
+`borrowable` is the LOCATE. Absent means the venue models no borrow constraint;
+`0` states a name nobody will lend, and any other value caps how short the
+account may go. It is checked against the account's NET position in the symbol.
+
+`settlement_ns` holds sale proceeds unspendable for that span. The money is
+credited immediately - it is the account's - and appears as `locked` on the
+balance row until it settles, which is what `T+N` means to a strategy. It is a
+fixed sim span rather than N sessions, so a weekend does not stretch it; a
+preset wanting the session-counted form owes a calendar-aware successor.
+
+**Cash account or margin account.** An equity with NO `[symbols.X.margin]` table
+is a CASH account: it pays the full notional on a buy and may not sell short at
+any price, which is refused by name rather than as a funding shortfall. Give the
+symbol a margin policy with `basis = "notional"` and it becomes a MARGIN
+account - `initial = "0.5"` and `maintenance = "0.25"` is Reg-T. It then posts a
+fraction of the notional and borrows the rest, so the settlement balance goes
+negative by the loan while the shares sit on the other side of it, and the
+maintenance requirement is measured against the position's value at the mark.
+
 ## Margin, fees and the calendar
 
 Every nested overlay form below is also legal under a symbol table: for

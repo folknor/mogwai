@@ -177,7 +177,8 @@ ledger.
   modelling it as `Spot { base: "AAPL" }` put it on the same footing as USD -
   which is what made short sales, settlement periods and round lots
   inexpressible. Cash moves by the full notional on both sides; the shares are
-  the position.
+  the position. All three conventions are now expressed on the class, and the
+  next paragraph is what they mean.
 - `Future` moves only settlement cash, with exposure carried as a marked
   position.
 - `Perpetual` is a future that pays FUNDING between long and short at an
@@ -192,12 +193,41 @@ ledger.
   carries the one implementation of both forms, so realized and unrealized can
   never disagree.
 
+AN EQUITY IS A CASH ACCOUNT OR A MARGIN ACCOUNT, and the margin policy is which.
+That distinction is what decides what an equity account may DO, and it is
+enforced rather than reported:
+
+- A CASH account (no margin policy on the symbol) pays the whole notional on a
+  buy and MAY NOT SELL SHORT at any price. The refusal names the reason rather
+  than reading as a funding shortfall, because shorting is not something a
+  larger balance would buy.
+- A MARGIN account posts the Reg-T requirement - `basis = "notional"`, `initial
+  = 0.5`, `maintenance = 0.25` - and BORROWS the rest, so the settlement balance
+  goes negative by the loan while the shares sit on the other side of it. The
+  account is worth what it was; `valuation_in` counts an equity at its MARKET
+  VALUE rather than its unrealized, because the cash already moved by the whole
+  notional. The maintenance walk measures the same way, which is what makes a
+  margin call reachable at all.
+
+THE LOCATE is `borrowable`: absent means the venue models no borrow market, `0`
+states a name nobody will lend, and any other value caps the account's net short.
+THE SETTLEMENT PERIOD is `settlement_ns`: a sale's proceeds are credited at once
+and held unspendable until the span has run, appearing as `locked` on the balance
+row - which is what a `T+N` convention actually is to a strategy. It is a fixed
+sim span rather than N sessions, and that simplification is stated rather than
+hidden. THE ROUND LOT is `lot_size`, and it governs what may be SUBMITTED rather
+than what the size grid can represent: a partial fill legitimately leaves an
+odd-lot remainder, so `size_increment` stays at one share.
+
 MARGIN HAS TWO BASES. `per_contract` is a fixed amount of settlement currency
 however the price moves, which is what CME publishes and what every shipped
 preset states. `notional` is a fraction of notional, so the requirement moves
 with the price - that is what forex, crypto margin and Reg-T equity margin
 actually do, and it is the leveraged account the venue previously had no way to
-express: ten-times leverage is `initial = 0.1`.
+express: ten-times leverage is `initial = 0.1`. THE MAINTENANCE WALK ASKS THE
+POLICY rather than multiplying `maintenance_per_contract` by a contract count,
+which read a notional-basis fraction as a per-contract amount and left a
+leveraged account unable to breach at any price.
 
 FUNDING IS CHECKED PER ACCOUNT AT BIND. The venue's `[balances]` is only what an
 unnamed account opens with, so a client that named its own funding cannot be
