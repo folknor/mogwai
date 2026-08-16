@@ -6,8 +6,9 @@
   readiness and broadcast to every connected WebSocket.
 - **Ledger**: the single `mogwai-engine` instance owned by the run. HTTP and
   WebSocket order entry act on the same ledger.
-- **Warmup**: the materialized simulated history from `data_origin_ns` through
-  `run_start_ns`. `warmup_ns` is their distance.
+- **Warmup**: the uniformly servable simulated history from `data_origin_ns`
+  through `run_start_ns`. `warmup_ns` is their distance. The boot river is
+  materialized before readiness and every other river on first read.
 - **Instrument class**: the shape an instrument takes - `spot` (a base/quote
   currency pair) or `future` (cash-settled, continuous, no expiry or roll).
   Everything else about the instrument is a knob on top of it.
@@ -29,6 +30,7 @@
 - **Session calendar**: the weekly open windows in exchange-local time. A
   scheduled close is configuration and the market is genuinely shut inside it,
   as distinct from `ReopenGap`, which is unscheduled havoc.
-- **ReadyRecord**: one versioned JSON line, the venue's only stdout output.
+- **ReadyRecord**: one versioned JSON line describing the venue, its only stdout
+  output. It names no symbol; attach identity is `addr` plus `run_seed`.
 - **RunComplete**: the terminal WebSocket announcement for a planned duration
   completion, followed by a normal close.

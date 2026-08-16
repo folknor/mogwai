@@ -329,7 +329,6 @@ async fn serve_async(
         version: mogwai_protocol::ReadyRecord::VERSION,
         addr: bound_addr,
         pid: std::process::id(),
-        symbol: instrument.symbol.to_string(),
         run_seed: seeds.run,
         data_origin_ns,
         run_start_ns,

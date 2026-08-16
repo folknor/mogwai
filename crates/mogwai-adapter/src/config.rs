@@ -84,13 +84,26 @@ impl MogwaiDataClientConfig {
     /// identifies nothing over time: the port is ephemeral, and this venue frees
     /// it before it exits, so a client that only knows where to dial cannot tell
     /// its own run from whatever answers there next.
+    ///
+    /// It names no river. A venue reports no symbol (`ReadyRecord` 6) because it
+    /// can serve many, so `symbol` stays `None` and the socket lands on the
+    /// venue's boot river; a host that wants a specific one says so with
+    /// [`Self::with_symbol`].
     #[must_use]
     pub fn for_run(record: &mogwai_protocol::ReadyRecord, account_id: AccountId) -> Self {
         Self {
             expected_run_seed: Some(record.run_seed),
-            symbol: Some(record.symbol.clone()),
             ..Self::for_addr(record.addr, account_id)
         }
+    }
+
+    /// Name the river this client's socket binds, matching `/ws?symbol=`.
+    /// Without one the socket takes the venue's boot river. This is the host's
+    /// choice and is not derivable from a venue readiness record.
+    #[must_use]
+    pub fn with_symbol(mut self, symbol: impl Into<String>) -> Self {
+        self.symbol = Some(symbol.into());
+        self
     }
 
     /// Arm havoc on this config, for the builder-ish call sites that want one
@@ -230,9 +243,17 @@ impl MogwaiExecClientConfig {
     pub fn for_run(record: &mogwai_protocol::ReadyRecord, account_id: AccountId) -> Self {
         Self {
             expected_run_seed: Some(record.run_seed),
-            symbol: Some(record.symbol.clone()),
             ..Self::for_addr(record.addr, account_id)
         }
+    }
+
+    /// Name the river this client's socket binds, matching `/ws?symbol=`.
+    /// Without one the socket takes the venue's boot river. This is the host's
+    /// choice and is not derivable from a venue readiness record.
+    #[must_use]
+    pub fn with_symbol(mut self, symbol: impl Into<String>) -> Self {
+        self.symbol = Some(symbol.into());
+        self
     }
 
     /// Arm havoc on this config.
@@ -415,7 +436,6 @@ mod tests {
             version: mogwai_protocol::ReadyRecord::VERSION,
             addr: "127.0.0.1:1234".parse().expect("address"),
             pid: 1,
-            symbol: "MNQ".into(),
             run_seed: 7,
             data_origin_ns: 0,
             run_start_ns: 0,
@@ -460,12 +480,20 @@ mod tests {
     }
 
     #[test]
-    fn for_run_carries_the_records_symbol() {
+    fn for_run_binds_the_run_and_names_no_river() {
         let record = ready_record();
         let data = MogwaiDataClientConfig::for_run(&record, AccountId::from(DEFAULT_ACCOUNT_ID));
         let exec = MogwaiExecClientConfig::for_run(&record, AccountId::from(DEFAULT_ACCOUNT_ID));
+        assert_eq!(data.symbol, None);
+        assert_eq!(exec.symbol, None);
+        let data = MogwaiDataClientConfig::for_run(&record, AccountId::from(DEFAULT_ACCOUNT_ID))
+            .with_symbol("MNQ");
+        let exec = MogwaiExecClientConfig::for_run(&record, AccountId::from(DEFAULT_ACCOUNT_ID))
+            .with_symbol("MNQ");
         assert_eq!(data.symbol.as_deref(), Some("MNQ"));
         assert_eq!(exec.symbol.as_deref(), Some("MNQ"));
+        assert!(data.ws_url().ends_with("/ws?symbol=MNQ"));
+        assert!(exec.ws_url().ends_with("/ws?symbol=MNQ"));
     }
 
     #[test]

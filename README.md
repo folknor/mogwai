@@ -187,9 +187,11 @@ load-bearing rather than conventional:
 
 1. Spawn `mogwai serve` as a **direct** child, capturing stdout.
 2. Read one line of stdout: a JSON `ReadyRecord`. Check its `version` first, then
-   use its `addr`. Stdout closing without a line means the venue failed to boot,
-   and its stderr says why. The read blocks for as long as warmup generation
-   takes, so bound it yourself and treat expiry as a boot failure.
+   use its `addr`. The record names no instrument; a launcher needing one takes
+   it from its own configuration. Stdout closing without a line means the venue
+   failed to boot, and its stderr says why. The read blocks for as long as
+   warmup generation takes, so bound it yourself and treat expiry as a boot
+   failure.
 3. Drain stderr continuously, or send it to a file or the null device. Logs go
    to stderr by design, a pipe holds about 64 KiB, and a full pipe blocks the
    writer - so a capture nobody reads wedges the venue mid-run, which at the

@@ -4,19 +4,19 @@ Pass a TOML file explicitly with `mogwai serve --config PATH`; omission uses
 built-in defaults. Unknown keys and malformed values fail startup.
 
 The lifecycle keys are `run_duration_ns` (zero means no declared completion)
-and `warmup_ns` (simulated history generated before readiness). `warmup_ns` was
-formerly `backfill_horizon_ns`: an operator carrying an old file renames the key
-and keeps the value, since the span it names is the same one - what changed is
-that the venue now MATERIALIZES it at boot instead of merely permitting requests
-into it. `/clock` names the resulting `data_origin_ns` and `warmup_ns`;
+and `warmup_ns` (the uniform servable span before the run starts). `warmup_ns`
+was formerly `backfill_horizon_ns`: an operator carrying an old file renames the
+key and keeps the value, since the span it names is the same one. The boot
+river is materialized before readiness and every other river on first read.
+`/clock` names the resulting `data_origin_ns` and `warmup_ns`;
 `/trades` and `/quotes` refuse a start below the floor or beyond current
 simulated time, and clamp an end past current simulated time to it. They also
 refuse with `400` a symbol not served by this run and name the served symbol,
 so an impossible request stays distinguishable from a quiet market. History
 symbols match the served instrument exactly, case included, even though config
 resolves preset names case-insensitively. The served spelling is the one the
-config wrote; clients should read it from the readiness record or
-`/instruments` rather than type it. This refusal concerns only this run's
+config wrote; clients should read it from `/instruments` rather than type it.
+The readiness record names no symbol. This refusal concerns only this run's
 symbol, never whether a preset exists for the requested string. `/quotes`
 returns only BBO publications whose `ts_event` lies in the inclusive requested
 window. It does not synthesize a leading governing quote when the window begins

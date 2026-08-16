@@ -109,14 +109,14 @@ pub(crate) struct Run {
     /// a second thing that could be re-anchored independently of the tape it
     /// dates.
     pub(crate) sim: SimClock,
-    /// Sim instant at which the run began serving live, set after warmup was
-    /// materialized. The epoch every duration is measured from.
+    /// Sim placement origin for every boat and epoch every duration is measured
+    /// from. Computed before any river's warmup is materialized.
     pub(crate) started_ns: u64,
     /// Sim instant at which the run stops itself, or `None` for indefinite.
     /// Equals `started_ns + run_duration_ns`.
     pub(crate) deadline_ns: Option<u64>,
-    /// Sim span of history generated eagerly at boot and held for the life of
-    /// the process. The history floor is `started_ns - warmup_ns`.
+    /// Uniform servable sim span before `started_ns`. The boot river is
+    /// materialized before readiness; other rivers materialize it on first read.
     pub(crate) warmup_ns: u64,
     pub(crate) delay_ms: AtomicU64,
     pub(crate) submit_act_ms: AtomicU64,

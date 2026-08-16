@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import traceback
 import urllib.request
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
@@ -46,7 +47,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Readiness-record schema this launcher understands. Step 3 refuses anything
 # else rather than reading fields that may have moved.
-READY_VERSION = 5
+READY_VERSION = 6
 
 # Each mode's default venue config, relative to scripts/. `None` means the
 # venue's own built-in defaults.
@@ -67,6 +68,39 @@ MODE_CONFIGS = {
 # --------------------------------------------------------------------------
 # Step 1-3: the launcher contract.
 # --------------------------------------------------------------------------
+
+
+def boot_key(config: str | None) -> str | None:
+    """The config's own name for its boot river, unresolved.
+
+    Either the top-level `symbol` key or, when that is absent, the
+    `[instrument] preset` name. This is what the operator TYPED, which is not
+    necessarily what the venue serves: preset lookup folds case.
+    """
+    if config is None:
+        return None
+    with open(config, "rb") as handle:
+        doc = tomllib.load(handle)
+    return doc.get("symbol") or doc.get("instrument", {}).get("preset")
+
+
+def boot_symbol(config: str | None, served: list[str]) -> str:
+    """The served spelling of this venue's boot river.
+
+    The venue reports no symbol (ReadyRecord 6): it serves any river its config
+    resolves. The served spelling is the venue's to state, so it comes from
+    `/instruments`, and the config key is used only to SELECT which served
+    entry is the boot river - case-insensitively, because preset lookup is.
+    Re-implementing the venue's resolution in `tomllib` would be a second,
+    drifting copy of it.
+    """
+    key = boot_key(config)
+    if key is None:
+        assert len(served) == 1, f"no boot key, and the venue serves {served}"
+        return served[0]
+    matches = [entry for entry in served if entry.lower() == key.lower()]
+    assert len(matches) == 1, f"config boot key {key} matches {matches} of {served}"
+    return matches[0]
 
 
 def venue_binary() -> str:
@@ -131,7 +165,11 @@ class Venue:
             raise AssertionError(f"unsupported readiness version: {record['version']}")
         self.record = record
         self.addr = record["addr"]
-        self.symbol = record["symbol"]
+        # The record names no river, so the boot symbol is resolved here, once,
+        # from the venue's own instrument list plus this config's boot key.
+        instruments = self.http("/instruments")
+        served = [entry["symbol"] for entry in instruments]
+        self.symbol = boot_symbol(config, served)
 
     def _drain_stderr(self) -> None:
         if self.child.stderr is None:
@@ -297,10 +335,9 @@ def check_common(venue: Venue) -> None:
         assert body["oms_type"] in ("netting", "hedging")
 
     instruments = venue.http("/instruments")
-    assert len(instruments) == 1, f"one run serves one instrument, got {instruments}"
-    assert instruments[0]["symbol"] == venue.symbol, (
-        f"the served instrument is {instruments[0]['symbol']}, the readiness "
-        f"record names {venue.symbol}"
+    served = [entry["symbol"] for entry in instruments]
+    assert venue.symbol in served, (
+        f"the venue serves {served}, the boot river is {venue.symbol}"
     )
 
     clock = venue.http("/clock")

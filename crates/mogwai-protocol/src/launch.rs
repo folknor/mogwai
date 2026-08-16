@@ -424,7 +424,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
             tracing::info!(
                 addr = %record.addr,
                 pid = record.pid,
-                symbol = %record.symbol,
+                run_start_ns = record.run_start_ns,
                 run_seed = record.run_seed,
                 warmup_ns = record.warmup_ns,
                 version_string = %record.version_string,
@@ -878,12 +878,11 @@ mod tests {
         assert!(matches!(error, LaunchError::Malformed { .. }), "{error:?}");
     }
 
-    fn record_json(version: u32) -> String {
+    fn record_value(version: u32) -> serde_json::Value {
         serde_json::json!({
             "version": version,
             "addr": "127.0.0.1:41235",
             "pid": 42,
-            "symbol": "BTCUSDT",
             "run_seed": 7,
             "data_origin_ns": 1,
             "run_start_ns": 2,
@@ -891,14 +890,52 @@ mod tests {
             "warmup_ns": 1,
             "version_string": "test",
         })
-        .to_string()
+    }
+
+    fn record_json(version: u32) -> String {
+        record_value(version).to_string()
+    }
+
+    /// The same body with the `symbol` key version 5 carried and version 6
+    /// dropped, so a test can put a stale field in front of the parser.
+    fn record_json_with_symbol(version: u32) -> String {
+        let mut value = record_value(version);
+        value["symbol"] = serde_json::json!("BTCUSDT");
+        value.to_string()
     }
 
     #[test]
     fn a_current_record_parses() {
         let record = parse_ready(&record_json(ReadyRecord::VERSION)).expect("current schema");
         assert_eq!(record.addr.port(), 41235);
-        assert_eq!(record.symbol, "BTCUSDT");
+        assert_eq!(record.run_seed, 7);
+        assert_eq!(record.data_origin_ns, 1);
+        assert_eq!(record.run_start_ns, 2);
+        assert_eq!(record.warmup_ns, 1);
+        assert_eq!(record.run_duration_ns, None);
+    }
+
+    /// `ReadyRecord` does not set `deny_unknown_fields`, so serde happily
+    /// ignores the `symbol` key version 5 carried: the raw version check in
+    /// `parse_ready` is the ONLY thing that refuses a stale record. Both halves
+    /// are asserted, because the refusal alone would hold just as well if serde
+    /// were strict, and then the test would be documenting the wrong mechanism.
+    #[test]
+    fn a_record_carrying_a_symbol_is_refused_by_version_alone() {
+        match parse_ready(&record_json_with_symbol(ReadyRecord::VERSION - 1)) {
+            Err(LaunchError::Version {
+                reported,
+                understood,
+            }) => {
+                assert_eq!(reported, ReadyRecord::VERSION - 1);
+                assert_eq!(understood, ReadyRecord::VERSION);
+            }
+            other => panic!("expected a version refusal, got {other:?}"),
+        }
+
+        let record = parse_ready(&record_json_with_symbol(ReadyRecord::VERSION))
+            .expect("serde ignores the removed field once the version matches");
+        assert_eq!(record.version, ReadyRecord::VERSION);
     }
 
     /// A reader that reports how many bytes it was actually asked to hand over.

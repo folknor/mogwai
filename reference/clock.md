@@ -21,7 +21,10 @@ deadline task, the fill sweeper and the trailing-volatility window keep
 working: `/clock` reports speed `1.0` for a firehose run. A non-zero speed
 paces delivery to `sim.wall_ns(ts)`.
 
-`warmup_ns` is the materialized simulated interval before `run_start_ns`.
+`warmup_ns` is the uniform servable simulated interval before `run_start_ns`.
+The boot river is materialized before readiness and every other river on first
+read. `run_start_ns` is every boat's placement origin, so per-boat clocks vary
+in wall anchor and speed but never in sim epoch.
 `data_origin_ns` is its earliest servable instant, always `TAPE_ORIGIN_NS`.
 `/clock` reports both the clock and the current simulated time. It takes an
 optional `?symbol=`, and answers for that river's boat: a boat carries its own

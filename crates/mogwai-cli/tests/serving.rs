@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! L3-L6 gates: the history floor, the eagerly materialized warmup, the
+//! L3-L6 gates: the history floor, the boot river's warmup span servable at
+//! readiness, the
 //! subscription-free feed, and the single ledger every connection shares.
 
 mod common;
@@ -9,12 +10,32 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    accelerated_config, band_config, fast_config, http_get, paced_config, spawn,
+    accelerated_config, band_config, fast_config, http_get, mnq_preset_config, paced_config, spawn,
     tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ServerMessage, TradeTick};
 use tokio_tungstenite::tungstenite::Message;
+
+/// A config whose boot river is named ONLY by `[instrument] preset`, with no
+/// top-level `symbol` key. The harness must resolve MNQ the way `serve.rs`
+/// does; reading the raw config key and defaulting to `DEFAULT_PRESET` answers
+/// BTCUSDT for a venue that serves MNQ, and no other config in this tree can
+/// tell the two apart.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn preset_only_config_resolves_the_boot_river() {
+    let venue = spawn(&["--config", &mnq_preset_config()]);
+    assert_eq!(venue.symbol, "MNQ");
+    let (status, body) = http_get(&venue.http_base(), "/instruments");
+    assert_eq!(status, 200, "instrument list answers: {body}");
+    let defs: Vec<mogwai_protocol::InstrumentDef> =
+        serde_json::from_str(&body).unwrap_or_else(|err| panic!("{body} is not a list: {err}"));
+    assert!(
+        defs.iter().any(|def| def.symbol.as_ref() == venue.symbol),
+        "the venue serves its resolved boot river: {body}"
+    );
+}
 
 #[test]
 #[ignore = "binds a loopback listener"]
@@ -74,10 +95,9 @@ async fn ws_upgrade_refuses_an_unserved_symbol_with_400() {
         other => panic!("expected an HTTP refusal before upgrade, got {other}"),
     }
 
-    let (mut socket, response) =
-        tokio_tungstenite::connect_async(venue.ws_url_for(&venue.record.symbol))
-            .await
-            .expect("the boot river upgrades");
+    let (mut socket, response) = tokio_tungstenite::connect_async(venue.ws_url_for(&venue.symbol))
+        .await
+        .expect("the boot river upgrades");
     assert_eq!(response.status(), 101);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
@@ -187,7 +207,7 @@ async fn an_order_for_another_symbol_is_refused_on_a_bound_socket() {
         202,
         "the act latency is armed"
     );
-    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url_for(&venue.record.symbol))
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url_for(&venue.symbol))
         .await
         .expect("bind the boot river");
     let submit = r#"{"type":"SubmitOrder","client_order_id":"WRONG-RIVER","symbol":"MES","side":"Buy","order_type":"Limit","quantity":"1","price":"1","time_in_force":"Gtc"}"#;
@@ -352,7 +372,7 @@ fn two_runs_with_the_same_configured_seed_serve_the_same_first_trades() {
     let page = |venue: &common::Venue| {
         let path = format!(
             "/trades?symbol={}&start=0&end={}&limit=50",
-            venue.record.symbol, venue.record.run_start_ns
+            venue.symbol, venue.record.run_start_ns
         );
         let (status, body) = http_get(&venue.http_base(), &path);
         assert_eq!(status, 200, "{body}");
@@ -373,7 +393,7 @@ fn trades_after_sim_now_are_refused_with_400() {
 
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!("/trades?symbol={}&start={far_future}", venue.record.symbol),
+        &format!("/trades?symbol={}&start={far_future}", venue.symbol),
     );
     assert_eq!(status, 400, "a future start is refused");
     assert!(
@@ -389,7 +409,7 @@ fn trades_after_sim_now_are_refused_with_400() {
         &venue.http_base(),
         &format!(
             "/trades?symbol={}&start={}&end={far_future}&limit=5",
-            venue.record.symbol, venue.record.run_start_ns
+            venue.symbol, venue.record.run_start_ns
         ),
     );
     assert_eq!(status, 200, "a future end is clamped, not refused: {body}");
@@ -410,13 +430,13 @@ fn history_for_an_unserved_symbol_is_refused_with_400() {
             "the refusal names the request: {body}"
         );
         assert!(
-            body.contains(&venue.record.symbol),
+            body.contains(&venue.symbol),
             "the refusal names the served symbol: {body}"
         );
     }
 
-    let lowercase = venue.record.symbol.to_lowercase();
-    if lowercase != venue.record.symbol {
+    let lowercase = venue.symbol.to_lowercase();
+    if lowercase != venue.symbol {
         let (status, body) = http_get(
             &venue.http_base(),
             &format!("/trades?symbol={lowercase}&start=0&limit=5"),
@@ -426,7 +446,7 @@ fn history_for_an_unserved_symbol_is_refused_with_400() {
 
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!("/trades?symbol={}&start=0&limit=5", venue.record.symbol),
+        &format!("/trades?symbol={}&start=0&limit=5", venue.symbol),
     );
     assert_eq!(
         status, 200,
@@ -445,10 +465,7 @@ fn the_full_warmup_span_is_servable_at_readiness() {
 
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!(
-            "/trades?symbol={}&start={floor}&limit=50",
-            venue.record.symbol
-        ),
+        &format!("/trades?symbol={}&start={floor}&limit=50", venue.symbol),
     );
     assert_eq!(status, 200, "the declared floor is servable: {body}");
 
@@ -487,7 +504,7 @@ async fn a_connection_receives_the_tape_without_asking() {
         if let Message::Text(text) = message
             && let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text)
         {
-            assert_eq!(trade.symbol.as_ref(), venue.record.symbol);
+            assert_eq!(trade.symbol.as_ref(), venue.symbol);
             return;
         }
     }
@@ -519,7 +536,7 @@ async fn a_venue_without_warmup_still_publishes_its_tape() {
         if let Message::Text(text) = message
             && let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text)
         {
-            assert_eq!(trade.symbol.as_ref(), venue.record.symbol);
+            assert_eq!(trade.symbol.as_ref(), venue.symbol);
             assert_eq!(venue.record.warmup_ns, 0, "the fixture declares no warmup");
             return;
         }
@@ -607,7 +624,7 @@ async fn two_connections_share_one_ledger() {
 
     let submit = format!(
         r#"{{"type":"SubmitOrder","client_order_id":"SHARED-1","symbol":"{}","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}}"#,
-        venue.record.symbol
+        venue.symbol
     );
     worker
         .send(Message::Text(submit.into()))
@@ -723,7 +740,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
         &venue.http_base(),
         &format!(
             "/trades?symbol={}&start={}&end={sim_now}&limit=10000",
-            venue.record.symbol,
+            venue.symbol,
             sim_now.saturating_sub(300_000_000_000)
         ),
     );
@@ -731,7 +748,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
     let price = trades.last().expect("anchor print").price - rust_decimal::Decimal::new(201, 2);
     let submit = format!(
         r#"{{"type":"SubmitOrder","client_order_id":"BAND-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"{price}","time_in_force":"Gtc"}}"#,
-        venue.record.symbol,
+        venue.symbol,
     );
     socket
         .send(Message::Text(submit.into()))
@@ -805,7 +822,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
             let id = format!("MKT-{path}-{attempt}");
             let submit = format!(
                 r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01"{price},"time_in_force":"Gtc"}}"#,
-                venue.record.symbol
+                venue.symbol
             );
             socket
                 .send(Message::Text(submit.into()))
@@ -866,7 +883,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
                 &venue.http_base(),
                 &format!(
                     "/trades?symbol={}&start={}&end={}&limit=10000",
-                    venue.record.symbol,
+                    venue.symbol,
                     // A 300 s lookback, not a 1 s one: the arrival clock's quiet
                     // state runs a mean gap of several seconds, so a one-second
                     // window is legitimately empty often enough to make this
@@ -913,7 +930,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
     let venue = spawn(&["--config", &band_config()]);
     let path = format!(
         "/trades?symbol={}&start={}&limit=200",
-        venue.record.symbol, venue.record.data_origin_ns
+        venue.symbol, venue.record.data_origin_ns
     );
     let (status, before) = http_get(&venue.http_base(), &path);
     assert_eq!(status, 200);
@@ -923,7 +940,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
     for index in 0..100 {
         let submit = format!(
             r#"{{"type":"SubmitOrder","client_order_id":"TAPE-{index}","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
-            venue.record.symbol
+            venue.symbol
         );
         socket
             .send(Message::Text(submit.into()))
@@ -979,7 +996,7 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     let venue = spawn(&["--config", &band_config()]);
     let path = format!(
         "/trades?symbol={}&start={}&limit=200",
-        venue.record.symbol, venue.record.data_origin_ns
+        venue.symbol, venue.record.data_origin_ns
     );
     let (status, before) = http_get(&venue.http_base(), &path);
     assert_eq!(status, 200);
@@ -999,12 +1016,12 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
         let submit = if index % 2 == 0 {
             format!(
                 r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopMarket","quantity":"0.01","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
-                venue.record.symbol
+                venue.symbol
             )
         } else {
             format!(
                 r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopLimit","quantity":"0.01","price":"1","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
-                venue.record.symbol
+                venue.symbol
             )
         };
         socket
@@ -1088,7 +1105,7 @@ async fn websocket_commands_cannot_overtake_each_other() {
         .expect("open order socket");
     let submit = format!(
         r#"{{"type":"SubmitOrder","client_order_id":"ORDERED-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
-        venue.record.symbol
+        venue.symbol
     );
     socket
         .send(Message::Text(submit.into()))
@@ -1148,7 +1165,7 @@ async fn websocket_command_work_is_bounded_without_an_act_delay() {
     for index in 0..50 {
         let command = format!(
             r#"{{"type":"SubmitOrder","client_order_id":"CAP-{index}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01","time_in_force":"Gtc"}}"#,
-            venue.record.symbol
+            venue.symbol
         );
         socket
             .send(Message::Text(command.into()))
@@ -1251,7 +1268,7 @@ fn post_divergence_body(base: &str, body: &str) -> (u16, String) {
 #[ignore = "binds a loopback listener"]
 fn a_generator_arm_on_a_boated_river_is_refused_naming_the_forking_alternative() {
     let venue = spawn(&["--config", &fast_config()]);
-    let symbol = venue.record.symbol.clone();
+    let symbol = venue.symbol.clone();
     let (status, body) = post_divergence_body(
         &venue.http_base(),
         &format!(
@@ -1287,7 +1304,7 @@ fn a_generator_arm_with_no_symbol_is_refused_naming_the_boated_rivers() {
         "an unqualified generator arm is refused: {body}"
     );
     assert!(
-        body.contains(&*venue.record.symbol),
+        body.contains(&*venue.symbol),
         "the refusal names the seated river: {body}"
     );
 }
@@ -1327,7 +1344,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
         .expect("open order socket");
     let submit = format!(
         r#"{{"type":"SubmitOrder","client_order_id":"SILENT-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
-        venue.record.symbol
+        venue.symbol
     );
     socket
         .send(Message::Text(submit.into()))
@@ -1359,7 +1376,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
         "the refusal names the request: {body}"
     );
     assert!(
-        body.contains(&*venue.record.symbol),
+        body.contains(&*venue.symbol),
         "the refusal names the order's own river: {body}"
     );
 
@@ -1368,7 +1385,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
         &venue.http_base(),
         &format!(
             r#"{{"type":"CancelOpenOrderSilently","symbol":"{}","client_order_id":"SILENT-1"}}"#,
-            venue.record.symbol
+            venue.symbol
         ),
     );
     assert_eq!(status, 202, "the matching symbol is accepted: {body}");
@@ -1394,7 +1411,7 @@ fn clock_answers_per_boat_when_a_symbol_is_named() {
     let venue = spawn(&["--config", &two_symbols_config()]);
     let (status, boated) = http_get(
         &venue.http_base(),
-        &format!("/clock?symbol={}", venue.record.symbol),
+        &format!("/clock?symbol={}", venue.symbol),
     );
     assert_eq!(status, 200, "the boot river answers: {boated}");
     let boated: mogwai_protocol::ServerClock = serde_json::from_str(&boated).unwrap();
@@ -1426,7 +1443,7 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
     let (mut leaving, _) = tokio_tungstenite::connect_async(format!(
         "{}?symbol={}&duration_ms=1500",
         venue.ws_url(),
-        venue.record.symbol
+        venue.symbol
     ))
     .await
     .expect("the bounded passenger boards the same boat");

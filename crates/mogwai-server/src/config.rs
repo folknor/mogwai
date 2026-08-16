@@ -115,11 +115,11 @@ pub struct Config {
     /// disables it. When enabled, each websocket session receives liveness
     /// frames that survive `StallData` but not `GoDark`.
     pub(crate) server_heartbeat_ms: u64,
-    /// Simulated history generated eagerly at boot, in nanoseconds.
+    /// Uniform servable simulated-history span, in nanoseconds.
     /// `data_origin = run_start_ns - warmup_ns` is the earliest instant the
-    /// tape can serve, and the whole span is MATERIALIZED before the readiness
-    /// record is written (see `Rivers::ensure_reach`) rather than merely
-    /// permitted. A request below the floor is refused loudly rather than
+    /// tape can serve. The boot river is materialized before readiness; every
+    /// other river materializes the span on first read. A request below the
+    /// floor is refused loudly rather than
     /// served short, so this default need not be exact - 24h covers a day's
     /// warmup. Formerly `backfill_horizon_ns`, which bounded what a client was
     /// allowed to ASK for; with warmup declared and generated those are the

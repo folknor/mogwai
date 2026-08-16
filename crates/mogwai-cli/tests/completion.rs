@@ -209,13 +209,10 @@ async fn run_complete_reaches_every_open_socket() {
 #[ignore = "binds a loopback listener"]
 async fn run_complete_is_stamped_on_the_receiving_sockets_clock() {
     let mut venue = spawn(&["--config", &two_symbols_config(), "--duration", "2s"]);
-    let (mut boot, _) = tokio_tungstenite::connect_async(format!(
-        "{}?symbol={}",
-        venue.ws_url(),
-        venue.record.symbol
-    ))
-    .await
-    .expect("join the boot river");
+    let (mut boot, _) =
+        tokio_tungstenite::connect_async(format!("{}?symbol={}", venue.ws_url(), venue.symbol))
+            .await
+            .expect("join the boot river");
     let (mut second, _) =
         tokio_tungstenite::connect_async(format!("{}?symbol=MNQ&speed=1", venue.ws_url()))
             .await

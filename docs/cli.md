@@ -12,8 +12,10 @@ because the venue models latency on the sim axis and runs on the same machine as
 its client.
 
 The endpoint therefore has to be learned rather than assumed. On boot the venue
-writes ONE line of JSON to STDOUT - the `ReadyRecord`, carrying `addr` among the
-rest - and that is the only thing it ever writes there. Logs go to stderr, so
+writes ONE line of JSON to STDOUT - the version 6 `ReadyRecord`, carrying
+`version`, `addr`, `pid`, `run_seed`, `data_origin_ns`, `run_start_ns`,
+`run_duration_ns`, `warmup_ns`, and `version_string` - and that is the only
+thing it ever writes there. It reports no symbol. Logs go to stderr, so
 the two never interleave. A launcher captures stdout and reads a line; a human
 sees the same line in the terminal.
 
@@ -24,6 +26,8 @@ with older clients. A socket owns exactly one river. A supplied symbol is 1 to
 Malformed or unserved symbols are refused with HTTP 400 before the upgrade.
 Any configured symbol is accepted. The first passenger places its river's boat
 and later passengers at the same speed share it.
+A client names that river from its own configuration; the readiness record does
+not supply one.
 
 The history endpoints `GET /trades` and `GET /quotes` are bounded by the named
 river's now. For a seated river that is the last instant its boat published;
@@ -79,7 +83,8 @@ it.
 
 The launcher starts `mogwai serve` as its direct child with stdout captured,
 reads exactly one JSON `ReadyRecord` line, checks `version`, and uses `addr` for
-both clients. That read blocks for as long as warmup generation takes, which is
+both clients. It takes any required river name from its own configuration. That
+read blocks for as long as warmup generation takes, which is
 proportional to `warmup_ns` and the tape's cadence; a launcher wanting a bound
 sets its own timeout and treats expiry as a boot failure. Stdout closing without
 a line is a boot failure, and the child's stderr and exit status say why. It keeps the child as a direct child: Linux parent-death

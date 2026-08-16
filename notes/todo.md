@@ -108,25 +108,19 @@ below (piece 4, piece 13) still resolve:
    keyed registry rather than off `INDEX`/`BOOT`. Piece 6 has since landed
    too: the `/ws` symbol carrier is no longer boot-symbol-only.
 
-SLICE 2 - many boats on many rivers. Piece 7 landed 2026-08-15 (the keyed
-`Rivers` registry replacing `RunIndex`/`BOOT`, plural instrument profiles,
-lazy engine registration); detail is git history, not this file. Pieces 6
-and 9 (the `/ws` symbol carrier, taken wholesale, and the boatyard - sharing
-key, placement/join/wind-down, and its open mechanics) have also landed
-2026-08-15; detail is git history, not this file. Pieces 10 (one clock per
-boat) and 11 (fill-path de-singling) have also landed, 2026-08-16; detail is
-git history, not this file.
-Numbering is left as it was assigned so the cross-references below (piece
-11, piece 13) still resolve:
+SLICE 2 - many boats on many rivers - is now wholly landed. Piece 7 (the
+keyed `Rivers` registry replacing `RunIndex`/`BOOT`, plural instrument
+profiles, lazy engine registration), pieces 6 and 9 (the `/ws` symbol
+carrier, taken wholesale, and the boatyard - sharing key, placement/join/
+wind-down, and its open mechanics), pieces 10 and 11 (one clock per boat,
+then fill-path de-singling moving `MarketReadingCache` onto the boat), and
+piece 12 (`ReadyRecord` version 6 describing the venue, naming no symbol,
+retaining the shared tape origin, placement origin and servable warmup
+span) all landed between 2026-08-15 and 2026-08-16; their detail is git
+history, not this file. Numbering is left as it was assigned so the
+cross-reference below (piece 13) still resolves.
 
-11. LANDED. Fill-path de-singling moved `MarketReadingCache` onto the boat, so
-    each river retains its own memo and unrelated walks take unrelated locks.
-    `last_swept_ns` already lives on the boat (piece 9). Detail is git history.
-12. `ReadyRecord` under per-boat clocks: drop `symbol` (VERSION 6) and
-    decide what the origin/start/warmup fields mean as river properties;
-    the seed-reproduces-a-venue-not-a-boat-placement knock-on.
-
-CROSS-CUTTING:
+CROSS-CUTTING, still open:
 
 13. The consumer surface as one landing: `/instruments` returns the
     resolved configuration, the adapter's subscription guard resolves with
@@ -135,8 +129,8 @@ CROSS-CUTTING:
 14. The durable prose: every decision above owes `reference/` and `docs/`
     writing WITH the code, per the standing item below.
 
-Piece 4 (and the guard question inside 13) is a decision before code; pieces
-6, 9, 10 and 11 were the highest-risk and have landed, leaving 12 as the next.
+Piece 4 (and the guard question inside 13) is ruled and consumed; slices 1
+and 2 are both fully landed, leaving 13 and 14 as the remaining work.
 Broadarrow's item 4
 (consuming the multi-instrument venue) is excluded - it is theirs, and
 their build breaking loudly when piece 13 lands is the designed handoff.
@@ -344,7 +338,7 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   venue-scoped account ledger). Detail is git history; the durable statement
   is `reference/clock.md`, `reference/architecture.md`, `docs/havoc.md` and
   `docs/cli.md`. Piece 11 has since moved `MarketReadingCache` onto each boat;
-  piece 12 (`ReadyRecord` under per-boat clocks) remains open, and the
+  piece 12 has since resolved the readiness record as venue-scoped, and the
   boatless-river sweep gap above is explicitly still open too.
 
 - SYMBOL RESOLUTION IS TOTAL, AND THE DEFAULT PRESET IS THE SHAPE CONTRACT.
@@ -432,27 +426,13 @@ their build breaking loudly when piece 13 lands is the designed handoff.
   is right for a typo and wrong for a servable-but-unconfigured symbol, where
   the adapter would refuse on a venue's behalf that would happily serve.
 
-- STILL OPEN, both surfaced 2026-08-15 and neither answered.
+- STILL OPEN, surfaced 2026-08-15 and not yet answered.
   1. IS SUBSCRIBING TO AN UNCONFIGURED SYMBOL A SUPPORTED SESSION, or merely a
      property of the tape machinery nobody exercises? If supported, the adapter
      guard above must go and a client needs a way to resolve an unlisted
      symbol's shape. If not, "accept any string" is true of the generator and
      not of a client session, which is coherent but must be STATED so the two
      do not read as contradictory.
-  2. `ReadyRecord` UNDER PER-BOAT CLOCKS. `symbol` is the named problem - a
-     venue has no symbol under this model, so the field can only lie, and
-     dropping it bumps `ReadyRecord::VERSION` to 6. Attach does not need it:
-     broadarrow keys on endpoint plus `run_seed`, which remain correct venue
-     identity. But the record also carries `data_origin_ns`, `run_start_ns` and
-     `warmup_ns`, and with one clock per boat those are properties of a RIVER
-     rather than of the venue, so the schema question is wider than the one
-     field. The knock-on this raised - that a specific river's path might also
-     depend on when its boat was placed, so `run_seed` plus config would
-     reproduce a venue but not a river - is CLOSED by piece 9's fixed
-     placement origin: a boat is always placed at the river's origin, never at
-     sim-now-at-placement, so a boat's path is a pure function of its key and
-     the run seed regardless of when it boards. Piece 12 inherits the schema
-     question above, not the knock-on.
 
 - GATE the hand-maintained tape-version prose the way the artifact binding
   blocks are gated. Surfaced by the bug-hunt loop on 2026-08-14: when
@@ -1334,7 +1314,7 @@ Named consts, canonical: `DEFAULT_REQUEST_TIMEOUT_SECS = 30`, `MAX_HISTORY_LIMIT
 = 50_000`, `BASELINE_LATENCY.base_nanos = 30_000_000` (30ms honest-feed latency
 floor), `MAX_LATENCY_NANOS = 60_000_000_000` (60s per-field ceiling),
 `control::MAX_DIVERGENCE_MS = 3_600_000` (1h DelayAcks/GoDark/StallData ceiling),
-`ReadyRecord::VERSION = 5`.
+`ReadyRecord::VERSION = 6`.
 
 The `launch` module (the shipped launcher) adds `DEFAULT_BINARY = "mogwai"`,
 `DEFAULT_READY_TIMEOUT = 300s`, `STDERR_RING = 64` retained lines, and

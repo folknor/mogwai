@@ -1,7 +1,7 @@
 # mogwai architecture
 
 Mogwai is a one-run fake venue. A direct launcher starts one foreground process
-and receives a versioned readiness record through an inherited file descriptor.
+and receives a versioned readiness record as one JSON line on the child's stdout.
 The process binds one endpoint and owns an open set of configured instruments,
 generated river tapes, and one engine ledger.
 
@@ -269,10 +269,14 @@ derives from it by domain-separated derivation; nothing else in a run is
 random. The fill root is run-level, because the band's draw key already carries
 the order's symbol; a tape root is per-river, keyed by the REQUESTED symbol
 label as described above, so two labels resolving to the same shape never share
-a path. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; warmup is generated
-before readiness and the run proper begins at `run_start_ns = TAPE_ORIGIN_NS +
-warmup_ns` on the same axis, so `data_origin_ns` is always `TAPE_ORIGIN_NS` and
-history outside `[data_origin_ns, sim_now]` is refused. A run is therefore a
+a path. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; the boot river's
+warmup is generated before readiness, every other river's on first read, and the
+run proper begins at `run_start_ns = TAPE_ORIGIN_NS + warmup_ns` on the same
+axis, so `data_origin_ns` is always `TAPE_ORIGIN_NS` and history outside
+`[data_origin_ns, sim_now]` is refused. The venue has one tape origin, one
+placement origin and one warmup span, but N rivers, each carrying at most one
+boat with its own wall anchor and speed. This is why the readiness record
+carries those three time facts and no symbol. A run is therefore a
 pure function of `(seed, config)` for a given build and fingerprint - with the
 limit that a new seed only draws a new path from the one fitted model behind
 the fingerprint, so marginalizing over seeds reduces variance conditional on

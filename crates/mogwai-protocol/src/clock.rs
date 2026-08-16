@@ -121,9 +121,9 @@ pub struct ServerClock {
     pub server_now_ns: u64,
     /// Earliest `ts_event` the tape can serve; a `start` below it is off-tape.
     pub data_origin_ns: u64,
-    /// Simulated history the venue GENERATED before it reported readiness, in
-    /// nanoseconds. The whole span is servable, not merely permitted: it is
-    /// materialized at boot and held for the life of the process.
+    /// Uniform servable history span before `run_start_ns`, in nanoseconds.
+    /// The boot river is materialized before readiness; other rivers
+    /// materialize it on first read.
     pub warmup_ns: u64,
     /// True when this answer belongs to a placed boat, false when it is the
     /// venue clock served as a fallback because the named river carries no

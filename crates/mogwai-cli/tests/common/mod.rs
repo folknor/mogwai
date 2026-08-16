@@ -38,6 +38,9 @@ use mogwai_protocol::{
 pub struct Venue {
     inner: LaunchedVenue,
     pub record: ReadyRecord,
+    /// Boot river resolved from the same config this harness launches. A venue
+    /// reports no symbol, so tests name one from their own configuration.
+    pub symbol: String,
     /// Wall instant the readiness line was read. The acceleration gate measures
     /// the served run from here, because that is when the launcher could first
     /// connect.
@@ -116,13 +119,29 @@ pub fn spec(extra_args: &[&str]) -> LaunchSpec {
 /// The launcher contract, executed through the shipped launcher. Panics with the
 /// boot failure - including the venue's own stderr - if it does not come up.
 pub fn spawn(extra_args: &[&str]) -> Venue {
-    let inner = launch(spec(extra_args)).expect("the venue launches and reports ready");
+    let spec = spec(extra_args);
+    let symbol = boot_symbol(spec.config.as_deref());
+    let inner = launch(spec).expect("the venue launches and reports ready");
     let ready_at = Instant::now();
     Venue {
         record: inner.record().clone(),
+        symbol,
         inner,
         ready_at,
     }
+}
+
+fn boot_symbol(config_path: Option<&std::path::Path>) -> String {
+    use mogwai_server::config;
+
+    let cfg = config::Config::load(config_path.map(PathBuf::from))
+        .expect("the harness launches only configs the venue accepts");
+    config::build_instrument_profiles(&cfg)
+        .expect("the harness launches only configs the venue accepts")
+        .boot_symbol_def(cfg.boot_symbol())
+        .expect("the boot shape resolves for a config the venue accepts")
+        .symbol
+        .to_string()
 }
 
 /// Step 3 of the contract: check `version` FIRST, refuse a record this
@@ -151,6 +170,13 @@ pub fn fast_config() -> String {
 pub fn two_symbols_config() -> String {
     format!(
         "{}/tests/configs/two-symbols.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+pub fn mnq_preset_config() -> String {
+    format!(
+        "{}/tests/configs/mnq-preset.toml",
         env!("CARGO_MANIFEST_DIR")
     )
 }
