@@ -860,10 +860,29 @@ required eventually, since both modes must be supported.
   tightly, but it makes a closed order unattributed, and the query surface
   reports terminal rows BY DESIGN - so every connection's finished history would
   have gone to everyone.
-  ONE OF THE THREE CHANNELS REMAINS OPEN, and it is the one no filter can close:
-  the single process-wide ledger. `GET /account` and the balance and position
-  arithmetic are still venue-wide, so passengers still share a wallet. That
-  needs the passenger object. See the river-and-passenger item above.
+  ALL THREE CHANNELS ARE CLOSED as of 2026-08-16. The third was the one no
+  filter could close - the single process-wide ledger - and it went with the
+  PASSENGER OBJECT landing: an account id plus its own engine, created on demand
+  and keyed by id, named with `ws?account=` and `account=` on the pulled
+  snapshot. A connection naming none gets the default account, which exists for
+  the ephemeral single-client venue rather than as a venue-wide account everyone
+  shares.
+  ATTRIBUTION IS BY ACCOUNT, NOT BY CONNECTION, corrected during that landing
+  and worth keeping: two sockets presenting one id are the SAME TRADER, so
+  hiding one socket's resting order from the other's query is not invisibility,
+  it is a client losing sight of its own book. The socket suite pins both
+  halves - same id shares a ledger, different ids do not.
+  THE SWEEPER STILL WALKS EACH RIVER ONCE. Pending scans are gathered across
+  every passenger BEFORE the walk and the results applied back per ledger
+  against the same prices, which is what keeps the water common and the money
+  private. Settlement marks are cloned per passenger, since a settlement instant
+  belongs to the calendar.
+  STILL OPEN FROM THE ACCOUNT-POLICY DESIGN, none of it blocking: the ledger is
+  opened from the venue's `[balances]` rather than from a client-named opening
+  balance; there is no risk policy, so nothing is enforced and nothing is
+  published; a second socket presenting a seated id does NOT evict the first;
+  and nothing freezes or resumes an account on disconnect. See the
+  account-policy item above.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an

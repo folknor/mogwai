@@ -682,6 +682,68 @@ async fn two_connections_share_one_ledger() {
     }
 }
 
+/// Two ACCOUNTS on one venue do not share a ledger, which is the converse of
+/// the test above and the property that makes a shared exchange usable.
+///
+/// The pair matters together: same account id means one trader and one book
+/// (above), different ids mean two traders who cannot see or move each other
+/// (here). Before the per-account ledger the engine was one per process, so
+/// this assertion failed - the observer saw the worker's order, and their
+/// balances moved together.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn two_accounts_on_one_venue_do_not_share_a_ledger() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let account_url = |account: &str| format!("{}?account={account}", venue.ws_url());
+    let (mut worker, _) = tokio_tungstenite::connect_async(account_url("WYRD-001"))
+        .await
+        .expect("open the first account's socket");
+    let (mut stranger, _) = tokio_tungstenite::connect_async(account_url("WYRD-002"))
+        .await
+        .expect("open the second account's socket");
+
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"PRIVATE-1","symbol":"{}","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}}"#,
+        venue.symbol
+    );
+    worker
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("submit an order on the first account");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stranger
+        .send(Message::Text(
+            r#"{"type":"QueryOrders","request_id":"Q-2","open_only":false}"#.into(),
+        ))
+        .await
+        .expect("query the second account's truth");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let message = tokio::time::timeout_at(deadline, stranger.next())
+            .await
+            .expect("the query is answered")
+            .expect("the socket stays open")
+            .expect("a well-formed frame");
+        if let Message::Text(text) = message
+            && let Ok(ServerMessage::OrderStatusSnapshot(snapshot)) =
+                serde_json::from_str::<ServerMessage>(&text)
+        {
+            assert_eq!(snapshot.request_id, "Q-2");
+            assert!(
+                snapshot
+                    .orders
+                    .iter()
+                    .all(|order| order.client_order_id != "PRIVATE-1"),
+                "one account can see another's order: the venue has one ledger \
+                 where it should have two"
+            );
+            return;
+        }
+    }
+}
+
 /// The 2026-08-02 defect, stated positively. A divergence armed over the
 /// control plane used to be diverted onto an auto-created account slot and
 /// never reached the market-data socket. With one run there is no other slot to
