@@ -174,6 +174,15 @@ pub fn two_symbols_config() -> String {
     )
 }
 
+/// A venue serving a PERPETUAL whose funding interval is one simulated second,
+/// so a gate can cross a funding instant without waiting eight sim-hours.
+pub fn perpetual_config() -> String {
+    format!(
+        "{}/tests/configs/perpetual.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 pub fn mnq_preset_config() -> String {
     format!(
         "{}/tests/configs/mnq-preset.toml",

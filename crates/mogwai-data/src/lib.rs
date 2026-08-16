@@ -98,7 +98,7 @@ pub use trigger::{
 /// `mogwai-lab` and `mogwai-cli` generation does not move because those paths
 /// pass literal or command-line seeds directly to `GeneratedSource`; none uses
 /// `RunSeeds`. The arrival-mechanism reservation remains 15.
-pub const TAPE_PROTOCOL_VERSION: u32 = 18;
+pub const TAPE_PROTOCOL_VERSION: u32 = 19;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

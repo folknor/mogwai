@@ -183,16 +183,31 @@ impl SizeGrid {
         }
     }
 
+    /// The grid an instrument's OWN SIZING states, rather than one inferred
+    /// from its class.
+    ///
+    /// This read `is_future()` and hardcoded whole contracts, which was right
+    /// while every derivative was an exchange-listed future. It stopped being
+    /// right when perpetuals landed: a crypto perp sizes fractionally - Binance
+    /// quotes BTCUSDT.P in thousandths - so a class-derived grid would refuse
+    /// the most common perpetual on the largest venue while claiming its
+    /// generator config was invalid.
+    ///
+    /// Deriving from `size_increment` and `size_precision` moves NO existing
+    /// tape: a future configured with increment 1 and precision 0 lands on
+    /// exactly the integral grid it had, and spot with 1e-8 lands on exactly
+    /// `spot()`. The tape version is bumped anyway, because the rule is
+    /// unconditional and a bump costs one integer.
     #[must_use]
     pub fn from_def(def: &InstrumentDef) -> Self {
-        if def.class.is_future() {
-            Self {
-                multiplier: def.class.multiplier(),
-                integral: true,
-                min_size: Decimal::ONE,
-            }
-        } else {
-            Self::spot()
+        Self {
+            multiplier: def.class.multiplier(),
+            integral: def.size_precision == 0 && def.size_increment == Decimal::ONE,
+            min_size: if def.size_increment > Decimal::ZERO {
+                def.size_increment
+            } else {
+                Decimal::new(1, SIZE_DECIMALS)
+            },
         }
     }
 }

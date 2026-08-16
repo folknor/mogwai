@@ -1022,12 +1022,53 @@ pub(crate) enum ConfiguredClass {
         base: String,
         quote: String,
     },
+    /// A share, held as a position and paid for in `currency`. NOT a spot pair
+    /// with the ticker as its base: see `InstrumentClass::Equity`.
+    Equity {
+        currency: String,
+        #[serde(default = "one")]
+        multiplier: Decimal,
+    },
     Future {
         underlying: String,
         settlement_currency: String,
         multiplier: Decimal,
         asset_class: WireAssetClass,
     },
+    /// A perpetual swap. `funding_interval_ns` and `funding_rate` are what make
+    /// it one rather than a future; the eight-hour default is the near-universal
+    /// convention, and a zero rate is legal and means a venue where longs and
+    /// shorts happen to be balanced.
+    Perpetual {
+        underlying: String,
+        settlement_currency: String,
+        multiplier: Decimal,
+        asset_class: WireAssetClass,
+        #[serde(default = "eight_hours_ns")]
+        funding_interval_ns: u64,
+        #[serde(default)]
+        funding_rate: Decimal,
+    },
+    /// A coin-margined contract: quoted in `quote_currency`, settled in
+    /// `settlement_currency`. The two must differ, or it is a linear contract
+    /// and should be configured as one.
+    Inverse {
+        underlying: String,
+        settlement_currency: String,
+        quote_currency: String,
+        multiplier: Decimal,
+        asset_class: WireAssetClass,
+    },
+}
+
+/// One share per contract, which is every venue that lists shares.
+fn one() -> Decimal {
+    Decimal::ONE
+}
+
+/// Eight hours, the funding interval essentially every perpetual venue uses.
+fn eight_hours_ns() -> u64 {
+    8 * 3_600 * 1_000_000_000
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1100,6 +1141,41 @@ impl ConfiguredInstrument {
                 } => InstrumentClass::Future {
                     underlying: underlying.clone(),
                     settlement_currency: settlement_currency.clone(),
+                    multiplier: *multiplier,
+                    asset_class: *asset_class,
+                },
+                ConfiguredClass::Equity {
+                    currency,
+                    multiplier,
+                } => InstrumentClass::Equity {
+                    currency: currency.clone(),
+                    multiplier: *multiplier,
+                },
+                ConfiguredClass::Perpetual {
+                    underlying,
+                    settlement_currency,
+                    multiplier,
+                    asset_class,
+                    funding_interval_ns,
+                    funding_rate,
+                } => InstrumentClass::Perpetual {
+                    underlying: underlying.clone(),
+                    settlement_currency: settlement_currency.clone(),
+                    multiplier: *multiplier,
+                    asset_class: *asset_class,
+                    funding_interval_ns: *funding_interval_ns,
+                    funding_rate: *funding_rate,
+                },
+                ConfiguredClass::Inverse {
+                    underlying,
+                    settlement_currency,
+                    quote_currency,
+                    multiplier,
+                    asset_class,
+                } => InstrumentClass::Inverse {
+                    underlying: underlying.clone(),
+                    settlement_currency: settlement_currency.clone(),
+                    quote_currency: quote_currency.clone(),
                     multiplier: *multiplier,
                     asset_class: *asset_class,
                 },
@@ -1399,6 +1475,7 @@ fn validate_derivative(
     underlying: &str,
     settlement_currency: &str,
     multiplier: Decimal,
+    whole_contracts: bool,
 ) -> anyhow::Result<()> {
     if underlying.trim().is_empty()
         || !underlying.is_ascii()
@@ -1420,7 +1497,12 @@ fn validate_derivative(
             def.symbol
         );
     }
-    if def.size_increment != Decimal::ONE || def.size_precision != 0 {
+    // EXCHANGE-LISTED derivatives trade whole contracts; a CME future or a
+    // coin-margined contract denominated in fixed quote units cannot be
+    // fractionally sized. A crypto PERPETUAL can and routinely is - Binance
+    // sizes BTCUSDT.P in thousandths - so requiring whole contracts of one would
+    // refuse the most common perpetual on the largest venue.
+    if whole_contracts && (def.size_increment != Decimal::ONE || def.size_precision != 0) {
         anyhow::bail!(
             "instrument {} derivative size_increment must be 1 and size_precision must be 0",
             def.symbol
@@ -1516,7 +1598,7 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             funding_rate,
             ..
         } => {
-            validate_derivative(def, underlying, settlement_currency, *multiplier)?;
+            validate_derivative(def, underlying, settlement_currency, *multiplier, false)?;
             if *funding_interval_ns == 0 {
                 anyhow::bail!(
                     "instrument {} funding_interval_ns must be positive; a perpetual that never \
@@ -1542,7 +1624,7 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             multiplier,
             ..
         } => {
-            validate_derivative(def, underlying, settlement_currency, *multiplier)?;
+            validate_derivative(def, underlying, settlement_currency, *multiplier, true)?;
             if quote_currency.trim().is_empty()
                 || quote_currency.len() > mogwai_protocol::MAX_CURRENCY_LEN
             {

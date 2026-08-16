@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::{
     accelerated_config, band_config, fast_config, http_get, http_post_json, mnq_preset_config,
-    paced_config, spawn, tiny_fanout_config, two_symbols_config,
+    paced_config, perpetual_config, spawn, tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{LiquiditySide, ServerMessage, TradeTick};
@@ -1187,6 +1187,57 @@ async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
     assert!(
         rendered.contains("400") || rendered.contains("HTTP"),
         "the refusal is a status before the upgrade: {rendered}"
+    );
+}
+
+/// A perpetual position PAYS FUNDING, which is the only thing tying a perp to
+/// spot when it has no expiry to converge at.
+///
+/// Without it a strategy holding a perp across funding instants has forward P
+/// and L that is wrong by construction rather than by approximation, so this is
+/// a correctness gate rather than a fidelity nicety.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_perpetual_position_pays_funding_across_an_interval() {
+    let venue = spawn(&["--config", &perpetual_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open the perpetual socket");
+
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"PERP-1","symbol":"{}","side":"Buy","order_type":"Market","quantity":"5","time_in_force":"Gtc"}}"#,
+        venue.symbol
+    );
+    socket
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("open a long perpetual position");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let balance_of = |body: &str| -> f64 {
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        value["balances"]
+            .as_array()
+            .expect("balances")
+            .iter()
+            .find(|row| row["currency"] == "USDT")
+            .and_then(|row| row["total"].as_str())
+            .expect("a USDT total")
+            .parse()
+            .expect("a decimal total")
+    };
+    let (_, before) = http_get(&venue.http_base(), "/account");
+    let before = balance_of(&before);
+
+    // Several sweep passes, each crossing at least one one-second funding
+    // instant on this venue's clock.
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let (_, after) = http_get(&venue.http_base(), "/account");
+    let after = balance_of(&after);
+
+    assert!(
+        after < before,
+        "a long perpetual must pay funding across an interval: {before} -> {after}"
     );
 }
 

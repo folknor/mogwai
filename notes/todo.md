@@ -680,12 +680,23 @@ required eventually, since both modes must be supported.
   contract, which is what forex, crypto margin and Reg-T equity margin do.
   `is_marked` replaced `is_future` wherever the question was really "does this
   carry a marked position", which is now a wider set than "is this a derivative".
+  ALL FIVE ARE CONFIGURABLE, not merely modelled: `[symbols.X.class]` takes
+  `kind = "equity" | "perpetual" | "inverse"` beside the two it had, and
+  `[symbols.X.margin]` takes `basis = "notional"`. `SizeGrid::from_def` now
+  derives from the def's OWN sizing rather than from its class, which is what
+  lets a perpetual size fractionally the way a real one does; that touched the
+  generation path so `TAPE_PROTOCOL_VERSION` went to 19 and the Stage A manifest
+  was re-blessed, though the change provably moves no existing tape (a future at
+  increment 1 lands on the integral grid it had, spot at 1e-8 on `spot()`).
   STILL OPEN ON THIS AXIS, none blocking: an equity has no SETTLEMENT PERIOD, no
   short-sale locate or borrow, and no round-lot rule beyond whole shares; a
   perpetual's funding rate is a CONSTANT rather than something that responds to
-  the mark-versus-index basis, which is what a real venue computes it from; and
-  nothing has been fitted for any of the new classes, so a preset using one is
-  serving the default tape under a different shape.
+  the mark-versus-index basis, which is what a real venue computes it from;
+  funding is paid on the fill sweeper's cadence so an instant is honoured on the
+  pass that crosses it rather than at the instant itself; and nothing has been
+  FITTED for any of the new classes, so a symbol configured as one is served the
+  default tape wearing a different shape - the intake sequence is what makes a
+  preset honest, and none has been run for equity, perps or inverse.
   THE RISK STATE IS PUBLISHED, and the reason is EVALUATION rather than
   strategy consumption. Ruled 2026-08-16. A real trader reads its remaining
   drawdown off the firm's dashboard; mogwai presents no dashboard, so if the

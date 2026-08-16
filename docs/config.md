@@ -112,6 +112,32 @@ up to that river's checkpoint ceiling. A malformed
 or unfunded `[symbols.*]` table refuses startup even when nothing ever asks for
 that label, so a typo cannot wait to surface as a runtime rejection.
 
+A `[symbols.NAME.class]` table names one of five `kind` values, and the choice
+decides how holding the instrument moves the ledger rather than merely how it is
+labelled:
+
+- `spot` with `base` and `quote`. Credits the base asset as a CURRENCY BALANCE,
+  which is right for crypto spot where the base is money you can spend.
+- `equity` with `currency` and an optional `multiplier` (one share per contract
+  by default). Held as a POSITION, paid for in cash. Not a spot pair with the
+  ticker as its base: that puts shares in the ledger as money.
+- `future` with `underlying`, `settlement_currency`, `multiplier` and
+  `asset_class`. Whole contracts only.
+- `perpetual`, the same fields plus `funding_interval_ns` (eight hours by
+  default) and `funding_rate`, the fraction of notional the LONG pays the SHORT
+  each interval. Negative reverses the direction, which is what a market
+  trading below spot produces. Sizing may be FRACTIONAL, unlike a listed
+  future, because that is what crypto perpetuals actually do.
+- `inverse`, coin-margined: `settlement_currency` is what moves and
+  `quote_currency` is what the contract is priced in. The two must differ.
+
+`[symbols.NAME.margin]` takes `initial_per_contract`, `maintenance_per_contract`,
+`breach_action`, and a `basis` of `per_contract` (the default) or `notional`.
+Per-contract is a fixed amount of settlement currency whatever the price, which
+is how CME states a performance bond. Notional is a fraction of notional, so the
+requirement moves with the price - ten-times leverage is `initial = 0.1`. That is
+the leveraged account forex, crypto margin and Reg-T equity margin need.
+
 `[regime]` selects the single run-wide market regime. `[balances]` is the
 OPENING balance every account is funded with when its client names none - not
 the balance of one shared ledger. A client that wants its own size opens an
