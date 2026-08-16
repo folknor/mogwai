@@ -768,15 +768,6 @@ consumer surface landed was the designed handoff.
   socket-level demonstration is ever wanted, design it on the divergence
   window's own clock rather than wall arrival order.
 
-- UNRESOLVED, restored 2026-08-16 after an erroneous close: `bounded_quotes`
-  filters each quote on `start` (`quote.ts_event >= start`) while
-  `bounded_trades` does not, and both now read the same
-  `rivers.history_source(symbol, start)`. `MergeSource::starting_at` is
-  documented to make `start` inclusive-and-not-earlier, so the extra guard is
-  either redundant or compensating for something trades does not compensate
-  for. Nobody has read `MergeSource` closely enough to say which; verified
-  still present in the code at the piece-10 landing.
-
 - GTD / `expire_time` on the wire, with a time-driven expiry pass on the
   sweeper. Refused today for limits and conditionals alike - the conditional-
   order-type landing carried a GTC-only rule for stops for exactly this

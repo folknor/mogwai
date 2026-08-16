@@ -1598,9 +1598,15 @@ pub(crate) fn bounded_quotes(
         let TickEvent::Quote(quote) = tick else {
             continue;
         };
-        if start.is_none_or(|start| quote.ts_event >= start) {
-            out.push(quote);
-        }
+        // No `>= start` guard, and deliberately none: `history_source` hands
+        // `start` to `MergeSource::starting_at`, which seeks each child and
+        // retains the first tick AT OR AFTER it, and every `seek_to` - the
+        // default drain and `GeneratedSource`'s checkpoint-skipping one alike -
+        // returns only `ts_event >= start_ts`. Nothing this loop sees can
+        // precede `start`. A guard here used to compensate for a contract that
+        // already holds, and its asymmetry with `bounded_trades` read as one of
+        // the two being wrong.
+        out.push(quote);
         if out.len() >= limit {
             break;
         }
@@ -1637,6 +1643,42 @@ mod calendar_tests {
             bounded
                 .iter()
                 .all(|quote| (start..=end).contains(&quote.ts_event))
+        );
+    }
+
+    /// The contract `bounded_quotes` dropped its own `>= start` guard onto:
+    /// a start instant landing in a GAP between ticks - the case an
+    /// on-a-tick start cannot distinguish - still yields nothing earlier than
+    /// it, on both routes. If a seek ever starts returning the tick BEFORE the
+    /// target, this is what says so.
+    #[test]
+    fn a_mid_gap_start_yields_nothing_earlier_on_either_route() {
+        let profiles = generated_profiles();
+        let quotes = bounded_quotes("BTCUSDT", Some(0), None, 8, &profiles).unwrap();
+        let trades = bounded_trades("BTCUSDT", Some(0), None, 8, &profiles).unwrap();
+        assert!(quotes.len() > 2 && trades.len() > 2);
+
+        // Strictly inside the gap between two prints, so the seek cannot land
+        // on the boundary by luck.
+        let gap = |before: u64, after: u64| {
+            assert!(after > before + 1, "adjacent prints leave no gap to aim at");
+            before + 1
+        };
+
+        let start = gap(quotes[0].ts_event, quotes[1].ts_event);
+        assert!(
+            bounded_quotes("BTCUSDT", Some(start), None, 8, &profiles)
+                .unwrap()
+                .iter()
+                .all(|quote| quote.ts_event >= start)
+        );
+
+        let start = gap(trades[0].ts_event, trades[1].ts_event);
+        assert!(
+            bounded_trades("BTCUSDT", Some(start), None, 8, &profiles)
+                .unwrap()
+                .iter()
+                .all(|trade| trade.ts_event >= start)
         );
     }
 
