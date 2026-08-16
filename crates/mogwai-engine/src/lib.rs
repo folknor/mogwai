@@ -4595,6 +4595,88 @@ mod tests {
         assert_eq!(usdt.free, Decimal::from(-300));
     }
 
+    /// `RejectNextCancel` refuses a cancel the venue COULD have honoured, and
+    /// the order stays resting.
+    ///
+    /// The order staying resting is the whole arm: a client that published a
+    /// replacement before its cancel was acknowledged now has two live orders
+    /// where its script rests one, which is a real live-path defect no venue
+    /// could previously provoke. A refusal that also removed the order would
+    /// model nothing.
+    #[test]
+    fn a_rejected_cancel_leaves_its_order_resting() {
+        let mut e = Engine::new();
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.arm(Divergence::RejectNextCancel {
+            reason: "venue said no".into(),
+        });
+
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "O1".into(),
+            },
+            2,
+        );
+        assert_eq!(cancel_reject_reason(&out), "venue said no");
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+            "a refused cancel must not also cancel the order"
+        );
+
+        // Still there, and cancellable once the single-shot arm is spent.
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "O1".into(),
+            },
+            3,
+        );
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+            "the order should have survived the refused cancel and be cancellable now"
+        );
+    }
+
+    /// The arm is not spent on a cancel that was going to be refused anyway.
+    /// Spending it there would look, to a scenario author, exactly like the arm
+    /// failing to fire.
+    #[test]
+    fn a_rejected_cancel_arm_survives_an_unknown_order() {
+        let mut e = Engine::new();
+        e.arm(Divergence::RejectNextCancel {
+            reason: "venue said no".into(),
+        });
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "ghost".into(),
+            },
+            1,
+        );
+        assert_eq!(cancel_reject_reason(&out), "unknown order");
+
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "O1".into(),
+            fraction: Decimal::from_f64(0.3).unwrap(),
+        });
+        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 2);
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "O1".into(),
+            },
+            3,
+        );
+        assert_eq!(
+            cancel_reject_reason(&out),
+            "venue said no",
+            "the arm should still have been waiting for a cancel it could refuse"
+        );
+    }
+
     #[test]
     fn cancel_of_already_filled_order_distinguishes_terminal_from_unknown() {
         // A limit on the no-book engine fills immediately on accept, so it is

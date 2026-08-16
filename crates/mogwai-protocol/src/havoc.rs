@@ -341,6 +341,12 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
+        control::Divergence::RejectNextCancel { reason } => {
+            if reason.len() > crate::MAX_REASON_LEN {
+                return Err("RejectNextCancel reason exceeds MAX_REASON_LEN");
+            }
+            Ok(())
+        }
         control::Divergence::DuplicateNextFill
         | control::Divergence::DropNextAccountUpdate
         | control::Divergence::ClearDivergences => Ok(()),

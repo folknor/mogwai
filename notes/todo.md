@@ -1570,10 +1570,14 @@ lands there.
 
 ### The `RejectNextCancel` ask, stated as a MOGWAI-repo item
 
-ACCEPTED 2026-08-16, as a no-brainer rather than a considered fork: it is one
-arm parallel to `RejectNextSubmit` on machinery that already exists, and it is
-the only way a consumer's real live-path defect becomes testable anywhere.
-Queued as a discrete implementation task.
+LANDED 2026-08-16. `control::Divergence::RejectNextCancel { reason }` refuses a
+cancel for a RESTING order and leaves the order where it was, which is the whole
+arm: a client that published its replacement before the cancel was acknowledged
+now rests two orders where its script rests one. It is deliberately NOT spent on
+an unknown or already-terminal id, since those are refused anyway and spending
+it there would look, to a scenario author, exactly like the arm failing to fire.
+Their three unrun scenario files can now be written against a venue that can
+produce the shape.
 
 Their acknowledgement-sequencing landing (2026-08-12) closed a real live-path
 defect: a rejected cancel with its replacement already published leaves two live

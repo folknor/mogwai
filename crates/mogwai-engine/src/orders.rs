@@ -1346,6 +1346,30 @@ impl Engine {
         client_order_id: ClientOrderId,
         ts: u64,
     ) -> Vec<ServerMessage> {
+        // Divergence: refuse a cancel the venue COULD have honoured, leaving the
+        // order resting. Checked before the book is touched, so the refusal
+        // really does leave everything where it was - the whole point is that
+        // the client's model and the book disagree afterwards.
+        //
+        // Only when the order EXISTS: refusing a cancel for an unknown or
+        // already-terminal id would spend the arm on a rejection that was going
+        // to happen anyway, which is the failure mode a scenario author would
+        // never see and would misread as the arm not firing.
+        if let Some(resting) = self
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == client_order_id)
+            .map(|order| order.venue_order_id.clone())
+            && let Some(Divergence::RejectNextCancel { reason }) =
+                self.take_armed(|d| matches!(d, Divergence::RejectNextCancel { .. }))
+        {
+            return vec![ServerMessage::OrderCancelRejected {
+                client_order_id,
+                venue_order_id: Some(resting),
+                reason: mogwai_protocol::truncate_reason(reason),
+                ts_event: ts,
+            }];
+        }
         if let Some(pos) = self.open.position(&client_order_id) {
             let o = self.take_open(pos);
             self.record_closed(&o, WireOrderStatus::Canceled, ts);

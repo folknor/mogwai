@@ -120,6 +120,7 @@ carved out and no new arm exists for the trigger itself.
 | Arm | Where it lands on a conditional |
 |---|---|
 | `RejectNextSubmit` | The submit. The conditional never exists, so nothing can trigger. |
+| `RejectNextCancel` | A cancel for a RESTING order, refusing it and leaving the order where it was. Not spent on an unknown or already-terminal id, which would be refused anyway and would look like the arm failing to fire. The point is what the client is left believing: publish a replacement before the cancel is acknowledged, have the cancel refused, and two orders rest where the script rests one. |
 | `PartialFillNext` | The fill the trigger produces, never the trigger itself. An untriggered stop consumes no arm - only a fill targets one by client order id. |
 | `DuplicateNextFill` | The fill event only. `OrderTriggered` is never duplicated - it is not a fill, and a duplicated trigger has no client FSM transition to land on. |
 | `DropNextAccountUpdate` | The account snapshot that follows the triggered fill, or the cancel a trigger's funds check produced, on the same rule as anywhere else. A trigger that only comes to rest still emits its snapshot, and consumes no arm. |

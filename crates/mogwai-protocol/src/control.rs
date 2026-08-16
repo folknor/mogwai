@@ -27,6 +27,20 @@ pub enum Divergence {
     },
     /// Reject the next submitted order with `reason`.
     RejectNextSubmit { reason: String },
+    /// Refuse the next `CancelOrder` with `reason`, leaving the order RESTING.
+    ///
+    /// The mirror of `RejectNextSubmit`, and it exists because nothing else can
+    /// produce the shape: a client that publishes a replacement before its
+    /// cancel is acknowledged, and then has the cancel refused, is left with two
+    /// live orders where its script rests one. That is a real live-path defect a
+    /// consumer fixed and could pin only with in-process tests, because no venue
+    /// could provoke it.
+    ///
+    /// Distinct from the order being unknown or already terminal, which produce
+    /// the same frame for real reasons. This one refuses a cancel the venue
+    /// COULD have honoured, so the order stays exactly what it was - the point
+    /// is that the book and the client's model disagree afterwards.
+    RejectNextCancel { reason: String },
     /// Delay every outbound execution event by `ms`, bounded by
     /// `MAX_DIVERGENCE_MS`. Arm with `ms: 0` to clear, or post
     /// `ClearDivergences`.
