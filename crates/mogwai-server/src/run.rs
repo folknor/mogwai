@@ -159,6 +159,10 @@ pub(crate) struct Run {
     /// the ephemeral single-client venue, where making the one client name an
     /// id would be ceremony; it is NOT the venue's one account.
     default_account_id: mogwai_protocol::AccountId,
+    /// Whether a returning client is handed a CLEAN ledger instead of its own.
+    /// See the config key of the same name; the readiness record reports it, so
+    /// nobody has to infer which way a venue is set.
+    reset_account_on_reconnect: bool,
     pub(crate) seeds: RunSeeds,
     pub(crate) boatyard: Arc<Boatyard>,
     boot_ticket: Mutex<Option<crate::boatyard::Ticket>>,
@@ -244,6 +248,7 @@ impl Run {
         oms_type: mogwai_protocol::OmsType,
         fill_band_max_ticks: u32,
         account_id: mogwai_protocol::AccountId,
+        reset_account_on_reconnect: bool,
         fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
     ) -> Arc<Self> {
         let boatyard = Boatyard::new(
@@ -266,6 +271,7 @@ impl Run {
                 fill_band_max_ticks,
             },
             default_account_id: account_id,
+            reset_account_on_reconnect,
             boot_symbol: instrument.symbol,
             rivers,
             oms_type,
@@ -338,6 +344,52 @@ impl Run {
     /// The passenger a connection that named no account is served under.
     pub(crate) fn default_passenger(&self) -> Arc<Passenger> {
         self.passenger(&self.default_account_id)
+    }
+
+    /// Seat a CONNECTION on an account: evict whoever holds it, then hand over
+    /// the ledger or a clean one.
+    ///
+    /// The whole reconnection story in one call. A second socket presenting a
+    /// seated id is indistinguishable from that client returning, so the venue
+    /// does not try to tell them apart: the incumbent is closed and the newcomer
+    /// gets the account. Whether it gets that account's HISTORY is the operator's
+    /// `reset_account_on_reconnect` choice, reported in the readiness record so
+    /// nobody has to guess which way a venue is set.
+    pub(crate) fn seat(&self, account_id: &mogwai_protocol::AccountId) -> Arc<Passenger> {
+        let displaced = self.evict_account(account_id.as_str());
+        if displaced > 0 {
+            tracing::info!(
+                account = %account_id.as_str(),
+                displaced,
+                reset = self.reset_account_on_reconnect,
+                "a new connection claimed a seated account",
+            );
+        }
+        if self.reset_account_on_reconnect {
+            self.reopen(account_id);
+        }
+        self.passenger(account_id)
+    }
+
+    /// Discard an account's ledger so the next connection opens a clean one.
+    /// Only `reset_account_on_reconnect` reaches this; the default is to keep
+    /// what the account has.
+    fn reopen(&self, account_id: &mogwai_protocol::AccountId) {
+        self.passengers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(account_id.as_str());
+        // The order claims go with it. Leaving them would attribute a fresh
+        // ledger's frames using a discarded ledger's history.
+        self.order_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, owner| owner != account_id.as_str());
+    }
+
+    /// The account a connection naming none is seated on.
+    pub(crate) fn default_account_id(&self) -> mogwai_protocol::AccountId {
+        self.default_account_id.clone()
     }
 
     /// Open an account with a CLIENT-NAMED opening balance, before anything
@@ -520,6 +572,47 @@ impl Run {
     /// must still find its own orders attributed to it.
     pub(crate) fn release_lanes(&self, id: u64) {
         self.locked_lanes().retain(|bound| bound.id != id);
+    }
+
+    /// Close every connection already trading `account_id`, because a newer one
+    /// has claimed it.
+    ///
+    /// AN ACCOUNT IS ON AT MOST ONE RIVER AT A TIME. Two sockets on one id would
+    /// be one ledger read and written from two places, with a trailing drawdown
+    /// computed across two instruments, so the venue evicts rather than
+    /// admitting the second alongside the first.
+    ///
+    /// The evicted socket is closed NORMALLY, not faulted: from the venue's side
+    /// a second connection presenting an id is indistinguishable from that
+    /// client reconnecting, and handing the ledger over is what makes a
+    /// reconnect work. A consumer must not treat it as a reason to redial, or it
+    /// would evict whatever evicted it.
+    ///
+    /// Returns how many were displaced, so the caller can say so.
+    pub(crate) fn evict_account(&self, account_id: &str) -> usize {
+        let displaced: Vec<BoundLane> = self
+            .locked_lanes()
+            .iter()
+            .filter(|bound| bound.account_id == account_id)
+            .cloned()
+            .collect();
+        for bound in &displaced {
+            drop(
+                bound
+                    .lanes
+                    .send_close(crate::admission::CloseSpec::evicted(format!(
+                        "another connection claimed account {account_id}; a ledger is never read \
+                     from two sockets at once"
+                    ))),
+            );
+        }
+        // Retired here rather than left to each socket's own teardown: the new
+        // connection must not see the old lanes in `bound_lanes` even for the
+        // instant it takes them to notice the close, or its first batch would
+        // be delivered to a socket that is on its way out.
+        self.locked_lanes()
+            .retain(|bound| bound.account_id != account_id);
+        displaced.len()
     }
 
     /// Record that the account `owner` submitted `venue_order_id`.
@@ -815,6 +908,7 @@ mod tests {
             200,
             mogwai_protocol::AccountId::parse(crate::config::DEFAULT_ACCOUNT_ID)
                 .expect("the default account id is legal"),
+            false,
             std::sync::mpsc::channel().0,
         )
     }

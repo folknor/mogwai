@@ -888,6 +888,7 @@ mod tests {
             "run_start_ns": 2,
             "run_duration_ns": null,
             "warmup_ns": 1,
+            "reset_account_on_reconnect": false,
             "version_string": "test",
         })
     }

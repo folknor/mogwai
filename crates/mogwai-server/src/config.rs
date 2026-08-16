@@ -59,6 +59,24 @@ pub struct Config {
     /// every run using it dead on arrival at the consumer. Refusing at boot
     /// costs a line; the alternative was discovered a minute into a run.
     pub(crate) account_id: String,
+    /// Whether a returning client gets its ledger back, or a clean one.
+    ///
+    /// FALSE BY DEFAULT, meaning accounts PERSIST: a socket presenting an id
+    /// that has traded resumes that ledger, with its positions and order history
+    /// intact. That is what makes a reconnect a continuation rather than a new
+    /// trader, and it is what the restart scenarios need - kill a worker holding
+    /// a position, start it again, find the book where it was left.
+    ///
+    /// It is also a behaviour an operator must be TOLD about rather than
+    /// discover, since a stale account silently inherited is a run measuring
+    /// something nobody asked for. The readiness record carries it, so a
+    /// launcher sees it without reading a log line.
+    ///
+    /// Set true and every connection opens a clean ledger under whatever id it
+    /// names, which is what a batch that reuses ids across independent
+    /// experiments wants.
+    #[serde(default)]
+    pub(crate) reset_account_on_reconnect: bool,
     pub(crate) oms_type: mogwai_protocol::OmsType,
     /// How many trailing-volatility horizons wide the fill band is. An order's
     /// trigger is drawn uniformly from `0 ..= band_ticks` ticks AWAY from its
@@ -207,6 +225,7 @@ impl Default for Config {
         Self {
             run_duration_ns: 0,
             account_id: DEFAULT_ACCOUNT_ID.to_owned(),
+            reset_account_on_reconnect: false,
             oms_type: mogwai_protocol::OmsType::Netting,
             fill_band_vol_mult: 0.005,
             fill_band_max_ticks: 200,

@@ -37,6 +37,19 @@ pub struct ReadyRecord {
     /// rivers. Every river is servable back to `data_origin_ns`. Materializing
     /// that span is a changing, per-river latency property and is not reported.
     pub warmup_ns: u64,
+    /// Whether a client returning with an account id it has already traded is
+    /// handed a CLEAN ledger instead of its own.
+    ///
+    /// FALSE means accounts PERSIST across reconnection, which is the default
+    /// and is what makes a reconnect a continuation rather than a new trader.
+    /// That is a behaviour an operator must be told about rather than discover:
+    /// a run that silently inherits a stale position book is measuring something
+    /// nobody asked for.
+    ///
+    /// ON THE RECORD RATHER THAN IN A LOG LINE, deliberately. The launcher
+    /// already parses this line, so a consumer can assert on the setting instead
+    /// of a human having to notice a message at boot.
+    pub reset_account_on_reconnect: bool,
     pub version_string: String,
 }
 
@@ -45,7 +58,7 @@ impl ReadyRecord {
     /// by any landing that adds or changes a field. Stated once, here, so the
     /// venue that writes the record and the test that pins its bytes cannot
     /// disagree about which schema they mean.
-    pub const VERSION: u32 = 6;
+    pub const VERSION: u32 = 7;
 }
 
 #[cfg(test)]
@@ -63,12 +76,13 @@ mod tests {
             run_start_ns: 2,
             run_duration_ns: None,
             warmup_ns: 1,
+            reset_account_on_reconnect: false,
             version_string: "test".into(),
         };
         let json = serde_json::to_string(&value).unwrap();
         assert_eq!(
             json,
-            r#"{"version":6,"addr":"127.0.0.1:41235","pid":42,"run_seed":7,"data_origin_ns":1,"run_start_ns":2,"run_duration_ns":null,"warmup_ns":1,"version_string":"test"}"#
+            r#"{"version":7,"addr":"127.0.0.1:41235","pid":42,"run_seed":7,"data_origin_ns":1,"run_start_ns":2,"run_duration_ns":null,"warmup_ns":1,"reset_account_on_reconnect":false,"version_string":"test"}"#
         );
         assert_eq!(serde_json::from_str::<ReadyRecord>(&json).unwrap(), value);
     }

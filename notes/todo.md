@@ -904,13 +904,24 @@ required eventually, since both modes must be supported.
   TWO GAPS CAME OUT OF THAT LANDING and are their own items below: the
   mark-cadence evaluation, and the single-currency confinement of a policed
   account.
+  EVICTION AND RESUMPTION LANDED, 2026-08-16. A second socket presenting a
+  seated account id evicts the first with a NORMAL close (`1000`, not a fault -
+  a consumer treating it as failure would redial and evict whatever evicted it)
+  and inherits that account's ledger, orders and risk state. That is the whole
+  reconnection story: the venue cannot tell a returning client from a stranger
+  claiming the id, so handing the account over is the only behaviour that lets a
+  killed worker come back to its own book, and it is what the two owed restart
+  runs need. `reset_account_on_reconnect` opts into a clean ledger instead, and
+  `ReadyRecord::VERSION` is 7 carrying that setting, so a launcher reads the
+  policy rather than inferring it.
   STILL OPEN FROM THE ACCOUNT-POLICY DESIGN, none of it blocking: policy
   PRESETS and their runtime registration do not exist, so step two of account
   resolution is absent and only steps one and three work - a client states its
   rules inline or gets none; a terminating breach does not yet END THE VENUE in
-  the ephemeral mode; a second socket presenting a seated id does NOT evict the
-  first; and nothing freezes or resumes an account on disconnect. See the
-  account-policy item above.
+  the ephemeral mode; nothing FREEZES an unattended account, so an account whose
+  connection drops is simply not marked until someone returns, which is the
+  intended behaviour but is untested; and there is no TTL collecting an account
+  nobody reclaims. See the account-policy item above.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an

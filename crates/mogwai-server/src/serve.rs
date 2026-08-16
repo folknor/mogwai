@@ -254,6 +254,7 @@ async fn serve_async(
         // Validated at load, so this cannot fail here.
         mogwai_protocol::AccountId::parse(cfg.account_id.trim())
             .map_err(|err| anyhow::anyhow!("account_id: {err}"))?,
+        cfg.reset_account_on_reconnect,
         fault_tx,
     );
     let boot_profile = rivers
@@ -335,6 +336,7 @@ async fn serve_async(
         run_start_ns,
         run_duration_ns,
         warmup_ns: cfg.warmup_ns,
+        reset_account_on_reconnect: cfg.reset_account_on_reconnect,
         version_string: long_version(),
     };
     {

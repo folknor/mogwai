@@ -955,6 +955,93 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
     );
 }
 
+/// A second socket claiming a seated account evicts the first, and RESUMES its
+/// ledger.
+///
+/// Both halves matter together. Eviction is what keeps an account on one river
+/// with one reader: two sockets on one id would be one ledger written from two
+/// places. Resuming is what makes a reconnect a continuation - the venue cannot
+/// tell a returning client from a stranger presenting the id, so handing the
+/// ledger over is the only behaviour that lets a killed worker come back to its
+/// own position.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_ledger() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let url = format!("{}?account=WYRD-300", venue.ws_url());
+    let (mut first, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("open the first socket");
+
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"RESUMED-1","symbol":"{}","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}}"#,
+        venue.symbol
+    );
+    first
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("submit an order on the first socket");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (mut second, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("open the second socket on the same account");
+
+    // The incumbent is closed, and NORMALLY: an eviction is not a fault, and a
+    // consumer that redialled on it would evict whatever evicted it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut closed = false;
+    while !closed {
+        let message = tokio::time::timeout_at(deadline, first.next())
+            .await
+            .expect("the first socket is closed")
+            .expect("a frame or a close")
+            .expect("a well-formed frame");
+        if let Message::Close(frame) = message {
+            let frame = frame.expect("the close carries a reason");
+            assert_eq!(
+                u16::from(frame.code),
+                1000,
+                "an eviction closes normally, not as a fault: {frame:?}"
+            );
+            assert!(
+                frame.reason.contains("claimed account"),
+                "the close says why: {frame:?}"
+            );
+            closed = true;
+        }
+    }
+
+    // And the newcomer inherits the book rather than a fresh one.
+    second
+        .send(Message::Text(
+            r#"{"type":"QueryOrders","request_id":"Q-3","open_only":false}"#.into(),
+        ))
+        .await
+        .expect("query the resumed ledger");
+    loop {
+        let message = tokio::time::timeout_at(deadline, second.next())
+            .await
+            .expect("the query is answered")
+            .expect("the socket stays open")
+            .expect("a well-formed frame");
+        if let Message::Text(text) = message
+            && let Ok(ServerMessage::OrderStatusSnapshot(snapshot)) =
+                serde_json::from_str::<ServerMessage>(&text)
+        {
+            assert_eq!(snapshot.request_id, "Q-3");
+            assert!(
+                snapshot
+                    .orders
+                    .iter()
+                    .any(|order| order.client_order_id == "RESUMED-1"),
+                "the returning connection did not get its own ledger back"
+            );
+            return;
+        }
+    }
+}
+
 /// An unpoliced account is enforced against nothing, which is what every client
 /// had before policies existed and what the default account still gets.
 #[test]

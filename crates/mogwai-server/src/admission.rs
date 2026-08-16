@@ -78,6 +78,20 @@ pub(crate) const CLOSE_ADMISSION_OVERLOAD: u16 = 1013;
 /// produces a result that looks fine and is not.
 pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
 
+/// A newer connection presented this connection's ACCOUNT ID, so the venue
+/// handed the ledger over and closed this one.
+///
+/// An account is on at most one river at a time and is never shared, so a second
+/// socket claiming an id is not a second trader - from the venue's side it is
+/// indistinguishable from that trader RECONNECTING, and the venue does not try
+/// to tell them apart. Handing the account to the newcomer is what makes a
+/// reconnect work at all.
+///
+/// `1000` (normal closure) rather than a fault code: nothing failed, and the
+/// distinction is what stops a consumer's reconnect ladder from firing. A client
+/// that redialled on this would evict whatever evicted it, forever.
+pub(crate) const CLOSE_EVICTED: u16 = 1000;
+
 /// How long the overload close may take to reach a peer before the connection
 /// is torn down anyway. WALL time, not sim time: this is a transport deadline.
 /// The writer may already be parked in `sink.send()` against a full TCP window,
@@ -342,6 +356,19 @@ impl CloseSpec {
     pub(crate) fn venue_fault(reason: impl Into<String>) -> Self {
         Self {
             code: CLOSE_VENUE_FAULT,
+            reason: truncate_reason(reason.into()),
+        }
+    }
+
+    /// A newer connection claimed this account, so this one is done.
+    ///
+    /// `CLOSE_EVICTED` and NOT a venue fault: nothing failed. Telling the two
+    /// apart matters to a consumer, because a fault is a reason to distrust the
+    /// venue and an eviction is a reason to stop reconnecting - a client that
+    /// redialled here would evict whatever evicted it, forever.
+    pub(crate) fn evicted(reason: impl Into<String>) -> Self {
+        Self {
+            code: CLOSE_EVICTED,
             reason: truncate_reason(reason.into()),
         }
     }

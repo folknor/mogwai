@@ -16,6 +16,18 @@ opening a fresh one. The venue cannot distinguish a reconnect from a stranger
 claiming the id and does not try, so an account id is effectively a bearer
 token.
 
+AN ACCOUNT IS ON AT MOST ONE RIVER, WITH ONE READER. A second socket presenting
+a seated account id EVICTS the first, because a ledger read and written from two
+places is one ledger with two notions of its own state. The evicted socket is
+closed with `1000`, normally rather than as a fault: the venue cannot tell a
+returning client from a stranger claiming the id, and treating an eviction as a
+failure would make a consumer's reconnect ladder evict whatever evicted it. By
+default the newcomer RESUMES that account - positions, order history and risk
+state intact - which is what makes a killed worker able to come back to its own
+book. `reset_account_on_reconnect` hands it a clean ledger instead, and the
+readiness record reports which way the venue is set so a launcher never has to
+infer it.
+
 A connection that names no account is served under the venue's DEFAULT account.
 That exists for the ephemeral single-client venue, where making the one client
 name an id would be ceremony; it is not a venue-wide account every connection

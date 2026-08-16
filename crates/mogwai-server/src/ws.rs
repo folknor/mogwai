@@ -112,9 +112,14 @@ pub(crate) async fn ws_upgrade(
     // THIS passenger's ledger. A malformed id is refused here rather than at
     // first order: nautilus cannot construct an `AccountId` from a bare word, so
     // a venue that accepted one would be refused by every consumer later.
+    //
+    // SEATED, not merely looked up: claiming an account evicts whoever already
+    // holds it, because a ledger is never read from two sockets at once and a
+    // second socket presenting an id is indistinguishable from that client
+    // reconnecting.
     let passenger = match &query.account {
         Some(named) => match mogwai_protocol::AccountId::parse(named) {
-            Ok(account_id) => state.run.passenger(&account_id),
+            Ok(account_id) => state.run.seat(&account_id),
             Err(error) => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -123,7 +128,7 @@ pub(crate) async fn ws_upgrade(
                     .into_response();
             }
         },
-        None => state.run.default_passenger(),
+        None => state.run.seat(&state.run.default_account_id()),
     };
     // The bind-time shape refusal: an invalid resolved shape or a
     // funding-barred one is a CONFIGURATION error, named here and before any
