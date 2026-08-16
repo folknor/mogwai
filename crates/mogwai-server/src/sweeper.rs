@@ -251,7 +251,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // its position is open in one batch and gone in the next
                     // when both describe the same instant.
                     let mut events = events;
-                    let (emitted, originated) = enforce_policy(
+                    let (emitted, originated, terminated) = enforce_policy(
                         passenger,
                         &mut engine,
                         &mut events,
@@ -261,10 +261,30 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     );
                     let shape = engine.book_shape();
                     drop(engine);
-                    if events.is_empty() {
-                        continue;
+                    if !events.is_empty() {
+                        deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
                     }
-                    deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
+                    // A TERMINATING breach on the venue's ONLY account ends the
+                    // run: its one account is dead, so there is nothing left to
+                    // serve, which is the same "no client, no job" rule that
+                    // governs disconnection. Announced AFTER the batch is
+                    // delivered, so the client learns why rather than seeing a
+                    // bare close.
+                    //
+                    // Conditioned on there being only one account, deliberately.
+                    // On a shared exchange one subagent breaching must not take
+                    // down the batch, and the count is the only thing that
+                    // distinguishes the two modes at runtime.
+                    if terminated && seated.len() == 1 {
+                        tracing::warn!(
+                            account = %passenger.account_id.as_str(),
+                            "the venue's only account terminated; ending the run",
+                        );
+                        sweep
+                            .run
+                            .complete(to_ns, to_ns.saturating_sub(sweep.run.started_ns));
+                        break 'passes;
+                    }
                 }
             }
         }
@@ -508,7 +528,7 @@ fn enforce_policy(
     to_ns: u64,
     emitted: usize,
     originated: usize,
-) -> (usize, usize) {
+) -> (usize, usize, bool) {
     let mut ledger = passenger
         .risk
         .lock()
@@ -516,7 +536,7 @@ fn enforce_policy(
     let Some(currency) = ledger.currency().map(str::to_owned) else {
         // Unpoliced. No equity is computed at all, so an unpoliced account pays
         // nothing for a feature it does not use.
-        return (emitted, originated);
+        return (emitted, originated, false);
     };
     let Some(equity) = crate::risk::equity_in(engine, &currency) else {
         // The account holds value this policy cannot express. Order entry
@@ -529,12 +549,12 @@ fn enforce_policy(
             %currency,
             "cannot value this account in its policy currency; risk is not enforced this pass",
         );
-        return (emitted, originated);
+        return (emitted, originated, false);
     };
     let verdict = ledger.observe(equity, to_ns);
     drop(ledger);
     let crate::risk::Verdict::Breached(breach) = verdict else {
-        return (emitted, originated);
+        return (emitted, originated, false);
     };
     tracing::warn!(
         account = %passenger.account_id.as_str(),
@@ -547,7 +567,11 @@ fn enforce_policy(
     let flattened = engine.liquidate_all(to_ns);
     let added = flattened.events.len();
     events.extend(flattened.events);
-    (emitted + added, originated + flattened.originated_orders)
+    (
+        emitted + added,
+        originated + flattened.originated_orders,
+        breach.action == mogwai_protocol::risk::BreachAction::Terminate,
+    )
 }
 
 fn refuse(

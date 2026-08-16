@@ -218,6 +218,18 @@ pub struct Config {
     /// built-in default (matching the committed mogwai.toml); an explicitly
     /// EMPTY `[balances]` table runs the account unfunded on purpose.
     pub(crate) balances: HashMap<String, Decimal>,
+    /// Named risk policies a client can ask for by name instead of restating.
+    ///
+    /// THE SAME IDEA AS AN INSTRUMENT PRESET: a named bundle of knobs a user
+    /// could set by hand, carrying no authority and conferring no status. What
+    /// differs is REGISTRATION. Instrument presets are compiled in, which is
+    /// defensible while there are three of them; account policies track funded
+    /// account programmes, of which there are hundreds, and their rules change
+    /// without notice. Nobody can follow that in a release cycle, so these are
+    /// read from the operator's config at boot and a registered name SHADOWS a
+    /// shipped one.
+    #[serde(default)]
+    pub(crate) account_policies: HashMap<String, mogwai_protocol::risk::AccountPolicy>,
 }
 
 impl Default for Config {
@@ -258,6 +270,7 @@ impl Default for Config {
             symbols: HashMap::new(),
             regime: None,
             balances: default_balances(),
+            account_policies: HashMap::new(),
         }
     }
 }

@@ -163,6 +163,9 @@ pub(crate) struct Run {
     /// See the config key of the same name; the readiness record reports it, so
     /// nobody has to infer which way a venue is set.
     reset_account_on_reconnect: bool,
+    /// Risk policies the operator registered by name, which a client asks for
+    /// instead of restating. Shadows a shipped name of the same spelling.
+    account_policies: std::collections::HashMap<String, mogwai_protocol::risk::AccountPolicy>,
     pub(crate) seeds: RunSeeds,
     pub(crate) boatyard: Arc<Boatyard>,
     boot_ticket: Mutex<Option<crate::boatyard::Ticket>>,
@@ -249,6 +252,7 @@ impl Run {
         fill_band_max_ticks: u32,
         account_id: mogwai_protocol::AccountId,
         reset_account_on_reconnect: bool,
+        account_policies: std::collections::HashMap<String, mogwai_protocol::risk::AccountPolicy>,
         fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
     ) -> Arc<Self> {
         let boatyard = Boatyard::new(
@@ -272,6 +276,7 @@ impl Run {
             },
             default_account_id: account_id,
             reset_account_on_reconnect,
+            account_policies,
             boot_symbol: instrument.symbol,
             rivers,
             oms_type,
@@ -385,6 +390,39 @@ impl Run {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, owner| owner != account_id.as_str());
+    }
+
+    /// Resolve a risk policy the way a symbol resolves: total, three steps,
+    /// step three never fails.
+    ///
+    /// 1. Knobs the client stated INLINE win.
+    /// 2. Otherwise a policy the operator REGISTERED under that name, or one
+    ///    this build ships under it. Registered shadows shipped, because the
+    ///    whole reason registration exists is that shipped terms go stale.
+    /// 3. Otherwise UNPOLICED, which is the default account's policy and what
+    ///    every client had before policies existed.
+    ///
+    /// A name nobody has is an ERROR rather than a silent fall to step three:
+    /// asking for `apex-50k` and quietly getting no rules at all would be a run
+    /// that believes it is enforced and is not.
+    pub(crate) fn resolve_policy(
+        &self,
+        named: Option<&str>,
+        inline: mogwai_protocol::risk::AccountPolicy,
+    ) -> Result<mogwai_protocol::risk::AccountPolicy, AccountRefusal> {
+        if !inline.is_unpoliced() {
+            return Ok(inline);
+        }
+        let Some(name) = named else {
+            return Ok(inline);
+        };
+        self.account_policies
+            .get(name)
+            .cloned()
+            .or_else(|| mogwai_protocol::risk::shipped_policy(name))
+            .ok_or_else(|| AccountRefusal::UnknownPolicy {
+                name: name.to_owned(),
+            })
     }
 
     /// The account a connection naming none is seated on.
@@ -745,6 +783,10 @@ pub(crate) enum AccountRefusal {
     /// Something already trades under this id. Never a reset: see
     /// `Run::open_account`.
     AlreadyOpen,
+    /// A policy name neither the operator nor this build has. Refused rather
+    /// than falling through to unpoliced, which would be a run that believes it
+    /// is enforced and is not.
+    UnknownPolicy { name: String },
 }
 
 impl std::fmt::Display for AccountRefusal {
@@ -753,6 +795,12 @@ impl std::fmt::Display for AccountRefusal {
             Self::AlreadyOpen => f.write_str(
                 "this account is already open; an account outlives its connections, so it is \
                  never re-opened with new terms - name a different account id for a fresh ledger",
+            ),
+            Self::UnknownPolicy { name } => write!(
+                f,
+                "no account policy is registered or shipped under {name}; shipped names are {}, \
+                 and an operator registers more under [account_policies] in the venue config",
+                mogwai_protocol::risk::SHIPPED_POLICIES.join(", ")
             ),
         }
     }
@@ -909,6 +957,7 @@ mod tests {
             mogwai_protocol::AccountId::parse(crate::config::DEFAULT_ACCOUNT_ID)
                 .expect("the default account id is legal"),
             false,
+            std::collections::HashMap::new(),
             std::sync::mpsc::channel().0,
         )
     }

@@ -1120,10 +1120,18 @@ pub(crate) struct OpenAccountRequest {
     /// is what makes a 25k experiment and a 100k experiment runnable on one
     /// venue.
     balances: std::collections::HashMap<String, rust_decimal::Decimal>,
-    /// The rules the venue ENFORCES against this account. Absent means
-    /// unpoliced, which is what every account had before policies existed.
+    /// The rules the venue ENFORCES against this account, stated inline.
+    /// Absent means unpoliced unless `policy_preset` names one.
     #[serde(default)]
     policy: mogwai_protocol::risk::AccountPolicy,
+    /// A registered or shipped policy to use instead of restating one.
+    ///
+    /// Resolution is total and three-step, the same shape a symbol resolves in:
+    /// inline knobs win, else this name, else unpoliced. A name NOBODY has is an
+    /// error rather than a silent fall to unpoliced, because a run that believes
+    /// it is enforced and is not is the worst of the three outcomes.
+    #[serde(default)]
+    policy_preset: Option<String>,
 }
 
 pub(crate) async fn open_account(
@@ -1149,15 +1157,24 @@ pub(crate) async fn open_account(
             "an account must open with at least one funded currency".to_owned(),
         );
     }
+    let policy = match state
+        .run
+        .resolve_policy(request.policy_preset.as_deref(), request.policy)
+    {
+        Ok(policy) => policy,
+        Err(refusal) => return (StatusCode::BAD_REQUEST, refusal.to_string()),
+    };
     // Validated where the policy ENTERS the venue, so a nonsense rule is a
     // refused request rather than an account that behaves strangely hours in.
-    if let Err(error) = request.policy.validate() {
+    // After resolution, so a shipped preset is held to the same bar as an inline
+    // policy rather than trusted for being ours.
+    if let Err(error) = policy.validate() {
         return (StatusCode::BAD_REQUEST, error);
     }
-    let policed = !request.policy.is_unpoliced();
+    let policed = !policy.is_unpoliced();
     match state
         .run
-        .open_account(&account_id, request.balances, request.policy)
+        .open_account(&account_id, request.balances, policy)
     {
         Ok(()) => {
             tracing::info!(account = %account_id.as_str(), policed, "opened an account");

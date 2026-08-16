@@ -46,9 +46,22 @@ accounts advertising the same number. THE ACCOUNT DEFINES ITS OWN DAY: the reset
 is a minute of the UTC day named by the policy, not the instrument's calendar,
 and it fires whenever sim time crosses it.
 
+A POLICY RESOLVES THE WAY A SYMBOL DOES: total, three steps, step three never
+fails. Knobs stated inline win; otherwise a policy registered by name under
+`[account_policies]` in the venue config, or one this build ships under that
+name, with registered shadowing shipped; otherwise unpoliced. A name NOBODY has
+is an error rather than a silent fall to unpoliced, because a run that believes
+it is enforced and is not is the worst of the three outcomes. Registration is a
+RUNTIME path, unlike instrument presets, which are compiled in: funded-account
+programmes number in the hundreds and change their terms without notice, so the
+shipped set is illustrative rather than authoritative.
+
 A breach FLATTENS - cancel every resting order, then close every position as
 reduce-only IOC market orders at the mark, judged against the configured
-liquidation band - and then locks. Enforcement without the flatten would be a
+liquidation band - and then locks. A TERMINATING breach on a venue serving ONE
+account ends the run, since its only account is dead and there is nothing left
+to serve; on a shared exchange it does not, because one subagent breaching must
+not take down the batch. Enforcement without the flatten would be a
 report; the flatten is what makes a forward claim mean anything, because a
 strategy that would have been liquidated actually is.
 

@@ -914,14 +914,25 @@ required eventually, since both modes must be supported.
   runs need. `reset_account_on_reconnect` opts into a clean ledger instead, and
   `ReadyRecord::VERSION` is 7 carrying that setting, so a launcher reads the
   policy rather than inferring it.
-  STILL OPEN FROM THE ACCOUNT-POLICY DESIGN, none of it blocking: policy
-  PRESETS and their runtime registration do not exist, so step two of account
-  resolution is absent and only steps one and three work - a client states its
-  rules inline or gets none; a terminating breach does not yet END THE VENUE in
-  the ephemeral mode; nothing FREEZES an unattended account, so an account whose
-  connection drops is simply not marked until someone returns, which is the
-  intended behaviour but is untested; and there is no TTL collecting an account
-  nobody reclaims. See the account-policy item above.
+  POLICY PRESETS AND THE TERMINAL BREACH LANDED, 2026-08-16, completing the
+  account-policy design bar the residue below. Resolution is now TOTAL and
+  three-step like a symbol's: inline knobs win, else a name registered under
+  `[account_policies]` in the venue config or one this build ships, with
+  registered shadowing shipped, else unpoliced. A name nobody has is an ERROR
+  rather than a silent fall to unpoliced - a run that believes it is enforced
+  and is not is the worst outcome available. Registration is a RUNTIME path
+  because funded-account programmes number in the hundreds and change without
+  notice; the three shipped names are illustrative shapes, not any firm's terms.
+  A TERMINATING breach on a venue serving ONE account now ends the run, and
+  deliberately does not on a shared exchange, where one subagent breaching must
+  not take down the batch. The account count is what distinguishes the modes at
+  runtime.
+  STILL OPEN, none of it blocking: nothing FREEZES an unattended account, so an
+  account whose connection drops is simply not marked until someone returns -
+  the intended behaviour, but untested and not stated anywhere a consumer reads;
+  there is no TTL collecting an account nobody reclaims; and transport havoc is
+  still armed run-wide rather than riding the passenger, which is now a filter
+  away since `arm_divergence` finally has accounts to divert onto.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an

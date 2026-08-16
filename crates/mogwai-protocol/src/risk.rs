@@ -225,6 +225,63 @@ pub enum BreachedRule {
     DailyLossLimit,
 }
 
+/// The names this build ships a policy under.
+pub const SHIPPED_POLICIES: &[&str] = &["intraday-trail", "eod-trail", "daily-limit-only"];
+
+/// A policy this build ships, by name.
+///
+/// ILLUSTRATIVE RATHER THAN AUTHORITATIVE, and deliberately few. These show the
+/// SHAPES a funded-account programme comes in - a hard intraday trail, a softer
+/// end-of-day trail that stops at breakeven, a daily limit that locks rather
+/// than kills - so an operator has something to copy and a test something to
+/// name. They do not track any real firm's current terms and must not be read
+/// as doing so: those change without notice, which is exactly why registration
+/// is a runtime path and why a name an operator registers SHADOWS a shipped one.
+///
+/// Built in code rather than parsed from embedded text, so this crate needs no
+/// TOML dependency to state three constants.
+#[must_use]
+pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
+    let usd = || Some("USD".to_owned());
+    match name {
+        "intraday-trail" => Some(AccountPolicy {
+            currency: usd(),
+            trailing_drawdown: Some(TrailingDrawdown {
+                amount: Decimal::from(2_000),
+                basis: TrailingBasis::PeakEquity,
+                lock_at_equity: None,
+                on_breach: BreachAction::Terminate,
+            }),
+            daily_loss_limit: Some(DailyLossLimit {
+                amount: Decimal::from(1_000),
+                on_breach: BreachAction::LockUntilReset,
+            }),
+            reset_minute_utc: default_reset_minute(),
+        }),
+        "eod-trail" => Some(AccountPolicy {
+            currency: usd(),
+            trailing_drawdown: Some(TrailingDrawdown {
+                amount: Decimal::from(2_000),
+                basis: TrailingBasis::EndOfDayBalance,
+                lock_at_equity: Some(Decimal::from(50_000)),
+                on_breach: BreachAction::Terminate,
+            }),
+            daily_loss_limit: None,
+            reset_minute_utc: default_reset_minute(),
+        }),
+        "daily-limit-only" => Some(AccountPolicy {
+            currency: usd(),
+            trailing_drawdown: None,
+            daily_loss_limit: Some(DailyLossLimit {
+                amount: Decimal::from(500),
+                on_breach: BreachAction::LockUntilReset,
+            }),
+            reset_minute_utc: default_reset_minute(),
+        }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

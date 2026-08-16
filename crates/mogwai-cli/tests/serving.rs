@@ -1042,6 +1042,43 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
     }
 }
 
+/// A client asks for a policy BY NAME rather than restating it, and a name
+/// nobody has is an error rather than a silent fall to unpoliced.
+///
+/// The second half is the one that matters: a run that believes it is enforced
+/// and is not is worse than either being enforced or being told it is not.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_policy_preset_resolves_by_name_and_an_unknown_one_is_refused() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-400","balances":{"USD":"50000"},
+            "policy_preset":"intraday-trail"}"#,
+    );
+    assert_eq!(status, 201, "the named policy resolves: {body}");
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-400");
+    assert_eq!(status, 200, "the account answers: {body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        value["risk"]["trailing_threshold"], "48000",
+        "the shipped intraday trail is a 2,000 drawdown: {body}"
+    );
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-401","balances":{"USD":"50000"},
+            "policy_preset":"apex-nonesuch-50k"}"#,
+    );
+    assert_eq!(status, 400, "an unknown policy name is refused: {body}");
+    assert!(
+        body.contains("apex-nonesuch-50k") && body.contains("intraday-trail"),
+        "the refusal names what was asked for and what exists: {body}"
+    );
+}
+
 /// An unpoliced account is enforced against nothing, which is what every client
 /// had before policies existed and what the default account still gets.
 #[test]
