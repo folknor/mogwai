@@ -109,6 +109,15 @@ pub(crate) struct Passenger {
     /// the engine books a fill, and the risk ledger judges the equity that fill
     /// produced.
     pub(crate) risk: Mutex<crate::risk::RiskLedger>,
+    /// TRANSPORT havoc, per account rather than per venue.
+    ///
+    /// These corrupt what one connection RECEIVES rather than what the
+    /// generator produces, so under the river-and-passenger model they ride the
+    /// passenger by construction: the river is untouched and there is nothing to
+    /// scope. They were run-wide, which meant one subagent arming a blackout
+    /// blacked out every other subagent on the exchange.
+    pub(crate) dark: HavocWindow,
+    pub(crate) stall: HavocWindow,
 }
 
 impl std::fmt::Debug for Passenger {
@@ -193,8 +202,6 @@ pub(crate) struct Run {
     pub(crate) submit_ack_ms: AtomicU64,
     pub(crate) modify_ack_ms: AtomicU64,
     pub(crate) cancel_ack_ms: AtomicU64,
-    pub(crate) dark: HavocWindow,
-    pub(crate) stall: HavocWindow,
     complete_tx: watch::Sender<Option<(u64, u64)>>,
     /// Every live connection's outbound lanes, so venue-ORIGINATED output - a
     /// trigger fill nobody commanded - reaches the connection it belongs to.
@@ -294,8 +301,6 @@ impl Run {
             submit_ack_ms: AtomicU64::new(0),
             modify_ack_ms: AtomicU64::new(0),
             cancel_ack_ms: AtomicU64::new(0),
-            dark: HavocWindow::new(),
-            stall: HavocWindow::new(),
             complete_tx,
             lanes: Mutex::new(Vec::new()),
             order_owners: Mutex::new(std::collections::HashMap::new()),
@@ -341,6 +346,8 @@ impl Run {
                 opening,
                 self.started_ns,
             )),
+            dark: HavocWindow::new(),
+            stall: HavocWindow::new(),
         });
         passengers.insert(account_id.as_str().to_owned(), Arc::clone(&seated));
         seated
@@ -481,6 +488,8 @@ impl Run {
                     opening,
                     self.started_ns,
                 )),
+                dark: HavocWindow::new(),
+                stall: HavocWindow::new(),
             }),
         );
         Ok(())

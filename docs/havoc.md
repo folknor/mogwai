@@ -43,8 +43,17 @@ same rule from the other side - naming a seated river refuses, while an
 unqualified clear lifts the transport windows run-wide and clears the surge on
 every boatless river, skipping seated ones rather than refusing.
 
-Transport controls such as `GoDark`, `StallData`, `DelayAcks` and
-`CommandLatency` remain runtime-armable and run-wide.
+Transport controls remain runtime-armable. `GoDark` and `StallData` are ARMED
+PER ACCOUNT: the request may name an `account`, and corrupts only that account's
+view. Naming none arms every account, which is what a single-account venue wants
+and what an existing scenario file already writes. They ride the account rather
+than the venue because they change what one connection RECEIVES rather than what
+the generator produces - so on a shared exchange, blacking out one subagent
+leaves the rest of the batch seeing. Clearing clears every account whatever the
+request names, since a clear means stop everything.
+
+`DelayAcks` and `CommandLatency` are still run-wide. That is the same shape of
+defect the blackout had and has the same fix available; it has not been taken.
 
 The market REGIMES - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are not
 runtime arms. They are a boot choice made by whoever launches the run, apply to

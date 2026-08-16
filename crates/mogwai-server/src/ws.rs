@@ -293,7 +293,7 @@ async fn run_writer(
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
     mut prio_rx: mpsc::UnboundedReceiver<Outbound>,
     mut out_rx: mpsc::Receiver<Outbound>,
-    state: AppState,
+    passenger: Arc<crate::run::Passenger>,
     sim: mogwai_protocol::SimClock,
 ) {
     let mut priority_open = true;
@@ -320,11 +320,16 @@ async fn run_writer(
                 // A terminal announcement outranks every armed window: see
                 // `FrameClass`. Everything else is gated - `GoDark` wholesale,
                 // `StallData` on market data alone.
+                //
+                // THIS PASSENGER'S windows, not the venue's: transport havoc
+                // corrupts what one connection receives, so arming a blackout on
+                // one account must not black out every other account on the
+                // exchange.
                 if frame.class != FrameClass::Terminal {
-                    if state.run.dark.open_at(sim, now) {
+                    if passenger.dark.open_at(sim, now) {
                         continue;
                     }
-                    if frame.class == FrameClass::MarketData && state.run.stall.open_at(sim, now) {
+                    if frame.class == FrameClass::MarketData && passenger.stall.open_at(sim, now) {
                         continue;
                     }
                 }
@@ -357,7 +362,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
         Arc::clone(session.ticket.boat()),
         Arc::clone(&session.passenger),
     );
-    let writer = tokio::spawn(run_writer(sink, prio_rx, out_rx, state.clone(), boat_sim));
+    let writer = tokio::spawn(run_writer(
+        sink,
+        prio_rx,
+        out_rx,
+        Arc::clone(&session.passenger),
+        boat_sim,
+    ));
     // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for
     // as long as this connection lives.

@@ -35,8 +35,36 @@ use crate::source;
 pub(crate) struct DivergenceRequest {
     #[serde(default)]
     symbol: Option<String>,
+    /// Which account a TRANSPORT divergence corrupts the view of. Absent means
+    /// every account, which is what an operator on a single-account venue wants
+    /// and what every existing scenario file already writes.
+    ///
+    /// Only the transport arms honour it. `GoDark` and `StallData` change what
+    /// one connection RECEIVES, so they are the passenger's own eyesight;
+    /// generator arms change the WATER, which is a property of the river and
+    /// reaches everyone reading it whatever account they trade.
+    #[serde(default)]
+    account: Option<String>,
     #[serde(flatten)]
     divergence: Divergence,
+}
+
+/// The passengers one control-plane request applies to: the named account, or
+/// every account when it names none.
+///
+/// An account nobody has trades yet resolves to the EMPTY set rather than
+/// creating one. Arming a blackout is not a reason to bring an account into
+/// existence, and a typo that silently created `WYRD-01` would be armed on a
+/// ledger nothing ever connects to.
+fn targeted(run: &Arc<Run>, account: Option<&str>) -> Vec<Arc<crate::run::Passenger>> {
+    match account {
+        Some(named) => run
+            .passengers()
+            .into_iter()
+            .filter(|passenger| passenger.account_id.as_str() == named)
+            .collect(),
+        None => run.passengers(),
+    }
 }
 
 /// What one order-entry command came to. Every variant that carries frames also
@@ -719,11 +747,25 @@ pub(crate) async fn arm_divergence(
         // simulated span, because the armer cannot know who will read it: a
         // passenger may board afterwards, and every reader judges the span on
         // its own boat clock.
+        //
+        // TARGETED at one account when the request names one, and at every
+        // account otherwise. Transport havoc rides the PASSENGER, so blacking
+        // out one subagent on a shared exchange must not black out the batch -
+        // and an operator on a single-account venue still writes what it always
+        // did, because naming no account still means everyone.
         Divergence::GoDark { ms } => {
-            run.dark.arm(now_ns(), sim_duration_from_millis(ms));
+            let armed = now_ns();
+            let span = sim_duration_from_millis(ms);
+            for passenger in targeted(run, request.account.as_deref()) {
+                passenger.dark.arm(armed, span);
+            }
         }
         Divergence::StallData { ms } => {
-            run.stall.arm(now_ns(), sim_duration_from_millis(ms));
+            let armed = now_ns();
+            let span = sim_duration_from_millis(ms);
+            for passenger in targeted(run, request.account.as_deref()) {
+                passenger.stall.arm(armed, span);
+            }
         }
         Divergence::FlowSurge {
             rate_mult,
@@ -884,8 +926,14 @@ pub(crate) async fn arm_divergence(
                     .collect(),
             };
             run.delay_ms.store(0, Ordering::Relaxed);
-            run.dark.clear();
-            run.stall.clear();
+            // Every account's transport windows, whatever the request named: a
+            // clear is an operator saying "stop everything", and clearing only
+            // one account's would leave a blackout armed somewhere the request
+            // did not mention.
+            for passenger in run.passengers() {
+                passenger.dark.clear();
+                passenger.stall.clear();
+            }
             for symbol in clearing {
                 state.rivers.clear_flow_surge(&symbol);
             }

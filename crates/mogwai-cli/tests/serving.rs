@@ -1079,6 +1079,75 @@ fn a_policy_preset_resolves_by_name_and_an_unknown_one_is_refused() {
     );
 }
 
+/// A blackout armed on one account does not blind another.
+///
+/// Transport havoc corrupts what one connection RECEIVES rather than what the
+/// generator produces, so it rides the passenger. Run-wide was the old shape,
+/// and on a shared exchange it meant one subagent arming a blackout blacked out
+/// the whole batch.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut dark, _) =
+        tokio_tungstenite::connect_async(format!("{}?account=WYRD-500", venue.ws_url()))
+            .await
+            .expect("open the account to be blacked out");
+    let (mut lit, _) =
+        tokio_tungstenite::connect_async(format!("{}?account=WYRD-501", venue.ws_url()))
+            .await
+            .expect("open the account that must keep seeing");
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/control/divergence",
+        // The ceiling, in SIMULATED ms. This config is accelerated, so a
+        // wall-comfortable window has to be a large sim one.
+        // The ceiling, in SIMULATED ms. This config is accelerated, so a
+        // wall-comfortable window has to be a large sim one.
+        r#"{"type":"GoDark","ms":3600000,"account":"WYRD-500"}"#,
+    );
+    assert_eq!(status, 202, "the targeted blackout arms: {body}");
+
+    // BOTH sockets are drained before either is judged. A socket is attached to
+    // the live tape on upgrade, so whatever the writer had queued when the
+    // blackout armed is still in flight on both of them and says nothing about
+    // whether a window is open. Asserting before this drain passes whichever way
+    // the targeting is wired, which is the trap this comment exists to mark.
+    // WHETHER A SOCKET GOES QUIET is the discriminator, and it has to be, because
+    // neither "did it receive something" nor "was the next frame absent" can
+    // tell the two apart: a socket is attached to the live tape on upgrade, so a
+    // blacked-out one keeps delivering its backlog for a while and a live one
+    // never goes quiet at all. Reading each to a gap gives a clean answer -
+    // blacked out means the backlog exhausts and a gap appears, still served
+    // means frames keep arriving until the deadline.
+    async fn goes_quiet(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if tokio::time::timeout(Duration::from_millis(250), socket.next())
+                .await
+                .is_err()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    assert!(
+        goes_quiet(&mut dark).await,
+        "the targeted account kept receiving: its blackout never opened"
+    );
+    assert!(
+        !goes_quiet(&mut lit).await,
+        "an untargeted account went quiet: the blackout reached an account it did not name"
+    );
+}
+
 /// An unpoliced account is enforced against nothing, which is what every client
 /// had before policies existed and what the default account still gets.
 #[test]
