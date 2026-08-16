@@ -1245,6 +1245,123 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
     );
 }
 
+/// Two accounts asking for the same river at different speeds both stay
+/// open. Speed is a cursor, not a refusal: the second is a cache miss on
+/// the sharing key, not a conflict with the first.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn two_accounts_at_different_speeds_both_stay_open() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (slow, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-700&speed=2",
+        venue.ws_url_for(&venue.symbol)
+    ))
+    .await
+    .expect("open the slow cursor");
+    let (fast, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-701&speed=3",
+        venue.ws_url_for(&venue.symbol)
+    ))
+    .await
+    .expect("an unserved speed is a second boat, not a 400");
+
+    let (status, body) = http_get(
+        &venue.http_base(),
+        &format!("/clock?symbol={}&speed=2", venue.symbol),
+    );
+    assert_eq!(status, 200, "the slow boat's clock answers: {body}");
+    let slow_clock: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(slow_clock["sim"]["speed"], 2.0);
+
+    let (status, body) = http_get(
+        &venue.http_base(),
+        &format!("/clock?symbol={}&speed=3", venue.symbol),
+    );
+    assert_eq!(status, 200, "the fast boat's clock answers: {body}");
+    let fast_clock: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fast_clock["sim"]["speed"], 3.0);
+
+    // Keep the sockets in scope so the boats stay seated while we read.
+    drop(slow);
+    drop(fast);
+}
+
+/// One ledger still carries one cadence. A second socket on the same account
+/// asking for a different speed of a river it is already riding is refused,
+/// because that would be two clocks judging one book.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_second_speed_on_the_same_account_is_refused() {
+    let venue = spawn(&["--config", &fast_config()]);
+    // Unnamed sockets share the default account and do not evict, so this is
+    // two live connections on one ledger rather than a reconnect.
+    let (_first, _) =
+        tokio_tungstenite::connect_async(format!("{}&speed=2", venue.ws_url_for(&venue.symbol)))
+            .await
+            .expect("open the first cadence");
+    let refused =
+        tokio_tungstenite::connect_async(format!("{}&speed=3", venue.ws_url_for(&venue.symbol)))
+            .await;
+    let Err(error) = refused else {
+        panic!("a second cadence on one ledger must not upgrade");
+    };
+    let rendered = format!("{error}");
+    assert!(
+        rendered.contains("400") || rendered.contains("already seated"),
+        "the refusal names the sitting cadence: {rendered}"
+    );
+}
+
+/// A seat is given up when the SOCKET ends, not when the account freezes.
+///
+/// Two unnamed sockets share the default account, so closing one leaves the
+/// account attached and never freezes it. If the departed socket's seat
+/// survived, a reconnect on that river at a new cadence would be refused
+/// against a cadence nobody is riding - and, because a boat key is just
+/// (river, speed), the ledger would be handed the next boat placed there
+/// whether or not it ever boarded.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_seat_is_released_when_its_socket_goes_even_though_the_account_stays() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    // The second river keeps the default account attached throughout, so
+    // nothing here is explained by a freeze.
+    let (_holder, _) =
+        tokio_tungstenite::connect_async(format!("{}&speed=2", venue.ws_url_for("MNQ")))
+            .await
+            .expect("hold the account open on another river");
+
+    let (leaving, _) =
+        tokio_tungstenite::connect_async(format!("{}&speed=2", venue.ws_url_for(&venue.symbol)))
+            .await
+            .expect("board the river being tested");
+    drop(leaving);
+
+    // Poll: the close is asynchronous, and the seat is released as the
+    // session unwinds rather than as the client's socket drops.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let reconnect = tokio_tungstenite::connect_async(format!(
+            "{}&speed=3",
+            venue.ws_url_for(&venue.symbol)
+        ))
+        .await;
+        match reconnect {
+            Ok((socket, _)) => {
+                drop(socket);
+                return;
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the vacated seat still refuses a new cadence: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
 /// An account not funded in what its symbol settles in is refused AT BIND,
 /// naming the currency.
 ///

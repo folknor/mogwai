@@ -47,9 +47,11 @@ pub(crate) struct SocketQuery {
     symbol: Option<String>,
     /// Absent means the venue's configured `speed`. Finite and non-negative,
     /// quantized to micro-multiples in the sharing key, so `100` and
-    /// `100.0000001` board the same boat. A speed differing from the one the
-    /// river's sitting boat carries is REFUSED before the 101, naming that
-    /// speed; it never places a second boat on the same water.
+    /// `100.0000001` board the same boat. An unserved speed PLACES a second
+    /// boat on the same water rather than being refused - speed mutates no
+    /// generated value, so it is a second cursor, not a second river. The one
+    /// refusal left is per LEDGER: an account already seated on this river at
+    /// another speed would be judged on two clocks.
     #[serde(default)]
     speed: Option<f64>,
     /// Absent means indefinite. SIMULATED milliseconds, measured on the boat's
@@ -77,9 +79,9 @@ pub(crate) struct SocketQuery {
 /// What one connection is bound to, decided before the upgrade completes and
 /// owned by the socket for its whole life.
 ///
-/// One field today. It exists as a struct rather than a bare `Symbol` because
-/// boat placement and the per-boat clock attach here, and because every
-/// downstream signature then changes exactly once.
+/// It exists as a struct rather than a bare `Symbol` because boat placement,
+/// the per-boat clock and the ledger attach here, and because every downstream
+/// signature then changes exactly once.
 #[derive(Debug)]
 pub(crate) struct SocketSession {
     pub(crate) symbol: mogwai_protocol::Symbol,
@@ -88,6 +90,23 @@ pub(crate) struct SocketSession {
     /// The ledger this connection trades on. Resolved before the upgrade, so a
     /// frame cannot reach a handler before the account it books into exists.
     pub(crate) passenger: Arc<crate::run::Passenger>,
+}
+
+/// THE SEAT IS RELEASED HERE, and it has to be here rather than at the freeze.
+///
+/// A freeze needs every socket on the account gone, so an account riding two
+/// rivers that loses one socket never freezes and would hold that seat
+/// forever. `BoatKey` carries no placement nonce, so the held seat is
+/// indistinguishable from a live one as soon as any account boards that river
+/// at that speed again - and the sweeper would then drive this ledger off a
+/// boat it never boarded.
+///
+/// `Drop` rather than a call at the end of `handle_socket`: the session is
+/// also dropped when an upgrade is abandoned before the handler ever runs.
+impl Drop for SocketSession {
+    fn drop(&mut self) {
+        self.passenger.unsit(&self.ticket.boat().key());
+    }
 }
 
 /// Bind one socket to one river, or refuse before the 101.
@@ -169,11 +188,43 @@ pub(crate) async fn ws_upgrade(
             .into_response();
     }
     let river = state.rivers.resolve_key(&profile);
-    let ticket = match state.run.boatyard.board(&BoardRequest { river, speed }).await {
+    let ticket = match state
+        .run
+        .boatyard
+        .board(&BoardRequest { river, speed })
+        .await
+    {
         Ok(ticket) => ticket,
-        Err(BoardRefusal::SpeedInUse { sitting_speed }) => return (StatusCode::BAD_REQUEST, format!("river {symbol} already has a boat at speed {sitting_speed}; request that speed or wait for its passengers to leave")).into_response(),
-        Err(BoardRefusal::Placement(err)) => return (StatusCode::BAD_REQUEST, format!("could not place boat for {symbol}: {err}")).into_response(),
+        Err(BoardRefusal::Placement(err)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("could not place boat for {symbol}: {err}"),
+            )
+                .into_response();
+        }
     };
+    // One ledger, one cadence. Two sockets on the default account can ride
+    // two rivers, but two speeds on one river would give that ledger two
+    // clocks.
+    //
+    // UNCONDITIONAL, including for a frozen account. A reseat at a new speed
+    // still passes, because a freeze released every seat; routing the frozen
+    // case around the check instead would reopen the race the check exists to
+    // close, since an account is CREATED frozen and does not attach until its
+    // socket reaches `resume` further down - so two first connections would
+    // both read themselves frozen and both sit.
+    if let Err(sitting) = passenger.try_sit(ticket.boat().key()) {
+        let sitting_speed = sitting.speed();
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "account {account} is already seated on {symbol} at speed {sitting_speed}; a \
+                 ledger carries one cadence",
+                account = passenger.account_id.as_str()
+            ),
+        )
+            .into_response();
+    }
     let session = SocketSession {
         symbol,
         ticket,

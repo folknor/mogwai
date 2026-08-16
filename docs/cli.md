@@ -28,10 +28,11 @@ with older clients. A socket owns exactly one river. A supplied symbol is 1 to
 32 ASCII letters, digits, dot, dash, or underscore, and matching is case exact.
 Malformed symbols are refused with HTTP 400 before the upgrade. Every legal
 symbol is resolved; the only other pre-upgrade refusals are a shape this run
-cannot fund or make valid, and a river already carrying a boat at a different
-speed. The upgrade also accepts `?speed=` (absent means the configured `speed`)
-and `?duration_ms=`. The first passenger places its river's boat
-and later passengers at the same speed share it.
+cannot fund or make valid, and an account already seated on that river at a
+different speed. The upgrade also accepts `?speed=` (absent means the configured
+`speed`) and `?duration_ms=`. The first passenger at a given speed places that
+cursor; later passengers at the same speed share it; a different speed places a
+second cursor on the same water.
 A client names that river from its own configuration; the readiness record does
 not supply one.
 

@@ -698,20 +698,41 @@ impl AppState {
     /// through to the venue clock. A request racing a boarding would otherwise
     /// receive a well-formed answer off a clock strictly ahead of the boat that
     /// is about to be seated - invisible precisely because it is well-formed.
-    pub(crate) async fn river_now(&self, symbol: &str) -> RiverNow {
-        if let Some(boat) = self
+    pub(crate) async fn river_now(&self, symbol: &str, speed: Option<f64>) -> RiverNow {
+        // Wait out an in-flight placement so a racing poll does not answer off
+        // the venue clock for a river about to have a boat. BEFORE the named
+        // speed is resolved too: the placement being awaited may be exactly
+        // the cadence that was asked for, and answering "no such boat" off the
+        // venue clock is the same well-formed lie in either shape.
+        let _ = self
             .run
             .boatyard
             .boat_for_symbol_awaiting_placement(symbol)
-            .await
-        {
-            RiverNow {
+            .await;
+        if let Some(speed) = speed {
+            return match self.run.boatyard.boat_at(symbol, speed) {
+                Some(boat) => RiverNow {
+                    ns: boat.published_ns.load(Ordering::Acquire),
+                    sim: boat.sim,
+                    from_boat: true,
+                },
+                None => RiverNow::venue(self.venue_sim()),
+            };
+        }
+        // Several cadences: the lead. `/clock?symbol=&speed=` names one.
+        let boat = self
+            .run
+            .boatyard
+            .boats_for_symbol(symbol)
+            .into_iter()
+            .max_by_key(|boat| boat.published_ns.load(Ordering::Acquire));
+        match boat {
+            Some(boat) => RiverNow {
                 ns: boat.published_ns.load(Ordering::Acquire),
                 sim: boat.sim,
                 from_boat: true,
-            }
-        } else {
-            RiverNow::venue(self.venue_sim())
+            },
+            None => RiverNow::venue(self.venue_sim()),
         }
     }
 }
@@ -947,7 +968,7 @@ pub(crate) async fn arm_divergence(
                     ),
                 );
             }
-            let ts = state.river_now(&order_symbol).await.ns;
+            let ts = state.river_now(&order_symbol, None).await.ns;
             if let Err(reason) = holder
                 .engine
                 .lock()
@@ -1294,6 +1315,8 @@ pub(crate) async fn open_account(
 pub(crate) struct ClockQuery {
     #[serde(default)]
     symbol: Option<String>,
+    #[serde(default)]
+    speed: Option<f64>,
 }
 
 pub(crate) async fn clock(
@@ -1307,14 +1330,15 @@ pub(crate) async fn clock(
     // clock. `data_origin_ns` is the fixed floor; the horizon is echoed so
     // the client can report the floor in its own terms.
     //
-    // `?symbol=` answers for that river's boat, of which there is at most one.
+    // `?symbol=` answers for that river's lead boat when more than one
+    // cadence is seated; `?speed=` names one.
     // For a boat, `server_now_ns` is the sim instant of the last tick it
     // PUBLISHED rather than the affine map evaluated at the wall: a boat placed
     // mid-run is deliberately behind its own clock's projection, and a client
     // pacing against a projection the feed has not reached would ask for water
     // that has not been delivered. With no boat the two coincide.
     let now = if let Some(symbol) = query.symbol.as_deref() {
-        state.river_now(symbol).await
+        state.river_now(symbol, query.speed).await
     } else {
         RiverNow::venue(state.venue_sim())
     };
@@ -1450,7 +1474,7 @@ pub(crate) async fn trades(
         return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
     // The ceiling is the NAMED RIVER's now, not the venue's.
-    let river_now = state.river_now(&symbol).await.ns;
+    let river_now = state.river_now(&symbol, None).await.ns;
     if let Some(body) = history_start_refusal(start, data_origin, river_now) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
@@ -1546,7 +1570,7 @@ pub(crate) async fn quotes(
         return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
     // The ceiling is the NAMED RIVER's now, not the venue's.
-    let river_now = state.river_now(&symbol).await.ns;
+    let river_now = state.river_now(&symbol, None).await.ns;
     if let Some(body) = history_start_refusal(start, data_origin, river_now) {
         return Err((StatusCode::BAD_REQUEST, body));
     }

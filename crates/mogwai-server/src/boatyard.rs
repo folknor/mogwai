@@ -32,12 +32,53 @@ pub(crate) struct BoatKey {
     speed_micros: u64,
 }
 
+/// THE ONE QUANTIZATION. Boarding and looking a cadence up both go through
+/// here, so a client writing `100.0000001` cannot board one boat and then fail
+/// to find it.
+///
+/// Micro-multiples, so the key is `Hash` and `Eq` and two clients writing
+/// `100` and `100.0000001` share a boat. Bounded first: a float cast saturates
+/// rather than wrapping, so an absurd speed would otherwise be silently
+/// REPLACED by a different one and then paced at it.
+fn quantize_speed(speed: f64) -> anyhow::Result<u64> {
+    if !speed.is_finite() || speed < 0.0 {
+        anyhow::bail!("speed must be finite and non-negative");
+    }
+    if speed * 1_000_000.0 > MAX_SPEED_MICROS as f64 {
+        anyhow::bail!(
+            "speed {speed} is beyond the quantization range; the maximum is {}",
+            MAX_SPEED_MICROS / 1_000_000
+        );
+    }
+    Ok((speed * 1_000_000.0).round() as u64)
+}
+
+impl BoatKey {
+    pub(crate) fn new(river: RiverKey, speed: f64) -> anyhow::Result<Self> {
+        Ok(Self {
+            river,
+            speed_micros: quantize_speed(speed)?,
+        })
+    }
+
+    pub(crate) fn river(&self) -> &RiverKey {
+        &self.river
+    }
+
+    pub(crate) fn speed_micros(&self) -> u64 {
+        self.speed_micros
+    }
+
+    /// The quantized speed, back in the units a client asked in. THE ONE
+    /// dequantization, so a message naming a sitting cadence and a lookup
+    /// matching one cannot disagree about what `2` means.
+    pub(crate) fn speed(&self) -> f64 {
+        self.speed_micros as f64 / 1_000_000.0
+    }
+}
+
 pub(crate) struct Boat {
     key: BoatKey,
-    /// The quantized speed this boat was placed at. Distinct from `sim.speed`,
-    /// which maps a zero pacing speed onto 1.0 so the affine clock stays
-    /// invertible; a refusal must name what a joiner has to ask for.
-    pub(crate) speed: f64,
     pub(crate) sim: SimClock,
     pub(crate) tape: Arc<Tape>,
     pub(crate) published_ns: Arc<AtomicU64>,
@@ -72,7 +113,7 @@ struct Seat {
 
 pub(crate) struct Boatyard {
     rivers: Arc<Rivers>,
-    boats: Mutex<HashMap<RiverKey, Slot>>,
+    boats: Mutex<HashMap<BoatKey, Slot>>,
     fanout_depth: usize,
     zero_speed_stall_ms: u64,
     fault_tx: mpsc::Sender<mogwai_data::TickFault>,
@@ -85,7 +126,6 @@ pub(crate) struct BoardRequest {
 }
 #[derive(Debug)]
 pub(crate) enum BoardRefusal {
-    SpeedInUse { sitting_speed: f64 },
     Placement(anyhow::Error),
 }
 
@@ -115,51 +155,22 @@ impl Boatyard {
         self: &Arc<Self>,
         req: &BoardRequest,
     ) -> Result<Ticket, BoardRefusal> {
-        if !req.speed.is_finite() || req.speed < 0.0 {
-            return Err(BoardRefusal::Placement(anyhow::anyhow!(
-                "speed must be finite and non-negative"
-            )));
-        }
-        // Quantized to micro-multiples so the key is `Hash` and `Eq` and two
-        // clients writing `100` and `100.0000001` share a boat. Bounded first:
-        // a float cast saturates rather than wrapping, so an absurd speed would
-        // otherwise be silently REPLACED by a different one and then paced at
-        // it.
-        if req.speed * 1_000_000.0 > MAX_SPEED_MICROS as f64 {
-            return Err(BoardRefusal::Placement(anyhow::anyhow!(
-                "speed {} is beyond the quantization range; the maximum is {}",
-                req.speed,
-                MAX_SPEED_MICROS / 1_000_000
-            )));
-        }
-        let speed_micros = (req.speed * 1_000_000.0).round() as u64;
-        let speed = speed_micros as f64 / 1_000_000.0;
-        let key = BoatKey {
-            river: req.river.clone(),
-            speed_micros,
-        };
+        let key = BoatKey::new(req.river.clone(), req.speed).map_err(BoardRefusal::Placement)?;
+        let speed = key.speed();
         loop {
             let wait = {
                 let mut boats = self.locked();
-                match boats.get_mut(&req.river) {
-                    Some(Slot::Seated(seat)) if seat.boat.key == key => {
+                match boats.get_mut(&key) {
+                    Some(Slot::Seated(seat)) => {
                         seat.passengers += 1;
                         return Ok(Ticket {
                             yard: Arc::clone(self),
                             boat: Arc::clone(&seat.boat),
                         });
                     }
-                    Some(Slot::Seated(seat)) => {
-                        return Err(BoardRefusal::SpeedInUse {
-                            sitting_speed: seat.boat.speed,
-                        });
-                    }
                     Some(Slot::Placing(placing)) => Some(Arc::clone(placing)),
                     None => {
-                        boats.insert(
-                            req.river.clone(),
-                            Slot::Placing(Arc::new(Semaphore::new(0))),
-                        );
+                        boats.insert(key.clone(), Slot::Placing(Arc::new(Semaphore::new(0))));
                         None
                     }
                 }
@@ -199,8 +210,7 @@ impl Boatyard {
             );
             let cancel = tape.cancel_flag();
             Arc::new(Boat {
-                key,
-                speed,
+                key: key.clone(),
                 sim,
                 tape,
                 published_ns,
@@ -212,7 +222,7 @@ impl Boatyard {
             })
         });
         let mut boats = self.locked();
-        let placing = match boats.remove(&req.river) {
+        let placing = match boats.remove(&key) {
             Some(Slot::Placing(placing)) => placing,
             _ => unreachable!("placement owns placeholder"),
         };
@@ -223,7 +233,7 @@ impl Boatyard {
         match boat {
             Ok(boat) => {
                 boats.insert(
-                    req.river.clone(),
+                    key,
                     Slot::Seated(Seat {
                         boat: Arc::clone(&boat),
                         passengers: 1,
@@ -237,18 +247,45 @@ impl Boatyard {
             Err(err) => Err(err),
         }
     }
-    fn locked(&self) -> std::sync::MutexGuard<'_, HashMap<RiverKey, Slot>> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, HashMap<BoatKey, Slot>> {
         self.boats
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     pub(crate) fn boat_for_symbol(&self, symbol: &str) -> Option<Arc<Boat>> {
-        self.locked().values().find_map(|slot| match slot {
-            Slot::Seated(seat) if seat.boat.key.river.symbol() == symbol => {
-                Some(Arc::clone(&seat.boat))
-            }
-            _ => None,
-        })
+        // Deterministic when a river carries more than one cadence: the
+        // slowest seated boat. Callers that mean "is anyone reading this
+        // symbol" only need Some; callers that need a particular speed use
+        // `boat_at`.
+        self.boats_for_symbol(symbol)
+            .into_iter()
+            .min_by_key(|boat| boat.key.speed_micros)
+    }
+
+    /// Every seated boat on `symbol`, any speed.
+    pub(crate) fn boats_for_symbol(&self, symbol: &str) -> Vec<Arc<Boat>> {
+        self.locked()
+            .values()
+            .filter_map(|slot| match slot {
+                Slot::Seated(seat) if seat.boat.key.river.symbol() == symbol => {
+                    Some(Arc::clone(&seat.boat))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The boat on `symbol` at this quantized speed, if one is seated.
+    ///
+    /// Quantized through `BoatKey::new`, the same call `board` keys by, and
+    /// compared against the KEY, so a caller naming `100.0000001` finds the
+    /// boat placed for `100` by construction rather than by two roundings
+    /// happening to agree.
+    pub(crate) fn boat_at(&self, symbol: &str, speed: f64) -> Option<Arc<Boat>> {
+        let speed_micros = quantize_speed(speed).ok()?;
+        self.boats_for_symbol(symbol)
+            .into_iter()
+            .find(|boat| boat.key.speed_micros == speed_micros)
     }
     /// As `boat_for_symbol`, but WAITS on a placement already in flight rather
     /// than reporting the river boatless.
@@ -275,8 +312,8 @@ impl Boatyard {
             let wait = {
                 let boats = self.locked();
                 let mut placing = None;
-                for (river, slot) in boats.iter() {
-                    if river.symbol() != symbol {
+                for (key, slot) in boats.iter() {
+                    if key.river.symbol() != symbol {
                         continue;
                     }
                     match slot {
@@ -291,13 +328,17 @@ impl Boatyard {
         }
     }
     pub(crate) fn seated_symbols(&self) -> Vec<String> {
-        self.locked()
+        let mut symbols: Vec<String> = self
+            .locked()
             .values()
             .filter_map(|slot| match slot {
                 Slot::Seated(seat) => Some(seat.boat.key.river.symbol().to_owned()),
                 _ => None,
             })
-            .collect()
+            .collect();
+        symbols.sort();
+        symbols.dedup();
+        symbols
     }
     pub(crate) fn boats(&self) -> Vec<Arc<Boat>> {
         self.locked()
@@ -315,8 +356,13 @@ impl Boat {
         self.key.river.symbol()
     }
     /// A stable identity for this boat that outlives the `Arc`, so a scheduler
-    /// keying per-boat state cannot confuse a departed boat with a new one that
-    /// happened to be allocated at the same address.
+    /// keying per-boat state cannot confuse it with a boat on another river or
+    /// at another cadence that happened to be allocated at the same address.
+    ///
+    /// NOT AN IDENTITY ACROSS LIFETIMES: the key is the sharing key, so a boat
+    /// placed after this one winds down carries the same key if it is the same
+    /// river at the same speed. State keyed by it must therefore be released
+    /// when its holder lets go, never left to be reclaimed by a match.
     pub(crate) fn key(&self) -> BoatKey {
         self.key.clone()
     }
@@ -331,7 +377,7 @@ impl Drop for Ticket {
     fn drop(&mut self) {
         let worker = {
             let mut boats = self.yard.locked();
-            let remove = match boats.get_mut(&self.boat.key.river) {
+            let remove = match boats.get_mut(&self.boat.key) {
                 Some(Slot::Seated(seat)) => {
                     seat.passengers -= 1;
                     seat.passengers == 0
@@ -341,7 +387,7 @@ impl Drop for Ticket {
             if !remove {
                 return;
             }
-            boats.remove(&self.boat.key.river);
+            boats.remove(&self.boat.key);
             self.boat.cancel.store(true, Ordering::Release);
             self.boat
                 .worker
@@ -514,19 +560,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_speed_on_a_boated_river_is_refused_naming_the_sitting_speed() {
+    async fn a_second_speed_on_a_boated_river_is_a_second_boat() {
         let (yard, river) = yard();
-        let _one = yard
+        let one = yard
             .board(&BoardRequest {
                 river: river.clone(),
                 speed: 2.0,
             })
             .await
             .unwrap();
-        match yard.board(&BoardRequest { river, speed: 3.0 }).await {
-            Err(BoardRefusal::SpeedInUse { sitting_speed }) => assert_eq!(sitting_speed, 2.0),
-            _ => panic!("second speed was not refused"),
-        }
+        let two = yard
+            .board(&BoardRequest { river, speed: 3.0 })
+            .await
+            .expect("an unserved speed is a cache miss, not a refusal");
+        assert!(
+            !Arc::ptr_eq(one.boat(), two.boat()),
+            "distinct speeds are distinct cursors on the same water"
+        );
+        assert_eq!(one.boat().key().speed(), 2.0);
+        assert_eq!(two.boat().key().speed(), 3.0);
+        assert_eq!(one.boat().symbol(), two.boat().symbol());
+        assert_eq!(yard.seated_symbols(), ["BTCUSDT"]);
+        assert_eq!(yard.boats_for_symbol("BTCUSDT").len(), 2);
+        drop(two);
+        assert_eq!(
+            yard.boats_for_symbol("BTCUSDT").len(),
+            1,
+            "winding one cadence down leaves the other seated"
+        );
     }
 
     #[tokio::test]
@@ -577,10 +638,10 @@ mod tests {
     /// a seat, so the handoff can be driven deterministically instead of raced.
     /// Returns the displaced seat and the handoff a completing placement would
     /// close.
-    fn hold_placement_open(yard: &Boatyard, river: &RiverKey) -> (Arc<Boat>, Arc<Semaphore>) {
+    fn hold_placement_open(yard: &Boatyard, key: &BoatKey) -> (Arc<Boat>, Arc<Semaphore>) {
         let handoff = Arc::new(Semaphore::new(0));
         let mut boats = yard.locked();
-        let boat = match boats.insert(river.clone(), Slot::Placing(Arc::clone(&handoff))) {
+        let boat = match boats.insert(key.clone(), Slot::Placing(Arc::clone(&handoff))) {
             Some(Slot::Seated(seat)) => seat.boat,
             _ => panic!("the river was not seated"),
         };
@@ -601,7 +662,8 @@ mod tests {
             })
             .await
             .unwrap();
-        let (boat, handoff) = hold_placement_open(&yard, &river);
+        let key = _ticket.boat().key();
+        let (boat, handoff) = hold_placement_open(&yard, &key);
 
         let reading = {
             let yard = Arc::clone(&yard);
@@ -620,7 +682,7 @@ mod tests {
         {
             let mut boats = yard.locked();
             boats.insert(
-                river.clone(),
+                key,
                 Slot::Seated(Seat {
                     boat: Arc::clone(&boat),
                     passengers: 1,
@@ -649,7 +711,8 @@ mod tests {
             })
             .await
             .unwrap();
-        let (boat, handoff) = hold_placement_open(&yard, &river);
+        let key = ticket.boat().key();
+        let (boat, handoff) = hold_placement_open(&yard, &key);
         drop(boat);
 
         let reading = {
@@ -660,7 +723,7 @@ mod tests {
         assert!(!reading.is_finished(), "the reader did not wait at all");
         {
             let mut boats = yard.locked();
-            boats.remove(&river);
+            boats.remove(&key);
             handoff.close();
         }
         let answered = tokio::time::timeout(std::time::Duration::from_secs(5), reading)

@@ -416,9 +416,13 @@ symbol binds the boot river, which is what a client written before symbols
 moved to the request does. An absent
 speed uses the configured default. Speed is finite and non-negative, capped at
 1,000,000, and quantized to micro-multiples, so `100` and `100.0000001` share.
-One river can
-carry one boat: a different quantized speed receives a `400` naming the speed
-already seated. Duration is simulated milliseconds from boarding and belongs
+A different quantized speed places a second boat on the same river. Two
+sockets on one account cannot ride two cadences of one river: that would give
+the ledger two clocks, and the second upgrade is a `400` naming the sitting
+speed. That seat belongs to the SOCKET, so it is given up when that socket
+closes and the account may then take the river at a new cadence - no
+disconnect of the whole account required. Duration is simulated milliseconds
+from boarding and belongs
 to the passenger, not the boat, so passengers with different durations share.
 
 Generator admission is based on mechanism constraints: positive finite values,

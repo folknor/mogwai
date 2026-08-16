@@ -188,13 +188,17 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             for boat in due_boats {
                 let symbol = boat.symbol().to_owned();
                 let to_ns = sim_now_ns(boat.sim);
-                // Every passenger's scans on this river, in ONE list, because the
-                // walk is a property of the water. The passenger index rides
-                // along so each result can be applied to the ledger it came
-                // from.
+                // Scans on this river from passengers actually RIDING this
+                // boat. The walk is a property of the water, but the clock is
+                // a property of the cursor: applying a fast boat's now to a
+                // slow passenger (or the reverse) would fill one ledger twice
+                // against two clocks.
+                let boat_key = boat.key();
                 let boat_scans: Vec<(usize, PendingScan)> = scans
                     .iter()
-                    .filter(|(_, scan)| scan.symbol.as_ref() == symbol)
+                    .filter(|(index, scan)| {
+                        scan.symbol.as_ref() == symbol && seated[*index].is_seated_on(&boat_key)
+                    })
                     .cloned()
                     .collect();
                 let mut results: Vec<Vec<ScanResult>> = vec![Vec::new(); seated.len()];
@@ -276,8 +280,8 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // settlement instant is unpriceable, and an index can carry a
                 // calendar the account holds nothing in; walking that list
                 // would stall the perp boat on a symbol it is not trading.
-                let boat_key = mogwai_protocol::Symbol::from(symbol.as_str());
-                let settlements: Vec<_> = std::iter::once(&boat_key)
+                let boat_symbol = mogwai_protocol::Symbol::from(symbol.as_str());
+                let settlements: Vec<_> = std::iter::once(&boat_symbol)
                     .filter_map(|symbol| {
                         // Resolved, not configured-only: a symbol nobody
                         // configured is served on a bundle that may carry a
@@ -344,6 +348,9 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     })
                     .unwrap_or_default();
                 for (index, passenger) in seated.iter().enumerate() {
+                    if !passenger.is_seated_on(&boat_key) {
+                        continue;
+                    }
                     let mut engine = passenger.engine.lock().await;
                     let (events, emitted, originated) = apply_engine_pass_on_clock(
                         &mut engine,

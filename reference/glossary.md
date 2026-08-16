@@ -1,8 +1,8 @@
 # mogwai glossary
 
-- **Run**: one foreground mogwai process, one ledger, many keyed rivers and at
-  most one boat per river. A run may declare a simulated duration, and so may an
-  individual passenger.
+- **Run**: one foreground mogwai process, many ledgers, many keyed rivers and
+  as many boats as distinct (river, speed) seats. A run may declare a simulated
+  duration, and so may an individual passenger.
 - **River**: the generated market-data sequence for one resolved instrument
   shape, keyed by the requested symbol plus that shape's knobs. Rivers are
   created on first use and never serialize on each other's checkpoint chain.
@@ -11,8 +11,8 @@
 - **Boat**: the paced reader of one river, placed on demand when the first
   socket boards and carrying its own `SimClock`, its own broadcast ring and its
   own market-reading memo. Sockets asking for the same river and the same speed
-  share one boat; a differing speed is refused before the upgrade rather than
-  placing a second boat on the same water.
+  share one boat; a different quantized speed places a second boat on the same
+  water. One ledger still carries one cadence.
 - **Boatyard**: the run-owned registry of keyed boats and the tickets that keep
   them alive. A boat winds down when its last passenger leaves.
 - **Tape**: what a boat publishes - the paced frame stream broadcast to that

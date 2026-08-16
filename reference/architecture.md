@@ -326,8 +326,8 @@ optional `account` names the ledger it trades.
 Absent, they default to the run's boot symbol and the configured `speed`, and
 to an indefinite passenger. The key is known before any tasks or bytes exist,
 a refusal - an illegal label, a shape that does not validate, a funding-barred
-one, an exhausted river cap, a non-finite or negative speed, or a speed
-differing from the one this river's sitting boat carries - is an HTTP 400
+one, an exhausted river cap, a non-finite or negative speed, or a second
+cadence on a river this account is already riding - is an HTTP 400
 rather than an
 ambiguous WebSocket close, and one connection still owns exactly one replay. A
 frame carrier would permit multiple replays and create an unbound interval
@@ -399,16 +399,26 @@ A passenger owns an uncloneable ticket for one websocket connection. The first
 passenger places the boat at the river's fixed warmup origin; later passengers
 with the same speed join it mid-stream. Speed is quantized to micro-multiples
 in the sharing key. Duration is passenger-local and is therefore not in that
-key. At most one boat sits on a river, and a differing speed is refused loudly.
-The last ticket removes the seat, cancels the worker and joins it away from the
-registry mutex. Rivers and their bounded checkpoint sets remain for process
-life so later history does not depend on eviction timing.
+key. An unserved speed is a second cursor on the same water, not a refusal:
+speed mutates no generated value. One ledger still carries one cadence - two
+sockets on the default account may ride two rivers, but a second speed on a
+river that account is already seated on is refused, because that would be two
+clocks judging one book. That account-side seat is COUNTED and is released
+when the session ends rather than when the account freezes: an account riding
+two rivers never freezes on losing one socket, and a boat key is only
+(river, speed), so a seat left behind would be indistinguishable from a live
+one as soon as anybody boarded that cadence again. The last ticket of a given
+cadence removes that seat,
+cancels its worker and joins it away from the registry mutex. Other cadences
+on the same river stay. Rivers and their bounded checkpoint sets remain for
+process life so later history does not depend on eviction timing.
 
 The BOOT river is the exception to placement on demand: `serve` boards it
 before it writes the readiness line, at the configured `speed`, and the run
-retains that ticket for process life. So the boot river always has a boat, it
-never winds down, and a socket asking for a different speed on the boot symbol
-is refused. Every other river is boatless until someone binds it.
+retains that ticket for process life. So the boot river always has a boat at
+the configured speed and that boat never winds down. A socket asking for a
+different speed on the boot symbol gets a second boat. Every other river is
+boatless until someone binds it.
 
 Concurrent first boarders share one placement through a semaphore handoff
 rather than each placing a boat, and a reader asking a river's now while a

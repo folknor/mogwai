@@ -364,12 +364,12 @@ required eventually, since both modes must be supported.
   immutable control history from a boundary at or before every live cursor,
   never by mutating the lead. See the history ledger for the adjudication's
   full grounds; the spec that recorded it is retired.
-  THE SPEED REFUSAL IS AN ARTIFACT, not a semantic, and it is recorded here so
-  nobody later defends it as intended behaviour. It exists because a cache was
-  promoted to a concept: sharing one cursor forces everyone served from it onto
-  one cadence, and the refusal is that constraint surfacing on the wire. Speed
-  mutates no generated value, so a passenger asking for an unserved speed is
-  asking for a second cursor on the same water. The end state serves it.
+  THE SPEED REFUSAL WAS AN ARTIFACT and is gone: seats are keyed by
+  (river, speed), an unserved speed is a second cursor, and the sweeper
+  applies a boat's walk only to passengers seated on it. One ledger still
+  carries one cadence, so a second socket on the same account asking for a
+  different speed of a river it is already riding is refused. That is the
+  ledger constraint, not the cache showing through.
   CLOSED 2026-08-16, as the second of those two: the venue refuses to leave
   orders resting on a river nobody is reading. An ATTACHED account's order on a
   symbol no cursor walks is cancelled at the sweep pass; a FROZEN account is
@@ -1821,14 +1821,12 @@ and a window means being served from its start. Sharing therefore only happens
 for the unnamed-window form - a preset plus a duration - which is exactly the
 request that says "wherever you are is fine".
 
-SPEED IS SERVED, NOT REFUSED. Today a socket asking for a speed the seated
-cursor does not carry gets a `400` before the 101. That refusal is the shared
-cursor showing through onto the wire, not a statement about the model: speed
-does not change the generated WATER, only its delivery cadence, so a passenger
-asking for an unserved speed is asking for a second cursor on the SAME river.
-An earlier draft called this "speed splits the river", which overstated it -
-river identity never contained speed, and two cadences over one river share the
-whole checkpoint chain underneath.
+SPEED IS SERVED, NOT REFUSED. LANDED: seats are keyed by (river, speed) and
+an unserved speed is a second cursor on the same water. The remaining 400 is
+one ledger, one cadence - a second socket on an account already riding that
+river at another speed. An earlier draft called this "speed splits the river",
+which overstated it - river identity never contained speed, and two cadences
+over one river share the whole checkpoint chain underneath.
 
 #### What that costs, measured against this checkout
 

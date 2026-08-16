@@ -4,9 +4,12 @@
 //! State owned by one venue process: one ledger, and keyed paced boats over
 //! many rivers.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use mogwai_engine::{Engine, EngineConfig};
@@ -125,6 +128,24 @@ pub(crate) struct Passenger {
     /// is no simulated clock while frozen: the boat that carried one wound down
     /// with the last socket. This is what the TTL is measured against.
     pub(crate) frozen_since: Mutex<Option<std::time::Instant>>,
+    /// Which boats this account is currently riding, and HOW MANY CONNECTIONS
+    /// ride each. One connection sits on one boat; the default account can
+    /// have two unnamed sockets on two symbols and therefore two boats. The
+    /// sweeper applies a boat's walk only to passengers seated on it, so two
+    /// cadences on one river cannot double-fill one ledger.
+    ///
+    /// COUNTED RATHER THAN A SET, because two unnamed sockets may share one
+    /// river at one speed and therefore one boat. A set would let the first of
+    /// them to close vacate the seat out from under the second, which stops
+    /// the sweeper applying that boat to a ledger somebody is still trading.
+    ///
+    /// A seat is released when the SESSION drops, not when the account
+    /// freezes: a freeze needs every socket gone, and the two-socket shape
+    /// above would otherwise leave a seat held by a connection that ended.
+    /// The key carries no placement nonce, so a stale seat would be
+    /// indistinguishable from a live one the moment any account boarded that
+    /// river at that speed again.
+    seated_on: Mutex<HashMap<crate::boatyard::BoatKey, usize>>,
     /// TRANSPORT havoc, per account rather than per venue.
     ///
     /// These corrupt what one connection RECEIVES rather than what the
@@ -183,11 +204,76 @@ impl Passenger {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if frozen.is_none() {
             *frozen = Some(std::time::Instant::now());
+            self.seated_on
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
             tracing::debug!(
                 account = %self.account_id.as_str(),
                 "account frozen: nobody is reading it, so it is not swept until a socket returns",
             );
         }
+    }
+
+    /// Take a seat on `key`, or name the seat this account already holds on
+    /// that river at a different speed.
+    ///
+    /// THE ONLY WAY TO SIT, and unconditional on the freeze state on purpose.
+    /// A frozen account has an empty map - the seats went with the sessions -
+    /// so a reseat at a new speed passes the check anyway, and routing a
+    /// frozen account past it instead would reopen the race this lock exists
+    /// to close: an account is created frozen and only attaches once its
+    /// socket reaches `resume`, so two first connections would both find
+    /// themselves frozen and both sit unchecked.
+    ///
+    /// The check and the insert share the lock, so of two sockets racing two
+    /// speeds exactly one wins.
+    pub(crate) fn try_sit(
+        &self,
+        key: crate::boatyard::BoatKey,
+    ) -> Result<(), crate::boatyard::BoatKey> {
+        let mut seated = self
+            .seated_on
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(other) = seated
+            .keys()
+            .find(|sitting| {
+                sitting.river() == key.river() && sitting.speed_micros() != key.speed_micros()
+            })
+            .cloned()
+        {
+            return Err(other);
+        }
+        *seated.entry(key).or_insert(0) += 1;
+        Ok(())
+    }
+
+    /// Give up one connection's seat on `key`.
+    ///
+    /// The seat itself is only vacated by the LAST rider, which is why the map
+    /// counts. Tolerant of a key it does not hold: a freeze clears the map,
+    /// and the freeze fires from lane release while the session that held the
+    /// seat is still unwinding.
+    pub(crate) fn unsit(&self, key: &crate::boatyard::BoatKey) {
+        let mut seated = self
+            .seated_on
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(riders) = seated.get_mut(key) {
+            *riders -= 1;
+            if *riders == 0 {
+                seated.remove(key);
+            }
+        }
+    }
+
+    /// Whether this account is riding `key`.
+    pub(crate) fn is_seated_on(&self, key: &crate::boatyard::BoatKey) -> bool {
+        self.seated_on
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(key)
     }
 
     fn attach(&self) {
@@ -448,6 +534,7 @@ impl Run {
             // abandoned, and starting it attached would make a POSTed account
             // nobody ever connects to immortal.
             frozen_since: Mutex::new(Some(std::time::Instant::now())),
+            seated_on: Mutex::new(HashMap::new()),
             dark: HavocWindow::new(),
             stall: HavocWindow::new(),
             delay_ms: AtomicU64::new(0),
@@ -658,6 +745,7 @@ impl Run {
                 // account opened and then abandoned must not outlive the TTL
                 // just because no socket ever reached it.
                 frozen_since: Mutex::new(Some(std::time::Instant::now())),
+                seated_on: Mutex::new(HashMap::new()),
                 dark: HavocWindow::new(),
                 stall: HavocWindow::new(),
                 delay_ms: AtomicU64::new(0),
@@ -1288,6 +1376,80 @@ mod tests {
 
         run.release_lanes(second_id);
         assert!(passenger.is_frozen(), "the last one left");
+    }
+
+    fn boat_key(run: &Run, symbol: &str, speed: f64) -> crate::boatyard::BoatKey {
+        let profile = run.rivers.resolve_profile(symbol).expect("a served symbol");
+        crate::boatyard::BoatKey::new(run.rivers.resolve_key(&profile), speed)
+            .expect("a legal speed")
+    }
+
+    /// Two sockets may share one boat - the default account, one symbol, one
+    /// speed - so the seat is COUNTED. The first to leave must not vacate a
+    /// seat the second is still riding, or the sweeper stops applying that
+    /// boat to a ledger somebody is still trading.
+    #[test]
+    fn a_seat_shared_by_two_connections_survives_the_first_leaving() {
+        let run = run(1_000, 400, None);
+        let passenger = run.passenger(&mogwai_protocol::AccountId::parse("SEAT-001").unwrap());
+        let key = boat_key(&run, "BTCUSDT", 2.0);
+
+        passenger.try_sit(key.clone()).expect("the first sits");
+        passenger
+            .try_sit(key.clone())
+            .expect("the second shares it");
+        passenger.unsit(&key);
+        assert!(
+            passenger.is_seated_on(&key),
+            "one connection left, one is still riding"
+        );
+        passenger.unsit(&key);
+        assert!(!passenger.is_seated_on(&key), "the last rider vacated it");
+    }
+
+    /// The one-cadence rule holds while the account is FROZEN, which is the
+    /// state every account is created in and stays in until its first socket
+    /// reaches `resume`. Two first connections racing two speeds therefore
+    /// both meet this check, and exactly one may win it.
+    #[test]
+    fn a_frozen_account_may_not_sit_on_two_cadences_of_one_river() {
+        let run = run(1_000, 400, None);
+        let passenger = run.passenger(&mogwai_protocol::AccountId::parse("SEAT-002").unwrap());
+        assert!(passenger.is_frozen(), "a fresh account is unattended");
+
+        passenger
+            .try_sit(boat_key(&run, "BTCUSDT", 2.0))
+            .expect("the first cadence sits");
+        let refused = passenger
+            .try_sit(boat_key(&run, "BTCUSDT", 3.0))
+            .expect_err("a second cadence on one ledger is refused");
+        assert_eq!(
+            refused.speed(),
+            2.0,
+            "the refusal names the sitting cadence"
+        );
+    }
+
+    /// A seat is released by the SESSION, not by the freeze - an account
+    /// riding two rivers that loses one socket never freezes. The key carries
+    /// no placement nonce, so a held seat would be indistinguishable from a
+    /// live one and would both refuse a legitimate new cadence and hand this
+    /// ledger a boat it never boarded.
+    #[test]
+    fn leaving_one_river_frees_that_seat_while_another_is_still_ridden() {
+        let run = run(1_000, 400, None);
+        let passenger = run.passenger(&mogwai_protocol::AccountId::parse("SEAT-003").unwrap());
+        let slow = boat_key(&run, "BTCUSDT", 2.0);
+
+        passenger.try_sit(slow.clone()).expect("board the slow one");
+        passenger.unsit(&slow);
+        assert!(
+            !passenger.is_seated_on(&slow),
+            "the seat went with the session, no freeze required"
+        );
+        passenger
+            .try_sit(boat_key(&run, "BTCUSDT", 3.0))
+            .expect("a new cadence on a river nobody is riding is not a conflict");
     }
 
     /// The TTL, which is the only thing that ever removes an account: a frozen

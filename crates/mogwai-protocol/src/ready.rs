@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 /// The venue's report to the process that launched it.
 ///
 /// This describes a venue, not a river or boat. A venue can serve many rivers,
-/// each carrying at most one boat with its own wall anchor and speed. Nothing
+/// each carrying as many boats as distinct speeds, each with its own wall
+/// anchor. Nothing
 /// that varies per river or boat appears here. Venue identity for attach is
 /// `addr` plus `run_seed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
