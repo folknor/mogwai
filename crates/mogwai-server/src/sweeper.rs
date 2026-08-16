@@ -856,6 +856,7 @@ mod tests {
             post_only: false,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
+            link: None,
         };
         engine.process_with_market(
             ClientMessage::SubmitOrder(order),
@@ -948,6 +949,7 @@ mod tests {
             post_only: false,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
+            link: None,
         };
         engine.process(ClientMessage::SubmitOrder(order), 2);
         let scan = engine

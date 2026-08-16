@@ -1309,19 +1309,15 @@ required eventually, since both modes must be supported.
   `TrailingStopMarket` is a per-order high-water mark plus an offset, which is
   the SAME ratchet the account-policy trailing drawdown needs, so the two share
   a mechanism if they are built in either order.
-  ORDER LISTS ARE THE STRUCTURAL ONE. mogwai models no linkage between orders at
-  all, so a genuine bracket where one fill cancels its sibling cannot exist.
-  broadarrow works around it with two independent reduce-only legs plus
-  stale-cancel reconciliation, which real venues also permit - but that is a
-  workaround for a missing primitive, not the primitive.
   ABSORBS the former standalone GTD item, whose content follows: `Gtd` needs an
   `expire_time` on the wire plus a time-driven expiry pass on the sweeper that
   has nothing to do with triggers. The conditional-order-type landing carried a
   GTC-only rule for stops for exactly this reason.
-  LANDED 2026-08-16, all but the order lists. `TrailingStopMarket`,
-  `MarketIfTouched`, `LimitIfTouched` and `MarketToLimit` are served, along with
-  `Day` and `Gtd`. The adapter's `wire_order_type` refuses only ORDER LISTS now,
-  which is the one shape the venue genuinely models no mechanism for.
+  LANDED 2026-08-16. `TrailingStopMarket`, `MarketIfTouched`, `LimitIfTouched`
+  and `MarketToLimit` are served, along with `Day` and `Gtd`. ORDER LISTS landed
+  with them: a linkage is a group id plus a rule each member carries, applied
+  where the fill is COMMITTED. `wire_order_type` now refuses only
+  `TrailingStopLimit`. See `docs/order-lists.md` and the architecture note.
   THE TOUCHED FAMILY is a third `ScanKind`, `TriggerToward`, rather than a flag
   on the stop predicate: a stop fires when price runs AWAY from what it protects
   and a touched order when price comes TOWARD its level, and putting the two
@@ -1336,10 +1332,7 @@ required eventually, since both modes must be supported.
   asking the calendar whether the swept span crossed from open to shut. An
   instrument with no calendar supplies no instant, so a day order on a 24/7
   symbol rests like a Gtc rather than expiring at an invented hour.
-  STILL OPEN: ORDER LISTS (OCO, OTO). The venue models no linkage between
-  orders, so a genuine bracket where one fill cancels its sibling cannot exist,
-  and the consumer's two-independent-reduce-only-legs workaround remains a
-  workaround for a missing primitive. Also unlanded: nautilus models expiry as
+  STILL OPEN: nautilus models expiry as
   its own `Expired` transition and the wire reports `Canceled`, which is a
   distinction nothing downstream currently acts on but is a real difference from
   what a nautilus host would see at a real venue.
@@ -1971,7 +1964,8 @@ cancels the sibling cannot exist. broadarrow works around it by placing two
 independent reduce-only legs and relying on reduce-only plus stale-cancel
 reconciliation to reap the loser, which is a real technique that real venues
 also permit, but it is a workaround for a missing primitive rather than the
-primitive.
+primitive. ALL SERVED as of 2026-08-16, order lists included; the workaround is
+no longer required, though it keeps working.
 
 `TrailingStopMarket` is the same gap and is written up separately below, since
 it was found first and has its own argument.

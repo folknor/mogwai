@@ -36,8 +36,8 @@ use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
 use nautilus_model::{
     accounts::AccountAny,
     enums::{
-        ContingencyType, LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType,
-        PositionSideSpecified, TriggerType,
+        LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSideSpecified,
+        TriggerType,
     },
     events::{
         AccountState as NautilusAccountState, OrderAccepted, OrderCancelRejected, OrderCanceled,
@@ -309,6 +309,102 @@ impl MogwaiExecutionClient {
             .context("mogwai execution client is not connected")?;
         tx.send(cmd.clone())
             .context("send execution websocket command")
+    }
+
+    /// One nautilus `OrderInitialized` as this venue's wire submit, linkage and
+    /// all. Shared by the single-order and order-list paths so the two cannot
+    /// disagree about what a leg means.
+    fn wire_submit(
+        &self,
+        client_order_id: &ClientOrderId,
+        instrument_id: InstrumentId,
+        position_id: Option<PositionId>,
+        init: &nautilus_model::events::OrderInitialized,
+    ) -> anyhow::Result<mogwai_protocol::SubmitOrder> {
+        convert::wire_trigger_type(init.trigger_type)?;
+        if init
+            .trigger_instrument_id
+            .is_some_and(|id| id != instrument_id)
+        {
+            anyhow::bail!(
+                "cross-instrument triggers are unsupported: MOGWAI triggers from the order instrument's tape"
+            );
+        }
+        Ok(mogwai_protocol::SubmitOrder {
+            client_order_id: client_order_id.to_string(),
+            symbol: symbol_from_instrument(instrument_id),
+            position_id: position_id.map(|id| id.to_string()),
+            side: convert::wire_side(init.order_side)?,
+            order_type: convert::wire_order_type(init.order_type)?,
+            quantity: init.quantity.as_decimal(),
+            price: init.price.map(|p| p.as_decimal()),
+            trigger_price: init.trigger_price.map(|p| p.as_decimal()),
+            // Nautilus states a trailing offset with a TYPE beside it - price,
+            // ticks, basis points. Only the price form maps: the venue's trail
+            // is an absolute distance, and converting the others needs a
+            // reference price the two ends would have to agree on separately.
+            trail_offset: convert::wire_trail_offset(
+                init.trailing_offset,
+                init.trailing_offset_type,
+            )?,
+            reduce_only: init.reduce_only,
+            post_only: init.post_only,
+            time_in_force: convert::wire_time_in_force(init.time_in_force)?,
+            expire_time: init.expire_time.map(|ts| ts.as_u64()),
+            link: convert::wire_order_link(init)?,
+        })
+    }
+
+    /// Mirror the order locally and tell nautilus it is on its way.
+    ///
+    /// Emitted only once conversion has succeeded and the mirror record exists.
+    /// The dispatch that follows may still fail at transport (WS channel gone,
+    /// or an HTTP POST error), in which case `dispatch_order` synthesizes the
+    /// matching `OrderRejected` - a valid Submitted -> Rejected transition - so
+    /// the order still reaches a terminal state.
+    fn announce_submitted(
+        &self,
+        client_order_id: &ClientOrderId,
+        strategy_id: nautilus_model::identifiers::StrategyId,
+        instrument_id: InstrumentId,
+        init: &nautilus_model::events::OrderInitialized,
+        ts_command: UnixNanos,
+    ) -> anyhow::Result<()> {
+        let order = self.core.get_order(client_order_id)?;
+        let ts_init = now_unix_nanos(self.sim);
+        let submitted = OrderSubmitted::new(
+            self.core.trader_id,
+            order.strategy_id(),
+            order.instrument_id(),
+            order.client_order_id(),
+            self.core.account_id,
+            UUID4::new(),
+            ts_init,
+            ts_init,
+        );
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+            state.orders.insert(
+                *client_order_id,
+                OrderRecord {
+                    strategy_id,
+                    instrument_id,
+                    order_side: init.order_side,
+                    order_type: init.order_type,
+                    status: OrderStatus::Submitted,
+                    venue_order_id: None,
+                    ts_last: ts_command,
+                    seen_trades: std::collections::HashSet::new(),
+                },
+            );
+            state.prune();
+        }
+        self.emitter
+            .send_order_event(OrderEventAny::Submitted(submitted));
+        Ok(())
     }
 
     fn exec_context(&self) -> ExecContext {
@@ -1001,8 +1097,6 @@ impl ExecutionClient for MogwaiExecutionClient {
     }
 
     fn submit_order(&self, cmd: SubmitOrder) -> anyhow::Result<()> {
-        let order = self.core.get_order(&cmd.client_order_id)?;
-
         // Build the wire order FIRST (AE8). An unsupported side/type/TIF errors
         // out of convert::wire_* here; emitting OrderSubmitted before this - as
         // the code used to - queued a Submitted event that nautilus then had to
@@ -1012,101 +1106,62 @@ impl ExecutionClient for MogwaiExecutionClient {
         // Submitted mirror stray that fed the unbounded ExecState growth.
         // Converting first means a conversion failure returns before any event is
         // emitted or any mirror record exists.
-        convert::wire_trigger_type(cmd.order_init.trigger_type)?;
-        if cmd
-            .order_init
-            .trigger_instrument_id
-            .is_some_and(|id| id != cmd.instrument_id)
-        {
-            anyhow::bail!(
-                "cross-instrument triggers are unsupported: MOGWAI triggers from the order instrument's tape"
-            );
-        }
-        if cmd.order_init.order_list_id.is_some()
-            || cmd
-                .order_init
-                .linked_order_ids
-                .as_ref()
-                .is_some_and(|ids| !ids.is_empty())
-        {
-            anyhow::bail!(
-                "order lists and linked bracket legs are unsupported: place and cancel fixed stops from the strategy"
-            );
-        }
-        if cmd
-            .order_init
-            .contingency_type
-            .is_some_and(|kind| kind != ContingencyType::NoContingency)
-        {
-            anyhow::bail!(
-                "contingent order lists are unsupported: place and cancel fixed stops from the strategy"
-            );
-        }
-        let wire = mogwai_protocol::SubmitOrder {
-            client_order_id: cmd.client_order_id.to_string(),
-            symbol: symbol_from_instrument(cmd.instrument_id),
-            position_id: cmd.position_id.map(|id| id.to_string()),
-            side: convert::wire_side(cmd.order_init.order_side)?,
-            order_type: convert::wire_order_type(cmd.order_init.order_type)?,
-            quantity: cmd.order_init.quantity.as_decimal(),
-            price: cmd.order_init.price.map(|p| p.as_decimal()),
-            trigger_price: cmd.order_init.trigger_price.map(|p| p.as_decimal()),
-            // Nautilus states a trailing offset with a TYPE beside it - price,
-            // ticks, basis points. Only the price form maps: the venue's trail
-            // is an absolute distance, and converting the others needs a
-            // reference price the two ends would have to agree on separately.
-            trail_offset: convert::wire_trail_offset(
-                cmd.order_init.trailing_offset,
-                cmd.order_init.trailing_offset_type,
-            )?,
-            reduce_only: cmd.order_init.reduce_only,
-            post_only: cmd.order_init.post_only,
-            time_in_force: convert::wire_time_in_force(cmd.order_init.time_in_force)?,
-            expire_time: cmd.order_init.expire_time.map(|ts| ts.as_u64()),
-        };
-
-        let ts_init = now_unix_nanos(self.sim);
-        let submitted = OrderSubmitted::new(
-            self.core.trader_id,
-            order.strategy_id(),
-            order.instrument_id(),
-            order.client_order_id(),
-            self.core.account_id,
-            UUID4::new(),
-            ts_init,
-            ts_init,
-        );
-
-        {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
-            state.orders.insert(
-                cmd.client_order_id,
-                OrderRecord {
-                    strategy_id: cmd.strategy_id,
-                    instrument_id: cmd.instrument_id,
-                    order_side: cmd.order_init.order_side,
-                    order_type: cmd.order_init.order_type,
-                    status: OrderStatus::Submitted,
-                    venue_order_id: None,
-                    ts_last: cmd.ts_init,
-                    seen_trades: std::collections::HashSet::new(),
-                },
-            );
-            state.prune();
-        }
-
-        // Emit Submitted only now that conversion has succeeded and the mirror
-        // record exists. The dispatch below may still fail at transport (WS
-        // channel gone, or an HTTP POST error), in which case dispatch_order
-        // synthesizes the matching OrderRejected - a valid Submitted -> Rejected
-        // transition - so the order still reaches a terminal state.
-        self.emitter
-            .send_order_event(OrderEventAny::Submitted(submitted));
-
+        let wire = self.wire_submit(
+            &cmd.client_order_id,
+            cmd.instrument_id,
+            cmd.position_id,
+            &cmd.order_init,
+        )?;
+        self.announce_submitted(
+            &cmd.client_order_id,
+            cmd.strategy_id,
+            cmd.instrument_id,
+            &cmd.order_init,
+            cmd.ts_init,
+        )?;
         self.dispatch_order(&ExecWsCommand::Submit(wire))
+    }
+
+    /// An ORDER LIST, submitted leg by leg in the list's own order.
+    ///
+    /// The legs go out as ordinary submits carrying their LINKAGE, because that
+    /// is what the venue models: a group id plus a rule each member holds, not a
+    /// list object the venue would have to own. Order matters and is nautilus's,
+    /// not ours - an `OrderList` puts the parent first, and the venue refuses a
+    /// child whose parent it has not seen, so re-ordering here would break a
+    /// bracket that nautilus assembled correctly.
+    ///
+    /// A leg that fails conversion aborts the whole list BEFORE anything is
+    /// dispatched, which is the only honest failure mode: half a bracket is
+    /// worse than none, and a strategy that gets a rejection for its entry can
+    /// retry, while one whose stop silently never reached the venue cannot.
+    fn submit_order_list(
+        &self,
+        cmd: nautilus_common::messages::execution::SubmitOrderList,
+    ) -> anyhow::Result<()> {
+        let mut wires = Vec::with_capacity(cmd.order_inits.len());
+        for init in &cmd.order_inits {
+            wires.push((
+                init.client_order_id,
+                self.wire_submit(
+                    &init.client_order_id,
+                    init.instrument_id,
+                    cmd.position_id,
+                    init,
+                )?,
+            ));
+        }
+        for ((client_order_id, wire), init) in wires.into_iter().zip(&cmd.order_inits) {
+            self.announce_submitted(
+                &client_order_id,
+                cmd.strategy_id,
+                init.instrument_id,
+                init,
+                cmd.ts_init,
+            )?;
+            self.dispatch_order(&ExecWsCommand::Submit(wire))?;
+        }
+        Ok(())
     }
 
     fn modify_order(&self, cmd: ModifyOrder) -> anyhow::Result<()> {

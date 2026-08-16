@@ -72,6 +72,16 @@ pub enum Resting {
     /// Never scanned: a market remainder left by a partial fill, which has no
     /// meaningful price for the tape to reach. Ends only on a client cancel.
     Inert,
+    /// An order-list CHILD waiting for its parent to fill. Accepted, on the
+    /// book, answerable to `QueryOrders` - and inert in every other respect: it
+    /// is never scanned and it holds no reservation, because an order that
+    /// cannot execute must not tie up funds the parent's own fill will need.
+    ///
+    /// A fill of the parent promotes it to the state it would have been given at
+    /// submit - `Limit` with a freshly drawn trigger, or `Conditional` - and it
+    /// takes its reservation then. That promotion is the whole of
+    /// one-triggers-the-other.
+    Held,
 }
 
 /// How many funding instants the half-open span `from_ns .. to_ns` crossed.
@@ -128,6 +138,17 @@ pub struct OpenOrder {
     /// alone is not enough: two overlapping walks can both name a still-resting
     /// order, and applying both double-counts the span they share.
     pub revision: u64,
+}
+
+impl OpenOrder {
+    /// The order this one waits on, if it is an order-list child.
+    #[must_use]
+    pub fn parent_order_id(&self) -> Option<&str> {
+        self.submit
+            .link
+            .as_ref()
+            .and_then(|link| link.parent_order_id.as_deref())
+    }
 }
 
 /// The one construction path for an engine. The core receives observations,
@@ -914,6 +935,9 @@ impl Engine {
                 expire_time: None,
                 reduce_only: true,
                 post_only: false,
+                // A venue-originated close belongs to no order list: it is the
+                // venue acting on its own account, not a leg of anybody's plan.
+                link: None,
             };
             events.extend(self.on_submit_from(
                 order,
@@ -994,6 +1018,9 @@ impl Engine {
                 expire_time: None,
                 reduce_only: true,
                 post_only: false,
+                // A venue-originated close belongs to no order list: it is the
+                // venue acting on its own account, not a leg of anybody's plan.
+                link: None,
             };
             events.extend(self.on_submit_from(
                 order,
@@ -1365,7 +1392,10 @@ impl Engine {
                         },
                         stop_px,
                     ),
-                    Resting::Inert => return None,
+                    // Neither has a price the tape can decide: an inert
+                    // remainder never had one, and a held child has one its
+                    // parent has not yet released it to use.
+                    Resting::Inert | Resting::Held => return None,
                 };
                 Some((
                     (
@@ -1619,6 +1649,7 @@ mod tests {
             post_only: false,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
+            link: None,
         }
     }
 
@@ -1643,6 +1674,7 @@ mod tests {
             expire_time: None,
             reduce_only: false,
             post_only: false,
+            link: None,
         }
     }
 
@@ -4817,6 +4849,7 @@ mod tests {
             expire_time: None,
             reduce_only: false,
             post_only: false,
+            link: None,
         }
     }
 
@@ -4969,6 +5002,432 @@ mod tests {
         assert!(validate_submit_order(&stop).is_err());
         stop.time_in_force = TimeInForce::Fok;
         assert!(validate_submit_order(&stop).is_err());
+    }
+
+    // --- Order lists: OCO, OTO and OUO ---------------------------------------
+
+    /// A funded engine on the spot default instrument, cash enough that no test
+    /// here is measuring the funds gate by accident.
+    fn linked_engine() -> Engine {
+        Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([
+                ("USDT".to_string(), Decimal::from(1_000_000)),
+                ("BTC".to_string(), Decimal::from(100)),
+            ]),
+            fill_seed: 7,
+        })
+    }
+
+    fn linked(order: SubmitOrder, link: mogwai_protocol::OrderLink) -> SubmitOrder {
+        SubmitOrder {
+            link: Some(link),
+            ..order
+        }
+    }
+
+    fn link_of(
+        contingency: mogwai_protocol::Contingency,
+        siblings: &[&str],
+        parent: Option<&str>,
+    ) -> mogwai_protocol::OrderLink {
+        mogwai_protocol::OrderLink {
+            order_list_id: "OL-1".into(),
+            contingency,
+            linked_order_ids: siblings.iter().map(|id| (*id).to_string()).collect(),
+            parent_order_id: parent.map(ToOwned::to_owned),
+        }
+    }
+
+    /// A resting limit at 100 that the tape has not reached: the market sits at
+    /// 200, well above a buy limit's trigger, so nothing fills on arrival.
+    fn away_reading() -> MarketReading {
+        MarketReading {
+            last_px: Decimal::from(200),
+            ts_ns: 1,
+            band_ticks: 0,
+        }
+    }
+
+    fn canceled_ids(events: &[ServerMessage]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::OrderCanceled {
+                    client_order_id, ..
+                } => Some(client_order_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The primitive the venue had no mechanism for: one leg filling reaps the
+    /// other, at the instant the fill is committed.
+    #[test]
+    fn an_oco_fill_cancels_its_sibling_where_the_fill_is_committed() {
+        let mut e = linked_engine();
+        for (id, sibling) in [("TP", "SL"), ("SL", "TP")] {
+            let mut order = limit_order(id, 1);
+            order.price = Some(Decimal::from(100));
+            let order = linked(
+                order,
+                link_of(mogwai_protocol::Contingency::Oco, &[sibling], None),
+            );
+            e.process_with_market(ClientMessage::SubmitOrder(order), 1, Some(away_reading()));
+        }
+        assert_eq!(e.open.len(), 2, "both legs rest");
+
+        // The tape reaches TP's trigger and nothing else.
+        let scans = e.pending_scans();
+        let tp = scans
+            .iter()
+            .find(|scan| scan.client_order_id == "TP")
+            .expect("TP is scanned");
+        let (out, _) = e.apply_scans(&[result(tp, true, 5)], 5);
+
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(fill) if fill.client_order_id == "TP")),
+            "the take-profit filled: {out:?}"
+        );
+        assert_eq!(
+            canceled_ids(&out),
+            ["SL"],
+            "its sibling is reaped in the same batch: {out:?}"
+        );
+        assert!(e.open.is_empty(), "no leg is left resting");
+    }
+
+    /// The failure the timing exists to prevent: two legs of one bracket swept
+    /// in ONE batch. A reap that waited for the next pass would let the second
+    /// leg fill against the same span of tape that filled the first.
+    #[test]
+    fn an_oco_sibling_swept_in_the_same_batch_cannot_also_fill() {
+        let mut e = linked_engine();
+        for (id, sibling) in [("TP", "SL"), ("SL", "TP")] {
+            let mut order = limit_order(id, 1);
+            order.price = Some(Decimal::from(100));
+            let order = linked(
+                order,
+                link_of(mogwai_protocol::Contingency::Oco, &[sibling], None),
+            );
+            e.process_with_market(ClientMessage::SubmitOrder(order), 1, Some(away_reading()));
+        }
+        let scans = e.pending_scans();
+        // BOTH legs are handed back as triggered in one batch, which is exactly
+        // what a tape crossing both prices in one span produces.
+        let results: Vec<ScanResult> = scans.iter().map(|scan| result(scan, true, 5)).collect();
+        let (out, _) = e.apply_scans(&results, 5);
+
+        let fills: Vec<&str> = out
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::OrderFilled(fill) => Some(fill.client_order_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fills.len(),
+            1,
+            "exactly one leg of an OCO pair may ever fill: {out:?}"
+        );
+        assert_eq!(
+            canceled_ids(&out).len(),
+            1,
+            "the other is canceled: {out:?}"
+        );
+        assert!(e.open.is_empty());
+    }
+
+    /// One-triggers-the-other: the child is accepted, holds nothing, is scanned
+    /// by nothing, and goes live at its parent's fill.
+    #[test]
+    fn an_oto_child_waits_for_its_parent_and_then_rests() {
+        let mut e = linked_engine();
+        let mut entry = limit_order("ENTRY", 1);
+        entry.price = Some(Decimal::from(100));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(300));
+        let exit = linked(
+            exit,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+        let out = e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderAccepted { .. })),
+            "a held child is accepted, not refused: {out:?}"
+        );
+        assert_eq!(
+            e.pending_scans().len(),
+            1,
+            "only the parent is scanned while the child waits"
+        );
+        assert!(
+            e.open
+                .iter()
+                .any(|order| order.submit.client_order_id == "EXIT"
+                    && matches!(order.resting, Resting::Held)),
+            "the child rests held"
+        );
+        let locked_while_held = e.snapshot(2);
+        assert_eq!(
+            balance(&locked_while_held, "BTC").locked,
+            Decimal::ZERO,
+            "a held sell child reserves no base currency"
+        );
+
+        let scans = e.pending_scans();
+        e.apply_scans(&[result(&scans[0], true, 5)], 5);
+
+        assert!(
+            e.open
+                .iter()
+                .any(|order| order.submit.client_order_id == "EXIT"
+                    && matches!(order.resting, Resting::Limit { .. })),
+            "the parent's fill released the child"
+        );
+        assert_eq!(
+            e.pending_scans().len(),
+            1,
+            "the released child is now the scanned order"
+        );
+        assert_eq!(
+            balance(&e.snapshot(5), "BTC").locked,
+            Decimal::ONE,
+            "and it takes its reservation at release"
+        );
+    }
+
+    /// A child of a parent that already filled has nothing to wait for. This is
+    /// the fast-market bracket: a market entry that filled on arrival.
+    #[test]
+    fn a_child_of_an_already_filled_parent_is_live_at_once() {
+        let mut e = linked_engine();
+        let entry = linked(
+            order("ENTRY", 1),
+            link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
+        );
+        e.process_with_market(
+            ClientMessage::SubmitOrder(entry),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(300));
+        let exit = linked(
+            exit,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+        assert!(
+            e.open
+                .iter()
+                .any(|order| order.submit.client_order_id == "EXIT"
+                    && matches!(order.resting, Resting::Limit { .. })),
+            "nothing to wait for, so the child rests live"
+        );
+    }
+
+    /// A bracket whose entry is cancelled must not leave its exits waiting for a
+    /// release that can never come.
+    #[test]
+    fn cancelling_a_parent_that_never_filled_reaps_its_children() {
+        let mut e = linked_engine();
+        let mut entry = limit_order("ENTRY", 1);
+        entry.price = Some(Decimal::from(100));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(300));
+        let exit = linked(
+            exit,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "ENTRY".into(),
+            },
+            3,
+        );
+        let mut canceled = canceled_ids(&out);
+        canceled.sort_unstable();
+        assert_eq!(canceled, ["ENTRY", "EXIT"], "both go: {out:?}");
+        assert!(e.open.is_empty());
+    }
+
+    /// One-updates-the-other, which is the bracket that survives a PARTIAL fill:
+    /// the surviving leg shrinks to what is left of the position rather than
+    /// staying sized for the whole of it.
+    #[test]
+    fn an_ouo_fill_shrinks_its_sibling_by_the_filled_quantity() {
+        let mut e = linked_engine();
+        for (id, sibling) in [("TP", "SL"), ("SL", "TP")] {
+            let mut order = limit_order(id, 4);
+            order.price = Some(Decimal::from(100));
+            let order = linked(
+                order,
+                link_of(mogwai_protocol::Contingency::Ouo, &[sibling], None),
+            );
+            e.process_with_market(ClientMessage::SubmitOrder(order), 1, Some(away_reading()));
+        }
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "TP".into(),
+            fraction: Decimal::new(25, 2),
+        });
+        let scans = e.pending_scans();
+        let tp = scans
+            .iter()
+            .find(|scan| scan.client_order_id == "TP")
+            .expect("TP is scanned");
+        let (out, _) = e.apply_scans(&[result(tp, true, 5)], 5);
+
+        assert!(
+            out.iter().any(
+                |event| matches!(event, ServerMessage::OrderUpdated { client_order_id, quantity, .. }
+                    if client_order_id == "SL" && *quantity == Decimal::from(3))
+            ),
+            "the sibling shrinks by the one unit that filled: {out:?}"
+        );
+        let sl = e
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == "SL")
+            .expect("SL still rests");
+        assert_eq!(sl.leaves_qty, Decimal::from(3));
+    }
+
+    /// The shapes the venue refuses, each for a reason it can state.
+    #[test]
+    fn linkage_shapes_the_venue_cannot_honour_are_refused() {
+        use mogwai_protocol::validate_submit_order;
+
+        let base = limit_order("X", 1);
+        let self_linked = linked(
+            base.clone(),
+            link_of(mogwai_protocol::Contingency::Oco, &["X"], None),
+        );
+        assert!(validate_submit_order(&self_linked).is_err());
+
+        let empty_oco = linked(
+            base.clone(),
+            link_of(mogwai_protocol::Contingency::Oco, &[], None),
+        );
+        assert!(validate_submit_order(&empty_oco).is_err());
+
+        let market_child = linked(
+            order("M", 1),
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
+        );
+        assert!(
+            validate_submit_order(&market_child).is_err(),
+            "a market child has nothing to rest on once released"
+        );
+
+        let mut ioc_child = base.clone();
+        ioc_child.time_in_force = TimeInForce::Ioc;
+        let ioc_child = linked(
+            ioc_child,
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
+        );
+        assert!(
+            validate_submit_order(&ioc_child).is_err(),
+            "a now-or-never child would expire before its parent ever fills"
+        );
+
+        // Venue-state refusals: an unknown parent, and a child of a child.
+        let mut e = linked_engine();
+        let orphan = linked(
+            base,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("NOBODY"),
+            ),
+        );
+        let out =
+            e.process_with_market(ClientMessage::SubmitOrder(orphan), 1, Some(away_reading()));
+        assert!(
+            reject_reason(&out).contains("unknown parent order"),
+            "{out:?}"
+        );
+    }
+
+    /// The depth rule, which is what makes a cancel's byte reservation
+    /// computable: one generation, never a chain.
+    #[test]
+    fn a_child_may_not_itself_be_a_parent() {
+        let mut e = linked_engine();
+        let mut entry = limit_order("ENTRY", 1);
+        entry.price = Some(Decimal::from(100));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Oto, &["CHILD"], None),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+
+        let mut child = limit_order("CHILD", 1);
+        child.price = Some(Decimal::from(100));
+        let child = linked(
+            child,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(child), 2, Some(away_reading()));
+
+        let mut grandchild = limit_order("GRANDCHILD", 1);
+        grandchild.price = Some(Decimal::from(100));
+        let grandchild = linked(
+            grandchild,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("CHILD"),
+            ),
+        );
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(grandchild),
+            3,
+            Some(away_reading()),
+        );
+        assert!(
+            reject_reason(&out).contains("may not itself be a parent"),
+            "{out:?}"
+        );
     }
 
     /// A `Gtd` order stops resting at its instant whether or not the tape ever

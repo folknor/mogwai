@@ -19,9 +19,12 @@ are keyed within it. Two accounts on one venue never share a position book.
 
 ORDER TYPES the venue serves: Market, Limit, StopMarket, StopLimit,
 TrailingStopMarket, MarketIfTouched, LimitIfTouched and MarketToLimit. The one
-refused shape is an ORDER LIST (OCO, OTO): the venue models no linkage between
-orders, so a bracket where one fill cancels its sibling has to be two
-independent reduce-only legs the strategy reaps itself.
+nautilus type still refused is `TrailingStopLimit`, whose trail rests as a limit
+where this venue's trail resolves to a market close - state such an exit as
+`TrailingStopMarket`.
+
+ORDER LISTS are served, so a genuine bracket needs no workaround. See
+[Order lists](order-lists.md) for the rules and what each one does.
 
 TIME-IN-FORCE: Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd but
 never Ioc or Fok - an order that must fill immediately cannot also wait for a

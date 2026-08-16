@@ -375,14 +375,102 @@ async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
     assert!(submit.contains(r#""reduce_only":true"#), "{submit}");
 }
 
-/// The refusal that REMAINS. Trailing stops need venue-side per-tick high-water
-/// state the venue does not model and were ruled out rather than deferred, so
-/// the refusal has to name what to do instead - and, per the AE8 ordering the
-/// convert-first block exists for, must fail before any `OrderSubmitted` is
-/// emitted.
+/// An ORDER LIST reaching the wire as linked legs, in the list's own order.
+///
+/// The venue models a linkage rather than a list object, so what has to arrive
+/// is each leg carrying its own rule: the entry naming what it triggers, the
+/// exit naming the entry as its parent. Both legs must be dispatched - half a
+/// bracket is the failure this path exists to prevent.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn a_trailing_stop_is_refused_by_name() {
+async fn an_order_list_reaches_the_wire_as_linked_legs() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let entry = cached_order(&cache);
+    let exit = cached_stop_market(&cache);
+    let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
+
+    let list_id = OrderListId::from("OL-1");
+    let mut entry_init = entry.init_event().clone();
+    entry_init.order_list_id = Some(list_id);
+    entry_init.contingency_type = Some(ContingencyType::Oto);
+    entry_init.linked_order_ids = Some(vec![exit.client_order_id()]);
+    let mut exit_init = exit.init_event().clone();
+    exit_init.order_list_id = Some(list_id);
+    exit_init.parent_order_id = Some(entry.client_order_id());
+
+    let list = nautilus_model::orders::OrderList::new(
+        list_id,
+        instrument_id(),
+        StrategyId::from("S-001"),
+        vec![entry.client_order_id(), exit.client_order_id()],
+        UnixNanos::default(),
+    );
+    let cmd = nautilus_common::messages::execution::SubmitOrderList::new(
+        TraderId::from("MOGWAI-001"),
+        Some(ClientId::from("MOGWAI-EXEC")),
+        StrategyId::from("S-001"),
+        list,
+        vec![entry_init, exit_init],
+        None,
+        None,
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+    );
+    client.submit_order_list(cmd).expect("the list is served");
+
+    // Dispatch is a channel hop to the websocket task, so the assertion drains
+    // to a DEADLINE rather than reading the stub once: reading immediately would
+    // race the flush, and reading `the next` message would be the same mistake
+    // in the other direction.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let submits = loop {
+        let seen: Vec<String> = state
+            .ws_client_messages
+            .lock()
+            .expect("ws client messages mutex")
+            .iter()
+            .filter(|text| text.contains("SubmitOrder"))
+            .cloned()
+            .collect();
+        if seen.len() >= 2 || std::time::Instant::now() >= deadline {
+            break seen;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(submits.len(), 2, "both legs are dispatched: {submits:?}");
+    assert!(
+        submits[0].contains(r#""contingency":"Oto""#)
+            && submits[0].contains(r#""order_list_id":"OL-1""#),
+        "the entry carries its rule and its list: {}",
+        submits[0]
+    );
+    assert!(
+        submits[1].contains(r#""parent_order_id":"O-1""#),
+        "the exit names the entry as its parent: {}",
+        submits[1]
+    );
+}
+
+/// The refusal that REMAINS on a trailing stop, now that the TYPE itself is
+/// served: an offset stated in anything but PRICE. The venue trails by an
+/// absolute price distance, and converting ticks or basis points needs a
+/// reference price the two ends would have to agree on independently - the exact
+/// silent disagreement that leaves a stop somewhere neither side intended.
+///
+/// Per the AE8 ordering the convert-first block exists for, it must fail before
+/// any `OrderSubmitted` is emitted.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_trailing_offset_the_venue_cannot_read_is_refused_by_name() {
     let state = Arc::new(StubState::default());
     state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
@@ -395,18 +483,18 @@ async fn a_trailing_stop_is_refused_by_name() {
     let client = connected_exec_client(base_url, cache, &mut sink_rx).await;
     let err = client
         .submit_order(submit_command(&order, order.init_event().clone()))
-        .expect_err("a trailing stop is still out of scope")
+        .expect_err("a PriceTier offset is unreadable here")
         .to_string();
     assert!(
-        err.contains("TrailingStopMarket"),
+        err.contains("trailing offset type"),
         "the refusal names the shape it refused: {err}"
     );
     assert!(
-        err.contains("StopMarket") && err.contains("StopLimit"),
-        "the refusal names the set that IS served: {err}"
+        err.contains("absolute price distance"),
+        "the refusal names what the venue CAN read: {err}"
     );
     assert!(
-        err.contains("re-places"),
+        err.contains("state the offset in price"),
         "the refusal names what to do instead: {err}"
     );
     assert_no_exec_event(&mut sink_rx).await;
@@ -448,31 +536,45 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
             Some(InstrumentId::new(Symbol::from("ETHUSDT"), *MOGWAI_VENUE));
         init
     };
-    let bracket_leg = {
+    // A linkage with no list to key it by. The four nautilus fields are
+    // independent, so this shape assembles - and means nothing, since the venue
+    // keys a linkage by `order_list_id`. Refused HERE rather than at the venue:
+    // a venue-side refusal of something the host could have caught reads to a
+    // strategy author as the venue being broken.
+    let unkeyed_linkage = {
         let mut init = legal.clone();
         init.contingency_type = Some(ContingencyType::Oco);
-        init.order_list_id = Some(OrderListId::from("OL-1"));
         init.linked_order_ids = Some(vec![ClientOrderId::from("O-SIBLING")]);
         init
     };
 
-    for (label, init, needle) in [
-        ("a mark-price trigger", mark_price, "trigger"),
-        ("a foreign trigger instrument", foreign_instrument, "tape"),
-        ("a bracket leg", bracket_leg, "order lists"),
+    for (label, init, needles) in [
+        (
+            "a mark-price trigger",
+            mark_price,
+            ["unsupported", "trigger"],
+        ),
+        (
+            "a foreign trigger instrument",
+            foreign_instrument,
+            ["unsupported", "tape"],
+        ),
+        (
+            "an unkeyed linkage",
+            unkeyed_linkage,
+            ["must name its order list", "order_list_id"],
+        ),
     ] {
         let err = client
             .submit_order(submit_command(&order, init))
             .expect_err(label)
             .to_string();
-        assert!(
-            err.contains("unsupported"),
-            "{label}: the refusal names itself a refusal: {err}"
-        );
-        assert!(
-            err.contains(needle),
-            "{label}: the refusal names the ruling: {err}"
-        );
+        for needle in needles {
+            assert!(
+                err.contains(needle),
+                "{label}: the refusal names the ruling ({needle}): {err}"
+            );
+        }
         assert_no_exec_event(&mut sink_rx).await;
     }
     assert!(

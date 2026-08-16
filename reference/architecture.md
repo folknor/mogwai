@@ -72,9 +72,26 @@ indistinguishable from one that never came close.
 
 THE ORDER-TYPE SURFACE IS COMPLETE RATHER THAN CURATED. Market, Limit,
 StopMarket, StopLimit, TrailingStopMarket, MarketIfTouched, LimitIfTouched and
-MarketToLimit are all served; the one shape still refused is an ORDER LIST,
-because the venue models no linkage between orders and a bracket where one fill
-cancels its sibling therefore cannot exist.
+MarketToLimit are all served. The one nautilus type still refused is
+`TrailingStopLimit`, whose trail rests as a limit where this venue's trail
+resolves to a market close.
+
+ORDER LISTS ARE A PRIMITIVE, not a workaround. A linkage is a GROUP ID plus a
+RULE that each member carries - one-cancels-the-other, one-triggers-the-other,
+one-updates-the-other - and the venue holds no list object, only what each order
+says about the orders it names. THE RULE IS APPLIED WHERE THE FILL IS COMMITTED,
+between sweep results and never after the batch: a tape span can cross both legs
+of a bracket at once, so a sibling reaped on a later pass would already have
+filled against the same prints. A CHILD (`parent_order_id`) rests HELD -
+accepted, answerable, scanned by nothing and holding no reservation - until its
+parent's first fill releases it into the state it would have been submitted
+into, drawing a fresh band trigger and taking its hold then. A parent that goes
+terminal without filling reaps its held children in the same batch.
+
+THE DEPTH RULE - a child may not itself be a parent, and a parent carries at
+most `MAX_LINKED_ORDERS` children - is what keeps a cancel's byte reservation
+computable: reaping is one generation, so `sizing::LINKAGE_MAX_BYTES` bounds it
+in advance. See `docs/order-lists.md` for the consumer-facing rules.
 
 A STOP and a TOUCHED order are the same machinery with opposite comparisons. A
 stop protects - buy above the market, sell below - and fires when price runs
@@ -258,10 +275,13 @@ otherwise - it does not manufacture a fill through a gapped print). Reduce-only
 and post-only are first-class wire flags: reduce-only clamps every fill to the
 position it would close and cancels the order once that position is gone;
 post-only rejects an order, at submit, at a price amend or at trigger, that
-would take liquidity rather than filling it. Trailing stops and two-leg brackets are refused by
-name; the venue models neither trailing state nor order linkage. No order book
+would take liquidity rather than filling it. Trailing stops carry per-order
+trailing state and two-leg brackets carry a linkage each member holds, both
+described above. No order book
 exists: orders never interact, so self-trade within one account is impossible
-rather than prevented, and every fill is judged only against the tape.
+rather than prevented, and every fill is judged only against the tape - and a
+linked sibling is reaped by the venue's own rule rather than by one order
+meeting another.
 
 Live pacing is owned by the boatyard. A river is deterministic checkpointed
 water keyed by symbol and its resolved bundle digest. A boat is one positioned

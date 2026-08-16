@@ -16,7 +16,7 @@
 //! costs a connection some budget while under-reserving voids the bound.
 use crate::{
     ClientMessage, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
-    MAX_SYMBOL_LEN,
+    MAX_LINKED_ORDERS, MAX_SYMBOL_LEN,
 };
 
 /// The engine-state facts a reservation must know to bound a command's output.
@@ -92,6 +92,18 @@ pub const FILL_ROW_MAX_BYTES: usize =
 /// `request_id` (capped by `validate_request_id` at `MAX_CLIENT_ID_LEN`).
 pub const SNAPSHOT_ENVELOPE_MAX_BYTES: usize = 128 + ESC * MAX_CLIENT_ID_LEN;
 
+/// What ONE executed order's LINKAGE can add to the batch it fills in.
+///
+/// Every sibling a filling order names produces at most one order-shaped frame:
+/// an `OrderCanceled` under `Oco`, or one `OrderUpdated` (or the cancel a shrink
+/// to zero becomes) under `Ouo`. Never both for one sibling, because a sibling
+/// cancelled is off the book. Releasing an OTO CHILD emits nothing at all - the
+/// child was accepted when it was submitted - so it costs no bytes here.
+///
+/// `MAX_LINKED_ORDERS` is what makes this computable in advance, and is the
+/// whole reason the linkage is capped rather than open-ended.
+pub const LINKAGE_MAX_BYTES: usize = MAX_LINKED_ORDERS * ORDER_EVENT_MAX_BYTES;
+
 /// A protocol-boundary refusal produces exactly one order-shaped frame and no
 /// `AccountState`, so its worst case is a constant - which is what lets the two
 /// pre-engine refusal paths reserve without a `BookShape` to size against.
@@ -124,7 +136,7 @@ pub fn account_state_max_bytes(shape: &BookShape) -> usize {
 /// of pending scans: a scan below its threshold produces no bytes.
 #[must_use]
 pub fn swept_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
-    orders * 4 * ORDER_EVENT_MAX_BYTES
+    orders * (4 * ORDER_EVENT_MAX_BYTES + LINKAGE_MAX_BYTES)
         + account_state_max_bytes(&BookShape {
             balances: shape.balances + 2 * orders,
             positions: shape.positions + orders,
@@ -138,8 +150,8 @@ pub fn swept_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
 /// sweep shape, so counting it as an ordinary fill is not a valid bound.
 #[must_use]
 pub fn swept_batch_max_bytes(shape: &BookShape, swept: usize, originated: usize) -> usize {
-    swept * 4 * ORDER_EVENT_MAX_BYTES
-        + originated * 5 * ORDER_EVENT_MAX_BYTES
+    swept * (4 * ORDER_EVENT_MAX_BYTES + LINKAGE_MAX_BYTES)
+        + originated * (5 * ORDER_EVENT_MAX_BYTES + LINKAGE_MAX_BYTES)
         + account_state_max_bytes(&BookShape {
             balances: shape.balances + 2 * (swept + originated),
             positions: shape.positions + swept + originated,
@@ -168,8 +180,12 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
         // pair introduces up to two currencies and one position the pre-command
         // snapshot never had. Widening by less under-counts by up to two
         // balance rows and makes the domination claim false.
+        // Plus the linkage allowance: a submit that fills on arrival reaps or
+        // shrinks every sibling its rule names, in the same batch, which is what
+        // makes the bracket real rather than swept-later.
         ClientMessage::SubmitOrder(_) => {
             5 * ORDER_EVENT_MAX_BYTES
+                + LINKAGE_MAX_BYTES
                 + account_state_max_bytes(&BookShape {
                     balances: shape.balances + 2,
                     positions: shape.positions + 1,
@@ -178,9 +194,13 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
                 })
         }
         // One order event (the cancel/update, or its rejection) plus the
-        // account state that follows a book mutation.
+        // account state that follows a book mutation - and, for a cancel, the
+        // linkage allowance: cancelling a parent that never filled reaps its
+        // held children in the same batch, because a child left waiting on an
+        // order that is gone would rest for the life of the run. One generation
+        // only, which is what the depth rule in `Engine::validate_link` buys.
         ClientMessage::CancelOrder { .. } | ClientMessage::ModifyOrder { .. } => {
-            ORDER_EVENT_MAX_BYTES + account_state_max_bytes(shape)
+            ORDER_EVENT_MAX_BYTES + LINKAGE_MAX_BYTES + account_state_max_bytes(shape)
         }
         ClientMessage::QueryOrders { .. } => {
             SNAPSHOT_ENVELOPE_MAX_BYTES

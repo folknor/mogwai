@@ -81,16 +81,63 @@ pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_pr
         OrderType::MarketIfTouched => Ok(mogwai_protocol::OrderType::MarketIfTouched),
         OrderType::LimitIfTouched => Ok(mogwai_protocol::OrderType::LimitIfTouched),
         OrderType::MarketToLimit => Ok(mogwai_protocol::OrderType::MarketToLimit),
-        // What remains refused is the shape the venue models no LINKAGE for.
-        // Every other nautilus order type is now served: the surface is
-        // complete rather than curated, because mogwai is an exchange and a
-        // shape it refuses is a strategy family with no forward test anywhere.
+        // `TrailingStopLimit` is what remains: a trail that RESTS as a limit
+        // once it fires, where the venue's trail resolves to a market close.
+        // Every other nautilus order type is served, order lists included: the
+        // surface is complete rather than curated, because mogwai is an exchange
+        // and a shape it refuses is a strategy family with no forward test
+        // anywhere.
         other => anyhow::bail!(
-            "unsupported order type {other:?}: the MOGWAI venue models no linkage between \
-             orders, so an order list (OCO, OTO) must be expressed as independent legs \
-             the strategy reaps itself"
+            "unsupported order type {other:?}: the MOGWAI venue trails to a market close, \
+             so state a trailing exit as TrailingStopMarket"
         ),
     }
+}
+
+/// The order-list membership a nautilus order carries, as this venue's linkage.
+///
+/// Nautilus spreads the linkage over four independent optional fields, which
+/// admits combinations that mean nothing - a contingency with nothing linked, a
+/// parent with no list. Those are refused HERE rather than passed on, because a
+/// venue-side refusal of a shape the host could have caught reads to a strategy
+/// author as the venue being broken.
+///
+/// An order with no list at all converts to `None`, which is every order this
+/// adapter sent before linkage existed.
+pub(crate) fn wire_order_link(
+    init: &nautilus_model::events::OrderInitialized,
+) -> anyhow::Result<Option<mogwai_protocol::OrderLink>> {
+    use nautilus_model::enums::ContingencyType;
+
+    let linked: Vec<String> = init
+        .linked_order_ids
+        .as_ref()
+        .map(|ids| ids.iter().map(ToString::to_string).collect())
+        .unwrap_or_default();
+    let contingency = match init.contingency_type {
+        None | Some(ContingencyType::NoContingency) => mogwai_protocol::Contingency::NoContingency,
+        Some(ContingencyType::Oco) => mogwai_protocol::Contingency::Oco,
+        Some(ContingencyType::Oto) => mogwai_protocol::Contingency::Oto,
+        Some(ContingencyType::Ouo) => mogwai_protocol::Contingency::Ouo,
+    };
+    let parent = init.parent_order_id.map(|id| id.to_string());
+    let Some(order_list_id) = init.order_list_id else {
+        if !linked.is_empty()
+            || parent.is_some()
+            || contingency != mogwai_protocol::Contingency::NoContingency
+        {
+            anyhow::bail!(
+                "a linked order must name its order list: MOGWAI keys a linkage by order_list_id"
+            );
+        }
+        return Ok(None);
+    };
+    Ok(Some(mogwai_protocol::OrderLink {
+        order_list_id: order_list_id.to_string(),
+        contingency,
+        linked_order_ids: linked,
+        parent_order_id: parent,
+    }))
 }
 
 /// The trailing offset a `TrailingStopMarket` carries, if the offset TYPE is one

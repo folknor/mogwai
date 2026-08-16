@@ -649,6 +649,69 @@ pub struct SubmitOrder {
     /// Legal on Limit and StopLimit only.
     #[serde(default)]
     pub post_only: bool,
+    /// The order list this order belongs to, and what its membership MEANS.
+    /// Absent for a standalone order, which is every order this venue served
+    /// before linkage existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<OrderLink>,
+}
+
+/// How many orders one linkage may name. A bracket needs two; the cap exists
+/// because every named sibling is a frame the fill that cancels or shrinks it
+/// can emit, and `sizing` has to bound that in advance.
+pub const MAX_LINKED_ORDERS: usize = 8;
+
+/// What one order's membership of an order list means.
+///
+/// A linkage is a GROUP ID plus a RULE, and nothing else: the venue holds no
+/// tree of orders, it holds a rule each member carries and applies at the
+/// instant a member fills. That is what makes a genuine bracket expressible -
+/// the sibling is reaped where the fill is COMMITTED, in the same batch, rather
+/// than on a later sweep that a second fill could beat.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrderLink {
+    /// The list's identity, shared by every member. Carried for the consumer's
+    /// benefit (nautilus keys an `OrderList` by it); the venue's own linkage
+    /// arithmetic runs off `contingency`, `linked_order_ids` and
+    /// `parent_order_id`.
+    pub order_list_id: String,
+    /// What a fill of this order does to the orders it names.
+    pub contingency: Contingency,
+    /// The siblings this order's rule acts on. Empty is legal only for a pure
+    /// child (one carrying `parent_order_id` and `NoContingency`).
+    #[serde(default)]
+    pub linked_order_ids: Vec<ClientOrderId>,
+    /// The order this one WAITS FOR. A child rests inert - unscanned, holding
+    /// no reservation - until its parent fills, which is the whole of
+    /// one-triggers-the-other. `None` for a parent or a standalone member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_order_id: Option<ClientOrderId>,
+}
+
+/// The rule a linked order carries, matching nautilus's `ContingencyType` so a
+/// host's order list maps across without reinterpretation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum Contingency {
+    /// The order names siblings for the venue's records but a fill of it does
+    /// nothing to them. What a bare OTO PARENT carries: its children are named
+    /// by their own `parent_order_id`, and releasing them is not a rule about
+    /// cancellation.
+    #[default]
+    NoContingency,
+    /// One-cancels-the-other: a fill of this order CANCELS every sibling it
+    /// names that is still resting. Any fill, not only a full one - a venue
+    /// that let a partially-filled take-profit leave its stop live would let a
+    /// bracket hold two live exits for one position.
+    Oco,
+    /// One-triggers-the-other. Carried by a PARENT whose children wait on it;
+    /// the release itself is driven by each child's `parent_order_id`, so this
+    /// value is a declaration of intent rather than a second mechanism.
+    Oto,
+    /// One-updates-the-other: a fill of this order SHRINKS every sibling it
+    /// names by the filled quantity, cancelling a sibling the shrink would take
+    /// to zero. This is the bracket that survives partial fills - the stop
+    /// tracks how much of the position is left.
+    Ouo,
 }
 
 /// API-boundary guard for a `SubmitOrder`, mirroring `validate_conn_havoc` /
@@ -691,6 +754,9 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
     }
     if order.price.is_some_and(|price| price <= Decimal::ZERO) {
         return Err("price must be > 0");
+    }
+    if let Some(link) = &order.link {
+        validate_order_link(order, link)?;
     }
     if order
         .trigger_price
@@ -767,6 +833,61 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         }
         _ => Ok(()),
     }
+}
+
+/// The wire-shape half of the linkage contract: bounded, self-consistent, and
+/// refusing the shapes whose meaning the venue would have to invent.
+///
+/// The rules that are NOT arbitrary:
+///
+/// - A rule that acts on siblings must NAME some. `Oco` and `Ouo` with nothing
+///   linked is an order that silently behaves like a standalone one, which is
+///   the failure a client would discover only by watching a stop it thought was
+///   reaped go on to fill.
+/// - An order may not link ITSELF. A self-cancelling `Oco` would try to cancel
+///   the order whose fill triggered it.
+/// - A CHILD must be able to wait. A market child released by its parent's fill
+///   would have to execute against a reading the release path does not take, and
+///   a now-or-never child would expire at submit, before its parent ever fills.
+///   Both are refused rather than reinterpreted.
+fn validate_order_link(order: &SubmitOrder, link: &OrderLink) -> Result<(), &'static str> {
+    if link.order_list_id.is_empty() {
+        return Err("order_list_id must not be empty");
+    }
+    if link.order_list_id.len() > MAX_CLIENT_ID_LEN {
+        return Err("order_list_id exceeds MAX_CLIENT_ID_LEN");
+    }
+    if link.linked_order_ids.len() > MAX_LINKED_ORDERS {
+        return Err("linked_order_ids exceeds MAX_LINKED_ORDERS");
+    }
+    for id in &link.linked_order_ids {
+        validate_client_order_id(id)?;
+        if *id == order.client_order_id {
+            return Err("an order may not link itself");
+        }
+    }
+    if let Some(parent) = &link.parent_order_id {
+        validate_client_order_id(parent)?;
+        if *parent == order.client_order_id {
+            return Err("an order may not be its own parent");
+        }
+        if order.order_type == OrderType::Market {
+            return Err(
+                "a Market order cannot be an order-list child: a released child rests, and a market order has nothing to rest on",
+            );
+        }
+        if matches!(order.time_in_force, TimeInForce::Ioc | TimeInForce::Fok) {
+            return Err(
+                "an order-list child cannot be immediate-or-cancel: it must outlive the submit that placed it to be released at all",
+            );
+        }
+    }
+    if matches!(link.contingency, Contingency::Oco | Contingency::Ouo)
+        && link.linked_order_ids.is_empty()
+    {
+        return Err("Oco and Ouo must name at least one linked order");
+    }
+    Ok(())
 }
 
 /// What an `AdmissionRejected` refers to. Present because the refusal must be

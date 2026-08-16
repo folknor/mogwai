@@ -2151,6 +2151,7 @@ mod calendar_tests {
             post_only: false,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
+            link: None,
         };
         let reading = Some(mogwai_engine::MarketReading {
             last_px: Decimal::from(21_000),

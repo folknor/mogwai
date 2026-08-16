@@ -53,6 +53,7 @@ fn order(id: String) -> SubmitOrder {
         post_only: false,
         time_in_force: TimeInForce::Gtc,
         expire_time: None,
+        link: None,
     }
 }
 
@@ -127,6 +128,7 @@ fn futures_book(size: usize) -> (Engine, Vec<(mogwai_protocol::Symbol, Decimal)>
             post_only: false,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
+            link: None,
         };
         let _ = engine.process_with_market(
             ClientMessage::SubmitOrder(submit),

@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 
 use mogwai_protocol::{
-    ClientOrderId, Hit, LiquiditySide, OrderFilled, OrderType, ServerMessage, Side, SubmitOrder,
-    TimeInForce, VenueOrderId, WireOrderStatus, control::Divergence, touches_trigger,
-    trades_through,
+    ClientOrderId, Contingency, Hit, LiquiditySide, MAX_LINKED_ORDERS, OrderFilled, OrderType,
+    ServerMessage, Side, SubmitOrder, TimeInForce, VenueOrderId, WireOrderStatus,
+    control::Divergence, touches_trigger, trades_through,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -85,6 +85,51 @@ impl Engine {
         let stated_px = risk_px(&order);
         let increment = self.instruments[&order.symbol].price_increment;
         let band_ticks = reading.map_or(0, |value| value.band_ticks);
+
+        // An order-list CHILD whose parent has not executed rests HELD: accepted
+        // and answerable, scanned by nothing, holding nothing. It is routed here,
+        // ahead of every marketability and fill decision, precisely because none
+        // of those questions may be asked of it yet - a child released later gets
+        // its band draw and its funds check at RELEASE, against the market that
+        // exists then rather than the one its parent was submitted into.
+        //
+        // A child whose parent has ALREADY filled skips this and takes the
+        // ordinary path, which is the fast-market case: a market entry that
+        // filled on arrival leaves its exits nothing to wait for.
+        if let Some(parent) = order
+            .link
+            .as_ref()
+            .and_then(|link| link.parent_order_id.as_ref())
+            && !self.has_filled(parent)
+        {
+            let venue_order_id = self.next_venue_order_id();
+            self.seen_client_order_ids
+                .insert(order.client_order_id.clone(), venue_order_id.clone());
+            let out = vec![
+                ServerMessage::OrderAccepted {
+                    client_order_id: order.client_order_id.clone(),
+                    venue_order_id: venue_order_id.clone(),
+                    ts_event: ts,
+                },
+                ServerMessage::AccountState(self.snapshot(ts)),
+            ];
+            let leaves_qty = order.quantity;
+            self.rest_open(OpenOrder {
+                venue_order_id,
+                submit: order,
+                leaves_qty,
+                ts_accepted: ts,
+                ts_last: ts,
+                ts_triggered: None,
+                band_ticks,
+                resting: Resting::Held,
+                band_draw: 0,
+                scanned_ns: ts,
+                revision: 0,
+            });
+            return out;
+        }
+
         let trigger_px = draw_trigger(self.fill_seed, &order, stated_px, increment, band_ticks, 0);
         let fill_px = if order.order_type == OrderType::Market {
             reading.map_or_else(
@@ -364,6 +409,10 @@ impl Engine {
                 apply_divergences,
             );
             out.extend(fill);
+            // Before this order is routed to rest or close: a sibling reaped
+            // here is off the book by the time anything else looks at it, and
+            // the order's own record is untouched by the linkage.
+            out.extend(self.apply_linkage_after_fill(&order, last_qty, ts));
         }
 
         // Freeze the accepted order's state once, then route it: rest it
@@ -557,6 +606,10 @@ impl Engine {
                 venue_order_id: order.venue_order_id.clone(),
                 ts_event: ts,
             });
+            // An expired parent is a parent that will never fill.
+            if !self.has_filled(&order.submit.client_order_id) {
+                out.extend(self.reap_children_of(vec![order.submit.client_order_id.clone()], ts));
+            }
         }
         if !out.is_empty() {
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
@@ -724,6 +777,29 @@ impl Engine {
                 ));
                 emitted += 1;
             }
+            // BETWEEN results, never after the loop. Two legs of one bracket can
+            // both be in this batch, and a sibling reaped after the loop would
+            // already have filled against the same span of tape.
+            //
+            // Position indices do not survive it - `OpenBook::remove` swaps - and
+            // they do not have to: every later iteration looks its own order up
+            // again by client order id. The `pos` captured above is not used past
+            // this point, and must not be.
+            //
+            // No `emitted` increment: linkage only ever runs off a fill, and the
+            // fill already counted this order once - the per-order reservation
+            // `swept_fill_max_bytes` charges includes the linkage allowance.
+            if last_qty > Decimal::ZERO {
+                let linkage = self.apply_linkage_after_fill(&submit, last_qty, ts);
+                out.extend(linkage);
+            }
+            let Some(pos) = self.open.position(&submit.client_order_id) else {
+                // The order that just filled was itself reaped by its own
+                // linkage - impossible today, since an order never links itself
+                // and its own record is not touched above, but the lookup is
+                // what makes that a checked fact rather than an assumption.
+                continue;
+            };
             if new_leaves > Decimal::ZERO && cap.is_some_and(|cap| cap < planned_qty) {
                 let order = self.take_open(pos);
                 self.record_closed(&order, WireOrderStatus::Canceled, ts);
@@ -793,6 +869,238 @@ impl Engine {
         (out, emitted)
     }
 
+    /// Whether the venue has seen this order execute at all - the predicate a
+    /// CHILD's release waits on.
+    ///
+    /// "Filled" is deliberately not the test. A parent that filled partially and
+    /// was then cancelled DID execute, and its child was released at that fill;
+    /// reading only the terminal status would call such a parent unfillable and
+    /// refuse a resubmitted child that the venue had already honoured one of.
+    fn has_filled(&self, client_order_id: &str) -> bool {
+        if let Some(pos) = self.open.position(client_order_id) {
+            let order = &self.open[pos];
+            return order.leaves_qty < order.submit.quantity;
+        }
+        self.closed.get(client_order_id).is_some_and(|info| {
+            info.status == WireOrderStatus::Filled || info.filled_qty > Decimal::ZERO
+        })
+    }
+
+    /// Every still-held child of this order, by client order id.
+    fn held_children_of(&self, parent: &str) -> Vec<ClientOrderId> {
+        self.open
+            .iter()
+            .filter(|order| {
+                matches!(order.resting, Resting::Held) && order.parent_order_id() == Some(parent)
+            })
+            .map(|order| order.submit.client_order_id.clone())
+            .collect()
+    }
+
+    /// What one order's fill does to the orders it is linked to, applied WHERE
+    /// THE FILL IS COMMITTED rather than on a later sweep.
+    ///
+    /// The timing is the whole point and it is why this is not a periodic reap:
+    /// two legs of one bracket can both be swept in a single batch, so a stop
+    /// reaped after the batch would already have filled against the same span of
+    /// tape that filled its take-profit. The caller applies this between
+    /// results, so a sibling cancelled here is off the book before the next
+    /// result is even looked up.
+    ///
+    /// Two independent things happen, in this order:
+    ///
+    /// 1. RELEASE. Every held child of this order becomes live, whatever rule
+    ///    the parent carries - a child waits on its parent's execution, not on a
+    ///    contingency value. Releasing emits no wire frame: the child was
+    ///    accepted when it was submitted and its status does not change.
+    /// 2. THE RULE. `Oco` cancels every named sibling still resting; `Ouo`
+    ///    shrinks each by the quantity just filled and cancels the ones that
+    ///    reach zero. `Oto` and `NoContingency` do neither - an OTO parent's
+    ///    whole effect is the release above.
+    ///
+    /// Deliberately emits no `AccountState`: the caller owns the batch's single
+    /// snapshot, so a linkage that freed reservations is reflected in a snapshot
+    /// taken after it rather than in one of its own.
+    pub(crate) fn apply_linkage_after_fill(
+        &mut self,
+        order: &SubmitOrder,
+        last_qty: Decimal,
+        ts: u64,
+    ) -> Vec<ServerMessage> {
+        let mut out = Vec::new();
+        for child in self.held_children_of(&order.client_order_id) {
+            self.release_child(&child, ts);
+        }
+        let Some(link) = order.link.as_ref() else {
+            return out;
+        };
+        match link.contingency {
+            Contingency::NoContingency | Contingency::Oto => {}
+            Contingency::Oco => {
+                for sibling in &link.linked_order_ids {
+                    let Some(pos) = self.open.position(sibling) else {
+                        continue;
+                    };
+                    let canceled = self.take_open(pos);
+                    self.record_closed(&canceled, WireOrderStatus::Canceled, ts);
+                    tracing::debug!(
+                        filled = %order.client_order_id,
+                        sibling = %canceled.submit.client_order_id,
+                        "one-cancels-the-other: sibling reaped at the fill",
+                    );
+                    out.push(ServerMessage::OrderCanceled {
+                        client_order_id: canceled.submit.client_order_id.clone(),
+                        venue_order_id: canceled.venue_order_id.clone(),
+                        ts_event: ts,
+                    });
+                    out.extend(
+                        self.reap_children_of(vec![canceled.submit.client_order_id.clone()], ts),
+                    );
+                }
+            }
+            Contingency::Ouo => {
+                for sibling in &link.linked_order_ids {
+                    let Some(pos) = self.open.position(sibling) else {
+                        continue;
+                    };
+                    let before = self.open[pos].clone();
+                    let new_total = before.submit.quantity.saturating_sub(last_qty);
+                    let new_leaves = before.leaves_qty.saturating_sub(last_qty);
+                    if new_leaves <= Decimal::ZERO {
+                        let canceled = self.take_open(pos);
+                        self.record_closed(&canceled, WireOrderStatus::Canceled, ts);
+                        out.push(ServerMessage::OrderCanceled {
+                            client_order_id: canceled.submit.client_order_id.clone(),
+                            venue_order_id: canceled.venue_order_id.clone(),
+                            ts_event: ts,
+                        });
+                        out.extend(
+                            self.reap_children_of(
+                                vec![canceled.submit.client_order_id.clone()],
+                                ts,
+                            ),
+                        );
+                        continue;
+                    }
+                    let updated = {
+                        let sibling = &mut self.open[pos];
+                        sibling.submit.quantity = new_total;
+                        sibling.leaves_qty = new_leaves;
+                        sibling.ts_last = ts;
+                        // A shrink is an amend the venue performed, so it
+                        // invalidates any walk planned against the old size for
+                        // the same reason a client's amend does.
+                        sibling.revision = sibling.revision.saturating_add(1);
+                        ServerMessage::OrderUpdated {
+                            client_order_id: sibling.submit.client_order_id.clone(),
+                            venue_order_id: sibling.venue_order_id.clone(),
+                            quantity: new_total,
+                            price: sibling.submit.price,
+                            trigger_price: sibling.submit.trigger_price,
+                            leaves_qty: new_leaves,
+                            ts_event: ts,
+                        }
+                    };
+                    self.refresh_open_reservation(pos, &before);
+                    out.push(updated);
+                }
+            }
+        }
+        out
+    }
+
+    /// Promote a held child to the state it would have rested in had it been
+    /// submitted standalone, and give it the reservation it was not holding
+    /// while it waited.
+    ///
+    /// The draw is FRESH (`band_draw` advances), because a queue position earned
+    /// at submit is not one a child sitting out its parent's execution kept, and
+    /// the scan frontier starts at the release instant: the span before it was
+    /// walked against an order that could not fill.
+    fn release_child(&mut self, client_order_id: &str, ts: u64) {
+        let Some(pos) = self.open.position(client_order_id) else {
+            return;
+        };
+        let before = self.open[pos].clone();
+        let increment = self
+            .instruments
+            .get(&before.submit.symbol)
+            .map_or(Decimal::ZERO, |def| def.price_increment);
+        let band_draw = before.band_draw.saturating_add(1);
+        let resting = if before.submit.order_type.is_conditional() {
+            match before.submit.trigger_price {
+                Some(stop_px) => Resting::Conditional {
+                    stop_px,
+                    toward: before.submit.order_type.triggers_toward(),
+                },
+                None => Resting::Inert,
+            }
+        } else {
+            match before.submit.price {
+                Some(price) => Resting::Limit {
+                    fill_trigger_px: draw_trigger(
+                        self.fill_seed,
+                        &before.submit,
+                        price,
+                        increment,
+                        before.band_ticks,
+                        band_draw,
+                    ),
+                },
+                None => Resting::Inert,
+            }
+        };
+        {
+            let child = &mut self.open[pos];
+            child.resting = resting;
+            child.band_draw = band_draw;
+            child.scanned_ns = ts;
+            child.revision = child.revision.saturating_add(1);
+            child.ts_last = ts;
+        }
+        self.refresh_open_reservation(pos, &before);
+        tracing::debug!(child = %client_order_id, "order-list child released by its parent's fill");
+    }
+
+    /// Cancel every held child of an order that has gone terminal WITHOUT ever
+    /// filling, so a bracket whose entry was cancelled does not leave its exits
+    /// waiting for a release that can never come.
+    ///
+    /// Iterative over a worklist rather than recursive, and the depth it can
+    /// reach is bounded by `validate_submit` refusing a child of a child: a
+    /// cancel reaps one generation, and each generation is capped at
+    /// `MAX_LINKED_ORDERS`, which is what makes the byte reservation for a
+    /// cancel computable.
+    pub(crate) fn reap_children_of(
+        &mut self,
+        parents: Vec<ClientOrderId>,
+        ts: u64,
+    ) -> Vec<ServerMessage> {
+        let mut out = Vec::new();
+        let mut worklist = parents;
+        while let Some(parent) = worklist.pop() {
+            for child in self.held_children_of(&parent) {
+                let Some(pos) = self.open.position(&child) else {
+                    continue;
+                };
+                let canceled = self.take_open(pos);
+                self.record_closed(&canceled, WireOrderStatus::Canceled, ts);
+                tracing::debug!(
+                    %parent,
+                    %child,
+                    "order-list child cancelled: its parent went terminal without filling",
+                );
+                out.push(ServerMessage::OrderCanceled {
+                    client_order_id: canceled.submit.client_order_id.clone(),
+                    venue_order_id: canceled.venue_order_id.clone(),
+                    ts_event: ts,
+                });
+                worklist.push(child);
+            }
+        }
+        out
+    }
+
     /// The quantity a reduce-only order may fill: the netted position it
     /// opposes, or zero. `None` for an order that is not reduce-only, which is
     /// what every call site distinguishes from a cap that happens to be zero.
@@ -842,6 +1150,12 @@ impl Engine {
         let mut order = self.open[pos].clone();
         order.ts_triggered = Some(ts);
         order.ts_last = ts;
+        // Held across the match because every arm may move `order` into the
+        // book, and the linkage is applied once at the end - after `pos` has
+        // stopped meaning anything, which is what makes reaping a sibling here
+        // safe.
+        let submit = order.submit.clone();
+        let mut filled_qty = Decimal::ZERO;
         let mut out = vec![ServerMessage::OrderTriggered {
             client_order_id: order.submit.client_order_id.clone(),
             venue_order_id: order.venue_order_id.clone(),
@@ -911,6 +1225,7 @@ impl Engine {
                         ts,
                         true,
                     ));
+                    filled_qty = fill_qty;
                 }
                 self.take_open(pos);
                 order.leaves_qty = leaves;
@@ -1001,6 +1316,7 @@ impl Engine {
                         ts,
                         true,
                     ));
+                    filled_qty = fill_qty;
                 }
                 self.take_open(pos);
                 order.leaves_qty = leaves;
@@ -1035,6 +1351,9 @@ impl Engine {
             OrderType::Market | OrderType::Limit | OrderType::MarketToLimit => {
                 unreachable!("only conditionals trigger")
             }
+        }
+        if filled_qty > Decimal::ZERO {
+            out.extend(self.apply_linkage_after_fill(&submit, filled_qty, ts));
         }
         out
     }
@@ -1222,6 +1541,56 @@ impl Engine {
             .max(self.commission_for(order, qty, px, LiquiditySide::Taker, surcharge))
     }
 
+    /// The half of the linkage contract that only the LIVE BOOK can answer.
+    /// `mogwai_protocol::validate_submit_order` has already ruled on the shape;
+    /// what is left is whether the orders this one names can mean anything here.
+    ///
+    /// THE DEPTH RULE IS LOAD-BEARING, not tidiness. A child of a child would
+    /// make cancelling one order reap a chain of unbounded length, and the byte
+    /// reservation a cancel takes has to be computable before the cancel runs.
+    /// One generation, capped at `MAX_LINKED_ORDERS`, is what
+    /// `sizing::LINKAGE_MAX_BYTES` bounds - and it costs nothing real, because a
+    /// bracket is one entry and its exits.
+    fn validate_link(&self, link: &mogwai_protocol::OrderLink) -> Result<(), String> {
+        if matches!(link.contingency, Contingency::Oto) && link.linked_order_ids.is_empty() {
+            return Err("Oto must name the orders it triggers".into());
+        }
+        let Some(parent) = link.parent_order_id.as_ref() else {
+            return Ok(());
+        };
+        if !self.seen_client_order_ids.contains_key(parent.as_str()) {
+            return Err(
+                "unknown parent order: an order list's parent is submitted before its children"
+                    .into(),
+            );
+        }
+        // Terminal and never executed: nothing will ever release this child, and
+        // resting it forever is worse than saying so.
+        if self.open.position(parent).is_none() && !self.has_filled(parent) {
+            return Err(
+                "parent order is terminal and never filled: its child could never be released"
+                    .into(),
+            );
+        }
+        if let Some(pos) = self.open.position(parent)
+            && self.open[pos].parent_order_id().is_some()
+        {
+            return Err("an order-list child may not itself be a parent".into());
+        }
+        if self
+            .open
+            .iter()
+            .filter(|open| open.parent_order_id() == Some(parent.as_str()))
+            .count()
+            >= MAX_LINKED_ORDERS
+        {
+            return Err(format!(
+                "parent order already carries {MAX_LINKED_ORDERS} children"
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_submit(
         &self,
         order: &SubmitOrder,
@@ -1243,6 +1612,10 @@ impl Engine {
             .contains_key(order.client_order_id.as_str())
         {
             return Err("duplicate client_order_id".into());
+        }
+
+        if let Some(link) = order.link.as_ref() {
+            self.validate_link(link)?;
         }
 
         let Some(instrument) = self.instruments.get(&order.symbol) else {
@@ -1535,10 +1908,17 @@ impl Engine {
             let o = self.take_open(pos);
             self.record_closed(&o, WireOrderStatus::Canceled, ts);
             let mut out = vec![ServerMessage::OrderCanceled {
-                client_order_id,
+                client_order_id: client_order_id.clone(),
                 venue_order_id: o.venue_order_id,
                 ts_event: ts,
             }];
+            // A cancelled parent that never filled can never release its
+            // children, and a held child left behind would rest for the life of
+            // the run holding a promise nothing can keep. Reaped here rather
+            // than swept later, for the same reason the OCO cancel is.
+            if !self.has_filled(&client_order_id) {
+                out.extend(self.reap_children_of(vec![client_order_id], ts));
+            }
             // A cancel takes the order OFF the book and gives its hold back, so
             // the snapshot it owes is exactly the account movement
             // `DropNextAccountUpdate` exists to hide - suppressing it leaves the

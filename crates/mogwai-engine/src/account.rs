@@ -67,6 +67,14 @@ impl Engine {
     }
 
     fn order_reservation_entry(&self, order: &crate::OpenOrder) -> Option<(String, Decimal, bool)> {
+        // A HELD order-list child reserves nothing. It cannot execute until its
+        // parent fills, and holding funds against it would let a bracket's exit
+        // legs starve the entry that has to fill before either can do anything.
+        // The hold appears at RELEASE, through the same `refresh_open_reservation`
+        // any other state change goes through.
+        if matches!(order.resting, crate::Resting::Held) {
+            return None;
+        }
         let instrument = self.instruments.get(&order.submit.symbol)?;
         let price = order.submit.price.or(order.submit.trigger_price)?;
         let mut clipped = false;
