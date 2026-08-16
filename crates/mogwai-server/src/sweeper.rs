@@ -242,6 +242,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         &results[index],
                         settlement_marks.clone(),
                         &marks,
+                        last_swept_ns,
                         to_ns,
                         boat.sim,
                     );
@@ -384,6 +385,9 @@ fn apply_engine_pass(
         results,
         settlement_marks,
         marks,
+        // No funding span: these callers are the unit tests, which drive
+        // settlement and marking rather than the funding clock.
+        to_ns,
         to_ns,
         mogwai_protocol::SimClock {
             sim_epoch_ns: 0,
@@ -398,6 +402,7 @@ fn apply_engine_pass_on_clock(
     results: &[ScanResult],
     settlement_marks: Vec<(mogwai_protocol::Symbol, u64, rust_decimal::Decimal)>,
     marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
+    from_ns: u64,
     to_ns: u64,
     sim: mogwai_protocol::SimClock,
 ) -> (Vec<ServerMessage>, usize, usize) {
@@ -409,6 +414,11 @@ fn apply_engine_pass_on_clock(
         events.extend(settled.events);
     }
     let marked = engine.mark(marks, to_ns);
+    // Marked FIRST, then funded: funding is paid on notional at the mark, so
+    // paying before the mark moved would charge this interval at the last
+    // interval's price.
+    let funded = engine.apply_funding(from_ns, to_ns, to_ns);
+    events.extend(funded.events);
     originated += marked.originated_orders;
     events.extend(marked.events);
     // EXACTLY one `AccountState` per pass, and it is the LAST one: scans,
@@ -805,6 +815,7 @@ mod tests {
                 initial_per_contract: Decimal::from(2_000),
                 maintenance_per_contract: Decimal::from(1_800),
                 breach_action: BreachAction::Refuse,
+                basis: Default::default(),
             },
         );
         let order = SubmitOrder {

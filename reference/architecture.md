@@ -70,6 +70,46 @@ The thresholds, the ratcheted peak and the remaining budget are PUBLISHED on
 no dashboard, so a run that ended flat having spent most of its budget would be
 indistinguishable from one that never came close.
 
+THE LEDGER MODELS FIVE INSTRUMENT CLASSES, split by SETTLEMENT SHAPE rather
+than by asset class, because the shape is what decides how holding one moves the
+ledger.
+
+- `Spot` credits the BASE ASSET as a currency balance. Right for crypto spot,
+  where the base genuinely is money you can spend on the next pair.
+- `Equity` credits a POSITION and never a balance. A share is not money, and
+  modelling it as `Spot { base: "AAPL" }` put it on the same footing as USD -
+  which is what made short sales, settlement periods and round lots
+  inexpressible. Cash moves by the full notional on both sides; the shares are
+  the position.
+- `Future` moves only settlement cash, with exposure carried as a marked
+  position.
+- `Perpetual` is a future that pays FUNDING between long and short at an
+  interval. With no expiry to converge at, funding is the only thing tying it to
+  spot, so a perpetual without it reports P and L that is wrong by construction.
+  Funding is paid on notional AT THE MARK, on instants that sit on multiples of
+  the interval from the unix epoch - a property of the clock, so the schedule
+  cannot depend on when a run booted or how the sweep passes were cut.
+- `Inverse` is coin-margined: quoted in one currency, settled in another. Value
+  is `multiplier * qty / price` rather than `multiplier * qty * price`, so P and
+  L is non-linear and a long is not the mirror of a short. `InstrumentDef`
+  carries the one implementation of both forms, so realized and unrealized can
+  never disagree.
+
+MARGIN HAS TWO BASES. `per_contract` is a fixed amount of settlement currency
+however the price moves, which is what CME publishes and what every shipped
+preset states. `notional` is a fraction of notional, so the requirement moves
+with the price - that is what forex, crypto margin and Reg-T equity margin
+actually do, and it is the leveraged account the venue previously had no way to
+express: ten-times leverage is `initial = 0.1`.
+
+FUNDING IS CHECKED PER ACCOUNT AT BIND. The venue's `[balances]` is only what an
+unnamed account opens with, so a client that named its own funding cannot be
+checked at boot. It is still knowable with no order at all, so a socket binding
+a symbol its account holds no balance line for is refused before the upgrade,
+naming the account and the currency. PRESENCE, never sufficiency: running out is
+DEPLETION, and a funds rejection on a served shape has to keep meaning that and
+only that.
+
 A POLICY NAMES THE CURRENCY its thresholds are stated in, and the account is
 VALUED in it. A spot fill credits the base asset as a currency balance and
 debits the quote, so an account trading spot holds an asset that has to be

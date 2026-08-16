@@ -340,7 +340,130 @@ pub(crate) fn instrument_any(
             .context("construct futures contract")?;
             Ok(InstrumentAny::FuturesContract(contract))
         }
+        // A share is `Equity`, not a currency pair. Nautilus carries the type,
+        // so the venue's distinction survives the seam rather than being
+        // flattened back into "base over quote" at the last step.
+        InstrumentClass::Equity { currency, .. } => {
+            let currency = Currency::from_str(currency)
+                .with_context(|| format!("unknown equity currency {currency}"))?;
+            let equity = nautilus_model::instruments::Equity::new_checked(
+                id,
+                symbol,
+                None,
+                currency,
+                def.price_precision,
+                price(def.price_increment, def.price_precision)?,
+                Some(quantity(def.size_increment, def.size_precision)?),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                UnixNanos::from(0),
+                ts_init,
+            )
+            .context("construct equity")?;
+            Ok(InstrumentAny::Equity(equity))
+        }
+        // Both crypto derivatives are `CryptoPerpetual`, which carries the
+        // `is_inverse` flag the two differ by. An inverse contract settles in
+        // its BASE asset, which is why the two currency arguments swap.
+        InstrumentClass::Perpetual {
+            underlying,
+            settlement_currency,
+            multiplier,
+            ..
+        } => crypto_perpetual(
+            def,
+            id,
+            symbol,
+            underlying,
+            settlement_currency,
+            settlement_currency,
+            *multiplier,
+            false,
+            ts_init,
+        ),
+        InstrumentClass::Inverse {
+            underlying,
+            settlement_currency,
+            quote_currency,
+            multiplier,
+            ..
+        } => crypto_perpetual(
+            def,
+            id,
+            symbol,
+            underlying,
+            quote_currency,
+            settlement_currency,
+            *multiplier,
+            true,
+            ts_init,
+        ),
     }
+}
+
+/// The shared construction for both crypto derivative classes.
+///
+/// `base` is what the contract is ON and `quote` what it is PRICED in; the
+/// SETTLEMENT currency is what moves, and for an inverse contract that is the
+/// base rather than the quote. Passing all three explicitly rather than deriving
+/// them keeps the inversion visible at each call site instead of hidden here.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every value is a distinct instrument fact; bundling them would only move the list"
+)]
+fn crypto_perpetual(
+    def: &InstrumentDef,
+    id: InstrumentId,
+    symbol: NautilusSymbol,
+    base: &str,
+    quote: &str,
+    settlement: &str,
+    multiplier: Decimal,
+    is_inverse: bool,
+    ts_init: UnixNanos,
+) -> anyhow::Result<InstrumentAny> {
+    let base = Currency::from_str(base).with_context(|| format!("unknown base {base}"))?;
+    let quote = Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;
+    let settlement = Currency::from_str(settlement)
+        .with_context(|| format!("unknown settlement currency {settlement}"))?;
+    let contract = nautilus_model::instruments::CryptoPerpetual::new_checked(
+        id,
+        symbol,
+        base,
+        quote,
+        settlement,
+        is_inverse,
+        def.price_precision,
+        def.size_precision,
+        price(def.price_increment, def.price_precision)?,
+        quantity(def.size_increment, def.size_precision)?,
+        Some(quantity(multiplier, multiplier.scale() as u8)?),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        UnixNanos::from(0),
+        ts_init,
+    )
+    .context("construct crypto perpetual")?;
+    Ok(InstrumentAny::CryptoPerpetual(contract))
 }
 
 #[cfg(test)]

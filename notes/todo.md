@@ -663,6 +663,29 @@ required eventually, since both modes must be supported.
   flagged as REVISITABLE for the same reason the order-type exclusions were
   reversed: "the owner does not need it" stopped being the scoping rule when
   mogwai went public. It stands until someone who understands them argues it.
+  ALL THREE LANDED 2026-08-16, plus inverse. `InstrumentClass` gained `Equity`,
+  `Perpetual` and `Inverse` beside `Spot` and `Future`, split by SETTLEMENT
+  SHAPE rather than asset class because the shape is what decides how holding
+  one moves the ledger. An equity credits a POSITION and never a balance, so its
+  cash leg is spot's quote leg without the base credit, and an equity account is
+  therefore statable in one currency where a spot account needs its base priced.
+  A perpetual pays funding on notional AT THE MARK, on instants sitting at
+  multiples of the interval from the unix epoch - a property of the CLOCK, so
+  the schedule cannot depend on when a run booted or how the sweep passes were
+  cut, and abutting spans never double-count. An inverse contract's value is
+  `multiplier * qty / px`; `InstrumentDef::notional` and `::unrealized` are the
+  ONE implementation of both forms, so realized and unrealized cannot disagree
+  and a position's value cannot jump the moment it closes. `MarginBasis::Notional`
+  is the leveraged account: a fraction of notional rather than a fixed amount per
+  contract, which is what forex, crypto margin and Reg-T equity margin do.
+  `is_marked` replaced `is_future` wherever the question was really "does this
+  carry a marked position", which is now a wider set than "is this a derivative".
+  STILL OPEN ON THIS AXIS, none blocking: an equity has no SETTLEMENT PERIOD, no
+  short-sale locate or borrow, and no round-lot rule beyond whole shares; a
+  perpetual's funding rate is a CONSTANT rather than something that responds to
+  the mark-versus-index basis, which is what a real venue computes it from; and
+  nothing has been fitted for any of the new classes, so a preset using one is
+  serving the default tape under a different shape.
   THE RISK STATE IS PUBLISHED, and the reason is EVALUATION rather than
   strategy consumption. Ruled 2026-08-16. A real trader reads its remaining
   drawdown off the firm's dashboard; mogwai presents no dashboard, so if the
@@ -689,16 +712,16 @@ required eventually, since both modes must be supported.
   not rediscovered later: it is not a precondition of anything above, and the
   account-policy path can land first and set the pattern.
 
-- FUNDING: was CLOSED, REOPENED 2026-08-16 by the account-policy ruling above -
-  the boot-checks-plus-bind-refusal design below assumed a venue-level
-  `[balances]`, which is being deleted. What survives is the SHAPE half: the set
-  of shapes is still closed at boot, so a symbol still contributes no currency
-  and a request whose named balances do not cover its shape's currency is still
-  knowable without an order. What moves is WHERE: from a boot check against
-  operator config to a CONNECT-TIME check against what the client named, which
-  makes it a bad REQUEST rather than a bad configuration. The
-  mismatch-versus-depletion distinction below is unaffected and still the
-  reason to keep the two refusals apart. The original text follows.
+- FUNDING: was CLOSED, REOPENED by the account-policy ruling, RE-CLOSED
+  2026-08-16. The boot-checks-plus-bind-refusal design below assumed a
+  venue-level `[balances]` that a client can now override per account, so the
+  check MOVED rather than went away: a socket binding a symbol its own account
+  holds no balance line for is refused before the upgrade, naming the account
+  and the currency. Still knowable with no order at all, so still a
+  CONFIGURATION error; and still PRESENCE rather than sufficiency, so a funds
+  rejection on a served shape keeps meaning DEPLETION and only depletion. The
+  boot-time barred set survives for the venue's configured shapes, which is what
+  an unnamed account opens with. The original text follows.
   The set of
   shapes is still closed at boot: configured shapes, every embedded preset,
   and the default bundle under the instrument overlay.

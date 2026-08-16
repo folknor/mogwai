@@ -1148,6 +1148,48 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
     );
 }
 
+/// An account not funded in what its symbol settles in is refused AT BIND,
+/// naming the currency.
+///
+/// The venue's `[balances]` is only what an unnamed account opens with, so a
+/// client that named its own funding cannot be checked at boot - the venue has
+/// no way to know then what it will say. It is still knowable with no order at
+/// all, though, so it stays a configuration error rather than becoming a
+/// fill-time funds rejection: collapsing the two would make a typo look like a
+/// trading outcome and waste a whole run.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-600","balances":{"JPY":"5000000"}}"#,
+    );
+    assert_eq!(
+        status, 201,
+        "the account opens on whatever it named: {body}"
+    );
+
+    // Through a real upgrade attempt: the refusal is a STATUS before the 101,
+    // and a plain GET never reaches the handler because the upgrade extractor
+    // rejects it first.
+    let refused = tokio_tungstenite::connect_async(format!(
+        "{}?account=WYRD-600&symbol={}",
+        venue.ws_url(),
+        venue.symbol
+    ))
+    .await;
+    let Err(error) = refused else {
+        panic!("the bind is refused, not served");
+    };
+    let rendered = format!("{error}");
+    assert!(
+        rendered.contains("400") || rendered.contains("HTTP"),
+        "the refusal is a status before the upgrade: {rendered}"
+    );
+}
+
 /// An unpoliced account is enforced against nothing, which is what every client
 /// had before policies existed and what the default account still gets.
 #[test]

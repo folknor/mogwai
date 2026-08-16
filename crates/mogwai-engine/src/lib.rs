@@ -67,6 +67,20 @@ pub enum Resting {
     Inert,
 }
 
+/// How many funding instants the half-open span `from_ns .. to_ns` crossed.
+///
+/// Instants sit on multiples of `interval_ns` from the unix epoch, which is the
+/// convention every venue publishing an eight-hour cycle follows and makes the
+/// schedule a property of the CLOCK rather than of when a run happened to boot.
+/// Half-open with `from_ns` exclusive, so a span abutting the previous one funds
+/// each instant exactly once however the sweep passes are cut.
+fn funding_instants(from_ns: u64, to_ns: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 || to_ns <= from_ns {
+        return 0;
+    }
+    (to_ns / interval_ns).saturating_sub(from_ns / interval_ns)
+}
+
 /// A resting order tracked by the venue.
 #[derive(Debug, Clone)]
 pub struct OpenOrder {
@@ -131,9 +145,60 @@ pub const DEFAULT_LIQUIDATION_BAND_TICKS: u32 = 200;
 /// time, and the sweeper strikes each instant it names.
 #[derive(Debug, Clone, Copy)]
 pub struct MarginPolicy {
+    /// What one contract costs to open and to hold.
+    ///
+    /// A FIXED CURRENCY AMOUNT PER CONTRACT, which is how exchange-listed
+    /// futures state performance bonds: CME publishes a dollar figure per MNQ,
+    /// not a ratio. `basis` decides whether these are read that way or as
+    /// leverage ratios; the fields are shared because the arithmetic downstream
+    /// is the same shape either way.
     pub initial_per_contract: Decimal,
     pub maintenance_per_contract: Decimal,
     pub breach_action: BreachAction,
+    pub basis: MarginBasis,
+}
+
+/// How a margin requirement is DERIVED, which is the difference between a
+/// futures account and a leveraged one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MarginBasis {
+    /// A fixed amount of settlement currency per contract, whatever the price.
+    /// Exchange-listed futures.
+    #[default]
+    PerContract,
+    /// A FRACTION OF NOTIONAL, so the requirement moves with the price. This is
+    /// what forex, crypto margin and Reg-T equity margin actually do, and it is
+    /// the account type the venue had no way to express: "10x leverage" is
+    /// `initial = 0.1`, and holding it as a per-contract constant would make a
+    /// position that doubled in value cost the same to hold as when it opened.
+    Notional,
+}
+
+impl MarginPolicy {
+    /// Initial margin owed on `qty` at `px`.
+    #[must_use]
+    pub fn initial(&self, def: &InstrumentDef, qty: Decimal, px: Decimal) -> Decimal {
+        self.required(self.initial_per_contract, def, qty, px)
+    }
+
+    /// Maintenance margin owed on `qty` at `px`.
+    #[must_use]
+    pub fn maintenance(&self, def: &InstrumentDef, qty: Decimal, px: Decimal) -> Decimal {
+        self.required(self.maintenance_per_contract, def, qty, px)
+    }
+
+    fn required(&self, rate: Decimal, def: &InstrumentDef, qty: Decimal, px: Decimal) -> Decimal {
+        match self.basis {
+            MarginBasis::PerContract => rate.saturating_mul(qty.abs()),
+            // Through `notional`, so an INVERSE contract's requirement is
+            // computed in its settlement asset rather than in the currency it
+            // happens to be quoted in.
+            MarginBasis::Notional => def
+                .notional(qty.abs(), px)
+                .and_then(|notional| notional.checked_mul(rate))
+                .unwrap_or(Decimal::MAX),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -497,6 +562,18 @@ impl Engine {
         symbols
     }
 
+    /// Whether this ledger holds a balance line in `currency` at all.
+    ///
+    /// PRESENCE, not sufficiency. An account funded in a currency can still run
+    /// out of it, and that is DEPLETION - a trading outcome. An account with no
+    /// line at all was never funded for the shape it is asking to trade, which
+    /// is a configuration mistake knowable with no order at all. Collapsing the
+    /// two would make a typo look like a market result and waste a whole run.
+    #[must_use]
+    pub fn is_funded_in(&self, currency: &str) -> bool {
+        self.account.balances.contains_key(currency)
+    }
+
     /// Every symbol this account needs a price for in order to state its worth.
     ///
     /// A superset of `futures_mark_symbols`: that answers "what must be marked
@@ -511,6 +588,22 @@ impl Engine {
     /// while the asset it was opened with is still sitting in the ledger.
     pub fn valuation_symbols(&self) -> Vec<Symbol> {
         let mut symbols = self.futures_mark_symbols();
+        // Every MARKED position, not only the margin-posting ones: an equity or
+        // a perpetual is worth nothing statable until its own symbol is priced,
+        // and `futures_mark_symbols` only answers what the margin ledger needs.
+        for (symbol, _) in self
+            .account
+            .positions
+            .keys()
+            .filter(|(symbol, _)| {
+                self.instruments
+                    .get(symbol)
+                    .is_some_and(|def| def.class.is_marked())
+            })
+            .cloned()
+        {
+            symbols.push(symbol);
+        }
         for (symbol, def) in &self.instruments {
             let Some(base) = def.class.base_currency() else {
                 continue;
@@ -567,15 +660,22 @@ impl Engine {
             let Some(def) = self.instruments.get(symbol) else {
                 continue;
             };
-            if !def.class.is_future() || def.class.settlement_currency() != currency {
+            if !def.class.is_marked() || def.class.settlement_currency() != currency {
                 continue;
             }
-            let unrealized = position
-                .mark_px
-                .checked_sub(position.avg_px)?
-                .checked_mul(position.qty)?
-                .checked_mul(def.class.multiplier())?;
-            total = total.checked_add(unrealized)?;
+            // EQUITY contributes its MARKET VALUE, every other marked class its
+            // UNREALIZED. The difference is what the cash leg already did: a
+            // share purchase debited the whole notional, so the shares must be
+            // added back at their current worth or the account reads as having
+            // spent the money and received nothing. A derivative's cash never
+            // moved on open, so only the gain since entry is outstanding.
+            let contribution =
+                if matches!(def.class, mogwai_protocol::InstrumentClass::Equity { .. }) {
+                    def.notional(position.qty, position.mark_px)?
+                } else {
+                    def.unrealized(position.qty, position.avg_px, position.mark_px)?
+                };
+            total = total.checked_add(contribution)?;
         }
         Some(total)
     }
@@ -629,7 +729,7 @@ impl Engine {
                 if self
                     .instruments
                     .get(symbol)
-                    .is_some_and(|def| def.class.is_future())
+                    .is_some_and(|def| def.class.is_marked())
                     && position.mark_px != *mark
                 {
                     position.mark_px = *mark;
@@ -896,6 +996,84 @@ impl Engine {
         MarkOutcome {
             events,
             originated_orders: originated,
+        }
+    }
+
+    /// Exchange FUNDING on every perpetual position, for each funding instant
+    /// the span `from_ns .. to_ns` crossed.
+    ///
+    /// A perpetual has no expiry to converge at, so funding is the only thing
+    /// tying it to spot: the long pays the short a fraction of notional at a
+    /// fixed interval, or the reverse when the rate is negative. A strategy
+    /// holding a perp across funding instants has a real cash flow, so a venue
+    /// without this reports P and L that is wrong by construction rather than by
+    /// approximation.
+    ///
+    /// PAID ON NOTIONAL AT THE MARK, not at entry: funding is a payment on what
+    /// the position is worth now, which is why a position that has moved against
+    /// its holder pays less as it shrinks.
+    ///
+    /// The span is half-open, `from_ns` exclusive and `to_ns` inclusive, matching
+    /// the settlement walk - so an instant is funded exactly once however the
+    /// sweep passes are cut.
+    pub fn apply_funding(&mut self, from_ns: u64, to_ns: u64, ts: u64) -> MarkOutcome {
+        let mut paid = false;
+        let symbols: Vec<Symbol> = self.instruments.keys().cloned().collect();
+        for symbol in symbols {
+            let Some(def) = self.instruments.get(&symbol) else {
+                continue;
+            };
+            let Some((interval_ns, rate)) = def.class.funding() else {
+                continue;
+            };
+            if interval_ns == 0 {
+                continue;
+            }
+            let instants = funding_instants(from_ns, to_ns, interval_ns);
+            if instants == 0 {
+                continue;
+            }
+            let currency = def.class.settlement_currency().to_owned();
+            let def = def.clone();
+            let mut owed = Decimal::ZERO;
+            for position in self
+                .account
+                .positions
+                .iter()
+                .filter(|((position_symbol, _), _)| *position_symbol == symbol)
+                .map(|(_, position)| position)
+            {
+                if position.qty.is_zero() {
+                    continue;
+                }
+                let Some(notional) = def.notional(position.qty, position.mark_px) else {
+                    continue;
+                };
+                // A LONG pays, so the sign follows the position: a positive rate
+                // debits a long and credits a short by the same amount, which is
+                // what makes funding a transfer rather than a fee.
+                let Some(payment) = notional
+                    .checked_mul(rate)
+                    .and_then(|per| per.checked_mul(Decimal::from(instants)))
+                else {
+                    continue;
+                };
+                owed = owed.saturating_sub(payment);
+            }
+            if owed.is_zero() {
+                continue;
+            }
+            let total = self.account.balances.entry(currency).or_default();
+            *total = total.saturating_add(owed);
+            paid = true;
+        }
+        let mut events = Vec::new();
+        if paid {
+            events.push(ServerMessage::AccountState(self.snapshot(ts)));
+        }
+        MarkOutcome {
+            events,
+            originated_orders: 0,
         }
     }
 
@@ -2330,6 +2508,7 @@ mod tests {
                 initial_per_contract: Decimal::from(2000),
                 maintenance_per_contract: Decimal::from(1800),
                 breach_action: action,
+                basis: MarginBasis::PerContract,
             },
         );
         engine
@@ -2465,6 +2644,7 @@ mod tests {
                     initial_per_contract: Decimal::from(2_000),
                     maintenance_per_contract: Decimal::from(1_800),
                     breach_action: BreachAction::Refuse,
+                    basis: Default::default(),
                 },
             );
             let order = order_with(symbol, Side::Buy, symbol, 1, Some(Decimal::from(21_000)));
@@ -2734,6 +2914,7 @@ mod tests {
                 initial_per_contract: Decimal::ONE,
                 maintenance_per_contract: Decimal::ONE,
                 breach_action: BreachAction::Refuse,
+                basis: Default::default(),
             },
         );
         let mut resting = order_with("HOLD", Side::Buy, "BTCUSDT", 1, Some(Decimal::from(50)));
@@ -3672,6 +3853,7 @@ mod tests {
                 initial_per_contract: Decimal::ZERO,
                 maintenance_per_contract: Decimal::ZERO,
                 breach_action: BreachAction::Refuse,
+                basis: Default::default(),
             },
         );
         for id in ["Z1", "Z2"] {
@@ -4593,6 +4775,170 @@ mod tests {
         assert_eq!(usdt.total, Decimal::from(-300));
         assert_eq!(usdt.locked, Decimal::ZERO);
         assert_eq!(usdt.free, Decimal::from(-300));
+    }
+
+    const EIGHT_HOURS_NS: u64 = 8 * 3_600 * 1_000_000_000;
+
+    fn perpetual(rate: Decimal) -> InstrumentDef {
+        InstrumentDef {
+            symbol: "BTCUSDT.P".into(),
+            class: InstrumentClass::Perpetual {
+                underlying: "BTC".into(),
+                settlement_currency: "USDT".into(),
+                multiplier: Decimal::ONE,
+                asset_class: WireAssetClass::Cryptocurrency,
+                funding_interval_ns: EIGHT_HOURS_NS,
+                funding_rate: rate,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::ONE,
+        }
+    }
+
+    /// A perpetual has no expiry to converge at, so funding is the only thing
+    /// tying it to spot. A LONG pays a positive rate, and pays it on notional at
+    /// the MARK rather than at entry.
+    #[test]
+    fn a_long_perpetual_pays_funding_on_its_marked_notional() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![perpetual(Decimal::new(1, 4))],
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(100_000))]),
+            fill_seed: 0,
+        });
+        e.set_margin_policy(
+            "BTCUSDT.P".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: BreachAction::Refuse,
+                basis: MarginBasis::PerContract,
+            },
+        );
+        e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "P1",
+                Side::Buy,
+                "BTCUSDT.P",
+                10,
+                Some(Decimal::from(50_000)),
+            )),
+            1,
+        );
+        e.mark(&[("BTCUSDT.P".into(), Decimal::from(60_000))], 2);
+        let before = *e.account.balances.get("USDT").expect("funded");
+
+        // One instant crossed: 10 contracts at 60,000 is 600,000 of notional,
+        // and one basis point of that is 60.
+        e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+        let after = *e.account.balances.get("USDT").expect("funded");
+        assert_eq!(
+            before - after,
+            Decimal::from(60),
+            "a long pays rate times marked notional per interval"
+        );
+    }
+
+    /// A negative rate reverses the flow, which is what a perpetual trading
+    /// below spot produces and is not an error.
+    #[test]
+    fn a_negative_funding_rate_pays_the_long() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![perpetual(-Decimal::new(1, 4))],
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(100_000))]),
+            fill_seed: 0,
+        });
+        e.set_margin_policy(
+            "BTCUSDT.P".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: BreachAction::Refuse,
+                basis: MarginBasis::PerContract,
+            },
+        );
+        e.process(
+            ClientMessage::SubmitOrder(order_with(
+                "P1",
+                Side::Buy,
+                "BTCUSDT.P",
+                10,
+                Some(Decimal::from(50_000)),
+            )),
+            1,
+        );
+        e.mark(&[("BTCUSDT.P".into(), Decimal::from(50_000))], 2);
+        let before = *e.account.balances.get("USDT").expect("funded");
+        e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+        assert!(
+            *e.account.balances.get("USDT").expect("funded") > before,
+            "a negative rate pays the long rather than charging it"
+        );
+    }
+
+    /// A span crossing no instant funds nothing, and a span crossing two funds
+    /// twice. The schedule is a property of the CLOCK, so it cannot depend on
+    /// how the sweep passes were cut.
+    #[test]
+    fn funding_instants_are_counted_once_per_interval_crossed() {
+        assert_eq!(funding_instants(0, EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS), 0);
+        assert_eq!(funding_instants(0, EIGHT_HOURS_NS, EIGHT_HOURS_NS), 1);
+        assert_eq!(
+            funding_instants(EIGHT_HOURS_NS, 3 * EIGHT_HOURS_NS, EIGHT_HOURS_NS),
+            2
+        );
+        // Abutting spans never double-count: the left edge is exclusive.
+        let first = funding_instants(0, EIGHT_HOURS_NS, EIGHT_HOURS_NS);
+        let second = funding_instants(EIGHT_HOURS_NS, 2 * EIGHT_HOURS_NS, EIGHT_HOURS_NS);
+        assert_eq!(first + second, 2);
+    }
+
+    /// A NOTIONAL margin basis is what makes a leveraged account expressible:
+    /// the requirement moves with the price, where a per-contract one does not.
+    #[test]
+    fn a_notional_margin_basis_scales_with_price() {
+        let def = InstrumentDef {
+            symbol: "EURUSD".into(),
+            class: InstrumentClass::Future {
+                underlying: "EUR".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::from(100_000),
+                asset_class: WireAssetClass::Fx,
+            },
+            price_precision: 5,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 5),
+            size_increment: Decimal::ONE,
+        };
+        // Thirty-to-one leverage, the retail forex ceiling.
+        let leveraged = MarginPolicy {
+            initial_per_contract: Decimal::new(333, 4),
+            maintenance_per_contract: Decimal::new(333, 4),
+            breach_action: BreachAction::Liquidate,
+            basis: MarginBasis::Notional,
+        };
+        let cheap = leveraged.initial(&def, Decimal::ONE, Decimal::ONE);
+        let dear = leveraged.initial(&def, Decimal::ONE, Decimal::TWO);
+        assert_eq!(
+            dear,
+            cheap * Decimal::TWO,
+            "a notional requirement doubles when the price doubles"
+        );
+
+        let fixed = MarginPolicy {
+            initial_per_contract: Decimal::from(2_000),
+            maintenance_per_contract: Decimal::from(1_800),
+            breach_action: BreachAction::Liquidate,
+            basis: MarginBasis::PerContract,
+        };
+        assert_eq!(
+            fixed.initial(&def, Decimal::ONE, Decimal::ONE),
+            fixed.initial(&def, Decimal::ONE, Decimal::from(9_999)),
+            "a per-contract requirement ignores the price, which is what CME publishes"
+        );
     }
 
     /// `RejectNextCancel` refuses a cancel the venue COULD have honoured, and
@@ -6248,6 +6594,7 @@ mod tests {
             initial_per_contract: Decimal::ONE,
             maintenance_per_contract: Decimal::ONE,
             breach_action: BreachAction::Refuse,
+            basis: Default::default(),
         };
         let fees = FeeSchedule {
             maker: FeeRate::BasisPoints { rate: Decimal::ONE },

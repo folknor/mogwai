@@ -1184,8 +1184,7 @@ impl Engine {
                 let commission =
                     self.maximum_commission(order, order.quantity, price, ts, apply_divergences);
                 let required = policy
-                    .initial_per_contract
-                    .saturating_mul(order.quantity)
+                    .initial(instrument, order.quantity, price)
                     .saturating_add(commission);
                 let currency = instrument.class.settlement_currency();
                 if self.free_balance(currency) < required {
@@ -1288,15 +1287,11 @@ impl Engine {
                 .get(&order.symbol)
                 .ok_or_else(|| "cash-settled futures require the margin ledger".to_string())?;
             if order.reduce_only {
-                (
-                    commission,
-                    policy.maintenance_per_contract.saturating_mul(qty),
-                )
+                (commission, policy.maintenance(instrument, qty, fill_px))
             } else {
                 (
                     policy
-                        .initial_per_contract
-                        .saturating_mul(qty)
+                        .initial(instrument, qty, fill_px)
                         .saturating_add(commission),
                     Decimal::ZERO,
                 )
@@ -1669,10 +1664,17 @@ impl Engine {
                     };
                     (
                         instrument.class.settlement_currency(),
-                        policy.initial_per_contract.saturating_mul(order.leaves_qty),
+                        policy.initial(
+                            instrument,
+                            order.leaves_qty,
+                            order
+                                .submit
+                                .price
+                                .or(order.submit.trigger_price)
+                                .unwrap_or_default(),
+                        ),
                         policy
-                            .initial_per_contract
-                            .saturating_mul(new_leaves)
+                            .initial(instrument, new_leaves, price.unwrap_or_default())
                             .saturating_add(commission),
                     )
                 } else {

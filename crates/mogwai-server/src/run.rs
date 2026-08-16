@@ -622,6 +622,14 @@ impl Run {
                             mogwai_engine::BreachAction::Liquidate
                         }
                     },
+                    basis: match margin.basis {
+                        crate::config::MarginBasis::PerContract => {
+                            mogwai_engine::MarginBasis::PerContract
+                        }
+                        crate::config::MarginBasis::Notional => {
+                            mogwai_engine::MarginBasis::Notional
+                        }
+                    },
                 },
             );
         }

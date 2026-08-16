@@ -137,6 +137,29 @@ pub(crate) async fn ws_upgrade(
         Ok(profile) => profile,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
+    // THIS ACCOUNT'S funding, against the shape it just bound.
+    //
+    // The boot-time barred set answers the same question for the venue's
+    // configured `[balances]`, which is now only what an UNNAMED account opens
+    // with - a client that named its own balances is funded in whatever it said,
+    // and the venue has no way to know at boot what that will be. So the check
+    // moves here for named accounts, where it is still knowable with no order at
+    // all and is still a CONFIGURATION error rather than a trading outcome.
+    //
+    // Presence, never sufficiency: running out is depletion, and a funds
+    // rejection on a served shape must keep meaning that and only that.
+    let settlement = profile.def.class.settlement_currency();
+    if !passenger.engine.lock().await.is_funded_in(settlement) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "account {account} is not funded in {settlement}, which is what {symbol} settles \
+                 in; open the account with a {settlement} balance",
+                account = passenger.account_id.as_str()
+            ),
+        )
+            .into_response();
+    }
     let speed = query.speed.unwrap_or(state.cfg.speed);
     if !speed.is_finite() || speed < 0.0 {
         return (

@@ -106,6 +106,7 @@ fn futures_book(size: usize) -> (Engine, Vec<(mogwai_protocol::Symbol, Decimal)>
         initial_per_contract: Decimal::from(2000),
         maintenance_per_contract: Decimal::from(1800),
         breach_action: BreachAction::Refuse,
+        basis: Default::default(),
     };
     for index in 0..size {
         let symbol: mogwai_protocol::Symbol = format!("F{index}").into();

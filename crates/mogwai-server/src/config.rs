@@ -1033,10 +1033,16 @@ pub(crate) enum ConfiguredClass {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfiguredMargin {
+    /// Read as a fixed amount of settlement currency per contract, or as a
+    /// FRACTION OF NOTIONAL, according to `basis`. So `initial = 2000` under the
+    /// default per-contract basis is CME's dollar performance bond, and
+    /// `initial = 0.1` under `notional` is ten-times leverage.
     pub(crate) initial_per_contract: Decimal,
     pub(crate) maintenance_per_contract: Decimal,
     #[serde(default)]
     pub(crate) breach_action: BreachAction,
+    #[serde(default)]
+    pub(crate) basis: MarginBasis,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
@@ -1045,6 +1051,21 @@ pub(crate) enum BreachAction {
     #[default]
     Refuse,
     Liquidate,
+}
+
+/// How a margin requirement is derived. See `mogwai_engine::MarginBasis`; this
+/// is its config face, kept separate so the wire vocabulary and the engine's are
+/// free to diverge.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MarginBasis {
+    /// A fixed amount per contract. Exchange-listed futures, and the default
+    /// because every shipped preset states a performance bond that way.
+    #[default]
+    PerContract,
+    /// A fraction of notional, so the requirement moves with the price. Forex,
+    /// crypto margin, and Reg-T equity margin.
+    Notional,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1371,6 +1392,43 @@ fn validate_instrument_options(
     Ok(())
 }
 
+/// The checks every DERIVATIVE class shares: a usable underlying, a usable
+/// settlement currency, a positive multiplier, and whole-contract sizing.
+fn validate_derivative(
+    def: &InstrumentDef,
+    underlying: &str,
+    settlement_currency: &str,
+    multiplier: Decimal,
+) -> anyhow::Result<()> {
+    if underlying.trim().is_empty()
+        || !underlying.is_ascii()
+        || underlying.len() > mogwai_protocol::MAX_SYMBOL_LEN
+    {
+        anyhow::bail!(
+            "instrument {} underlying must be non-blank ASCII within MAX_SYMBOL_LEN",
+            def.symbol
+        );
+    }
+    if settlement_currency.trim().is_empty()
+        || settlement_currency.len() > mogwai_protocol::MAX_CURRENCY_LEN
+    {
+        anyhow::bail!("instrument {} settlement_currency is invalid", def.symbol);
+    }
+    if multiplier <= Decimal::ZERO || multiplier.scale() > 9 {
+        anyhow::bail!(
+            "instrument {} multiplier must be positive with scale <= 9",
+            def.symbol
+        );
+    }
+    if def.size_increment != Decimal::ONE || def.size_precision != 0 {
+        anyhow::bail!(
+            "instrument {} derivative size_increment must be 1 and size_precision must be 0",
+            def.symbol
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()> {
     if def.symbol.trim().is_empty() {
         anyhow::bail!("instrument symbol must not be empty");
@@ -1422,6 +1480,78 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             if def.size_increment != Decimal::ONE || def.size_precision != 0 {
                 anyhow::bail!(
                     "instrument {} futures size_increment must be 1 and size_precision must be 0",
+                    def.symbol
+                );
+            }
+        }
+        InstrumentClass::Equity {
+            currency,
+            multiplier,
+        } => {
+            if currency.trim().is_empty() || currency.len() > mogwai_protocol::MAX_CURRENCY_LEN {
+                anyhow::bail!("instrument {} equity currency is invalid", def.symbol);
+            }
+            if *multiplier <= Decimal::ZERO || multiplier.scale() > 9 {
+                anyhow::bail!(
+                    "instrument {} multiplier must be positive with scale <= 9",
+                    def.symbol
+                );
+            }
+            // Whole shares. Fractional-share programmes exist, but every lot,
+            // borrow and settlement convention an equity surface owes is stated
+            // in shares, so admitting a fraction here would be admitting a
+            // quantity nothing downstream can size against.
+            if def.size_increment != Decimal::ONE || def.size_precision != 0 {
+                anyhow::bail!(
+                    "instrument {} equity size_increment must be 1 and size_precision must be 0",
+                    def.symbol
+                );
+            }
+        }
+        InstrumentClass::Perpetual {
+            underlying,
+            settlement_currency,
+            multiplier,
+            funding_interval_ns,
+            funding_rate,
+            ..
+        } => {
+            validate_derivative(def, underlying, settlement_currency, *multiplier)?;
+            if *funding_interval_ns == 0 {
+                anyhow::bail!(
+                    "instrument {} funding_interval_ns must be positive; a perpetual that never \
+                     funds is a future, and should be configured as one",
+                    def.symbol
+                );
+            }
+            // A rate above 100 percent per interval is a configuration mistake
+            // rather than a market: the largest funding any venue has printed is
+            // orders of magnitude below it, and the arithmetic is applied to
+            // notional, so a typo here empties an account in one interval.
+            if funding_rate.abs() > Decimal::ONE {
+                anyhow::bail!(
+                    "instrument {} funding_rate must be within +/-1 (100 percent per interval)",
+                    def.symbol
+                );
+            }
+        }
+        InstrumentClass::Inverse {
+            underlying,
+            settlement_currency,
+            quote_currency,
+            multiplier,
+            ..
+        } => {
+            validate_derivative(def, underlying, settlement_currency, *multiplier)?;
+            if quote_currency.trim().is_empty()
+                || quote_currency.len() > mogwai_protocol::MAX_CURRENCY_LEN
+            {
+                anyhow::bail!("instrument {} quote_currency is invalid", def.symbol);
+            }
+            if quote_currency == settlement_currency {
+                anyhow::bail!(
+                    "instrument {} is inverse but quotes and settles in the same currency; that \
+                     is a linear contract, and should be configured as one",
                     def.symbol
                 );
             }
@@ -1611,6 +1741,7 @@ mod tests {
                 initial_per_contract: Decimal::from(2000),
                 maintenance_per_contract: Decimal::from(1800),
                 breach_action: BreachAction::Refuse,
+                basis: MarginBasis::PerContract,
             }),
             fees: None,
             generator: Some(profile.scalars),

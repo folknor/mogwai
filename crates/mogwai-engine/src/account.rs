@@ -225,7 +225,6 @@ impl Engine {
 
         if instrument.class.is_future() {
             let settlement = instrument.class.settlement_currency().to_owned();
-            let multiplier = instrument.class.multiplier();
             let before = previous_position;
             let reducing = (before.qty > Decimal::ZERO && fill.side == Side::Sell)
                 || (before.qty < Decimal::ZERO && fill.side == Side::Buy);
@@ -236,17 +235,59 @@ impl Engine {
                 } else {
                     -Decimal::ONE
                 };
-                let pnl = fill
-                    .last_px
-                    .saturating_sub(before.avg_px)
-                    .saturating_mul(closed)
-                    .saturating_mul(multiplier)
-                    .saturating_mul(direction);
+                // Through `InstrumentDef::unrealized`, which is the one place
+                // the INVERSE arithmetic lives: a coin-margined contract's P and
+                // L is `multiplier * qty * (1/entry - 1/exit)`, not
+                // `(exit - entry) * qty * multiplier`. Realized and unrealized
+                // must come from the same expression or a position's value would
+                // jump the moment it closed.
+                let pnl = instrument
+                    .unrealized(
+                        closed.saturating_mul(direction),
+                        before.avg_px,
+                        fill.last_px,
+                    )
+                    .unwrap_or(Decimal::ZERO);
                 let total = self.account.balances.entry(settlement).or_default();
                 *total = total.saturating_add(pnl).saturating_sub(fill.commission);
             } else if !fill.commission.is_zero() {
                 let total = self.account.balances.entry(settlement).or_default();
                 *total = total.saturating_sub(fill.commission);
+            }
+            return;
+        }
+        // EQUITY moves cash only. The shares are the POSITION, which
+        // `apply_position` above already recorded, and crediting them as a
+        // balance too would both double-count them and make them spendable as
+        // money. This is the spot branch's quote leg without its base leg, and
+        // the difference is exactly what makes an equity account statable in one
+        // currency where a spot account needs its base priced.
+        if matches!(
+            instrument.class,
+            mogwai_protocol::InstrumentClass::Equity { .. }
+        ) {
+            let currency = instrument.class.settlement_currency().to_owned();
+            let mut clipped = false;
+            let notional = mul_clamped(
+                mul_clamped(fill.last_qty, fill.last_px, &mut clipped),
+                instrument.class.multiplier(),
+                &mut clipped,
+            );
+            let total = self.account.balances.entry(currency).or_default();
+            *total = match fill.side {
+                Side::Buy => sub_clamped(
+                    *total,
+                    add_clamped(notional, fill.commission, &mut clipped),
+                    &mut clipped,
+                ),
+                Side::Sell => add_clamped(
+                    *total,
+                    sub_clamped(notional, fill.commission, &mut clipped),
+                    &mut clipped,
+                ),
+            };
+            if clipped {
+                self.warn_saturated(&fill.symbol);
             }
             return;
         }
@@ -403,9 +444,11 @@ impl Engine {
                 continue;
             };
             if instrument.class.settlement_currency() == currency {
-                let reserve = policy
-                    .maintenance_per_contract
-                    .saturating_mul(position.qty.abs());
+                // At the position's MARK, which is what makes a notional-basis
+                // requirement move with the price the way a leveraged account's
+                // actually does. A per-contract policy ignores the price, so
+                // this is the same number it always was for futures.
+                let reserve = policy.maintenance(instrument, position.qty, position.mark_px);
                 locked = add_clamped(locked, reserve, &mut clipped);
             }
         }
@@ -437,9 +480,14 @@ impl Engine {
         };
         if instrument.class.is_future() {
             return match self.margin.get(&submit.symbol) {
-                Some(policy) => {
-                    Reservation::Settlement(policy.initial_per_contract.saturating_mul(leaves))
-                }
+                // Priced at the ORDER's price, since that is the notional the
+                // account is committing to; there is no mark for an order that
+                // has not filled.
+                Some(policy) => Reservation::Settlement(policy.initial(
+                    instrument,
+                    leaves,
+                    submit.price.unwrap_or_default(),
+                )),
                 None => Reservation::None,
             };
         }
@@ -479,9 +527,7 @@ impl Engine {
                 continue;
             }
             let currency = instrument.class.settlement_currency().to_owned();
-            let reserve = policy
-                .maintenance_per_contract
-                .saturating_mul(position.qty.abs());
+            let reserve = policy.maintenance(instrument, position.qty, position.mark_px);
             let total = locked.entry(currency).or_default();
             *total = total.saturating_add(reserve);
         }
