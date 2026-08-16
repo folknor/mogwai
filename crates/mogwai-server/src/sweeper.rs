@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mogwai_engine::ScanResult;
+use mogwai_engine::{PendingScan, ScanResult};
 use mogwai_protocol::{AdmissionSubject, ServerMessage};
 
 use crate::{admission::ExecLanes, config::sim_now_ns, fills, run::Run, source::Rivers};
@@ -99,12 +99,24 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
                 _ = completion.changed() => break 'passes,
             }
-            // One acquisition, so the scans and the mark symbols this pass
-            // works from are the same engine state.
-            let (scans, mark_symbols) = {
-                let engine = sweep.run.engine.lock().await;
-                (engine.pending_scans(), engine.futures_mark_symbols())
-            };
+            // One acquisition PER PASSENGER, so each ledger's scans and mark
+            // symbols come from one consistent read of it.
+            //
+            // Gathered across every passenger BEFORE the walk, deliberately: the
+            // tape walk is the expensive part of a pass and is a property of the
+            // river, not of any ledger, so N passengers resting orders on one
+            // symbol still walk it ONCE. Results are grouped back per passenger
+            // afterwards.
+            let seated = sweep.run.passengers();
+            let mut scans: Vec<(usize, PendingScan)> = Vec::new();
+            let mut mark_symbols = Vec::new();
+            for (index, passenger) in seated.iter().enumerate() {
+                let engine = passenger.engine.lock().await;
+                scans.extend(engine.pending_scans().into_iter().map(|scan| (index, scan)));
+                mark_symbols.extend(engine.futures_mark_symbols());
+            }
+            mark_symbols.sort();
+            mark_symbols.dedup();
             // Only the boats whose own converted interval has elapsed, each
             // re-armed on ITS clock and floored at `MIN_SWEEP_WALL` as before.
             let now = Instant::now();
@@ -125,14 +137,19 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             for boat in due_boats {
                 let symbol = boat.symbol().to_owned();
                 let to_ns = sim_now_ns(boat.sim);
-                let boat_scans: Vec<_> = scans
+                // Every passenger's scans on this river, in ONE list, because the
+                // walk is a property of the water. The passenger index rides
+                // along so each result can be applied to the ledger it came
+                // from.
+                let boat_scans: Vec<(usize, PendingScan)> = scans
                     .iter()
-                    .filter(|scan| scan.symbol.as_ref() == symbol)
+                    .filter(|(_, scan)| scan.symbol.as_ref() == symbol)
                     .cloned()
                     .collect();
-                let mut results = Vec::new();
+                let mut results: Vec<Vec<ScanResult>> = vec![Vec::new(); seated.len()];
                 let rivers = Arc::clone(&sweep.rivers);
-                let scans_for_walk = boat_scans.clone();
+                let scans_for_walk: Vec<PendingScan> =
+                    boat_scans.iter().map(|(_, scan)| scan.clone()).collect();
                 let walk_symbol = symbol.clone();
                 let walked = tokio::task::spawn_blocking(move || {
                     fills::scan_triggers(&walk_symbol, &scans_for_walk, to_ns, &rivers)
@@ -145,15 +162,15 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // nothing advances: an unreachable span is not a span
                 // nothing triggered in.
                 if let Some(walk) = walked {
-                    results.extend(boat_scans.into_iter().zip(walk.hits).map(|(scan, hit)| {
-                        ScanResult {
+                    for ((owner, scan), hit) in boat_scans.into_iter().zip(walk.hits) {
+                        results[owner].push(ScanResult {
                             client_order_id: scan.client_order_id,
                             from_ns: scan.from_ns,
                             revision: scan.revision,
                             hit,
                             scanned_to_ns: walk.reached_ns,
-                        }
-                    }));
+                        });
+                    }
                 }
                 let last_swept_ns = boat
                     .last_swept_ns
@@ -205,21 +222,32 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // `last_swept_ns..to_ns`.
                     continue;
                 };
-                let mut engine = sweep.run.engine.lock().await;
-                let (events, emitted, originated) = apply_engine_pass_on_clock(
-                    &mut engine,
-                    &results,
-                    settlement_marks,
-                    &marks,
-                    to_ns,
-                    boat.sim,
-                );
-                let shape = engine.book_shape();
-                drop(engine);
-                if events.is_empty() {
-                    continue;
+                // One pass PER PASSENGER over the shared reading. Each ledger
+                // books its own fills, settles its own positions and marks its
+                // own exposure against the same prices - which is what makes the
+                // tape common and the money private. Deliveries are separate
+                // too, since `deliver` attributes by order ownership anyway.
+                //
+                // The settlement marks are cloned per passenger rather than
+                // moved: a settlement instant belongs to the CALENDAR, so every
+                // ledger holding that symbol crosses it.
+                for (index, passenger) in seated.iter().enumerate() {
+                    let mut engine = passenger.engine.lock().await;
+                    let (events, emitted, originated) = apply_engine_pass_on_clock(
+                        &mut engine,
+                        &results[index],
+                        settlement_marks.clone(),
+                        &marks,
+                        to_ns,
+                        boat.sim,
+                    );
+                    let shape = engine.book_shape();
+                    drop(engine);
+                    if events.is_empty() {
+                        continue;
+                    }
+                    deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
                 }
-                deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
             }
         }
     })
@@ -400,31 +428,36 @@ fn deliver(
     // Resolved once for the batch rather than once per lane: the lookup takes
     // the run's ownership mutex, and a batch crossing N connections would
     // otherwise take it N times for the same answers.
-    let owners: Vec<Option<u64>> = events
+    let owners: Vec<Option<String>> = events
         .iter()
         .map(|event| crate::run::addressed_order(event).and_then(|id| run.order_owner(id)))
         .collect();
-    for (id, lane) in run.bound_lanes() {
+    for bound in run.bound_lanes() {
         let mine: Vec<ServerMessage> = events
             .iter()
             .zip(&owners)
-            .filter(|(_, owner)| owner.is_none_or(|owner| owner == id))
+            .filter(|(_, owner)| {
+                owner
+                    .as_deref()
+                    .is_none_or(|owner| owner == bound.account_id)
+            })
             .map(|(event, _)| event.clone())
             .collect();
         if mine.is_empty() {
             continue;
         }
-        let Some(reservation) = lane.reserve_swept(shape, emitted, originated) else {
-            if refuse(&lane, subject.clone(), ts).is_err() {
-                closed.push(id);
+        let Some(reservation) = bound.lanes.reserve_swept(shape, emitted, originated) else {
+            if refuse(&bound.lanes, subject.clone(), ts).is_err() {
+                closed.push(bound.id);
             }
             continue;
         };
-        if lane
+        if bound
+            .lanes
             .submit_produced(reservation, Instant::now(), None, mine)
             .is_err()
         {
-            closed.push(id);
+            closed.push(bound.id);
         }
     }
     // No ownership bookkeeping here, deliberately. A sweep-produced order is one
@@ -485,10 +518,10 @@ mod tests {
         let run = crate::run::test_run();
         let (mine, mut my_rx) = ExecLanes::detached();
         let (theirs, mut their_rx) = ExecLanes::detached();
-        run.bind_lanes(mine.clone());
-        run.bind_lanes(theirs.clone());
+        run.bind_lanes(mine.clone(), "MOGWAI-001");
+        run.bind_lanes(theirs.clone(), "MOGWAI-002");
         let order: mogwai_protocol::VenueOrderId = "V-1".into();
-        run.claim_order(order.clone(), mine.id());
+        run.claim_order(order.clone(), "MOGWAI-001");
 
         // A PARTIAL fill, so the batch does not also retire the claim it is
         // being attributed by; the assertion is about delivery, not cleanup.

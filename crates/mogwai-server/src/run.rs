@@ -87,6 +87,48 @@ impl HavocWindow {
     }
 }
 
+/// One connected trader: its own account, its own ledger, its own orders.
+///
+/// This is the noun the venue serves. A river is the tape and is shared; a
+/// passenger is never shared, because the moment a ledger hangs off something
+/// two connections have in common they share a balance and a position book.
+///
+/// The engine is per passenger for exactly that reason. It was one per PROCESS,
+/// which is right while a venue serves one run and wrong the moment an
+/// orchestrator points fifty subagents at one exchange: every subagent's fills
+/// moved every other subagent's net.
+pub(crate) struct Passenger {
+    pub(crate) account_id: mogwai_protocol::AccountId,
+    pub(crate) engine: AsyncMutex<Engine>,
+}
+
+impl std::fmt::Debug for Passenger {
+    /// The account only. A ledger's contents are not something a diagnostic
+    /// should splice into a log line, and the engine is behind an async mutex a
+    /// formatter cannot take.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Passenger")
+            .field("account_id", &self.account_id.as_str())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What every passenger's ledger is opened from. Held on the run because a
+/// passenger is created on demand - when a connection first names an account -
+/// and the values it is built from are venue configuration.
+///
+/// This is the venue-wide `[balances]` seed, which the account-policy design
+/// retires in favour of a client-named opening balance and risk policy. Until
+/// that lands it is the OPENING balance applied to each passenger rather than
+/// the balance of one shared ledger, which is the same value doing a different
+/// job.
+struct LedgerTemplate {
+    opening_balances: std::collections::HashMap<String, Decimal>,
+    fill_seed: u64,
+    oms_type: mogwai_protocol::OmsType,
+    fill_band_max_ticks: u32,
+}
+
 pub(crate) struct Run {
     /// The shape this run placed its BOOT boat on, and the river a `/ws`
     /// upgrade binds when it names no symbol. Every configured shape has a
@@ -98,7 +140,16 @@ pub(crate) struct Run {
     /// two symbols never serialize on each other's checkpoint chain.
     pub(crate) rivers: Arc<source::Rivers>,
     pub(crate) oms_type: mogwai_protocol::OmsType,
-    pub(crate) engine: AsyncMutex<Engine>,
+    /// Every account this venue has served, created on demand and keyed by
+    /// account id. An id is the CLIENT'S to choose and outlives its connection,
+    /// so a returning socket finds its own ledger rather than a fresh one; that
+    /// is what makes a reconnect a continuation instead of a new trader.
+    passengers: Mutex<std::collections::HashMap<String, Arc<Passenger>>>,
+    template: LedgerTemplate,
+    /// The account a connection that names none is served under. It exists for
+    /// the ephemeral single-client venue, where making the one client name an
+    /// id would be ceremony; it is NOT the venue's one account.
+    default_account_id: mogwai_protocol::AccountId,
     pub(crate) seeds: RunSeeds,
     pub(crate) boatyard: Arc<Boatyard>,
     boot_ticket: Mutex<Option<crate::boatyard::Ticket>>,
@@ -139,25 +190,30 @@ pub(crate) struct Run {
     /// `order_owners` below; the table stays a list of every live connection
     /// because venue-wide frames (the account snapshot, a venue fault) still go
     /// to all of them.
-    lanes: Mutex<Vec<(u64, ExecLanes)>>,
+    lanes: Mutex<Vec<BoundLane>>,
     /// Which connection submitted each live order, so a sweep-produced fill goes
     /// to the passenger that owns it and to nobody else.
     ///
     /// Keyed by `VenueOrderId` because that is what every sweep-produced frame
-    /// and every query row carries; the value is `ExecLanes::id`. An order
-    /// absent from this table - one the VENUE originated, or one whose
-    /// connection is already retired - is delivered to EVERY lane and visible to
-    /// every query, which is the old behaviour and the conservative direction to
-    /// fail in: a passenger seeing a stray frame is the defect this closes, but
-    /// a passenger MISSING its own fill would be a worse one.
+    /// and every query row carries; the value is the ACCOUNT ID that submitted
+    /// it. An order absent from this table - one the VENUE originated - is
+    /// delivered to EVERY lane and visible to every query, which is the old
+    /// behaviour and the conservative direction to fail in: a passenger seeing a
+    /// stray frame is the defect this closes, but a passenger MISSING its own
+    /// fill would be a worse one.
     ///
-    /// A claim survives its order's TERMINAL state and is dropped only when the
-    /// connection is released. Retiring on the ending frame would bound the
-    /// table more tightly and was the first shape of this, but it makes a closed
-    /// order unattributed - so `QueryOrders` and `QueryFills`, which report
-    /// terminal rows by design, would show every connection's history to
-    /// everyone. Growth is bounded by orders submitted per connection.
-    order_owners: Mutex<std::collections::HashMap<mogwai_protocol::VenueOrderId, u64>>,
+    /// BY ACCOUNT, NOT BY CONNECTION, and the difference is not cosmetic. A
+    /// ledger belongs to an account, so two sockets presenting the same id are
+    /// the SAME TRADER and must each see the whole account's orders; keying on
+    /// the connection hid a client's own resting order from its own second
+    /// socket. Different accounts is what invisibility is about.
+    ///
+    /// A claim survives its order's TERMINAL state. Retiring on the ending frame
+    /// would bound the table more tightly and was the first shape of this, but
+    /// it makes a closed order unattributed - so `QueryOrders` and `QueryFills`,
+    /// which report terminal rows by design, would show every account's history
+    /// to everyone.
+    order_owners: Mutex<std::collections::HashMap<mogwai_protocol::VenueOrderId, String>>,
 }
 
 impl Run {
@@ -189,18 +245,18 @@ impl Run {
             started_ns,
         );
         let (complete_tx, _) = watch::channel(None);
-        let mut engine = Engine::build(EngineConfig {
-            account_id,
-            instruments: Vec::new(),
-            balances,
-            fill_seed: seeds.fill,
-        });
-        engine.set_oms_type(oms_type);
-        engine.set_liquidation_band_ticks(fill_band_max_ticks);
-        // The engine starts EMPTY. An instrument becomes tradable when a socket
-        // binds its symbol or an order names it, through `ensure_instrument`.
+        // No engine is built here. A ledger belongs to a PASSENGER, and no
+        // passenger exists until a connection arrives, so the run carries only
+        // what one is opened from.
         Arc::new(Self {
-            engine: AsyncMutex::new(engine),
+            passengers: Mutex::new(std::collections::HashMap::new()),
+            template: LedgerTemplate {
+                opening_balances: balances,
+                fill_seed: seeds.fill,
+                oms_type,
+                fill_band_max_ticks,
+            },
+            default_account_id: account_id,
             boot_symbol: instrument.symbol,
             rivers,
             oms_type,
@@ -226,6 +282,82 @@ impl Run {
         })
     }
 
+    /// The passenger trading under `account_id`, created on first sight.
+    ///
+    /// Creation is the whole lifecycle: an account outlives the connection that
+    /// named it, so a second connection presenting the same id gets the SAME
+    /// ledger, with its positions and order history intact. That is what a
+    /// reconnect is from the venue's side, and it is indistinguishable from a
+    /// stranger claiming the id, which is why nothing here tries to tell them
+    /// apart.
+    pub(crate) fn passenger(&self, account_id: &mogwai_protocol::AccountId) -> Arc<Passenger> {
+        let mut passengers = self
+            .passengers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(seated) = passengers.get(account_id.as_str()) {
+            return Arc::clone(seated);
+        }
+        // The ledger starts EMPTY of instruments. One becomes tradable when this
+        // passenger binds a symbol or names it on an order, through
+        // `ensure_instrument` - which is per passenger for the same reason the
+        // engine is.
+        let mut engine = Engine::build(EngineConfig {
+            account_id: account_id.clone(),
+            instruments: Vec::new(),
+            balances: self.template.opening_balances.clone(),
+            fill_seed: self.template.fill_seed,
+        });
+        engine.set_oms_type(self.template.oms_type);
+        engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
+        let seated = Arc::new(Passenger {
+            account_id: account_id.clone(),
+            engine: AsyncMutex::new(engine),
+        });
+        passengers.insert(account_id.as_str().to_owned(), Arc::clone(&seated));
+        seated
+    }
+
+    /// The passenger a connection that named no account is served under.
+    pub(crate) fn default_passenger(&self) -> Arc<Passenger> {
+        self.passenger(&self.default_account_id)
+    }
+
+    /// The passenger whose book holds `client_order_id` as a RESTING order, and
+    /// the symbol it rests on.
+    ///
+    /// The control plane names an order without naming an account, so the target
+    /// has to be found. Ids are client-chosen and therefore not unique across
+    /// passengers; the first match wins, which is a real ambiguity to close when
+    /// the control plane grows an account parameter of its own.
+    pub(crate) async fn passenger_holding(
+        &self,
+        client_order_id: &str,
+    ) -> Option<(Arc<Passenger>, Symbol)> {
+        for passenger in self.passengers() {
+            let symbol = passenger
+                .engine
+                .lock()
+                .await
+                .open_order_symbol(client_order_id);
+            if let Some(symbol) = symbol {
+                return Some((passenger, symbol));
+            }
+        }
+        None
+    }
+
+    /// Every passenger this venue has served, for the venue-wide walks: the fill
+    /// sweeper, and the control plane's reach into every ledger.
+    pub(crate) fn passengers(&self) -> Vec<Arc<Passenger>> {
+        self.passengers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(Arc::clone)
+            .collect()
+    }
+
     pub(crate) fn retain_boot_ticket(&self, ticket: crate::boatyard::Ticket) {
         *self
             .boot_ticket
@@ -233,11 +365,15 @@ impl Run {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ticket);
     }
 
-    /// Make `symbol` tradable on this run's engine: register the def and install
-    /// the margin policy and fee schedule from its profile. Called when a socket
-    /// binds a symbol and before an order for it is admitted. `false` means no
-    /// profile resolves it, and the caller lets the engine produce its own
-    /// unknown-instrument rejection rather than inventing a second wording.
+    /// Make `symbol` tradable on ONE PASSENGER'S ledger: register the def and
+    /// install the margin policy and fee schedule from its profile. Called when
+    /// a socket binds a symbol and before an order for it is admitted. An `Err`
+    /// means no profile resolves it, and the caller lets the engine produce its
+    /// own unknown-instrument rejection rather than inventing a second wording.
+    ///
+    /// Per passenger because the engine is: two traders on one venue each keep
+    /// their own registered instruments, margin policy and fee schedule, and
+    /// nothing one of them binds is visible in the other's ledger.
     ///
     /// This is the ONE path from a profile to engine policy - `Run::new` no
     /// longer has a copy - and the installs are guarded on the registration
@@ -245,10 +381,11 @@ impl Run {
     /// resets its configuration.
     pub(crate) async fn ensure_instrument(
         &self,
+        passenger: &Passenger,
         symbol: &str,
     ) -> Result<Arc<crate::source::InstrumentProfile>, crate::source::ResolveRefusal> {
         let profile = self.rivers.resolve_profile(symbol)?;
-        let mut engine = self.engine.lock().await;
+        let mut engine = passenger.engine.lock().await;
         if !engine.ensure_instrument(profile.def.clone()) {
             return Ok(profile);
         }
@@ -295,44 +432,42 @@ impl Run {
     /// here. That is what lets `process_order_cmd` - which is handed the lanes
     /// and nothing else naming the connection - record who owns an order it just
     /// saw accepted.
-    pub(crate) fn bind_lanes(&self, lanes: ExecLanes) -> u64 {
+    pub(crate) fn bind_lanes(&self, lanes: ExecLanes, account_id: &str) -> u64 {
         let id = lanes.id();
-        self.locked_lanes().push((id, lanes));
+        self.locked_lanes().push(BoundLane {
+            id,
+            account_id: account_id.to_owned(),
+            lanes,
+        });
         id
     }
 
+    /// Retire one connection. The ACCOUNT'S order claims survive: an account
+    /// outlives every connection that ever presented it, so a returning socket
+    /// must still find its own orders attributed to it.
     pub(crate) fn release_lanes(&self, id: u64) {
-        self.locked_lanes().retain(|(bound, _)| *bound != id);
-        // The orders this connection owned outlive it in the engine, but their
-        // ownership record must not: an id is never reused, so a stale entry
-        // would address nobody and its fills would reach nobody. Dropping the
-        // claim returns those orders to the unattributed set, which is
-        // delivered to every lane - the same conservative direction the
-        // ownership lookup fails in.
+        self.locked_lanes().retain(|bound| bound.id != id);
+    }
+
+    /// Record that the account `owner` submitted `venue_order_id`.
+    pub(crate) fn claim_order(&self, venue_order_id: mogwai_protocol::VenueOrderId, owner: &str) {
         self.order_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, owner| *owner != id);
+            .insert(venue_order_id, owner.to_owned());
     }
 
-    /// Record that `owner` submitted `venue_order_id`.
-    pub(crate) fn claim_order(&self, venue_order_id: mogwai_protocol::VenueOrderId, owner: u64) {
-        self.order_owners
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(venue_order_id, owner);
-    }
-
-    /// Who submitted `venue_order_id`, or `None` for an order nobody claimed.
+    /// Which account submitted `venue_order_id`, or `None` for an order nobody
+    /// claimed.
     pub(crate) fn order_owner(
         &self,
         venue_order_id: &mogwai_protocol::VenueOrderId,
-    ) -> Option<u64> {
+    ) -> Option<String> {
         self.order_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(venue_order_id)
-            .copied()
+            .cloned()
     }
 
     /// Claim every order a just-produced batch accepted for `owner`.
@@ -341,7 +476,7 @@ impl Run {
     /// claimed: an order appearing there was originated by the VENUE - a margin
     /// liquidation - so there is no submitting connection to attribute it to,
     /// and inventing one would address its frames to a lane that never asked.
-    pub(crate) fn track_ownership(&self, events: &[mogwai_protocol::ServerMessage], owner: u64) {
+    pub(crate) fn track_ownership(&self, events: &[mogwai_protocol::ServerMessage], owner: &str) {
         for event in events {
             if let mogwai_protocol::ServerMessage::OrderAccepted { venue_order_id, .. } = event {
                 self.claim_order(venue_order_id.clone(), owner);
@@ -359,7 +494,7 @@ impl Run {
     pub(crate) fn scope_query_rows(
         &self,
         events: &mut [mogwai_protocol::ServerMessage],
-        owner: u64,
+        owner: &str,
     ) {
         use mogwai_protocol::ServerMessage as M;
         let mine = |venue_order_id: &mogwai_protocol::VenueOrderId| {
@@ -383,11 +518,11 @@ impl Run {
     /// lock rather than held across the delivery: delivery serializes JSON and
     /// touches per-connection budgets, and doing that while holding a run-wide
     /// mutex would let one connection's cost block every other's teardown.
-    pub(crate) fn bound_lanes(&self) -> Vec<(u64, ExecLanes)> {
+    pub(crate) fn bound_lanes(&self) -> Vec<BoundLane> {
         self.locked_lanes().clone()
     }
 
-    fn locked_lanes(&self) -> std::sync::MutexGuard<'_, Vec<(u64, ExecLanes)>> {
+    fn locked_lanes(&self) -> std::sync::MutexGuard<'_, Vec<BoundLane>> {
         self.lanes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -430,7 +565,18 @@ impl Run {
     }
 }
 
-/// The order a frame is ABOUT, for connection attribution. `None` means the
+/// One live connection: its identity, the account it trades under, and its
+/// outbound machinery. The account rides along because delivery is attributed
+/// by ACCOUNT - two sockets on one account are one trader and both hear about
+/// its fills - while retirement is per connection.
+#[derive(Clone)]
+pub(crate) struct BoundLane {
+    pub(crate) id: u64,
+    pub(crate) account_id: String,
+    pub(crate) lanes: ExecLanes,
+}
+
+/// The order a frame is ABOUT, for account attribution. `None` means the
 /// frame is not order-scoped - a venue fault, a completion, the account
 /// snapshot - and belongs to every connection.
 ///
@@ -581,12 +727,10 @@ mod tests {
     /// ownership outlives an order's end. Deleting the `retain` in
     /// `scope_query_rows` makes the count assertion fail at 2.
     #[test]
-    fn a_query_reply_carries_only_the_asking_connections_orders() {
+    fn a_query_reply_carries_only_the_asking_accounts_orders() {
         let run = run(1_000, 400, None);
-        let (mine, _my_rx) = ExecLanes::detached();
-        let (theirs, _their_rx) = ExecLanes::detached();
-        run.claim_order("V-mine".into(), mine.id());
-        run.claim_order("V-theirs".into(), theirs.id());
+        run.claim_order("V-mine".into(), "MOGWAI-001");
+        run.claim_order("V-theirs".into(), "MOGWAI-002");
 
         let row = |venue_order_id: &str| mogwai_protocol::OrderStatusInfo {
             client_order_id: venue_order_id.into(),
@@ -614,12 +758,12 @@ mod tests {
                 ts_event: 1,
             },
         )];
-        run.scope_query_rows(&mut events, mine.id());
+        run.scope_query_rows(&mut events, "MOGWAI-001");
 
         let mogwai_protocol::ServerMessage::OrderStatusSnapshot(snapshot) = &events[0] else {
             panic!("the snapshot survives scoping");
         };
-        assert_eq!(snapshot.orders.len(), 1, "one connection, one order");
+        assert_eq!(snapshot.orders.len(), 1, "one account, one order");
         assert_eq!(snapshot.orders[0].venue_order_id, "V-mine");
     }
 

@@ -59,6 +59,19 @@ pub(crate) struct SocketQuery {
     /// at its own deadline, and the boat winds down when the last one leaves.
     #[serde(default)]
     duration_ms: Option<u64>,
+    /// The account to trade under. Absent means the venue's default account,
+    /// which exists for the ephemeral single-client venue where naming one
+    /// would be ceremony - it is NOT a venue-wide account every connection
+    /// shares.
+    ///
+    /// The id is the CLIENT'S and outlives the connection, so presenting the
+    /// same one again resumes that ledger. The venue cannot distinguish a
+    /// reconnect from a stranger claiming the id and does not try; anyone who
+    /// knows an id can claim its account, which is acceptable on a loopback
+    /// venue serving one orchestrator's subagents and is stated rather than
+    /// assumed.
+    #[serde(default)]
+    account: Option<String>,
 }
 
 /// What one connection is bound to, decided before the upgrade completes and
@@ -72,6 +85,9 @@ pub(crate) struct SocketSession {
     pub(crate) symbol: mogwai_protocol::Symbol,
     pub(crate) ticket: Ticket,
     pub(crate) duration_ms: Option<u64>,
+    /// The ledger this connection trades on. Resolved before the upgrade, so a
+    /// frame cannot reach a handler before the account it books into exists.
+    pub(crate) passenger: Arc<crate::run::Passenger>,
 }
 
 /// Bind one socket to one river, or refuse before the 101.
@@ -92,10 +108,27 @@ pub(crate) async fn ws_upgrade(
         Ok(symbol) => symbol,
         Err(body) => return (StatusCode::BAD_REQUEST, body).into_response(),
     };
+    // Resolved before the instrument, because the instrument is registered on
+    // THIS passenger's ledger. A malformed id is refused here rather than at
+    // first order: nautilus cannot construct an `AccountId` from a bare word, so
+    // a venue that accepted one would be refused by every consumer later.
+    let passenger = match &query.account {
+        Some(named) => match mogwai_protocol::AccountId::parse(named) {
+            Ok(account_id) => state.run.passenger(&account_id),
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("account id is not usable: {error}"),
+                )
+                    .into_response();
+            }
+        },
+        None => state.run.default_passenger(),
+    };
     // The bind-time shape refusal: an invalid resolved shape or a
     // funding-barred one is a CONFIGURATION error, named here and before any
     // trading, rather than surfacing later as a fill-time funds rejection.
-    let profile = match state.run.ensure_instrument(&symbol).await {
+    let profile = match state.run.ensure_instrument(&passenger, &symbol).await {
         Ok(profile) => profile,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
@@ -117,6 +150,7 @@ pub(crate) async fn ws_upgrade(
         symbol,
         ticket,
         duration_ms: query.duration_ms,
+        passenger,
     };
     ws.max_message_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
         .max_frame_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
@@ -149,9 +183,10 @@ async fn dispatch_command(
     lanes: &ExecLanes,
     symbol: &mogwai_protocol::Symbol,
     boat: &Arc<crate::boatyard::Boat>,
+    passenger: &Arc<crate::run::Passenger>,
 ) {
     let class = CommandClass::of(&cmd);
-    match process_order_cmd(cmd, state, &state.run, lanes, symbol, boat).await {
+    match process_order_cmd(cmd, state, &state.run, lanes, symbol, boat, passenger).await {
         OrderOutcome::Produced {
             mut events,
             reservation,
@@ -166,8 +201,9 @@ async fn dispatch_command(
             //
             // Claim first, then scope: a submit that is immediately queried in
             // the same batch would otherwise have its own row dropped.
-            state.run.track_ownership(&events, lanes.id());
-            state.run.scope_query_rows(&mut events, lanes.id());
+            let account = passenger.account_id.as_str();
+            state.run.track_ownership(&events, account);
+            state.run.scope_query_rows(&mut events, account);
             drop(lanes.submit_produced(reservation, Instant::now(), class, events));
         }
         OrderOutcome::NotAdmitted(frame) | OrderOutcome::Diagnostic(frame) => {
@@ -182,6 +218,7 @@ fn spawn_command_dispatcher(
     lanes: ExecLanes,
     symbol: mogwai_protocol::Symbol,
     boat: Arc<crate::boatyard::Boat>,
+    passenger: Arc<crate::run::Passenger>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The permit's scope is the correctness property: the process-wide
@@ -191,7 +228,7 @@ fn spawn_command_dispatcher(
         // than left to a destructure binding whose lifetime an underscore
         // pattern would silently end early.
         while let Some(queued) = commands.recv().await {
-            dispatch_command(queued.cmd, &state, &lanes, &symbol, &boat).await;
+            dispatch_command(queued.cmd, &state, &lanes, &symbol, &boat, &passenger).await;
             drop(queued.global_slot);
         }
     })
@@ -313,12 +350,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
         lanes.clone(),
         Arc::clone(&session.symbol),
         Arc::clone(session.ticket.boat()),
+        Arc::clone(&session.passenger),
     );
     let writer = tokio::spawn(run_writer(sink, prio_rx, out_rx, state.clone(), boat_sim));
     // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for
     // as long as this connection lives.
-    let lane_id = state.run.bind_lanes(lanes.clone());
+    let lane_id = state
+        .run
+        .bind_lanes(lanes.clone(), session.passenger.account_id.as_str());
     let pump = spawn_exec_pump(held_rx, Arc::clone(&state.run), boat_sim, out_tx.clone());
     let feed = {
         // This connection's own boat, and its own ring: a busy river cannot

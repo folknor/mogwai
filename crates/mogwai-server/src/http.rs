@@ -13,7 +13,7 @@ use axum::{
     Json,
     extract::{Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
@@ -230,6 +230,7 @@ pub(crate) async fn process_order_cmd(
     lanes: &ExecLanes,
     socket_symbol: &mogwai_protocol::Symbol,
     boat: &Arc<crate::boatyard::Boat>,
+    passenger: &crate::run::Passenger,
 ) -> OrderOutcome {
     let sim = boat.sim;
     // Sampled at entry for the boundary rejections below: they return before
@@ -280,7 +281,7 @@ pub(crate) async fn process_order_cmd(
     // existing unknown-instrument rejection with its existing wording instead of
     // a second one invented here.
     if let ClientMessage::SubmitOrder(order) = &order_cmd {
-        let _configured = run.ensure_instrument(&order.symbol).await;
+        let _configured = run.ensure_instrument(passenger, &order.symbol).await;
     }
     // The venue's ACT delay sits BETWEEN the protocol boundary and the market
     // price stamp. After the boundary, because a malformed command is refused
@@ -375,7 +376,7 @@ pub(crate) async fn process_order_cmd(
             reservation,
         };
     }
-    let mut engine = run.engine.lock().await;
+    let mut engine = passenger.engine.lock().await;
     let shape = engine.book_shape();
     let Some(reservation) = lanes.reserve(&order_cmd, &shape) else {
         // The engine has NOT been asked to process anything, so nothing
@@ -707,11 +708,20 @@ pub(crate) async fn arm_divergence(
             );
         }
         Divergence::FeeSurcharge { mult, window_ms } => {
-            run.engine.lock().await.arm_fee_surcharge(
-                mult,
-                now_ns(),
-                sim_duration_from_millis(window_ms),
-            );
+            // Every ledger, because the control plane is an OPERATOR surface
+            // that names no account: a surcharge is a statement about the venue's
+            // fees, so a passenger connecting later gets it too - which is why
+            // this is stored on the template rather than only applied to the
+            // seated set.
+            let armed = now_ns();
+            let window = sim_duration_from_millis(window_ms);
+            for passenger in run.passengers() {
+                passenger
+                    .engine
+                    .lock()
+                    .await
+                    .arm_fee_surcharge(mult, armed, window);
+            }
         }
         // Immediate book action, not an armed trigger: cancel the resting
         // order right now, silently (no lifecycle event - that lost event IS
@@ -724,13 +734,16 @@ pub(crate) async fn arm_divergence(
             // symbol and its river, and a request-supplied `symbol` can disagree
             // with it. A mismatch is refused rather than silently preferred
             // either way.
-            let Some(order_symbol) = run.engine.lock().await.open_order_symbol(&client_order_id)
-            else {
-                // No resting order carries this id. Let the engine say WHY -
-                // unknown id and already-terminal are different diagnoses, and
-                // this arm must not flatten them into one message. The clock
-                // handed in is irrelevant: this call can only fail.
+            // The order names no account, so its passenger is found rather than
+            // supplied.
+            let Some((holder, order_symbol)) = run.passenger_holding(&client_order_id).await else {
+                // No passenger rests this id. Let a ledger say WHY - unknown id
+                // and already-terminal are different diagnoses, and this arm must
+                // not flatten them into one message. The DEFAULT passenger
+                // answers because the call can only fail and its wording does not
+                // depend on which ledger produced it.
                 let reason = run
+                    .default_passenger()
                     .engine
                     .lock()
                     .await
@@ -751,7 +764,7 @@ pub(crate) async fn arm_divergence(
                 );
             }
             let ts = state.river_now(&order_symbol).await.ns;
-            if let Err(reason) = run
+            if let Err(reason) = holder
                 .engine
                 .lock()
                 .await
@@ -799,7 +812,9 @@ pub(crate) async fn arm_divergence(
             for symbol in clearing {
                 state.rivers.clear_flow_surge(&symbol);
             }
-            run.engine.lock().await.clear_fee_surcharge();
+            for passenger in run.passengers() {
+                passenger.engine.lock().await.clear_fee_surcharge();
+            }
             // All six `CommandLatency` fields go with them. This clears what the
             // venue will do to commands it has NOT started acting on yet, and it
             // lifts an ack window off frames already queued (the pump reads that
@@ -846,7 +861,18 @@ pub(crate) async fn arm_divergence(
             // does not fire") was wrong - the arm had been evicted. The status
             // stays `202` because the requested arm WAS accepted; the body is
             // where the collateral damage is named.
-            if let Some(shed) = run.engine.lock().await.arm(engine_div) {
+            //
+            // Armed on EVERY ledger: the control plane names no account, so an
+            // engine divergence is a statement about the venue. The eviction
+            // report is whichever passenger shed one - every ledger holds the
+            // same arms and hits the cap together, so the first is
+            // representative rather than arbitrary.
+            let mut evicted = None;
+            for passenger in run.passengers() {
+                let shed = passenger.engine.lock().await.arm(engine_div.clone());
+                evicted = evicted.or(shed);
+            }
+            if let Some(shed) = evicted {
                 let body = format!(
                     "armed; the engine queue was at its {MAX_ARMED_DIVERGENCES}-entry cap, \
                      so the oldest armed divergence was discarded to make room: {shed:?}"
@@ -899,19 +925,48 @@ enum ClockAxis {
 /// exists before the first order is worked, rather than learning the account
 /// only when the first fill's `AccountState` arrives.
 ///
-/// STAMPED ON THE VENUE CLOCK, deliberately. The ledger is venue-scoped - one
-/// engine serving every river - so there is no boat axis to put it on: stamp
-/// from the boot boat and a push from a later-placed boat on another river is
-/// AHEAD of the pull; stamp from the newest boat and it is behind. No choice
-/// can keep a cross-clock monotonicity promise, so the answer keeps the venue
-/// stamp and says so, and a consumer orders pulls against pushes BY SEQUENCE.
-pub(crate) async fn account(State(state): State<AppState>) -> Json<AccountSnapshot> {
+/// WHOSE ACCOUNT is named by `?account=`, defaulting to the venue's default
+/// account - the same resolution the socket does, so a client that named no
+/// account on either surface sees one ledger. An id nobody has traded under is
+/// not an error: the passenger is created, and the answer is its opening
+/// balances, which is what a client asking before its first order expects.
+///
+/// STAMPED ON THE VENUE CLOCK, deliberately. A ledger spans every river its
+/// passenger has touched, so there is no boat axis to put it on: stamp from one
+/// boat and a push from a later-placed boat on another river is AHEAD of the
+/// pull; stamp from the newest and it is behind. No choice can keep a
+/// cross-clock monotonicity promise, so the answer keeps the venue stamp and
+/// says so, and a consumer orders pulls against pushes BY SEQUENCE.
+pub(crate) async fn account(
+    Query(query): Query<AccountQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    let passenger = match &query.account {
+        Some(named) => match mogwai_protocol::AccountId::parse(named) {
+            Ok(account_id) => state.run.passenger(&account_id),
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("account id is not usable: {error}"),
+                )
+                    .into_response();
+            }
+        },
+        None => state.run.default_passenger(),
+    };
     let ts = sim_now_ns(state.venue_sim());
-    let mut engine = state.run.engine.lock().await;
+    let mut engine = passenger.engine.lock().await;
     Json(AccountSnapshot {
         clock: ClockAxis::Venue,
         account: engine.account_snapshot(ts),
     })
+    .into_response()
+}
+
+#[derive(Default, Deserialize)]
+pub(crate) struct AccountQuery {
+    #[serde(default)]
+    account: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
