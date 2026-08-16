@@ -36,6 +36,10 @@ pub(crate) struct TapeSpawn {
     pub(crate) zero_speed_stall_ms: u64,
     pub(crate) fault_tx: mpsc::Sender<TickFault>,
     pub(crate) published_ns: Arc<std::sync::atomic::AtomicU64>,
+    /// Where this thread records the high and low of the span since the sweeper
+    /// last looked. See `crate::extremes`: it is what gives peak equity and a
+    /// trailing stop tick resolution without evaluating either here.
+    pub(crate) extremes: Arc<crate::extremes::PriceExtremes>,
 }
 impl Tape {
     pub(crate) fn start(
@@ -54,6 +58,10 @@ impl Tape {
         let handle = thread::spawn(move || {
             let wall_anchor = now_ns();
             let instant_anchor = Instant::now();
+            // This thread's own running extremes. Stack-local on purpose: the
+            // comparison is per tick and must not take a lock, so the shared
+            // slot is written only when an extreme actually moves.
+            let mut span = crate::extremes::SpanWriter::default();
             while !worker.cancel.load(Ordering::Relaxed) {
                 let Some(tick) = cursor.next_tick() else {
                     if let Some(fault) = cursor.fault() {
@@ -78,6 +86,14 @@ impl Tape {
                 }
                 let ts_event = tick.ts_event();
                 spawn.published_ns.store(ts_event, Ordering::Release);
+                // TRADES only, and that is the same rule the mark reads follow:
+                // a mark is a last-PRINT read, so an extreme drawn from quotes
+                // would be an extreme no fill or valuation could ever have been
+                // taken at. Recorded before publication, so a reader that takes
+                // the span after seeing a frame cannot miss that frame's price.
+                if let mogwai_data::TickEvent::Trade(trade) = &tick {
+                    spawn.extremes.record(&mut span, trade.price, ts_event);
+                }
                 let is_quote = matches!(tick, mogwai_data::TickEvent::Quote(_));
                 let event = match tick {
                     mogwai_data::TickEvent::Trade(trade) => {

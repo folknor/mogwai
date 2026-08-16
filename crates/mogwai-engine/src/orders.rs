@@ -529,24 +529,6 @@ impl Engine {
     /// As `apply_scans`, on the clock of the boat whose sweep produced these
     /// results. The sweeper walks one boat at a time and every `ts` here was
     /// sampled on that boat, so the fee surcharge is judged on it.
-    /// Advance every resting `TrailingStopMarket` whose trigger the tape has
-    /// left behind.
-    ///
-    /// A sell trail rises with the high and NEVER falls back; a buy trail falls
-    /// with the low and never rises. That one-way movement is the whole
-    /// mechanism - a trigger that retreated would be a stop somebody keeps
-    /// amending, not a trailing stop - so the candidate is only taken when it
-    /// improves on where the trigger already is.
-    ///
-    /// RATCHETED ON THE MARK, which is the same resolution the risk policy runs
-    /// at and carries the same bound: a spike between two sweep passes does not
-    /// move the trail, so the stop sits further from the extreme than a
-    /// tick-resolution venue would place it. Lenient in the holder's favour
-    /// rather than wrong, and closing it wants the same tick-level hook.
-    ///
-    /// The trigger is moved on BOTH the resting state and the submit, because
-    /// the order's reservation is derived from the submit and a trail that
-    /// moved only the scan predicate would hold the wrong amount.
     /// Cancel every resting order whose time-in-force has run out.
     ///
     /// TIME-DRIVEN and nothing to do with triggers, which is why it is its own
@@ -617,12 +599,39 @@ impl Engine {
         out
     }
 
+    /// Advance every resting `TrailingStopMarket` whose trigger the tape has
+    /// left behind, against the EXTREME its side follows.
+    ///
+    /// A sell trail rises with the high and NEVER falls back; a buy trail falls
+    /// with the low and never rises. That one-way movement is the whole
+    /// mechanism - a trigger that retreated would be a stop somebody keeps
+    /// amending, not a trailing stop - so the candidate is only taken when it
+    /// improves on where the trigger already is.
+    ///
+    /// The trigger is moved on BOTH the resting state and the submit, because
+    /// the order's reservation is derived from the submit and a trail that moved
+    /// only the scan predicate would hold the wrong amount.
+    ///
+    /// `extremes` carries, per symbol, the highest and lowest price the tape
+    /// reached since the last pass - not the closing mark. That is what gives
+    /// the trail tick resolution: a sell trail tracks the running high and a buy
+    /// trail the running low, both monotone, so the maximum over a span's ticks
+    /// IS the span's high and ratcheting once against it is bit-for-bit what
+    /// ratcheting per tick would have produced. A symbol with no span (a river
+    /// that printed nothing, or a symbol the tape did not cover) falls back to
+    /// its mark, which is the pre-extremes behaviour and the honest answer when
+    /// there is no finer evidence.
     pub(crate) fn ratchet_trailing_stops(
         &mut self,
         marks: &[(mogwai_protocol::Symbol, Decimal)],
+        extremes: &[(mogwai_protocol::Symbol, Decimal, Decimal)],
         ts: u64,
     ) {
         for (symbol, mark) in marks {
+            let span = extremes
+                .iter()
+                .find(|(candidate, _, _)| candidate == symbol)
+                .map(|(_, high, low)| (*high, *low));
             let positions: Vec<usize> = self
                 .open
                 .iter()
@@ -642,9 +651,18 @@ impl Engine {
                 let Resting::Conditional { stop_px, toward } = order.resting else {
                     continue;
                 };
+                // The price this side's trail follows: the span's HIGH for a
+                // sell, its LOW for a buy - the extreme the trail would have
+                // ratcheted to had it seen every tick. Without a span, the
+                // closing mark.
+                let followed = match (order.submit.side, span) {
+                    (Side::Sell, Some((high, _))) => high,
+                    (Side::Buy, Some((_, low))) => low,
+                    (_, None) => *mark,
+                };
                 let candidate = match order.submit.side {
-                    Side::Sell => mark.checked_sub(offset),
-                    Side::Buy => mark.checked_add(offset),
+                    Side::Sell => followed.checked_sub(offset),
+                    Side::Buy => followed.checked_add(offset),
                 };
                 let Some(candidate) = candidate else {
                     continue;

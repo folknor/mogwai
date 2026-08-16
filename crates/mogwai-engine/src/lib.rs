@@ -665,7 +665,36 @@ impl Engine {
     /// A LAST MARK, NOT A LIVE QUOTE. The value is only as fresh as the last
     /// `mark` this engine saw, which the fill sweeper drives once per pass, so
     /// this inherits exactly the staleness the margin ledger already runs on.
+    /// [`Engine::valuation_at`] is how a caller holding a fresher price - the
+    /// extremes the tape reached between two passes - asks the same question at
+    /// that price instead.
     pub fn valuation_in(&self, currency: &str) -> Option<Decimal> {
+        self.valuation_at(currency, &[])
+    }
+
+    /// What this account would be worth in `currency` if the named symbols were
+    /// priced at the given prices instead of at their last marks.
+    ///
+    /// This is what makes tick-resolution risk possible without a tick-resolution
+    /// evaluation. Equity is LINEAR in the price of a held instrument, so its
+    /// extreme over a span is attained at a price extreme; asking this question
+    /// at the span's high and its low answers what a per-tick walk would have
+    /// found, at two evaluations rather than thousands. The engine lock is taken
+    /// once, by the sweeper, exactly as before.
+    ///
+    /// An override for a symbol the account does not hold changes nothing, and a
+    /// symbol with no override keeps its last mark - so a span on one river
+    /// leaves every other symbol's contribution exactly where the last pass put
+    /// it.
+    pub fn valuation_at(&self, currency: &str, at: &[(Symbol, Decimal)]) -> Option<Decimal> {
+        let overridden = |symbol: &Symbol| -> Option<Decimal> {
+            at.iter()
+                .find(|(candidate, _)| candidate == symbol)
+                .map(|(_, px)| *px)
+        };
+        let priced = |symbol: &Symbol| -> Option<Decimal> {
+            overridden(symbol).or_else(|| self.last_marks.get(symbol).copied())
+        };
         let mut total = self
             .account
             .balances
@@ -679,7 +708,7 @@ impl Engine {
             let price = self.instruments.iter().find_map(|(symbol, def)| {
                 (def.class.base_currency() == Some(held_currency.as_str())
                     && def.class.settlement_currency() == currency)
-                    .then(|| self.last_marks.get(symbol).copied())
+                    .then(|| priced(symbol))
                     .flatten()
             })?;
             total = total.checked_add(amount.checked_mul(price)?)?;
@@ -697,11 +726,16 @@ impl Engine {
             // added back at their current worth or the account reads as having
             // spent the money and received nothing. A derivative's cash never
             // moved on open, so only the gain since entry is outstanding.
+            // A POSITION carries its own mark, which is not always the last mark
+            // of its symbol - a fresh position is marked at its fill price
+            // before any pass has marked it - so only an explicit override
+            // displaces it.
+            let mark_px = overridden(symbol).unwrap_or(position.mark_px);
             let contribution =
                 if matches!(def.class, mogwai_protocol::InstrumentClass::Equity { .. }) {
-                    def.notional(position.qty, position.mark_px)?
+                    def.notional(position.qty, mark_px)?
                 } else {
-                    def.unrealized(position.qty, position.avg_px, position.mark_px)?
+                    def.unrealized(position.qty, position.avg_px, mark_px)?
                 };
             total = total.checked_add(contribution)?;
         }
@@ -737,6 +771,25 @@ impl Engine {
     }
 
     pub fn mark(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
+        self.mark_over(marks, &[], ts)
+    }
+
+    /// As `mark`, told what the tape's HIGH and LOW were over the span this mark
+    /// closes.
+    ///
+    /// The mark itself is still the span's closing price - that is what a
+    /// position is worth now, and nothing about the extremes changes it. What
+    /// the extremes decide is the TRAILING STOP: a trail follows the running
+    /// extreme rather than the close, so a spike between two passes drags it
+    /// even though the price came back. Passing an empty slice is the
+    /// pre-extremes behaviour and is what every caller with no tape under it
+    /// does.
+    pub fn mark_over(
+        &mut self,
+        marks: &[(Symbol, Decimal)],
+        extremes: &[(Symbol, Decimal, Decimal)],
+        ts: u64,
+    ) -> MarkOutcome {
         let mut moved = false;
         // Recorded for EVERY class, before the futures-only position update
         // below. A spot pair posts no margin and holds no marked position, so
@@ -767,7 +820,7 @@ impl Engine {
         }
         // The trail follows the marks this pass saw, BEFORE the margin walk, so
         // a stop that just ratcheted is the one a breach liquidation sees.
-        self.ratchet_trailing_stops(marks, ts);
+        self.ratchet_trailing_stops(marks, extremes, ts);
         let mut events = Vec::new();
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if moved || originated_orders > 0 {

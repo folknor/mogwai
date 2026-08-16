@@ -102,11 +102,24 @@ queue position. The two predicates are separate functions and separate
 easily confused behaviours in the venue.
 
 A TRAILING STOP's trigger ratchets with the tape and never retreats: a sell trail
-rises with the high and stays put when price falls back. It is advanced on the
-MARK, which carries the same resolution bound as the risk policy - a spike
-between two sweep passes does not move it, so the stop sits further from the
-extreme than a tick-resolution venue would place it, which is lenient in the
-holder's favour rather than wrong.
+rises with the high and stays put when price falls back. It is advanced against
+the SPAN'S EXTREME rather than its closing mark, so a spike between two sweep
+passes drags it exactly as a tick-resolution venue would.
+
+TICK RESOLUTION WITHOUT PER-TICK EVALUATION, and this is one mechanism serving
+both the trail and the risk policy. The tape thread records the HIGH and the LOW
+its river reached since the sweeper last looked, with the instant of each; the
+sweeper takes that span once per pass. Two properties make it exact rather than
+approximate. A trail is a MONOTONE function of the tape, so the maximum over a
+span's ticks IS the span's high. Equity is LINEAR in the price of the one
+instrument an account can hold - an account is on at most one river, strategies
+are single-instrument - so its extreme over the span sits at a price extreme.
+The policy therefore observes the two extremes IN THE ORDER THE TAPE REACHED
+THEM and then the close: a spike that opened and closed between passes spends
+drawdown budget, and a collapse that recovered before the pass breaches. Order
+matters and is not a detail - replaying favourable-first would invent breaches
+that never happened. The tape thread's cost is two comparisons and one relaxed
+load per tick, and it publishes only when an extreme actually moves.
 
 TIME-IN-FORCE covers Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd
 - both can wait for a trigger - but never Ioc or Fok, which cannot wait for
@@ -174,12 +187,19 @@ Valuation is ONE HOP: an asset is priced only through an instrument quoting it
 directly in the policy currency, never through a chain. There is no rate
 surface.
 
-KNOWN FIDELITY GAP: the policy is evaluated on the fill sweeper's mark cadence,
-not per tape tick. At a real venue the ratchet is effectively tick-by-tick, so a
-spike lasting a fraction of a sweep interval still spends budget; here such a
-spike is invisible and the account keeps room it should have lost. The gap is
-one of resolution and never of direction - every peak that IS seen ratchets
-exactly as it should - so enforcement is lenient rather than wrong.
+The policy is evaluated at TICK RESOLUTION, through the span of extremes the
+tape thread records rather than through a per-tick evaluation. See the trailing
+stop above for the mechanism and why it is exact: a spike lasting a fraction of a
+sweep interval spends drawdown budget, and a collapse that recovers before the
+pass still breaches.
+
+WHAT THE SPAN DOES NOT COVER, stated because it is the one place the exactness
+argument stops: an account holding MORE THAN ONE marked symbol. Equity is then a
+sum of linear terms whose extremes need not coincide, and only the swept river's
+symbol carries a span - every other symbol contributes at its last mark, which is
+the mark-cadence behaviour. That costs nothing under the model the venue enforces
+(an account is on at most one river) and is a bound to state rather than a defect
+to hide.
 
 Symbol resolution is total over wire-legal labels. Configured profiles are
 held directly and other profiles are memoized without a cap. The permanent,

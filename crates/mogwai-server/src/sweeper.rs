@@ -228,6 +228,12 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let frontier = frontier_after(last_swept_ns, to_ns, reads.is_some());
                 boat.last_swept_ns
                     .store(frontier, std::sync::atomic::Ordering::Release);
+                // The high and low this river actually reached since the last
+                // pass, taken from the tape thread. Taken AFTER the mark read,
+                // so the span it closes is the one the mark closes too, and
+                // taken once per pass whatever the passenger count - it is a
+                // property of the water, like the walk.
+                let span = boat.extremes.take();
                 let Some((marks, settlement_marks)) = reads else {
                     // The reading task died, or one of this span's settlement
                     // instants had no readable price. Abandoning the whole pass is
@@ -247,6 +253,16 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // The settlement marks are cloned per passenger rather than
                 // moved: a settlement instant belongs to the CALENDAR, so every
                 // ledger holding that symbol crosses it.
+                let symbol_key = mogwai_protocol::Symbol::from(symbol.as_str());
+                let extremes: Vec<_> = span
+                    .map(|span| {
+                        vec![(
+                            mogwai_protocol::Symbol::clone(&symbol_key),
+                            span.high_px,
+                            span.low_px,
+                        )]
+                    })
+                    .unwrap_or_default();
                 for (index, passenger) in seated.iter().enumerate() {
                     let mut engine = passenger.engine.lock().await;
                     let (events, emitted, originated) = apply_engine_pass_on_clock(
@@ -254,6 +270,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         &results[index],
                         settlement_marks.clone(),
                         &marks,
+                        &extremes,
                         last_swept_ns,
                         to_ns,
                         session_closed.as_deref(),
@@ -269,6 +286,8 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         passenger,
                         &mut engine,
                         &mut events,
+                        &symbol_key,
+                        span,
                         to_ns,
                         emitted,
                         originated,
@@ -398,6 +417,9 @@ fn apply_engine_pass(
         results,
         settlement_marks,
         marks,
+        // No tape under these callers, so no span: the trail follows the mark,
+        // which is the pre-extremes behaviour.
+        &[],
         // No funding span and no session close: these callers are the unit
         // tests, which drive settlement and marking rather than the clock.
         to_ns,
@@ -420,6 +442,11 @@ fn apply_engine_pass_on_clock(
     results: &[ScanResult],
     settlement_marks: Vec<(mogwai_protocol::Symbol, u64, rust_decimal::Decimal)>,
     marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
+    extremes: &[(
+        mogwai_protocol::Symbol,
+        rust_decimal::Decimal,
+        rust_decimal::Decimal,
+    )],
     from_ns: u64,
     to_ns: u64,
     session_closed: Option<&str>,
@@ -432,7 +459,7 @@ fn apply_engine_pass_on_clock(
         originated += settled.originated_orders;
         events.extend(settled.events);
     }
-    let marked = engine.mark(marks, to_ns);
+    let marked = engine.mark_over(marks, extremes, to_ns);
     // Time-driven expiry, which has nothing to do with triggers: a Gtd limit
     // nothing ever approached must still stop resting at its instant, and a Day
     // order must stop resting when its session closes whether or not the tape
@@ -555,10 +582,28 @@ fn deliver(
 /// lock is what the breach action decides - until the next reset for a daily
 /// limit, forever for a trailing drawdown - and it is read by the order-entry
 /// gate rather than here.
+///
+/// EVALUATED AT TICK RESOLUTION, which is what `span` buys. Equity is linear in
+/// the price of the one instrument an account can be holding, so its extreme
+/// over the span is attained at a price extreme: replaying the span's two
+/// extremes IN THE ORDER THE TAPE REACHED THEM reproduces what a per-tick walk
+/// would have found, at two valuations rather than thousands. A spike that
+/// opened and closed between two passes now spends drawdown budget, and a
+/// collapse that recovered before the pass now breaches, both of which they did
+/// at the venue being modelled.
+///
+/// The CLOSING equity is observed last regardless, because that is the reading
+/// the published risk state has to agree with.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one account's judgement needs the ledger, the batch it rides on, the span the tape covered and the admission counts it may grow"
+)]
 fn enforce_policy(
     passenger: &crate::run::Passenger,
     engine: &mut mogwai_engine::Engine,
     events: &mut Vec<ServerMessage>,
+    symbol: &mogwai_protocol::Symbol,
+    span: Option<crate::extremes::PriceSpan>,
     to_ns: u64,
     emitted: usize,
     originated: usize,
@@ -585,7 +630,25 @@ fn enforce_policy(
         );
         return (emitted, originated, false);
     };
-    let verdict = ledger.observe(equity, to_ns);
+    // The span's extremes first, in time order, then the close. A breach found
+    // at an extreme is the FIRST verdict returned: the account was liquidated at
+    // that instant, so a later reading cannot un-breach it, and `observe`
+    // refuses to re-evaluate a breached ledger anyway.
+    let mut verdict = crate::risk::Verdict::Clear;
+    for (px, ts) in span.map(|span| span.in_time_order()).unwrap_or_default() {
+        let Some(equity) =
+            engine.valuation_at(&currency, &[(mogwai_protocol::Symbol::clone(symbol), px)])
+        else {
+            continue;
+        };
+        if let crate::risk::Verdict::Breached(breach) = ledger.observe(equity, ts) {
+            verdict = crate::risk::Verdict::Breached(breach);
+            break;
+        }
+    }
+    if verdict == crate::risk::Verdict::Clear {
+        verdict = ledger.observe(equity, to_ns);
+    }
     drop(ledger);
     let crate::risk::Verdict::Breached(breach) = verdict else {
         return (emitted, originated, false);
@@ -868,6 +931,181 @@ mod tests {
             }),
         );
         engine
+    }
+
+    /// The account for the tick-resolution tests: long one MNQ at 21,000 under
+    /// a trailing drawdown, on a venue whose engine already holds the position.
+    async fn policed_passenger(
+        run: &Arc<crate::run::Run>,
+        amount: u64,
+    ) -> Arc<crate::run::Passenger> {
+        let account = AccountId::parse("RISK-001").unwrap();
+        run.open_account(
+            &account,
+            HashMap::from([("USD".to_string(), Decimal::from(10_000))]),
+            mogwai_protocol::risk::AccountPolicy {
+                trailing_drawdown: Some(mogwai_protocol::risk::TrailingDrawdown {
+                    amount: Decimal::from(amount),
+                    basis: mogwai_protocol::risk::TrailingBasis::PeakEquity,
+                    lock_at_equity: None,
+                    on_breach: mogwai_protocol::risk::BreachAction::Terminate,
+                }),
+                daily_loss_limit: None,
+                reset_minute_utc: 0,
+                currency: Some("USD".to_owned()),
+            },
+        )
+        .expect("a fresh account opens");
+        let passenger = run.passenger(&account);
+        *passenger.engine.lock().await = engine_with_position();
+        passenger
+    }
+
+    /// THE GAP THIS CLOSES. A spike that opened and closed entirely between two
+    /// sweep passes used to be invisible: the pass saw only the closing mark, so
+    /// the account kept drawdown room it had actually spent. The span carries
+    /// the high, so the ratchet sees it.
+    ///
+    /// One MNQ long at 21,000 with a 2 multiplier: a 100-point spike is 200
+    /// dollars of equity, so a 500-dollar trail that ratcheted spends 200 of it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_spike_between_two_passes_spends_drawdown_budget() {
+        let run = crate::run::test_run();
+        let passenger = policed_passenger(&run, 500).await;
+        let mut engine = passenger.engine.lock().await;
+        let mut events = Vec::new();
+        let symbol = mogwai_protocol::Symbol::from("MNQ");
+        // The tape spiked to 21,100 and came back to 21,000, which is the only
+        // price a mark-cadence evaluation would ever have seen.
+        engine.mark(
+            &[(
+                mogwai_protocol::Symbol::clone(&symbol),
+                Decimal::from(21_000),
+            )],
+            10,
+        );
+        let span = crate::extremes::PriceSpan {
+            high_px: Decimal::from(21_100),
+            high_ns: 5,
+            low_px: Decimal::from(21_000),
+            low_ns: 9,
+        };
+        let (_, _, terminated) = enforce_policy(
+            &passenger,
+            &mut engine,
+            &mut events,
+            &symbol,
+            Some(span),
+            10,
+            0,
+            0,
+        );
+        assert!(!terminated, "the spike breaches nothing on its own");
+        let state = passenger
+            .risk
+            .lock()
+            .unwrap()
+            .state(engine.valuation_in("USD").expect("valuable"));
+        assert_eq!(
+            state.peak_equity,
+            Decimal::from(10_200),
+            "the peak ratcheted to the spike, not to the close"
+        );
+        assert_eq!(
+            state.trailing_remaining,
+            Some(Decimal::from(300)),
+            "flat on the pass and 200 of the 500 budget is gone",
+        );
+    }
+
+    /// The other half: a COLLAPSE that recovered before the pass. A
+    /// mark-cadence evaluation sees an account comfortably inside its floor; the
+    /// account was liquidated at the venue being modelled.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_collapse_that_recovered_before_the_pass_still_breaches() {
+        let run = crate::run::test_run();
+        let passenger = policed_passenger(&run, 500).await;
+        let mut engine = passenger.engine.lock().await;
+        let mut events = Vec::new();
+        let symbol = mogwai_protocol::Symbol::from("MNQ");
+        engine.mark(
+            &[(
+                mogwai_protocol::Symbol::clone(&symbol),
+                Decimal::from(21_000),
+            )],
+            10,
+        );
+        // Down 400 points - 800 dollars, well through a 500-dollar floor - and
+        // back before the pass looked.
+        let span = crate::extremes::PriceSpan {
+            high_px: Decimal::from(21_000),
+            high_ns: 9,
+            low_px: Decimal::from(20_600),
+            low_ns: 5,
+        };
+        let (_, _, terminated) = enforce_policy(
+            &passenger,
+            &mut engine,
+            &mut events,
+            &symbol,
+            Some(span),
+            10,
+            0,
+            0,
+        );
+        assert!(
+            terminated,
+            "the account crossed its floor inside the span and is dead",
+        );
+        assert!(
+            passenger.risk.lock().unwrap().is_locked(),
+            "a terminating breach locks the account"
+        );
+    }
+
+    /// A trailing stop follows the SPAN'S HIGH rather than its closing mark,
+    /// which is the same tick-resolution fix on the order side.
+    #[test]
+    fn a_trailing_stop_ratchets_to_the_span_high_not_the_close() {
+        let mut engine = engine_with_position();
+        let trail = SubmitOrder {
+            client_order_id: "TRAIL".into(),
+            symbol: "MNQ".into(),
+            position_id: None,
+            side: Side::Sell,
+            order_type: OrderType::TrailingStopMarket,
+            quantity: Decimal::ONE,
+            price: None,
+            trigger_price: Some(Decimal::from(20_900)),
+            trail_offset: Some(Decimal::from(100)),
+            reduce_only: true,
+            post_only: false,
+            time_in_force: TimeInForce::Gtc,
+            expire_time: None,
+            link: None,
+        };
+        engine.process(ClientMessage::SubmitOrder(trail), 2);
+        let symbol = mogwai_protocol::Symbol::from("MNQ");
+        // Spiked to 21,100 and closed back at 21,000.
+        engine.mark_over(
+            &[(
+                mogwai_protocol::Symbol::clone(&symbol),
+                Decimal::from(21_000),
+            )],
+            &[(symbol, Decimal::from(21_100), Decimal::from(21_000))],
+            10,
+        );
+        let trigger = engine
+            .open_orders()
+            .iter()
+            .find(|order| order.submit.client_order_id == "TRAIL")
+            .and_then(|order| order.submit.trigger_price)
+            .expect("the trail still rests");
+        assert_eq!(
+            trigger,
+            Decimal::from(21_000),
+            "the trail followed the spike's high less its offset, not the close",
+        );
     }
 
     #[test]

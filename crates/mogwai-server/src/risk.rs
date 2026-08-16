@@ -9,16 +9,26 @@
 //! no dashboard, so numbers that are not on the wire cannot be judged after the
 //! run.
 //!
-//! EVALUATED ON THE MARK, WHICH IS A KNOWN FIDELITY GAP. The design ruling is
-//! that peak equity tracks EVERY TICK, because at a real venue the ratchet is
-//! effectively tick-by-tick and a spike lasting 200 ms still spends budget.
-//! This evaluates on the fill sweeper's mark cadence instead, so a spike
-//! entirely between two marks is invisible and the account keeps room it should
-//! have lost. The gap is one of resolution and never of direction: every peak
-//! this DOES see ratchets exactly as it should, so the enforcement is lenient
-//! rather than wrong. Closing it means evaluating in the tape thread, which
-//! cannot take the engine lock, so it wants the equity inputs published out of
-//! the engine rather than read from it.
+//! EVALUATED AT TICK RESOLUTION, which is the design ruling: peak equity tracks
+//! every tick, because at a real venue the ratchet is effectively tick-by-tick
+//! and a spike lasting 200 ms still spends budget. This ran on the fill
+//! sweeper's mark cadence until 2026-08-16, so a spike entirely between two
+//! marks was invisible and the account kept room it should have lost.
+//!
+//! It is NOT closed by evaluating per tick. Equity is LINEAR in the price of the
+//! one instrument an account can be holding - an account is on at most one
+//! river, and strategies are single-instrument - so its extreme over a span is
+//! attained at a PRICE extreme. The tape thread records the high and the low it
+//! reached (`crate::extremes`), and the sweeper replays those two readings in
+//! the order the tape reached them before observing the close. Two valuations
+//! per pass answer what thousands would have, the engine lock is still taken
+//! once, and the tape thread's whole contribution is two comparisons per tick.
+//!
+//! THE TIME ORDER IS WHAT KEEPS IT HONEST. A span that spiked and then fell is a
+//! different run from one that fell and then spiked: in the first the ratchet
+//! raises the floor before the fall tests it. Replaying favourable-first would
+//! invent breaches that never happened, which is the opposite error to the
+//! leniency being removed.
 
 use mogwai_protocol::risk::{
     AccountPolicy, Breach, BreachAction, BreachedRule, RiskState, TrailingBasis,

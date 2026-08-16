@@ -48,6 +48,10 @@ pub(crate) struct Boat {
     /// a run-level memo held one entry, so two symbols evicted each other into
     /// a guaranteed miss and then serialized on the walk behind one mutex.
     pub(crate) market_readings: crate::fills::MarketReadingCache,
+    /// The high and low this river reached since the sweeper last looked,
+    /// written by the tape thread. What gives peak equity and a trailing stop
+    /// tick resolution without a per-tick evaluation; see `crate::extremes`.
+    pub(crate) extremes: Arc<crate::extremes::PriceExtremes>,
     worker: Mutex<Option<JoinHandle<()>>>,
     cancel: Arc<AtomicBool>,
 }
@@ -180,6 +184,7 @@ impl Boatyard {
                 wall_anchor_ns: now_ns(),
                 speed: if speed == 0.0 { 1.0 } else { speed },
             };
+            let extremes = Arc::new(crate::extremes::PriceExtremes::default());
             let (tape, worker) = Tape::start(
                 cursor,
                 TapeSpawn {
@@ -189,6 +194,7 @@ impl Boatyard {
                     zero_speed_stall_ms: self.zero_speed_stall_ms,
                     fault_tx: self.fault_tx.clone(),
                     published_ns: Arc::clone(&published_ns),
+                    extremes: Arc::clone(&extremes),
                 },
             );
             let cancel = tape.cancel_flag();
@@ -200,6 +206,7 @@ impl Boatyard {
                 published_ns,
                 last_swept_ns: AtomicU64::new(self.origin_ns),
                 market_readings: crate::fills::MarketReadingCache::for_symbol(req.river.symbol()),
+                extremes,
                 worker: Mutex::new(Some(worker)),
                 cancel,
             })
