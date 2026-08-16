@@ -10,8 +10,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    accelerated_config, band_config, fast_config, http_get, mnq_preset_config, paced_config, spawn,
-    tiny_fanout_config, two_symbols_config,
+    accelerated_config, band_config, fast_config, http_get, http_post_json, mnq_preset_config,
+    paced_config, spawn, tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{LiquiditySide, ServerMessage, TradeTick};
@@ -742,6 +742,75 @@ async fn two_accounts_on_one_venue_do_not_share_a_ledger() {
             return;
         }
     }
+}
+
+/// A client names its own opening balance, and that is the ledger it trades.
+///
+/// The venue's `[balances]` is what an UNNAMED account gets; it stops being the
+/// balance of the one ledger. Two experiments sized differently are the case
+/// this exists for, and they have to be runnable on one venue.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn an_account_opens_on_the_balance_its_client_named() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-100","balances":{"USDT":"250000"}}"#,
+    );
+    assert_eq!(status, 201, "the account opens: {body}");
+
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-100");
+    assert_eq!(status, 200, "the named account answers: {body}");
+    let named: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(named["account_id"], "WYRD-100");
+    assert!(
+        body.contains("250000"),
+        "the client's opening balance is the ledger's: {body}"
+    );
+
+    // The default account is untouched by it, which is what makes the two
+    // separable rather than one ledger wearing a different label.
+    let (status, body) = http_get(&venue.http_base(), "/account");
+    assert_eq!(status, 200, "the default account still answers: {body}");
+    let default: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_ne!(
+        default["account_id"], "WYRD-100",
+        "the default account is a different ledger: {body}"
+    );
+    assert_ne!(
+        default["balances"], named["balances"],
+        "a client-named balance leaked into the default account: {body}"
+    );
+}
+
+/// Re-opening a live account is refused rather than resetting it. An account
+/// outlives its connections, so the request is ambiguous between a fresh
+/// experiment and a reconnecting client re-sending its config - and the second
+/// reading would silently wipe a position book.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn an_account_that_is_already_open_is_not_reset() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-101","balances":{"USDT":"1000"}}"#,
+    );
+    assert_eq!(status, 201, "the account opens: {body}");
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-101","balances":{"USDT":"9999"}}"#,
+    );
+    assert_eq!(status, 409, "re-opening is refused: {body}");
+
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-101");
+    assert_eq!(status, 200, "the account answers: {body}");
+    assert!(
+        body.contains("1000") && !body.contains("9999"),
+        "the refused re-open must not have moved the balance: {body}"
+    );
 }
 
 /// The 2026-08-02 defect, stated positively. A divergence armed over the

@@ -243,3 +243,32 @@ pub fn http_get(base: &str, path: &str) -> (u16, String) {
         .unwrap_or_default();
     (status, body)
 }
+
+/// One blocking HTTP POST of a JSON body, returning the status code and body.
+/// Same reasoning as `http_get`, plus a `Content-Type` and a length.
+pub fn http_post_json(base: &str, path: &str, body: &str) -> (u16, String) {
+    let authority = base.trim_start_matches("http://");
+    let mut stream = TcpStream::connect(authority).expect("connect to the venue");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("read timeout");
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\n\
+         Content-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        len = body.len()
+    );
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read response");
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .expect("a status line");
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    (status, body)
+}

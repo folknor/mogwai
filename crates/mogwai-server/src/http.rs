@@ -969,6 +969,61 @@ pub(crate) struct AccountQuery {
     account: Option<String>,
 }
 
+/// Open an account on terms the CLIENT states, before it trades.
+///
+/// Structured account config goes over HTTP for the same reason a divergence
+/// does: it is a nested document validated at its own boundary, and the socket
+/// query string carries scalars. A socket then names the account it opened with
+/// `?account=`, and only that id crosses the upgrade.
+///
+/// OPTIONAL, and that is the design rather than a convenience. Account
+/// resolution is TOTAL: a connection that never calls this is served under the
+/// default account, so the ephemeral single-client venue needs no call at all.
+/// What this buys is the case the default cannot express - a batch of subagents
+/// on one exchange, each sized differently.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OpenAccountRequest {
+    account_id: String,
+    /// Opening balances by currency. The venue's `[balances]` is what an
+    /// unnamed account gets; this is the same value stated per account, which
+    /// is what makes a 25k experiment and a 100k experiment runnable on one
+    /// venue.
+    balances: std::collections::HashMap<String, rust_decimal::Decimal>,
+}
+
+pub(crate) async fn open_account(
+    State(state): State<AppState>,
+    Json(request): Json<OpenAccountRequest>,
+) -> impl IntoResponse {
+    let account_id = match mogwai_protocol::AccountId::parse(&request.account_id) {
+        Ok(account_id) => account_id,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("account id is not usable: {error}"),
+            );
+        }
+    };
+    if request.balances.is_empty() {
+        // An account funded in nothing can hold no position and would meet a
+        // funds rejection on its first order, which reads as depletion. Naming
+        // it here keeps a configuration mistake distinguishable from a trading
+        // outcome, which is the whole reason the two refusals are kept apart.
+        return (
+            StatusCode::BAD_REQUEST,
+            "an account must open with at least one funded currency".to_owned(),
+        );
+    }
+    match state.run.open_account(&account_id, request.balances) {
+        Ok(()) => {
+            tracing::info!(account = %account_id.as_str(), "opened an account");
+            (StatusCode::CREATED, String::new())
+        }
+        Err(refusal) => (StatusCode::CONFLICT, refusal.to_string()),
+    }
+}
+
 #[derive(Default, Deserialize)]
 pub(crate) struct ClockQuery {
     #[serde(default)]

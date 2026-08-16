@@ -877,12 +877,23 @@ required eventually, since both modes must be supported.
   against the same prices, which is what keeps the water common and the money
   private. Settlement marks are cloned per passenger, since a settlement instant
   belongs to the calendar.
-  STILL OPEN FROM THE ACCOUNT-POLICY DESIGN, none of it blocking: the ledger is
-  opened from the venue's `[balances]` rather than from a client-named opening
-  balance; there is no risk policy, so nothing is enforced and nothing is
-  published; a second socket presenting a seated id does NOT evict the first;
-  and nothing freezes or resumes an account on disconnect. See the
-  account-policy item above.
+  THE CLIENT-NAMED OPENING BALANCE LANDED TOO, 2026-08-16: `POST /accounts`
+  takes an id and its balances over the JSON control plane, following the
+  `/control/divergence` precedent, and only the id crosses the socket upgrade.
+  OPTIONAL by design, since account resolution is total - a connection that
+  never calls it is served under the default account on the venue's
+  `[balances]`, which stops being the balance of one ledger and becomes the
+  OPENING balance of every unnamed one. Re-opening a live account is a `409`
+  rather than a reset: an account outlives its connections, so the request
+  cannot be told apart from a reconnecting client re-sending its config, and
+  the reset reading would silently wipe a position book.
+  STILL OPEN FROM THE ACCOUNT-POLICY DESIGN, none of it blocking: there is no
+  RISK POLICY, so nothing is enforced and nothing is published - no daily loss
+  limit, no trailing drawdown, no peak equity, no breach action; policy PRESETS
+  and their runtime registration do not exist, so step two of account
+  resolution is absent and only steps one and three work; a second socket
+  presenting a seated id does NOT evict the first; and nothing freezes or
+  resumes an account on disconnect. See the account-policy item above.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an

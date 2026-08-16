@@ -308,6 +308,7 @@ async fn serve_async(
         .route("/quotes", get(quotes))
         .route("/clock", get(clock))
         .route("/ws", get(ws_upgrade))
+        .route("/accounts", post(http::open_account))
         .route("/control/divergence", post(arm_divergence))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(BIND_ADDR).await?;

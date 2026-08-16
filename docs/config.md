@@ -112,17 +112,21 @@ up to that river's checkpoint ceiling. A malformed
 or unfunded `[symbols.*]` table refuses startup even when nothing ever asks for
 that label, so a typo cannot wait to surface as a runtime rejection.
 
-`[regime]` selects the single run-wide market regime. `[balances]` funds the one ledger.
+`[regime]` selects the single run-wide market regime. `[balances]` is the
+OPENING balance every account is funded with when its client names none - not
+the balance of one shared ledger. A client that wants its own size opens an
+account with `POST /accounts`, naming an id and its balances; a connection that
+never does is served under the default account on these values.
 `oms_type` is `netting` (the default) or `hedging`; the venue serves both and
 refuses a client over neither, and `/health` reports the run's choice.
 
-`account_id` names the account the run's single ledger is reported under,
-defaulting to `MOGWAI-001`. It NAMES rather than selects: one venue is one run
-is one ledger, so there is nothing to look up and no `?account=` to honour - a
-query naming another account is ignored, not served. Set it because the
-CONSUMER asserts it. A nautilus host holds an account of its own naming and
-compares it against what the venue reports, so a venue insisting on its own
-label is a venue that host cannot use.
+`account_id` names the DEFAULT account - the one a connection naming none is
+served under - and defaults to `MOGWAI-001`. Every socket may name its own with
+`/ws?account=`, and `GET /account?account=` reports whichever ledger it names,
+so this selects a default rather than declaring the venue's one account. Set it
+because the CONSUMER asserts it: a nautilus host holds an account of its own
+naming and compares it against what the venue reports, so a venue insisting on
+its own label is a venue that host cannot use.
 
 The value must have the `ISSUER-NUMBER` shape, and boot is refused otherwise.
 That is a nautilus rule rather than a wire rule - mogwai's own account type

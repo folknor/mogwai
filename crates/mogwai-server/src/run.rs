@@ -323,6 +323,51 @@ impl Run {
         self.passenger(&self.default_account_id)
     }
 
+    /// Open an account with a CLIENT-NAMED opening balance, before anything
+    /// trades on it.
+    ///
+    /// This is step one of the three-step account resolution, the one where the
+    /// client states its own terms. Steps two and three - a named policy preset,
+    /// and the default account preset - are what a connection gets when it never
+    /// calls this, which is why calling it is OPTIONAL and its absence is not an
+    /// error anywhere.
+    ///
+    /// REFUSED IF THE ACCOUNT IS ALREADY OPEN, rather than resetting it. An
+    /// account outlives the connection that named it, so re-opening one is
+    /// ambiguous between "I am starting a fresh experiment" and "I reconnected
+    /// and re-sent my config", and the second reading would silently wipe a
+    /// live position book. A client that wants a clean ledger names a different
+    /// id, which costs it nothing.
+    pub(crate) fn open_account(
+        &self,
+        account_id: &mogwai_protocol::AccountId,
+        balances: std::collections::HashMap<String, Decimal>,
+    ) -> Result<(), AccountRefusal> {
+        let mut passengers = self
+            .passengers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if passengers.contains_key(account_id.as_str()) {
+            return Err(AccountRefusal::AlreadyOpen);
+        }
+        let mut engine = Engine::build(EngineConfig {
+            account_id: account_id.clone(),
+            instruments: Vec::new(),
+            balances,
+            fill_seed: self.template.fill_seed,
+        });
+        engine.set_oms_type(self.template.oms_type);
+        engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
+        passengers.insert(
+            account_id.as_str().to_owned(),
+            Arc::new(Passenger {
+                account_id: account_id.clone(),
+                engine: AsyncMutex::new(engine),
+            }),
+        );
+        Ok(())
+    }
+
     /// The passenger whose book holds `client_order_id` as a RESTING order, and
     /// the symbol it rests on.
     ///
@@ -561,6 +606,25 @@ impl Run {
             CommandClass::Submit => self.submit_ack_ms.load(Ordering::Relaxed),
             CommandClass::Modify => self.modify_ack_ms.load(Ordering::Relaxed),
             CommandClass::Cancel => self.cancel_ack_ms.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Why an account could not be opened on the terms asked for.
+#[derive(Debug)]
+pub(crate) enum AccountRefusal {
+    /// Something already trades under this id. Never a reset: see
+    /// `Run::open_account`.
+    AlreadyOpen,
+}
+
+impl std::fmt::Display for AccountRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyOpen => f.write_str(
+                "this account is already open; an account outlives its connections, so it is \
+                 never re-opened with new terms - name a different account id for a fresh ledger",
+            ),
         }
     }
 }

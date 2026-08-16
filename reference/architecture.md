@@ -1,9 +1,25 @@
 # mogwai architecture
 
-Mogwai is a one-run fake venue. A direct launcher starts one foreground process
-and receives a versioned readiness record as one JSON line on the child's stdout.
+Mogwai is a fake venue. A direct launcher starts one foreground process and
+receives a versioned readiness record as one JSON line on the child's stdout.
 The process binds one endpoint and owns an open set of resolved instruments,
-generated river tapes, and one engine ledger.
+generated river tapes, and one ledger PER ACCOUNT.
+
+A RIVER is a tape and is shared; a PASSENGER is one connected trader - its own
+account, its own ledger, its own orders - and is never shared. The engine is
+per passenger for that reason: one engine per process meant every client's
+fills moved every other client's net, which is right for a venue owned by one
+run and wrong for an exchange serving a batch. A `Passenger` is created on
+demand, keyed by account id, and the id is the CLIENT'S: it outlives the
+connection, so a socket presenting it again resumes that ledger rather than
+opening a fresh one. The venue cannot distinguish a reconnect from a stranger
+claiming the id and does not try, so an account id is effectively a bearer
+token.
+
+A connection that names no account is served under the venue's DEFAULT account.
+That exists for the ephemeral single-client venue, where making the one client
+name an id would be ceremony; it is not a venue-wide account every connection
+shares.
 
 Symbol resolution is total over wire-legal labels. Configured profiles are
 held directly and other profiles are memoized without a cap. The permanent,
@@ -22,8 +38,17 @@ registers a def and installs its margin policy and fee schedule the first time
 a socket binds that symbol or an order names it, guarded on the registration
 having been new so re-binding never resets a live configuration.
 
-The server exposes `/health`, `/account`, `/instruments`, `/clock`, `/trades`,
-`/quotes`, `/control/divergence`, and `/ws`. Order entry is WebSocket-only: the
+The server exposes `/health`, `/account`, `/accounts`, `/instruments`, `/clock`,
+`/trades`, `/quotes`, `/control/divergence`, and `/ws`. `POST /accounts` opens
+an account on terms the client states - an id and its opening balances - and is
+OPTIONAL: account resolution is total, so a connection that never calls it is
+served under the default account. Structured account config goes over HTTP for
+the same reason a divergence does, and only the id crosses the socket upgrade.
+Re-opening an account that already exists is a `409` rather than a reset,
+because an account outlives its connections and the request cannot be told
+apart from a reconnecting client re-sending its config.
+`GET /account` names whose ledger with `?account=`, defaulting the same way.
+Order entry is WebSocket-only: the
 `POST /orders` carrier went with the HTTP transport profiles. Each socket feeds
 one bounded sequential dispatcher, so admitted commands reach the market read
 and engine in socket arrival order even when their modeled act latencies differ.
@@ -35,7 +60,8 @@ default no longer sets the venue's memory bound; an oversized frame ends the
 connection. A WebSocket carries its whole binding in the upgrade query string,
 which `deny_unknown_fields` rejects any other key on: the optional, case-exact
 `symbol` names its one river, the optional `speed` names the pacing multiple,
-and the optional `duration_ms` names a passenger-local simulated deadline.
+the optional `duration_ms` names a passenger-local simulated deadline, and the
+optional `account` names the ledger it trades.
 Absent, they default to the run's boot symbol and the configured `speed`, and
 to an indefinite passenger. The key is known before any tasks or bytes exist,
 a refusal - an illegal label, a shape that does not validate, a funding-barred
