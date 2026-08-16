@@ -77,6 +77,26 @@ pub struct Config {
     /// experiments wants.
     #[serde(default)]
     pub(crate) reset_account_on_reconnect: bool,
+    /// How long an UNATTENDED account survives before the venue collects it, in
+    /// WALL milliseconds. `0` (the default) means never.
+    ///
+    /// An account whose last connection went away freezes and is resumable, so
+    /// a killed worker can come back to its own book. That also makes it state
+    /// with no lifecycle: nothing else would ever remove it, and a long-lived
+    /// shared exchange serving a batch of subagents would accumulate one ledger
+    /// per id anybody ever presented, for the life of the process.
+    ///
+    /// WALL rather than simulated, because a frozen account has no simulated
+    /// clock: the boat that carried one wound down with the last socket. The
+    /// span an operator means here is "how long do I let a worker be down", which
+    /// is a wall question anyway.
+    ///
+    /// Set it LONGER than the slowest restart any consumer performs. A collected
+    /// account is gone: the next socket presenting that id opens a clean ledger,
+    /// which is the correct behaviour and a surprising one to discover mid-run,
+    /// so the readiness record carries the setting.
+    #[serde(default)]
+    pub(crate) account_ttl_ms: u64,
     pub(crate) oms_type: mogwai_protocol::OmsType,
     /// How many trailing-volatility horizons wide the fill band is. An order's
     /// trigger is drawn uniformly from `0 ..= band_ticks` ticks AWAY from its
@@ -238,6 +258,10 @@ impl Default for Config {
             run_duration_ns: 0,
             account_id: DEFAULT_ACCOUNT_ID.to_owned(),
             reset_account_on_reconnect: false,
+            // Never collected by default, which is the conservative direction:
+            // an operator who has not thought about restart windows must not
+            // lose a book to a timer they did not set.
+            account_ttl_ms: 0,
             oms_type: mogwai_protocol::OmsType::Netting,
             fill_band_vol_mult: 0.005,
             fill_band_max_ticks: 200,

@@ -442,6 +442,7 @@ mod tests {
             run_duration_ns: Some(1_000_000_000),
             warmup_ns: 0,
             reset_account_on_reconnect: false,
+            account_ttl_ms: 0,
             version_string: "test".into(),
         }
     }

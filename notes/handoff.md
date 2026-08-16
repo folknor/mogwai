@@ -41,45 +41,46 @@ keeps a cancel's byte reservation computable.
 `submit_order_list`, which silently no-opped through the nautilus trait default
 before, and `wire_order_type` now refuses only `TrailingStopLimit`.
 
-## 2. Per-tick risk evaluation and trail ratcheting
+## 2. Per-tick risk evaluation and trail ratcheting - LANDED 2026-08-16
 
-RECORDED AS A RULING AND THEN NOT HONOURED, which is the most important debt in
-the session. `notes/todo.md` has this as its own item; the ruling is that peak
-equity tracks every tick, and both the risk policy and the trailing stop
-currently move on the fill sweeper's MARK cadence instead.
+Closed WITHOUT a per-tick evaluation, because neither quantity needs one. A
+trail is monotone in the tape, so the maximum over a span's ticks IS the span's
+high; equity is linear in the price of the one instrument an account can hold,
+so its extreme over a span sits at a price extreme. The tape thread records only
+the high and the low it reached, with the instant of each (`extremes.rs`), and
+the sweeper replays those two readings IN THE ORDER THE TAPE REACHED THEM before
+observing the close. Replaying favourable-first would have invented breaches
+that never happened, which is why the instants are carried.
 
-The gap is resolution, never direction - every peak that IS seen ratchets
-correctly - so enforcement is uniformly lenient rather than wrong. But a spike
-lasting less than a sweep interval spends no budget and moves no trail, and at
-a real venue it would do both.
+Cost on the hot path is one relaxed load and two `Decimal` comparisons per tick;
+the shared slot is written only when an extreme moves.
 
-Closing it means evaluating in the tape thread, which cannot take the engine
-lock. So it wants the equity INPUTS published out of the engine (position
-quantity, average price, balance) into something lock-free the tape thread can
-read, with the policy evaluated against the tick price there. Measure what it
-costs before taking it: this is the hottest path in the venue.
+## 3. The boatless-river sweep gap - LANDED 2026-08-16
 
-## 3. The boatless-river sweep gap
+Closed as "refuse to leave orders resting on a river nobody is reading", in two
+halves that meet:
 
-OPEN SINCE PIECE 9 and still open. The fill sweeper iterates seated cursors, so
-a resting order on a river whose cursor wound down is never swept until someone
-connects to that river again. It cannot be swept without one - there is no clock
-to sample a `to_ns` from.
+- An ATTACHED account's order on a symbol no cursor is walking is CANCELLED at
+  the sweep pass. It could never fill or expire, and the client is there to be
+  told.
+- A FROZEN account is skipped wholesale and its book kept, because a socket is
+  expected back for it - which is what the owed restart scenarios need.
 
-Two honest fixes, both stated in `todo.md`: keep the venue clock as the sweep
-instant for unseated rivers, or refuse to leave orders resting on a river nobody
-is reading. Pick one and land it; the current behaviour is neither.
+## 4. Freeze and TTL for unattended accounts - LANDED 2026-08-16
 
-## 4. Freeze and TTL for unattended accounts
+The freeze is now by construction rather than by accident: `Passenger` carries
+its attachment, the sweeper skips a frozen account entirely, and the behaviour
+is tested and stated in `reference/architecture.md` and `docs/config.md`.
 
-The ruling is that in the durable mode an account whose connection drops is NOT
-marked, NOT liquidated, and resumable by a returning client. That behaviour is
-what the code does today by accident rather than by construction - nothing
-explicitly freezes anything - and it is untested and unstated anywhere a
-consumer reads.
+Resuming does two things a returning socket needs. Every surviving order is
+RE-BASED onto the returning boat's clock - a cursor is placed at its river's
+origin, so a frozen order's frontier sits in the new boat's future and would
+have wedged it for as long as the previous session ran. And whatever the account
+held off the newly joined river is retired, per the standing ruling.
 
-Also missing: the TTL that collects an account nobody reclaims. Without it the
-passenger registry grows for the life of the process.
+`account_ttl_ms` collects an account nobody reclaims, in WALL time because a
+frozen account has no simulated clock. Zero (never) is the default, and the
+setting rides the readiness record - `ReadyRecord::VERSION` is 8.
 
 ## 5. Equity is a class with no equity conventions
 

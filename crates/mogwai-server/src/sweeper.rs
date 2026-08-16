@@ -107,11 +107,58 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             // river, not of any ledger, so N passengers resting orders on one
             // symbol still walk it ONCE. Results are grouped back per passenger
             // afterwards.
-            let seated = sweep.run.passengers();
+            // ATTACHED accounts only. An account nobody is reading is FROZEN:
+            // its orders do not rest, its positions do not mark, its funding
+            // does not accrue and its policy cannot liquidate somebody who is
+            // not there. That is a deliberate departure from a real venue, where
+            // being away is no defence, and it is the right one here - mogwai
+            // exists to exercise a client's live path, not to run an account
+            // nobody is trading. The consequence to state in any claim is that a
+            // run spanning a disconnect has a gap in its risk history.
+            //
+            // It also closes the boatless-river gap from the other side. Every
+            // resting order belongs to the river its account is BOUND to, which
+            // has a boat for as long as the account is attached, so a frozen
+            // account is the only way an order can end up on a river nobody
+            // reads - and a frozen account is skipped here rather than swept
+            // against a clock that no longer exists.
+            let seated: Vec<_> = sweep
+                .run
+                .passengers()
+                .into_iter()
+                .filter(|passenger| !passenger.is_frozen())
+                .collect();
+            // What a cursor is actually reading right now. An ATTACHED account's
+            // order outside this set rests on a river with no clock: nothing can
+            // sweep it, nothing can expire it, and it cannot be told apart from
+            // an order the tape has not reached. The venue refuses to leave it
+            // there rather than letting it sit forever - the client is attached,
+            // so it can be told. A FROZEN account is not here at all, and its
+            // book survives for the socket that returns to it.
+            let readable: Vec<mogwai_protocol::Symbol> = next_due
+                .values()
+                .map(|(boat, _)| mogwai_protocol::Symbol::from(boat.symbol()))
+                .collect();
             let mut scans: Vec<(usize, PendingScan)> = Vec::new();
             let mut mark_symbols = Vec::new();
+            let venue_now = sim_now_ns(sweep.run.sim);
             for (index, passenger) in seated.iter().enumerate() {
-                let engine = passenger.engine.lock().await;
+                let mut engine = passenger.engine.lock().await;
+                // Stamped on the VENUE clock, which is the only one that
+                // answers here: the order being cancelled is on a river with no
+                // boat, so there is no river clock to date it by.
+                let cancelled = engine.cancel_unreadable_orders(&readable, venue_now);
+                if !cancelled.is_empty() {
+                    let shape = engine.book_shape();
+                    deliver(
+                        &sweep.run,
+                        &shape,
+                        &cancelled,
+                        cancelled.len(),
+                        0,
+                        venue_now,
+                    );
+                }
                 scans.extend(engine.pending_scans().into_iter().map(|scan| (index, scan)));
                 // Valuation symbols, not just the margin ones: a policed
                 // account holding a spot asset needs that pair priced to state

@@ -50,6 +50,19 @@ pub struct ReadyRecord {
     /// already parses this line, so a consumer can assert on the setting instead
     /// of a human having to notice a message at boot.
     pub reset_account_on_reconnect: bool,
+    /// How long an UNATTENDED account survives before the venue collects it, in
+    /// wall milliseconds. `0` means never.
+    ///
+    /// An account whose last connection went away is FROZEN, not liquidated: it
+    /// is not swept, not marked and not judged, and a socket returning with the
+    /// same id resumes it. That is what lets a killed worker come back to its
+    /// own book - and it is also state with no lifecycle, so a span bounds it.
+    ///
+    /// On the record for the same reason as the setting above: a consumer whose
+    /// restart takes longer than this gets a clean ledger rather than its
+    /// positions back, and that is a fact it must be able to assert on rather
+    /// than discover.
+    pub account_ttl_ms: u64,
     pub version_string: String,
 }
 
@@ -58,7 +71,7 @@ impl ReadyRecord {
     /// by any landing that adds or changes a field. Stated once, here, so the
     /// venue that writes the record and the test that pins its bytes cannot
     /// disagree about which schema they mean.
-    pub const VERSION: u32 = 7;
+    pub const VERSION: u32 = 8;
 }
 
 #[cfg(test)]
@@ -77,12 +90,13 @@ mod tests {
             run_duration_ns: None,
             warmup_ns: 1,
             reset_account_on_reconnect: false,
+            account_ttl_ms: 0,
             version_string: "test".into(),
         };
         let json = serde_json::to_string(&value).unwrap();
         assert_eq!(
             json,
-            r#"{"version":7,"addr":"127.0.0.1:41235","pid":42,"run_seed":7,"data_origin_ns":1,"run_start_ns":2,"run_duration_ns":null,"warmup_ns":1,"reset_account_on_reconnect":false,"version_string":"test"}"#
+            r#"{"version":8,"addr":"127.0.0.1:41235","pid":42,"run_seed":7,"data_origin_ns":1,"run_start_ns":2,"run_duration_ns":null,"warmup_ns":1,"reset_account_on_reconnect":false,"account_ttl_ms":0,"version_string":"test"}"#
         );
         assert_eq!(serde_json::from_str::<ReadyRecord>(&json).unwrap(), value);
     }

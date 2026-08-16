@@ -1093,6 +1093,163 @@ impl Engine {
         }
     }
 
+    /// Retire everything this account holds that is NOT on `symbol`: cancel the
+    /// resting orders, close the positions at their last mark.
+    ///
+    /// AN ACCOUNT IS ON AT MOST ONE RIVER, and this is what makes that true of
+    /// the BOOK rather than only of the connection. A returning socket may name
+    /// a different symbol than the account was trading, and a position carried
+    /// across would be one the new session can neither see nor close: nothing
+    /// prices it, no sweep marks it, and no order can reach it. The same is true
+    /// of a resting order, with the sharper edge that it would sit on a river no
+    /// boat is reading, where nothing would ever sweep it and nothing would say
+    /// so.
+    ///
+    /// Closed AT THE LAST MARK, which is the best price that exists: the river
+    /// it traded on has no cursor, so there is no fresher one to be had.
+    pub fn retire_off_river(&mut self, symbol: &str, ts: u64) -> Vec<ServerMessage> {
+        let mut events = Vec::new();
+        let stranded: Vec<String> = self
+            .open
+            .iter()
+            .filter(|order| order.submit.symbol.as_ref() != symbol)
+            .map(|order| order.submit.client_order_id.clone())
+            .collect();
+        for client_order_id in stranded {
+            tracing::info!(
+                %client_order_id,
+                bound = %symbol,
+                "cancelling a resting order off the river this account is bound to",
+            );
+            events.extend(self.on_cancel(client_order_id, ts));
+        }
+        let positions: Vec<_> = self
+            .account
+            .positions
+            .iter()
+            .filter(|((position_symbol, _), state)| {
+                position_symbol.as_ref() != symbol && !state.qty.is_zero()
+            })
+            .map(|((position_symbol, position_id), state)| {
+                (
+                    Symbol::clone(position_symbol),
+                    position_id.clone(),
+                    state.qty,
+                    state.mark_px,
+                )
+            })
+            .collect();
+        for (position_symbol, position_id, qty, mark) in positions {
+            tracing::info!(
+                symbol = %position_symbol,
+                bound = %symbol,
+                "flattening a position off the river this account is bound to",
+            );
+            events.extend(self.close_at_mark(&position_symbol, position_id, qty, mark, ts));
+        }
+        events
+    }
+
+    /// Cancel every resting order on a symbol NOBODY IS READING.
+    ///
+    /// `readable` is the set of symbols a cursor is currently walking. An order
+    /// outside it rests on a river with no clock: there is no instant to sweep
+    /// it to, so it cannot fill, cannot expire and cannot be told apart from an
+    /// order the tape simply has not reached. Leaving it there is the one
+    /// outcome that is neither of the two honest ones - so the venue refuses to
+    /// leave it, and the client is told with an ordinary `OrderCanceled`.
+    ///
+    /// A FROZEN account never reaches this: it is skipped by the sweeper
+    /// wholesale, and its book survives untouched for the socket that returns to
+    /// it. The two rules are the same statement from opposite sides - an order
+    /// nobody is reading either belongs to an account that will come back for
+    /// it, or it should not be resting.
+    pub fn cancel_unreadable_orders(&mut self, readable: &[Symbol], ts: u64) -> Vec<ServerMessage> {
+        let stranded: Vec<String> = self
+            .open
+            .iter()
+            .filter(|order| !readable.contains(&order.submit.symbol))
+            .map(|order| order.submit.client_order_id.clone())
+            .collect();
+        let mut events = Vec::new();
+        for client_order_id in stranded {
+            tracing::info!(
+                %client_order_id,
+                "cancelling a resting order on a river no cursor is reading",
+            );
+            events.extend(self.on_cancel(client_order_id, ts));
+        }
+        events
+    }
+
+    /// Re-base every resting order's scan frontier onto `now_ns`.
+    ///
+    /// A frozen account's orders carry the frontier of the boat that departed,
+    /// which sits in a returning boat's FUTURE: a cursor is placed at its
+    /// river's origin, so without this the order waits for the new cursor to
+    /// reach an instant the old one had already passed, which is as long as the
+    /// previous session ran.
+    ///
+    /// Nothing is owed for the span in between. Nobody was reading the account,
+    /// so no pass watched that water on its behalf - which is the same statement
+    /// the freeze itself makes, applied to the frontier rather than to the
+    /// sweep.
+    pub fn rebase_scans(&mut self, now_ns: u64) {
+        for pos in 0..self.open.len() {
+            let order = &mut self.open[pos];
+            if order.scanned_ns == now_ns {
+                continue;
+            }
+            order.scanned_ns = now_ns;
+            // A walk planned against the old frontier says nothing about the new
+            // one, exactly as after an amend.
+            order.revision = order.revision.saturating_add(1);
+        }
+    }
+
+    /// One venue-originated reduce-only close at the mark, the shape both the
+    /// margin breach and the risk breach use.
+    fn close_at_mark(
+        &mut self,
+        symbol: &Symbol,
+        position_id: Option<String>,
+        qty: Decimal,
+        mark: Decimal,
+        ts: u64,
+    ) -> Vec<ServerMessage> {
+        self.liquidation_seq = self.liquidation_seq.saturating_add(1);
+        let order = SubmitOrder {
+            client_order_id: format!("LQ-{}-{}", symbol, self.liquidation_seq),
+            symbol: Symbol::clone(symbol),
+            position_id,
+            side: if qty > Decimal::ZERO {
+                Side::Sell
+            } else {
+                Side::Buy
+            },
+            order_type: OrderType::Market,
+            quantity: qty.abs(),
+            price: Some(mark),
+            trigger_price: None,
+            trail_offset: None,
+            time_in_force: TimeInForce::Ioc,
+            expire_time: None,
+            reduce_only: true,
+            post_only: false,
+            link: None,
+        };
+        self.on_submit_from(
+            order,
+            ts,
+            Some(MarketReading {
+                last_px: mark,
+                ts_ns: ts,
+                band_ticks: self.liquidation_band_ticks,
+            }),
+            false,
+        )
+    }
+
     /// Exchange FUNDING on every perpetual position, for each funding instant
     /// the span `from_ns .. to_ns` crossed.
     ///
@@ -5055,6 +5212,116 @@ mod tests {
         assert!(validate_submit_order(&stop).is_err());
         stop.time_in_force = TimeInForce::Fok;
         assert!(validate_submit_order(&stop).is_err());
+    }
+
+    // --- Rivers nobody is reading --------------------------------------------
+
+    /// The gap this closes: a resting order on a river with no cursor cannot
+    /// fill, cannot expire, and cannot be told apart from one the tape has not
+    /// reached. The venue refuses to leave it there.
+    #[test]
+    fn an_order_on_a_river_nobody_reads_is_cancelled_rather_than_left() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        let mut order = limit_order("REST", 1);
+        order.price = Some(Decimal::from(1));
+        e.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert_eq!(e.open.len(), 1);
+
+        // A cursor IS reading it: nothing happens.
+        let readable = vec![Symbol::from("BTCUSDT")];
+        assert!(e.cancel_unreadable_orders(&readable, 5).is_empty());
+        assert_eq!(e.open.len(), 1);
+
+        // The cursor wound down.
+        let out = e.cancel_unreadable_orders(&[], 6);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderCanceled { client_order_id, .. } if client_order_id == "REST")),
+            "the client is told rather than left with an order nothing can decide: {out:?}"
+        );
+        assert!(e.open.is_empty());
+    }
+
+    /// A returning account's orders carry the DEPARTED boat's frontier, which
+    /// sits in the new boat's future. Without a re-base the order waits for the
+    /// new cursor to reach an instant the old one had already passed.
+    #[test]
+    fn a_resumed_order_scans_from_the_returning_boats_clock() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        let mut order = limit_order("REST", 1);
+        order.price = Some(Decimal::from(1));
+        e.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            9_000,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 9_000,
+                band_ticks: 0,
+            }),
+        );
+        assert_eq!(e.pending_scans()[0].from_ns, 9_000);
+
+        // A fresh boat is placed at its river's origin, which is BEHIND where
+        // the departed one got to.
+        e.rebase_scans(100);
+        assert_eq!(
+            e.pending_scans()[0].from_ns,
+            100,
+            "the order resumes from the clock that is actually running"
+        );
+    }
+
+    /// A returning socket may name a different symbol than the account was
+    /// trading. What it holds off the joined river is retired, because the new
+    /// session can neither see nor close it.
+    #[test]
+    fn resuming_on_another_river_retires_what_the_account_left_behind() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        let mut order = limit_order("REST", 1);
+        order.price = Some(Decimal::from(1));
+        e.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        let out = e.retire_off_river("MNQ", 5);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+            "the stranded order goes: {out:?}"
+        );
+        assert!(e.open.is_empty());
+        assert!(
+            e.retire_off_river("BTCUSDT", 6).is_empty(),
+            "and an account resuming on its own river keeps everything"
+        );
     }
 
     // --- Order lists: OCO, OTO and OUO ---------------------------------------

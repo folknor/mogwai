@@ -48,6 +48,41 @@ unpaced delivery, not a stopped clock - the underlying sim time still advances
 at wall rate. `server_heartbeat_ms` sets the server-originated liveness
 cadence; zero disables it.
 
+## Accounts that outlive their connection
+
+An account is the CLIENT'S and outlives the socket that named it, so a client
+returning with the same id resumes its own ledger. Two keys govern what that
+means, and both are reported on the readiness record so a launcher never has to
+infer them.
+
+`reset_account_on_reconnect` (default `false`) decides whether a returning
+client gets its ledger back or a clean one. False, the default, is what makes a
+reconnect a continuation - kill a worker holding a position, start it again,
+find the book where it was left. Set it true when a batch reuses ids across
+independent experiments.
+
+`account_ttl_ms` (default `0`, meaning never) is how long an UNATTENDED account
+survives before the venue collects it. While unattended an account is FROZEN: it
+is not swept, its positions do not mark, its funding does not accrue and its
+policy cannot liquidate it. That is deliberate - mogwai exists to exercise a
+client's live path, not to run an account nobody is trading - and it means a run
+spanning a disconnect has a gap in its risk history. Set the TTL longer than the
+slowest restart any consumer performs; a collected account is gone, and the next
+socket presenting that id opens a clean ledger.
+
+The span is WALL time rather than simulated, because a frozen account has no
+simulated clock: the boat carrying one wound down with the last socket.
+
+Two things happen when a socket returns to a frozen account. Every surviving
+order resumes scanning from the RETURNING boat's clock, since the departed one's
+frontier sits in the new cursor's future. And whatever the account held off the
+river the new socket bound - resting orders, positions - is retired, because the
+new session can neither see nor close it.
+
+While a client is ATTACHED, an order on a symbol no cursor is reading is
+cancelled rather than left resting: nothing could ever fill or expire it, and
+the client is there to be told.
+
 History synthesis is admitted fail-fast at four concurrent `/trades` or
 `/quotes` requests per run. A fifth request receives `503` with `history
 request capacity exhausted`; it is not queued ahead of order-entry market

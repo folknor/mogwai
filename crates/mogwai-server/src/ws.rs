@@ -398,6 +398,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
     let lane_id = state
         .run
         .bind_lanes(lanes.clone(), session.passenger.account_id.as_str());
+    // ATTACHED from here, which is what un-freezes the account and puts it back
+    // in the sweep. Bound AFTER the lane, so anything the resume retires has a
+    // lane to be delivered on; a returning socket learns what its absence cost
+    // rather than discovering a cancelled order by querying.
+    let resumed = state
+        .run
+        .resume(
+            &session.passenger,
+            &session.symbol,
+            crate::config::sim_now_ns(boat_sim),
+        )
+        .await;
+    if !resumed.is_empty() {
+        let shape = session.passenger.engine.lock().await.book_shape();
+        if let Some(reservation) = lanes.reserve_swept(&shape, resumed.len(), resumed.len()) {
+            drop(lanes.submit_produced(reservation, Instant::now(), None, resumed));
+        }
+    }
     let pump = spawn_exec_pump(
         held_rx,
         Arc::clone(&session.passenger),

@@ -12,10 +12,13 @@ because the venue models latency on the sim axis and runs on the same machine as
 its client.
 
 The endpoint therefore has to be learned rather than assumed. On boot the venue
-writes ONE line of JSON to STDOUT - the version 6 `ReadyRecord`, carrying
+writes ONE line of JSON to STDOUT - the version 8 `ReadyRecord`, carrying
 `version`, `addr`, `pid`, `run_seed`, `data_origin_ns`, `run_start_ns`,
-`run_duration_ns`, `warmup_ns`, and `version_string` - and that is the only
-thing it ever writes there. It reports no symbol. Logs go to stderr, so
+`run_duration_ns`, `warmup_ns`, `reset_account_on_reconnect`, `account_ttl_ms`
+and `version_string` - and that is the only thing it ever writes there. The last
+two are the account-persistence policy: whether a returning client gets its own
+ledger back, and how long an unattended one survives before the venue collects
+it. It reports no symbol. Logs go to stderr, so
 the two never interleave. A launcher captures stdout and reads a line; a human
 sees the same line in the terminal.
 

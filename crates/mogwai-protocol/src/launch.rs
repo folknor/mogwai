@@ -889,6 +889,7 @@ mod tests {
             "run_duration_ns": null,
             "warmup_ns": 1,
             "reset_account_on_reconnect": false,
+            "account_ttl_ms": 0,
             "version_string": "test",
         })
     }

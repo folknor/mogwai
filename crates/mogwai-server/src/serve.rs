@@ -286,6 +286,29 @@ async fn serve_async(
         rivers: Arc::clone(&rivers),
         interval_ms: cfg.fill_sweep_interval_ms,
     });
+    // The TTL reaper. A frozen account is resumable state with no lifecycle of
+    // its own, so without this a long-lived shared exchange accumulates one
+    // ledger per id anybody ever presented. Spawned only when a TTL is
+    // configured: the default is to keep accounts forever, which is what a
+    // consumer restarting a worker needs and what an operator who has not
+    // thought about restart windows should get.
+    if cfg.account_ttl_ms > 0 {
+        let ttl = std::time::Duration::from_millis(cfg.account_ttl_ms);
+        let reaping = Arc::clone(&run);
+        // Swept at a fraction of the TTL, floored, so the effective lifetime
+        // overshoots by at most that fraction rather than by a whole TTL.
+        let cadence = (ttl / 10).max(std::time::Duration::from_millis(50));
+        tokio::spawn(async move {
+            let mut completion = reaping.completion();
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(cadence) => {}
+                    _ = completion.changed() => break,
+                }
+                reaping.collect_expired_accounts(ttl);
+            }
+        });
+    }
     let state = AppState {
         run,
         cfg: cfg.clone(),
@@ -338,6 +361,7 @@ async fn serve_async(
         run_duration_ns,
         warmup_ns: cfg.warmup_ns,
         reset_account_on_reconnect: cfg.reset_account_on_reconnect,
+        account_ttl_ms: cfg.account_ttl_ms,
         version_string: long_version(),
     };
     {

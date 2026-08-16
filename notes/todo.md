@@ -370,13 +370,11 @@ required eventually, since both modes must be supported.
   one cadence, and the refusal is that constraint surfacing on the wire. Speed
   mutates no generated value, so a passenger asking for an unserved speed is
   asking for a second cursor on the same water. The end state serves it.
-  OPEN, and created by that landing: the fill sweeper now iterates over seated
-  CURSORS, so a resting order on a river whose cursor wound down is no longer
-  swept until someone connects to that river again. It cannot be swept without
-  one - there is no clock to sample a `to_ns` from - so the honest fixes are
-  either to keep the venue clock as the sweep instant for unseated rivers or to
-  refuse to leave orders resting on a river nobody is reading. Neither is piece
-  9's, and piece 10 (below) left it explicitly untouched too.
+  CLOSED 2026-08-16, as the second of those two: the venue refuses to leave
+  orders resting on a river nobody is reading. An ATTACHED account's order on a
+  symbol no cursor walks is cancelled at the sweep pass; a FROZEN account is
+  skipped wholesale and its book kept for the socket expected back. See
+  `reference/architecture.md`.
   LANDED in piece 10, 2026-08-16: every remaining run-level singleton that
   assumed one notion of now - engine event stamps, `/clock`, the history
   ceilings on `/trades` and `/quotes`, the pulled `/account` snapshot, the
@@ -970,10 +968,12 @@ required eventually, since both modes must be supported.
   stop everything. Generator arms are untouched: they change the WATER, which
   belongs to the river and reaches everyone reading it whatever account they
   trade. The water/view test the design named is now the actual code structure.
-  STILL OPEN, none of it blocking: nothing FREEZES an unattended account, so an
-  account whose connection drops is simply not marked until someone returns -
-  the intended behaviour, but untested and not stated anywhere a consumer reads;
-  and there is no TTL collecting an account nobody reclaims.
+  THE FREEZE AND ITS TTL LANDED 2026-08-16. A `Passenger` carries its
+  attachment, the sweeper skips a frozen account entirely, resuming re-bases
+  every surviving order onto the returning boat's clock and retires what the
+  account held off the newly joined river, and `account_ttl_ms` collects an
+  account nobody reclaims. `ReadyRecord::VERSION` is 8, carrying the TTL beside
+  the reset setting.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an
@@ -1216,33 +1216,6 @@ required eventually, since both modes must be supported.
   gates, per the standing lessons on wall-clock socket tests. If a
   socket-level demonstration is ever wanted, design it on the divergence
   window's own clock rather than wall arrival order.
-
-- THE RISK POLICY IS EVALUATED ON THE MARK, NOT PER TICK, which contradicts the
-  ruling that peak equity tracks every tick. Landed knowingly 2026-08-16 with
-  the account-policy work; recorded here because nothing else will surface it.
-  WHY IT MATTERS. The trailing threshold ratchets on peak equity, and at a real
-  venue that ratchet is effectively tick-by-tick: a spike lasting 200 ms still
-  spends budget. `enforce_policy` runs once per fill-sweeper pass per boat, so a
-  spike that opens and closes entirely between two passes never happened as far
-  as the account is concerned, and it keeps room it should have lost. At the
-  default one-second sweep interval under acceleration that window is short in
-  wall time and a full second in SIM time, which is the axis the policy is
-  stated on.
-  THE GAP IS RESOLUTION AND NEVER DIRECTION, which is the reason it was
-  acceptable to land: every peak the evaluation DOES see ratchets exactly as it
-  should, so enforcement is uniformly LENIENT rather than wrong. An account is
-  never liquidated for a spike that did not happen; it is sometimes not
-  liquidated for one that did.
-  WHAT CLOSING IT NEEDS, and it is why this was not just done: the evaluation
-  would have to run in the tape thread, which cannot take the engine lock - the
-  whole sweeper design exists because the tape walk must stay off it. So it
-  wants the equity INPUTS published out of the engine (position quantity, avg
-  price, balance) into something the tape thread can read lock-free, with the
-  policy evaluated against the tick price there. That is a real piece of work
-  and it touches the hottest path in the venue, so it wants a measurement
-  naming what it costs before it is taken.
-  NOT THE SAME as tightening `SWEEP_INTERVAL_NS`, which would buy resolution
-  everywhere at a cost the fill golden's own item already describes.
 
 - ACCOUNT VALUATION: what a holding is worth in the currency its policy is
   stated in. LARGELY CLOSED 2026-08-16, with the residue stated at the end.

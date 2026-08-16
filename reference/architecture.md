@@ -28,6 +28,42 @@ book. `reset_account_on_reconnect` hands it a clean ledger instead, and the
 readiness record reports which way the venue is set so a launcher never has to
 infer it.
 
+AN UNATTENDED ACCOUNT FREEZES. The moment its last connection goes away it is
+not swept, not marked, not funded and not judged against its policy, and a
+socket returning with the same id resumes it. This is a deliberate departure
+from a real venue, where being away is no defence against liquidation: mogwai
+exists to exercise a client's live path rather than to simulate an account
+nobody is trading. THE CONSEQUENCE TO STATE IN ANY CLAIM is that a run spanning
+a disconnect has a gap in its risk history.
+
+RESUMING RE-BASES THE BOOK, because a returning boat is not the one that left. A
+cursor is placed at its river's origin, so a frozen order's scan frontier - the
+instant the departed boat had reached - sits in the new boat's FUTURE, and an
+order left carrying it would wait for the new cursor to cover ground the old one
+had already covered. Every surviving order therefore resumes scanning from the
+returning boat's own clock. Nothing is owed for the span in between: nobody was
+reading the account, which is the same statement the freeze makes.
+
+WHAT THE ACCOUNT HELD OFF THE JOINED RIVER IS RETIRED at that moment - resting
+orders cancelled, positions closed at their last mark. A returning socket may
+name a different symbol than the account was trading, and carrying that forward
+would leave it holding something the new session can neither see nor close.
+
+AN ORDER ON A RIVER NOBODY READS IS CANCELLED rather than left, and this is the
+other half of the same rule. An attached account's order on a symbol no cursor
+is walking cannot fill, cannot expire, and cannot be told apart from one the
+tape has not reached; the client is attached, so it is told. A frozen account is
+exempt because it is skipped wholesale - its book is being kept for the socket
+that comes back for it. Between the two, no resting order can sit indefinitely
+on water nothing is reading.
+
+A TTL BOUNDS THE FREEZE. `account_ttl_ms` collects an account nobody reclaims,
+in WALL time because a frozen account has no simulated clock - the boat that
+carried one wound down with the last socket. Zero, the default, keeps accounts
+for the life of the process, which is what a consumer restarting a worker needs.
+The setting is on the readiness record, so a consumer whose restart takes longer
+than the TTL can assert on the fact rather than discover it as a clean ledger.
+
 A connection that names no account is served under the venue's DEFAULT account.
 That exists for the ephemeral single-client venue, where making the one client
 name an id would be ceremony; it is not a venue-wide account every connection

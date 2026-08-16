@@ -109,6 +109,22 @@ pub(crate) struct Passenger {
     /// the engine books a fill, and the risk ledger judges the equity that fill
     /// produced.
     pub(crate) risk: Mutex<crate::risk::RiskLedger>,
+    /// WHETHER ANYBODY IS READING THIS ACCOUNT, and since when.
+    ///
+    /// `None` while a connection is attached. `Some(wall_instant)` once the last
+    /// one went away, which FREEZES the account: it is not swept, not marked,
+    /// not funded and not judged against its policy until a socket returns.
+    ///
+    /// This is a deliberate departure from a real venue, where being away is no
+    /// defence against liquidation. Mogwai exists to exercise a client's live
+    /// path rather than to simulate an account nobody is trading, and the
+    /// consequence to state in any claim is that a run spanning a disconnect has
+    /// a GAP IN ITS RISK HISTORY.
+    ///
+    /// A WALL instant rather than a simulated one, and the reason is that there
+    /// is no simulated clock while frozen: the boat that carried one wound down
+    /// with the last socket. This is what the TTL is measured against.
+    pub(crate) frozen_since: Mutex<Option<std::time::Instant>>,
     /// TRANSPORT havoc, per account rather than per venue.
     ///
     /// These corrupt what one connection RECEIVES rather than what the
@@ -135,6 +151,52 @@ pub(crate) struct Passenger {
 }
 
 impl Passenger {
+    /// How long this account has been unattended, or `None` while a connection
+    /// is reading it.
+    pub(crate) fn frozen_for(&self) -> Option<std::time::Duration> {
+        self.frozen_since
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map(|since| since.elapsed())
+    }
+
+    /// Whether this account is currently unattended, and therefore not swept,
+    /// marked, funded or judged.
+    pub(crate) fn is_frozen(&self) -> bool {
+        self.frozen_since
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Freeze the account, unless a connection is still reading it.
+    ///
+    /// Called when a lane is retired, so it must ask whether ANY lane is left
+    /// rather than assume the one that went away was the last: an eviction
+    /// retires the incumbent while the newcomer is already binding, and freezing
+    /// an account somebody just claimed would leave it unswept until its next
+    /// reconnect.
+    fn freeze(&self) {
+        let mut frozen = self
+            .frozen_since
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if frozen.is_none() {
+            *frozen = Some(std::time::Instant::now());
+            tracing::debug!(
+                account = %self.account_id.as_str(),
+                "account frozen: nobody is reading it, so it is not swept until a socket returns",
+            );
+        }
+    }
+
+    fn attach(&self) {
+        *self
+            .frozen_since
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     pub(crate) fn act_ms(&self, class: CommandClass) -> u64 {
         match class {
             CommandClass::Submit => self.submit_act_ms.load(Ordering::Relaxed),
@@ -381,6 +443,11 @@ impl Run {
                 opening,
                 self.started_ns,
             )),
+            // Born FROZEN, at the instant it was created. An account with no
+            // connection is not being read whether it was just opened or just
+            // abandoned, and starting it attached would make a POSTed account
+            // nobody ever connects to immortal.
+            frozen_since: Mutex::new(Some(std::time::Instant::now())),
             dark: HavocWindow::new(),
             stall: HavocWindow::new(),
             delay_ms: AtomicU64::new(0),
@@ -442,20 +509,59 @@ impl Run {
         self.passenger(account_id)
     }
 
+    /// Collect every account that has been unattended longer than `ttl`.
+    ///
+    /// A frozen account is resumable state with no lifecycle of its own: nothing
+    /// else would ever remove it, so a long-lived shared exchange would
+    /// accumulate one ledger per id anybody ever presented, for the life of the
+    /// process. The TTL is what bounds that, and it is deliberately the only
+    /// thing that does - a frozen account is never liquidated, marked or judged
+    /// on its way out, it is simply gone.
+    ///
+    /// Returns the ids collected, so the caller can say which.
+    pub(crate) fn collect_expired_accounts(&self, ttl: std::time::Duration) -> Vec<String> {
+        let expired: Vec<String> = self
+            .passengers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, passenger)| {
+                passenger
+                    .frozen_for()
+                    .is_some_and(|unattended| unattended >= ttl)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for account_id in &expired {
+            tracing::info!(
+                account = %account_id,
+                ttl_ms = ttl.as_millis(),
+                "collecting an account nobody reclaimed",
+            );
+            self.discard_account(account_id);
+        }
+        expired
+    }
+
     /// Discard an account's ledger so the next connection opens a clean one.
     /// Only `reset_account_on_reconnect` reaches this; the default is to keep
     /// what the account has.
     fn reopen(&self, account_id: &mogwai_protocol::AccountId) {
+        self.discard_account(account_id.as_str());
+    }
+
+    /// Forget one account entirely: its ledger and the order claims attributing
+    /// its frames. The claims must go with it, or a fresh ledger's frames would
+    /// be attributed using a discarded one's history.
+    fn discard_account(&self, account_id: &str) {
         self.passengers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(account_id.as_str());
-        // The order claims go with it. Leaving them would attribute a fresh
-        // ledger's frames using a discarded ledger's history.
+            .remove(account_id);
         self.order_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, owner| owner != account_id.as_str());
+            .retain(|_, owner| owner != account_id);
     }
 
     /// Resolve a risk policy the way a symbol resolves: total, three steps,
@@ -547,6 +653,11 @@ impl Run {
                     opening,
                     self.started_ns,
                 )),
+                // A POSTed account nobody has connected to yet is unattended
+                // like any other, which is also what makes it collectable: an
+                // account opened and then abandoned must not outlive the TTL
+                // just because no socket ever reached it.
+                frozen_since: Mutex::new(Some(std::time::Instant::now())),
                 dark: HavocWindow::new(),
                 stall: HavocWindow::new(),
                 delay_ms: AtomicU64::new(0),
@@ -692,7 +803,75 @@ impl Run {
     /// outlives every connection that ever presented it, so a returning socket
     /// must still find its own orders attributed to it.
     pub(crate) fn release_lanes(&self, id: u64) {
-        self.locked_lanes().retain(|bound| bound.id != id);
+        let account = {
+            let mut lanes = self.locked_lanes();
+            let account = lanes
+                .iter()
+                .find(|bound| bound.id == id)
+                .map(|bound| bound.account_id.clone());
+            lanes.retain(|bound| bound.id != id);
+            // Only when nothing is left reading it. An eviction retires the
+            // incumbent while the newcomer is binding, and freezing an account
+            // somebody has just claimed would leave it unswept for the life of
+            // that connection.
+            account.filter(|account| !lanes.iter().any(|bound| &bound.account_id == account))
+        };
+        let Some(account) = account else {
+            return;
+        };
+        if let Some(passenger) = self
+            .passengers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(account.as_str())
+        {
+            passenger.freeze();
+        }
+    }
+
+    /// Attach an account to the river a socket has just bound, and put it in a
+    /// state that river can actually serve.
+    ///
+    /// THREE THINGS HAPPEN, and each closes a way an account could otherwise
+    /// hold something nobody is reading:
+    ///
+    /// 1. The account is UNFROZEN, which is what the sweeper reads.
+    /// 2. What a RETURNING account holds off this river is retired - resting
+    ///    orders cancelled, positions closed at their last mark. A returning
+    ///    socket may name a different symbol than the frozen account was
+    ///    trading, and carrying that position forward would leave the account
+    ///    holding something the new session can neither see nor close.
+    /// 3. Every surviving order's scan frontier is RE-BASED onto this boat's
+    ///    clock. A frozen order's frontier is wherever the departed boat got to,
+    ///    which sits in the NEW boat's future - so without this the order is
+    ///    wedged until the new cursor catches up, which is as long as the
+    ///    previous session ran. The span while nobody was reading was never
+    ///    watched and no fill is owed for it, which is the same statement the
+    ///    freeze makes.
+    ///
+    /// STEPS 2 AND 3 RUN ONLY FOR A RETURNING ACCOUNT, and that is not a
+    /// shortcut. A client that opens two sockets on two symbols and names no
+    /// account lands both on the DEFAULT account, which is a supported shape;
+    /// retiring on every bind would make the second socket close the first
+    /// socket's book. Neither step has anything to do with a live account
+    /// anyway: nothing is stranded and no clock has been left behind.
+    ///
+    /// Returns the events the retirement produced, for the caller to deliver.
+    pub(crate) async fn resume(
+        &self,
+        passenger: &Passenger,
+        symbol: &mogwai_protocol::Symbol,
+        now_ns: u64,
+    ) -> Vec<mogwai_protocol::ServerMessage> {
+        let returning = passenger.is_frozen();
+        passenger.attach();
+        if !returning {
+            return Vec::new();
+        }
+        let mut engine = passenger.engine.lock().await;
+        let events = engine.retire_off_river(symbol, now_ns);
+        engine.rebase_scans(now_ns);
+        events
     }
 
     /// Close every connection already trading `account_id`, because a newer one
@@ -1076,6 +1255,83 @@ mod tests {
         };
         assert_eq!(snapshot.orders.len(), 1, "one account, one order");
         assert_eq!(snapshot.orders[0].venue_order_id, "V-mine");
+    }
+
+    /// The freeze, stated as behaviour rather than as an accident of nobody
+    /// having a boat: an account is frozen the moment its last connection goes,
+    /// and attached again when one returns.
+    #[test]
+    fn an_account_freezes_when_its_last_connection_goes_and_thaws_when_one_returns() {
+        let run = run(1_000, 400, None);
+        let account = mogwai_protocol::AccountId::parse("FREEZE-001").unwrap();
+        let passenger = run.passenger(&account);
+        assert!(
+            passenger.is_frozen(),
+            "an account nobody has connected to is unattended like any other"
+        );
+
+        let (first, _first_rx) = crate::admission::ExecLanes::detached();
+        let first_id = run.bind_lanes(first, account.as_str());
+        passenger.attach();
+        assert!(!passenger.is_frozen());
+
+        // A SECOND connection on the same account: retiring the first must not
+        // freeze an account somebody is still reading. This is the eviction
+        // shape, where the incumbent is retired while the newcomer binds.
+        let (second, _second_rx) = crate::admission::ExecLanes::detached();
+        let second_id = run.bind_lanes(second, account.as_str());
+        run.release_lanes(first_id);
+        assert!(
+            !passenger.is_frozen(),
+            "a connection is still reading this account"
+        );
+
+        run.release_lanes(second_id);
+        assert!(passenger.is_frozen(), "the last one left");
+    }
+
+    /// The TTL, which is the only thing that ever removes an account: a frozen
+    /// ledger is otherwise state with no lifecycle.
+    #[test]
+    fn the_ttl_collects_an_account_nobody_reclaimed_and_spares_an_attached_one() {
+        let run = run(1_000, 400, None);
+        let abandoned = mogwai_protocol::AccountId::parse("GONE-001").unwrap();
+        let held = mogwai_protocol::AccountId::parse("HELD-001").unwrap();
+        run.passenger(&abandoned);
+        let held_passenger = run.passenger(&held);
+        let (lanes, _rx) = crate::admission::ExecLanes::detached();
+        run.bind_lanes(lanes, held.as_str());
+        held_passenger.attach();
+
+        // A TTL nothing has outlived yet spares even the unattended account,
+        // which is what makes the collection about the SPAN rather than about
+        // being unattended at all.
+        assert!(
+            run.collect_expired_accounts(std::time::Duration::from_secs(3_600))
+                .is_empty(),
+            "an account frozen a moment ago has not outlived an hour"
+        );
+
+        // A zero TTL collects everything already unattended, which is what makes
+        // the rest of this about the ATTACHMENT rather than about a sleep.
+        let collected = run.collect_expired_accounts(std::time::Duration::ZERO);
+        assert_eq!(
+            collected,
+            vec!["GONE-001".to_string()],
+            "only the unattended account is collected: {collected:?}"
+        );
+        assert!(
+            !run.passengers()
+                .iter()
+                .any(|passenger| passenger.account_id.as_str() == "GONE-001"),
+            "and it is gone from the registry"
+        );
+        assert!(
+            run.passengers()
+                .iter()
+                .any(|passenger| passenger.account_id.as_str() == "HELD-001"),
+            "the attached account survives"
+        );
     }
 
     #[test]
