@@ -144,11 +144,19 @@ pub(crate) struct Run {
     /// to the passenger that owns it and to nobody else.
     ///
     /// Keyed by `VenueOrderId` because that is what every sweep-produced frame
-    /// carries; the value is `ExecLanes::id`. An order absent from this table -
-    /// one submitted before this landed, or by a connection already retired - is
-    /// delivered to EVERY lane, which is the old behaviour and the conservative
-    /// direction to fail in: a passenger seeing a stray frame is the defect this
-    /// closes, but a passenger MISSING its own fill would be a worse one.
+    /// and every query row carries; the value is `ExecLanes::id`. An order
+    /// absent from this table - one the VENUE originated, or one whose
+    /// connection is already retired - is delivered to EVERY lane and visible to
+    /// every query, which is the old behaviour and the conservative direction to
+    /// fail in: a passenger seeing a stray frame is the defect this closes, but
+    /// a passenger MISSING its own fill would be a worse one.
+    ///
+    /// A claim survives its order's TERMINAL state and is dropped only when the
+    /// connection is released. Retiring on the ending frame would bound the
+    /// table more tightly and was the first shape of this, but it makes a closed
+    /// order unattributed - so `QueryOrders` and `QueryFills`, which report
+    /// terminal rows by design, would show every connection's history to
+    /// everyone. Growth is bounded by orders submitted per connection.
     order_owners: Mutex<std::collections::HashMap<mogwai_protocol::VenueOrderId, u64>>,
 }
 
@@ -315,16 +323,6 @@ impl Run {
             .insert(venue_order_id, owner);
     }
 
-    /// Forget a terminal order's ownership. Called on the frames that END an
-    /// order, so the table tracks LIVE orders rather than growing for the life
-    /// of the process.
-    pub(crate) fn forget_order(&self, venue_order_id: &mogwai_protocol::VenueOrderId) {
-        self.order_owners
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(venue_order_id);
-    }
-
     /// Who submitted `venue_order_id`, or `None` for an order nobody claimed.
     pub(crate) fn order_owner(
         &self,
@@ -337,28 +335,46 @@ impl Run {
             .copied()
     }
 
-    /// Claim every order a just-produced batch accepted, and forget every one it
-    /// ended. Called wherever a batch is produced - the command dispatcher and
-    /// the fill sweeper - so the table follows the orders rather than the call
-    /// site.
+    /// Claim every order a just-produced batch accepted for `owner`.
+    ///
+    /// Only the command dispatcher calls this. A sweep-produced batch is never
+    /// claimed: an order appearing there was originated by the VENUE - a margin
+    /// liquidation - so there is no submitting connection to attribute it to,
+    /// and inventing one would address its frames to a lane that never asked.
     pub(crate) fn track_ownership(&self, events: &[mogwai_protocol::ServerMessage], owner: u64) {
         for event in events {
             if let mogwai_protocol::ServerMessage::OrderAccepted { venue_order_id, .. } = event {
                 self.claim_order(venue_order_id.clone(), owner);
             }
         }
-        self.retire_terminal(events);
     }
 
-    /// Retire the ownership claims a batch's terminal frames end, claiming
-    /// nothing. This is what the SWEEPER uses: an order appearing in a
-    /// sweep-produced batch was originated by the VENUE - a margin liquidation -
-    /// so there is no submitting connection to attribute it to, and inventing
-    /// one would address the frame to a lane that never asked for it.
-    pub(crate) fn retire_terminal(&self, events: &[mogwai_protocol::ServerMessage]) {
+    /// Drop the rows of a query reply that belong to another connection.
+    ///
+    /// The engine answers `QueryOrders` and `QueryFills` from ONE book, because
+    /// there is one ledger; scoping happens here, where the connection is known.
+    /// A row for an unclaimed order stays, on the same rule the delivery filter
+    /// uses: better a stray row than a missing one, and a venue-originated
+    /// liquidation genuinely concerns whoever holds the position.
+    pub(crate) fn scope_query_rows(
+        &self,
+        events: &mut [mogwai_protocol::ServerMessage],
+        owner: u64,
+    ) {
+        use mogwai_protocol::ServerMessage as M;
+        let mine = |venue_order_id: &mogwai_protocol::VenueOrderId| {
+            self.order_owner(venue_order_id)
+                .is_none_or(|found| found == owner)
+        };
         for event in events {
-            if let Some(ended) = terminates_order(event) {
-                self.forget_order(ended);
+            match event {
+                M::OrderStatusSnapshot(snapshot) => {
+                    snapshot.orders.retain(|row| mine(&row.venue_order_id));
+                }
+                M::FillSnapshot(snapshot) => {
+                    snapshot.fills.retain(|fill| mine(&fill.venue_order_id));
+                }
+                _ => {}
             }
         }
     }
@@ -435,21 +451,6 @@ pub(crate) fn addressed_order(
         M::OrderModifyRejected { venue_order_id, .. }
         | M::OrderCancelRejected { venue_order_id, .. } => venue_order_id.as_ref(),
         M::OrderFilled(fill) => Some(&fill.venue_order_id),
-        _ => None,
-    }
-}
-
-/// The order a frame ENDS, if it ends one. A fill ends an order only when it
-/// leaves nothing resting, which is why this is not folded into
-/// `addressed_order`: a PARTIAL fill addresses an order that is still live, and
-/// forgetting its owner there would send the remainder's fill to everyone.
-fn terminates_order(
-    event: &mogwai_protocol::ServerMessage,
-) -> Option<&mogwai_protocol::VenueOrderId> {
-    use mogwai_protocol::ServerMessage as M;
-    match event {
-        M::OrderCanceled { venue_order_id, .. } => Some(venue_order_id),
-        M::OrderFilled(fill) if fill.leaves_qty <= Decimal::ZERO => Some(&fill.venue_order_id),
         _ => None,
     }
 }
@@ -570,6 +571,56 @@ mod tests {
                 .expect("the default account id is legal"),
             std::sync::mpsc::channel().0,
         )
+    }
+
+    /// A query reply carries the asking connection's orders and nobody else's.
+    ///
+    /// The engine answers from one book because there is one ledger, so without
+    /// this scoping a passenger polling `QueryOrders` reads every other
+    /// passenger's order history - including their terminal rows, which is why
+    /// ownership outlives an order's end. Deleting the `retain` in
+    /// `scope_query_rows` makes the count assertion fail at 2.
+    #[test]
+    fn a_query_reply_carries_only_the_asking_connections_orders() {
+        let run = run(1_000, 400, None);
+        let (mine, _my_rx) = ExecLanes::detached();
+        let (theirs, _their_rx) = ExecLanes::detached();
+        run.claim_order("V-mine".into(), mine.id());
+        run.claim_order("V-theirs".into(), theirs.id());
+
+        let row = |venue_order_id: &str| mogwai_protocol::OrderStatusInfo {
+            client_order_id: venue_order_id.into(),
+            venue_order_id: venue_order_id.into(),
+            symbol: Symbol::from("BTCUSDT"),
+            position_id: None,
+            side: mogwai_protocol::Side::Buy,
+            order_type: mogwai_protocol::OrderType::Limit,
+            time_in_force: mogwai_protocol::TimeInForce::Gtc,
+            status: mogwai_protocol::WireOrderStatus::Filled,
+            quantity: Decimal::ONE,
+            filled_qty: Decimal::ONE,
+            price: None,
+            trigger_price: None,
+            ts_triggered: None,
+            reduce_only: false,
+            post_only: false,
+            ts_accepted: 1,
+            ts_last: 1,
+        };
+        let mut events = vec![mogwai_protocol::ServerMessage::OrderStatusSnapshot(
+            mogwai_protocol::OrderStatusSnapshot {
+                request_id: "R-1".into(),
+                orders: vec![row("V-mine"), row("V-theirs")],
+                ts_event: 1,
+            },
+        )];
+        run.scope_query_rows(&mut events, mine.id());
+
+        let mogwai_protocol::ServerMessage::OrderStatusSnapshot(snapshot) = &events[0] else {
+            panic!("the snapshot survives scoping");
+        };
+        assert_eq!(snapshot.orders.len(), 1, "one connection, one order");
+        assert_eq!(snapshot.orders[0].venue_order_id, "V-mine");
     }
 
     #[test]

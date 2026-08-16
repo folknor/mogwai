@@ -427,12 +427,11 @@ fn deliver(
             closed.push(id);
         }
     }
-    // The batch's own terminal frames retire their ownership claims. Done after
-    // the fanout, not before: the resolution above still needs the table to
-    // answer for the fill that ends an order. Retire-only, never claim - a
-    // sweep-produced order is one the VENUE originated (a liquidation), which
-    // no connection submitted and which therefore stays unattributed.
-    run.retire_terminal(events);
+    // No ownership bookkeeping here, deliberately. A sweep-produced order is one
+    // the VENUE originated (a liquidation), so there is nobody to claim it for,
+    // and a claim is retired when its connection is released rather than when
+    // its order ends - a terminal order still has to be attributable, because
+    // `QueryOrders` reports terminal rows by design.
     // A lane whose receiver is gone is a connection that is already tearing
     // down; retiring it here means a wedged socket cannot make every later pass
     // pay for it.

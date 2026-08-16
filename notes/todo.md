@@ -846,13 +846,24 @@ required eventually, since both modes must be supported.
   unable to observe that another exists.
   LANDED 2026-08-16: `ExecLanes` carries its own minted id, the run keys live
   orders to the connection that submitted them, and `deliver` attributes each
-  order-scoped frame rather than broadcasting it. Venue-wide frames still reach
-  every lane, and an unattributed order - one the VENUE originated, such as a
-  margin liquidation - still reaches all of them, which is the conservative
-  direction: a stray frame is the defect being closed, a MISSING fill would be
-  worse. TWO OF THE THREE CHANNELS REMAIN OPEN, and both need the passenger
-  object rather than a filter: the single process-wide ledger, and the unscoped
-  order-query surface. See the river-and-passenger item above.
+  order-scoped frame rather than broadcasting it. The ORDER-QUERY surface landed
+  with it: `QueryOrders` and `QueryFills` are answered from the one book, as
+  they must be while there is one ledger, and their rows are scoped to the
+  asking connection on the way out. Venue-wide frames still reach every lane,
+  and an unattributed order - one the VENUE originated, such as a margin
+  liquidation - is still delivered and reported to all of them, which is the
+  conservative direction: a stray row is the defect being closed, a MISSING fill
+  would be worse.
+  ONE DESIGN NOTE WORTH KEEPING, because the first shape of this was wrong: an
+  ownership claim survives its order's TERMINAL state and is dropped only when
+  the connection is released. Retiring on the ending frame bounds the table more
+  tightly, but it makes a closed order unattributed, and the query surface
+  reports terminal rows BY DESIGN - so every connection's finished history would
+  have gone to everyone.
+  ONE OF THE THREE CHANNELS REMAINS OPEN, and it is the one no filter can close:
+  the single process-wide ledger. `GET /account` and the balance and position
+  arithmetic are still venue-wide, so passengers still share a wallet. That
+  needs the passenger object. See the river-and-passenger item above.
 
 - PROBLEM STATEMENTS. **This was the solvable set of problems believed to get
   mogwai to the end state the user needs.** That was a claim rather than an

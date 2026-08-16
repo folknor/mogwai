@@ -153,19 +153,21 @@ async fn dispatch_command(
     let class = CommandClass::of(&cmd);
     match process_order_cmd(cmd, state, &state.run, lanes, symbol, boat).await {
         OrderOutcome::Produced {
-            events,
+            mut events,
             reservation,
         }
         | OrderOutcome::Refused {
-            events,
+            mut events,
             reservation,
         } => {
-            // Before the batch leaves: whatever it accepted is now owned by THIS
-            // connection, and whatever it ended is owned by nobody. Recorded
-            // here rather than inside `process_order_cmd` because this is the
-            // one place that holds both the produced events and the lanes whose
-            // id names the submitter.
+            // Attribution happens here rather than inside `process_order_cmd`
+            // because this is the one place holding both the produced events and
+            // the lanes whose id names the submitter.
+            //
+            // Claim first, then scope: a submit that is immediately queried in
+            // the same batch would otherwise have its own row dropped.
             state.run.track_ownership(&events, lanes.id());
+            state.run.scope_query_rows(&mut events, lanes.id());
             drop(lanes.submit_produced(reservation, Instant::now(), class, events));
         }
         OrderOutcome::NotAdmitted(frame) | OrderOutcome::Diagnostic(frame) => {
