@@ -414,9 +414,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.4.2"
+version = "1.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d262e149917187838d5b42777c8253bcb64500067342904e7d429499a6f277e"
+checksum = "509591b7bcd67f4ef775afad7662703b4935daaa6ec0e5605cfb1090b32a2b6d"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -951,9 +951,9 @@ dependencies = [
 
 [[package]]
 name = "fearless_simd"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0f5f895dac0865bc235f1364793899569a7db538137f1024dccea56bf41c78d"
+checksum = "f4beca3cb2444e3304ac30843cc091f44ed58932353cd492ce740067bfce6b12"
 
 [[package]]
 name = "fiat-crypto"
@@ -963,9 +963,9 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.10"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
+checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
 name = "flate2"
@@ -1225,9 +1225,9 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hotpath"
-version = "0.23.2"
+version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62e810bedda5a467ef5c9b5c8a20763fefebc89b63ef36f7ee44a143085204a2"
+checksum = "dce755d457a63bdd0c95e4c91511daad1b58b33209543b7f38027b676f387e5e"
 dependencies = [
  "arc-swap",
  "cfg-if",
@@ -1249,9 +1249,9 @@ dependencies = [
 
 [[package]]
 name = "hotpath-macros"
-version = "0.23.2"
+version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01bdc59bfc1a9984bee2ff5da63b2f6fccbaa57cd9a4119d709524632bddf341"
+checksum = "a903af89a8429cb07790c3818bc15270b394f80af1bc254e5ccf9c7de2961770"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1260,15 +1260,15 @@ dependencies = [
 
 [[package]]
 name = "hotpath-macros-meta"
-version = "0.23.2"
+version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9216e8a01abe1e1671c376dc8736fb1bf772d7a889538d25f9e1200120ced38"
+checksum = "bcc0ab94ffbb2ee77f4a897df02b5a137a10cf24d69bda936e59aff4dd456e61"
 
 [[package]]
 name = "hotpath-meta"
-version = "0.23.2"
+version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f22a9d20435fb79511b19dae37b3607224cd98f342a410702d84657cc38fc72f"
+checksum = "053481f6cec8f775a3276c7f6e2f21123111d28261e4edc15ea7421c445964bb"
 dependencies = [
  "hotpath-macros-meta",
 ]
@@ -1676,9 +1676,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.19"
+version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2026a5056764a10b2bf5d56488cba40da507f5493a6a429340e2004d9ed085fa"
+checksum = "28d0a00925a9f930d679b6789b721e3a7f9ed110f41b86d2497caa780c3a070a"
 dependencies = [
  "libc",
 ]
@@ -2236,9 +2236,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkg-config"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "potential_utf"
@@ -3731,9 +3731,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.24.0"
+version = "1.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -4292,9 +4292,9 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zrip"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa05c09787b3aaaaa57870dca9fd9f3b4934018cbb5dde1b112017e2e70ec491"
+checksum = "6ef05d0a0abfcffec1d7dabdbd73373fef2b5838c20dc86ad8b6b6ee1a48a3cb"
 dependencies = [
  "zrip-core",
  "zrip-decode",
@@ -4303,15 +4303,15 @@ dependencies = [
 
 [[package]]
 name = "zrip-core"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9335acd94c1f09f729178fc339f9d49790254c1e98ba076f88df3a3f534c4e7d"
+checksum = "d0122e5712041938e8a1a4db57975da142f9b9cd1aab24cf8a94bb2ce4b79774"
 
 [[package]]
 name = "zrip-decode"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1801cd8b5d374e2bc31cd8a231182dd47e621492fa0bf68ca7d3033e001cd06b"
+checksum = "8a21823fd3263a53b26c082461bd411006652fa3e0d7842c5bac552ac5498bab"
 dependencies = [
  "fearless_simd",
  "zrip-core",
@@ -4319,9 +4319,9 @@ dependencies = [
 
 [[package]]
 name = "zrip-encode"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38e7e22b665b947f0240b44805713e87a15c34e86d0891cbe2856c575c5cda1d"
+checksum = "d5df1e3a40c73ef22d3ac48ac5cdb56a20d0f56ad00b56575bc515a990862e8c"
 dependencies = [
  "zrip-core",
 ]
