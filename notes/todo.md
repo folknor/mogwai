@@ -712,19 +712,6 @@ consumer surface landed was the designed handoff.
   identity chain the code builds - now just run, tape and ledger, since the
   lifecycle landing collapsed account, session and subscription out of it.
 
-- `scripts/smoke.py` DEFAULT MODE IS FLAKY on the first market frame. Observed
-  2026-08-15 during the slice-1 review pass: one run failed with "the first
-  market frame must be the BBO snapshot, got Trade" and the immediate rerun
-  passed, on a tree whose default tape was byte-identical to the committed
-  one, so it is pre-existing and unrelated to that landing. It is the "never
-  assert on THE NEXT frame" family applied to the launcher contract script:
-  either the assertion needs a drain-to-deadline, or snapshot-first is a real
-  wire contract the server must uphold and the race is a server defect.
-  Decide which before patching the script. SECOND OCCURRENCE later the same
-  day, at the piece-5 landing gate: identical failure text, identical
-  pass-on-immediate-rerun, again on a tree whose tape generation was
-  untouched. Two hits in one day says the race is not rare.
-
 - `an_armed_divergence_reaches_every_connection` FLAKED ONCE at the piece-7
   landing gate, 2026-08-15: "market data generated after an armed StallData
   window arrived", in a full `--gate` sweep under machine load, then passed

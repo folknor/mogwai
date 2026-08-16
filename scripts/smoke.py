@@ -413,10 +413,20 @@ def mode_default(venue: Venue) -> str:
     try:
         # No Subscribe frame is sent, and none exists to send: the venue pushes
         # the run's one tape on upgrade.
-        quote = ws.recv()
-        assert quote and quote.get("type") == "Quote", (
-            f"the first market frame must be the BBO snapshot, got {quote}"
-        )
+        #
+        # DRAINED, not asserted on the NEXT frame. This used to require the very
+        # first market frame to be the BBO snapshot and flaked on it twice in one
+        # day. Snapshot-first is NOT a wire contract and the server never claimed
+        # it was: `Tape::subscribe_with_snapshot` returns an OPTION, and a boat
+        # that has not yet published a quote has no BBO to hand over, so a socket
+        # binding in the instant between the tape's first trade and its first
+        # quote legitimately sees the trade first. There is no stale-BBO hole
+        # behind that - the snapshot is absent only when no quote exists yet, and
+        # the tape's own first quote follows immediately. What the venue does
+        # promise, and what is worth smoking, is that a bound socket receives a
+        # well-formed two-sided quote unbidden.
+        quote = ws.until(lambda frame: frame.get("type") == "Quote")
+        assert quote, "the venue pushed no BBO quote to a bound socket"
         assert quote["symbol"] == venue.symbol
         assert Decimal(quote["bid_px"]) < Decimal(quote["ask_px"])
         assert Decimal(quote["bid_sz"]) > 0 and Decimal(quote["ask_sz"]) > 0

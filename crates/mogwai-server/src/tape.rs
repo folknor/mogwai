@@ -100,6 +100,12 @@ impl Tape {
         });
         (tape, handle)
     }
+    /// Subscribe, plus the last quote this boat PUBLISHED if it has published
+    /// one. The option is the contract, not an implementation detail: a socket
+    /// binding between a boat's first trade and its first quote gets `None` and
+    /// therefore sees a trade as its first market frame. Callers must not turn
+    /// this into a snapshot-first promise - there is nothing to snapshot yet,
+    /// and the tape's own first quote is immediately behind it.
     pub(crate) fn subscribe_with_snapshot(
         &self,
     ) -> (broadcast::Receiver<TapeFrame>, Option<TapeFrame>) {

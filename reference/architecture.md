@@ -238,6 +238,19 @@ parent may print beyond the touch without making the book malformed. A connectin
 receives the current BBO snapshot before later tape frames, and the adapter
 retains that snapshot until its host activates quote delivery.
 
+That snapshot is CONDITIONAL, and a consumer must not read it as a
+snapshot-first wire contract. `Tape::subscribe_with_snapshot` hands back an
+option: the boat retains the last quote it PUBLISHED, so a socket binding in
+the window between a boat's first trade and its first quote is handed no
+snapshot and sees that trade as its first market frame. Nothing is hidden by
+the absence - the snapshot is missing only when no quote has been published on
+that river yet, and the tape's own first quote follows immediately, so there is
+no case where a bound socket holds a stale BBO or none at all for long. A test
+or a consumer that requires the FIRST frame to be a quote is asserting
+something stronger than the venue promises, and it will lose that bet at boot;
+drain to a deadline instead. `scripts/smoke.py` did exactly that and flaked
+twice in one day before it was corrected.
+
 The volatility innovation is standardized to unit variance before it reaches
 that recursion. The `a0` derivation has always assumed this, but the innovation
 was a raw Student-t whose variance is `df / (df - 2)`, so the true condition was
