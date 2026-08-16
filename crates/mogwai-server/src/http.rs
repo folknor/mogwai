@@ -2146,9 +2146,11 @@ mod calendar_tests {
             quantity: Decimal::ONE,
             price: None,
             trigger_price: None,
+            trail_offset: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
+            expire_time: None,
         };
         let reading = Some(mogwai_engine::MarketReading {
             last_px: Decimal::from(21_000),

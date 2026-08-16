@@ -127,18 +127,24 @@ impl Engine {
         let marketable = order.order_type == OrderType::Market
             || reading.is_some_and(|value| trades_through(order.side, trigger_px, value.last_px));
 
-        if matches!(
-            order.order_type,
-            OrderType::StopMarket | OrderType::StopLimit
-        ) {
+        if order.order_type.is_conditional() {
             let venue_order_id = self.next_venue_order_id();
             self.seen_client_order_ids
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
             let stop_px = order
                 .trigger_price
                 .expect("validated conditional has trigger");
-            let touched =
-                reading.is_some_and(|value| touches_trigger(order.side, stop_px, value.last_px));
+            // Which predicate this conditional waits on: a STOP fires when
+            // price runs away from what it protects, a TOUCHED order when
+            // price comes toward the level it is waiting at.
+            let toward = order.order_type.triggers_toward();
+            let touched = reading.is_some_and(|value| {
+                if toward {
+                    mogwai_protocol::touches_toward(order.side, stop_px, value.last_px)
+                } else {
+                    touches_trigger(order.side, stop_px, value.last_px)
+                }
+            });
             let leaves_qty = order.quantity;
             let record = OpenOrder {
                 venue_order_id: venue_order_id.clone(),
@@ -148,7 +154,7 @@ impl Engine {
                 ts_last: ts,
                 ts_triggered: None,
                 band_ticks,
-                resting: Resting::Conditional { stop_px },
+                resting: Resting::Conditional { stop_px, toward },
                 band_draw: 0,
                 scanned_ns: ts,
                 revision: 0,
@@ -236,7 +242,7 @@ impl Engine {
                 // against the acceptance-time reading, and cancels short of its
                 // trigger rather than filling at a price the market never
                 // reached.
-                TimeInForce::Gtc => self.rest_open(record),
+                TimeInForce::Gtc | TimeInForce::Day | TimeInForce::Gtd => self.rest_open(record),
                 TimeInForce::Ioc => {
                     out.push(ServerMessage::OrderCanceled {
                         client_order_id: record.submit.client_order_id.clone(),
@@ -411,7 +417,7 @@ impl Engine {
                 };
             }
             match record.submit.time_in_force {
-                TimeInForce::Gtc => {
+                TimeInForce::Gtc | TimeInForce::Day | TimeInForce::Gtd => {
                     self.rest_open(record);
                 }
                 TimeInForce::Ioc => {
@@ -474,6 +480,147 @@ impl Engine {
     /// As `apply_scans`, on the clock of the boat whose sweep produced these
     /// results. The sweeper walks one boat at a time and every `ts` here was
     /// sampled on that boat, so the fee surcharge is judged on it.
+    /// Advance every resting `TrailingStopMarket` whose trigger the tape has
+    /// left behind.
+    ///
+    /// A sell trail rises with the high and NEVER falls back; a buy trail falls
+    /// with the low and never rises. That one-way movement is the whole
+    /// mechanism - a trigger that retreated would be a stop somebody keeps
+    /// amending, not a trailing stop - so the candidate is only taken when it
+    /// improves on where the trigger already is.
+    ///
+    /// RATCHETED ON THE MARK, which is the same resolution the risk policy runs
+    /// at and carries the same bound: a spike between two sweep passes does not
+    /// move the trail, so the stop sits further from the extreme than a
+    /// tick-resolution venue would place it. Lenient in the holder's favour
+    /// rather than wrong, and closing it wants the same tick-level hook.
+    ///
+    /// The trigger is moved on BOTH the resting state and the submit, because
+    /// the order's reservation is derived from the submit and a trail that
+    /// moved only the scan predicate would hold the wrong amount.
+    /// Cancel every resting order whose time-in-force has run out.
+    ///
+    /// TIME-DRIVEN and nothing to do with triggers, which is why it is its own
+    /// pass rather than a branch of the trigger walk: a `Gtd` limit nothing ever
+    /// approached must still stop resting at its instant, and a `Day` order must
+    /// stop resting at the session boundary whether or not the tape came near
+    /// it.
+    ///
+    /// `closed_symbol` names an instrument whose SESSION JUST CLOSED, which the
+    /// caller detects by asking the calendar whether the span it swept crossed
+    /// from open to shut. A day order's expiry is that instant rather than
+    /// anything the client stated, and an instrument with no calendar never
+    /// supplies one - so a day order on a 24/7 symbol rests like a `Gtc`, which
+    /// is the honest answer: with no session to end there is no instant to
+    /// expire at, and inventing one (midnight UTC, say) would expire orders at a
+    /// time the market they trade has never heard of.
+    pub fn expire_orders(
+        &mut self,
+        now_ns: u64,
+        closed_symbol: Option<&str>,
+        ts: u64,
+    ) -> Vec<ServerMessage> {
+        let expired: Vec<String> = self
+            .open
+            .iter()
+            .filter(|order| match order.submit.time_in_force {
+                TimeInForce::Gtd => order
+                    .submit
+                    .expire_time
+                    .is_some_and(|expire_at| now_ns >= expire_at),
+                TimeInForce::Day => {
+                    closed_symbol.is_some_and(|symbol| order.submit.symbol.as_ref() == symbol)
+                }
+                _ => false,
+            })
+            .map(|order| order.submit.client_order_id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for client_order_id in expired {
+            let Some(pos) = self.open.position(&client_order_id) else {
+                continue;
+            };
+            let order = self.take_open(pos);
+            self.record_closed(&order, WireOrderStatus::Canceled, ts);
+            // CANCELED rather than a status of its own: nautilus models expiry
+            // as a distinct `Expired` transition, but the wire's status set has
+            // no such member and adding one would break every consumer's match
+            // for a distinction nothing downstream acts on differently. The
+            // reason is in the log line, not in the wire status.
+            tracing::debug!(
+                client_order_id = %order.submit.client_order_id,
+                time_in_force = ?order.submit.time_in_force,
+                "resting order expired",
+            );
+            out.push(ServerMessage::OrderCanceled {
+                client_order_id: order.submit.client_order_id.clone(),
+                venue_order_id: order.venue_order_id.clone(),
+                ts_event: ts,
+            });
+        }
+        if !out.is_empty() {
+            out.push(ServerMessage::AccountState(self.snapshot(ts)));
+        }
+        out
+    }
+
+    pub(crate) fn ratchet_trailing_stops(
+        &mut self,
+        marks: &[(mogwai_protocol::Symbol, Decimal)],
+        ts: u64,
+    ) {
+        for (symbol, mark) in marks {
+            let positions: Vec<usize> = self
+                .open
+                .iter()
+                .enumerate()
+                .filter(|(_, order)| {
+                    order.submit.order_type.trails()
+                        && order.submit.symbol == *symbol
+                        && matches!(order.resting, Resting::Conditional { .. })
+                })
+                .map(|(pos, _)| pos)
+                .collect();
+            for pos in positions {
+                let order = &self.open[pos];
+                let Some(offset) = order.submit.trail_offset else {
+                    continue;
+                };
+                let Resting::Conditional { stop_px, toward } = order.resting else {
+                    continue;
+                };
+                let candidate = match order.submit.side {
+                    Side::Sell => mark.checked_sub(offset),
+                    Side::Buy => mark.checked_add(offset),
+                };
+                let Some(candidate) = candidate else {
+                    continue;
+                };
+                let improves = match order.submit.side {
+                    Side::Sell => candidate > stop_px,
+                    Side::Buy => candidate < stop_px,
+                };
+                if !improves {
+                    continue;
+                }
+                let before = order.clone();
+                let order = &mut self.open[pos];
+                order.submit.trigger_price = Some(candidate);
+                order.resting = Resting::Conditional {
+                    stop_px: candidate,
+                    toward,
+                };
+                // The trigger window restarts, exactly as an amend restarts a
+                // limit's: a span walked against the OLD trigger says nothing
+                // about the new one.
+                order.scanned_ns = ts;
+                order.revision = order.revision.saturating_add(1);
+                order.ts_last = ts;
+                self.refresh_open_reservation(pos, &before);
+            }
+        }
+    }
+
     pub fn apply_scans_on_clock(
         &mut self,
         results: &[ScanResult],
@@ -717,7 +864,13 @@ impl Engine {
         }
         let increment = self.instruments[&order.submit.symbol].price_increment;
         match order.submit.order_type {
-            OrderType::StopMarket => {
+            // Every conditional that TAKES liquidity once triggered. The three
+            // differ only in what made them live - a stop running away from a
+            // position, a touched order coming toward its level, a trailing stop
+            // whose own trigger followed the tape - and not at all in what
+            // happens next, which is why they share this arm rather than three
+            // copies of it.
+            OrderType::StopMarket | OrderType::TrailingStopMarket | OrderType::MarketIfTouched => {
                 // The triggering print, slipped adversely by a fresh draw from
                 // the band the order was accepted under. Never `read_market`
                 // again: the print is what made the order live, and a second
@@ -778,7 +931,8 @@ impl Engine {
                     self.rest_open(order);
                 }
             }
-            OrderType::StopLimit => {
+            // Both conditionals that REST as a limit once triggered.
+            OrderType::StopLimit | OrderType::LimitIfTouched => {
                 // A live limit at the stated price, judged EXACTLY as a limit
                 // submitted at this instant: the print that made it live is
                 // offered to it, and a gap that never reached the limit leaves
@@ -878,7 +1032,9 @@ impl Engine {
                     self.rest_open(order);
                 }
             }
-            OrderType::Market | OrderType::Limit => unreachable!("only conditionals trigger"),
+            OrderType::Market | OrderType::Limit | OrderType::MarketToLimit => {
+                unreachable!("only conditionals trigger")
+            }
         }
         out
     }
@@ -1118,27 +1274,37 @@ impl Engine {
             OrderType::Limit if order.trigger_price.is_some() => {
                 return Err("Limit order must not carry trigger_price".into());
             }
-            OrderType::StopMarket if order.price.is_some() => {
-                return Err("StopMarket order must not carry a price".into());
+            OrderType::StopMarket | OrderType::MarketIfTouched | OrderType::TrailingStopMarket
+                if order.price.is_some() =>
+            {
+                return Err("a market-on-trigger order must not carry a price".into());
             }
-            OrderType::StopMarket | OrderType::StopLimit if order.trigger_price.is_none() => {
+            _ if order.order_type.is_conditional() && order.trigger_price.is_none() => {
                 return Err("conditional order must carry trigger_price".into());
             }
-            OrderType::Limit | OrderType::StopLimit if order.price.is_none() => {
+            OrderType::Limit
+            | OrderType::StopLimit
+            | OrderType::LimitIfTouched
+            | OrderType::MarketToLimit
+                if order.price.is_none() =>
+            {
                 return Err("limit order must carry a price".into());
             }
             _ => {}
         }
         let price = risk_px(order);
-        if matches!(
-            order.order_type,
-            OrderType::StopMarket | OrderType::StopLimit
-        ) && order.time_in_force != TimeInForce::Gtc
+        if order.order_type.is_conditional()
+            && matches!(order.time_in_force, TimeInForce::Ioc | TimeInForce::Fok)
         {
-            return Err("conditional orders are good-till-cancel only: a now-or-never order cannot wait for a trigger".into());
+            return Err("conditional orders cannot be immediate-or-cancel: a now-or-never order cannot wait for a trigger".into());
         }
-        if order.post_only && !matches!(order.order_type, OrderType::Limit | OrderType::StopLimit) {
-            return Err("post_only is legal only on Limit and StopLimit".into());
+        if order.post_only
+            && !matches!(
+                order.order_type,
+                OrderType::Limit | OrderType::StopLimit | OrderType::LimitIfTouched
+            )
+        {
+            return Err("post_only is legal only on orders that rest as a limit".into());
         }
         if let Some(trigger) = order.trigger_price
             && !on_increment(trigger, instrument.price_increment)
@@ -1445,10 +1611,7 @@ impl Engine {
         // with the reason that is actually true of each.
         if trigger_price.is_some() && !matches!(self.open[pos].resting, Resting::Conditional { .. })
         {
-            let conditional = matches!(
-                self.open[pos].submit.order_type,
-                OrderType::StopMarket | OrderType::StopLimit
-            );
+            let conditional = self.open[pos].submit.order_type.is_conditional();
             return vec![ServerMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
@@ -1765,6 +1928,7 @@ impl Engine {
                 order.submit.trigger_price = Some(new_trigger);
                 order.resting = Resting::Conditional {
                     stop_px: new_trigger,
+                    toward: order.submit.order_type.triggers_toward(),
                 };
                 order.scanned_ns = ts;
             }

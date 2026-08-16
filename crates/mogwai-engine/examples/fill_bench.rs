@@ -48,9 +48,11 @@ fn order(id: String) -> SubmitOrder {
         quantity: Decimal::ONE,
         price: Some(Decimal::from(100)),
         trigger_price: None,
+        trail_offset: None,
         reduce_only: false,
         post_only: false,
         time_in_force: TimeInForce::Gtc,
+        expire_time: None,
     }
 }
 
@@ -120,9 +122,11 @@ fn futures_book(size: usize) -> (Engine, Vec<(mogwai_protocol::Symbol, Decimal)>
             quantity: Decimal::ONE,
             price: Some(Decimal::from(21_000)),
             trigger_price: None,
+            trail_offset: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
+            expire_time: None,
         };
         let _ = engine.process_with_market(
             ClientMessage::SubmitOrder(submit),

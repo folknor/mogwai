@@ -67,8 +67,18 @@ pub fn touches_trigger(side: Side, trigger: Decimal, traded: Decimal) -> bool {
 pub enum ScanKind {
     /// `trades_through` against a live limit's drawn band trigger.
     FillThrough,
-    /// `touches_trigger` against an untriggered conditional's stop price.
+    /// `touches_trigger` against an untriggered STOP's trigger price.
     TriggerTouch,
+    /// `touches_toward` against an untriggered TOUCHED order's trigger price.
+    ///
+    /// The complement of `TriggerTouch` in direction and its twin in strictness.
+    /// A stop protects - buy above the market, sell below - so it fires when
+    /// price runs AWAY from where you are. A touched order enters - buy below,
+    /// sell above - so it fires when price comes TOWARD its level. Same
+    /// machinery, opposite comparison; collapsing them into one predicate with a
+    /// flag would put the two most easily confused behaviours in the venue
+    /// behind one boolean.
+    TriggerToward,
 }
 
 impl ScanKind {
@@ -77,7 +87,23 @@ impl ScanKind {
         match self {
             Self::FillThrough => trades_through(side, px, traded),
             Self::TriggerTouch => touches_trigger(side, px, traded),
+            Self::TriggerToward => touches_toward(side, px, traded),
         }
+    }
+}
+
+/// True when a traded price has reached a TOUCHED order's trigger from the
+/// entry side: a buy waits for the tape to come DOWN to it, a sell for it to
+/// come UP.
+///
+/// TOUCH rather than through, exactly like `touches_trigger`, and for the same
+/// reason: a conditional holds no queue position, so its trigger is a pure price
+/// predicate the venue evaluates on its own book.
+#[must_use]
+pub fn touches_toward(side: Side, trigger: Decimal, traded: Decimal) -> bool {
+    match side {
+        Side::Buy => traded <= trigger,
+        Side::Sell => traded >= trigger,
     }
 }
 
@@ -288,6 +314,85 @@ pub enum OrderType {
     /// Untriggered conditional carrying both. `price` is the limit price the
     /// order takes AFTER it triggers.
     StopLimit,
+    /// A stop whose trigger RATCHETS with the tape and fires on touch like any
+    /// other stop.
+    ///
+    /// The trigger follows the extreme the tape has reached since the order
+    /// rested, held `trail_offset` away from it, and never retreats: a sell
+    /// stop rises with the high and stays put when price falls back. That
+    /// one-way movement is what makes it a trailing stop rather than a stop
+    /// somebody keeps amending.
+    ///
+    /// It exists because a Pine `strategy.exit` with a native trailing leg
+    /// compiles into exactly this, and refusing it halted the run - so an entire
+    /// dealt exit family was untestable anywhere, forward being the only place
+    /// resting-order timing can be validated at all. Re-placing it as a fixed
+    /// stop each bar is a real workaround for the doctrines whose trail level is
+    /// an indicator value, and covers neither `trail_points` nor `trail_offset`.
+    TrailingStopMarket,
+    /// The mirror of a stop: fires when the tape touches `trigger_price` coming
+    /// from the OTHER side, then takes liquidity.
+    ///
+    /// A stop protects a position (sell below, buy above); a touched order
+    /// enters on strength or weakness (buy below, sell above). The trigger
+    /// arithmetic differs only in which direction closes the gap, which is why
+    /// the two share a state machine.
+    MarketIfTouched,
+    /// `MarketIfTouched` that rests as a limit at `price` once touched, exactly
+    /// as `StopLimit` is to `StopMarket`.
+    LimitIfTouched,
+    /// A market order that RESTS as a limit at the price it could not fill at,
+    /// rather than sweeping through the book.
+    ///
+    /// The venue's fill model has no book to sweep, so what this expresses here
+    /// is "take what is available at the touch and rest the remainder" - which
+    /// is the behaviour a real market-to-limit gives and which an IOC market
+    /// cannot, since IOC cancels its remainder instead of resting it.
+    MarketToLimit,
+}
+
+impl OrderType {
+    /// Whether this type waits for the tape to reach a trigger before it can
+    /// fill or rest.
+    #[must_use]
+    pub const fn is_conditional(self) -> bool {
+        matches!(
+            self,
+            Self::StopMarket
+                | Self::StopLimit
+                | Self::TrailingStopMarket
+                | Self::MarketIfTouched
+                | Self::LimitIfTouched
+        )
+    }
+
+    /// Whether the order becomes a LIMIT once its trigger fires, rather than
+    /// taking liquidity.
+    #[must_use]
+    pub const fn rests_after_trigger(self) -> bool {
+        matches!(self, Self::StopLimit | Self::LimitIfTouched)
+    }
+
+    /// Whether the trigger fires when the tape reaches it from BELOW for a buy
+    /// and from ABOVE for a sell - the touched family - rather than the stop
+    /// family's opposite convention.
+    ///
+    /// A STOP buy triggers when price rises to it and a stop sell when price
+    /// falls to it: that is protection. A TOUCHED buy triggers when price falls
+    /// to it and a touched sell when price rises to it: that is entry. Same
+    /// machinery, opposite comparison, and getting it backwards turns every
+    /// protective order into an entry.
+    #[must_use]
+    pub const fn triggers_toward(self) -> bool {
+        matches!(self, Self::MarketIfTouched | Self::LimitIfTouched)
+    }
+
+    /// Whether the trigger moves with the tape instead of staying where it was
+    /// placed.
+    #[must_use]
+    pub const fn trails(self) -> bool {
+        matches!(self, Self::TrailingStopMarket)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +400,25 @@ pub enum TimeInForce {
     Gtc,
     Ioc,
     Fok,
+    /// Rests until the end of the trading DAY, then expires.
+    ///
+    /// Not optional trivia: this is the DEFAULT on equity venues, so a surface
+    /// offering only Gtc, Ioc and Fok is not an equity surface. The day boundary
+    /// comes from the instrument's calendar - a session close is a real instant
+    /// the venue already knows - rather than from a wall clock.
+    Day,
+    /// Rests until `expire_time`, then expires. Common enough across all four
+    /// asset classes to belong beside `Day`.
+    Gtd,
+}
+
+impl TimeInForce {
+    /// Whether this order expires on its own rather than resting until it is
+    /// cancelled or filled.
+    #[must_use]
+    pub const fn expires(self) -> bool {
+        matches!(self, Self::Day | Self::Gtd)
+    }
 }
 
 /// Client → server order-entry messages. Market data is streamed immediately
@@ -501,7 +625,20 @@ pub struct SubmitOrder {
     /// REQUIRED on StopMarket/StopLimit, refused on Market/Limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_price: Option<Decimal>,
+    /// How far a `TrailingStopMarket`'s trigger sits from the extreme the tape
+    /// has reached. REQUIRED on that type and refused on every other.
+    ///
+    /// An absolute price distance, not a fraction: Pine states a trail in points
+    /// or in ticks, and converting a fraction back would need a reference price
+    /// nothing here agrees on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail_offset: Option<Decimal>,
     pub time_in_force: TimeInForce,
+    /// Sim instant a `Gtd` order expires at. REQUIRED on `Gtd` and refused on
+    /// every other time-in-force, including `Day` - a day order's expiry comes
+    /// from the instrument's calendar, not from the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire_time: Option<u64>,
     /// Fills are clamped to the position this order would close, and the order
     /// is canceled rather than filled when that position is gone. Exempt from
     /// the funded-admission check and from `locked_balances`: it can only
@@ -569,26 +706,64 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         OrderType::Limit if order.trigger_price.is_some() => {
             Err("Limit order must not carry trigger_price")
         }
-        OrderType::StopMarket if order.price.is_some() => {
-            Err("StopMarket order must not carry a price")
+        OrderType::StopMarket | OrderType::MarketIfTouched | OrderType::TrailingStopMarket
+            if order.price.is_some() =>
+        {
+            Err("a market-on-trigger order must not carry a price")
         }
-        OrderType::StopMarket | OrderType::StopLimit if order.trigger_price.is_none() => {
+        _ if order.order_type.is_conditional() && order.trigger_price.is_none() => {
             Err("conditional order must carry trigger_price")
         }
-        OrderType::StopLimit if order.price.is_none() => Err("StopLimit order must carry a price"),
-        _ if order.post_only
-            && !matches!(order.order_type, OrderType::Limit | OrderType::StopLimit) =>
-        {
-            Err("post_only is legal only on Limit and StopLimit")
+        OrderType::StopLimit | OrderType::LimitIfTouched if order.price.is_none() => {
+            Err("a limit-on-trigger order must carry a price")
         }
-        _ if matches!(
-            order.order_type,
-            OrderType::StopMarket | OrderType::StopLimit
-        ) && order.time_in_force != TimeInForce::Gtc =>
+        OrderType::MarketToLimit if order.price.is_none() => {
+            Err("MarketToLimit order must carry a price: it is the limit the remainder rests at")
+        }
+        OrderType::MarketToLimit if order.trigger_price.is_some() => {
+            Err("MarketToLimit order must not carry trigger_price")
+        }
+        // The trail offset is what makes a trailing stop one, and it is
+        // meaningless anywhere else - accepting it silently on a fixed stop
+        // would leave a client believing its stop moves.
+        OrderType::TrailingStopMarket if order.trail_offset.is_none() => {
+            Err("TrailingStopMarket order must carry trail_offset")
+        }
+        _ if order.trail_offset.is_some() && !order.order_type.trails() => {
+            Err("trail_offset is legal only on TrailingStopMarket")
+        }
+        _ if order
+            .trail_offset
+            .is_some_and(|offset| offset <= Decimal::ZERO) =>
+        {
+            Err("trail_offset must be > 0")
+        }
+        _ if order.post_only
+            && !matches!(
+                order.order_type,
+                OrderType::Limit | OrderType::StopLimit | OrderType::LimitIfTouched
+            ) =>
+        {
+            Err("post_only is legal only on orders that rest as a limit")
+        }
+        // A conditional cannot be now-or-never: an order that must fill
+        // immediately cannot also wait for a trigger. Day and Gtd CAN wait, so
+        // they are admitted where Ioc and Fok are not.
+        _ if order.order_type.is_conditional()
+            && matches!(order.time_in_force, TimeInForce::Ioc | TimeInForce::Fok) =>
         {
             Err(
-                "conditional orders are good-till-cancel only: a now-or-never order cannot wait for a trigger",
+                "conditional orders cannot be immediate-or-cancel: a now-or-never order cannot wait for a trigger",
             )
+        }
+        // `expire_time` is Gtd's whole content, and it belongs to nothing else -
+        // a Day order's expiry comes from the instrument's calendar, so a client
+        // stating one would be stating a deadline the venue ignores.
+        _ if order.time_in_force == TimeInForce::Gtd && order.expire_time.is_none() => {
+            Err("Gtd order must carry expire_time")
+        }
+        _ if order.expire_time.is_some() && order.time_in_force != TimeInForce::Gtd => {
+            Err("expire_time is legal only on Gtd")
         }
         _ => Ok(()),
     }

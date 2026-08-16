@@ -1318,6 +1318,31 @@ required eventually, since both modes must be supported.
   `expire_time` on the wire plus a time-driven expiry pass on the sweeper that
   has nothing to do with triggers. The conditional-order-type landing carried a
   GTC-only rule for stops for exactly this reason.
+  LANDED 2026-08-16, all but the order lists. `TrailingStopMarket`,
+  `MarketIfTouched`, `LimitIfTouched` and `MarketToLimit` are served, along with
+  `Day` and `Gtd`. The adapter's `wire_order_type` refuses only ORDER LISTS now,
+  which is the one shape the venue genuinely models no mechanism for.
+  THE TOUCHED FAMILY is a third `ScanKind`, `TriggerToward`, rather than a flag
+  on the stop predicate: a stop fires when price runs AWAY from what it protects
+  and a touched order when price comes TOWARD its level, and putting the two
+  most easily confused behaviours in the venue behind one boolean is how they
+  end up swapped.
+  THE TRAIL ratchets on the MARK - never retreating, which is the whole
+  mechanism - and moves the trigger on both the resting state and the submit,
+  because the reservation derives from the submit. It carries the same
+  resolution bound as the risk policy and for the same reason.
+  EXPIRY is its own time-driven pass. `Gtd` expires at its stated instant; `Day`
+  expires when its own instrument's SESSION CLOSES, which the sweeper detects by
+  asking the calendar whether the swept span crossed from open to shut. An
+  instrument with no calendar supplies no instant, so a day order on a 24/7
+  symbol rests like a Gtc rather than expiring at an invented hour.
+  STILL OPEN: ORDER LISTS (OCO, OTO). The venue models no linkage between
+  orders, so a genuine bracket where one fill cancels its sibling cannot exist,
+  and the consumer's two-independent-reduce-only-legs workaround remains a
+  workaround for a missing primitive. Also unlanded: nautilus models expiry as
+  its own `Expired` transition and the wire reports `Canceled`, which is a
+  distinction nothing downstream currently acts on but is a real difference from
+  what a nautilus host would see at a real venue.
 
 - A trigger-act latency havoc arm, if a scenario ever needs a trigger fired
   later than the sweep interval already allows. Deliberately not built with

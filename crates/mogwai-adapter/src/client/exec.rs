@@ -1051,9 +1051,18 @@ impl ExecutionClient for MogwaiExecutionClient {
             quantity: cmd.order_init.quantity.as_decimal(),
             price: cmd.order_init.price.map(|p| p.as_decimal()),
             trigger_price: cmd.order_init.trigger_price.map(|p| p.as_decimal()),
+            // Nautilus states a trailing offset with a TYPE beside it - price,
+            // ticks, basis points. Only the price form maps: the venue's trail
+            // is an absolute distance, and converting the others needs a
+            // reference price the two ends would have to agree on separately.
+            trail_offset: convert::wire_trail_offset(
+                cmd.order_init.trailing_offset,
+                cmd.order_init.trailing_offset_type,
+            )?,
             reduce_only: cmd.order_init.reduce_only,
             post_only: cmd.order_init.post_only,
             time_in_force: convert::wire_time_in_force(cmd.order_init.time_in_force)?,
+            expire_time: cmd.order_init.expire_time.map(|ts| ts.as_u64()),
         };
 
         let ts_init = now_unix_nanos(self.sim);

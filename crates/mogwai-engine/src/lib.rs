@@ -61,7 +61,14 @@ pub enum Resting {
     /// own stated price.
     Limit { fill_trigger_px: Decimal },
     /// Untriggered conditional. A print TOUCHING `stop_px` triggers it.
-    Conditional { stop_px: Decimal },
+    ///
+    /// `toward` picks which direction closes the gap: a STOP fires when price
+    /// runs away from the position it protects, a TOUCHED order when price comes
+    /// toward the level it is waiting at. The flag lives on the resting state
+    /// rather than being re-derived from the order type at every scan, so the
+    /// scan planner and the trigger handler cannot disagree about which
+    /// predicate an order is waiting on.
+    Conditional { stop_px: Decimal, toward: bool },
     /// Never scanned: a market remainder left by a partial fill, which has no
     /// meaningful price for the tape to reach. Ends only on a client cancel.
     Inert,
@@ -737,6 +744,9 @@ impl Engine {
                 }
             }
         }
+        // The trail follows the marks this pass saw, BEFORE the margin walk, so
+        // a stop that just ratcheted is the one a breach liquidation sees.
+        self.ratchet_trailing_stops(marks, ts);
         let mut events = Vec::new();
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if moved || originated_orders > 0 {
@@ -899,7 +909,9 @@ impl Engine {
                 quantity: qty.abs(),
                 price: Some(mark),
                 trigger_price: None,
+                trail_offset: None,
                 time_in_force: TimeInForce::Ioc,
+                expire_time: None,
                 reduce_only: true,
                 post_only: false,
             };
@@ -977,7 +989,9 @@ impl Engine {
                 quantity: qty.abs(),
                 price: Some(mark),
                 trigger_price: None,
+                trail_offset: None,
                 time_in_force: TimeInForce::Ioc,
+                expire_time: None,
                 reduce_only: true,
                 post_only: false,
             };
@@ -1343,7 +1357,14 @@ impl Engine {
             .filter_map(|order| {
                 let (kind, px) = match order.resting {
                     Resting::Limit { fill_trigger_px } => (ScanKind::FillThrough, fill_trigger_px),
-                    Resting::Conditional { stop_px } => (ScanKind::TriggerTouch, stop_px),
+                    Resting::Conditional { stop_px, toward } => (
+                        if toward {
+                            ScanKind::TriggerToward
+                        } else {
+                            ScanKind::TriggerTouch
+                        },
+                        stop_px,
+                    ),
                     Resting::Inert => return None,
                 };
                 Some((
@@ -1593,9 +1614,11 @@ mod tests {
             quantity,
             price,
             trigger_price: None,
+            trail_offset: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
+            expire_time: None,
         }
     }
 
@@ -1615,7 +1638,9 @@ mod tests {
             quantity: Decimal::ONE,
             price: price.map(Decimal::from),
             trigger_price: Some(Decimal::from(trigger)),
+            trail_offset: None,
             time_in_force: TimeInForce::Gtc,
+            expire_time: None,
             reduce_only: false,
             post_only: false,
         }
@@ -1855,7 +1880,7 @@ mod tests {
             order.time_in_force = tif;
             let out = e.process(ClientMessage::SubmitOrder(order), 10);
             assert!(
-                reject_reason(&out).starts_with("conditional orders are good-till-cancel only"),
+                reject_reason(&out).starts_with("conditional orders cannot be immediate-or-cancel"),
                 "{tif:?} stop must be refused"
             );
         }
@@ -1891,7 +1916,7 @@ mod tests {
                     o.order_type = OrderType::StopMarket;
                     o.trigger_price = Some(Decimal::from(90));
                 },
-                "StopMarket order must not carry a price",
+                "a market-on-trigger order must not carry a price",
             ),
             (
                 "stop-limit with no price",
@@ -1916,7 +1941,7 @@ mod tests {
                 |o| {
                     o.post_only = true;
                 },
-                "post_only is legal only on Limit and StopLimit",
+                "post_only is legal only on orders that rest as a limit",
             ),
         ];
         for (name, shape, reason) in cases {
@@ -2339,7 +2364,7 @@ mod tests {
             20,
         );
         assert!(
-            matches!(e.open[0].resting, Resting::Conditional { stop_px } if stop_px == Decimal::from(100))
+            matches!(e.open[0].resting, Resting::Conditional { stop_px, .. } if stop_px == Decimal::from(100))
         );
         assert_eq!(e.open[0].scanned_ns, 10, "the trigger window is untouched");
         assert_eq!(e.open[0].submit.price, Some(Decimal::from(98)));
@@ -4775,6 +4800,255 @@ mod tests {
         assert_eq!(usdt.total, Decimal::from(-300));
         assert_eq!(usdt.locked, Decimal::ZERO);
         assert_eq!(usdt.free, Decimal::from(-300));
+    }
+
+    fn trailing_stop(id: &str, side: Side, trigger: i64, offset: i64) -> SubmitOrder {
+        SubmitOrder {
+            client_order_id: id.into(),
+            symbol: "BTCUSDT".into(),
+            position_id: None,
+            side,
+            order_type: OrderType::TrailingStopMarket,
+            quantity: Decimal::ONE,
+            price: None,
+            trigger_price: Some(Decimal::from(trigger)),
+            trail_offset: Some(Decimal::from(offset)),
+            time_in_force: TimeInForce::Gtc,
+            expire_time: None,
+            reduce_only: false,
+            post_only: false,
+        }
+    }
+
+    fn resting_trigger(e: &Engine, id: &str) -> Decimal {
+        let order = e
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == id)
+            .expect("the order is still resting");
+        match order.resting {
+            Resting::Conditional { stop_px, .. } => stop_px,
+            other => panic!("expected an untriggered conditional, got {other:?}"),
+        }
+    }
+
+    /// A trailing stop follows the tape UP and never comes back down. The
+    /// one-way movement is the whole mechanism: a trigger that retreated would
+    /// be a stop somebody keeps amending.
+    #[test]
+    fn a_sell_trailing_stop_ratchets_up_and_never_retreats() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            // A spot sell delivers the base, so the account has to hold some or
+            // the order is refused before it can rest.
+            balances: HashMap::from([("BTC".to_string(), Decimal::from(10))]),
+            fill_seed: 7,
+        });
+        let accepted = e.process_with_market(
+            ClientMessage::SubmitOrder(trailing_stop("T1", Side::Sell, 90, 10)),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            e.open
+                .iter()
+                .any(|order| order.submit.client_order_id == "T1"),
+            "the trailing stop must rest: {accepted:?}"
+        );
+        assert_eq!(resting_trigger(&e, "T1"), Decimal::from(90));
+
+        // The tape rises, so the trail follows it up to mark less the offset.
+        e.mark(&[("BTCUSDT".into(), Decimal::from(150))], 2);
+        assert_eq!(
+            resting_trigger(&e, "T1"),
+            Decimal::from(140),
+            "the trail follows the tape up"
+        );
+
+        // And it stays there when the tape falls back, which is the point.
+        e.mark(&[("BTCUSDT".into(), Decimal::from(120))], 3);
+        assert_eq!(
+            resting_trigger(&e, "T1"),
+            Decimal::from(140),
+            "a trailing stop never retreats"
+        );
+    }
+
+    /// A buy trail is the mirror: it follows the tape DOWN.
+    #[test]
+    fn a_buy_trailing_stop_ratchets_down() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        e.process_with_market(
+            ClientMessage::SubmitOrder(trailing_stop("T2", Side::Buy, 110, 10)),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        e.mark(&[("BTCUSDT".into(), Decimal::from(50))], 2);
+        assert_eq!(resting_trigger(&e, "T2"), Decimal::from(60));
+        e.mark(&[("BTCUSDT".into(), Decimal::from(80))], 3);
+        assert_eq!(
+            resting_trigger(&e, "T2"),
+            Decimal::from(60),
+            "a buy trail never rises"
+        );
+    }
+
+    /// A STOP protects and a TOUCHED order enters, so for the same side and the
+    /// same price they wait on opposite predicates. Getting this backwards turns
+    /// every protective order into an entry.
+    #[test]
+    fn a_touched_order_triggers_from_the_opposite_side_of_a_stop() {
+        use mogwai_protocol::{ScanKind, touches_toward, touches_trigger};
+        let trigger = Decimal::from(100);
+        // A SELL stop protects a long: it fires when price falls to it.
+        assert!(touches_trigger(Side::Sell, trigger, Decimal::from(99)));
+        assert!(!touches_trigger(Side::Sell, trigger, Decimal::from(101)));
+        // A SELL touched order enters short on strength: it fires when price
+        // rises to it.
+        assert!(touches_toward(Side::Sell, trigger, Decimal::from(101)));
+        assert!(!touches_toward(Side::Sell, trigger, Decimal::from(99)));
+        // Both are TOUCH rather than through, so the level itself fires them.
+        assert!(touches_trigger(Side::Sell, trigger, trigger));
+        assert!(touches_toward(Side::Sell, trigger, trigger));
+        assert!(ScanKind::TriggerToward.hit(Side::Buy, trigger, Decimal::from(99)));
+        assert!(!ScanKind::TriggerToward.hit(Side::Buy, trigger, Decimal::from(101)));
+    }
+
+    /// The new fields belong to exactly one shape each, and stating one
+    /// elsewhere is refused rather than ignored - a client whose trail offset
+    /// was silently dropped would believe its stop moves.
+    #[test]
+    fn the_new_order_fields_are_refused_where_they_mean_nothing() {
+        use mogwai_protocol::validate_submit_order;
+        let mut trailing = trailing_stop("T3", Side::Sell, 90, 10);
+        trailing.trail_offset = None;
+        assert!(validate_submit_order(&trailing).is_err());
+
+        let mut fixed = stop_order("S1", Side::Sell, OrderType::StopMarket, 90, None);
+        fixed.trail_offset = Some(Decimal::from(10));
+        assert!(validate_submit_order(&fixed).is_err());
+
+        let mut gtd = order("G1", 1);
+        gtd.time_in_force = TimeInForce::Gtd;
+        assert!(validate_submit_order(&gtd).is_err(), "Gtd needs an expiry");
+        gtd.expire_time = Some(10);
+        assert!(validate_submit_order(&gtd).is_ok());
+
+        let mut day = order("D1", 1);
+        day.time_in_force = TimeInForce::Day;
+        day.expire_time = Some(10);
+        assert!(
+            validate_submit_order(&day).is_err(),
+            "a day order's expiry comes from the calendar, not the client"
+        );
+    }
+
+    /// A conditional can be Day or Gtd - both can wait for a trigger - but not
+    /// Ioc or Fok, which cannot wait for anything.
+    #[test]
+    fn a_conditional_may_expire_but_may_not_be_immediate() {
+        use mogwai_protocol::validate_submit_order;
+        let mut stop = stop_order("S2", Side::Sell, OrderType::StopMarket, 90, None);
+        stop.time_in_force = TimeInForce::Day;
+        assert!(validate_submit_order(&stop).is_ok());
+        stop.time_in_force = TimeInForce::Ioc;
+        assert!(validate_submit_order(&stop).is_err());
+        stop.time_in_force = TimeInForce::Fok;
+        assert!(validate_submit_order(&stop).is_err());
+    }
+
+    /// A `Gtd` order stops resting at its instant whether or not the tape ever
+    /// came near it. That independence from the trigger walk is why expiry is
+    /// its own pass.
+    #[test]
+    fn a_gtd_order_expires_at_its_instant_and_not_before() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        let mut order = limit_order("G1", 1);
+        order.price = Some(Decimal::from(1));
+        order.time_in_force = TimeInForce::Gtd;
+        order.expire_time = Some(500);
+        e.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert_eq!(e.open.len(), 1);
+
+        assert!(
+            e.expire_orders(499, None, 499).is_empty(),
+            "an order must not expire before its instant"
+        );
+        assert_eq!(e.open.len(), 1);
+
+        let out = e.expire_orders(500, None, 500);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+            "the order expires at its instant: {out:?}"
+        );
+        assert!(e.open.is_empty());
+    }
+
+    /// A `Day` order expires when ITS OWN symbol's session closes, and a
+    /// symbol with no calendar never supplies one - so a day order on a 24/7
+    /// instrument rests like a Gtc rather than expiring at an invented hour.
+    #[test]
+    fn a_day_order_expires_only_when_its_own_session_closes() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        let mut order = limit_order("D1", 1);
+        order.price = Some(Decimal::from(1));
+        order.time_in_force = TimeInForce::Day;
+        e.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+
+        assert!(
+            e.expire_orders(1_000, None, 1_000).is_empty(),
+            "no session closed, so nothing expires"
+        );
+        assert!(
+            e.expire_orders(1_000, Some("SOMETHING-ELSE"), 1_000)
+                .is_empty(),
+            "another instrument's close must not expire this order"
+        );
+        assert!(
+            !e.expire_orders(1_000, Some("BTCUSDT"), 1_000).is_empty(),
+            "its own session closing expires it"
+        );
     }
 
     const EIGHT_HOURS_NS: u64 = 8 * 3_600 * 1_000_000_000;

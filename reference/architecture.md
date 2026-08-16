@@ -70,6 +70,37 @@ The thresholds, the ratcheted peak and the remaining budget are PUBLISHED on
 no dashboard, so a run that ended flat having spent most of its budget would be
 indistinguishable from one that never came close.
 
+THE ORDER-TYPE SURFACE IS COMPLETE RATHER THAN CURATED. Market, Limit,
+StopMarket, StopLimit, TrailingStopMarket, MarketIfTouched, LimitIfTouched and
+MarketToLimit are all served; the one shape still refused is an ORDER LIST,
+because the venue models no linkage between orders and a bracket where one fill
+cancels its sibling therefore cannot exist.
+
+A STOP and a TOUCHED order are the same machinery with opposite comparisons. A
+stop protects - buy above the market, sell below - and fires when price runs
+AWAY. A touched order enters - buy below, sell above - and fires when price comes
+TOWARD it. Both fire on TOUCH rather than through, because a conditional holds no
+queue position. The two predicates are separate functions and separate
+`ScanKind`s rather than one function with a flag, since they are the two most
+easily confused behaviours in the venue.
+
+A TRAILING STOP's trigger ratchets with the tape and never retreats: a sell trail
+rises with the high and stays put when price falls back. It is advanced on the
+MARK, which carries the same resolution bound as the risk policy - a spike
+between two sweep passes does not move it, so the stop sits further from the
+extreme than a tick-resolution venue would place it, which is lenient in the
+holder's favour rather than wrong.
+
+TIME-IN-FORCE covers Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd
+- both can wait for a trigger - but never Ioc or Fok, which cannot wait for
+anything. Expiry is a TIME-DRIVEN pass with nothing to do with triggers: a Gtd
+order stops resting at its instant whether or not the tape came near it, and a
+Day order stops when its own instrument's SESSION CLOSES, which the sweeper
+detects by asking the calendar whether the span it swept crossed from open to
+shut. An instrument with no calendar supplies no such instant, so a day order on
+a 24/7 symbol rests like a Gtc - the honest answer, since inventing midnight UTC
+would expire orders at a time that market has never heard of.
+
 THE LEDGER MODELS FIVE INSTRUMENT CLASSES, split by SETTLEMENT SHAPE rather
 than by asset class, because the shape is what decides how holding one moves the
 ledger.

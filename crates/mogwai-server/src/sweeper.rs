@@ -184,6 +184,18 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     .filter(|candidate| candidate.as_ref() == symbol)
                     .cloned()
                     .collect();
+                // Whether THIS boat's river crossed a session close in the span
+                // just swept, which is what expires a Day order. Asked of the
+                // calendar rather than derived from a clock: the venue already
+                // knows when a session ends, and only an instrument that HAS a
+                // calendar has a day to end.
+                let session_closed = sweep
+                    .rivers
+                    .resolve_profile(&symbol)
+                    .ok()
+                    .and_then(|profile| profile.calendar.clone())
+                    .filter(|calendar| calendar.is_open(last_swept_ns) && !calendar.is_open(to_ns))
+                    .map(|_| mogwai_protocol::Symbol::from(symbol.as_str()));
                 let settlements: Vec<_> = symbols
                     .iter()
                     .filter_map(|symbol| {
@@ -244,6 +256,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         &marks,
                         last_swept_ns,
                         to_ns,
+                        session_closed.as_deref(),
                         boat.sim,
                     );
                     // The account's own rules, judged against the equity this
@@ -385,10 +398,11 @@ fn apply_engine_pass(
         results,
         settlement_marks,
         marks,
-        // No funding span: these callers are the unit tests, which drive
-        // settlement and marking rather than the funding clock.
+        // No funding span and no session close: these callers are the unit
+        // tests, which drive settlement and marking rather than the clock.
         to_ns,
         to_ns,
+        None,
         mogwai_protocol::SimClock {
             sim_epoch_ns: 0,
             wall_anchor_ns: 0,
@@ -397,6 +411,10 @@ fn apply_engine_pass(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one pass over one ledger needs every one of these: the scans, the settlement and mark prices, the swept span for funding, the session close for expiry, and the clock to stamp with"
+)]
 fn apply_engine_pass_on_clock(
     engine: &mut mogwai_engine::Engine,
     results: &[ScanResult],
@@ -404,6 +422,7 @@ fn apply_engine_pass_on_clock(
     marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
     from_ns: u64,
     to_ns: u64,
+    session_closed: Option<&str>,
     sim: mogwai_protocol::SimClock,
 ) -> (Vec<ServerMessage>, usize, usize) {
     let (mut events, emitted) = engine.apply_scans_on_clock(results, to_ns, sim);
@@ -414,6 +433,11 @@ fn apply_engine_pass_on_clock(
         events.extend(settled.events);
     }
     let marked = engine.mark(marks, to_ns);
+    // Time-driven expiry, which has nothing to do with triggers: a Gtd limit
+    // nothing ever approached must still stop resting at its instant, and a Day
+    // order must stop resting when its session closes whether or not the tape
+    // came near it.
+    events.extend(engine.expire_orders(to_ns, session_closed, to_ns));
     // Marked FIRST, then funded: funding is paid on notional at the mark, so
     // paying before the mark moved would charge this interval at the last
     // interval's price.
@@ -827,9 +851,11 @@ mod tests {
             quantity: Decimal::ONE,
             price: Some(Decimal::from(21_000)),
             trigger_price: None,
+            trail_offset: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
+            expire_time: None,
         };
         engine.process_with_market(
             ClientMessage::SubmitOrder(order),
@@ -917,9 +943,11 @@ mod tests {
             quantity: Decimal::ONE,
             price: Some(Decimal::from(21_100)),
             trigger_price: None,
+            trail_offset: None,
             reduce_only: true,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
+            expire_time: None,
         };
         engine.process(ClientMessage::SubmitOrder(order), 2);
         let scan = engine

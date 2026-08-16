@@ -17,6 +17,18 @@ are keyed within it. Two accounts on one venue never share a position book.
   one; a fill reports the id the venue actually booked it against, which
   under hedging may not be the id the client sent.
 
+ORDER TYPES the venue serves: Market, Limit, StopMarket, StopLimit,
+TrailingStopMarket, MarketIfTouched, LimitIfTouched and MarketToLimit. The one
+refused shape is an ORDER LIST (OCO, OTO): the venue models no linkage between
+orders, so a bracket where one fill cancels its sibling has to be two
+independent reduce-only legs the strategy reaps itself.
+
+TIME-IN-FORCE: Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd but
+never Ioc or Fok - an order that must fill immediately cannot also wait for a
+trigger. `Gtd` carries an `expire_time`; `Day` does not, because its expiry is
+the instrument's own session close rather than anything a client states, and an
+instrument with no calendar never expires one.
+
 A hedging reduce-only order must name the `position_id` it reduces. Without
 one, "reduce whatever I have" is ambiguous when several independent or
 opposing positions exist, so the venue rejects the submit instead of assigning

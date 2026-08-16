@@ -337,9 +337,11 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
                 quantity: Decimal::ONE,
                 price: Some(price),
                 trigger_price: None,
+                trail_offset: None,
                 reduce_only: false,
                 post_only: false,
                 time_in_force: TimeInForce::Gtc,
+                expire_time: None,
             };
             // Exactly what `http::market_reading` hands the engine on the real
             // path, refusals included: a refused reading is passed on as `None`

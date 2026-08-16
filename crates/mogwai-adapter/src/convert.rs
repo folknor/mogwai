@@ -77,11 +77,47 @@ pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_pr
         OrderType::Limit => Ok(mogwai_protocol::OrderType::Limit),
         OrderType::StopMarket => Ok(mogwai_protocol::OrderType::StopMarket),
         OrderType::StopLimit => Ok(mogwai_protocol::OrderType::StopLimit),
+        OrderType::TrailingStopMarket => Ok(mogwai_protocol::OrderType::TrailingStopMarket),
+        OrderType::MarketIfTouched => Ok(mogwai_protocol::OrderType::MarketIfTouched),
+        OrderType::LimitIfTouched => Ok(mogwai_protocol::OrderType::LimitIfTouched),
+        OrderType::MarketToLimit => Ok(mogwai_protocol::OrderType::MarketToLimit),
+        // What remains refused is the shape the venue models no LINKAGE for.
+        // Every other nautilus order type is now served: the surface is
+        // complete rather than curated, because mogwai is an exchange and a
+        // shape it refuses is a strategy family with no forward test anywhere.
         other => anyhow::bail!(
-            "unsupported order type {other:?}: the MOGWAI venue serves Market, Limit, \
-             StopMarket and StopLimit. It models no trailing state and no order lists, \
-             so a trailing stop or a bracket leg must be expressed as a fixed stop that \
-             the strategy re-places itself"
+            "unsupported order type {other:?}: the MOGWAI venue models no linkage between \
+             orders, so an order list (OCO, OTO) must be expressed as independent legs \
+             the strategy reaps itself"
+        ),
+    }
+}
+
+/// The trailing offset a `TrailingStopMarket` carries, if the offset TYPE is one
+/// the venue can act on.
+///
+/// Nautilus states an offset with a type beside it - a price distance, a number
+/// of ticks, or basis points. Only the price form maps here: the venue's trail
+/// is an absolute price distance, and the other two need a reference price the
+/// two ends would have to agree on independently, which is exactly the kind of
+/// silent disagreement that makes a stop sit somewhere neither side intended.
+/// Refusing is the honest response; a strategy stating ticks can state points.
+pub(crate) fn wire_trail_offset(
+    offset: Option<Decimal>,
+    offset_type: Option<nautilus_model::enums::TrailingOffsetType>,
+) -> anyhow::Result<Option<Decimal>> {
+    use nautilus_model::enums::TrailingOffsetType;
+    let Some(offset) = offset else {
+        return Ok(None);
+    };
+    match offset_type {
+        None | Some(TrailingOffsetType::NoTrailingOffset | TrailingOffsetType::Price) => {
+            Ok(Some(offset))
+        }
+        Some(other) => anyhow::bail!(
+            "unsupported trailing offset type {other:?}: the MOGWAI venue trails by an \
+             absolute price distance, so state the offset in price rather than in ticks \
+             or basis points"
         ),
     }
 }
@@ -102,6 +138,8 @@ pub(crate) fn wire_time_in_force(tif: TimeInForce) -> anyhow::Result<mogwai_prot
         TimeInForce::Gtc => Ok(mogwai_protocol::TimeInForce::Gtc),
         TimeInForce::Ioc => Ok(mogwai_protocol::TimeInForce::Ioc),
         TimeInForce::Fok => Ok(mogwai_protocol::TimeInForce::Fok),
+        TimeInForce::Day => Ok(mogwai_protocol::TimeInForce::Day),
+        TimeInForce::Gtd => Ok(mogwai_protocol::TimeInForce::Gtd),
         other => anyhow::bail!("unsupported time in force {other:?}"),
     }
 }
@@ -122,6 +160,10 @@ pub(crate) fn nautilus_order_type(order_type: mogwai_protocol::OrderType) -> Ord
         mogwai_protocol::OrderType::Limit => OrderType::Limit,
         mogwai_protocol::OrderType::StopMarket => OrderType::StopMarket,
         mogwai_protocol::OrderType::StopLimit => OrderType::StopLimit,
+        mogwai_protocol::OrderType::TrailingStopMarket => OrderType::TrailingStopMarket,
+        mogwai_protocol::OrderType::MarketIfTouched => OrderType::MarketIfTouched,
+        mogwai_protocol::OrderType::LimitIfTouched => OrderType::LimitIfTouched,
+        mogwai_protocol::OrderType::MarketToLimit => OrderType::MarketToLimit,
     }
 }
 
@@ -130,6 +172,8 @@ pub(crate) fn nautilus_time_in_force(tif: mogwai_protocol::TimeInForce) -> TimeI
         mogwai_protocol::TimeInForce::Gtc => TimeInForce::Gtc,
         mogwai_protocol::TimeInForce::Ioc => TimeInForce::Ioc,
         mogwai_protocol::TimeInForce::Fok => TimeInForce::Fok,
+        mogwai_protocol::TimeInForce::Day => TimeInForce::Day,
+        mogwai_protocol::TimeInForce::Gtd => TimeInForce::Gtd,
     }
 }
 

@@ -104,18 +104,35 @@ pub fn scan_triggers(
     let mut fill_sell_min: Option<Decimal> = None;
     let mut touch_buy_min: Option<Decimal> = None;
     let mut touch_sell_max: Option<Decimal> = None;
+    // The TOUCHED family opens in the opposite direction to the stop family and
+    // the same one as a limit: a touched BUY hits at or below its trigger, so
+    // its bound is the largest such trigger, and symmetrically for a sell. Kept
+    // as its own pair rather than folded into the `fill_*` slots, because the
+    // strictness differs - `<=` against `<` - and sharing a bound would make the
+    // prune drop a print that lands exactly on a touched trigger.
+    let mut toward_buy_max: Option<Decimal> = None;
+    let mut toward_sell_min: Option<Decimal> = None;
     for scan in scans {
         let slot = match (scan.kind, scan.side) {
             (ScanKind::FillThrough, Side::Buy) => &mut fill_buy_max,
             (ScanKind::FillThrough, Side::Sell) => &mut fill_sell_min,
             (ScanKind::TriggerTouch, Side::Buy) => &mut touch_buy_min,
             (ScanKind::TriggerTouch, Side::Sell) => &mut touch_sell_max,
+            (ScanKind::TriggerToward, Side::Buy) => &mut toward_buy_max,
+            (ScanKind::TriggerToward, Side::Sell) => &mut toward_sell_min,
         };
-        *slot = Some(match (*slot, scan.kind, scan.side) {
-            (Some(bound), ScanKind::FillThrough, Side::Buy)
-            | (Some(bound), ScanKind::TriggerTouch, Side::Sell) => bound.max(scan.px),
-            (Some(bound), _, _) => bound.min(scan.px),
-            (None, _, _) => scan.px,
+        // Which extreme this group's predicate opens toward: a group whose
+        // predicate admits prices BELOW its bound keeps the largest, one that
+        // admits prices above keeps the smallest.
+        let keeps_max = matches!(
+            (scan.kind, scan.side),
+            (ScanKind::FillThrough | ScanKind::TriggerToward, Side::Buy)
+                | (ScanKind::TriggerTouch, Side::Sell)
+        );
+        *slot = Some(match *slot {
+            Some(bound) if keeps_max => bound.max(scan.px),
+            Some(bound) => bound.min(scan.px),
+            None => scan.px,
         });
     }
     // `reached_ns` names a timestamp this walk has drained COMPLETELY, because
@@ -156,7 +173,9 @@ pub fn scan_triggers(
             let any_price_can_hit = fill_buy_max.is_some_and(|px| trade.price < px)
                 || fill_sell_min.is_some_and(|px| trade.price > px)
                 || touch_buy_min.is_some_and(|px| trade.price >= px)
-                || touch_sell_max.is_some_and(|px| trade.price <= px);
+                || touch_sell_max.is_some_and(|px| trade.price <= px)
+                || toward_buy_max.is_some_and(|px| trade.price <= px)
+                || toward_sell_min.is_some_and(|px| trade.price >= px);
             if !any_price_can_hit {
                 continue;
             }
