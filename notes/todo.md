@@ -1478,6 +1478,31 @@ required eventually, since both modes must be supported.
   `empty_hour_stats_use_complete_utc_buckets`. That file retires at 4b; the
   comment should name the Rust `dwell_stats` instead.
 
+- `brokkr check --gate` IS RED ON MASTER, and not for a reason any code change
+  made. Found 2026-08-16 and verified against a clean stashed tree at `9664f41`,
+  so it predates the order-list, tick-resolution, freeze and equity landings.
+  The test lanes themselves pass; what fails is the profile's own COVERAGE
+  AUDIT, with 416 orphaned `(build shape, test)` pairs - every `mogwai-data`
+  test reported as "run nowhere, quarantined nowhere" under the `instrumented`
+  sweep. The gate is the only invocation that runs the four socket-backed
+  adapter binaries, so while it is red the pre-commit rule in `CLAUDE.md` cannot
+  be followed as written.
+  THE WORKING PROCEDURE UNTIL IT IS FIXED, and it is what this session used:
+  run the socket suites BY NAME - `brokkr test -p mogwai-adapter "" --debug` for
+  all four adapter binaries and `brokkr test -p mogwai-cli socket --debug` for
+  the server-side ones. Both are fast and both were green at every landing.
+  Note `brokkr test -p mogwai-cli ""` additionally trips
+  `arrival_control_refuses_a_tree_that_changed_during_the_run`, which refuses a
+  DIRTY TREE by design and fails rather than skips - indistinguishable from a
+  real regression at a glance, so commit or stash before reading its result.
+  WHERE TO LOOK: `[test.profiles.gate]` in `brokkr.toml` names `sweeps =
+  ["workspace", "instrumented"]` with `certifies = "complete"`, and the
+  instrumented sweep is package-scoped to `mogwai-data` and `mogwai-lab`. The
+  audit appears to expect the instrumented lane to run tests that only the
+  workspace lane does. Whether the fix is a brokkr change, a profile change or a
+  quarantine entry is undecided, and it is a tooling question rather than a venue
+  one - which is why it is recorded here rather than acted on.
+
 - REPAIR the `brokkr check --gate` profile mismatch for
   `tape_lateness_under_acceleration`. The gate runs the workspace test pass in
   DEBUG profile, and that test asserts a 50ms p99 WALL-CLOCK pacing bound the
@@ -1539,6 +1564,17 @@ Where one asserts something about this venue's behaviour, treat it as a LEAD to
 check against the source - the same standing rule the hardcoded-value inventory
 carries, and for the same reason. Several may already have been overtaken by a
 mogwai landing.
+
+OWED: TELL THEM, and expect their build to break. Nobody has, and the whole
+account surface moved under them - they set no `account_type`, inherit
+`MOGWAI-001`, POST no account, and have no handling for a run that ends by
+LIQUIDATION. That break is DESIGNED (see the account-policy item's consumer
+paragraph), but designed-to-break only works if the other side is told it is
+coming. Several entries below are now stale IN THEIR FAVOUR and should go in the
+same message: trailing stops are served, the full order-type surface is served,
+ORDER LISTS are served so the two-independent-legs workaround is no longer
+required, and `RejectNextCancel` exists - so their three unrun scenario files can
+now be written against a venue that produces the shapes they need.
 
 ### MOGWAI is the test venue, by decision (broadarrow, 2026-08-14)
 

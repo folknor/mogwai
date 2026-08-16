@@ -233,6 +233,15 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   in release. A test pinning `debug_assertions` behaviour must be gated
   `#[cfg(debug_assertions)]` or the release sweep fails it; a test whose bite
   depends on optimization must be checked in release.
+- RUN THE SOCKET SUITES AFTER ANY CHANGE TO THE SERVING PATH. `brokkr check` is
+  blind to roughly thirty tests that bind loopback listeners, and a real
+  regression shipped through that gap and stayed red across four commits -
+  eviction on the default account closing a client's own second socket, which
+  only the socket suite surfaced. `brokkr check --gate` is the invocation that
+  covers them and is currently RED for an unrelated coverage-audit reason (see
+  `notes/todo.md`), so run them by name meanwhile:
+  `brokkr test -p mogwai-adapter "" --debug` and
+  `brokkr test -p mogwai-cli socket --debug`.
 - AUDIT THE SEAM ITSELF: a test double must be verified against the real
   endpoint's semantics, not against what the test needs. A stub that replays
   queued responses whatever the client asked for is blind by construction;
