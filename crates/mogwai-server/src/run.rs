@@ -409,8 +409,25 @@ impl Run {
     /// gets the account. Whether it gets that account's HISTORY is the operator's
     /// `reset_account_on_reconnect` choice, reported in the readiness record so
     /// nobody has to guess which way a venue is set.
-    pub(crate) fn seat(&self, account_id: &mogwai_protocol::AccountId) -> Arc<Passenger> {
-        let displaced = self.evict_account(account_id.as_str());
+    pub(crate) fn seat(
+        &self,
+        account_id: &mogwai_protocol::AccountId,
+        claimed: bool,
+    ) -> Arc<Passenger> {
+        // ONLY A CLAIMED ACCOUNT EVICTS. Naming an id is a statement about
+        // identity - "this ledger is mine, hand it over" - and eviction is the
+        // answer to it. Naming NONE is not: it means the client has no opinion,
+        // and the default account is a convenience for exactly that case.
+        //
+        // Evicting there broke the ordinary shape it exists to serve. A single
+        // client opening two sockets on two symbols names no account on either,
+        // so both land on the default and the second closed the first - which
+        // is a client evicting itself.
+        let displaced = if claimed {
+            self.evict_account(account_id.as_str())
+        } else {
+            0
+        };
         if displaced > 0 {
             tracing::info!(
                 account = %account_id.as_str(),
@@ -419,7 +436,7 @@ impl Run {
                 "a new connection claimed a seated account",
             );
         }
-        if self.reset_account_on_reconnect {
+        if claimed && self.reset_account_on_reconnect {
             self.reopen(account_id);
         }
         self.passenger(account_id)

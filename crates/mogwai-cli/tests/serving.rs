@@ -1241,6 +1241,35 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
     );
 }
 
+/// Two sockets that name NO account both live. Only a CLAIMED account evicts.
+///
+/// This is the shape the default account exists to serve, and the eviction
+/// landing broke it: both sockets resolve to the default, so keying eviction on
+/// the account alone made the second close the first - a client evicting itself
+/// by opening a second socket. Naming an id is a statement about identity and
+/// eviction is the answer to it; naming none is the client saying it has no
+/// opinion.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn two_sockets_naming_no_account_both_stay_open() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut first, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open the first socket");
+    let (mut second, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open the second socket");
+
+    // Both are still being served: neither closed, and both keep receiving.
+    for (label, socket) in [("first", &mut first), ("second", &mut second)] {
+        let seen = tokio::time::timeout(Duration::from_secs(10), socket.next()).await;
+        assert!(
+            matches!(seen, Ok(Some(Ok(Message::Text(_))))),
+            "the {label} socket stopped being served: {seen:?}"
+        );
+    }
+}
+
 /// An unpoliced account is enforced against nothing, which is what every client
 /// had before policies existed and what the default account still gets.
 #[test]

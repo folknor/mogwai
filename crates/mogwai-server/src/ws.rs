@@ -119,7 +119,7 @@ pub(crate) async fn ws_upgrade(
     // reconnecting.
     let passenger = match &query.account {
         Some(named) => match mogwai_protocol::AccountId::parse(named) {
-            Ok(account_id) => state.run.seat(&account_id),
+            Ok(account_id) => state.run.seat(&account_id, true),
             Err(error) => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -128,7 +128,7 @@ pub(crate) async fn ws_upgrade(
                     .into_response();
             }
         },
-        None => state.run.seat(&state.run.default_account_id()),
+        None => state.run.seat(&state.run.default_account_id(), false),
     };
     // The bind-time shape refusal: an invalid resolved shape or a
     // funding-barred one is a CONFIGURATION error, named here and before any
