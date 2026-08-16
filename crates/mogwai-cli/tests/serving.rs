@@ -828,7 +828,8 @@ fn a_policed_account_publishes_its_remaining_budget() {
         &venue.http_base(),
         "/accounts",
         r#"{"account_id":"WYRD-200","balances":{"USDT":"50000"},
-            "policy":{"trailing_drawdown":{"amount":"2000"},
+            "policy":{"currency":"USDT",
+                      "trailing_drawdown":{"amount":"2000"},
                       "daily_loss_limit":{"amount":"500"}}}"#,
     );
     assert_eq!(status, 201, "the policed account opens: {body}");
@@ -867,7 +868,7 @@ fn an_unenforceable_policy_is_refused_at_the_boundary() {
         &venue.http_base(),
         "/accounts",
         r#"{"account_id":"WYRD-201","balances":{"USDT":"50000"},
-            "policy":{"trailing_drawdown":{"amount":"0"}}}"#,
+            "policy":{"currency":"USDT","trailing_drawdown":{"amount":"0"}}}"#,
     );
     assert_eq!(status, 400, "a zero drawdown is refused: {body}");
     assert!(
@@ -879,9 +880,79 @@ fn an_unenforceable_policy_is_refused_at_the_boundary() {
         &venue.http_base(),
         "/accounts",
         r#"{"account_id":"WYRD-202","balances":{"USDT":"50000"},
-            "policy":{"reset_minute_utc":1440}}"#,
+            "policy":{"currency":"USDT","reset_minute_utc":1440}}"#,
     );
     assert_eq!(status, 400, "a reset outside the day is refused: {body}");
+
+    // A rule with no currency has no meaning: the threshold would be stated in
+    // nothing, and the venue has no rate to pick one with.
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-203","balances":{"USDT":"50000"},
+            "policy":{"daily_loss_limit":{"amount":"500"}}}"#,
+    );
+    assert_eq!(
+        status, 400,
+        "a policy without a currency is refused: {body}"
+    );
+    assert!(
+        body.contains("currency"),
+        "the refusal names what is missing: {body}"
+    );
+}
+
+/// A policed account may not acquire a currency its policy cannot value, and
+/// is told so at ORDER ENTRY rather than after the fill has already made its
+/// equity unstateable.
+///
+/// This is what confines a policed account to one settlement currency, which
+/// today means futures: a spot fill credits the base asset as a currency
+/// balance and debits the quote, so one buy leaves two currencies and no rate
+/// to combine them with.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_policed_account_is_refused_a_shape_it_cannot_be_valued_in() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-204","balances":{"USDT":"50000"},
+            "policy":{"currency":"USDT","daily_loss_limit":{"amount":"500"}}}"#,
+    );
+    assert_eq!(status, 201, "the policed account opens: {body}");
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("{}?account=WYRD-204", venue.ws_url()))
+            .await
+            .expect("open the policed account's socket");
+    let submit = format!(
+        r#"{{"type":"SubmitOrder","client_order_id":"SPOT-1","symbol":"{}","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}}"#,
+        venue.symbol
+    );
+    socket
+        .send(Message::Text(submit.into()))
+        .await
+        .expect("submit a spot order");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the submit is answered")
+            .expect("the socket stays open")
+            .expect("a well-formed frame");
+        if let Message::Text(text) = message
+            && let Ok(ServerMessage::OrderRejected { reason, .. }) =
+                serde_json::from_str::<ServerMessage>(&text)
+        {
+            assert!(
+                reason.contains("policed") && reason.contains("another currency"),
+                "the refusal says why a policed account cannot trade this shape: {reason}"
+            );
+            return;
+        }
+    }
 }
 
 /// An unpoliced account is enforced against nothing, which is what every client

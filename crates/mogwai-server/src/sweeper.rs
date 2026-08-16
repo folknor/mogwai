@@ -505,15 +505,31 @@ fn enforce_policy(
     emitted: usize,
     originated: usize,
 ) -> (usize, usize) {
-    let equity = {
-        let snapshot = engine.account_snapshot(to_ns);
-        crate::risk::equity_of(&snapshot)
-    };
-    let verdict = passenger
+    let mut ledger = passenger
         .risk
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .observe(equity, to_ns);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(currency) = ledger.currency().map(str::to_owned) else {
+        // Unpoliced. No equity is computed at all, so an unpoliced account pays
+        // nothing for a feature it does not use.
+        return (emitted, originated);
+    };
+    let snapshot = engine.account_snapshot(to_ns);
+    let Some(equity) = crate::risk::equity_in(&snapshot, &currency) else {
+        // The account holds value this policy cannot express. Order entry
+        // refuses what would create that state, so reaching here means an
+        // account acquired it another way - a venue-originated liquidation
+        // partial, say. Enforcing against a wrong number would be worse than
+        // not enforcing, so this warns loudly and declines rather than guessing.
+        tracing::warn!(
+            account = %passenger.account_id.as_str(),
+            %currency,
+            "cannot value this account in its policy currency; risk is not enforced this pass",
+        );
+        return (emitted, originated);
+    };
+    let verdict = ledger.observe(equity, to_ns);
+    drop(ledger);
     let crate::risk::Verdict::Breached(breach) = verdict else {
         return (emitted, originated);
     };

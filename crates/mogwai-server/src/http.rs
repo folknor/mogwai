@@ -275,6 +275,48 @@ pub(crate) async fn process_order_cmd(
             reservation,
         };
     }
+    // A POLICED ACCOUNT HOLDS ONE CURRENCY, refused here rather than discovered
+    // as a mis-valued threshold later.
+    //
+    // Equity is computed in the policy's currency and the venue has no exchange
+    // rate. A SPOT fill credits the base asset as a currency balance and debits
+    // the quote, so one buy leaves the account holding two currencies and its
+    // equity unstateable; futures move only the settlement currency. So a
+    // policed account trades shapes settling in its own currency, which today
+    // means futures, and asking for anything else is a client error with a
+    // reason that says why.
+    if let ClientMessage::SubmitOrder(order) = &order_cmd
+        && let Some(currency) = passenger
+            .risk
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .currency()
+            .map(str::to_owned)
+        && let Ok(profile) = run.rivers.resolve_profile(&order.symbol)
+        && !settles_only_in(&profile.def, &currency)
+    {
+        let Some(reservation) = lanes.try_reserve_boundary() else {
+            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+                subject: admission_subject(&order_cmd),
+                reason: "execution output admission budget exhausted".into(),
+                ts_event: ts,
+            });
+        };
+        let echoed: String = order.symbol.chars().take(MAX_ECHOED_SYMBOL).collect();
+        return OrderOutcome::Refused {
+            events: vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id.clone(),
+                reason: truncate_reason(format!(
+                    "account {account} is policed in {currency} and {echoed} would make it hold \
+                     another currency; the venue has no rate to state its equity with, so a \
+                     policed account trades only shapes settling in its own currency",
+                    account = passenger.account_id.as_str()
+                )),
+                ts_event: ts,
+            }],
+            reservation,
+        };
+    }
     // A LOCKED ACCOUNT OPENS NOTHING. This is the other half of enforcement: the
     // breach flattened the book, and this is what stops the strategy putting it
     // straight back on. Placed with the other client-error refusals and BEFORE
@@ -1001,12 +1043,23 @@ pub(crate) async fn account(
     // its remaining drawdown off the firm's dashboard; mogwai presents none, so
     // a run that ended flat having spent 90 percent of its budget would be
     // indistinguishable from one that never came close.
-    let risk = crate::risk::equity_of(&account);
-    let risk = passenger
+    let ledger = passenger
         .risk
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .state(risk);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // An unpoliced account still reports its equity, which is the one number an
+    // evaluator wants whether or not anything is enforced against it. With no
+    // policy currency there is nothing to compute it in, so it reports the
+    // settlement currency's balance only when exactly one is held.
+    let currency = ledger
+        .currency()
+        .map(str::to_owned)
+        .or_else(|| sole_currency(&account));
+    let equity = currency
+        .and_then(|currency| crate::risk::equity_in(&account, &currency))
+        .unwrap_or_default();
+    let risk = ledger.state(equity);
+    drop(ledger);
     Json(AccountSnapshot {
         clock: ClockAxis::Venue,
         account,
@@ -1019,6 +1072,29 @@ pub(crate) async fn account(
 pub(crate) struct AccountQuery {
     #[serde(default)]
     account: Option<String>,
+}
+
+/// Whether trading this shape moves ONE currency, and that one is `currency`.
+///
+/// A future settles in one currency and its fills touch no other. A SPOT pair
+/// touches two by construction - the base is credited as a balance and the
+/// quote debited - so no spot shape can satisfy this whatever currency is
+/// named.
+fn settles_only_in(def: &InstrumentDef, currency: &str) -> bool {
+    def.class.settlement_currency() == currency && def.class.base_currency().is_none()
+}
+
+/// The one currency an account holds, or `None` if it holds none or several.
+/// Used only to report an UNPOLICED account's equity, where no policy names a
+/// currency to compute it in; a policed account always has one.
+fn sole_currency(account: &AccountState) -> Option<String> {
+    let mut held = account
+        .balances
+        .iter()
+        .filter(|balance| !balance.total.is_zero());
+    let first = held.next()?;
+    // Several, and nothing says which of them the account is measured in.
+    held.next().is_none().then(|| first.currency.clone())
 }
 
 /// Open an account on terms the CLIENT states, before it trades.

@@ -68,6 +68,12 @@ impl RiskLedger {
         }
     }
 
+    /// The currency this policy's thresholds are stated in, if it polices
+    /// anything.
+    pub(crate) fn currency(&self) -> Option<&str> {
+        self.policy.currency.as_deref()
+    }
+
     /// Whether the account may open. A locked account is flat and stays flat
     /// until its next reset; a terminated one never opens again.
     pub(crate) fn is_locked(&self) -> bool {
@@ -193,28 +199,41 @@ impl RiskLedger {
     }
 }
 
-/// Account equity: every balance total plus every position's unrealized.
+/// Account equity IN ONE CURRENCY: that currency's balance plus the unrealized
+/// on positions, which futures carry in their settlement currency.
 ///
-/// SUMMED ACROSS CURRENCIES WITHOUT CONVERSION, which is exact for the accounts
-/// that exist today and wrong for one funded in two currencies at once. Every
-/// shipped shape settles in one currency, so a policy is stated in that
-/// currency and this sum is that currency's number. A cross-currency account
-/// needs a rate the venue has no source for, and inventing one would make a
-/// threshold mean something nobody stated - so this stays a documented bound
-/// rather than a silent approximation.
-pub(crate) fn equity_of(account: &mogwai_protocol::AccountState) -> Decimal {
-    let balances: Decimal = account
-        .balances
-        .iter()
-        .map(|balance| balance.total)
-        .fold(Decimal::ZERO, |sum, total| {
-            sum.checked_add(total).unwrap_or(sum)
-        });
-    account
-        .positions
-        .iter()
-        .map(|position| position.unrealized_pnl)
-        .fold(balances, |sum, pnl| sum.checked_add(pnl).unwrap_or(sum))
+/// ONE CURRENCY AND NEVER A SUM ACROSS THEM. An earlier version summed every
+/// balance total, which silently valued one unit of any asset at one unit of
+/// any other - and that is not an exotic case, it is the DEFAULT one: a spot
+/// fill credits the base asset as a currency balance, so buying one BTC at
+/// 60,000 leaves `BTC: 1` beside `USDT: -60,000` and the sum reads as a 59,999
+/// loss on a trade that changed nothing. The venue has no exchange rate and no
+/// live spot mark to build one from, so the balances it cannot value are not
+/// approximated here; a policed account is prevented from acquiring them at
+/// order entry instead.
+///
+/// `None` when the account holds value this policy cannot express, which is the
+/// caller's signal to refuse rather than to enforce against a wrong number.
+pub(crate) fn equity_in(
+    account: &mogwai_protocol::AccountState,
+    currency: &str,
+) -> Option<Decimal> {
+    let mut equity = Decimal::ZERO;
+    for balance in &account.balances {
+        if balance.currency == currency {
+            equity = equity.checked_add(balance.total)?;
+        } else if !balance.total.is_zero() {
+            // A holding in a currency the policy does not name. Refusing to
+            // guess is the whole point: enforcing a threshold against a number
+            // that ignores part of the account would be worse than not
+            // enforcing at all, because it would look enforced.
+            return None;
+        }
+    }
+    for position in &account.positions {
+        equity = equity.checked_add(position.unrealized_pnl)?;
+    }
+    Some(equity)
 }
 
 /// Which reset period a sim instant falls in.
@@ -244,6 +263,7 @@ mod tests {
             }),
             daily_loss_limit: None,
             reset_minute_utc: 0,
+            currency: Some("USD".to_owned()),
         }
     }
 
@@ -308,6 +328,7 @@ mod tests {
                 on_breach: BreachAction::LockUntilReset,
             }),
             reset_minute_utc: 0,
+            currency: Some("USD".to_owned()),
         };
         let mut ledger = RiskLedger::new(policy, 50_000.into(), 0);
         let Verdict::Breached(breach) = ledger.observe(49_499.into(), 1) else {
@@ -341,6 +362,7 @@ mod tests {
             }),
             daily_loss_limit: None,
             reset_minute_utc: 0,
+            currency: Some("USD".to_owned()),
         };
         let mut ledger = RiskLedger::new(policy, 50_000.into(), 0);
         assert_eq!(ledger.observe(60_000.into(), 1), Verdict::Clear);

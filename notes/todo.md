@@ -901,18 +901,9 @@ required eventually, since both modes must be supported.
   by name, while its cancels and queries are still served so it can tidy its
   own book. Thresholds, the ratcheted peak and remaining budget publish on
   `GET /account` for the evaluator.
-  TWO GAPS TO KNOW, both recorded in the code that has them.
-  EVALUATED ON THE MARK, NOT PER TICK, which contradicts the ruling above. A
-  spike entirely between two sweeps is invisible and the account keeps room it
-  should have lost. The gap is resolution and never direction - every peak that
-  IS seen ratchets correctly - so enforcement is lenient rather than wrong.
-  Closing it means evaluating in the tape thread, which cannot take the engine
-  lock, so it wants the equity inputs published out of the engine rather than
-  read from it.
-  EQUITY SUMS CURRENCIES WITHOUT CONVERSION, exact for every shipped shape
-  (all settle in one currency) and wrong for an account funded in two at once.
-  A rate has no source in the venue, and inventing one would make a threshold
-  mean something nobody stated.
+  TWO GAPS CAME OUT OF THAT LANDING and are their own items below: the
+  mark-cadence evaluation, and the single-currency confinement of a policed
+  account.
   STILL OPEN FROM THE ACCOUNT-POLICY DESIGN, none of it blocking: policy
   PRESETS and their runtime registration do not exist, so step two of account
   resolution is absent and only steps one and three work - a client states its
@@ -1162,6 +1153,72 @@ required eventually, since both modes must be supported.
   gates, per the standing lessons on wall-clock socket tests. If a
   socket-level demonstration is ever wanted, design it on the divergence
   window's own clock rather than wall arrival order.
+
+- THE RISK POLICY IS EVALUATED ON THE MARK, NOT PER TICK, which contradicts the
+  ruling that peak equity tracks every tick. Landed knowingly 2026-08-16 with
+  the account-policy work; recorded here because nothing else will surface it.
+  WHY IT MATTERS. The trailing threshold ratchets on peak equity, and at a real
+  venue that ratchet is effectively tick-by-tick: a spike lasting 200 ms still
+  spends budget. `enforce_policy` runs once per fill-sweeper pass per boat, so a
+  spike that opens and closes entirely between two passes never happened as far
+  as the account is concerned, and it keeps room it should have lost. At the
+  default one-second sweep interval under acceleration that window is short in
+  wall time and a full second in SIM time, which is the axis the policy is
+  stated on.
+  THE GAP IS RESOLUTION AND NEVER DIRECTION, which is the reason it was
+  acceptable to land: every peak the evaluation DOES see ratchets exactly as it
+  should, so enforcement is uniformly LENIENT rather than wrong. An account is
+  never liquidated for a spike that did not happen; it is sometimes not
+  liquidated for one that did.
+  WHAT CLOSING IT NEEDS, and it is why this was not just done: the evaluation
+  would have to run in the tape thread, which cannot take the engine lock - the
+  whole sweeper design exists because the tape walk must stay off it. So it
+  wants the equity INPUTS published out of the engine (position quantity, avg
+  price, balance) into something the tape thread can read lock-free, with the
+  policy evaluated against the tick price there. That is a real piece of work
+  and it touches the hottest path in the venue, so it wants a measurement
+  naming what it costs before it is taken.
+  NOT THE SAME as tightening `SWEEP_INTERVAL_NS`, which would buy resolution
+  everywhere at a cost the fill golden's own item already describes.
+
+- A POLICED ACCOUNT IS CONFINED TO ONE SETTLEMENT CURRENCY, which today means
+  FUTURES ONLY. Landed 2026-08-16 as the honest response to a defect, and it is
+  a real limit on what can be forward tested under enforcement rather than a
+  tidy-up.
+  THE MECHANISM. A SPOT fill credits the base asset as a CURRENCY BALANCE and
+  debits the quote - `apply_fill` in `mogwai-engine/src/account.rs` - so buying
+  one BTC at 60,000 leaves the ledger holding `BTC: 1` beside
+  `USDT: -60,000`. Equity therefore cannot be stated without valuing the base,
+  and the venue has no exchange rate and no live spot mark to build one from:
+  `Engine::mark` refreshes only FUTURES positions, so a spot position's
+  `mark_px` is never advanced past its fill price. A future moves only its
+  settlement currency and carries its own unrealized, which is why it works.
+  THE DEFECT THIS REPLACED, recorded because the wrong version shipped for one
+  commit: equity summed every balance total, which values one unit of any asset
+  at one unit of any other. On the DEFAULT preset shape - BTCUSDT spot - that
+  reads a 59,999 loss on a purchase that changed nothing, so a trailing
+  drawdown would fire on the first buy. It was not an exotic case; it was the
+  common one.
+  WHAT SHIPPED INSTEAD. `AccountPolicy` must name the `currency` its thresholds
+  are stated in whenever it sets a rule, `equity_in` computes in that currency
+  alone and returns `None` rather than guessing when the account holds anything
+  else, and an order that would open a second currency is refused AT ENTRY by
+  name. So the failure is a client error at submit rather than a mis-valued
+  threshold hours later.
+  WHAT IT COSTS: no spot instrument can be forward tested under an enforced
+  risk policy. Since the designated default tape is a spot shape and crypto
+  spot is a whole session class the preset set means to cover, that is a real
+  hole rather than a corner.
+  WHAT CLOSING IT NEEDS is a way to value a non-settlement holding: either
+  marking spot positions on the tape the way futures are marked, which the mark
+  path already almost does and which would let equity be quote balance plus
+  base at mark; or an explicit rate surface, which is a bigger idea and buys
+  cross-currency accounts too. The first is much cheaper and covers the case
+  that exists. Neither is started.
+  RELATED, and it points the same way: the ledger-generality ruling above wants
+  shares, leverage and funding payments, and every one of those needs a holding
+  valued in a currency it is not denominated in. Whatever closes this closes
+  part of that.
 
 - THE ORDER-TYPE SURFACE IS COMPLETE, NOT CURATED. Ruled by the owner
   2026-08-16: mogwai is an exchange, so there is no axis on which it limits

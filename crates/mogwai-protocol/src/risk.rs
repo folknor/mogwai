@@ -114,6 +114,26 @@ pub struct AccountPolicy {
     /// a daily limit silently becomes a run-lifetime limit.
     #[serde(default = "default_reset_minute")]
     pub reset_minute_utc: u32,
+    /// The currency every threshold in this policy is stated in, and the only
+    /// currency a policed account may hold.
+    ///
+    /// REQUIRED WHENEVER A RULE IS SET, because a threshold has no meaning
+    /// without one. Equity is computed in this currency alone: the venue sums
+    /// the balance and the unrealized on positions settling in it, and has no
+    /// exchange rate for anything else.
+    ///
+    /// THE CONSEQUENCE IS THAT A POLICED ACCOUNT TRADES ONE SETTLEMENT
+    /// CURRENCY, which today means futures. A SPOT fill credits the base asset
+    /// as a CURRENCY BALANCE and debits the quote - buy one BTC at 60,000 and
+    /// the ledger holds `BTC: 1` beside `USDT: -60,000` - so a spot account
+    /// holds two currencies from its first fill, and the venue would have to
+    /// value the base to state its equity. It cannot: `Engine::mark` refreshes
+    /// only futures positions, so a spot position's mark is never live, and
+    /// inventing a rate would make every threshold mean something nobody
+    /// stated. An order that would open a second currency is therefore refused
+    /// at ENTRY, by name, rather than silently mis-valued afterwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
 }
 
 /// 22:00 UTC, which is 17:00 US Eastern in summer - the reset most funded
@@ -144,6 +164,13 @@ impl AccountPolicy {
         }
         if self.reset_minute_utc >= 24 * 60 {
             return Err("reset_minute_utc must be a minute of the day, 0 to 1439".to_owned());
+        }
+        if !self.is_unpoliced() && self.currency.as_ref().is_none_or(String::is_empty) {
+            return Err(
+                "a policy with any rule must name the currency its thresholds are stated in; \
+                 equity is computed in that currency alone and the venue has no exchange rate"
+                    .to_owned(),
+            );
         }
         Ok(())
     }

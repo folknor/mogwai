@@ -45,6 +45,16 @@ The thresholds, the ratcheted peak and the remaining budget are PUBLISHED on
 no dashboard, so a run that ended flat having spent most of its budget would be
 indistinguishable from one that never came close.
 
+A POLICED ACCOUNT HOLDS ONE CURRENCY, which today means it trades futures. The
+policy names the currency its thresholds are stated in, equity is computed in
+that currency alone, and an order that would open a second one is refused at
+entry by name. A spot fill credits the base asset as a currency balance and
+debits the quote, so a spot account holds two currencies from its first fill and
+its equity cannot be stated: the venue has no exchange rate, and `Engine::mark`
+refreshes only futures positions, so a spot position carries no live mark to
+build one from. No spot instrument can therefore be forward tested under an
+enforced policy.
+
 KNOWN FIDELITY GAP: the policy is evaluated on the fill sweeper's mark cadence,
 not per tape tick. At a real venue the ratchet is effectively tick-by-tick, so a
 spike lasting a fraction of a sweep interval still spends budget; here such a
