@@ -102,6 +102,34 @@ consumer surface landed was the designed handoff.
 
 ## Open issues
 
+- `/health` REPORTS ONLY THE BOOT RIVER'S TAPE FAULT, so under the open
+  instrument set a tape fault is invisible on every other river. Found
+  2026-08-16 auditing the durable docs against the code, not by a failure.
+  The handler builds its `fault` field from
+  `boatyard.boat_for_symbol(&run.boot_symbol)` and reads `boat.tape.fault()`
+  on that one boat; a grep for `fault()` confirms this is the ONLY consumer of
+  a boat's tape fault anywhere in the server. That was exactly right when a run
+  had one paced tape. It is now a leftover: a run seats a boat per keyed river,
+  every one of them owns its own tape and can fault independently, and a client
+  bound to a non-boot symbol whose arrival draw refuses gets a healthy `/health`
+  while its own tape is stuck.
+  WHY IT IS NOT MERELY COSMETIC: `/health` is what a launcher and an
+  orchestrator poll to decide whether a run is worth keeping, and the ecosystem
+  runs many fire-and-forget instances precisely so a bad path can be discarded
+  cheaply. A per-river fault that never reaches the poll defeats that: the run
+  is scored as healthy and its output silently trusted. The boot river always
+  holds a boat for process life, so the ONE river guaranteed to be reported is
+  also the one a strategy under test is least likely to have bound.
+  WHAT THE SHAPE OF THE FIX HAS TO DECIDE, and why this is parked rather than
+  patched: `fault` is a single optional object on the response, and there are
+  now N boats. Reporting the first faulted boat makes the field
+  nondeterministic across polls; reporting a map changes the wire shape for
+  every existing consumer; reporting only the boat the caller asks about needs
+  a `?symbol=` the endpoint does not have and would leave a fleet poller with
+  no way to ask "is ANY river faulted". Note also that the venue's terminal
+  fault shutdown path is separate from this field, so a decision here does not
+  change when a run dies - only what a poller can see before it does.
+
 - NAUTILUS HAS NO CHANNEL FOR A DECLARED FEED GAP, so mogwai's `FeedLagged`
   can only reach a host as a log line. CROSS-REPO, and written for a reader who
   has not seen the bug loop.

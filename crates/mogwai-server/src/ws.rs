@@ -26,10 +26,10 @@ use crate::{
 
 /// The upgrade's query string, exactly as the client wrote it.
 ///
-/// `deny_unknown_fields` is a WIRE-COMPATIBILITY decision, taken knowingly:
-/// later pieces add `speed` and `duration_ms` here, and until they do, a client
-/// that sends one is REFUSED rather than silently served a different river than
-/// it asked for. The price is that ANY unrecognized key is a `400`, including
+/// `deny_unknown_fields` is a WIRE-COMPATIBILITY decision, taken knowingly: a
+/// client that sends a key this carrier does not handle is REFUSED rather than
+/// silently served a different river, speed or duration than it asked for. The
+/// price is that ANY unrecognized key is a `400`, including
 /// one an unrelated client, proxy or tracing layer appends, and including a
 /// future key added before its handling lands. That is accepted:
 /// accepted-and-ignored is the failure mode this carrier exists to prevent, and

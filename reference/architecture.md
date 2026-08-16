@@ -12,6 +12,16 @@ refused atomically, with no eviction. A `RiverKey` includes the exact requested
 label, its per-label tape seed, and the resolved bundle digest, so two labels
 wearing the same default shape still own independent water.
 
+`/instruments` therefore answers the union of the configured shapes and every
+shape this run has MATERIALIZED a river for - materialized, not merely
+resolved, because resolution is total and a memo-shaped list would advertise
+labels nothing had registered. A socket bind and a history poll spend the same
+river budget, so the advertised set grows exactly when the capped resource
+does. The ENGINE's instrument set grows on the same demand: `Run::ensure_instrument`
+registers a def and installs its margin policy and fee schedule the first time
+a socket binds that symbol or an order names it, guarded on the registration
+having been new so re-binding never resets a live configuration.
+
 The server exposes `/health`, `/account`, `/instruments`, `/clock`, `/trades`,
 `/quotes`, `/control/divergence`, and `/ws`. Order entry is WebSocket-only: the
 `POST /orders` carrier went with the HTTP transport profiles. Each socket feeds
@@ -22,16 +32,23 @@ the blocking pool or engine mutex, and a full bound is a visible
 `AdmissionRejected` the engine never sees. Inbound frames and reassembled
 messages are capped at `MAX_CLIENT_MESSAGE_BYTES`, 64 KiB, so a dependency
 default no longer sets the venue's memory bound; an oversized frame ends the
-connection. A WebSocket names its one river with the optional, case-exact
-`symbol` query parameter on the upgrade. The key is known before any tasks or
-bytes exist, a refusal - an illegal label, a shape that does not validate, a
-funding-barred one, or an exhausted river cap - is an HTTP 400 rather than an
+connection. A WebSocket carries its whole binding in the upgrade query string,
+which `deny_unknown_fields` rejects any other key on: the optional, case-exact
+`symbol` names its one river, the optional `speed` names the pacing multiple,
+and the optional `duration_ms` names a passenger-local simulated deadline.
+Absent, they default to the run's boot symbol and the configured `speed`, and
+to an indefinite passenger. The key is known before any tasks or bytes exist,
+a refusal - an illegal label, a shape that does not validate, a funding-barred
+one, an exhausted river cap, a non-finite or negative speed, or a speed
+differing from the one this river's sitting boat carries - is an HTTP 400
+rather than an
 ambiguous WebSocket close, and one connection still owns exactly one replay. A
 frame carrier would permit multiple replays and create an unbound interval
 before the first frame. The query carrier is the seam where river-keyed state,
-boat placement, and per-boat clocks attach. `handle_socket` resolves the query
-symbol, ensures its instrument exists, resolves its `RiverKey`, and boards a
-boat on that river. Every resolved shape owns a lazily created checkpoint
+boat placement, and per-boat clocks attach. `ws_upgrade` resolves the query
+symbol, registers its instrument on the engine, resolves its `RiverKey`, and
+boards a boat on that river, all before the 101; `handle_socket` then owns the
+already-bound session. Every resolved shape owns a lazily created checkpoint
 chain, keyed and locked independently, and is servable through history. Clients
 do not send subscribe frames or an account identity. The bounded fanout
 ring remains; a lagging client receives
@@ -97,19 +114,55 @@ The last ticket removes the seat, cancels the worker and joins it away from the
 registry mutex. Rivers and their bounded checkpoint sets remain for process
 life so later history does not depend on eviction timing.
 
+The BOOT river is the exception to placement on demand: `serve` boards it
+before it writes the readiness line, at the configured `speed`, and the run
+retains that ticket for process life. So the boot river always has a boat, it
+never winds down, and a socket asking for a different speed on the boot symbol
+is refused. Every other river is boatless until someone binds it.
+
+Concurrent first boarders share one placement through a semaphore handoff
+rather than each placing a boat, and a reader asking a river's now while a
+placement is in flight WAITS for it instead of falling through to the venue
+clock - falling through would hand back a well-formed answer off a clock ahead
+of the boat about to be seated, which is the look-ahead per-boat clocks exist
+to remove. `/health` keeps the non-blocking form, because it must never block
+on a placement.
+
 The venue also retains a wall-to-sim reference, but it is not a seated boat's
 clock. It bounds history for a boatless river, drives the venue deadline, and
 stamps the venue-scoped pulled account ledger. A seated river instead answers
 only through the instant its own boat has published.
+
+The ledger stays venue-scoped because one engine serves every river, so a
+pulled `/account` snapshot has no boat axis to sit on: stamping it from any one
+boat makes it ahead of or behind a push from another. `GET /account` therefore
+keeps the venue stamp and LABELS it, adding a `clock: "venue"` field beside the
+otherwise unchanged `AccountState` so a consumer can never mistake that
+`ts_event` for boat time; pushes are ordered against pulls by sequence.
+`/clock` answers the same way - `?symbol=` renders that river's boat clock and
+sets `boat_clock`, and without a symbol it renders the venue's.
 
 Each boat has its own settlement watermark and its own ring. Market water is
 exogenous: orders never move it and there is no queue competition. Fifty agents
 submitting the same buy against the same water receive the same fill without
 changing one another's result. Generator-level havoc belongs to river identity
 and cannot mutate a seated boat; transport havoc remains a property of what a
-passenger sees. A timed havoc window carries a wall arming instant and a
+passenger sees. So `FlowSurge` and the generator half of `ClearDivergences` are
+refused with a 400 on a river that has a seated boat, and unqualified
+`FlowSurge` is refused outright while any boat sits, naming the seated symbols;
+an unqualified clear reaches every materialized river that is boatless and
+SKIPS the seated ones, because the transport half of that control is run-wide
+and must stay reachable while a boat is sitting. A timed havoc window carries a
+wall arming instant and a
 simulated span rather than one boat's absolute deadline, and every passenger
 judges it on its own clock.
+
+The fill sweeper is ONE task on an earliest-deadline schedule over the seated
+boats, keyed by boat identity rather than by allocation address, each boat
+re-armed on its own clock and floored in wall time so an accelerated run cannot
+turn the pass into a hot loop. The consequence to know: a river with no seated
+boat is not swept, because a sweep needs a clock to sample, so resting orders
+on a wound-down river stay unscanned until someone boards again.
 
 An instrument is a bundle of knobs, not one fixed shape. Two classes are
 selectable: a spot currency pair, and a cash-settled continuous future with a
@@ -166,7 +219,10 @@ so an arm inside a closure cannot be skipped forever. The protocol-12b
 MECHANISM landing, long pencilled in for 13, now takes 15. Version 16 retired
 the second unnamed default knob bundle without moving generated bytes. Version
 17 keys each server river's tape root by the requested symbol label, moving
-every server tape while leaving offline generation seeds untouched.
+every server tape while leaving offline generation seeds untouched. Version 18
+is the boatyard landing: placement, pacing and the per-boat clock moved off the
+one venue-wide replay, so what a socket receives is a function of its boat
+rather than of the run.
 
 Each generated parent event publishes one BBO before its first trade. The book
 has an exact positive integer-tick width and is centered, with one rounding, on
@@ -288,17 +344,52 @@ carries those three time facts and no symbol. A run is therefore a
 pure function of `(seed, config)` for a given build and fingerprint - with the
 limit that a new seed only draws a new path from the one fitted model behind
 the fingerprint, so marginalizing over seeds reduces variance conditional on
-that model rather than adding out-of-sample market evidence. A declared
-duration starts at `run_start_ns`, not boot. At its deadline the server
-announces `RunComplete`, closes WebSockets normally, drains, and exits zero.
+that model rather than adding out-of-sample market evidence.
 
-The history endpoints refuse rather than return an empty page on all three
-impossible-request axes: before the tape origin, past the current clock, or a
-symbol not served by this run.
+Two durations exist and they are not the same object. The RUN duration is
+configured, starts at `run_start_ns` rather than boot, and is measured on the
+venue clock; at its deadline the server announces `RunComplete`, closes
+WebSockets normally, drains, and exits zero. A PASSENGER duration is the
+socket's own `duration_ms`, simulated milliseconds measured on its boat's clock
+from its boarding instant, so passengers with different durations still share
+one boat and each closes at its own deadline while the boat winds down only
+when the last of them leaves. The venue's completion instant is the SIGNAL that
+crosses to a socket; the numbers on the `RunComplete` frame are always
+re-derived on that socket's boat clock, and `elapsed_ns` is how much tape that
+boat actually covered.
+
+The history endpoints refuse rather than return an empty page on every
+impossible request, so a refusal is never mistaken for a span nothing traded
+in. A START before the tape origin or past the ceiling is a 400; so is a
+shape-class refusal decided before the synthesis task runs - an illegal label,
+a shape that does not validate, a funding-barred one, or an exhausted river
+cap. A synthesis failure is a 500 naming the symbol and the window. There is no
+"symbol this run does not serve" axis any more: resolution is total, and a poll
+MATERIALIZES the river it names, which is also what makes it advertise through
+`/instruments`.
+
+The ceiling is the NAMED RIVER's now - what its boat has published - and only a
+boatless river answers with venue sim-now. An `end` past that ceiling is
+CLAMPED rather than refused, deliberately asymmetric with the start: a boat
+placed `T` wall-nanoseconds after boot sits `T * speed` simulated nanoseconds
+behind the venue clock by construction, so a client stamping its `end` from
+`/clock` with no `?symbol=` is routinely ahead of this answer, and refusing it
+would fail every honest warmup fetch. A client that needs to know where the
+tail actually is reads `/clock?symbol=`.
 
 The protocol crate owns every JSON type shared by server and adapter. The
-adapter uses WebSocket streaming only; `/trades` remains a request endpoint,
-which is how history and warmup are fetched.
+adapter uses WebSocket streaming only for market data and execution; `/trades`
+and `/quotes` remain request endpoints, which is how history and warmup are
+fetched. Each adapter client names its river with an optional `symbol` in its
+own config, which becomes `/ws?symbol=`; it carries no `speed` or
+`duration_ms`, so the data and execution clients of one host board the same
+boat at the venue's configured speed. The adapter holds NO served-symbol guard
+of its own any more: since resolution became total there is no set to guard
+against, so both clients re-read `/instruments` AFTER binding - binding is what
+registers an unconfigured symbol, so only a read taken after the socket is up
+can see it - behind a watch-gated readiness barrier that black-holes delivery
+until the reseed says go, and a failed reseed tears the connection down rather
+than wedging the delivery pump.
 
 The generated tape publishes BBO updates and raw fills, not aggregated trades. One parent
 match event updates the latent market once and emits a same-side sweep of one
@@ -337,10 +428,22 @@ instrument, versus the 12.6 ms recorded before the checkpoint stride was
 repaired). The residual replay is now a small part of that: the 300 s
 volatility window is the walk, which is why cutting checkpoint positioning by
 53x moved this number by only a few milliseconds. So acceptance-time readings
-are memoized per symbol per
-fill-sweep interval and a submit sees a reading that may be up to one interval
-stale. A market order therefore fills at or beyond the market as of that
-reading, not as of the fill instant.
+are memoized ON THE BOAT - one memo per boat, bucketed by fill-sweep interval
+on that boat's own clock - and a submit sees a reading that may be up to one
+interval stale. A market order therefore fills at or beyond the market as of
+that reading, not as of the fill instant. The memo lives on the boat rather
+than on the run because the bucket is a function of the boat's clock and the
+walk it saves is a walk of one river: a run-level memo held a single entry, so
+two symbols evicted each other into a guaranteed miss and then serialized on
+the walk behind one mutex. The lock is held ACROSS the walk deliberately, so
+two passengers landing in the same bucket pay for one walk rather than two.
+
+The exact-instant mark and settlement reads that never come from this memo fail
+differently from each other on purpose:
+an unreadable ordinary mark costs one pass of unrealized P&L freshness and is
+dropped, while an unreadable SETTLEMENT price refuses the whole read and leaves
+the watermark where it stands, because nothing looks back past a watermark that
+has moved.
 
 ## The workspace and the offline evidence toolbox
 
@@ -351,9 +454,14 @@ exchange core. `mogwai-data` owns `TickSource`, the k-way merge and the
 `mogwai-server` is a library - it owns the sockets, the clock and the replay
 pacing, and ships no binary of its own. `mogwai-cli` is the `mogwai` BINARY: a
 clap dispatcher over `serve` (which does no work itself, just forwards to
-`mogwai_server::serve`) plus every offline subcommand - `gen`,
+`mogwai_server::serve`) plus every offline subcommand. `serve` is the only one
+that binds a socket; the rest are the intake and measurement surface - `gen`,
 `tick-composition`, `presets`, `man`, `preflight`, `measure`, `fit`, `cache`,
-`synth fingerprint`/`synth cadence` and `cadence-feasible`. `mogwai-adapter` is
+`synth`, `cadence-feasible`, `characterize`, `select-windows`,
+`session-profile`, and the protocol-12 instruments (`count-curve`, `stage-m`,
+`minute-range-envelope`, `arrival-control`, `arrival-screen`,
+`arrival-envelope-diagnostic`, `tick-composition-ratios`). `mogwai --help` is
+the authority on the current set. `mogwai-adapter` is
 the lone nautilus-dependent crate, unchanged by anything below.
 
 `mogwai-lab` is the fifth non-adapter crate: the corpus-to-fingerprint method
@@ -379,7 +487,7 @@ identity. `InstrumentDef` is derived through one path from the symbol and the
 operator overlay: an explicit preset, a matching preset, or the BTCUSDT default
 bundle. No second hardcoded default bundle exists, and no symbol is refused for
 wanting a fit. The three shipped presets - MNQ, MES and BTCUSDT - are the
-current state, not the end state. The intake sequence makes a tape better:
+current state, not the end state.
 
 Config declares no closed instrument set. It supplies a default knob overlay
 and optional case-insensitive per-symbol overlays for total symbol resolution.
@@ -387,6 +495,7 @@ The top-level boot symbol selects the eagerly warmed boot river and remains the
 default for a request that carries no symbol; other request symbols materialize
 and board their own rivers in the same run.
 
+The intake sequence therefore makes a tape better and gates nothing:
 survey what cheap data exists, decide whether a paid corpus is worth buying
 and which windows of it, buy, preflight, measure, characterize, fit, ship a
 preset with its provenance. The offline toolbox is that sequence made

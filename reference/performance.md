@@ -14,9 +14,13 @@ Piece 9 reduced the shipped per-boat `fanout_depth` to 1,048,576, the smallest
 power of two already measured to hold the protocol-8 worst p99.9 wall-second
 frame work. On host `bygg`, `brokkr mogwai ring_sizing --alloc 3 --force`
 reported `ring_resident_bytes=42213376` for one eagerly allocated Tokio
-broadcast ring. The tree was intentionally dirty because the implementation
-was not to be committed, so brokkr correctly stored no durable results row;
-the benchmark's stderr counter is the measurement record for this landing.
+broadcast ring. It was measured from the dirty tree that preceded the boatyard
+landing, so brokkr correctly stored no durable results row; the benchmark's
+stderr counter is the measurement record for this landing. The depth itself is
+`mogwai_server::config::DEFAULT_FANOUT_DEPTH`, public precisely so the
+`ring_sizing` harness measures the shipped value rather than a copy of it, and
+the ring is allocated PER BOAT - a run serving several rivers at once pays it
+once per placed boat.
 
 ## History admission gate, 2026-08-15
 
@@ -78,8 +82,8 @@ Fill BEHAVIOUR is gated automatically, by
 Settled 2026-08-10, replacing the two-layer setup that preceded it. There are no
 layers and no frozen workloads: the argv is composed at the call site and
 captured verbatim in the row, so pairing rows is a query rather than a name
-lookup. The design and what it deliberately defers are in
-`notes/benchmarking-design.md`.
+lookup. The registry that carries the targets and their feature shapes, and the
+reasoning for what it deliberately does NOT carry, is `brokkr.toml`.
 
 Two kinds of surface, the same three modes over both. Recording a row needs a
 clean tree.
@@ -197,7 +201,9 @@ every rule here should be traceable to a run.
   at 311 ms p99 on 2026-08-08 with a load average of 1.46 across 32 visible
   CPUs, so load average alone is not a sufficient admission test. The bound is
   unchanged and authoritative; what is unresolved is the environment under which
-  it can be evaluated. Open work in `notes/todo.md`.
+  it can be evaluated, which is why the test stays `#[ignore]`d and directly
+  runnable (`brokkr test -p mogwai-cli tape_lateness_under_acceleration`)
+  rather than gated in a check lane.
 - **Read counters before crediting a wall.** Every surface emits its work size
   beside its timing. A cell whose wall moved while `parents` or `prints` moved
   did different work, and the wall comparison is void rather than interesting.
@@ -208,8 +214,8 @@ every rule here should be traceable to a run.
   stays at phase boundaries - see the discipline above.
 - **Neither `--hotpath` nor `--alloc` reports peak RSS.** It comes from the
   sidecar timeline on a `--bench` or plain run. Peak anon is a headline quantity
-  here rather than a footnote: the end state runs on the order of 200 venue
-  instances on one host, so every instance-level cost is multiplied.
+  here rather than a footnote: a venue is one process per run, hosts carry many
+  of them at once, and every instance-level cost is multiplied by that count.
 
 ## Stage A baseline, 2026-08-09
 
@@ -626,10 +632,14 @@ under-reserved the admission budget for a hedged book; the row is now
 aggregated per symbol over positions AND resting orders, which is what the
 current numbers price. These numbers do
 not hide the dominant server cost: a cache miss still pays the previously
-measured 13.86 ms tape walk per symbol, and the cache is single-entry, so a
-multi-symbol pass can evict itself. The landing shares the HTTP cache with the
-sweeper to remove duplicate same-bucket walks when the keys coincide, but it
-does not close the separate market-reading performance item.
+measured 13.86 ms tape walk per symbol. That landing's memo was a single
+run-level entry shared between the command path and the sweeper, so a
+multi-symbol pass could evict itself; 2026-08-16 moved the memo ONTO THE BOAT,
+one single-entry cache per river keyed by the boat's own sweep-interval bucket,
+which removes the cross-symbol eviction. The sweeper no longer reads that memo
+at all - its two reads are exact-instant last-print reads - so the only consumer
+today is the command path. The tape walk a miss pays is unchanged and remains
+the open cost; see the 2026-08-14 close reading below for the current levels.
 
 ## 2026-08-03 warmup materialization throughput
 
@@ -668,8 +678,10 @@ question is a Rust byte-level parse, which nobody has measured.
 
 ## 2026-08-04 protocol 7 BBO composition
 
-The `mogwai tick-composition` fixtures measure each of the five presets
-independently over 2,000,000 parent events, eight seeds, and four arrival modes.
+The `mogwai tick-composition` fixtures measured each of the five presets then
+shipped - ETHUSDT and SOLUSDT were retired 2026-08-09, leaving MNQ, MES and
+BTCUSDT - independently over 2,000,000 parent events, eight seeds, and four
+arrival modes.
 Each preset is resolved through `config::profile_from_preset`, the same path the
 venue boots from, so preset inheritance, scalar defaulting, the size grid, the
 session profile and the calendar are the venue's own: MNQ and MES are measured
@@ -733,22 +745,22 @@ simulated-minute spacing contract. The two-times headroom and power-of-two
 rounding make the final bound deliberately longer than an exact preservation;
 it cannot shorten the baseline horizon. At the worst measured wall rate, the
 old 65,536-frame fanout held 0.007398 wall seconds; the resized fanout holds
-0.029553 wall seconds, so its horizon does not shrink. Regenerate both fixtures
-with
-`brokkr run mogwai -- tick-composition --out-6 analysis/tick-composition-protocol-6.json --out-7 analysis/tick-composition-protocol-7.json`,
-then run `mogwai tick-composition-ratios compare` after any
-event-composition change. One invocation emits both: protocol 6 is a count
+0.029553 wall seconds, so its horizon does not shrink. This round regenerated
+both fixtures from ONE invocation of `tick-composition`, which then took an
+`--out-6` and an `--out-7` path and was followed by
+`mogwai tick-composition-ratios compare`. The command takes a single `--out`
+today and every later protocol is measured independently, so the paired form is
+recorded here as history rather than as a runnable line. Protocol 6 was a count
 projection of the protocol-7 tape, so the two fixtures are counted off a single
-traversal and are paired by construction rather than by two runs agreeing. Both
-documents carry the same `pairing_id`, which the ratio script asserts on, so a
-fixture paired with a stale partner is refused rather than silently ratioed.
-Both are serialized in full and staged beside their destinations before either
-is touched, so a serialization failure or a full disk cannot consume a finished
-run. The two renames remain two operations - a crash between them leaves a new
-protocol 6 beside an old protocol 7, and two paths cannot be replaced atomically
-as a pair - so what is guaranteed is DETECTION of that mismatch, not its
-prevention. `--jobs N` sets worker count, defaulting to the machine's
-parallelism.
+traversal and were paired by construction rather than by two runs agreeing. Both
+documents carried the same `pairing_id`, which the ratio comparison asserts on,
+so a fixture paired with a stale partner is refused rather than silently
+ratioed. Both were serialized in full and staged beside their destinations
+before either was touched, so a serialization failure or a full disk could not
+consume a finished run; the two renames were still two operations, so what that
+shape guaranteed was DETECTION of a mismatch rather than its prevention.
+`--jobs N` sets worker count, defaulting to the machine's parallelism, and
+still does.
 
 ## 2026-08-05 protocol 8 session-profile composition
 
@@ -918,10 +930,13 @@ yet distinguish wire reordering (the fill frame arriving before
 `OrderAccepted`) from timestamp inversion, and ring depth is not
 consulted after construction at nonzero speed, so the suspected channel
 is the eager allocation shifting boot phase relative to the anchored run
-clock. The investigation item in `notes/todo.md` carries the exact
-reproduction; `the_fanout_default_carries_the_protocol_11_exception`
-pins the default so a later mechanical application of the generated
-proposal must be argued, not slipped through.
+clock. That mechanism is still unresolved.
+`the_fanout_default_carries_the_protocol_11_exception`, in
+`mogwai-server/src/config.rs`, pins the default so a later mechanical
+application of the generated proposal must be argued, not slipped
+through; it now pins 1,048,576, the per-boat depth the 2026-08-15
+section above records, rather than the 4,194,304 that stood when this
+exception was taken.
 
 `MAX_EXTEND_TICKS` and `SWEEP_DRAIN_WARN_TICKS` stay unchanged for the
 recorded standing reasons: a per-lock runaway backstop and an

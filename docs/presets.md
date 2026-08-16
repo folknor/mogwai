@@ -1,8 +1,14 @@
 # Choosing an instrument preset
 
-An operator names a symbol and mogwai resolves its tape knobs. Three presets ship inside the `mogwai`
-binary - no data directory, no network fetch, nothing outside the executable
-itself.
+A symbol arrives and mogwai resolves its tape knobs. The symbol may come from
+the run config, from a websocket binding a river, or from a history query -
+resolution is the same either way, and it is TOTAL: every wire-legal symbol
+resolves to a shape, so nothing is refused for wanting a preset. Three presets
+ship inside the `mogwai` binary - no data directory, no network fetch, nothing
+outside the executable itself.
+
+A preset is a named bundle of tape knobs, not an admission record. Presets make
+a symbol's tape BETTER; they never decide whether it can be served.
 
 ## Listing and inspecting presets
 
@@ -30,8 +36,9 @@ are.
 
 ## Selecting a bundle in your config
 
-Name the boot symbol at top level. If its name matches a shipped preset, case-insensitively, that
-preset supplies the whole bundle.
+Name the boot symbol at top level - the river a client gets when it binds
+without naming one. If its name matches a shipped preset, case-insensitively,
+that preset supplies the whole bundle.
 
 ```toml
 symbol = "MNQ"
@@ -49,6 +56,11 @@ symbol = "FOOBAR"
 [symbols.FOOBAR]
 preset = "MNQ"
 ```
+
+`[instrument]` is the DEFAULT overlay: it applies to every symbol this run
+resolves, including one no config mentions, so a `preset` written there becomes
+the bundle for the whole run. `[symbols.<SYM>]` is the same overlay shape
+applied to one symbol on top of it.
 
 ## Overriding a knob
 
@@ -78,9 +90,6 @@ Every override is logged at startup with both the preset's value and the
 value you supplied, so a run's log makes the deviation from the preset
 visible without you having to diff two TOML files.
 
-A preset is a named knob bundle, not an admission record. Every symbol is
-servable: an unmatched symbol resolves through the BTCUSDT default under its
-own name. Presets improve a symbol's tape; they do not authorize the symbol.
 Requested labels are case-exact river identities. Preset names and
 `[symbols.*]` overlay keys are matched case-insensitively, so `mnq` may select
 the MNQ knobs while remaining a different river and label from `MNQ`.
@@ -131,11 +140,34 @@ name.
 
 ## Serving a symbol without a preset
 
-Every string is served. An unmatched symbol gets the BTCUSDT preset's spot,
-always-open, USDT-settled knobs under its own name. BTCUSDT is the default
+Every wire-legal string is served. An unmatched symbol gets the BTCUSDT preset's
+spot, always-open, USDT-settled knobs under its own name. BTCUSDT is the default
 because it makes no calendar or margin claim about an unfitted symbol, its
 settlement currency is funded by the shipped balances, and its dynamics were
 fitted from trade-level archives. Name a futures preset explicitly when a
 future-shaped bundle is required. The unmatched symbol wears the default
 preset's shape, never its tape path, because its requested label enters the
-seed derivation.
+seed derivation - two symbols on the same bundle run different tapes.
+
+A symbol nobody configured materializes its own river the first time it is
+asked for, and from then on it appears in `/instruments` alongside the
+configured shapes. Materialization is the one bounded resource here: a run
+serves at most 256 distinct rivers, and the 257th is refused loudly, naming the
+cap. That is a trust contract for a venue driven by its owner's own agents, not
+a quota to plan around.
+
+## Funding decides which presets your run can serve
+
+A shape can only trade if its SETTLEMENT currency is funded in `[balances]`.
+The rule lands in two places. A shape you configured is checked at boot: an
+unfunded one refuses the run rather than rejecting every buy minutes in. Every
+shipped preset is resolved at boot too, and one whose settlement currency is
+unfunded is recorded as funding-barred - a client that later asks for a symbol
+landing on that shape is refused when it binds, with a message naming the
+symbol and the currency.
+
+This bites the shipped default. The default balances fund USDT only, which
+covers BTCUSDT and every unmatched symbol resolving through it, but NOT the
+USD-settled MNQ and MES bundles. Fund USD in `[balances]` for a run whose
+clients may ask for the index futures. The payoff is that a funds rejection on
+a served shape then means depletion and only depletion.

@@ -175,9 +175,9 @@ pub struct Config {
     /// Process-wide ceiling on queued or executing commands across every
     /// websocket connection. See `admission::GLOBAL_PENDING_COMMAND_SLOTS`.
     pub(crate) global_pending_command_acts: usize,
-    /// The symbol whose river receives the run's paced tape. Absent, the default bundle's symbol
-    /// stands. This boot key becomes a request default when symbols move to the
-    /// request in slice 2.
+    /// The symbol whose river is boarded before readiness and holds a boat for
+    /// process life. Absent, the default bundle's symbol stands. It is also the
+    /// request default: a socket or poll that names no symbol gets this one.
     pub symbol: Option<String>,
     /// Operator knobs applied to every resolved symbol, exactly as written.
     #[serde(rename = "instrument")]
@@ -1506,7 +1506,8 @@ mod tests {
     /// formula proposed 16,777,216 and both reviewers rejected it (eagerly
     /// allocated ring state for a 1.4 percent measured ratio, and the
     /// rejected capacity deterministically breaks the accept-before-fill
-    /// serving invariant - see notes/todo.md). A later mechanical
+    /// serving invariant: a socket whose ring lapses can observe a fill for
+    /// an order whose accept it never received). A later mechanical
     /// application of a generated proposal must fail HERE and be argued,
     /// not slip through as bookkeeping.
     #[test]

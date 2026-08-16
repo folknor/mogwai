@@ -24,10 +24,13 @@ plugs into broadarrow (which is built on nautilus_trader) to exercise the \
 live trading path: it synthesizes market data from a committed fingerprint \
 and injects realistic execution divergences (partial fills, rejects, delays, \
 duplicate fills, dropped account updates, venue blackouts) that an \
-in-process backtest cannot produce. Its mogwai-adapter crate path-deps \
-nautilus to ship the ExecutionClient/DataClient pair that drives the MOGWAI \
-venue over a native JSON-over-WS protocol. When asked to review or opine, \
-ground your answers in nautilus_trader's code and documents."""
+in-process backtest cannot produce. Its mogwai-adapter crate builds against \
+the PUBLISHED nautilus crates from crates.io, version-pinned with \
+default-features off and no pyo3, to ship the ExecutionClient/DataClient pair \
+that drives the MOGWAI venue over a native JSON-over-WS protocol. The vendored \
+copy is what you READ; the pinned release is what COMPILES, and the two are \
+kept in sync. When asked to review or opine, ground your answers in \
+nautilus_trader's code and documents."""
 
 [_defaults]
 providers = ["codex"]

@@ -3,7 +3,9 @@
 mogwai's own run config selects an order-management style with `oms_type`,
 either `netting` (the default) or `hedging`. This is a **run-level** choice,
 not an instrument one - it applies to the whole venue for the run, the same
-way `seed` or `speed` does.
+way `seed` or `speed` does. One run is one ledger: a run serving several
+symbols books every fill on all of them into that one account, and the style
+below decides only how positions are keyed within it.
 
 - **Netting** collapses every fill on an instrument into one position per
   symbol: an opposing fill reduces or reverses that one position, and a

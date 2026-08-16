@@ -1,11 +1,30 @@
 # mogwai glossary
 
-- **Run**: one foreground mogwai process, one ledger, one paced tape and many
-  keyed rivers. A run may declare a simulated duration.
-- **Tape**: the run-owned generated market-data sequence. It is warmed before
-  readiness and broadcast to every connected WebSocket.
-- **Ledger**: the single `mogwai-engine` instance owned by the run. HTTP and
-  WebSocket order entry act on the same ledger.
+- **Run**: one foreground mogwai process, one ledger, many keyed rivers and at
+  most one boat per river. A run may declare a simulated duration, and so may an
+  individual passenger.
+- **River**: the generated market-data sequence for one resolved instrument
+  shape, keyed by the requested symbol plus that shape's knobs. Rivers are
+  created on first use and never serialize on each other's checkpoint chain.
+  History reads a river directly; nothing has to be boarded for `/trades` or
+  `/quotes` to answer.
+- **Boat**: the paced reader of one river, placed on demand when the first
+  socket boards and carrying its own `SimClock`, its own broadcast ring and its
+  own market-reading memo. Sockets asking for the same river and the same speed
+  share one boat; a differing speed is refused before the upgrade rather than
+  placing a second boat on the same water.
+- **Boatyard**: the run-owned registry of keyed boats and the tickets that keep
+  them alive. A boat winds down when its last passenger leaves.
+- **Tape**: what a boat publishes - the paced frame stream broadcast to that
+  boat's passengers only. The boot river's warmup is materialized before
+  readiness; a river reached later materializes on first read.
+- **Ledger**: the single `mogwai-engine` instance owned by the run. Order entry
+  is WebSocket-only - there is no HTTP order carrier - and every socket, whatever
+  symbol it bound, acts on that one ledger.
+- **Boot symbol / boot river**: the shape the run boards a boat on before it
+  writes its readiness line, and the river a request that names no symbol binds.
+  It is the only river warmed eagerly and the only boat that never winds down;
+  every other river is boatless until someone boards it.
 - **Warmup**: the uniformly servable simulated history from `data_origin_ns`
   through `run_start_ns`. `warmup_ns` is their distance. The boot river is
   materialized before readiness and every other river on first read.
@@ -33,4 +52,11 @@
 - **ReadyRecord**: one versioned JSON line describing the venue, its only stdout
   output. It names no symbol; attach identity is `addr` plus `run_seed`.
 - **RunComplete**: the terminal WebSocket announcement for a planned duration
-  completion, followed by a normal close.
+  completion, followed by a normal close. A socket may carry its own
+  `duration_ms`, measured in simulated milliseconds on its boat's clock from its
+  own boarding instant, so passengers on one boat complete independently.
+- **Served symbol**: any symbol a request names that resolves to a legal,
+  fundable shape. A symbol with a preset gets that preset's shape; one without
+  gets the default shape under its own label, memoized per run. Refusals are
+  about the label or the run's `[balances]`, never about the absence of a
+  preset.

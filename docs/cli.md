@@ -24,7 +24,10 @@ optional; omitting it binds the socket to the run's boot symbol for compatibilit
 with older clients. A socket owns exactly one river. A supplied symbol is 1 to
 32 ASCII letters, digits, dot, dash, or underscore, and matching is case exact.
 Malformed symbols are refused with HTTP 400 before the upgrade. Every legal
-symbol is resolved. The first passenger places its river's boat
+symbol is resolved; the only other pre-upgrade refusals are a shape this run
+cannot fund or make valid, and a river already carrying a boat at a different
+speed. The upgrade also accepts `?speed=` (absent means the configured `speed`)
+and `?duration_ms=`. The first passenger places its river's boat
 and later passengers at the same speed share it.
 A client names that river from its own configuration; the readiness record does
 not supply one.
@@ -35,13 +38,26 @@ A run retains at most 256 materialized rivers and never evicts them. This is an
 operational bound for trusted clients belonging to the run's owner, not a
 hostile-client defence.
 
-The history endpoints `GET /trades` and `GET /quotes` are bounded by the named
-river's now. For a seated river that is the last instant its boat published;
-for a boatless river it is the venue clock. An omitted or future `end` is
-clamped to that ceiling, and a `start` above it is refused with HTTP 400. A
-client must therefore read `/clock?symbol=<symbol>` before constructing a
-history window. Using boatless `/clock` as the `start` for a seated river can
-be ahead of that river and is refused.
+The history endpoints `GET /trades` and `GET /quotes` both REQUIRE `symbol`;
+`start`, `end` and `limit` are optional. They are bounded by the named river's
+now. For a seated river that is the last instant its boat published; for a
+boatless river it is the venue clock. An omitted or future `end` is clamped to
+that ceiling, and a `start` above it - or below the tape origin - is refused
+with HTTP 400. A client must therefore read `/clock?symbol=<symbol>` before
+constructing a history window. Using boatless `/clock` as the `start` for a
+seated river can be ahead of that river and is refused.
+
+A history poll materializes the named river, so the only refusals left are
+about the SHAPE rather than about the symbol being unknown: a label that is not
+a legal symbol, a shape whose settlement currency this run does not fund, a
+shape the resolved configuration makes invalid, and an exhausted river cap.
+Each is a 400 naming its reason.
+
+`GET /clock` takes an optional `?symbol=`. Naming a SEATED river answers on its
+boat's clock: `server_now_ns` is the last instant that boat published, and
+`boat_clock` is true. Naming a boatless river, or omitting the parameter,
+answers on the venue clock with `boat_clock` false. `data_origin_ns` and `warmup_ns` are venue facts either
+way, identical for every river.
 
 `GET /account` returns the venue-wide ledger. Its `ts_event` is venue time and
 the top-level `clock` field is `"venue"`. Pushed account events are stamped on
@@ -71,7 +87,7 @@ config, the fingerprint and `version_string` reproduces every served path; the
 requested symbol label is the fifth input that selects one path from the run.
 
 `mogwai --version` prints semver, build hash, build time and the tape
-generation process's version (`mogwai_data::TAPE_PROTOCOL_VERSION`) on one
+protocol version on one
 line; the same string is what the readiness record reports as
 `version_string`, so an operator can tell whether two runs' tapes are even
 comparable before comparing seeds.
@@ -178,10 +194,14 @@ bar counts and its clustering constants are declared with a rationale saying
 they come from nowhere at all. Choosing a preset without reading that is
 choosing a number you have not been told the standing of.
 
-`gen` remains the offline generator command. `--symbol` resolves against the
-built-in venue first and then against the embedded presets, so
+`gen` remains the offline generator command. `--symbol` (default `BTCUSDT`)
+resolves against the built-in venue first and then against the embedded presets,
+so
 `mogwai gen --symbol MNQ --type bars --interval 1m --length 3d` charts the index
-future rather than failing on an unknown symbol. A preset carries its session
+future rather than failing on an unknown symbol. `--config PATH` resolves the
+instrument from an operator TOML instead, through the same load path a served
+config takes; it is mutually exclusive with an explicit `--symbol`. A preset
+carries its session
 calendar into the dump, which is what makes a futures tape show its closed
 weekend and its daily maintenance halt as zero-volume runs; before this the
 offline path dropped the calendar and printed straight through both, so a chart
@@ -190,7 +210,7 @@ taken from it disagreed with the served tape it was supposed to illustrate.
 `tick-composition` is the offline measurement the tape budget constants are
 derived from. It walks all three presets across eight seeds and four arrival
 configurations and writes ONE fixture, named by `--out` and stamped with the
-live `TAPE_PROTOCOL_VERSION`. Each preset is resolved the way `serve` resolves
+live tape protocol version. Each preset is resolved the way `serve` resolves
 it, so the futures are measured on their own size grid and session calendar. It
 is a long run - about an hour at the default 2,000,000 parent events per
 combination, nearly all of it the maximum-surge arm - and `--jobs` bounds its
@@ -220,9 +240,10 @@ the compact path are continuation-tested from identical initial states.
 
 `man` renders the bundled reference docs. Bare, it lists the topics; with one -
 `mogwai man cli` - it renders that document to the terminal, colour dropped when
-stdout is not a TTY or `NO_COLOR` is set. The docs travel inside the binary via
-`include_str!`, so an installed `mogwai` documents itself with no source tree
-present. The user-facing docs only: the process documents are not bundled.
+stdout is not a TTY or `NO_COLOR` is set. The topics are `cli`, `config`,
+`architecture`, `havoc`, `clock`, `presets` and `oms-types`. The docs travel
+inside the binary, so an installed `mogwai` documents itself with no source tree
+present. The durable documents only: transient working notes are not bundled.
 
 There is no `stop` subcommand.
 
@@ -352,12 +373,13 @@ come back.
 
 Alongside the per-symbol byte comparisons, and never in place of them, it
 reads the diff from the baseline commit (`--b1-baseline-commit`, default
-`HEAD~1`) to HEAD and records whether it touched `crates/mogwai-data/`,
-`crates/mogwai-protocol/`, `crates/mogwai-server/presets/` or
+`HEAD~1`) to HEAD and records whether it touched any tape-bearing area - the
+data crate, the protocol crate, the shipped preset bundles, or
 `analysis/fingerprint.json`; touching any of them, or a tape protocol version
-other than the accepted identity (17 since each server river took a tape root
-keyed by the requested symbol label, which moves no offline tape because no
-offline command seeds through `RunSeeds`; 16 was the shipped BTCUSDT preset
+other than the accepted identity (18 since boat placement moved to an
+independent cursor at the fixed river origin; 17 was each server river taking a
+tape root keyed by the requested symbol label, which moves no offline tape
+because no offline command seeds per symbol; 16 was the shipped BTCUSDT preset
 replacing the retired built-in default bundle, and 14 the calendar-aware
 `ReopenGap` crossing repair), fails the
 tape-identity gate. Test-only files inside those paths
@@ -402,5 +424,24 @@ than scheduler throughput.
 A full run requires a clean tree before reading any input and re-attests
 it immediately before serializing, exactly as `arrival-control` does. The
 command lands no generator change and moves no tape byte: the run records
-the live `TAPE_PROTOCOL_VERSION` (18 after boat placement moved to an
+the live tape protocol version (18 after boat placement moved to an
 independent cursor at the fixed river origin) in the artifact's binding block.
+
+### The remaining offline commands
+
+These are evidence tools with narrower audiences. Each writes an artifact and
+documents its own arguments under `--help`.
+
+- `count-curve` - the signed count-curve preregistration's generated-only
+  Stage 0 backcheck.
+- `stage-m` - Tier 1 per-month measurement and its ladder: `preflight`,
+  `month`, `backcheck`, `reverify-amendment2`, `schedule-equivalence`,
+  `promote-july`, `exchangeability`, `power`, `summarize` and `tier2`.
+- `minute-range-envelope` - builds the bound minute-range-envelope artifact
+  `arrival-control` reads.
+- `arrival-envelope-diagnostic` - evaluates coarse envelopes the official
+  screen skipped, without changing that screen's verdict.
+- `select-windows` - bar-frame intake: which tick-data windows to buy,
+  stratified on what a one-minute bar can measure.
+- `tick-composition-ratios` - turns composition fixtures into the four
+  proposed sized constants, with `compare` for version pairs.

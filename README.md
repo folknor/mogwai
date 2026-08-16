@@ -29,14 +29,17 @@ nautilus adapter does.
 The seed is the whole of the reproduction: that command draws the same tape on
 any machine running the same build.
 
-A Cargo workspace of six crates under `crates/`:
+A Cargo workspace of seven crates under `crates/`:
 
-- `mogwai-protocol` - the JSON-over-WS wire types and the divergence catalog.
+- `mogwai-protocol` - the JSON-over-WS wire types, the divergence catalog and
+  the shipped launcher.
 - `mogwai-engine` - the venue-agnostic exchange core and divergence seam.
 - `mogwai-data` - the synthetic generator and the k-way tick merge.
 - `mogwai-server` - the axum library owning sockets, clock and replay pacing.
 - `mogwai-cli` - the `mogwai` binary: `serve` plus the offline generator and
   measurement subcommands.
+- `mogwai-lab` - the offline corpus-to-fingerprint method library: corpus
+  parsing, the measurement engine, fingerprint synthesis and the fit.
 - `mogwai-adapter` - the nautilus venue adapter a host registers for the
   `MOGWAI` venue; the only crate that imports nautilus.
 
@@ -51,7 +54,7 @@ A Cargo workspace of six crates under `crates/`:
 
 ## Building
 
-The five broker crates build nautilus-free. `mogwai-adapter` depends on the
+The six broker crates build nautilus-free. `mogwai-adapter` depends on the
 published nautilus crates from crates.io, pinned in its `Cargo.toml`
 (default-features off, no pyo3), so a full build needs no sibling checkout -
 cargo fetches nautilus like any other dependency.
@@ -101,12 +104,18 @@ mogwai gen --help                  # dump a tape offline, no venue involved
 mogwai man cli                     # read a bundled doc; bare `man` lists topics
 ```
 
-One venue is ONE RUN: one instrument, one account, one ledger, on an ephemeral
-loopback port. It is not a service you start once and point many strategies at -
-two independent forward tests are two processes, not two clients of one venue.
+One venue is ONE RUN: one account and one ledger, on an ephemeral loopback port.
+It is not a service you start once and point many strategies at - two
+independent forward tests are two processes, not two clients of one venue.
 Sockets may still be many (the adapter alone opens two, data and execution), but
 they all speak for the same account, so anything they submit lands in one shared
 ledger.
+
+The INSTRUMENT SET IS OPEN, and the venue does not gate on it: a symbol that
+arrives is served. If a tuned preset exists for it, that preset drives the tape;
+if none does, the default tape is served under that symbol. So one run can serve
+many symbols - each gets its own paced tape, and the config supplies the SHAPE a
+requested symbol resolves to rather than declaring the run's one instrument.
 
 ### Driving it from a nautilus live node
 
@@ -170,9 +179,10 @@ let builder = builder
 dedicated OS thread internally, so the caller's runtime cannot shorten the
 venue's life.
 
-Three things worth knowing at the call site. The venue's own knobs - `speed`,
-`warmup_ns`, `[balances]`, the instrument - live in the file passed as `config`,
-and the host restates none of them. Trading a futures preset wants
+Three things worth knowing at the call site. The venue's own knobs - `warmup_ns`,
+`[balances]`, the instrument shapes and the default `speed` - live in the file
+passed as `config`, and the host restates none of them; a client picks its own
+symbol and pacing on the socket it opens. Trading a futures preset wants
 `.with_account_type(AccountType::Margin)` on the exec config, because a nautilus
 `CashAccount` has nowhere to keep the margin rows the venue reports and drops
 them client-side. And divergences are armed either per-client with
@@ -219,8 +229,9 @@ Using it:
 - [`docs/config.md`](docs/config.md) - the run configuration file, knob by knob.
 - [`docs/havoc.md`](docs/havoc.md) - every divergence variant, the four havoc
   surfaces, and the validation boundaries.
-- [`docs/presets.md`](docs/presets.md) - choosing one of the five instrument
-  presets shipped inside the binary, and reading its provenance.
+- [`docs/presets.md`](docs/presets.md) - the three instrument presets shipped
+  inside the binary, how a requested symbol resolves to one, and their
+  provenance.
 - [`docs/oms-types.md`](docs/oms-types.md) - the run-level `oms_type` choice,
   and how netting and hedging differ on the wire.
 

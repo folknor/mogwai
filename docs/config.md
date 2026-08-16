@@ -8,16 +8,21 @@ and `warmup_ns` (the uniform servable span before the run starts). `warmup_ns`
 was formerly `backfill_horizon_ns`: an operator carrying an old file renames the
 key and keeps the value, since the span it names is the same one. The boot
 river is materialized before readiness and every other river on first read.
-`/clock` names the resulting `data_origin_ns` and `warmup_ns`;
-`/trades` and `/quotes` refuse a start below the floor or beyond current
-simulated time, and clamp an end past current simulated time to it. They also
-refuse with `400` a symbol not served by this run and name the served symbol,
-so an impossible request stays distinguishable from a quiet market. History
-symbols match the served instrument exactly, case included, even though config
-resolves preset names case-insensitively. The served spelling is the one the
-config wrote; clients should read it from `/instruments` rather than type it.
-The readiness record names no symbol. This refusal concerns only this run's
-symbol, never whether a preset exists for the requested string. `/quotes`
+`/clock` names the resulting `data_origin_ns` and `warmup_ns`, and its optional
+`?symbol=` answers on that river's boat clock rather than the venue clock.
+`/trades` and `/quotes` refuse a start below the floor or beyond the NAMED
+RIVER's now, and clamp an end past it. They do not refuse an unfamiliar symbol:
+resolution is total, so any wire-legal label names a river this run will serve.
+What they still refuse with `400` is a label that is not a legal symbol, a
+shape this run's `[balances]` cannot fund, a shape the resolved configuration
+makes invalid, and a run that has already materialized its river cap.
+
+Symbols are LABELS and match case-exactly on the wire, even though
+`[symbols.*]` keys and preset names resolve case-insensitively - `mnq` and
+`MNQ` are two distinct rivers with two distinct tapes. The readiness record
+names no symbol, so a client takes the labels it wants from its own
+configuration; `/instruments` reports the configured shapes unioned with every
+river materialized so far. `/quotes`
 returns only BBO publications whose `ts_event` lies in the inclusive requested
 window. It does not synthesize a leading governing quote when the window begins
 inside a parent burst; callers needing that earlier book request an earlier
@@ -33,9 +38,12 @@ is random. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; the
 run proper begins one `warmup_ns` later on the same axis, so a run is a pure
 function of `(seed, config)` for a given build and fingerprint, and one served
 symbol's tape is a pure function of `(seed, config, label)`. There is no
-wall-clock input to a run's identity left: the only clock key is `speed`,
+wall-clock input to a run's identity left: every boat is placed at that same
+fixed origin whenever it boards, so a river's path does not depend on when, or
+whether, anyone connects to it. The only clock key is `speed`,
 which paces delivery against wall time but never decides which tick is
-served. `speed = 0.0` is
+served - a boat placed some way into a run is therefore permanently behind the
+venue clock, which is what `/clock?symbol=` exists to report. `speed = 0.0` is
 unpaced delivery, not a stopped clock - the underlying sim time still advances
 at wall rate. `server_heartbeat_ms` sets the server-originated liveness
 cadence; zero disables it.
@@ -55,7 +63,7 @@ its stated price, where `band_ticks` is `fill_band_vol_mult` times the tape's
 trailing realized volatility scaled to a 60-second horizon, clamped to
 `fill_band_max_ticks`. `fill_band_vol_mult = 0.0` degenerates to a strict
 through-at-the-stated-price fill. The default is `0.005`, selected by
-`fills::vol_probe`: it samples 128 readings at a 10-minute stride, requires no
+a volatility probe: it samples 128 readings at a 10-minute stride, requires no
 more than one percent cold-window refusals (currently zero), and picks the
 smallest multiplier whose median implied band lands in the usable 3-to-100-tick
 window. On the committed BTCUSDT fingerprint `0.005` reads a median band of 4
@@ -68,23 +76,41 @@ is how often the run re-checks its resting limits against the tape; the sweep
 is the only thing that ever fills a resting limit or delivers a market order's
 slipped fill unsolicited, so boot refuses a zero interval.
 
+Config does NOT declare the run's instrument. A run serves whatever symbol a
+client asks for; what config supplies is the SHAPE each requested label
+resolves to, and one boot label so a run has a river under a boat before it
+announces readiness.
+
 Instrument resolution has three layers: a preset bundle, default knobs from
-`[instrument]`, then knobs from the matching `[symbols.<SYM>]` table. The
-top-level `symbol` selects the river receiving the live paced tape; if absent, the default
+`[instrument]`, then knobs from the matching `[symbols.<SYM>]` table. This
+resolution is TOTAL - a label with no `[symbols.*]` table and no matching preset
+name resolves `[instrument]` over the operator's `preset` or over BTCUSDT.
+The top-level `symbol` names only the boot river, the one that receives a boat
+at readiness; if absent, the default
 bundle's BTCUSDT symbol stands. An explicit per-symbol `preset` beats a default
 `[instrument]` preset, which beats a preset matching the symbol, which beats the
 BTCUSDT default. Symbol-table lookup is ASCII case-insensitive, and boot refuses
 two table keys that differ only in case. `[instrument].symbol` is refused:
 overlays carry knobs, while the top-level key carries the boot symbol.
 
-Boot resolves and validates every shape the config can reach, funding
-currencies included. Every configured shape is reported by `/instruments` and
-is servable through history; only the boot shape has a live paced tape. The
-first history request for another cold river synchronously materializes its
+Boot resolves and validates every shape the config NAMES - the boot symbol and
+every `[symbols.*]` table - funding currencies included, and refuses startup
+over any of them. It additionally resolves each shipped preset and the
+unconfigured fallback, but only RECORDS an unfundable settlement currency there
+rather than refusing: barring a BTCUSDT-only operator over an unfunded USD
+would make the venue harder to launch than to use. A request landing on one of
+those barred shapes is refused at bind or at the history poll instead, naming
+the currency to add to `[balances]`.
+
+Every configured shape is reported by `/instruments`, and every river a socket
+bind or a history poll materializes joins the list. Any river can carry a boat:
+the first socket on it places one, so a live paced tape is not the boot river's
+privilege. A run retains at most 256 materialized rivers and never evicts them.
+The first history request for a cold river synchronously materializes its
 checkpoint chain through the requested instant, so it can be slow and allocate
 up to that river's checkpoint ceiling. A malformed
-or unfunded table refuses startup even when the run would never serve it, so a
-typo cannot wait to surface as a runtime rejection.
+or unfunded `[symbols.*]` table refuses startup even when nothing ever asks for
+that label, so a typo cannot wait to surface as a runtime rejection.
 
 `[regime]` selects the single run-wide market regime. `[balances]` funds the one ledger.
 `oms_type` is `netting` (the default) or `hedging`; the venue serves both and
@@ -107,9 +133,11 @@ load costs a line.
 
 ## The instrument class
 
-The top-level `symbol` may be the only instrument-facing key. It selects a
-matching shipped preset or the BTCUSDT default, and the derived definition
-supplies the class, precision and increments. Overlay keys are logged explicit choices:
+A config may carry no instrument-facing key at all, and many do: an unnamed
+label selects a matching shipped preset or the BTCUSDT default, and the derived
+definition supplies the class, precision and increments. Write a
+`[symbols.<SYM>]` table only for a label whose shape you want to differ from
+that. Overlay keys are logged explicit choices:
 they replace a knob the bundle sets, or add an optional section - `fees`,
 `margin`, `calendar` - it leaves out. Top-level `base` and `quote` remain
 invalid.
@@ -183,7 +211,9 @@ open, which is the crypto case and the default.
 
 ## Presets
 
-The symbol selects a matching committed preset, or BTCUSDT when unmatched.
+A REQUESTED symbol selects a committed preset of the same name, or BTCUSDT when
+unmatched - so `?symbol=MNQ` gets the index-future bundle from a config that
+never mentions MNQ.
 An explicit `preset = "MNQ"` in either overlay takes precedence and serves that
 bundle under the requested symbol. Top-level overlay keys are legal replacements or additions;
 `[instrument.override]` or `[symbols.<SYM>.override]` reaches dotted paths such as
@@ -228,8 +258,11 @@ comparison; it is derived from the latent median, reference price, contract
 multiplier, and lognormal shape and never feeds the sampler.
 
 Websocket requests accept `?symbol=`, `?speed=` and `?duration_ms=`. An absent
-speed uses the configured default. Speed is finite and non-negative and is
-quantized to micro-multiples, so `100` and `100.0000001` share. One river can
+symbol binds the boot river, which is what a client written before symbols
+moved to the request does. An absent
+speed uses the configured default. Speed is finite and non-negative, capped at
+1,000,000, and quantized to micro-multiples, so `100` and `100.0000001` share.
+One river can
 carry one boat: a different quantized speed receives a `400` naming the speed
 already seated. Duration is simulated milliseconds from boarding and belongs
 to the passenger, not the boat, so passengers with different durations share.

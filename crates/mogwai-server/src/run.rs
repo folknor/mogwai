@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! State owned by one venue process: one ledger and one paced boat over many rivers.
+//! State owned by one venue process: one ledger, and keyed paced boats over
+//! many rivers.
 
 use std::sync::{
     Arc, Mutex,

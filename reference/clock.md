@@ -15,7 +15,13 @@ published, not the boat clock's affine projection. Every symbol-bearing HTTP
 endpoint uses that same resolution rule and waits for an in-flight placement
 before choosing its answer.
 
-`speed` is the only clock key left in config. `speed = 0.0` is unpaced
+`speed` is the only clock key left in config, and it is a DEFAULT rather than
+the run's one pacing rate: a `/ws` upgrade may name its own `speed`, and the
+boat it boards is keyed by river and by that speed quantized to micro-multiples.
+A socket asking for a speed the river's sitting boat does not carry is refused
+before the 101 - one river never carries two boats - so an absent `speed` means
+the configured one and is what every client that predates the carrier sends.
+`speed = 0.0` is unpaced
 delivery, not a stopped clock: the sim axis still advances at wall rate so the
 deadline task, the fill sweeper and the trailing-volatility window keep
 working: `/clock` reports speed `1.0` for a firehose run. A non-zero speed

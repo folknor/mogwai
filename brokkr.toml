@@ -93,9 +93,9 @@ skip = [
     # Its environment sensitivity is REAL and unresolved: a release rerun on
     # 2026-08-08 failed at 311 ms p99 with a load average of 1.46 across 32
     # visible CPUs, so load average is not a sufficient admission test either.
-    # That is open repository work, recorded in `notes/todo.md`. Excluding the
-    # test from a lane that cannot judge it does not claim this host meets the
-    # budget.
+    # That is open repository work: no admission test yet distinguishes a host
+    # that can judge this budget from one that cannot. Excluding the test from a
+    # lane that cannot judge it does not claim this host meets the budget.
     "tape_lateness_under_acceleration",
     "read_market_latency_stays_within_submit_budget",
     "dwell_is_bounded_across_run_seeds",
@@ -221,8 +221,6 @@ message = "brokkr is local dev tooling and must never be named from shipped Rust
 # and captured verbatim in the row; pairing rows is a query (`--command`,
 # `--dataset`, `--grep`, `--grep-v`), not a name lookup, and the captured argv
 # cannot lie about what was run the way a name can.
-#
-# The design note is `notes/benchmarking-design.md`.
 #
 # TWO KINDS OF SURFACE.
 #

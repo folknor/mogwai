@@ -814,10 +814,11 @@ pub(crate) async fn arm_divergence(
     (StatusCode::ACCEPTED, String::new())
 }
 
-/// Every shape this run configured, sorted by symbol, each of them servable for
-/// history.
+/// Every shape this run configured UNION every symbol it has since
+/// materialized, sorted by symbol, each of them servable for history.
 ///
-/// Websocket upgrades place paced boats on demand for any served symbol.
+/// Websocket upgrades place paced boats on demand for any served symbol, and a
+/// history poll materializes a river too - so this set grows during a run.
 pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<InstrumentDef>> {
     Json(state.rivers.instrument_defs())
 }

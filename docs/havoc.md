@@ -1,13 +1,21 @@
 # mogwai havoc
 
 Transport and engine havoc is armed against the one run, not against an account
-or subscription.
+or a connection.
 Order-path divergences operate on the run ledger; data-path divergences operate
 on the selected river or on connected sockets. Admission and execution
 lanes remain connection-local memory bounds. Order-path arms apply only to
-client-originated orders. Venue-originated maintenance, including forced
+client-originated orders, which reach the venue over the websocket carrier and
+nowhere else. Venue-originated maintenance, including forced
 liquidation, bypasses them and leaves them armed for the next matching client
 action.
+
+Two nouns run through what follows. A RIVER is one symbol's tape, materialized
+the first time this run is asked for that symbol. A BOAT is the paced reader
+sitting on a river, placed when the first websocket binds to that symbol at a
+given speed; the connections sharing it are its PASSENGERS, and the boat carries
+the clock every answer about that symbol is dated on. There is no venue-wide
+notion of now, so a havoc window cannot be an interval on one clock.
 
 An armed `CommandLatency` act delay is HEAD-OF-LINE on its socket. Each
 connection feeds one sequential dispatcher, so a delayed submit holds every
@@ -22,27 +30,45 @@ only, so a server heartbeat still arrives and a stalled feed stays
 distinguishable from a dead venue.
 
 Generator havoc is river-scoped. The control payload accepts an optional
-`symbol`. `FlowSurge { rate_mult, children_mult, duration_ms }` on an unboated
+`symbol`. `FlowSurge { rate_mult, children_mult, duration_ms }` on a BOATLESS
 river mutates its checkpointed water at parent boundaries and is visible to
-history and every later passenger. A generator arm on a seated river is
-refused with `400` and names the alternative: place a boat whose sharing key
-carries the havoc. An arm without a symbol is also refused while any boat is
-seated, naming those rivers. Mid-run mutation of shared live water is not
-supported. Transport controls such as `GoDark`, `StallData`, `DelayAcks` and
+history and to every passenger that boards later; its window opens at the
+river's own origin, and the `202` body names that origin so you can see which
+span was armed. A generator arm on a river that already has a boat is refused
+with `400` naming that river: mid-run mutation of shared live water is not
+supported, so arm the surge before any socket binds that symbol. An arm without
+a symbol is refused too while any boat is seated, naming those rivers; with no
+boat anywhere it falls to the run's boot symbol. `ClearDivergences` follows the
+same rule from the other side - naming a seated river refuses, while an
+unqualified clear lifts the transport windows run-wide and clears the surge on
+every boatless river, skipping seated ones rather than refusing.
+
+Transport controls such as `GoDark`, `StallData`, `DelayAcks` and
 `CommandLatency` remain runtime-armable and run-wide.
-`LiquidityDrought` remains the inverse rate control: it stretches parent gaps
-while leaving sweep shape unchanged.
+
+The market REGIMES - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are not
+runtime arms. They are a boot choice made by whoever launches the run, apply to
+the whole run's tape, and enter the tape identity, so a regime run is a
+different tape rather than a mutation of one. `LiquidityDrought` is the inverse
+rate control to a surge: it stretches parent gaps while leaving sweep shape
+unchanged. `mogwai gen` takes the same regimes offline.
 
 Every timed havoc window, including transport windows and `FeeSurcharge`, is
-measured in simulated milliseconds on the receiving passenger's clock. A
-passenger that boards after the arm receives the full declared span from its
-own boarding instant, not the remainder of a venue-clock interval.
+measured in simulated milliseconds on the receiving passenger's clock. The
+window is stored as the WALL instant it was armed at plus a simulated span, so
+each reader judges the span on its own boat's clock: a passenger that boards
+after the arm receives the full declared span from its own boarding instant,
+and so does a boat placed after the arm, which opens the window at its own
+epoch. Re-arming a window replaces it outright rather than extending it, so a
+smaller `ms` shortens a blackout already running.
 
 `FeeSurcharge { mult, window_ms }` multiplies the configured maker or taker
 charge for fills inside one simulated-time window. The multiplier is restricted
 to `(0, 100]`, the duration to one hour, and a later arm replaces the earlier
-window outright. Whether it applies is a pure function of simulated time, so a
-later fill cannot erase the window for a replayed earlier timestamp. A
+window outright. Whether it applies is a pure function of the fill's simulated
+timestamp on the clock of the boat that booked it, so a later fill cannot erase
+the window for a replayed earlier timestamp, and two boats running at different
+speeds each pay over the same number of simulated milliseconds. A
 venue-originated fill does not pay the surcharge.
 
 `CancelOpenOrderSilently` takes its clock and symbol from the targeted resting
@@ -91,4 +117,4 @@ carved out and no new arm exists for the trigger itself.
 | `CommandLatency` submit act/ack | The submit only. There is no trigger-act or trigger-ack knob - the trigger is venue-internal with no client command behind it, and the sweep interval already bounds how late it can fire. |
 | `DelayAcks` / `GoDark` / `StallData` | Transport, unchanged. `OrderTriggered` classifies as execution, so `DelayAcks` holds it and `GoDark` drops it; `StallData` never touches it. |
 | `CancelOpenOrderSilently` | An untriggered conditional is a resting order, so it works today's way - the venue silently kills the protective leg and only a `QueryOrders` poll reveals it. A silent cancel racing a trigger in the same sweep pass leaves the order canceled: the cancel takes the lock first and removes the order, so the in-flight trigger fails its lookup and is dropped. |
-| `MarketRegime` / `VolStorm` / `LiquidityDrought` / `ReopenGap` | Per subscription, on the data feed, never on the trigger decision - the sweep always walks the canonical tape, which no per-subscription regime touches (only `FlowSurge` mutates it, for every consumer at once). A drought silences a client's view while its stops still trigger off the canonical tape, the same property acceptance-time readings already have. |
+| `VolStorm` / `LiquidityDrought` / `ReopenGap` | Not an arm at all - a boot regime baked into the run's tape, so the sweep and the client see the same water. A drought thins what a stop has to trigger on rather than hiding prints from the client. |
