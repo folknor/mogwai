@@ -82,7 +82,7 @@ State when this index was added: bricks F (freeze), K (kernel,
 dormant) and B4 (the two-sided bound instrument) are DONE. The Stage A
 screen core (`mogwai_lab::arrival_screen`: observed projections, grid
 rules, loss) exists without its driver or CLI. `TAPE_PROTOCOL_VERSION`
-is 11. Not yet run: the B4 artifact command (an orchestrator run
+stood at 11. Not yet run: the B4 artifact command (an orchestrator run
 against landed code, precondition of item 1, no spec needed).
 
 UPDATE 2026-08-09: brick N is DONE and item 1 is removed above. The

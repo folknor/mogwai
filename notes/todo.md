@@ -419,22 +419,15 @@ consumer surface landed was the designed handoff.
   requested label, and the `RiverKey` widens to that label in the same
   change, which is what makes sharing sound under it. Detail is git history.
 
-- GATE the hand-maintained tape-version prose the way the artifact binding
-  blocks are gated. Surfaced by the bug-hunt loop on 2026-08-14: when
-  `TAPE_PROTOCOL_VERSION` went to 13, six separate durable statements had to
-  be corrected by hand, and one of them - `reference/architecture.md` - still
-  claimed version 11, meaning the durable architecture reference had been
-  wrong about tape identity across at least two prior bumps and nobody caught
-  it. The artifact binding blocks do not have this problem, because
-  `stage_a_batch.rs` refuses a manifest whose version is not the live
-  constant and the screen artifact's test asserts the binding equals the
-  constant. The prose has no such gate, so the next bump will silently miss
-  it again. Cheap fix in the same shape: a test asserting the durable
-  documents name the live constant.
-
-  The same class hit again on 2026-08-14, and NOT only for the version
-  constant, which is the part that makes a narrow version-only gate a partial
-  fix. `reference/architecture.md` carried a 12.6 ms market-reading cost that a
+- GATE DURABLE PROSE THAT ASSERTS A LIVE FACT. The tape-version half of this
+  item is CLOSED, 2026-08-16: `crates/mogwai-data/tests/tape_version_prose.rs`
+  walks every markdown file in the repository - the set from a walk, never a
+  hardcoded list, because the third occurrence was in `notes/` - and checks two
+  claim forms against the live constant. The convention is stated in AGENTS.md
+  under Tape protocol version. It bit on its first run, finding the 12b spec's
+  index preamble still claiming the live identity was 11.
+  WHAT REMAINS OPEN is the general kind, and it is why a narrow version-only
+  gate was only a partial fix. `reference/architecture.md` carried a 12.6 ms market-reading cost that a
   stride change had superseded; `checkpoint.rs` argued its safety from a
   `BoundedSeek` type that had been deleted from the tree, in three separate
   comments; `tick_composition_ratios.rs` claimed to decide `CHECKPOINT_K`,
@@ -443,15 +436,9 @@ consumer surface landed was the designed handoff.
   general kind - durable prose asserting a measured number or a live type -
   wants either a citation convention that can be checked (a symbol name a test
   can resolve) or a review habit of grepping the identifier before deleting it.
-
-  And a third time on the SAME DAY, when the bump to 14 landed. Eight durable
-  statements needed hand editing, and the reservation prose reaches further
-  than `docs/` and `reference/`: `notes/protocol-12a-measurement-spec.md`
-  states the identity the eventual 12b mechanism landing consumes in TWO
-  places, and both were still naming 13 - stale since the previous bump,
-  read by a different workstream, and invisible to any gate that only checks
-  the durable folders. Whatever gate gets built should take the set of
-  documents naming the constant from a grep, not from a hardcoded list.
+  Neither is built. The version gate's shape is the available precedent: a
+  claim form a test can recognize, applied to prose that means to assert a live
+  fact, leaving every historical record alone.
 
 - DECIDE whether the protocol-12b Stage A refinement pass should run at
   all. Deferred by the owner on 2026-08-09 rather than settled, so the
@@ -1102,6 +1089,161 @@ The third is worth a look from this side regardless of the ask: an armed
 `GoDark` swallowing the startup query means a client can never complete boot,
 which may be correct-by-design (it is a blackout) or may be an arm that is
 too broad to be useful.
+
+### Be an exchange: the instrument, order and account surface (broadarrow, 2026-08-16)
+
+READ THIS FIRST, BECAUSE THE REST OF THE SECTION IS UNREADABLE WITHOUT IT.
+
+Strip every havoc knob off mogwai and what is left is a venue. An exchange.
+That is not a metaphor and it is not a reduction - it is the product. The havoc
+is an adversarial dial ON TOP of an exchange, and it can only be a dial on top
+of the parts of an exchange that exist. Every gap below is a place where the
+thing the dial sits on is missing, so no amount of havoc reaches it.
+
+WHY IT MATTERS BEYOND TIDINESS. mogwai is the only model of venue timing either
+this project or broadarrow has, and the forward leg of broadarrow's pipeline is
+the only place a strategy's EXECUTION behaviour can be validated at all - a
+bar-close backtest structurally cannot see resting-order timing, conditional
+fills, partial fills, or latency. So for any strategy shape whose instrument,
+order type, account type or time-in-force mogwai does not model, there is no
+forward test anywhere. Not a worse one: none. The venue is not merely
+inconvenient for those shapes, it is the reason they are untestable.
+
+THE ITEMS BELOW ARE NOT DERIVED FROM ANY DOWNSTREAM CATALOG'S CURRENT CONTENTS,
+and that is deliberate - an earlier draft of this section justified each item by
+what `wyrd` happens to deal today, which is backwards. Those tools are in
+development and their catalogs grow; sizing a venue against a snapshot of them
+would guarantee re-deriving this list every time one lands a component. The
+requirement is definitional and upstream: an exchange serves stocks, futures,
+forex and crypto, and serves the order types, time-in-force values and account
+types that go with each. mogwai currently serves a strict subset, and the subset
+boundary is what this section names.
+
+WHAT MOGWAI MODELS TODAY, so the gaps read against something concrete.
+`InstrumentClass` has exactly two arms - `Spot { base, quote }` and
+`Future { underlying, settlement_currency, multiplier, asset_class }`, the future
+being cash-settled and continuous. Order types are Market, Limit, StopMarket and
+StopLimit. `TimeInForce` is `Gtc | Ioc | Fok`. The ledger is one funds-checked
+cash account, with per-contract initial and maintenance margin on futures only.
+Everything an exchange does that is not in that list is either absent or gets
+flattened into one of those two classes.
+
+#### Instrument classes
+
+**Equity.** A stock is not a currency pair, and modelling it as
+`Spot { base: "AAPL", quote: "USD" }` is not a near-enough approximation - it
+makes the ledger hold AAPL as a CURRENCY BALANCE, on the same footing as USD or
+BTC. That is right for crypto spot, where you genuinely hold the base asset as
+money, and wrong for equity, where you hold shares. Downstream of that one
+choice: no share or round-lot conventions, no settlement period, no short-sale
+locate or borrow, and no way to express the cash-versus-margin account
+distinction that decides what an equity account may even do. Nautilus carries a
+distinct `Equity` instrument type, so a consumer has somewhere to put it.
+
+**Forex.** Expressible as a `Spot` pair only by discarding the thing that makes
+it forex: LEVERAGE. mogwai has margin exclusively on `Future`, so a currency
+pair cannot post collateral, and a forex strategy's position sizing - the part
+most likely to be wrong in a way that costs money - cannot be exercised. Also
+missing with it: pip and point conventions, and rollover or swap charges for a
+position held across the daily boundary. The 24/5 session the existing
+`[instrument.calendar]` can already express, so that half is done.
+
+**Crypto perpetuals.** Absent entirely, and they are the dominant crypto
+instrument rather than an exotic one. A perp is close to the existing cash
+settled future - no expiry, a multiplier - but it has a FUNDING RATE, a
+recurring payment between long and short that mogwai has no mechanism for at
+all. A strategy holding a perp across funding instants has a real cash flow the
+venue cannot produce, so its forward P&L is wrong by construction rather than by
+approximation.
+
+**Inverse / coin-margined.** Also standard, also absent. Worth noting because
+this one is nearly free on the consumer side: broadarrow's `VenueProduct`
+already carries an `Inverse` arm, and the only reason a MOGWAI inverse run
+refuses is that we have nothing to map it to.
+
+**Futures expiry and roll.** The lowest-priority item here, recorded for
+completeness rather than pressed. The continuous cash-settled future is a
+defensible simplification for most strategy work; it does foreclose anything
+keyed to expiry itself, and any strategy whose horizon crosses a roll is being
+tested against a contract that never rolls.
+
+#### Order types and time-in-force
+
+Missing order types: `MarketIfTouched`, `LimitIfTouched`, `MarketToLimit`, and
+ORDER LISTS (OCO and OTO). The order-list gap is the structural one - mogwai
+models no linkage between orders, so a genuine two-leg bracket where one fill
+cancels the sibling cannot exist. broadarrow works around it by placing two
+independent reduce-only legs and relying on reduce-only plus stale-cancel
+reconciliation to reap the loser, which is a real technique that real venues
+also permit, but it is a workaround for a missing primitive rather than the
+primitive.
+
+`TrailingStopMarket` is the same gap and is written up separately below, since
+it was found first and has its own argument.
+
+Missing time-in-force: `Day` and `Gtd`. `Day` is not optional trivia - it is the
+DEFAULT on equity venues, so an equity surface that only offers Gtc, Ioc and Fok
+is not an equity surface. `Gtd` is common enough across all four classes to
+belong beside it.
+
+#### Account types
+
+One funds-checked cash ledger plus per-contract futures margin is two points in
+a space that needs at least three. What is missing is a genuine LEVERAGED MARGIN
+ACCOUNT - notional against posted collateral at a leverage ratio, rather than
+fixed currency per contract. Forex needs it, crypto margin and perpetuals need
+it, and Reg-T equity margin needs it. Without it, "account type" is not really a
+dimension the venue has, which is why a consumer configuring one has nothing to
+configure it against.
+
+The consumer half of this is broadarrow's and is tracked there: we currently
+never set `account_type` at all, so a nautilus `CashAccount` silently discards
+the margin rows mogwai already reports correctly on futures. That is our defect,
+not yours, and it is worth stating here only so the two halves are not confused
+for one.
+
+### Trailing stops block a whole dealt exit family (broadarrow, 2026-08-16)
+
+`wire_order_type` in `mogwai-adapter/src/convert.rs` refuses everything outside
+Market, Limit, StopMarket and StopLimit, telling the caller that "a trailing
+stop or a bracket leg must be expressed as a fixed stop that the strategy
+re-places itself". For a bracket that advice is fine, and broadarrow already
+takes it - `SubmitBracket` is two independent reduce-only submits, not an order
+list. For TRAILING it is not advice broadarrow can take at the venue seam: a
+Pine `strategy.exit` carrying a native trailing leg compiles through
+`core::translate_trailing_exit` into a reduce-only `TrailingStopMarket`, the
+adapter refuses it at submit, and the bridge HALTS rather than run the position
+unprotected. Correct fail-closed behaviour on their side; the run is over.
+
+WHY THIS IS NOW A PIPELINE ITEM RATHER THAN A CAVEAT. The strategy-search end
+state deals slates with `wyrd`, whose exit catalog carries a
+`exit-winner/trailing-doctrines/*` family - `keltner-trail`, `kase-devstop`,
+`yoyo-exit` among them. A sample 12-slate batch dealt three of them. Those
+slates are exactly the ones whose exits a bar-close backtest cannot validate,
+so forward against this venue is the ONLY place they can be tested - and it is
+the one place they cannot run. The family that most needs the venue is the
+family the venue refuses.
+
+A dealt trailing doctrine can sometimes be authored as a stop the script
+recomputes and amends each bar, which mogwai serves today. That is a real
+workaround and it covers the doctrines whose trail level is an indicator value.
+It does NOT cover Pine's native `trail_points`/`trail_offset`, and leaving the
+choice to whichever agent drew the slate makes forward-testability a property
+of authoring style rather than of the venue.
+
+The ask, in preference order:
+
+1. Model trailing state on a resting order: a `TrailingStopMarket` whose trigger
+   ratchets with the tape's extreme and fires on touch like any other stop. The
+   fill sweep already walks prints against per-order trigger prices, so this is
+   a per-order high-water mark plus an offset, not a new execution path.
+2. Failing that, say so durably in `docs/oms-types.md` or `docs/havoc.md` as a
+   named permanent exclusion, so the pipeline can drop trailing doctrines from
+   the dealt catalog rather than discovering the halt per run.
+
+Not asked for: `MarketIfTouched`. TradingView rejects the offset-absent
+exit-at-activation shape as invalid Pine, so broadarrow retired that build and
+refuses the shape statically at preflight. Nothing on either side wants MIT.
 
 ### Runs owed against MOGWAI, all stageable today
 
