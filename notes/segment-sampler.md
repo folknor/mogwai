@@ -129,6 +129,93 @@ viewer:
    and the viewer shows its own frame - always state times in UTC
    and say what they are in the viewer's frame.
 
+## Slice 1 gate verdict, 2026-08-18: FAILED, and the control was contaminated
+
+The owner viewed the two Asia charts and rejected both as unusable: they
+carry 300-point moves inside the session body, over spans of one to
+twenty minutes. Such moves are real at the first minutes after an open,
+where price can literally jump rather than trade through the range, and
+they do not happen in Asia session body at all.
+
+BOTH ARMS FAILED, which is the load-bearing part. `asia-endless-nogaps`
+is the gaps-OFF control and was supposed to be a continuous tape with no
+discontinuities, so the failure is not the reopen-gap injection that
+slice 1 built. Measured with `analysis/asia_jump_probe.py` over the two
+bar CSVs, segments being 540 bars of 60 s - nine hours, 22 of them,
+so seams fall at multiples of 540:
+
+- THE CONTROL IS NOT A CONTROL. Gaps-OFF still jumps AT SEAMS: bar 1080
+  by 87 points, 3510 by 74, 4590 by 71. `--no-reopen-gaps` suppresses
+  the measured gap injection but not the level discontinuity between
+  spliced segments, so both arms carry seam jumps and the ON arm merely
+  adds the measured gap on top. The A/B therefore never isolated the
+  feature it was built to judge, and no conclusion about reopen gaps can
+  be drawn from this pair.
+- THE OWNER'S DEFECT IS MID-SEGMENT AND UPSTREAM OF COMPOSITION. Bars
+  1112 and 1113 move 176 and 131 points in two consecutive minutes - 307
+  points in two minutes, 32 bars after a seam - and are IDENTICAL in both
+  tapes. Identical across the two arms means it is carried in from the
+  segment data, not produced by composition or by gap injection. So the
+  cut is admitting something that is not Asia session body: a segment
+  whose span crosses an open, or a corpus artifact the cut does not
+  screen.
+- A LEAD ON GRANULARITY. Two mid-segment offenders, bars 3510 and 4590,
+  sit at exactly 6.5 and 8.5 segments - the MIDPOINT of a 540-bar
+  segment. A 270-bar internal boundary appearing as a discontinuity
+  points at a splice granularity INSIDE the segment, not only at its
+  edges. Unconfirmed; it is two instances.
+
+Scale, gaps-OFF: median one-minute move 1.75 points, p95 8.00, p99
+14.50, max 175.75. Twenty-minute p99 93.00, max 330.00. So the
+300-pointers are RARE rather than pervasive - which does not soften the
+verdict, because the objection is that they cannot happen at all, and a
+rare impossibility still dominates the eye on a chart.
+
+THE DEFECT IS ASIA-SPECIFIC. The probe run against the other three
+windows (all gaps-ON) finds nothing of the kind - largest single-bar move
+59.50 in London, 61.00 in NY morning, 51.50 in NY afternoon, against
+Asia's 175.75 with gaps OFF and 294.75 with them ON. Twenty-minute maxima
+are 104.25, 161.00 and 150.00 against Asia's 330.00 and 331.00.
+
+Two things follow that were not obvious from the Asia pair alone:
+
+- ASIA'S ORDINARY TEXTURE IS THE CALMEST OF THE FOUR, which is correct for
+  the window. Median one-minute move is 1.75 points in Asia against 2.25
+  London, 3.75 NY afternoon and 5.00 NY morning, and the p95 ordering
+  matches. So the pathology is ISOLATED EVENTS sitting on top of a
+  plausible texture, not a texture that is uniformly too hot - which is
+  what makes a screen the likely repair rather than a rebuild.
+- NO SEAM JUMPS OUTSIDE ASIA, with gap injection ON. London's largest
+  single-bar move is 59.50 and it is not at a seam. That is consistent
+  with the mechanism rather than against it: the reopen gap is the gap
+  across the DAILY close, which is the Asia open, so London and NY reopen
+  after a break with little to gap across. Worth confirming rather than
+  assuming, since the alternative reading is that injection only fires
+  for one window.
+
+NY morning's two largest early moves are at bars 30 and 36, near the
+start of a segment - the open igniting, which is the one place a jump of
+that size is legitimate.
+
+THE TEXTURE IS GOOD, owner's eye, 2026-08-18, on a quiet stretch of the
+gaps-OFF Asia tape around bars 5000-6000: movement, consolidations,
+ranges and breaks all read as real. THIS IS THE LOAD-BEARING ACCEPTANCE
+OF THE WHOLE APPROACH. Carrying within-session texture from real data is
+the entire argument for resampled segments over generated ones, and it is
+the one claim no statistic here can settle, which is why it is an
+eyeball gate. It passed. What failed is a small number of isolated
+events sitting on top of that texture, so the repair is a SCREEN plus a
+SEAM FIX, not a rebuild - and the corroborating statistic is that Asia's
+ordinary texture is the calmest of the four windows, exactly as the
+window should be.
+
+WHAT THIS BINDS. The gate stands: nothing further is built on the
+composed tape. Two repairs are owed before a re-render is worth the
+owner's eye - the seam level discontinuity that contaminates the control,
+which is ours and self-contained, and whatever the cut is admitting at
+bars 1112-1113, which may turn into a cut-criteria question for the
+owner rather than a bug.
+
 ## What this supersedes
 
 The arrival-successor contract reached its terminal Tier 2 outcome

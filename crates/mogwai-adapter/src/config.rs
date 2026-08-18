@@ -35,10 +35,13 @@ pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 /// venue's frozen ledger is being reclaimed by a genuinely new process, and the
 /// stale sockets of the dead one must go.
 ///
-/// It is derived from the pid and the process's start instant rather than
-/// randomly, so it is stable for the life of the process without any state to
-/// keep, and two processes cannot collide: a reused pid arrives with a later
-/// start instant.
+/// It is derived from the pid and a wall-clock instant rather than randomly, so
+/// it is stable for the life of the process without any state to keep, and two
+/// processes cannot collide: a reused pid arrives with a later instant. The
+/// instant is the one this `OnceLock` initializes at - the first client this
+/// process builds - not the process's start, which is a distinction with no
+/// consequence for either property and is stated because the two are easy to
+/// conflate and the argument should rest on what the code does.
 fn process_session_id() -> &'static str {
     static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SESSION.get_or_init(|| {

@@ -38,9 +38,20 @@ filter. That is what a real client-side aggregator on a lossy feed experiences,
 so it is the honest simulation of THIS venue; modelling a dropped bar would be
 modelling a venue that ships bars natively, which mogwai is not. It follows the
 same principle as the rest of the surface: mogwai injects faults and declines to
-repair them downstream. A strategy that needs to tell a quiet feed from a lossy
-one reads `FeedLagged`, which carries the skipped count, rather than inferring it
-from bar shape.
+repair them downstream.
+
+WHAT A CLIENT CAN DO ABOUT IT DEPENDS ON THE CLIENT, and the nautilus case is
+the constrained one. The venue declares the hole on the wire: `FeedLagged`
+carries the skipped count, so a client reading the protocol directly can tell a
+quiet feed from a lossy one rather than inferring it from bar shape. A nautilus
+host CANNOT: `DataEvent` has no gap or degradation variant, the client reaches
+the host as a `dyn DataClient` with no downcast, and fabricating an
+`InstrumentStatus` would report a venue halt that did not happen - so
+`mogwai-adapter` logs the frame at ERROR, at the level a host alerts on, and
+that log line is the only channel the signal has. A bar-folding strategy is
+therefore not in a position to read it, and a run that needs the distinction
+programmatically wants a client on the raw protocol. The real fix is a declared
+feed-gap event upstream; it is filed in `notes/todo.md`.
 
 Generator havoc is river-scoped. The control payload accepts an optional
 `symbol`. `FlowSurge { rate_mult, children_mult, duration_ms }` on a BOATLESS

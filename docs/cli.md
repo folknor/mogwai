@@ -487,13 +487,12 @@ reads the diff from the baseline commit (`--b1-baseline-commit`, default
 `HEAD~1`) to HEAD and records whether it touched any tape-bearing area - the
 data crate, the protocol crate, the shipped preset bundles, or
 `analysis/fingerprint.json`; touching any of them, or a tape protocol version
-other than the accepted identity (18 since boat placement moved to an
-independent cursor at the fixed river origin; 17 was each server river taking a
-tape root keyed by the requested symbol label, which moves no offline tape
-because no offline command seeds per symbol; 16 was the shipped BTCUSDT preset
-replacing the retired built-in default bundle, and 14 the calendar-aware
-`ReopenGap` crossing repair), fails the
-tape-identity gate. Test-only files inside those paths
+that has MOVED since the baseline commit, fails the tape-identity gate. The
+accepted identity is not written down anywhere: the check reads
+`TAPE_PROTOCOL_VERSION` out of the baseline commit itself and compares it
+against the running binary's, so what it asserts is that no bump landed in the
+range the baseline tapes came from. It used to name a literal, which went three
+bumps stale and made the gate unpassable. Test-only files inside those paths
 are reported separately and do not fail it, since a `cfg(test)` module
 contributes no byte to a shipped tape.
 
@@ -535,8 +534,8 @@ than scheduler throughput.
 A full run requires a clean tree before reading any input and re-attests
 it immediately before serializing, exactly as `arrival-control` does. The
 command lands no generator change and moves no tape byte: the run records
-the live tape protocol version (18 after boat placement moved to an
-independent cursor at the fixed river origin) in the artifact's binding block.
+whatever `TAPE_PROTOCOL_VERSION` reads at run time in the artifact's binding
+block, so the artifact states the identity rather than this page doing it.
 
 ### The remaining offline commands
 

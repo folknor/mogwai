@@ -217,19 +217,30 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
-- OWNER GATE PENDING: LOOK AT THE FIVE COMPOSED-TAPE CHARTS. Slice 1 of the
-  session-segment sampler landed 2026-08-18 and its acceptance is the owner's
-  eye on a rendered chart, which is a standing gate for any change to tape
-  generation. The owner was at work and on a different host when it landed, so
-  nothing has been judged yet. NOTHING FURTHER SHOULD BE BUILT ON THE COMPOSED
-  TAPE UNTIL THIS IS LOOKED AT - in particular the serving wiring, which is a
-  real refactor (`CheckpointIndex` is typed on `GeneratedSource`, so a composed
-  river means generalizing the checkpoint and resume path) and must not go ahead
-  of the gate.
+- OWNER GATE JUDGED 2026-08-18: SLICE 1 FAILED. The owner viewed the two Asia
+  charts and rejected both as unusable - 300-point moves inside the session
+  body over one-to-twenty-minute spans, which happen at an open and never in
+  Asia session body. BOTH ARMS FAILED, including the gaps-OFF control, so the
+  reopen-gap injection slice 1 built is not the cause. The full verdict, the
+  measurements behind it and the two repairs it owes are in
+  `notes/segment-sampler.md`; the probe is `analysis/asia_jump_probe.py`.
 
-  FIVE CHARTS are rendered and waiting, all MNQ 2026-04 at seed 42. They are
+  THE GATE STANDS: nothing further is built on the composed tape - in
+  particular the serving wiring, which is a real refactor (`CheckpointIndex` is
+  typed on `GeneratedSource`, so a composed river means generalizing the
+  checkpoint and resume path) and must not go ahead of a re-render that passes.
+
+  Two repairs are owed before a re-render is worth the owner's eye: the seam
+  LEVEL DISCONTINUITY that survives `--no-reopen-gaps` and contaminates the
+  control, which is self-contained and ours; and whatever the cut admits at
+  bars 1112-1113 of the Asia tape, which is carried in from the segment data
+  and may be a cut-criteria question for the owner rather than a bug.
+
+  FIVE CHARTS were rendered for the gate, all MNQ 2026-04 at seed 42. They are
   gitignored and live on the build host only, so they either get viewed there
-  or regenerated locally.
+  or regenerated locally. The three not yet judged - London and the two NY
+  windows - are still unviewed, and the probe has not been run against them
+  either, so whether the defect is Asia-specific or general is OPEN.
 
   | chart | what it is | bars |
   |---|---|---|

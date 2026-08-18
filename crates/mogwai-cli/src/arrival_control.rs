@@ -162,20 +162,33 @@ const FROZEN_PATHS: [&str; 4] = [
 ];
 
 /// B1's supporting check: `git diff --name-only <parent>..HEAD` touches none of
-/// the frozen paths, and `TAPE_PROTOCOL_VERSION` is the accepted baseline 18.
-/// B1 is re-baselined from 14 to 16 because slice 1 retired the second default
-/// knob bundle and bumped the constant under the unconditional rule; the
-/// committed fill golden re-rendered unchanged, so no tape byte moved and the
-/// baseline this check defends still holds. Recorded ALONGSIDE
+/// the frozen paths, and `TAPE_PROTOCOL_VERSION` still reads what it read at the
+/// baseline commit. Recorded ALONGSIDE
 /// the per-symbol byte comparisons and never substituted for them - it is a much
 /// weaker statement than tape identity, since a generator change outside those
 /// paths would pass it - but it is ANDed into B1's verdict rather than merely
 /// reported, because a decorative check nobody can fail is not evidence.
-/// The baseline moves again from 16 to 17 for piece 8's symbol-keyed server
-/// tape root. That changes every server tape but no offline tape: all
-/// `mogwai-cli` and `mogwai-lab` generation seeds go directly to
-/// `GeneratedSource` rather than through `RunSeeds`. The baseline tapes are
-/// therefore re-taken at the piece-8 landing boundary.
+///
+/// THE ACCEPTED IDENTITY IS DERIVED, NOT WRITTEN DOWN, and that is a repair
+/// rather than a refinement. This check spent its whole life comparing the
+/// constant against a hand-edited literal, re-baselined 14 to 16 to 17 to 18 as
+/// the bumps landed, and then the literal stopped being edited: three further
+/// bumps took the constant to 20 while the check still demanded 18, so B1 could
+/// only ever fail, whatever the per-symbol byte comparisons said. That is the
+/// exact failure [`is_non_shipping`] records having found once already - a
+/// supporting check contradicting the evidence it supports - and a decorative
+/// check nobody can PASS is worse than one nobody can fail. Nothing detected it:
+/// `tape_version_prose.rs` reads markdown, so an executable statement of a live
+/// tape identity is invisible to it.
+///
+/// So the baseline version is read out of the baseline commit, the same way and
+/// for the same reason the baseline COMMIT is an argument rather than a
+/// hardcoded `HEAD~1`. It also states something stronger than the literal did:
+/// the tapes B1 compares came from that commit's binary, so what matters is that
+/// no bump landed between it and HEAD, which a literal cannot express and a
+/// derivation cannot get stale. A baseline commit whose constant cannot be read
+/// REFUSES, on [`require_baseline`]'s doctrine - an unreadable comparand must
+/// not read as agreement.
 ///
 /// The baseline commit is an ARGUMENT rather than a hardcoded `HEAD~1`. It has
 /// to be: `HEAD~1` is only the pre-landing boundary while the brick's landing
@@ -207,7 +220,8 @@ fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
     // moved and can disagree with this reasoning.
     let (non_shipping, shipping): (Vec<&str>, Vec<&str>) =
         frozen.iter().partition(|p| is_non_shipping(p));
-    let version_ok = mogwai_data::TAPE_PROTOCOL_VERSION == 18;
+    let baseline_version = tape_version_at(baseline_commit)?;
+    let version_ok = mogwai_data::TAPE_PROTOCOL_VERSION == baseline_version;
     Ok(json!({
         "command": format!("git diff --name-only {range}"),
         "baseline_commit": baseline_commit,
@@ -215,8 +229,47 @@ fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
         "touched_frozen_shipping_paths": shipping,
         "touched_frozen_non_shipping_paths": non_shipping,
         "tape_protocol_version": mogwai_data::TAPE_PROTOCOL_VERSION,
+        "baseline_tape_protocol_version": baseline_version,
         "passed": shipping.is_empty() && version_ok,
     }))
+}
+
+/// The path and the declaration `TAPE_PROTOCOL_VERSION` is written at, as this
+/// check has to read them out of an OLD commit rather than out of the tree.
+/// Reading the file at a revision is the only way to learn what the constant was
+/// then: the compiled-in value is HEAD's by construction, and comparing it
+/// against itself would pass vacuously.
+const TAPE_VERSION_PATH: &str = "crates/mogwai-data/src/lib.rs";
+const TAPE_VERSION_DECL: &str = "pub const TAPE_PROTOCOL_VERSION: u32 = ";
+
+/// `TAPE_PROTOCOL_VERSION` as it stood at `commit`, read from that revision's
+/// copy of the declaring file.
+///
+/// Every failure REFUSES rather than defaulting: an unreachable commit, a
+/// revision predating the file, a declaration this parser cannot find. A silent
+/// fallback here would put the check straight back where it was - passing or
+/// failing for a reason unrelated to the tape.
+fn tape_version_at(commit: &str) -> anyhow::Result<u32> {
+    let spec = format!("{commit}:{TAPE_VERSION_PATH}");
+    let out = Command::new("git")
+        .args(["show", &spec])
+        .output()
+        .map_err(|e| anyhow!("B1 refused: cannot spawn git show: {e}"))?;
+    if !out.status.success() {
+        bail!("B1 refused: cannot read {spec}; {commit} is unreachable or predates the file");
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let value = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(TAPE_VERSION_DECL))
+        .and_then(|rest| rest.trim_end_matches(';').trim().parse::<u32>().ok())
+        .ok_or_else(|| {
+            anyhow!(
+                "B1 refused: no `{TAPE_VERSION_DECL}<N>;` declaration in {spec}. The constant \
+                 moved or was respelled; teach this check where it lives before running the gate."
+            )
+        })?;
+    Ok(value)
 }
 
 /// Whether a repository path is outside the shipped library and so cannot
@@ -489,6 +542,32 @@ mod tests {
         // The missing input paths above are the point: the refusal must come
         // from the tree, before a byte of either artifact is read.
         assert!(err.to_string().contains("working tree is dirty"));
+    }
+
+    /// The derivation B1's supporting check now rests on has to actually find
+    /// the constant. This asserts the PARSE, not an equality against the
+    /// compiled-in value: the moment a bump lands, the edit is uncommitted for a
+    /// while, and a test demanding that HEAD's committed constant match the
+    /// tree's would fail for the duration of every legitimate bump - the same
+    /// stale-literal trap in a new place.
+    #[test]
+    fn the_baseline_tape_version_is_read_out_of_a_commit() {
+        let version = tape_version_at("HEAD")
+            .expect("HEAD declares the tape constant where this check looks for it");
+        // Zero is the value a silent fallback would have produced, and the whole
+        // point of the refusal is that there is no such fallback.
+        assert!(version > 0);
+    }
+
+    /// An unreachable baseline commit REFUSES. A version check that defaulted
+    /// here would be decoration again, passing for a reason unrelated to the
+    /// tape - which is how the hardcoded literal this replaced went stale
+    /// unnoticed.
+    #[test]
+    fn an_unreadable_baseline_commit_refuses_rather_than_defaulting() {
+        let err = tape_version_at("no-such-ref-for-a-tape-version")
+            .expect_err("an unreachable commit must refuse");
+        assert!(err.to_string().contains("B1 refused"));
     }
 
     /// The venue binary must never spawn the build tool: it is local
