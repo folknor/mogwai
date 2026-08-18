@@ -28,6 +28,17 @@ deadline task, the fill sweeper and the trailing-volatility window keep
 working: `/clock` reports speed `1.0` for a firehose run. A non-zero speed
 paces delivery to `sim.wall_ns(ts)`.
 
+THE CONSEQUENCE, stated because it has already been reasoned about backwards
+twice: on a `speed = 0.0` venue the TWO AXES COME APART. Delivery is unpaced, so
+the tape's `ts_event` runs as far ahead as the generator can carry it, while
+`server_now_ns` walks at wall rate from the boat's origin. Nothing on such a
+venue supports the reading "sim time is roughly wall time since boot", and a
+condition that anchors a `/clock` target on a TAPE STAMP is satisfied the instant
+it is asked. Neither is the reverse true - the clock does not race the wall; it
+IS the wall, at rate 1. A test or a tool that needs "some wall time has passed
+for the sweeper" gets nothing from the clock on this config, because the sweeper
+is on a wall cadence the clock cannot distinguish itself from.
+
 ## What acceleration costs a consumer that stops reading
 
 The venue is COHERENT. Once live, no reader can advance the canonical lead past

@@ -14,67 +14,78 @@ Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 
 ## A. The unenumerated family - fixed spans on the success path
 
-The parked pair (`venue_announces_run_complete_...`,
-`run_complete_reaches_every_open_socket`) is not the whole family. What they
-actually share is UNREAD SOCKETS ROTTING WHILE THE TEST DOES SOMETHING ELSE, and
-`fast.toml` / `band.toml` are unpaced firehoses (`speed = 0.0`, `speed = 100.0`)
-so an unread socket overruns the fanout ring and gets ejected. These four have
-the same shape and, like the parked pair, fail with a WRONG ANSWER rather than a
-timeout:
+Findings 1-4 were fixed on 2026-08-18 and are removed. What landed, so a later
+round does not re-derive it: every one of them now drains its sockets
+concurrently with whatever else it is doing, gives each phase its own deadline,
+and - the part that matters - reports a venue-side CLOSE as a close rather than
+folding it into the property under test. `goes_quiet` was replaced by a
+three-valued observer (`Serving` / `Quiet` / `Closed`), because the two-valued
+one returned "still receiving" for a socket that no longer existed, which is how
+the untargeted account passed its assertion while dead. The two tape-purity
+tests now `split()` their socket and send while draining. Each fix was
+bite-checked by injecting a real close and observing the new, truthful message.
 
-1. **`a_passenger_duration_closes_one_socket_and_leaves_the_boat_running`**
-   (serving.rs:2312). `staying` connects first, then the test spends at least
-   1.5 s draining `leaving` without ever reading `staying`. On the unpaced
-   `fast.toml` tape, `staying` can be `FeedLagged`-ejected in that window. The
-   final drain then sees `Close`/`None`, `while let Ok(Some(Ok(...)))` falls
-   through, and the test panics with "one passenger's deadline wound down the
-   boat under another" - a diagnosis that sends the reader hunting a serving
-   defect that is not there. Exactly the parked pair's failure mode.
+THE FIRST PASS AT THAT LEFT THREE HOLES, all found by cold review of its own
+diff and closed the same day. They are worth keeping as a shape rather than as
+history, because the shape recurs: A DRAIN THAT DOES NOT RECORD HOW THE STREAM
+ENDED IS NOT A DRAIN. The pass introduced background drains spelled
+`tokio::spawn(async move { while s.next().await.is_some() {} })` and only ever
+`abort()`ed the handle, so `None`, a close frame and a transport error ended it
+identically and unobservably - reintroducing, in the background, exactly the
+misdiagnosis it had just removed from the foreground. It also left the
+resting-stop test's socket unread across the clock poll it had just added,
+immediately after splitting the socket to avoid that, and left the other socket
+unread across `await_acceptance` in both ledger tests. The file now carries two
+shared helpers for this and nothing hand-rolls it: `BackgroundDrain`, which
+remembers the ending and is checked with `assert_still_serving` BEFORE the
+property is asserted, and `while_draining`, which drains one socket for the
+duration of a future on another.
 
-2. **`a_blackout_armed_on_one_account_leaves_another_seeing`**
-   (serving.rs:1187). `goes_quiet` is called SEQUENTIALLY: `dark` is drained for
-   up to 5 s while `lit` is unread, then `lit` is judged. Worse, `goes_quiet`
-   cannot distinguish a live socket from a DEAD one - a closed stream makes
-   `socket.next()` return `None` immediately, which is not a `timeout` error, so
-   `goes_quiet` returns `false` and the `!goes_quiet(&mut lit)` assertion PASSES
-   ON AN EVICTED SOCKET. Under load this test is green for the wrong reason. Fix:
-   assert `lit` received `Trade`/`Quote` frames with `ts_event > armed_at`, and
-   drain both concurrently (`tokio::join!`), not in sequence. (Also: lines
-   1201-1204 duplicate the same two-line comment verbatim.)
+One correction to the report's own reading, worth keeping: it called the
+`two_connections_share_one_ledger` pair harmless "because the query is retried by
+the drain loop". It is not retried - the query is sent once - and the converse
+test was the more dangerous of the two, since an order the venue had not booked
+yet satisfies its `all(id != PRIVATE-1)` assertion VACUOUSLY. Both now wait for
+the venue's own `OrderAccepted` before querying.
 
-3. **`a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_ledger`**
-   (serving.rs:969). One `deadline` instant (`+30 s`) is SHARED ACROSS TWO
-   PHASES: draining `first` to its close, then reading `second`'s query answer.
-   If phase one eats the budget, phase two's `.expect("the query is answered")`
-   fires with a message that blames the ledger. And `second` sits unread for the
-   whole of phase one, so `.expect("the socket stays open")` can fire on an
-   eviction. Give each phase its own deadline and read `second` concurrently.
+`a_passenger_duration_closes_one_socket_and_leaves_the_boat_running` was rebuilt
+rather than patched, because neither cheap shape establishes its property. A
+"discard whatever is queued, then take the next frame" drain empties only what
+the reader task has FORWARDED, so a frame that reached the socket before the
+exit and had not been polled yet is accepted as post-exit evidence; and a
+comparison of tape stamps against the venue clock is meaningless on a
+`speed = 0.0` venue. It now stages a ROUND TRIP - a query sent after the close,
+then a print counted after the answer - which is post-exit by the stream's own
+ordering. Its unbounded channel, which had been accumulating one entry per frame
+across 1.5 s of unpaced firehose, is a `watch` of monotone counts.
 
-4. **`the_tape_is_identical_with_and_without_order_flow`** /
-   **`..._a_resting_stop`** (serving.rs:1803, 1869). 100 submits are pushed
-   back-to-back with nothing draining the socket, on `band.toml` at speed 100.
-   The socket can lag out mid-send; `.expect("the socket stayed open")` then
-   reports as if the tape purity property broke. The stop variant additionally
-   ends on a bare `sleep(500ms)` as its SUCCESS PATH ("let several sweep passes
-   run") - there is no condition establishing that a sweep pass actually ran, so
-   this test is also partly green by construction.
+Remaining, with reasons:
 
-Other fixed spans that are the success path, not a failure bound:
-
-- `a_policed_spot_account_is_valued_at_the_marked_price` - `sleep(1_500ms)` then
-  one HTTP read (serving.rs:939).
-- `a_perpetual_position_pays_funding_across_an_interval` - `sleep(500)` +
-  `sleep(3_000)` (serving.rs:1429, 1448).
-- `two_connections_share_one_ledger` /
-  `two_accounts_on_one_venue_do_not_share_a_ledger` - `sleep(500ms)` before
-  querying (serving.rs:652, 714). Harmless here only because the query is retried
-  by the drain loop; still a bet, not a condition.
 - `history_is_bounded_by_the_rivers_own_boat_not_the_venue_clock` -
-  `sleep(250ms)` to "construct a late boat" (serving.rs:142). It does assert the
-  premise afterwards (`venue_clock > boat`), which is the right pattern; the
-  sleep could be a poll on `/clock` instead.
-- `sigterm_closes_without_announcing_run_complete` (completion.rs:248) -
-  `sleep(300ms)` "let the connection settle".
+  `sleep(250ms)` to "construct a late boat" (serving.rs:142). REFUSED, on the
+  report's own grounds: it asserts the premise afterwards (`venue_clock > boat`),
+  so a sleep that was too short fails the premise rather than producing a wrong
+  answer about the property. That is already the correct pattern and the change
+  would be cosmetic.
+- `a_perpetual_position_pays_funding_across_an_interval` keeps its
+  `sleep(3_000)`. The obvious replacement - poll the boat's clock across three
+  one-second funding intervals - was implemented, run, and found VACUOUS: that
+  venue is `speed = 0.0`, where the sim axis is not wall-rated and races ahead,
+  so the poll returns immediately, before any wall-cadenced sweep pass has
+  charged funding, and the test then fails on an unmoved balance. The binding
+  resource is the sweeper's WALL cadence, and nothing the venue serves counts
+  sweep passes. Filed in `notes/todo.md`; the test's own comment records the
+  measurement so nobody retries it blind. Its `sleep(500)` is gone - it now waits
+  for `OrderFilled`.
+
+  The fix pass's EXPLANATION of that measurement was wrong and is corrected here
+  so a later round does not inherit it: a zero speed does NOT make the clock race
+  the wall. `build_run_clock` and the boatyard both substitute 1.0 for a
+  configured 0.0, so the clock IS the wall, at rate 1. What comes apart is
+  delivery, which is unpaced and runs the tape's `ts_event` far ahead of
+  `server_now_ns` - so a clock target anchored on a tape stamp is satisfied at
+  once. Written down durably in `reference/clock.md`, because round 3 reasons
+  about wall-clock budgets and would otherwise re-derive it wrong.
 
 ## B. Tests that cannot fail, or fail for free
 

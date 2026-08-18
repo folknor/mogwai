@@ -649,7 +649,21 @@ async fn two_connections_share_one_ledger() {
 
     // The order is worked on one socket; the LEDGER it moved is the run's, so
     // the other socket's query answers from the same book.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    //
+    // The query waits on the ACCEPTANCE, not on a fixed 500 ms. The query is
+    // sent once and never retried, so a submit still in flight when it went out
+    // produced a snapshot without SHARED-1 and a failure reading "the run has
+    // more than one ledger" - a wrong answer about a venue that was merely busy.
+    //
+    // `observer` is drained for that whole wait. It is attached to the live tape
+    // too, so leaving it parked would make an eviction the next thing this test
+    // saw, reported as the ledger property failing.
+    while_draining(
+        &mut observer,
+        await_acceptance(&mut worker, "SHARED-1"),
+        "the observing socket",
+    )
+    .await;
     observer
         .send(Message::Text(
             r#"{"type":"QueryOrders","request_id":"Q-1","open_only":false}"#.into(),
@@ -711,7 +725,19 @@ async fn two_accounts_on_one_venue_do_not_share_a_ledger() {
         .await
         .expect("submit an order on the first account");
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // As above, but here the fixed wait was worse than a wrong answer: this
+    // assertion is that the stranger's book does NOT contain PRIVATE-1, and an
+    // order the venue had not booked yet satisfies it VACUOUSLY. Waiting for the
+    // acceptance is what makes the absence mean something.
+    //
+    // And `stranger` is drained across the wait, for the reason above: an
+    // absence proved on an evicted socket is not an absence.
+    while_draining(
+        &mut stranger,
+        await_acceptance(&mut worker, "PRIVATE-1"),
+        "the second account's socket",
+    )
+    .await;
     stranger
         .send(Message::Text(
             r#"{"type":"QueryOrders","request_id":"Q-2","open_only":false}"#.into(),
@@ -935,20 +961,67 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
         .await
         .expect("submit a spot order");
 
-    // Let the fill book and at least one sweep pass mark the pair.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
-    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-204");
-    assert_eq!(status, 200, "the account answers: {body}");
+    // The purchase must actually book before anything is asked about its
+    // valuation, and the ORDER OF THE TWO WAITS is what makes this test able to
+    // fail at all: the account opens with 5,000,000 USDT, so the equity floor
+    // below is already satisfied before the fill lands. A poll that did not wait
+    // for the fill first would pass on the opening balance.
+    //
+    // Waiting for the fill on the wire also keeps the socket drained. It sat
+    // unread across the old 1.5 s sleep, and on this unpaced tape an unread
+    // socket is eventually ejected by the bounded fanout ring.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the spot buy fills within 30 s")
+            .expect("the venue CLOSED the policed account's socket before the buy filled")
+            .expect("a well-formed frame");
+        if let Message::Text(text) = message
+            && let Ok(ServerMessage::OrderFilled(fill)) =
+                serde_json::from_str::<ServerMessage>(&text)
+            && fill.client_order_id == "SPOT-1"
+        {
+            break;
+        }
+    }
+    let drain = BackgroundDrain::spawn(socket);
+
+    // Then the mark. A sweep pass valuing the pair is what lifts equity back
+    // over the floor, and it runs on its own cadence - so this RETRIES to a
+    // deadline rather than betting a fixed span was enough. A venue that never
+    // marks fails here with the reading it actually served, instead of the
+    // reading whichever host it ran on happened to reach in 1.5 s.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let body = loop {
+        let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-204");
+        assert_eq!(status, 200, "the account answers: {body}");
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let equity: f64 = value["risk"]["equity"]
+            .as_str()
+            .expect("equity is reported")
+            .parse()
+            .expect("equity parses");
+        if equity > 4_000_000.0 {
+            break body;
+        }
+        drain.assert_still_serving("the policed account's socket");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "buying an asset must not read as spending its notional; 30 s after the fill the \
+             account still reads: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    drain.stop("the policed account's socket");
+    // The RETRY above cannot hide a transient mispricing, and that is a property
+    // of the breach rather than of the loop. `RiskLedger::breach` is LATCHED -
+    // `observe` returns early once it is set, and the first breach is the one
+    // that describes the run - so an equity reading that momentarily collapsed
+    // by the notional would have crossed this account's 1,000,000 trailing
+    // drawdown off its 5,000,000 opening and STUCK. The poll can wait for the
+    // mark; it cannot wait out a breach that already fired.
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let equity: f64 = value["risk"]["equity"]
-        .as_str()
-        .expect("equity is reported")
-        .parse()
-        .expect("equity parses");
-    assert!(
-        equity > 4_000_000.0,
-        "buying an asset must not read as spending its notional: {body}"
-    );
     assert!(
         value["risk"]["breached"].is_null(),
         "a purchase is not a drawdown breach: {body}"
@@ -987,59 +1060,91 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
         .await
         .expect("open the second socket on the same account");
 
-    // The incumbent is closed, and NORMALLY: an eviction is not a fault, and a
-    // consumer that redialled on it would evict whatever evicted it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let mut closed = false;
-    while !closed {
-        let message = tokio::time::timeout_at(deadline, first.next())
-            .await
-            .expect("the first socket is closed")
-            .expect("a frame or a close")
-            .expect("a well-formed frame");
-        if let Message::Close(frame) = message {
-            let frame = frame.expect("the close carries a reason");
-            assert_eq!(
-                u16::from(frame.code),
-                1000,
-                "an eviction closes normally, not as a fault: {frame:?}"
-            );
-            assert!(
-                frame.reason.contains("claimed account"),
-                "the close says why: {frame:?}"
-            );
-            closed = true;
-        }
-    }
-
-    // And the newcomer inherits the book rather than a fresh one.
+    // The query goes out BEFORE the eviction is observed, and both sockets are
+    // then read concurrently, each on its OWN deadline.
+    //
+    // Sequencing them shared one 30 s instant across two phases, so a slow
+    // eviction ate the query's budget and the timeout fired with a message about
+    // the ledger. Worse, `second` sat unread for the whole of the first phase:
+    // this venue's fanout is a bounded ring, so a socket nobody reads is ejected
+    // with `FeedLagged`, and the resulting `None` would have been reported as
+    // the resumed ledger failing to answer. Each arm below therefore names its
+    // OWN failure, and a venue-side close is spelled out as a close rather than
+    // folded into "the query went unanswered".
     second
         .send(Message::Text(
             r#"{"type":"QueryOrders","request_id":"Q-3","open_only":false}"#.into(),
         ))
         .await
         .expect("query the resumed ledger");
-    loop {
-        let message = tokio::time::timeout_at(deadline, second.next())
-            .await
-            .expect("the query is answered")
-            .expect("the socket stays open")
-            .expect("a well-formed frame");
-        if let Message::Text(text) = message
-            && let Ok(ServerMessage::OrderStatusSnapshot(snapshot)) =
-                serde_json::from_str::<ServerMessage>(&text)
-        {
-            assert_eq!(snapshot.request_id, "Q-3");
-            assert!(
-                snapshot
-                    .orders
-                    .iter()
-                    .any(|order| order.client_order_id == "RESUMED-1"),
-                "the returning connection did not get its own ledger back"
-            );
-            return;
+
+    // The incumbent is closed, and NORMALLY: an eviction is not a fault, and a
+    // consumer that redialled on it would evict whatever evicted it.
+    let evicted = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let message = tokio::time::timeout_at(deadline, first.next())
+                .await
+                .map_err(|_| {
+                    "the incumbent socket was still open 30 s after another claimed its account"
+                        .to_string()
+                })?
+                .ok_or_else(|| {
+                    "the incumbent stream ended without a close frame, so the eviction carried no \
+                     reason"
+                        .to_string()
+                })?
+                .map_err(|err| format!("the incumbent socket failed in transport: {err}"))?;
+            if let Message::Close(frame) = message {
+                return Ok::<_, String>(frame);
+            }
         }
-    }
+    };
+
+    // And the newcomer inherits the book rather than a fresh one.
+    let resumed = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let message = tokio::time::timeout_at(deadline, second.next())
+                .await
+                .map_err(|_| "the resumed socket did not answer Q-3 within 30 s".to_string())?
+                .ok_or_else(|| {
+                    "the venue CLOSED the resuming socket before it answered Q-3, so this run says \
+                     nothing about whether the ledger resumes"
+                        .to_string()
+                })?
+                .map_err(|err| format!("the resumed socket failed in transport: {err}"))?;
+            if let Message::Text(text) = message
+                && let Ok(ServerMessage::OrderStatusSnapshot(snapshot)) =
+                    serde_json::from_str::<ServerMessage>(&text)
+                && snapshot.request_id == "Q-3"
+            {
+                return Ok::<_, String>(snapshot);
+            }
+        }
+    };
+
+    let (evicted, resumed) = tokio::join!(evicted, resumed);
+    let frame = evicted.unwrap_or_else(|why| panic!("{why}"));
+    let frame = frame.expect("the close carries a reason");
+    assert_eq!(
+        u16::from(frame.code),
+        1000,
+        "an eviction closes normally, not as a fault: {frame:?}"
+    );
+    assert!(
+        frame.reason.contains("claimed account"),
+        "the close says why: {frame:?}"
+    );
+
+    let snapshot = resumed.unwrap_or_else(|why| panic!("{why}"));
+    assert!(
+        snapshot
+            .orders
+            .iter()
+            .any(|order| order.client_order_id == "RESUMED-1"),
+        "the returning connection did not get its own ledger back"
+    );
 }
 
 /// A client asks for a policy BY NAME rather than restating it, and a name
@@ -1200,8 +1305,6 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
         "/control/divergence",
         // The ceiling, in SIMULATED ms. This config is accelerated, so a
         // wall-comfortable window has to be a large sim one.
-        // The ceiling, in SIMULATED ms. This config is accelerated, so a
-        // wall-comfortable window has to be a large sim one.
         r#"{"type":"GoDark","ms":3600000,"account":"WYRD-500"}"#,
     );
     assert_eq!(status, 202, "the targeted blackout arms: {body}");
@@ -1218,31 +1321,87 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
     // never goes quiet at all. Reading each to a gap gives a clean answer -
     // blacked out means the backlog exhausts and a gap appears, still served
     // means frames keep arriving until the deadline.
-    async fn goes_quiet(
-        socket: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) -> bool {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while tokio::time::Instant::now() < deadline {
-            if tokio::time::timeout(Duration::from_millis(250), socket.next())
-                .await
-                .is_err()
-            {
-                return true;
+    //
+    // The two are drained CONCURRENTLY, and the observer is three-valued rather
+    // than a bool. Both properties are load-bearing:
+    //
+    // - Draining one while the other sits unread let the unread one rot. This
+    //   venue's fanout is a bounded ring, so a socket nobody reads is eventually
+    //   ejected with `FeedLagged` and closed, and the eviction would then be
+    //   read as the blackout's doing.
+    // - A two-valued "did it go quiet" CANNOT SEE that ejection at all. A closed
+    //   stream answers `next()` with `None` immediately, which is not a timeout,
+    //   so a bool observer reports "still receiving" for a socket that is gone -
+    //   and `lit` would pass this gate while dead. `Closed` is therefore its own
+    //   verdict, and it fails both halves with a message that names the eviction
+    //   instead of blaming the blackout's targeting.
+    let (dark_saw, lit_saw) = tokio::join!(
+        observe(&mut dark, Duration::from_secs(5)),
+        observe(&mut lit, Duration::from_secs(5)),
+    );
+    assert_eq!(
+        dark_saw,
+        Observed::Quiet,
+        "the targeted account was expected to fall silent inside its blackout; it {}",
+        dark_saw.describe()
+    );
+    assert_eq!(
+        lit_saw,
+        Observed::Serving,
+        "the untargeted account was expected to keep receiving; it {}",
+        lit_saw.describe()
+    );
+}
+
+/// What draining a `/ws` socket to a deadline actually observed.
+///
+/// Three-valued on purpose: `Closed` is NOT `Quiet`. A socket the venue has
+/// ejected returns `None` from `next()` at once, so any observer that folds the
+/// two together reports silence for a socket that no longer exists.
+#[derive(Debug, PartialEq, Eq)]
+enum Observed {
+    /// Frames kept arriving for the whole window - the socket never gapped.
+    Serving,
+    /// The socket stayed open and produced nothing for a whole gap slice.
+    Quiet,
+    /// The stream ended: a close frame, a transport error, or end of stream.
+    Closed(String),
+}
+
+impl Observed {
+    fn describe(&self) -> String {
+        match self {
+            Self::Serving => "kept receiving frames".to_string(),
+            Self::Quiet => "went quiet".to_string(),
+            Self::Closed(why) => {
+                format!("was CLOSED by the venue, which says nothing about the blackout: {why}")
             }
         }
-        false
     }
+}
 
-    assert!(
-        goes_quiet(&mut dark).await,
-        "the targeted account kept receiving: its blackout never opened"
-    );
-    assert!(
-        !goes_quiet(&mut lit).await,
-        "an untargeted account went quiet: the blackout reached an account it did not name"
-    );
+/// Drains `socket` for `window`, reporting which of the three states it is in.
+/// A quarter-second without a frame counts as a gap, which on an unpaced tape is
+/// several orders of magnitude longer than the inter-frame spacing.
+async fn observe(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    window: Duration,
+) -> Observed {
+    let deadline = tokio::time::Instant::now() + window;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(250), socket.next()).await {
+            Err(_) => return Observed::Quiet,
+            Ok(None) => return Observed::Closed("the stream ended".to_string()),
+            Ok(Some(Err(err))) => return Observed::Closed(format!("transport error: {err}")),
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                return Observed::Closed(format!("close frame {frame:?}"));
+            }
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+    Observed::Serving
 }
 
 /// Two accounts asking for the same river at different speeds both stay
@@ -1426,7 +1585,32 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
         .send(Message::Text(submit.into()))
         .await
         .expect("open a long perpetual position");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The CONDITION this test needs is "the position is open", and the venue
+    // states it on the wire. Waiting a fixed 500 ms for it instead both bet on
+    // the host and left the socket unread on an unpaced tape, where an unread
+    // socket is eventually ejected by the bounded fanout ring - and the funding
+    // assertion below would then have been read as funding not being charged.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the perpetual position opens within 30 s")
+            .expect("the venue CLOSED the perpetual socket before the position opened")
+            .expect("a well-formed frame");
+        if let Message::Text(text) = message
+            && let Ok(ServerMessage::OrderFilled(fill)) =
+                serde_json::from_str::<ServerMessage>(&text)
+            && fill.client_order_id == "PERP-1"
+        {
+            break;
+        }
+    }
+    // Nothing else on this socket is read, but it must keep being drained for
+    // the rest of the run for the same reason - and the drain REMEMBERS how the
+    // stream ended, so an eviction during the funding wait is named as one
+    // instead of surfacing as an unmoved balance.
+    let drain = BackgroundDrain::spawn(socket);
 
     let balance_of = |body: &str| -> f64 {
         let value: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -1445,9 +1629,25 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
 
     // Several sweep passes, each crossing at least one one-second funding
     // instant on this venue's clock.
+    //
+    // This one STAYS a wall sleep, and the reason is worth writing down because
+    // the obvious replacement was tried and is vacuous here. The binding
+    // resource is the SWEEPER, which runs on a WALL cadence; funding is charged
+    // by a sweep pass, not by the clock reaching an instant. And this config is
+    // `speed = 0.0`, where the two axes come apart in a way that defeats the
+    // obvious poll: the boat's CLOCK is still built wall-rated (a zero speed is
+    // replaced by 1.0 when the `SimClock` is constructed), while DELIVERY is
+    // unpaced, so the tape's `ts_event` runs far ahead of `server_now_ns`.
+    // Anchoring a clock target on a tape stamp therefore satisfies it at once
+    // and the test fails on an unmoved balance, which is what was measured.
+    // Nothing the venue serves
+    // counts sweep passes, so there is no condition to wait on: a monotonic
+    // per-river count of completed passes on `/clock` or `/health` is what would
+    // turn this sleep into a condition, and nothing on the wire carries it.
     tokio::time::sleep(Duration::from_millis(3_000)).await;
     let (_, after) = http_get(&venue.http_base(), "/account");
     let after = balance_of(&after);
+    drain.stop("the perpetual socket");
 
     assert!(
         after < before,
@@ -1808,40 +2008,58 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
     );
     let (status, before) = http_get(&venue.http_base(), &path);
     assert_eq!(status, 200);
-    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+    let (socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("open order socket");
-    for index in 0..100 {
-        let submit = format!(
-            r#"{{"type":"SubmitOrder","client_order_id":"TAPE-{index}","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
-            venue.symbol
-        );
-        socket
-            .send(Message::Text(submit.into()))
-            .await
-            .expect("submit");
-    }
+    // The socket is SPLIT and drained while the submits go out. Pushing a
+    // hundred submits with nothing reading left the socket unread for the whole
+    // burst, and this venue's fanout is a bounded ring: an unread socket on a
+    // live tape is ejected with `FeedLagged` and closed, which the drain below
+    // then reported as if the tape-purity property had broken.
+    let (mut writer, mut reader) = socket.split();
+    let submitting = async {
+        for index in 0..100 {
+            let submit = format!(
+                r#"{{"type":"SubmitOrder","client_order_id":"TAPE-{index}","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+                venue.symbol
+            );
+            writer
+                .send(Message::Text(submit.into()))
+                .await
+                .map_err(|err| format!("submit TAPE-{index} could not be sent: {err}"))?;
+        }
+        Ok::<_, String>(())
+    };
     // Drain to the LAST acceptance before re-reading. Comparing the pages while
     // the submits were still in flight would let a clean run and a broken one
     // look alike.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let message = tokio::time::timeout_at(deadline, socket.next())
-            .await
-            .expect("the venue answered every submit")
-            .expect("the socket stayed open")
-            .expect("a websocket frame");
-        let Message::Text(text) = message else {
-            continue;
-        };
-        if let Ok(ServerMessage::OrderAccepted {
-            client_order_id, ..
-        }) = serde_json::from_str::<ServerMessage>(&text)
-            && client_order_id == "TAPE-99"
-        {
-            break;
+    let draining = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let message = tokio::time::timeout_at(deadline, reader.next())
+                .await
+                .map_err(|_| "the venue did not accept TAPE-99 within 60 s".to_string())?
+                .ok_or_else(|| {
+                    "the venue CLOSED the order socket mid-burst, so this run says nothing about \
+                     tape purity"
+                        .to_string()
+                })?
+                .map_err(|err| format!("the order socket failed in transport: {err}"))?;
+            let Message::Text(text) = message else {
+                continue;
+            };
+            if let Ok(ServerMessage::OrderAccepted {
+                client_order_id, ..
+            }) = serde_json::from_str::<ServerMessage>(&text)
+                && client_order_id == "TAPE-99"
+            {
+                return Ok::<_, String>(());
+            }
         }
-    }
+    };
+    let (submitted, drained) = tokio::join!(submitting, draining);
+    submitted.unwrap_or_else(|why| panic!("{why}"));
+    drained.unwrap_or_else(|why| panic!("{why}"));
     let (status, after) = http_get(&venue.http_base(), &path);
     assert_eq!(status, 200);
     assert_eq!(
@@ -1874,9 +2092,14 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     );
     let (status, before) = http_get(&venue.http_base(), &path);
     assert_eq!(status, 200);
-    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+    let (socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("open order socket");
+    // Split and drained while sending, for the same reason as the twin above: a
+    // socket left unread through a hundred submits on a live tape is ejected by
+    // the bounded fanout ring, and the drain would report that eviction as a
+    // tape-purity failure.
+    let (mut writer, mut reader) = socket.split();
     // Sell stops at a trigger of 1: unreachable by any BTCUSDT print, so every
     // one of them REMAINS resting and untriggered for the whole test, which is
     // the state that puts a touch scan into every sweep pass. Half stop-market
@@ -1886,53 +2109,95 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     // actually is: the funded account holds no BTC, and section 1.8's admission
     // exemption is precisely what lets such a leg rest rather than be refused at
     // the door.
-    for index in 0..100 {
-        let submit = if index % 2 == 0 {
-            format!(
-                r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopMarket","quantity":"0.01","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
-                venue.symbol
-            )
-        } else {
-            format!(
-                r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopLimit","quantity":"0.01","price":"1","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
-                venue.symbol
-            )
-        };
-        socket
-            .send(Message::Text(submit.into()))
-            .await
-            .expect("submit");
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let message = tokio::time::timeout_at(deadline, socket.next())
-            .await
-            .expect("the venue answered every submit")
-            .expect("the socket stayed open")
-            .expect("a websocket frame");
-        let Message::Text(text) = message else {
-            continue;
-        };
-        match serde_json::from_str::<ServerMessage>(&text) {
-            Ok(ServerMessage::OrderRejected {
-                client_order_id,
-                reason,
-                ..
-            }) => panic!("{client_order_id} was rejected: {reason}"),
-            Ok(ServerMessage::OrderTriggered {
-                client_order_id, ..
-            }) => panic!("{client_order_id} triggered: a trigger of 1 is unreachable"),
-            Ok(ServerMessage::OrderAccepted {
-                client_order_id, ..
-            }) if client_order_id == "STOP-99" => break,
-            _ => {}
+    let submitting = async {
+        for index in 0..100 {
+            let submit = if index % 2 == 0 {
+                format!(
+                    r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopMarket","quantity":"0.01","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
+                    venue.symbol
+                )
+            } else {
+                format!(
+                    r#"{{"type":"SubmitOrder","client_order_id":"STOP-{index}","symbol":"{}","side":"Sell","order_type":"StopLimit","quantity":"0.01","price":"1","trigger_price":"1","reduce_only":true,"time_in_force":"Gtc"}}"#,
+                    venue.symbol
+                )
+            };
+            writer
+                .send(Message::Text(submit.into()))
+                .await
+                .map_err(|err| format!("submit STOP-{index} could not be sent: {err}"))?;
         }
-    }
+        Ok::<_, String>(())
+    };
+    let draining = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let message = tokio::time::timeout_at(deadline, reader.next())
+                .await
+                .map_err(|_| "the venue did not accept STOP-99 within 60 s".to_string())?
+                .ok_or_else(|| {
+                    "the venue CLOSED the order socket mid-burst, so this run says nothing about \
+                     tape purity"
+                        .to_string()
+                })?
+                .map_err(|err| format!("the order socket failed in transport: {err}"))?;
+            let Message::Text(text) = message else {
+                continue;
+            };
+            match serde_json::from_str::<ServerMessage>(&text) {
+                Ok(ServerMessage::OrderRejected {
+                    client_order_id,
+                    reason,
+                    ..
+                }) => panic!("{client_order_id} was rejected: {reason}"),
+                Ok(ServerMessage::OrderTriggered {
+                    client_order_id, ..
+                }) => panic!("{client_order_id} triggered: a trigger of 1 is unreachable"),
+                Ok(ServerMessage::OrderAccepted {
+                    client_order_id, ..
+                }) if client_order_id == "STOP-99" => return Ok::<_, String>(()),
+                _ => {}
+            }
+        }
+    };
+    let (submitted, drained) = tokio::join!(submitting, draining);
+    submitted.unwrap_or_else(|why| panic!("{why}"));
+    drained.unwrap_or_else(|why| panic!("{why}"));
     // Let several sweep passes run WITH the hundred touch scans in the book.
     // Draining to the last acceptance only proves the submit path is pure; the
     // walk is what this test is actually about, and it runs on its own cadence
     // (`fill_sweep_interval_ms = 10`).
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    //
+    // This waits on the VENUE'S OWN CLOCK rather than on a wall sleep. Nothing
+    // the venue serves counts sweep passes, so no observable here can prove one
+    // ran; what a clock poll does establish is that the boat is alive and its
+    // sim axis has moved far past the last acceptance, which a fixed sleep does
+    // not - a stalled venue would have satisfied the sleep and been read as a
+    // clean pass. At speed 100 the fifty sim-seconds below are about half a wall
+    // second, so fifty sweep opportunities at the 10 ms cadence, and the poll
+    // waits longer if the venue is slow instead of proceeding early.
+    //
+    // `reader` keeps being drained across that wait. It is the ONLY socket on
+    // this venue and it is attached to the live tape at speed 100, so parking it
+    // for the half wall second below reopens the very window the split was
+    // introduced to close - and the eviction would not even surface as a tape
+    // failure: the clock poll would keep polling, and if the boat went with the
+    // connection `venue_sim_now` would panic about a river carrying no boat.
+    let drain = BackgroundDrain::spawn(reader);
+    let clock_path = format!("/clock?symbol={}", venue.symbol);
+    let sim_at_acceptance = venue_sim_now(&venue.http_base(), &clock_path);
+    let target = sim_at_acceptance + 50_000_000_000;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while venue_sim_now(&venue.http_base(), &clock_path) < target {
+        drain.assert_still_serving("the order socket");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the boat's clock did not advance 50 sim-seconds in 60 s of wall time, so no sweep \
+             pass can be claimed to have run over the resting conditionals"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drain.stop("the order socket");
 
     let (status, after) = http_get(&venue.http_base(), &path);
     assert_eq!(status, 200);
@@ -1940,6 +2205,201 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
         before, after,
         "a resting conditional's touch scan advanced or altered the clean tape"
     );
+}
+
+/// A `/ws` socket as `tokio_tungstenite` hands it back from a connect.
+type WsSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A background drain that REMEMBERS how the stream ended.
+///
+/// The naive shape, a spawned `while s.next().await.is_some() {}`, ends
+/// identically on a close frame, a transport error and end of stream,
+/// and since the handle is only ever aborted, nothing ever reads that. A venue
+/// that ejects the socket mid-wait is then invisible, and whatever the test
+/// asserts afterwards fails as if the PROPERTY had broken. That is the exact
+/// misdiagnosis this file spent a pass removing from the foreground drains, so
+/// the background ones may not reintroduce it: this records the ending and
+/// `assert_still_serving` is what turns it back into a truthful message.
+struct BackgroundDrain {
+    handle: tokio::task::JoinHandle<()>,
+    ended: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl BackgroundDrain {
+    /// Starts draining `stream` until it ends or the drain is stopped.
+    fn spawn<S>(mut stream: S) -> Self
+    where
+        S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin
+            + Send
+            + 'static,
+    {
+        let ended = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot = std::sync::Arc::clone(&ended);
+        let handle = tokio::spawn(async move {
+            let why = loop {
+                match stream.next().await {
+                    Some(Ok(Message::Close(frame))) => {
+                        break format!("the venue sent a close frame: {frame:?}");
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(err)) => break format!("the socket failed in transport: {err}"),
+                    None => break "the stream ended".to_string(),
+                }
+            };
+            *slot.lock().expect("the drain's ending is recorded") = Some(why);
+        });
+        Self { handle, ended }
+    }
+
+    /// Panics naming `subject` if the venue ended the stream while it drained.
+    /// Call this BEFORE asserting the property the wait was for.
+    fn assert_still_serving(&self, subject: &str) {
+        if let Some(why) = self
+            .ended
+            .lock()
+            .expect("the drain's ending is readable")
+            .as_ref()
+        {
+            panic!(
+                "the venue ended {subject} while the test waited, so this run says nothing about \
+                 the property under test: {why}"
+            );
+        }
+    }
+
+    /// Checks the ending one last time, then stops draining.
+    fn stop(self, subject: &str) {
+        self.assert_still_serving(subject);
+        self.handle.abort();
+    }
+}
+
+/// Runs `work` while `idle` is DRAINED, and panics if the venue ends `idle`
+/// first.
+///
+/// A socket the test is not reading YET is not exempt from the bounded fanout
+/// ring: every socket is attached to the live tape on upgrade, so on an unpaced
+/// tape an unread one is exactly what gets ejected - and the subsequent
+/// `expect("the socket stays open")` would report that as the property failing.
+async fn while_draining<S, F>(idle: &mut S, work: F, subject: &str) -> F::Output
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    F: std::future::Future,
+{
+    tokio::pin!(work);
+    loop {
+        tokio::select! {
+            done = &mut work => return done,
+            frame = idle.next() => match frame {
+                Some(Ok(Message::Close(spec))) => {
+                    panic!("the venue CLOSED {subject} while the test waited: {spec:?}")
+                }
+                Some(Err(err)) => {
+                    panic!("{subject} failed in transport while the test waited: {err}")
+                }
+                None => panic!("the venue ended {subject}'s stream while the test waited"),
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+}
+
+/// The two drain helpers above are what every socket-backed test in this file
+/// now relies on to tell a CLOSE from the property under test, so they are
+/// pinned directly rather than only through the venues that use them. No
+/// listener is bound: the streams are fabricated, which is the point - a venue
+/// cannot be made to evict on command, and the behaviour being pinned is the
+/// helper's, not the venue's.
+#[tokio::test]
+#[should_panic(expected = "the venue sent a close frame")]
+async fn a_background_drain_names_a_close_instead_of_swallowing_it() {
+    let drain = BackgroundDrain::spawn(futures_util::stream::iter(vec![
+        Ok(Message::Text("a print".into())),
+        Ok(Message::Close(None)),
+    ]));
+    // The drain runs on its own task, so the ending is observed on the next
+    // yield rather than instantly - which is exactly the shape at every call
+    // site, where the check sits inside a polling loop.
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    drain.assert_still_serving("the fabricated socket");
+}
+
+#[tokio::test]
+async fn a_background_drain_says_nothing_about_a_stream_that_is_still_running() {
+    let drain = BackgroundDrain::spawn(futures_util::stream::pending::<
+        Result<Message, tokio_tungstenite::tungstenite::Error>,
+    >());
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    drain.stop("the fabricated socket");
+}
+
+#[tokio::test]
+#[should_panic(expected = "the venue CLOSED the idle socket while the test waited")]
+async fn a_socket_drained_alongside_other_work_reports_its_own_close() {
+    let mut idle = futures_util::stream::iter(vec![Ok(Message::Close(None))]);
+    // The work never completes, so the only way out is the idle socket's close -
+    // which must be named as a close rather than leaving the caller to blame
+    // whatever it was about to assert.
+    while_draining(&mut idle, std::future::pending::<()>(), "the idle socket").await;
+}
+
+#[tokio::test]
+async fn work_finishing_first_is_what_while_draining_returns() {
+    let mut idle =
+        futures_util::stream::pending::<Result<Message, tokio_tungstenite::tungstenite::Error>>();
+    let answer = while_draining(&mut idle, std::future::ready(7_u8), "the idle socket").await;
+    assert_eq!(
+        answer, 7,
+        "the drained socket does not eat the work's value"
+    );
+}
+
+/// Drains `socket` until the venue accepts `client_order_id`, which is the
+/// condition "the venue has booked this order" stated on the wire. Every use
+/// replaced a fixed sleep that was standing in for it.
+async fn await_acceptance(socket: &mut WsSocket, client_order_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .unwrap_or_else(|_| panic!("the venue accepted {client_order_id} within 30 s"))
+            .unwrap_or_else(|| {
+                panic!("the venue CLOSED this socket before accepting {client_order_id}")
+            })
+            .expect("a well-formed frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<ServerMessage>(&text) {
+            Ok(ServerMessage::OrderAccepted {
+                client_order_id: accepted,
+                ..
+            }) if accepted == client_order_id => return,
+            Ok(ServerMessage::OrderRejected {
+                client_order_id: rejected,
+                reason,
+                ..
+            }) if rejected == client_order_id => panic!("{client_order_id} was rejected: {reason}"),
+            _ => {}
+        }
+    }
+}
+
+/// The named boat's own `server_now_ns`, so a test can wait on the venue's clock
+/// instead of on the host's.
+fn venue_sim_now(base: &str, clock_path: &str) -> u64 {
+    let (status, body) = http_get(base, clock_path);
+    assert_eq!(status, 200, "the boat's clock answers: {body}");
+    let clock: mogwai_protocol::ServerClock =
+        serde_json::from_str(&body).expect("the clock answer parses");
+    assert!(clock.boat_clock, "the boot river carries a boat: {body}");
+    clock.server_now_ns
 }
 
 /// One blocking `POST /control/divergence`, returning the status code.
@@ -2311,7 +2771,7 @@ fn clock_answers_per_boat_when_a_symbol_is_named() {
 #[ignore = "binds a loopback listener"]
 async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
     let venue = spawn(&["--config", &fast_config()]);
-    let (mut staying, _) = tokio_tungstenite::connect_async(venue.ws_url())
+    let (staying, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("the indefinite passenger boards");
     let (mut leaving, _) = tokio_tungstenite::connect_async(format!(
@@ -2321,6 +2781,55 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
     ))
     .await
     .expect("the bounded passenger boards the same boat");
+
+    // `staying` is read CONTINUOUSLY from here, not left parked while the
+    // bounded passenger runs its 1.5 s down. This venue's fanout is a bounded
+    // ring: a socket nobody reads is ejected with `FeedLagged` and closed, so
+    // the old shape - drain `leaving` for 1.5 s, then ask whether `staying` has
+    // a frame - could observe an eviction and report it as "one passenger's
+    // deadline wound down the boat under another", sending the reader after a
+    // serving defect that is not there. The reader task also reports HOW the
+    // socket ended, so a close is named as a close.
+    //
+    // The socket is SPLIT so the test keeps the write half: the post-exit
+    // evidence below is a ROUND TRIP, which the reader alone cannot stage. What
+    // crosses is a pair of monotone COUNTS - query answers and tape prints - on
+    // a `watch` that overwrites rather than a queue that grows. The queue shape
+    // it replaced accumulated one entry per frame across a 1.5 s window of
+    // unpaced firehose; monotone counts coalesce losslessly under a watch,
+    // because the reader only ever compares them with `>`.
+    let (mut staying_writer, mut staying_reads) = staying.split();
+    let (staying_tx, mut staying_rx) = tokio::sync::watch::channel(Ok((0_u64, 0_u64)));
+    let staying_reader = tokio::spawn(async move {
+        let (mut answered, mut prints) = (0_u64, 0_u64);
+        loop {
+            let ended = match staying_reads.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    match serde_json::from_str::<ServerMessage>(&text) {
+                        Ok(ServerMessage::Trade(_) | ServerMessage::Quote(_)) => prints += 1,
+                        Ok(ServerMessage::OrderStatusSnapshot(snapshot))
+                            if snapshot.request_id == "AFTER-EXIT" =>
+                        {
+                            answered += 1;
+                        }
+                        _ => {}
+                    }
+                    if staying_tx.send(Ok((answered, prints))).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Some(Ok(Message::Close(frame))) => {
+                    format!("the venue closed the indefinite passenger's socket: {frame:?}")
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(err)) => format!("the indefinite passenger's socket failed: {err}"),
+                None => "the indefinite passenger's stream ended".to_string(),
+            };
+            drop(staying_tx.send(Err(ended)));
+            return;
+        }
+    });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut announced = false;
@@ -2339,13 +2848,67 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
         "the bounded passenger announced its completion before closing"
     );
 
-    // The boat is still carrying the other passenger, so frames keep arriving
-    // on a socket that asked for no duration at all.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, staying.next()).await {
-        if matches!(message, Message::Text(_)) {
-            return;
+    // The boat is still carrying the other passenger. Establishing that takes a
+    // print the venue produced AFTER the exit, and the query is what makes one
+    // provable: it goes out once the bounded passenger has closed, so its answer
+    // cannot have been sitting in a buffer, and the stream's own ordering makes
+    // everything the venue writes after that answer post-exit too. A print past
+    // it is therefore a print the boat made with the other passenger gone.
+    //
+    // NEITHER CHEAPER SHAPE ESTABLISHES THAT. "Discard whatever is queued, then
+    // take the next frame" empties only what the reader task has already
+    // FORWARDED, so frames that reached the socket before the exit and had not
+    // been polled yet land afterwards and are counted as post-exit evidence -
+    // and this test is current-thread, so that scheduling lag is real rather
+    // than theoretical. Comparing tape stamps against the venue's clock fails
+    // for a different reason: `fast.toml` is `speed = 0.0`, where delivery is
+    // UNPACED while the boat clock is still built wall-rated, so `ts_event` runs
+    // far ahead of `server_now_ns` and says nothing about when a frame was
+    // served.
+    staying_writer
+        .send(Message::Text(
+            r#"{"type":"QueryOrders","request_id":"AFTER-EXIT","open_only":false}"#.into(),
+        ))
+        .await
+        .expect("the indefinite passenger can still be heard");
+    // Five seconds, not the thirty this file uses elsewhere, and deliberately:
+    // both waits below are milliseconds of expected latency, and the whole test
+    // has to finish inside the harness's per-test budget or its truthful message
+    // is replaced by a hung-test kill - which is the same wrong-answer failure
+    // it exists to avoid.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let prints_at_answer = loop {
+        let (answered, prints) = match *staying_rx.borrow_and_update() {
+            Ok(counts) => counts,
+            Err(ref why) => panic!("{why}"),
+        };
+        if answered > 0 {
+            break prints;
         }
+        tokio::time::timeout_at(deadline, staying_rx.changed())
+            .await
+            .expect("the venue answers the indefinite passenger within 5 s of the other's exit")
+            .expect("the reader task ended without saying why");
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, prints) = match *staying_rx.borrow_and_update() {
+            Ok(counts) => counts,
+            Err(ref why) => panic!("{why}"),
+        };
+        if prints > prints_at_answer {
+            break;
+        }
+        tokio::time::timeout_at(deadline, staying_rx.changed())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "one passenger's deadline wound down the boat under another: 5 s after the \
+                     bounded passenger left, the indefinite one has been served no print the \
+                     venue can be shown to have made afterwards"
+                )
+            })
+            .expect("the reader task ended without saying why");
     }
-    panic!("one passenger's deadline wound down the boat under another");
+    staying_reader.abort();
 }

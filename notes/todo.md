@@ -217,6 +217,38 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- THE VENUE COUNTS SWEEP PASSES FOR NOBODY, which is the missing observable
+  behind the last fixed sleeps in the item below. Filed 2026-08-18 by the
+  lifecycle-test fix pass.
+
+  Two integration tests need to wait until the fill sweeper has walked the book,
+  and neither can state it.
+  `serving::the_tape_is_identical_with_and_without_a_resting_stop` puts a hundred
+  resting conditionals in the book and needs several passes to walk them, because
+  the WALK - not the submit path - is what its purity claim is about;
+  `serving::a_perpetual_position_pays_funding_across_an_interval` needs a pass to
+  cross a funding instant and charge the position. Both waited on a bare
+  `tokio::time::sleep`, which is a bet on the host rather than a condition: a
+  venue that had stalled satisfies the sleep and is judged as if it had swept.
+
+  WHAT THE VENUE WOULD HAVE TO SHIP: a monotonic count of completed sweep passes
+  per river, readable from a route that already exists - a field on `/clock` or
+  `/health` would do. A test could then read it, wait for it to advance by N, and
+  say exactly what it waited for. Nothing on the wire carries it today; the
+  sweeper is internal to `mogwai-server`'s fill path and emits no frame, no
+  counter and no log a test can consume.
+
+  WHAT WAS DONE INSTEAD. The resting-stop test polls `/clock?symbol=` until the
+  boat's sim clock has advanced fifty simulated seconds, which on its `band.toml`
+  venue at speed 100 is about half a wall second and roughly fifty opportunities
+  at the 10 ms sweep cadence - and a stalled venue now FAILS there rather than
+  passing. The funding test keeps its wall sleep: the same poll was implemented,
+  run, and found vacuous on `perpetual.toml`, and the reason is a property of
+  `speed = 0.0` now written down in `reference/clock.md`. Neither test can state
+  "a sweep pass ran"; the first waits on a proxy that is only sound because that
+  config's clock is wall-affine, and the second still bets on the host. Both are
+  one server-side counter away from being conditions.
+
 - TRIAGE EVERY TEST FOR PARALLEL SAFETY, AND KILL EVERY FIXED DURATION AND
   WAIT. Filed 2026-08-18, after `[test.profiles.gate]` took `test_threads = 8`
   and cut `brokkr check --gate` from 3m01s to about 1m00s. That setting is a

@@ -243,9 +243,22 @@ async fn sigterm_closes_without_announcing_run_complete() {
     let mut venue = spawn(&["--config", &fast_config()]);
     let mut socket = connect(&venue).await;
 
-    // Let the connection settle so a missed frame cannot be blamed on a race
-    // between the upgrade and the signal.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The condition this needs is "this socket is attached and being served",
+    // and the venue states it by serving a frame. Waiting a fixed 300 ms for it
+    // meant a slow host signalled a socket that was not attached yet, and the
+    // absent `RunComplete` below - the whole point of the test - would then have
+    // been the race rather than the venue's behaviour.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the socket is served a frame within 30 s of upgrade")
+            .expect("the venue closed the socket before serving it anything")
+            .expect("a well-formed frame");
+        if matches!(message, Message::Text(_)) {
+            break;
+        }
+    }
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(i32::try_from(venue.record.pid).expect("pid fits")),
         nix::sys::signal::Signal::SIGTERM,
