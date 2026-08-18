@@ -141,6 +141,12 @@ fn cut(args: CutArgs) -> anyhow::Result<()> {
         window.name,
         dir.display()
     );
+    // Elapsed is emitted by the command itself rather than left to an external
+    // stopwatch. The cut is the expensive surface here - a delivered month is
+    // multiple GB decompressed - and the decision it informs is whether cutting
+    // a full eleven-month corpus is a coffee break or an overnight job, which
+    // the standing rule says to answer BEFORE running it rather than after.
+    let started = std::time::Instant::now();
     let (library, dropped) = segments::cut_with(
         &dir,
         &args.symbol,
@@ -172,6 +178,7 @@ fn cut(args: CutArgs) -> anyhow::Result<()> {
     eprintln!("segment_ticks={ticks}");
     eprintln!("segments_with_measured_open_gap={gapped}");
     eprintln!("segments_dropped_as_thin={}", dropped.len());
+    eprintln!("cut_seconds={:.1}", started.elapsed().as_secs_f64());
 
     if let Some(parent) = args.out.parent()
         && !parent.as_os_str().is_empty()
@@ -192,8 +199,14 @@ fn cut(args: CutArgs) -> anyhow::Result<()> {
     reason = "matches the by-value dispatch site; the body only borrows args internally"
 )]
 fn tape(args: TapeArgs) -> anyhow::Result<()> {
+    // Load and compose are timed separately because they scale differently: the
+    // load is one parse of a whole month's library and grows with the corpus,
+    // while the compose is linear in --ticks and does not. A single wall would
+    // hide which one a slow run spent its time in.
+    let load_started = std::time::Instant::now();
     let library = SegmentLibrary::load(&args.library)
         .with_context(|| format!("loading {}", args.library.display()))?;
+    let load_seconds = load_started.elapsed().as_secs_f64();
     let mut config = SegmentCompose::new(&args.symbol, args.seed);
     config.start_price = args.start_price;
     config.start_ns = args.start;
@@ -206,6 +219,7 @@ fn tape(args: TapeArgs) -> anyhow::Result<()> {
 
     let mut source = SegmentSource::new(library, config)?;
     eprintln!("composing the {} window", source.window());
+    let compose_started = std::time::Instant::now();
 
     let mut sink: Box<dyn Write> = match &args.out {
         Some(path) => {
@@ -237,6 +251,11 @@ fn tape(args: TapeArgs) -> anyhow::Result<()> {
     }
     sink.flush().context("flushing the CSV")?;
     eprintln!("composed_ticks={}", args.ticks);
+    eprintln!("library_load_seconds={load_seconds:.1}");
+    eprintln!(
+        "compose_seconds={:.1}",
+        compose_started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

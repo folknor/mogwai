@@ -126,7 +126,7 @@ required eventually, since both modes must be supported.
 
 ## Open issues
 
-- OWNER GATE PENDING: LOOK AT THE ENDLESS-ASIA CHART. Slice 1 of the
+- OWNER GATE PENDING: LOOK AT THE FIVE COMPOSED-TAPE CHARTS. Slice 1 of the
   session-segment sampler landed 2026-08-18 and its acceptance is the owner's
   eye on a rendered chart, which is a standing gate for any change to tape
   generation. The owner was at work and on a different host when it landed, so

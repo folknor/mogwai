@@ -8,6 +8,47 @@ Numbers measured through `brokkr mogwai` carry their result UUID, so any claim
 here can be re-derived - `brokkr results <uuid>` and `brokkr sidecar <uuid>`.
 Numbers from the criterion harnesses do not, and are pinned by commit instead.
 
+## Session-segment cut and compose, 2026-08-18
+
+The session-segment sampler's two offline surfaces, measured on host `bygg`
+against the delivered MNQ 2026-04 TBBO month. Not through `brokkr mogwai`, and
+the reason is worth recording: that tool resolves the first token after `--` as
+a HARNESS TARGET unless it is one of the CLI subcommands it already knows, and
+`segments` is new, so an argv-shaped bench of it is refused with
+`unknown target "segments"` despite the documented rule that CLI surfaces need
+no registration. The commands therefore emit their own elapsed as stderr
+counters - `cut_seconds`, `library_load_seconds`, `compose_seconds` - beside
+the work-size counters they already carried, which makes the surface
+self-measuring rather than dependent on that resolution being fixed.
+
+Worst case of the four windows, `ny-afternoon`, 9,572,450 ticks over 21
+sessions: `cut_seconds=45.9`. Composing 4,000,000 ticks from the resulting
+165 MB library: `library_load_seconds=0.4`, `compose_seconds=0.7`.
+
+WHAT THIS DECIDES, and it was measured to decide it: whether cutting the full
+eleven-month corpus needs optimizing before it is run, per the standing rule
+that a multi-hour computation is presumptively a defect rather than a budget.
+It does not. Eleven months across four windows is on the order of 44 cuts at
+roughly three quarters of a minute each, so about half an hour - a coffee
+break, not an overnight job, and not worth optimizing ahead of a need.
+
+THE LEVER IF IT EVER MATTERS, recorded so it need not be rediscovered: cut cost
+is dominated by streaming the month's TBBO, which is the same work whichever
+window is being cut, so cutting four windows re-reads the same month four
+times. One pass emitting all four libraries would be close to four times
+cheaper. The window bounds are already resolved per trade date up front and the
+stream is classified against them as it flows, so the change is to carry a
+table of windows rather than one - not a restructuring.
+
+Library size is the number more likely to bite than time: 408 MB of JSON for
+one month across four windows, so an eleven-month corpus is roughly 4.5 GB and
+a single-window eleven-month library about 1.8 GB, parsed whole into memory to
+compose. The load stays linear and the 0.4 s above scales to a few seconds at
+that size, which is tolerable; what would not be is holding several such
+libraries at once. A compact binary encoding is the answer if that arrives, and
+nothing about the format's contract prevents one - the parallel arrays are
+already the storage shape.
+
 ## Per-boat ring sizing, 2026-08-15
 
 Piece 9 reduced the shipped per-boat `fanout_depth` to 1,048,576, the smallest
