@@ -13,7 +13,8 @@ mod common;
 
 use std::{
     io::{BufRead, BufReader},
-    process::{Command, Stdio},
+    os::unix::process::CommandExt,
+    process::{Child, ChildStdout, Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -178,6 +179,95 @@ fn sigterm_stops_the_venue_within_the_shutdown_grace() {
     );
 }
 
+/// The intermediate launcher's whole PROCESS GROUP, killed on drop.
+///
+/// A GROUP RATHER THAN A CHILD, because the child is not what leaks. The venue
+/// dies with the shell through `PR_SET_PDEATHSIG` and the shell dies when this
+/// test kills it - but `sleep 3600` is a SEPARATE process the shell forked, so
+/// killing the shell orphans it onto init and it sits there for an hour. That
+/// was happening on the SUCCESS path, every green run, and the machine this was
+/// written on was carrying five of them from earlier runs when the guard went
+/// in. `Child::kill` cannot reach it: the sleep is a grandchild and the test
+/// never learns its pid.
+///
+/// `process_group(0)` therefore makes the shell a group leader, so the sleep and
+/// the venue inherit the group and one `killpg` reaches all three. It runs on
+/// DROP rather than at the end of the test because the leak's other half is a
+/// panic between the spawn and the kill - and an explicit cleanup on the path
+/// that does not fail is not a guard at all.
+///
+/// It does NOT replace the explicit kill below. That one must signal the SHELL
+/// ALONE: the property under test is that the kernel reaps the venue when its
+/// launcher dies, and a group kill would have killed the venue directly and
+/// proven nothing.
+///
+/// TWO THINGS IT DEPENDS ON, both load-bearing and neither obvious.
+///
+/// THE PGID SURVIVES THE LEADER BEING REAPED. The test kills and `wait()`s the
+/// shell, so by the time this runs the pid it names has been released - and a
+/// pgid is only safe from reuse while the group still has a member. `sleep 3600`
+/// is that member: it holds the group open, which is why a `killpg` up to ten
+/// seconds later reaches the right processes rather than whatever group
+/// inherited a recycled pid. CHANGE THE SCRIPT SO NOTHING OUTLIVES THE SHELL AND
+/// THIS GUARD BECOMES A SIGKILL AIMED AT A STRANGER. If the sleep ever goes, the
+/// group must be signalled before the shell is reaped, not after.
+///
+/// WHETHER THE SLEEP IS FORKED IS SHELL-DEPENDENT. A shell may exec the last
+/// command of `A & B` in place, in which case there is no grandchild and nothing
+/// leaks; `/bin/sh` on the machine this was written on does not, and nine orphans
+/// had accumulated. The guard is correct either way - it is the fix's NECESSITY
+/// that varies by shell, not its safety.
+struct ReapedGroup(Child);
+
+impl ReapedGroup {
+    fn pgid(&self) -> nix::unistd::Pid {
+        nix::unistd::Pid::from_raw(i32::try_from(self.0.id()).expect("a pid fits in the type"))
+    }
+}
+
+impl Drop for ReapedGroup {
+    fn drop(&mut self) {
+        // ESRCH once every member is gone, which is the ordinary outcome.
+        nix::sys::signal::killpg(self.pgid(), nix::sys::signal::Signal::SIGKILL).ok();
+        self.0.kill().ok();
+        self.0.wait().ok();
+    }
+}
+
+/// Reads one line from a child's stdout, bounded by the test's wall budget.
+///
+/// `BufRead::read_line` IS UNBOUNDED, and on a pipe a child holds open it blocks
+/// forever. A venue that never writes its readiness line would therefore be
+/// reported by the per-test hang watchdog - which names the whole test, kills
+/// the process group and says nothing about what was being waited for - rather
+/// than by this test, which knows. The read runs on its own thread because there
+/// is no portable way to bound a blocking pipe read in place; that thread ends
+/// when the pipe closes, which the drop guard above guarantees.
+///
+/// THAT RECLAMATION IS AN ORDERING DEPENDENCY, so it is written down. On the
+/// panic path the reader thread is still blocked on the pipe, and what closes
+/// the pipe is `ReapedGroup`'s drop killing the shell. The guard must therefore
+/// already be CONSTRUCTED when this is called - which it is, the `Child` is
+/// moved into it at spawn. Reorder those two and a failing test leaks a thread
+/// blocked forever on a live child's stdout.
+fn read_line_within(stdout: ChildStdout, cap: Duration) -> String {
+    let deadline = common::wall_deadline(cap);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        drop(tx.send(reader.read_line(&mut line).map(|_| line)));
+    });
+    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(Ok(line)) => line,
+        Ok(Err(err)) => panic!("reading the readiness line from the intermediate launcher: {err}"),
+        Err(_) => panic!(
+            "the intermediate launcher produced no readiness line within {cap:?} (or the test's \
+             remaining budget); the venue it spawned never reported ready"
+        ),
+    }
+}
+
 /// Decision 10, tested the only way it can be: an intermediate process spawns
 /// the venue and is then SIGKILLed, so it sends nothing on the way out. The
 /// kernel's `PR_SET_PDEATHSIG` is what has to reap the venue.
@@ -194,18 +284,21 @@ fn venue_dies_when_its_launcher_is_killed_without_cleanup() {
         venue_binary(),
         fast_config()
     );
-    let mut launcher = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(script)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the intermediate launcher");
+    let mut launcher = ReapedGroup(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            // Its own process group, so the guard can reach the `sleep` the
+            // shell forks. See `ReapedGroup`.
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the intermediate launcher"),
+    );
 
-    let stdout = launcher.stdout.take().expect("launcher stdout");
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    reader.read_line(&mut line).expect("read readiness line");
+    let stdout = launcher.0.stdout.take().expect("launcher stdout");
+    let line = read_line_within(stdout, Duration::from_secs(10));
     let record = common::parse_ready(&line);
     let venue_pid =
         nix::unistd::Pid::from_raw(i32::try_from(record.pid).expect("a pid fits in the type"));
@@ -216,12 +309,21 @@ fn venue_dies_when_its_launcher_is_killed_without_cleanup() {
         200
     );
 
-    launcher.kill().expect("SIGKILL the intermediate launcher");
-    launcher.wait().expect("reap the intermediate launcher");
+    launcher
+        .0
+        .kill()
+        .expect("SIGKILL the intermediate launcher");
+    launcher.0.wait().expect("reap the intermediate launcher");
 
     // The venue is not our child, so we cannot wait on it; poll for the
     // process to disappear instead.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    //
+    // On `teardown_deadline` rather than `wall_deadline`: this is the wait that
+    // runs LAST and its failure message is a claim about the VENUE, so it is
+    // entitled to the reserve the budget holds back for exactly that. Twenty
+    // seconds was never a bound at all - it sits past the per-test watchdog, so
+    // a venue that outlived its launcher arrived as an unattributed kill.
+    let deadline = common::teardown_deadline(Duration::from_secs(10));
     loop {
         let alive = nix::sys::signal::kill(venue_pid, None).is_ok();
         if !alive {

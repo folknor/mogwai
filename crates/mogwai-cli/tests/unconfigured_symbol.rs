@@ -22,6 +22,17 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// A label no config in this tree mentions, wire-legal and not a preset name,
 /// so it resolves to the DEFAULT bundle wearing its own label.
+///
+/// `FOOBAR` IS THE WORKSPACE'S IDIOM for exactly this - `config.rs`, `source.rs`
+/// and `seeds.rs` all use it as the unconfigured placeholder, and
+/// `configs/unmatched-symbol.toml` boots a venue on it - so it is deliberately
+/// NOT renamed to something locally unique. The literal is not what makes the
+/// tests below fragile. WHAT MAKES THEM FRAGILE IS THAT EACH ONE ASSERTS AN
+/// ABSENCE FIRST: `!advertises(..)` is a statement about a venue nothing has
+/// materialized this label on yet, so it is sound only while the venue is this
+/// test's alone. Both tests here must therefore stay on the OWNED side of any
+/// shared-venue split; a shared `fast.toml` venue would let another test spend
+/// the river first and this would fail on a run where nothing is wrong.
 const UNCONFIGURED: &str = "FOOBAR";
 
 fn instruments(base: &str) -> Vec<InstrumentDef> {
@@ -57,19 +68,45 @@ async fn a_run_serves_a_symbol_nobody_configured() {
     // Drain to a DEADLINE, never asserting on the next frame: every socket is
     // attached to the live tape on upgrade, so what arrives first is whatever
     // the venue was emitting.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    // Clamped to the test's wall budget: a 30 s bound sits PAST the 20 s
+    // per-test hang watchdog, so the "no market frame" panic below could never
+    // have been printed - the watchdog would have killed the process group
+    // first, naming the test and nothing else. This file was not part of the
+    // sweep that closed that class in the other three.
+    //
+    // AND IT RECORDS HOW THE STREAM ENDED. The shape this replaces -
+    // `while let Ok(Some(Ok(Message::Text(_))))` - exits on a Ping, a Binary or
+    // a Close as well as on the deadline, and every one of them then arrived as
+    // "the bound river produced no market frame". That is a WRONG ANSWER rather
+    // than a timeout: a venue that closed the socket, or that sent a control
+    // frame before its first print, would have been reported as a venue that
+    // served an unlabelled river.
+    let deadline = common::deadline(Duration::from_secs(10));
     let mut labelled = false;
-    while let Ok(Some(Ok(Message::Text(frame)))) =
-        tokio::time::timeout_at(deadline, socket.next()).await
-    {
-        if frame.contains(UNCONFIGURED)
-            && (frame.contains("\"Trade\"") || frame.contains("\"Quote\""))
-        {
-            labelled = true;
-            break;
+    let ending = loop {
+        match tokio::time::timeout_at(deadline, socket.next()).await {
+            Err(_) => break "the deadline expired with no labelled market frame".to_string(),
+            Ok(None) => break "the venue ended the stream".to_string(),
+            Ok(Some(Err(err))) => break format!("the socket failed: {err}"),
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                break format!("the venue CLOSED the socket: {frame:?}");
+            }
+            Ok(Some(Ok(Message::Text(frame)))) => {
+                if frame.contains(UNCONFIGURED)
+                    && (frame.contains("\"Trade\"") || frame.contains("\"Quote\""))
+                {
+                    labelled = true;
+                    break String::new();
+                }
+            }
+            // A Ping, a Pong or a Binary frame is not the end of anything.
+            Ok(Some(Ok(_))) => {}
         }
-    }
-    assert!(labelled, "the bound river produced no market frame");
+    };
+    assert!(
+        labelled,
+        "the bound river produced no market frame labelled {UNCONFIGURED}: {ending}"
+    );
 
     let defs = instruments(&base);
     let served = defs

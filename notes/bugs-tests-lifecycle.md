@@ -392,32 +392,121 @@ re-derive it:
     instruction not to remove the pin. Reopening this needs an owner decision,
     not another reading of the same code.
 
-17. **`lifecycle::venue_dies_when_its_launcher_is_killed_without_cleanup`** -
-    `reader.read_line()` is UNBOUNDED; if the venue never writes, this hangs
-    until cargo's watchdog. And if anything panics between `spawn` and
-    `launcher.kill()`, a `sleep 3600` shell leaks for an hour (the venue itself
-    dies via PDEATHSIG, the shell does not). Wrap the `Child` in a drop guard.
+Findings 17-19 were fixed on 2026-08-19 and finding 20 was refused; the detail
+each one still binds is below, and the cold review of that pass is folded in
+rather than kept as a second layer.
 
-18. **`completion::a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not`**
-    - the first `diagnostics`/`diagnostics_for_sink` pair (lines 111-121) is
-    built, moved into the sink, then shadowed at line 133 and never read. Dead.
-    Its comment ("The faulted configuration is installed after this assertion
-    below, avoiding a startup race") describes a structure that is not there -
-    the first launch is plain `fast_config`. Delete the first pair and the
-    comment.
+17. FIXED on 2026-08-19, and THE LEAK WAS WORSE THAN FILED. The unbounded
+    `read_line` is now `read_line_within`, a bounded read on its own thread
+    (there is no portable way to bound a blocking pipe read in place), reported
+    at 10.22 s by the test itself rather than at 20 s by the watchdog. The
+    20 s poll round 3 left unclamped is `teardown_deadline(10s)` - that wait
+    runs last and its message blames the venue, which is what the reserve is
+    for.
 
-19. **`characterize_cli::scratch`** does `remove_dir_all` on a
-    `CARGO_TARGET_TMPDIR`-relative path keyed by a hand-written name. Currently
-    all three names are unique, so it is safe, but nothing enforces it and the
-    failure mode under `--test-threads=8` would be one test deleting another's
-    output mid-run. A `concat!(module_path!(), line!())` key or a `tempfile`
-    would remove the hazard.
+    THE `sleep 3600` LEAKS ON THE SUCCESS PATH, not only on a panic, and a drop
+    guard around the `Child` does not fix it. The shell FORKS the sleep rather
+    than exec'ing it, so killing the shell orphans a grandchild the test never
+    learns the pid of; the machine this was fixed on was carrying five of them
+    from earlier green runs, and each further run added one. The guard is a
+    PROCESS GROUP - `process_group(0)` on the shell, `killpg` on drop - and the
+    explicit kill below it still signals the SHELL ALONE, because a group kill
+    would have killed the venue directly and the PDEATHSIG property under test
+    would have proven nothing. Bite-checked in both directions: with the venue
+    removed from the script the bounded read reports at 10.22 s naming what it
+    waited for, and `pgrep -P 1 sleep` grew by one per sweep before the group
+    guard and by zero across every run after it, the full gate included.
 
-20. `unconfigured_symbol.rs`'s two tests hard-code `FOOBAR` / `BARFOO`;
-    `serving::a_symbol_no_preset_covers_is_served_under_the_default_bundle` also
-    uses `FOOBAR` via `unmatched-symbol.toml`. Different processes, so no
-    collision today - noted only because it is the kind of shared literal that
-    bites when someone consolidates binaries.
+    TWO THINGS THE GUARD DEPENDS ON, raised by cold review and now stated at the
+    guard rather than left implicit. The pgid is signalled AFTER the shell has
+    been killed and reaped, so the pid it names has been released - and that is
+    safe only because `sleep 3600` keeps the group non-empty and therefore pins
+    the pgid against reuse. Change the script so nothing outlives the shell and
+    the `killpg` becomes a SIGKILL aimed at whatever group inherited a recycled
+    pid. And whether the sleep is forked at all is SHELL-DEPENDENT: a shell may
+    exec the last command of `A & B` in place, in which case there is no
+    grandchild and nothing leaks. The nine orphans say this machine's `/bin/sh`
+    forks; the guard is safe either way, it is its NECESSITY that varies.
+    `read_line_within`'s thread reclamation carries the matching ordering
+    dependency - on the panic path the pipe is closed by the guard's drop, so the
+    guard must already be constructed when the read is taken - and now says so.
+
+18. FIXED on 2026-08-19, with one CORRECTION to the finding. The dead
+    `diagnostics`/`diagnostics_for_sink` pair is gone and the first launch now
+    says `StderrSink::Discard`, which is what it always was in effect - a buffer
+    filling for no reader, which reads to a maintainer as though the assertion
+    beside it were scoring something.
+
+    THE COMMENT WAS NOT DESCRIBING NOTHING, so it was rewritten rather than
+    deleted. The race it names is real and the structure IS there: the faulted
+    config is launched after the healthy assertion, and it has to be, because a
+    venue whose source faults may be gone before any client can poll `/health`
+    - so "`fault` is null before the fault" is not observable on that process.
+    What was wrong is that the comment sat on a launch named `faulted` that is
+    the HEALTHY one; the variable is `healthy` now and the comment states the
+    reason rather than the ordering.
+
+19. FIXED on 2026-08-19, in `common::scratch`, and used by
+    `characterize_cli.rs` and `arrival_control_exposure.rs` alike. Two
+    collisions, closed differently because they are different: ACROSS PROCESSES
+    the directory name carries the pid, so a collision is unrepresentable rather
+    than detected; WITHIN a process two tests share a pid and nothing about the
+    path can separate them, so the names are claimed in a registry and the
+    second claim PANICS naming the shared key. The finding's own suggestion
+    (`line!()`) would have made the names unique without making a reused one
+    loud, which is the weaker half of the same job. Bite-checked by pointing two
+    of the three characterize tests at one name: the second refuses with the
+    shared key rather than deleting the first's output.
+
+    THE PID SUFFIX TRADED A COLLISION FOR A LEAK, found by cold review of that
+    diff and closed the same day. Reuse was the only thing bounding the growth of
+    `target/tmp`: a fixed name was one directory rewritten every run, while
+    `<name>-<pid>` is a fresh directory per run that nothing ever revisits, so
+    three of them - each holding a synthesized corpus and a written report -
+    accumulated per invocation, forever. `scratch` returns a `Scratch` GUARD now,
+    on the pattern `mogwai-lab`'s `storage::ScratchDir` already uses, and the one
+    call site that passed the path straight into a callee binds it to a name so
+    the temporary cannot drop first. The guard KEEPS the directory when the
+    thread is panicking and says where it is: that directory is the whole
+    evidence of a failing characterize run, and removing it would leave a
+    maintainer the assertion message and nothing to read. Bite-checked by
+    counting: two further runs of the characterize binary added zero directories
+    where each had previously added one.
+
+    LATERAL, NOT FIXED, because it is another owner's file: `target/tmp` on this
+    machine also holds 503 `*d-*.log`, 180 `bad-*.toml` and 168 `bad-*.log`
+    entries, and twelve `stale-*.pid`. Whatever writes those is leaking the same
+    way and is outside this document's scope.
+
+20. REFUSED on 2026-08-19, and the reason matters for round 5. `FOOBAR` IS THE
+    WORKSPACE'S IDIOM for an unconfigured label - `config.rs`, `source.rs`,
+    `seeds.rs` and `configs/unmatched-symbol.toml` all use it - so renaming it
+    in one test file buys nothing today and costs the idiom.
+
+    THE LITERAL IS NOT THE HAZARD. What is fragile in `unconfigured_symbol.rs`
+    is that both tests ASSERT AN ABSENCE FIRST: `!advertises(..)` is a statement
+    about a venue on which nothing has materialized the label yet, and it is
+    sound only while the venue belongs to that test alone. Consolidating
+    binaries does not break it; SHARING A VENUE does, which is precisely round
+    5's first move. Both tests are therefore recorded in place as belonging on
+    the OWNED side of any shared-venue split, which is a durable statement about
+    the property rather than a rename that would look like protection.
+
+    ONE REAL DEFECT FOUND IN THAT FILE while judging this, and fixed: its drain
+    took `tokio::time::Instant::now() + Duration::from_secs(30)`, a bound PAST
+    the 20 s watchdog, so its "the bound river produced no market frame" panic
+    could never have been printed. Round 3's sweep covered `lifecycle.rs`,
+    `completion.rs` and `serving.rs` only, and nothing detects a fourth file
+    holding the same shape - which is the open item on that mechanism, not a
+    property of this file.
+
+    ITS DRAIN WAS THE WRONG SHAPE TOO, and the first pass clamped the deadline
+    while standing next to it. `while let Ok(Some(Ok(Message::Text(..))))` ends
+    on a Ping, a Binary or a Close as well as on the deadline, so a venue that
+    CLOSED the socket arrived as a venue that served an unlabelled river - a
+    wrong answer, and the drain rule this document opens with, in the very file
+    the sweep had just visited. The loop records its ending now, in four
+    distinguishable forms, and the assertion carries it.
 
 ## E. Structural - the thing the hunter would actually fix first
 
@@ -456,14 +545,118 @@ Three moves, in order of payoff:
 
 ## F. Out of scope but noticed
 
-- `arrival_control_exposure.rs` writes into
-  `<repo>/target/arrival-control-exposure` - a fixed shared path. It is
-  `#[ignore]`d and run explicitly, so no collision today, but two concurrent
-  invocations would corrupt each other silently.
-- `brokkr.toml`'s skip list uses the bare prefix `"parity3b"` and `"parity12a_"`.
-  The file's own invariant comment warns that a prefix is "only safe while every
-  test that shares it stays ignored, which is a property of files this file
-  cannot see" - and `parity3b.rs` currently has tests whose names begin
-  `parity3b`, so any future non-ignored `parity3b_*` test silently stops running.
-  The invariant is documented but not enforced; nothing detects a violation
-  except the coverage audit, and only for the ignored/non-ignored mismatch.
+Both items were fixed on 2026-08-19 and are removed. What landed:
+
+- The fixed shared `target/arrival-control-exposure` path is
+  `common::scratch("arrival-control-exposure")`, per finding 19 above. Worth
+  keeping from the reading: under `curve: None` - which is what this call site
+  passes - `control_generated_pass` never touches the directory at all, so the
+  collision was latent rather than live. That is a property of the CALL SITE,
+  not of the callee, which is why the fix went in anyway.
+- THE SKIP-LIST INVARIANT IS ENFORCED, by
+  `crates/mogwai-cli/tests/gate_skip_list.rs`. It reads the gate profile's skip
+  list out of the project config as DATA, reconstructs every test name under
+  `crates/*/src` and `crates/*/tests` from the source text, and fails naming
+  both the pattern and the non-ignored test it swallowed - where the coverage
+  audit could only report the downstream orphan. It also refuses a DEAD entry
+  matching no test at all, and a second test holds the release sweep's `only`
+  list against the same skip list, which is the other invariant the config
+  states in prose and closes with "nothing checks that they do".
+
+  THE SCANNER'S FIRST RUN FAILED, and the failure was its own blind spot rather
+  than a defect in the list: ten of the envelope fidelity gates are emitted by a
+  `fidelity_gate!` macro, so a `fn`-only scan called their skip entry dead. It
+  reads `macro_rules!` generators now - a macro whose body carries `#[test]`,
+  with the generated name taken from the invocation's first argument - which is
+  the shape the tree uses. That blindness was the dangerous direction too: a
+  non-ignored macro-generated test would have been invisible to the violation
+  check as well. Bite-checked three ways: un-`#[ignore]`ing
+  `parity3b_session_profile_reproduces_the_preset_dow_weight` names it with file
+  and line under the `parity3b_` prefix; un-`#[ignore]`ing the macro body names
+  all ten generated gates with their full `arrival_envelope::tests::` paths;
+  and dropping `read_market_latency_stays_within_submit_budget` from the skip
+  list fails the second test naming the release sweep.
+
+  THAT FIRST VERSION SHIPPED FOUR HOLES OF THE KIND IT WAS BUILT TO DETECT, all
+  found by cold review of its own diff and closed the same day. A parser-backed
+  scanner that fails OPEN is worse than no scanner, because it reports green, so
+  the shape of every fix is the same: REFUSE where the parser cannot see, and
+  bound the refusal with a fixture.
+
+  - COMMENT STRIPPING WAS ONE-SIDED AND WRONG IN THE DANGEROUS DIRECTION. It
+    claimed a `//` cut inside a string literal "can only ever lose a brace and
+    pop a module early"; losing a CLOSE does the opposite - `depth` stays too
+    high, the `mod` is never popped, and every later test in the file gets a
+    phantom prefix, which turns a live skip entry into a false DEAD one and,
+    where the prefix was all that stood above the match, a live violation into a
+    false negative. Block comments were not handled at all, so a commented-out
+    `#[test] fn foo()` counted as a live test. It is a literal-aware whole-file
+    stripper now - line comments, NESTED block comments, `"..."`, raw and byte
+    strings at any hash count, and character literals distinguished from
+    lifetimes - and it BLANKS string interiors rather than copying them, which
+    also stops a `{` or a `[` inside a message from moving the module depth or
+    an attribute's bracket count. An unterminated comment or string panics
+    naming the file. Bite-checked by restoring the naive stripper as a text
+    edit: `second`, which sits outside `mod inner`, is reported as
+    `inner::second`.
+  - ONE IGNORE STATUS WAS ATTRIBUTED TO EVERY TEST A GENERATOR EMITS, which is
+    only sound while the body is uniform - and "all ignored" is exactly the
+    answer that satisfies this file's invariant for free, so the hole came back
+    one level down. Uniformity is MEASURED now, `#[test]` count against
+    `#[ignore` count, and a mixed body panics rather than guessing; a
+    per-invocation ignore attribute is refused separately. Bite-checked by
+    adding a second, non-ignored arm to `fidelity_gate!`: it refuses naming the
+    macro, the file and both counts.
+  - GENERATORS WERE ONLY FOUND IN THE FILE THAT INVOKED THEM, so a
+    `macro_rules!` exported from a shared module was invisible to both checks.
+    The scan is two passes now, generators tree-wide first. The cost is an
+    over-approximation, which is the safe direction for the violation check.
+  - INTEGRATION SUBMODULES WERE UNDER-RECONSTRUCTED: only a TOP-LEVEL file in
+    `tests/` is a binary, so `tests/foo/bar.rs` reports as `foo::bar::<test>`
+    and the flat treatment produced false dead entries.
+
+  AND THE SCANNER NOW REFUSES RATHER THAN DROPPING what it cannot parse. A
+  `#[test]` attribute that does not land on a declaration it recognizes is
+  collected and reported by name, line and attribute text - the `tests.len() >
+  500` threshold was the only guard before, and it would not have caught losing
+  one file or one declaration form, which is precisely how the first version
+  failed. That refusal fired on its first run, on a real blind spot nobody had
+  filed: a `#[ignore = "..."]` long enough that rustfmt WRAPPED it, whose
+  continuation line was being read as the declaration. Attributes are
+  accumulated across lines by bracket balance now. Five parser fixtures pin all
+  of this in a `parser` module beside the checks, every one bite-checked by
+  reverting its production half as a text edit.
+
+  THE RELEASE-SWEEP AGREEMENT WAS A SUBSTRING COMPARISON, AND NEITHER DIRECTION
+  OF IT IS THE INVARIANT. The review was right that `skip.contains(filter)` is
+  pure slack - any unrelated long skip entry satisfies it - but the sound
+  converse, `filter.contains(skip)`, REFUSES THE CONFIG AS IT STANDS: the live
+  `only` filter `read_market_latency` is SHORTER than the skip entry
+  `read_market_latency_stays_within_submit_budget`. That was measured, not
+  argued - the first version of the fix was the converse and the full gate
+  failed on it. So the check is resolved against the TESTS instead, which this
+  file already reconstructs: every test the `only` filter catches must be
+  matched by some skip entry, and an `only` filter matching no test at all is
+  refused as a lane that evaluates nothing. That also catches what no substring
+  form can see - a NEW test growing into the `only` filter without growing into
+  any skip entry. Bite-checked by widening the filter to `market_reading`, which
+  fails naming both tests it would have caught. A degenerate short skip entry is
+  refused too: the empty string is a substring of every name and would satisfy
+  every check here vacuously.
+
+  IT COST ONE EXCLUSION IN THE `no-brokkr-in-rust-source` textlint rule, for
+  that one file by name. The rule's stated purpose is that a source file must
+  not be able to INVOKE the tool - the deadlock it was written for needs a
+  subprocess - and this file spawns nothing; it opens the config with `std::fs`
+  and parses it. Excluding one named path rather than relaxing the pattern keeps
+  the rule absolute everywhere else.
+
+  THAT EXEMPTION IS A PROPERTY OF THE FILE'S CONTENTS AND NOT OF ITS PATH, so it
+  is bounded rather than permanent: `the_excluded_file_spawns_no_subprocess`
+  reads this file's own source, strips it so the prose about spawning cannot
+  trip a check about the code, and refuses any process-spawning construct in it.
+  Bite-checked by adding a `std::process::id()` call, which it names. The
+  config's prose was corrected in the same pass on both counts the review
+  raised - the `only`/`skip` sentence that still ended "nothing checks that they
+  do", and a comment placing the skip list BELOW itself when it is thirty lines
+  above.

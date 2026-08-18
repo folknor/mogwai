@@ -24,6 +24,8 @@ use std::path::PathBuf;
 use mogwai_lab::arrival_control::{GeneratedBinding, control_generated_pass};
 use serde_json::Value;
 
+mod common;
+
 /// The crate's own manifest dir, walked up to the workspace root: an
 /// integration test's working directory is the crate, not the repository.
 fn repo_root() -> PathBuf {
@@ -60,13 +62,22 @@ fn the_lab_walk_matches_the_measure_exposure_contract() {
         "the committed binding no longer carries the FINAL_START_NS anchor"
     );
 
-    let lab = control_generated_pass(
-        &root.join("target/arrival-control-exposure"),
-        &binding,
-        None,
-        1,
-    )
-    .expect("the lab-side generated pass");
+    // A PER-PROCESS SCRATCH, not `target/arrival-control-exposure`. That was a
+    // fixed shared path: `control_generated_pass` writes
+    // `arrival-control-<seed>.toml` into it and removes the file again, so two
+    // concurrent runs of this gate - it is `#[ignore]`d and invoked by hand,
+    // which is exactly when two of them overlap - would write and delete one
+    // another's config under one name and each would read whichever won. The
+    // failure is silent: the pass that lost its config resolves a profile it did
+    // not ask for. Under `curve: None` the directory is not touched at all
+    // today, which is a property of this call site rather than of the callee.
+    //
+    // BOUND TO A NAME, not passed as a temporary: the value is a guard that
+    // removes the directory when it drops, and a temporary would drop at the end
+    // of this statement.
+    let scratch = common::scratch("arrival-control-exposure");
+    let lab = control_generated_pass(scratch.path(), &binding, None, 1)
+        .expect("the lab-side generated pass");
     let cli = mogwai_cli::measure::run_final_walk(1).expect("the measure-side generated pass");
 
     assert_eq!(

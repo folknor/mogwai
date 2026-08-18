@@ -36,6 +36,9 @@ mogwai-protocol.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true
+# `tests/gate_skip_list.rs` reads the project config as DATA, to hold its skip
+# list against the tests that actually match it.
+toml.workspace = true
 tungstenite = "0.30.0"
 tokio-tungstenite = "0.30.0"
 nix = { version = "0.31.3", features = ["fs", "process", "signal"] }

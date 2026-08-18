@@ -35,18 +35,9 @@ fn corpus(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).expect("clearing the scratch directory");
-    }
-    std::fs::create_dir_all(&dir).expect("creating the scratch directory");
-    dir
-}
-
 #[test]
 fn a_path_shaped_argument_writes_the_report_named_after_the_file() {
-    let root = scratch("characterize_path_shaped");
+    let root = common::scratch("characterize_path_shaped");
     let data = root.join("data");
     let out = root.join("out");
     let input = corpus(&data, "KEUR.csv");
@@ -97,7 +88,7 @@ fn a_path_shaped_argument_writes_the_report_named_after_the_file() {
 /// `no char_*.json found` while `characterize` had exited successfully.
 #[test]
 fn the_written_report_is_discoverable_by_the_fingerprint_loader() {
-    let root = scratch("characterize_loader_visible");
+    let root = common::scratch("characterize_loader_visible");
     let data = root.join("data");
     let out = root.join("out");
     let input = corpus(&data, "KEUR.csv");
@@ -124,7 +115,7 @@ fn the_written_report_is_discoverable_by_the_fingerprint_loader() {
 /// same way, so the fix did not trade one entry point for the other.
 #[test]
 fn a_bare_symbol_argument_still_writes_the_same_name() {
-    let root = scratch("characterize_bare_symbol");
+    let root = common::scratch("characterize_bare_symbol");
     let data = root.join("data");
     let out = root.join("out");
     corpus(&data, "KEUR.csv");

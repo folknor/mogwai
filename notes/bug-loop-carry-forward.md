@@ -90,6 +90,56 @@ trusts yet.
     on a Ping and truncates the sample silently - the drain rule below, in the
     measurement's costume. Control frames are counted, not fatal; measured at
     zero in a 3 s sample, so the truncation was latent.
+- `common::scratch(name)` OWNS EVERY SCRATCH DIRECTORY THE `mogwai-cli` TEST
+  BINARIES WRITE, and none of them may hand-roll a `CARGO_TARGET_TMPDIR` path
+  again. SCOPED TO THOSE BINARIES DELIBERATELY: `mogwai-lab`'s
+  `storage::ScratchDir` hand-rolls one too, correctly, and stating this
+  workspace-wide would read as an audited invariant that nothing checks. The name
+  carries the pid, so a cross-process collision is unrepresentable rather than
+  detected, and the names are claimed in a process registry so a second claim
+  PANICS instead of resolving the ambiguity by deleting the first test's output.
+  Two callers: `characterize_cli.rs` and `arrival_control_exposure.rs`.
+  - IT RETURNS A GUARD, and the guard is not optional. The pid suffix removed
+    the REUSE that used to bound `target/tmp`: a fixed name was one directory
+    rewritten per run, `<name>-<pid>` is a fresh one nothing revisits, so three
+    corpora and three reports accumulated per invocation until `Drop` went in.
+    Hold it for the test's lifetime - dropping it early removes the directory out
+    from under the code still writing there, which is why the one call site that
+    passed the path straight into a callee binds it to a name. It KEEPS the
+    directory when the thread is panicking, because that directory is the
+    evidence of the failure. `mogwai-lab`'s `ScratchDir` is the pattern.
+  - LATERAL AND UNOWNED: `target/tmp` on this machine also carries 503
+    `*d-*.log`, 180 `bad-*.toml`, 168 `bad-*.log` and twelve `stale-*.pid`.
+    Something else leaks the same way, outside the lifecycle document's scope.
+- `crates/mogwai-cli/tests/gate_skip_list.rs` ENFORCES THE PROJECT CONFIG'S OWN
+  SKIP-LIST INVARIANT - a skip pattern may match only `#[ignore]`d tests - by
+  reconstructing every test name from source text.
+  - A PARSER-BACKED SCANNER THAT FAILS OPEN IS WORSE THAN NO SCANNER, and this
+    one is built on that: it REFUSES wherever it cannot see. A `#[test]`
+    attribute that does not land on a declaration it recognizes is reported by
+    file, line and attribute text rather than dropped; a `macro_rules!`
+    generator whose emitted tests are not uniformly `#[ignore]`d panics rather
+    than being marked all-ignored (which would satisfy the invariant for free);
+    an unterminated comment or string panics naming the file. A NEW WAY OF
+    DECLARING A TEST therefore fails the scan loudly rather than shrinking it
+    silently - teach the parser, never relax the refusal. Five fixtures in its
+    `parser` module pin the comment stripping and the attribute handling.
+  - ITS COMMENT STRIPPING IS LITERAL-AWARE AND BLANKS STRING INTERIORS. Both
+    halves are load-bearing: a naive `//` cut loses a closing brace and gives
+    every later test a phantom module prefix, and a `{` or `[` inside a message
+    moves the module depth or an attribute's bracket count the same way.
+  - THE `only`/`skip` AGREEMENT IS RESOLVED AGAINST THE TESTS, not by comparing
+    the two strings. Both directions of the substring comparison were tried and
+    both are wrong: `skip.contains(filter)` is satisfied by any unrelated long
+    skip entry, and the sound-looking converse REFUSES THE LIVE CONFIG, where
+    the `only` filter is the shorter of the two. What is owed is that every test
+    the filter catches is excluded by some skip entry.
+  - It is the single excluded file in the `no-brokkr-in-rust-source` textlint
+    rule, named explicitly - it reads the config with `std::fs` and spawns
+    nothing, which is the distinction the rule is actually about. THAT
+    EXEMPTION IS BOUNDED BY A TEST IN THE FILE, `the_excluded_file_spawns_no
+    _subprocess`, because an exemption justified by contents and keyed on a path
+    decays into the hole the rule was written for.
 - The rule those helpers encode, which recurred often enough to be the round's
   main lesson: A DRAIN THAT DOES NOT RECORD HOW THE STREAM ENDED IS NOT A DRAIN.
   It is the guard-scope family in a new costume - the drain outlives nothing it
@@ -166,23 +216,30 @@ trusts yet.
   `serving.rs` through the `common` budget helpers above, so the class is closed
   in those three files - but nothing detects a new `Instant::now() + <cap>`
   landing in them, and the other test binaries in `mogwai-cli` were not swept.
-  ONE DEADLINE WAS DELIBERATELY LEFT: the 20 s poll in
-  `lifecycle::venue_dies_when_its_launcher_is_killed_without_cleanup`, because
-  that function is finding 17 and round 4 owns it. Whoever takes 17 clamps it in
-  the same edit.
+  Round 4 clamped the one deadline round 3 left (finding 17) and found a
+  FOURTH FILE holding the same shape - `unconfigured_symbol.rs` had a 30 s
+  drain bound, past the watchdog, so its panic could never print. THE SWEEP WAS
+  PER-FILE AND THE REMAINING `mogwai-cli` TEST BINARIES ARE STILL UNSWEPT;
+  nothing detects the shape, so it is found by looking or not at all. WHERE ONE
+  IS FOUND, READ THE DRAIN IT SITS IN TOO: that same file's loop ended on a Ping
+  or a Close as well as the deadline, and the round-4 pass clamped the bound
+  while standing next to it. The two defects travel together because both are
+  written by someone reaching for the shortest loop that compiles.
 - THE GATE RUNS THE PARALLEL LANE and says so in its own output, so a green
   gate is NOT evidence about anything serial. Round 3 turned on exactly that
   distinction. Run `brokkr test -p mogwai-cli socket --debug` alongside it after
   touching the harness; it is the invocation AGENTS.md prescribes and the only
   one that exercises `--test-threads=1`.
 - `brokkr check` is blind to the socket-backed suites; `brokkr check --gate` is
-  the invocation. Baseline at the end of round 3: 1171 workspace + 442
-  instrumented, unchanged from round 2 - round 3 deleted a test that was in the
-  gate's `skip` list, so it was never in the count.
+  the invocation. Baseline at the end of round 4: 1173 workspace + 442
+  instrumented, in 1m05s, with 65 ignored and 0 orphaned pairs. It was 1171 at
+  the end of round 3; the two are `gate_skip_list.rs`'s pair.
 - `brokkr check --profile timing` is a SEPARATE lane and round 3 changed it. It
   now names one test, `read_market_latency_stays_within_submit_budget`; run it
   after touching either list, because `brokkr.toml`'s `only` and the gate's
-  `skip` have to agree and nothing checks that they do.
+  `skip` have to agree. THAT AGREEMENT IS CHECKED NOW, by
+  `every_release_only_filter_is_skipped_by_the_gate`, and the config's prose
+  saying nothing checks it was corrected in the same pass.
 
 ## Decisions already ruled on - do not silently reopen
 
@@ -204,6 +261,22 @@ trusts yet.
   place, so the next reader does not rediscover it as an accident. Do not remove
   that pin, and do not let it become the only non-trivial boot river in the tree
   without noticing.
+- `unconfigured_symbol.rs` KEEPS `FOOBAR` / `BARFOO`. Round 4 refused the
+  rename: `FOOBAR` is the workspace idiom for an unconfigured label, used by
+  `config.rs`, `source.rs`, `seeds.rs` and `configs/unmatched-symbol.toml`, and
+  a shared literal across SEPARATE BINARIES costs nothing. THE HAZARD IS NOT THE
+  LITERAL AND ROUND 5 SHOULD READ IT THAT WAY: both tests in that file assert an
+  ABSENCE first (`!advertises(..)`), which is sound only on a venue nothing else
+  has touched, so they belong on the OWNED side of the shared-venue split, not
+  the read-only side. The same question is worth asking of every test the split
+  moves - an absence asserted about a shared venue is a wrong answer waiting for
+  a neighbour, not a flake.
+- A SHELL SPAWNED FROM A TEST LEAKS ITS GRANDCHILDREN. `Child::kill` reaches the
+  shell and nothing it forked; `/bin/sh -c "... & sleep 3600"` orphans the sleep
+  onto init on the SUCCESS path, and nine of them had accumulated on the machine
+  before round 4 looked. The fix is `process_group(0)` at spawn plus `killpg` in
+  a drop guard, and it composes with a test whose property needs the child alone
+  signalled: kill the child explicitly, let the guard take the group afterwards.
 - `analysis/asia_jump_probe.py` is untracked, unrelated to this arc, and
   predates it. It is not to be swept into a commit.
 

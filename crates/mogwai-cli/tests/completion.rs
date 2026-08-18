@@ -111,27 +111,27 @@ async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadlin
 #[test]
 #[ignore = "binds a loopback listener"]
 fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
-    let diagnostics = Arc::new(Mutex::new(Vec::new()));
-    let diagnostics_for_sink = Arc::clone(&diagnostics);
-    let faulted = launch(LaunchSpec {
+    // The null side of the field, on a HEALTHY venue, taken first. It is a
+    // separate launch rather than a phase of the faulted one below because a
+    // venue whose source faults may be gone before any client can poll it - so
+    // "`fault` is null before the fault" is not observable on that process, and
+    // asserting it there would be a race dressed as a property.
+    //
+    // Its stderr is DISCARDED, deliberately: nothing here reads the healthy
+    // venue's diagnostics. This launch used to carry a capturing sink and an
+    // `Arc<Mutex<Vec<_>>>` that was shadowed a dozen lines below and never read
+    // once - a buffer filling for no reader, which reads to a maintainer as
+    // though the assertion below were scoring it.
+    let healthy = launch(LaunchSpec {
         binary: Some(common::venue_binary().into()),
         config: Some(common::fast_config().into()),
-        stderr: StderrSink::Lines(Box::new(move |line| {
-            diagnostics_for_sink
-                .lock()
-                .expect("diagnostic lock")
-                .push(line);
-        })),
+        stderr: StderrSink::Discard,
         ..LaunchSpec::default()
     })
-    .expect("fault venue reports readiness before its terminal source fault");
-
-    // This first verifies the null side of the field on a healthy venue.  The
-    // faulted configuration is installed after this assertion below, avoiding
-    // a startup race in which no listener ever publishes the diagnostic.
-    let (_, healthy_health) = http_get(&format!("http://{}", faulted.addr()), "/health");
+    .expect("a healthy venue reports readiness");
+    let (_, healthy_health) = http_get(&format!("http://{}", healthy.addr()), "/health");
     assert!(healthy_health.contains("\"fault\":null"));
-    drop(faulted);
+    drop(healthy);
 
     let diagnostics = Arc::new(Mutex::new(Vec::new()));
     let diagnostics_for_sink = Arc::clone(&diagnostics);

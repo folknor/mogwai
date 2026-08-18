@@ -24,7 +24,7 @@ use std::{
     ffi::OsString,
     io::{Read, Write},
     net::TcpStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -551,6 +551,94 @@ pub fn accelerated_config() -> String {
         "{}/tests/configs/accelerated.toml",
         env!("CARGO_MANIFEST_DIR")
     )
+}
+
+/// A private scratch directory for a test that writes files.
+///
+/// TWO WAYS A SCRATCH DIRECTORY COLLIDES, and this closes both. A test that
+/// clears its directory before use - which every one of them must, or it reads
+/// the last run's output - DELETES whatever it finds there, so a name two tests
+/// share is one test destroying another's output mid-run, silently, and only
+/// under a thread count that puts them in flight together.
+///
+/// - ACROSS PROCESSES the name carries this process's pid, so two concurrent
+///   invocations of the same test binary, or a test binary running beside the
+///   `#[ignore]`d gate that used to write a fixed path under `target/`, cannot
+///   land on one directory at all. That collision is not detected, it is
+///   unrepresentable.
+/// - WITHIN A PROCESS the names are claimed in a registry and a second claim of
+///   one name PANICS, naming both callers' shared key. Two tests in one binary
+///   share a pid, so nothing about the path can separate them; what is available
+///   is refusing the ambiguity out loud instead of resolving it by deletion.
+///
+/// `name` is therefore free to be readable rather than unique-by-construction:
+/// nothing rests on a human noticing that all of them differ.
+///
+/// IT RETURNS A GUARD BECAUSE THE PID SUFFIX REMOVED THE REUSE, and reuse was
+/// the only thing bounding the growth of `target/tmp`. A fixed name was one
+/// directory rewritten every run; `<name>-<pid>` is a fresh directory per run
+/// that nothing ever revisits, so without a `Drop` every invocation of every
+/// test binary would deposit another synthesized corpus and another written
+/// report there, forever. Hold the guard for the test's lifetime - dropping it
+/// early removes the directory out from under the code still writing to it.
+pub struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn join(&self, tail: impl AsRef<Path>) -> PathBuf {
+        self.path.join(tail)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // KEPT ON THE PANIC PATH. The directory holds the corpus the test
+        // synthesized and the report the binary wrote, which is the whole
+        // evidence of a failure; deleting it would leave a maintainer with the
+        // assertion message and nothing to read. On the passing path there is
+        // nothing to look at and the removal is what keeps `target/tmp` from
+        // growing without bound.
+        if std::thread::panicking() {
+            eprintln!(
+                "[scratch] kept for triage because this test panicked: {}",
+                self.path.display()
+            );
+            return;
+        }
+        std::fs::remove_dir_all(&self.path).ok();
+    }
+}
+
+pub fn scratch(name: &str) -> Scratch {
+    static CLAIMED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    {
+        let mut claimed = CLAIMED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !claimed.iter().any(|held| held == name),
+            "two tests in this binary both claimed the scratch name {name:?}; they would share one \
+             directory and each would delete the other's output on entry. Give one of them a \
+             different name."
+        );
+        claimed.push(name.to_string());
+    }
+    let dir =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
+    if dir.exists() {
+        // Only reachable when a pid is reused across runs AND the guard below
+        // did not run - a killed process, or a panic, which keeps the directory
+        // on purpose. Either way the contents are the stale output this clear
+        // exists for.
+        std::fs::remove_dir_all(&dir).expect("clearing the scratch directory");
+    }
+    std::fs::create_dir_all(&dir).expect("creating the scratch directory");
+    Scratch { path: dir }
 }
 
 /// One blocking HTTP GET, returning the status code and the body. Hand-rolled

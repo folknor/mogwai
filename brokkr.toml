@@ -55,8 +55,20 @@ features = ["hotpath-alloc"]
 #
 # NOTE ON `only`: it is a substring filter, so `read_market_latency` catches
 # `read_market_latency_stays_within_submit_budget` and nothing else today. The
-# name is also in the gate's `skip` list; the two lists have to agree, and
-# nothing checks that they do.
+# name is also in the gate's `skip` list, because the two lists state one
+# decision - a wall-clock contract excluded from the debug gate BECAUSE the
+# release sweep evaluates it - and they have to agree.
+#
+# THAT AGREEMENT IS CHECKED NOW, by
+# `every_release_only_filter_is_skipped_by_the_gate` in
+# `crates/mogwai-cli/tests/gate_skip_list.rs`, and it is resolved AGAINST THE
+# TESTS rather than by comparing the two strings. Comparing them as substrings
+# is either slack or wrong - `skip.contains(filter)` is satisfied by any
+# unrelated long skip entry, and the sound converse refuses the pair below,
+# where the `only` filter is deliberately the shorter of the two. What is
+# actually owed is that every test this filter catches is excluded by some skip
+# entry, which is what the check asserts. It also refuses an `only` filter that
+# matches no test, since that lane would then evaluate nothing.
 [[check]]
 name = "timing"
 profile = "release"
@@ -134,6 +146,14 @@ include_ignored = true
 # prefix did exactly this, and the audit caught it. Prefer full test names;
 # a prefix is only safe while every test that shares it stays ignored, which
 # is a property of files this file cannot see.
+#
+# IT IS ENFORCED NOW, by `crates/mogwai-cli/tests/gate_skip_list.rs`. It reads
+# the list below, reconstructs every test name under `crates/*/src` and
+# `crates/*/tests` from the source text, and fails naming both the pattern and
+# the non-ignored test it swallowed - a direct statement, where the coverage
+# audit could only report the downstream orphan. It also refuses a DEAD entry,
+# one matching no test at all, because a name that drifted has stopped
+# excluding whatever it was written for.
 [test.profiles.gate]
 description = "Everything, including the socket-backed adapter tests"
 sweeps = ["workspace", "instrumented"]
@@ -279,10 +299,26 @@ certifies = "complete"
 # So the rule is the string, not the call: a source file has no business
 # mentioning the build tool at all. Prose about it belongs in markdown, where
 # it cannot become an invocation.
+#
+# ONE EXCLUSION, and it is the exception that proves what the rule is about.
+# `gate_skip_list.rs` enforces the skip-list invariant declared ABOVE, at the
+# gate profile - that a skip pattern may match only `#[ignore]`d tests - which
+# it can only do by reading THIS FILE. It reads it as DATA, with `std::fs` and
+# a TOML parse, and spawns nothing; the deadlock the rule exists to prevent
+# needs a subprocess, and there is none. Excluding one named file rather than
+# relaxing the pattern keeps the rule absolute everywhere else.
+#
+# THE EXCLUSION IS A PROPERTY OF THAT FILE'S CONTENTS, NOT OF ITS PATH, and an
+# exemption nothing re-checks decays into the hole the rule was written for. So
+# the file checks itself: `the_excluded_file_spawns_no_subprocess` reads its own
+# source and refuses any process-spawning construct in it. Add one and that test
+# fails before the deadlock can happen, which is what makes the exemption
+# bounded rather than permanent.
 [[textlint]]
 name = "no-brokkr-in-rust-source"
 pattern = 'brokkr'
 paths = ["crates/**/*.rs"]
+exclude = ["**/tests/gate_skip_list.rs"]
 message = "brokkr is local dev tooling and must never be named from shipped Rust; put the prose in markdown and run the gate outside the binary"
 
 # ---------------------------------------------------------------------------
