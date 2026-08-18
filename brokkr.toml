@@ -27,8 +27,62 @@ name = "instrumented"
 packages = ["mogwai-data", "mogwai-lab"]
 features = ["hotpath-alloc"]
 
+# The two wall-clock contracts, and the only sweep in this workspace that
+# compiles RELEASE. Both assert a latency budget, so the build profile is not an
+# implementation detail of how they are run - it is part of what they measure. A
+# debug binary reports 106-330 ms against
+# `tape_lateness_under_acceleration`'s 50 ms p99, which is a fact about the
+# optimization level rather than about the code, so running them in a dev lane
+# does not produce a weaker result: it produces a meaningless one.
+#
+# They are excluded from the gate (its lane is dev, and they are `#[ignore]`d at
+# the source, so they are in its `skip` list) and they live here instead, where
+# `brokkr test` resolves them at the profile they need whatever the project-wide
+# default becomes. That ordering is the point of the key: a sweep's profile beats
+# `[test] debug`, so the documented bare invocation cannot silently pick dev.
+#
+# `curated` because the entry runs two named tests rather than a package's suite.
+# Without it a `certifies = "complete"` profile would have to reference this
+# sweep, and the release build shape would then enumerate a coverage universe of
+# its own - every test in the workspace, none of them run here.
+#
+# NOTE ON `only`: it is a substring filter, so `read_market_latency` catches
+# `read_market_latency_stays_within_submit_budget` and nothing else today. Both
+# names are also in the gate's `skip` list; the two lists have to agree, and
+# nothing checks that they do.
+[[check]]
+name = "timing"
+profile = "release"
+only = ["tape_lateness_under_acceleration", "read_market_latency"]
+curated = true
+
 [test]
 gate_profile = "gate"
+
+# `brokkr test` builds DEV. The focused runner is used for bite-checks and
+# single-test debugging, where release LTO compile time dominates wall time and
+# the optimization level changes nothing about the property under test - which is
+# why nearly every invocation of it in this repo was already passing `--debug` by
+# hand. Making that the default removes a flag everyone was typing.
+#
+# It is safe only because the two tests that genuinely need release now say so
+# themselves, in the `timing` sweep above. A sweep's profile beats this key, so
+# the bare documented invocation cannot silently pick dev for them. Anything else
+# that turns out to depend on optimization belongs in that sweep too, NOT in a
+# reader remembering to pass `--release`.
+debug = true
+
+# The wall-clock lane, run deliberately: `brokkr check --profile timing`. It is
+# not part of the gate and is not meant to be - `reference/performance.md` keeps
+# the authoritative numbers, and `brokkr.toml`'s own note on
+# `tape_lateness_under_acceleration` records that even a release run failed at
+# 311 ms under a load average of 1.46. No admission test yet distinguishes a host
+# that can judge these budgets from one that cannot, so a red result here is a
+# question rather than a verdict.
+[test.profiles.timing]
+description = "The wall-clock latency contracts, in release, run on purpose"
+sweeps = ["timing"]
+include_ignored = true
 
 # `brokkr check --gate` - the complete answer, and the only invocation that
 # runs the adapter's socket-backed integration tests.
