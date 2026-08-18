@@ -2220,6 +2220,7 @@ mod calendar_tests {
             price: None,
             trigger_price: None,
             trail_offset: None,
+            limit_offset: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,

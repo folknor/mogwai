@@ -337,7 +337,10 @@ impl MogwaiExecutionClient {
             side: convert::wire_side(init.order_side)?,
             order_type: convert::wire_order_type(init.order_type)?,
             quantity: init.quantity.as_decimal(),
-            price: init.price.map(|p| p.as_decimal()),
+            price: match init.order_type {
+                OrderType::TrailingStopLimit => None,
+                _ => init.price.map(|p| p.as_decimal()),
+            },
             trigger_price: init.trigger_price.map(|p| p.as_decimal()),
             // Nautilus states a trailing offset with a TYPE beside it - price,
             // ticks, basis points. Only the price form maps: the venue's trail
@@ -347,6 +350,18 @@ impl MogwaiExecutionClient {
                 init.trailing_offset,
                 init.trailing_offset_type,
             )?,
+            // The limit half of a trailing stop limit, under the same
+            // offset-type restriction and for the same reason. The venue
+            // DERIVES the limit price from it, so a nautilus-stated `price` on
+            // this type is dropped rather than forwarded - the wire refuses one
+            // there, and forwarding it would trade a working order for a
+            // rejection over a field the first ratchet would have overwritten.
+            limit_offset: match init.order_type {
+                OrderType::TrailingStopLimit => {
+                    convert::wire_trail_offset(init.limit_offset, init.trailing_offset_type)?
+                }
+                _ => None,
+            },
             reduce_only: init.reduce_only,
             post_only: init.post_only,
             time_in_force: convert::wire_time_in_force(init.time_in_force)?,

@@ -1029,6 +1029,7 @@ impl Engine {
                 price: Some(mark),
                 trigger_price: None,
                 trail_offset: None,
+                limit_offset: None,
                 time_in_force: TimeInForce::Ioc,
                 expire_time: None,
                 reduce_only: true,
@@ -1112,6 +1113,7 @@ impl Engine {
                 price: Some(mark),
                 trigger_price: None,
                 trail_offset: None,
+                limit_offset: None,
                 time_in_force: TimeInForce::Ioc,
                 expire_time: None,
                 reduce_only: true,
@@ -1294,6 +1296,7 @@ impl Engine {
             price: Some(mark),
             trigger_price: None,
             trail_offset: None,
+            limit_offset: None,
             time_in_force: TimeInForce::Ioc,
             expire_time: None,
             reduce_only: true,
@@ -1993,6 +1996,7 @@ mod tests {
             price,
             trigger_price: None,
             trail_offset: None,
+            limit_offset: None,
             reduce_only: false,
             post_only: false,
             time_in_force: TimeInForce::Gtc,
@@ -2018,6 +2022,7 @@ mod tests {
             price: price.map(Decimal::from),
             trigger_price: Some(Decimal::from(trigger)),
             trail_offset: None,
+            limit_offset: None,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
             reduce_only: false,
@@ -5193,6 +5198,7 @@ mod tests {
             price: None,
             trigger_price: Some(Decimal::from(trigger)),
             trail_offset: Some(Decimal::from(offset)),
+            limit_offset: None,
             time_in_force: TimeInForce::Gtc,
             expire_time: None,
             reduce_only: false,
@@ -5288,6 +5294,170 @@ mod tests {
         );
     }
 
+    fn trailing_stop_limit(
+        id: &str,
+        side: Side,
+        trigger: i64,
+        trail: i64,
+        limit_gap: i64,
+    ) -> SubmitOrder {
+        let mut order = trailing_stop(id, side, trigger, trail);
+        order.client_order_id = id.into();
+        order.order_type = OrderType::TrailingStopLimit;
+        order.limit_offset = Some(Decimal::from(limit_gap));
+        order
+    }
+
+    fn resting_limit_px(e: &Engine, id: &str) -> Decimal {
+        e.open
+            .iter()
+            .find(|order| order.submit.client_order_id == id)
+            .expect("the order is still resting")
+            .submit
+            .price
+            .expect("a trailing stop limit carries a derived limit")
+    }
+
+    /// THE LIMIT RIDES THE TRIGGER. A trailing stop limit carries two
+    /// distances, and the second one is what this type exists for: the trigger
+    /// trails the tape, and the limit trails the trigger. A limit that stayed
+    /// where it started would drift further behind on every ratchet until it
+    /// was unreachable, which is a working order that silently stops being one.
+    #[test]
+    fn a_trailing_stop_limit_moves_its_limit_with_its_trigger() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("BTC".to_string(), Decimal::from(10))]),
+            fill_seed: 7,
+        });
+        let accepted = e.process_with_market(
+            ClientMessage::SubmitOrder(trailing_stop_limit("TL1", Side::Sell, 90, 10, 2)),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            e.open
+                .iter()
+                .any(|order| order.submit.client_order_id == "TL1"),
+            "the trailing stop limit must rest: {accepted:?}"
+        );
+        // The limit is DERIVED at acceptance, on the fillable side of the
+        // trigger: a sell rests below it.
+        assert_eq!(resting_trigger(&e, "TL1"), Decimal::from(90));
+        assert_eq!(resting_limit_px(&e, "TL1"), Decimal::from(88));
+
+        // The tape rises; both move, and the gap between them is preserved.
+        e.mark(&[("BTCUSDT".into(), Decimal::from(150))], 2);
+        assert_eq!(resting_trigger(&e, "TL1"), Decimal::from(140));
+        assert_eq!(
+            resting_limit_px(&e, "TL1"),
+            Decimal::from(138),
+            "the limit ratchets with the trigger, holding limit_offset"
+        );
+
+        // And neither retreats.
+        e.mark(&[("BTCUSDT".into(), Decimal::from(120))], 3);
+        assert_eq!(resting_trigger(&e, "TL1"), Decimal::from(140));
+        assert_eq!(resting_limit_px(&e, "TL1"), Decimal::from(138));
+    }
+
+    /// A buy is the mirror on BOTH distances: the trigger follows the tape down
+    /// and the limit sits ABOVE the trigger, because that is the side a buy can
+    /// fill from.
+    #[test]
+    fn a_buy_trailing_stop_limit_rests_its_limit_above_the_trigger() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        e.process_with_market(
+            ClientMessage::SubmitOrder(trailing_stop_limit("TL2", Side::Buy, 110, 10, 2)),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert_eq!(resting_limit_px(&e, "TL2"), Decimal::from(112));
+        e.mark(&[("BTCUSDT".into(), Decimal::from(50))], 2);
+        assert_eq!(resting_trigger(&e, "TL2"), Decimal::from(60));
+        assert_eq!(resting_limit_px(&e, "TL2"), Decimal::from(62));
+    }
+
+    /// WHAT THE TYPE IS FOR, and it is the gap case rather than the ordinary
+    /// one. A sell's limit rests BELOW its trigger, so a print that merely
+    /// reaches the trigger is normally through the limit too and fills at once.
+    /// The limit is a floor, not a delay. It bites when the tape GAPS past
+    /// both: the trigger fires, the limit is not reachable, and the order rests
+    /// instead of dumping into the hole. That is the whole difference from
+    /// `TrailingStopMarket`, which would take whatever the gap offered.
+    #[test]
+    fn a_trailing_stop_limit_rests_rather_than_filling_through_its_limit() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("BTC".to_string(), Decimal::from(10))]),
+            fill_seed: 7,
+        });
+        // Trigger 90, limit 88: sell at 88 or better, never worse.
+        e.process_with_market(
+            ClientMessage::SubmitOrder(trailing_stop_limit("TL3", Side::Sell, 90, 10, 2)),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert_eq!(resting_limit_px(&e, "TL3"), Decimal::from(88));
+
+        // The tape GAPS from 100 straight to 70, through the trigger and
+        // through the limit. The trigger fires on that print and the limit
+        // cannot be met at it.
+        let scan = e.pending_scans().remove(0);
+        let (out, _) = e.apply_scans(
+            &[ScanResult {
+                client_order_id: scan.client_order_id,
+                from_ns: scan.from_ns,
+                revision: scan.revision,
+                hit: Some(Hit {
+                    ts_ns: 2,
+                    px: Decimal::from(70),
+                }),
+                scanned_to_ns: 2,
+            }],
+            2,
+        );
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderTriggered { .. })),
+            "the trigger fires: {out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "it must not fill through its own limit into the gap: {out:?}"
+        );
+        let order = e
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == "TL3")
+            .expect("it rests as a limit");
+        assert!(
+            matches!(order.resting, Resting::Limit { .. }),
+            "expected a live limit, got {:?}",
+            order.resting
+        );
+    }
+
     /// A STOP protects and a TOUCHED order enters, so for the same side and the
     /// same price they wait on opposite predicates. Getting this backwards turns
     /// every protective order into an entry.
@@ -5322,6 +5492,47 @@ mod tests {
         let mut fixed = stop_order("S1", Side::Sell, OrderType::StopMarket, 90, None);
         fixed.trail_offset = Some(Decimal::from(10));
         assert!(validate_submit_order(&fixed).is_err());
+
+        // A trailing stop LIMIT owes both distances, and the limit price is the
+        // venue's to derive - a client-stated one would be overwritten by the
+        // first ratchet, so it is refused rather than silently replaced.
+        let sound = trailing_stop_limit("TL9", Side::Sell, 90, 10, 2);
+        assert!(validate_submit_order(&sound).is_ok());
+
+        let mut no_gap = sound.clone();
+        no_gap.limit_offset = None;
+        assert!(
+            validate_submit_order(&no_gap).is_err(),
+            "TrailingStopLimit owes a limit_offset"
+        );
+
+        let mut no_trail = sound.clone();
+        no_trail.trail_offset = None;
+        assert!(
+            validate_submit_order(&no_trail).is_err(),
+            "it owes a trail_offset too, like every trailing order"
+        );
+
+        let mut stated = sound.clone();
+        stated.price = Some(Decimal::from(88));
+        assert!(
+            validate_submit_order(&stated).is_err(),
+            "the limit price is derived, so stating one is refused"
+        );
+
+        let mut zero = sound.clone();
+        zero.limit_offset = Some(Decimal::ZERO);
+        assert!(
+            validate_submit_order(&zero).is_err(),
+            "a zero gap is a limit AT the trigger, which is a stop-limit"
+        );
+
+        let mut elsewhere = stop_order("S2", Side::Sell, OrderType::StopLimit, 90, Some(88));
+        elsewhere.limit_offset = Some(Decimal::from(2));
+        assert!(
+            validate_submit_order(&elsewhere).is_err(),
+            "limit_offset means nothing on a fixed stop-limit"
+        );
 
         let mut gtd = order("G1", 1);
         gtd.time_in_force = TimeInForce::Gtd;

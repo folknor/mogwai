@@ -338,6 +338,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
                 price: Some(price),
                 trigger_price: None,
                 trail_offset: None,
+                limit_offset: None,
                 reduce_only: false,
                 post_only: false,
                 time_in_force: TimeInForce::Gtc,

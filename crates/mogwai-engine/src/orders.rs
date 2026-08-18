@@ -53,6 +53,35 @@ impl Engine {
                 ts_event: ts,
             }];
         }
+        // A trailing stop limit's LIMIT is derived, never stated - the wire
+        // refuses a price on this type for exactly that reason. Deriving it
+        // HERE, before `risk_px` reads it, is what makes the reservation the
+        // one the limit implies rather than the one the trigger implies; the
+        // ratchet re-derives it through the same function so the two cannot
+        // disagree about which side of the trigger the limit sits on.
+        if order.order_type == OrderType::TrailingStopLimit {
+            let trigger = order
+                .trigger_price
+                .expect("validated conditional carries a trigger");
+            let offset = order
+                .limit_offset
+                .expect("validated TrailingStopLimit carries limit_offset");
+            let Some(limit) = OrderType::trailing_limit_px(order.side, trigger, offset) else {
+                return vec![ServerMessage::OrderRejected {
+                    client_order_id: order.client_order_id,
+                    reason: "limit_offset overflows the trigger price".into(),
+                    ts_event: ts,
+                }];
+            };
+            if limit <= Decimal::ZERO {
+                return vec![ServerMessage::OrderRejected {
+                    client_order_id: order.client_order_id,
+                    reason: "limit_offset puts the derived limit at or below zero".into(),
+                    ts_event: ts,
+                }];
+            }
+            order.price = Some(limit);
+        }
 
         // Divergence: reject the next submit outright. `RejectNextSubmit`
         // carries no target, so it applies to whatever submit arrives next.
@@ -678,9 +707,29 @@ impl Engine {
                 if !improves {
                     continue;
                 }
+                // A trailing stop LIMIT carries its limit `limit_offset` from
+                // its own trigger, so the limit ratchets with it. Derived
+                // through the same function the accept path uses. An offset
+                // that overflows or drives the limit non-positive leaves the
+                // trigger where it was rather than moving one of the two: a
+                // trigger that advanced without its limit would rest at a price
+                // the client never agreed to.
+                let trailing_limit = if order.submit.order_type == OrderType::TrailingStopLimit {
+                    match order.submit.limit_offset.and_then(|gap| {
+                        OrderType::trailing_limit_px(order.submit.side, candidate, gap)
+                    }) {
+                        Some(limit) if limit > Decimal::ZERO => Some(limit),
+                        _ => continue,
+                    }
+                } else {
+                    None
+                };
                 let before = order.clone();
                 let order = &mut self.open[pos];
                 order.submit.trigger_price = Some(candidate);
+                if let Some(limit) = trailing_limit {
+                    order.submit.price = Some(limit);
+                }
                 order.resting = Resting::Conditional {
                     stop_px: candidate,
                     toward,
@@ -1268,8 +1317,12 @@ impl Engine {
                     self.rest_open(order);
                 }
             }
-            // Both conditionals that REST as a limit once triggered.
-            OrderType::StopLimit | OrderType::LimitIfTouched => {
+            // Every conditional that RESTS as a limit once triggered. A
+            // trailing stop limit reaches here with a trigger and a limit that
+            // ratcheted together, so by this point it is a stop-limit whose
+            // prices happen to have moved - nothing about the trigger handling
+            // differs, which is why it shares the arm rather than copying it.
+            OrderType::StopLimit | OrderType::LimitIfTouched | OrderType::TrailingStopLimit => {
                 // A live limit at the stated price, judged EXACTLY as a limit
                 // submitted at this instant: the print that made it live is
                 // offered to it, and a gap that never reached the limit leaves

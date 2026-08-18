@@ -1297,8 +1297,13 @@ required eventually, since both modes must be supported.
   LANDED 2026-08-16. `TrailingStopMarket`, `MarketIfTouched`, `LimitIfTouched`
   and `MarketToLimit` are served, along with `Day` and `Gtd`. ORDER LISTS landed
   with them: a linkage is a group id plus a rule each member carries, applied
-  where the fill is COMMITTED. `wire_order_type` now refuses only
-  `TrailingStopLimit`. See `docs/order-lists.md` and the architecture note.
+  where the fill is COMMITTED. See `docs/order-lists.md` and the architecture
+  note.
+  COMPLETE 2026-08-18: `TrailingStopLimit` was the last refusal and is served,
+  carrying `limit_offset` beside `trail_offset` with its limit price DERIVED and
+  re-derived on every ratchet. `wire_order_type` now has no refusal arm at all,
+  so a type nautilus adds later is a compile error rather than a runtime refusal
+  a strategy meets mid-run. The surface is complete in fact, not only in intent.
   THE TOUCHED FAMILY is a third `ScanKind`, `TriggerToward`, rather than a flag
   on the stop predicate: a stop fires when price runs AWAY from what it protects
   and a touched order when price comes TOWARD its level, and putting the two
@@ -1527,6 +1532,12 @@ same message: trailing stops are served, the full order-type surface is served,
 ORDER LISTS are served so the two-independent-legs workaround is no longer
 required, and `RejectNextCancel` exists - so their three unrun scenario files can
 now be written against a venue that produces the shapes they need.
+ALSO FOR THE SAME MESSAGE, 2026-08-18 and this one is purely in their favour:
+`TrailingStopLimit` is served, so NO order type is refused any more. Their
+`translate_trailing_exit` can emit the limit form as well as the market one, and
+the halt that a native Pine trailing leg used to cause is gone for both shapes.
+The venue derives the limit price from a `limit_offset`, so they must send that
+offset and NOT a price.
 ONE MORE BREAK FOR THE SAME MESSAGE, 2026-08-18: an expired order now reports
 `ServerMessage::OrderExpired` with a terminal `Expired` status where it reported
 `OrderCanceled` before. A consumer matching the wire enum exhaustively stops
@@ -2071,7 +2082,8 @@ own adapter's `wire_order_type` refusal, which moved with the venue, so
 `strategy.exit(stop = ...)` trades end to end. THE FILL MODEL replacement is
 reconciled into their `reference/mogwai.md`. THE ATTACH CAPABILITY landed
 entirely on their side; they state explicitly that no mogwai-side change was
-needed. Trailing stops remain the one refused shape, by our ruling and theirs.
+needed. Trailing stops were the one refused shape when this was written; both
+forms are served now, so NOTHING is refused and that sentence is history.
 
 ### Tape sparsity, settled on both sides
 

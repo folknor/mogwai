@@ -18,10 +18,23 @@ are keyed within it. Two accounts on one venue never share a position book.
   under hedging may not be the id the client sent.
 
 ORDER TYPES the venue serves: Market, Limit, StopMarket, StopLimit,
-TrailingStopMarket, MarketIfTouched, LimitIfTouched and MarketToLimit. The one
-nautilus type still refused is `TrailingStopLimit`, whose trail rests as a limit
-where this venue's trail resolves to a market close - state such an exit as
-`TrailingStopMarket`.
+TrailingStopMarket, TrailingStopLimit, MarketIfTouched, LimitIfTouched and
+MarketToLimit. That is every order type nautilus expresses; none is refused.
+
+A `TrailingStopLimit` carries TWO offsets and no price. `trail_offset` is how
+far its trigger sits from the extreme the tape has reached, as on a
+`TrailingStopMarket`. `limit_offset` is how far its LIMIT sits from that
+trigger, on the side the order can fill from - a sell rests at
+`trigger - limit_offset`, a buy at `trigger + limit_offset`. The venue derives
+the limit price from those and re-derives it every time the trigger ratchets, so
+DO NOT send a `price`: it is refused, because the first ratchet would overwrite
+it.
+
+Use it over `TrailingStopMarket` when you want a floor on the exit. Normally the
+two behave alike, since a print that reaches the trigger is usually through the
+limit as well. The difference shows when the tape gaps past both: the trailing
+stop market takes whatever the gap offers, while the trailing stop limit rests
+and waits rather than trading through your limit.
 
 ORDER LISTS are served, so a genuine bracket needs no workaround. See
 [Order lists](order-lists.md) for the rules and what each one does.

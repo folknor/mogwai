@@ -81,16 +81,7 @@ pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_pr
         OrderType::MarketIfTouched => Ok(mogwai_protocol::OrderType::MarketIfTouched),
         OrderType::LimitIfTouched => Ok(mogwai_protocol::OrderType::LimitIfTouched),
         OrderType::MarketToLimit => Ok(mogwai_protocol::OrderType::MarketToLimit),
-        // `TrailingStopLimit` is what remains: a trail that RESTS as a limit
-        // once it fires, where the venue's trail resolves to a market close.
-        // Every other nautilus order type is served, order lists included: the
-        // surface is complete rather than curated, because mogwai is an exchange
-        // and a shape it refuses is a strategy family with no forward test
-        // anywhere.
-        other => anyhow::bail!(
-            "unsupported order type {other:?}: the MOGWAI venue trails to a market close, \
-             so state a trailing exit as TrailingStopMarket"
-        ),
+        OrderType::TrailingStopLimit => Ok(mogwai_protocol::OrderType::TrailingStopLimit),
     }
 }
 
@@ -211,6 +202,7 @@ pub(crate) fn nautilus_order_type(order_type: mogwai_protocol::OrderType) -> Ord
         mogwai_protocol::OrderType::MarketIfTouched => OrderType::MarketIfTouched,
         mogwai_protocol::OrderType::LimitIfTouched => OrderType::LimitIfTouched,
         mogwai_protocol::OrderType::MarketToLimit => OrderType::MarketToLimit,
+        mogwai_protocol::OrderType::TrailingStopLimit => OrderType::TrailingStopLimit,
     }
 }
 
@@ -821,6 +813,35 @@ mod tests {
             err.is_err(),
             "rounds-to-zero size must be rejected, not panic"
         );
+    }
+
+    /// THE ORDER-TYPE SURFACE IS COMPLETE. `wire_order_type` refused
+    /// `TrailingStopLimit` until 2026-08-18 and had no other refusal left, so
+    /// this asserts the state the completeness ruling asks for rather than one
+    /// more converted type: every nautilus order type maps, and the match is
+    /// exhaustive with no fallback arm, which is what makes a new nautilus type
+    /// a compile error here instead of a silent runtime refusal.
+    #[test]
+    fn every_nautilus_order_type_maps_to_the_venue() {
+        for order_type in [
+            OrderType::Market,
+            OrderType::Limit,
+            OrderType::StopMarket,
+            OrderType::StopLimit,
+            OrderType::TrailingStopMarket,
+            OrderType::TrailingStopLimit,
+            OrderType::MarketIfTouched,
+            OrderType::LimitIfTouched,
+            OrderType::MarketToLimit,
+        ] {
+            let wire = wire_order_type(order_type)
+                .unwrap_or_else(|err| panic!("{order_type:?} must be served: {err}"));
+            assert_eq!(
+                nautilus_order_type(wire),
+                order_type,
+                "{order_type:?} must round-trip"
+            );
+        }
     }
 
     /// An expired order reaches nautilus AS EXPIRED. The venue expires `Gtd`

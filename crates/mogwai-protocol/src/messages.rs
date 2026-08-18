@@ -349,6 +349,24 @@ pub enum OrderType {
     /// is the behaviour a real market-to-limit gives and which an IOC market
     /// cannot, since IOC cancels its remainder instead of resting it.
     MarketToLimit,
+    /// A trailing stop that RESTS AS A LIMIT once it fires, rather than taking
+    /// liquidity - `TrailingStopMarket` is to this what `StopMarket` is to
+    /// `StopLimit`.
+    ///
+    /// It carries TWO distances. `trail_offset` holds the trigger away from the
+    /// extreme the tape has reached, exactly as on `TrailingStopMarket`.
+    /// `limit_offset` holds the limit away from that trigger, on the fillable
+    /// side of it: a sell rests at `trigger - limit_offset`, a buy at
+    /// `trigger + limit_offset`. The limit is DERIVED and re-derived on every
+    /// ratchet, so it follows the trigger rather than drifting away from it.
+    ///
+    /// WHAT IT BUYS over `TrailingStopMarket`: a bound on the price the exit
+    /// accepts. A trailing stop that takes liquidity fills at whatever the
+    /// triggering print slipped to, which is the shape a client uses when
+    /// certainty of exit beats price; this one refuses to fill through its
+    /// limit, and rests instead. That is a real strategy choice and the venue
+    /// does not make it for anyone.
+    TrailingStopLimit,
 }
 
 impl OrderType {
@@ -361,6 +379,7 @@ impl OrderType {
             Self::StopMarket
                 | Self::StopLimit
                 | Self::TrailingStopMarket
+                | Self::TrailingStopLimit
                 | Self::MarketIfTouched
                 | Self::LimitIfTouched
         )
@@ -370,7 +389,10 @@ impl OrderType {
     /// taking liquidity.
     #[must_use]
     pub const fn rests_after_trigger(self) -> bool {
-        matches!(self, Self::StopLimit | Self::LimitIfTouched)
+        matches!(
+            self,
+            Self::StopLimit | Self::LimitIfTouched | Self::TrailingStopLimit
+        )
     }
 
     /// Whether the trigger fires when the tape reaches it from BELOW for a buy
@@ -391,7 +413,29 @@ impl OrderType {
     /// placed.
     #[must_use]
     pub const fn trails(self) -> bool {
-        matches!(self, Self::TrailingStopMarket)
+        matches!(self, Self::TrailingStopMarket | Self::TrailingStopLimit)
+    }
+
+    /// The limit price a trailing stop limit rests at, given where its trigger
+    /// now sits. ONE implementation, called at acceptance and again on every
+    /// ratchet, so the two can never disagree about which side of the trigger
+    /// the limit belongs on.
+    ///
+    /// The limit sits on the FILLABLE side: a sell triggers as price falls, so
+    /// resting below the trigger is what makes it reachable, and the offset is
+    /// the slippage the client will accept before it would rather not trade.
+    /// Putting it on the other side would rest a limit the tape has already
+    /// passed through.
+    #[must_use]
+    pub fn trailing_limit_px(
+        side: Side,
+        trigger: Decimal,
+        limit_offset: Decimal,
+    ) -> Option<Decimal> {
+        match side {
+            Side::Sell => trigger.checked_sub(limit_offset),
+            Side::Buy => trigger.checked_add(limit_offset),
+        }
     }
 }
 
@@ -634,14 +678,30 @@ pub struct SubmitOrder {
     /// REQUIRED on StopMarket/StopLimit, refused on Market/Limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_price: Option<Decimal>,
-    /// How far a `TrailingStopMarket`'s trigger sits from the extreme the tape
-    /// has reached. REQUIRED on that type and refused on every other.
+    /// How far a trailing stop's trigger sits from the extreme the tape has
+    /// reached. REQUIRED on `TrailingStopMarket` and `TrailingStopLimit`, and
+    /// refused on every other type.
     ///
     /// An absolute price distance, not a fraction: Pine states a trail in points
     /// or in ticks, and converting a fraction back would need a reference price
     /// nothing here agrees on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail_offset: Option<Decimal>,
+    /// How far a `TrailingStopLimit`'s LIMIT sits from its own trigger, on the
+    /// fillable side of it. REQUIRED on that type and refused on every other.
+    ///
+    /// Distinct from `trail_offset`, which holds the trigger away from the
+    /// tape's extreme: this one holds the limit away from the trigger, so a
+    /// trailing stop limit carries two independent distances and collapsing
+    /// them would silently tie how far the stop trails to how much slippage the
+    /// client tolerates.
+    ///
+    /// The limit price is DERIVED from it rather than stated, at acceptance and
+    /// again on every ratchet, which is why `price` is refused on this type: a
+    /// trigger that moves and a limit that does not would drift apart until the
+    /// limit is unreachable, and nautilus models the same materialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_offset: Option<Decimal>,
     pub time_in_force: TimeInForce,
     /// Sim instant a `Gtd` order expires at. REQUIRED on `Gtd` and refused on
     /// every other time-in-force, including `Day` - a day order's expiry comes
@@ -801,11 +861,30 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         // The trail offset is what makes a trailing stop one, and it is
         // meaningless anywhere else - accepting it silently on a fixed stop
         // would leave a client believing its stop moves.
-        OrderType::TrailingStopMarket if order.trail_offset.is_none() => {
-            Err("TrailingStopMarket order must carry trail_offset")
+        _ if order.order_type.trails() && order.trail_offset.is_none() => {
+            Err("a trailing order must carry trail_offset")
         }
         _ if order.trail_offset.is_some() && !order.order_type.trails() => {
-            Err("trail_offset is legal only on TrailingStopMarket")
+            Err("trail_offset is legal only on a trailing order")
+        }
+        // The limit price is DERIVED from the trigger and this offset, and is
+        // re-derived on every ratchet. A client-stated price would be
+        // overwritten by the first trail, so accepting one would be a lie
+        // rather than a harmless redundancy.
+        OrderType::TrailingStopLimit if order.limit_offset.is_none() => {
+            Err("TrailingStopLimit order must carry limit_offset")
+        }
+        OrderType::TrailingStopLimit if order.price.is_some() => {
+            Err("TrailingStopLimit order must not carry a price: it is derived from limit_offset")
+        }
+        _ if order.limit_offset.is_some() && order.order_type != OrderType::TrailingStopLimit => {
+            Err("limit_offset is legal only on TrailingStopLimit")
+        }
+        _ if order
+            .limit_offset
+            .is_some_and(|offset| offset <= Decimal::ZERO) =>
+        {
+            Err("limit_offset must be > 0")
         }
         _ if order
             .trail_offset
@@ -814,10 +893,8 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
             Err("trail_offset must be > 0")
         }
         _ if order.post_only
-            && !matches!(
-                order.order_type,
-                OrderType::Limit | OrderType::StopLimit | OrderType::LimitIfTouched
-            ) =>
+            && !(order.order_type == OrderType::Limit
+                || order.order_type.rests_after_trigger()) =>
         {
             Err("post_only is legal only on orders that rest as a limit")
         }

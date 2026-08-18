@@ -113,11 +113,32 @@ The thresholds, the ratcheted peak and the remaining budget are PUBLISHED on
 no dashboard, so a run that ended flat having spent most of its budget would be
 indistinguishable from one that never came close.
 
-THE ORDER-TYPE SURFACE IS COMPLETE RATHER THAN CURATED. Market, Limit,
-StopMarket, StopLimit, TrailingStopMarket, MarketIfTouched, LimitIfTouched and
-MarketToLimit are all served. The one nautilus type still refused is
-`TrailingStopLimit`, whose trail rests as a limit where this venue's trail
-resolves to a market close.
+THE ORDER-TYPE SURFACE IS COMPLETE RATHER THAN CURATED, and as of 2026-08-18 it
+is complete in fact and not only in intent: Market, Limit, StopMarket,
+StopLimit, TrailingStopMarket, TrailingStopLimit, MarketIfTouched,
+LimitIfTouched and MarketToLimit are served, which is every order type nautilus
+expresses. `wire_order_type` has no refusal arm left, so a type nautilus adds
+later is a COMPILE ERROR in the adapter rather than a runtime refusal a strategy
+discovers mid-run.
+
+A TRAILING STOP LIMIT CARRIES TWO DISTANCES, which is what distinguishes it from
+every other conditional. `trail_offset` holds the trigger away from the extreme
+the tape has reached, exactly as on a trailing stop market. `limit_offset` holds
+the LIMIT away from that trigger, on the side the order can fill from: a sell
+rests at `trigger - limit_offset`, a buy at `trigger + limit_offset`. The limit
+price is DERIVED rather than client-stated, at acceptance and again on every
+ratchet through one function, so the two can never disagree about which side of
+the trigger the limit belongs on and the limit can never drift out of reach as
+the trigger advances. A client-stated price is refused on this type for the same
+reason: the first ratchet would overwrite it.
+
+What the second distance BUYS is a floor on the exit, and it bites in the gap
+case rather than the ordinary one. A sell's limit sits below its trigger, so a
+print that reaches the trigger is normally through the limit too and fills at
+once. When the tape GAPS past both, the trigger fires and the limit is not
+reachable, so the order RESTS instead of dumping into the hole - where a
+trailing stop market would have taken whatever the gap offered. Which of those
+a strategy wants is a real choice and the venue makes it for nobody.
 
 ORDER LISTS ARE A PRIMITIVE, not a workaround. A linkage is a GROUP ID plus a
 RULE that each member carries - one-cancels-the-other, one-triggers-the-other,
