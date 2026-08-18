@@ -2560,7 +2560,7 @@ fn safe_price(stated: Decimal, candidate: Option<Decimal>) -> Decimal {
 /// which is free money the venue manufactured and a strictly worse forward test
 /// than the instant fill this replaced. `u = 0` is the front-of-queue draw and
 /// reduces to one print strictly through the stated price.
-fn draw_trigger(
+pub(super) fn draw_trigger(
     fill_seed: u64,
     order: &SubmitOrder,
     price: Decimal,

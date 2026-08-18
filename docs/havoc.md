@@ -29,6 +29,19 @@ suppresses a connection's output wholesale; `StallData` suppresses market data
 only, so a server heartbeat still arrives and a stalled feed stays
 distinguishable from a dead venue.
 
+TRANSPORT HAVOC RESHAPES BARS RATHER THAN DROPPING THEM, and that is deliberate.
+The venue ships no bars: every bar a nautilus host receives is FABRICATED by the
+adapter by folding the trades it was delivered. Dropping or duplicating a trade
+therefore changes a bar's open, high, low, close or volume rather than removing
+or duplicating a whole bar frame, because the fold happens downstream of the
+filter. That is what a real client-side aggregator on a lossy feed experiences,
+so it is the honest simulation of THIS venue; modelling a dropped bar would be
+modelling a venue that ships bars natively, which mogwai is not. It follows the
+same principle as the rest of the surface: mogwai injects faults and declines to
+repair them downstream. A strategy that needs to tell a quiet feed from a lossy
+one reads `FeedLagged`, which carries the skipped count, rather than inferring it
+from bar shape.
+
 Generator havoc is river-scoped. The control payload accepts an optional
 `symbol`. `FlowSurge { rate_mult, children_mult, duration_ms }` on a BOATLESS
 river mutates its checkpointed water at parent boundaries and is visible to

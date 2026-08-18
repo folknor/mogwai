@@ -1341,29 +1341,6 @@ required eventually, since both modes must be supported.
   on disk would settle it; until then the slippage magnitude stays an
   unquantified mechanism shared by every order type that slips.
 
-- RESTORE DISCRIMINATION to the fill golden's banded half. Found 2026-08-03 while
-  re-calibrating `fill_band_vol_mult` from `0.5` to `0.005`: the re-blessed
-  `crates/mogwai-server/tests/golden/fill_distribution.json` now has its five
-  banded cells BYTE-IDENTICAL to its five unbanded ones - same fill counts, same
-  latency vectors, same pass counts. The banded half therefore certifies that the
-  band pipeline RUNS, not that the band BITES, and a regression that silently
-  zeroed the band would still pass this golden.
-  The cause is resolution rather than calibration. Latency is quantized to the
-  harness's one-second `SWEEP_INTERVAL_NS`, and one second of raw-fill tape
-  carries roughly fifty prints travelling much further than the 0-to-4 ticks -
-  about 0.1 basis points on a 37,000 tape - that a `0.005` band displaces a
-  trigger by, so the tape crosses the displacement inside the same sweep pass.
-  The old `0.5` discriminated only because it was clamp-saturated at 200 ticks,
-  which is the defect the re-calibration removed; this is the bill for fixing it,
-  not a new regression.
-  Two knobs restore it, both costing runtime in a harness whose coverage was
-  deliberately cut for runtime: a finer `SWEEP_INTERVAL_NS`, so sub-second
-  latency differences are representable, and a tighter offset ladder, so the band
-  is a large fraction of the distance to the limit rather than a rounding error
-  against it. Neither was taken. A third option is to stop asking this artifact
-  the question and add a direct assertion that a banded trigger differs from its
-  stated price, which is cheap but proves much less.
-
 - RE-SCOPE the acceptance-time market reading, or accept 9.8 ms inside a
   submit. Re-measured 2026-08-14 after the checkpoint stride repair: miss median
   9.782 ms, p99 9.987 ms, hit 0.096 ms, on host `bygg` in release. The stride
@@ -1383,14 +1360,6 @@ required eventually, since both modes must be supported.
   wire, so both end-to-end gates now assert a bracket - see the doc comment on
   `MarketReadingCache`). Putting the reading instant on `OrderFilled` would buy
   the contract back cheaply and independently of the re-scoping.
-
-- mogwai-engine `next_position` unbounded accumulation. The per-fill weighted-
-  average is now overflow-guarded (a single oversized order is rejected before
-  it reaches the arithmetic), but `current.qty` still accumulates across many
-  individually-valid orders on one symbol/side, so a long-lived engine can
-  overflow the `current_abs * avg_px + delta_abs * px` computation over time.
-  Closing it means introducing a position-size or notional cap - a design
-  decision, not a local fix.
 
 - The reconciliation exposure is a CLASS, not one method: every report path
   mogwai relies on shares the silent-degrade property. The socket-backed guard
@@ -1418,21 +1387,6 @@ required eventually, since both modes must be supported.
   longest empty-hour run), and an armed LiquidityDrought legitimately
   silences the feed but is visible via the control plane, so the watchdog can
   account for it.
-
-- DECIDE: does dup/drop havoc reshaping fabricated bars model the right venue?
-  (Formerly sweep item AD21a.) Bars are built AFTER the `HavocFilter` on both the
-  WS and poll paths, so a dup or drop of one trade silently reshapes OHLCV rather
-  than duplicating or dropping a whole bar frame. Bars here are FABRICATED by the
-  adapter - the server never ships one - so deriving them from a corrupted trade
-  feed is what a real client-side aggregator on a lossy feed experiences, and is
-  arguably the honest simulation; the alternative models a venue that ships bars
-  natively, which mogwai is not. Leaning accept-and-document, on the same
-  principle that settled the reconnect account staleness: mogwai injects faults
-  and declines to repair them downstream. (The reorder half of the original item
-  was a different finding and is closed - `fold_trade` now documents an ordering
-  EXPECTATION with a defined failure mode, names the adapter as a deliberate
-  violator under `reorder_prob`, and is pinned by
-  `an_out_of_order_trade_folds_into_the_open_window_without_wedging`.)
 
 - NUMERICAL STABILITY in `AutoCorr`, and it needs cadence-impact analysis before
   anyone touches it. Surfaced 2026-08-05 by the F3-F6 conformance fixtures. Its

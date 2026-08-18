@@ -8286,6 +8286,64 @@ mod tests {
         );
     }
 
+    /// THE BAND BITES, which the fill golden cannot show. That artifact's five
+    /// BANDED cells are byte-identical to its five unbanded ones, so it
+    /// certifies the band pipeline RUNS and not that it MOVES anything: a
+    /// regression that silently zeroed the band would pass it. The cause is
+    /// resolution rather than calibration - the golden quantizes latency to a
+    /// one-second sweep and the tape crosses a sub-basis-point displacement
+    /// inside one pass - so the fix there is a finer sweep or a tighter offset
+    /// ladder, both of which cost runtime that harness deliberately does not
+    /// spend.
+    ///
+    /// This asserts the property DIRECTLY instead. It proves much less than a
+    /// distributional golden would, and it proves exactly the part that was
+    /// unpinned: with a band, some trigger is displaced from its stated price,
+    /// and the displacement is ADVERSE on both sides. A zeroed band fails it.
+    #[test]
+    fn a_nonzero_band_displaces_a_trigger_adversely_from_its_stated_price() {
+        let stated = Decimal::from(100);
+        let increment = Decimal::new(1, 2);
+        // The draw is uniform over `0..=band_ticks`, so a single order may
+        // legitimately draw zero. The claim is about the band moving prices at
+        // all, so it is asked over a fixture rather than of one order.
+        let displaced = |side: Side| {
+            (0..64)
+                .map(|i| {
+                    let mut order = limit_order(&format!("band-{side:?}-{i}"), 1);
+                    order.side = side;
+                    order.price = Some(stated);
+                    order
+                })
+                .filter_map(|order| {
+                    let banded = crate::orders::draw_trigger(42, &order, stated, increment, 8, 0);
+                    let flat = crate::orders::draw_trigger(42, &order, stated, increment, 0, 0);
+                    assert_eq!(
+                        flat, stated,
+                        "a zero band must leave the stated price exactly where it is"
+                    );
+                    (banded != stated).then_some(banded)
+                })
+                .next()
+        };
+
+        // A BUY's trigger moves DOWN: it must wait for a better price than it
+        // asked for, never a worse one. Moving it up would fill a buy limit the
+        // tape never actually reached.
+        let buy = displaced(Side::Buy).expect("some buy in the fixture draws a nonzero offset");
+        assert!(
+            buy < stated,
+            "a banded buy trigger sits below {stated}: {buy}"
+        );
+
+        // A SELL's mirrors it and moves UP.
+        let sell = displaced(Side::Sell).expect("some sell in the fixture draws a nonzero offset");
+        assert!(
+            sell > stated,
+            "a banded sell trigger sits above {stated}: {sell}"
+        );
+    }
+
     #[test]
     fn decimal_scale_does_not_change_the_fill_draw() {
         let order = limit_order("scale-stable", 1);
