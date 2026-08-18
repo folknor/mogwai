@@ -1032,6 +1032,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             self.http_quota.clone(),
             http_base_url.clone(),
             self.config.expected_run_seed,
+            "exec",
         );
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(

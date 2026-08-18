@@ -172,6 +172,30 @@ nautilus adapter does this through `MogwaiDataClientConfig::for_run` /
 refuse - terminally, logging `venue identity mismatch` - when the address is
 serving a different run.
 
+BIND TO THE RUN, NOT THE ADDRESS. This is a usage contract rather than a knob to
+tune, because the identity is always available: `addr` and `run_seed` arrive in
+the SAME readiness record, on the same line. So there is no shape of deployment
+that can know where to dial and not know what it is dialling.
+
+- If you LAUNCH the venue, you parsed that record to get the address. Build the
+  client config with `for_run`, not `for_addr`.
+- If you hand ONE venue's address to several clients, hand them the `run_seed`
+  with it. You are already distributing per-client configuration - the account
+  id each one must name - and the seed rides the same path.
+
+`for_addr` is the lossy path: it takes an address alone and sets no expected
+seed, so the client cannot tell its venue from whatever answers there next. It
+is not a client that COULDN'T check, it is a config that dropped the identity one
+call earlier, so a client built that way logs a warning naming the fix.
+
+What the contract buys is worth stating plainly, because the failure is silent
+rather than loud. A recycled port is most likely held by ANOTHER MOGWAI VENUE -
+they all bind ephemeral loopback ports - and a sibling venue speaks the wire
+perfectly: it accepts the subscription, serves a tape, takes orders. The run then
+completes green against the wrong river, and the seed recorded against its result
+is not the seed that produced it. Checking the run turns that into a refusal at
+connect.
+
 ## Whether a run is worth keeping
 
 `GET /health` carries an optional `fault` object, present when a SEATED

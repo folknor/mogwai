@@ -487,8 +487,29 @@ pub(crate) fn run_identity_check(
     quota: HttpQuota,
     http_base: String,
     expected: Option<u64>,
+    label: &'static str,
 ) -> Option<RunIdentityCheck> {
-    let expected = expected?;
+    let Some(expected) = expected else {
+        // DIALLING BLIND, said once per client rather than per dial. An address
+        // and the run it belongs to arrive together in the readiness record, so
+        // a config without a seed is one that DISCARDED the identity, never one
+        // that could not have it - which is why this is worth a line rather
+        // than being the silent default it looks like at the call site.
+        //
+        // What it costs: a venue frees its port before it exits and binds an
+        // ephemeral one, so an address outlives the run that owned it. A client
+        // that dials a recycled port reaches whoever holds it now - most likely
+        // another mogwai venue, which speaks the wire perfectly and will serve
+        // a tape from a different run without either side noticing.
+        tracing::warn!(
+            client = label,
+            base_url = %http_base,
+            "no expected_run_seed: this client cannot tell its venue from another \
+             holding the same address. Build the config with `for_run` from the \
+             readiness record, or pass the record's `run_seed` alongside the address"
+        );
+        return None;
+    };
     Some(Arc::new(move || {
         let http = http.clone();
         let quota = quota.clone();
@@ -674,6 +695,48 @@ mod tests {
         assert_eq!(
             date_to_unix_nanos(Some(far_future)),
             Some(UnixNanos::from(u64::try_from(i64::MAX).expect("fits")))
+        );
+    }
+
+    /// A config with no expected seed produces NO probe, which is the blind
+    /// path the warning beside it names. Pinned because the absence is the
+    /// whole behaviour: `run_ws_connection` treats `None` as "nothing to
+    /// check", so a regression that started returning a probe here would make
+    /// every seedless client refuse its own venue, and one that stopped
+    /// returning a probe when a seed IS set would silently disable the check.
+    #[test]
+    fn an_absent_expected_seed_installs_no_identity_probe() {
+        let http = HttpClient::new(
+            std::collections::HashMap::new(),
+            vec![],
+            vec![],
+            None,
+            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
+            None,
+        )
+        .expect("http client builds");
+        let quota = HttpQuota::from_conn(&ConnHavoc::default(), SimClock::identity());
+        assert!(
+            run_identity_check(
+                http.clone(),
+                quota.clone(),
+                "http://127.0.0.1:1".to_owned(),
+                None,
+                "data",
+            )
+            .is_none(),
+            "no expected seed means no probe to run"
+        );
+        assert!(
+            run_identity_check(
+                http,
+                quota,
+                "http://127.0.0.1:1".to_owned(),
+                Some(7),
+                "data",
+            )
+            .is_some(),
+            "an expected seed installs the probe"
         );
     }
 

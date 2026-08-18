@@ -1442,34 +1442,6 @@ required eventually, since both modes must be supported.
   found it. Until then a release run of this test is informative when it
   passes and ambiguous when it fails.
 
-- DECIDE whether a config with no `expected_run_seed` should keep dialling
-  blind. The EVIDENCE half is now settled, 2026-08-18, by
-  `dialing_blind_establishes_a_full_session_with_a_stranger` in the adapter
-  havoc suite: against a wire-speaking stub serving a DIFFERENT run, a client
-  with no expected seed establishes a full session and nothing notices. So the
-  cost of the blind default is not a dial that fails fast, it is a live client
-  consuming a stranger's market data as its own venue's - a forward run silently
-  corrupted rather than failed.
-  THE QUESTION AS ORIGINALLY POSED CANNOT BE ANSWERED, and that is a finding
-  rather than a gap: it asked whether this client's ACCOUNT ID gets stamped onto
-  the stranger's state, and the adapter discloses no account id at all - it
-  POSTs no account and its `/ws` query carries only an optional `symbol`. The
-  account id it holds is a nautilus-side label. The exposure is what a client
-  CONSUMES, not what it reveals. The test pins that as a negative, so it starts
-  failing if the adapter ever adopts the account surface - which is the moment
-  to re-decide rather than re-document.
-  The earlier QA bound on the window (about 160 ms) came entirely from the
-  consumer's own child-exit poll, which covers nothing for a consumer that does
-  not own the venue as a child, and nothing at all when the venue is wedged
-  rather than exited. What remains is the owner's call: default the check on,
-  leave it opt-in, or warn loudly when it is unset.
-
-- The venue frees its port BEFORE it exits: a declared completion stops the
-  accept loop, then drains live connections for up to `SHUTDOWN_GRACE`. So the
-  address is reusable while the process is still alive, which is why a consumer
-  watching for child exit sees nothing during that window. Not a defect - the
-  drain is deliberate - but it is the mechanism behind the item above, and worth
-  keeping in view before anyone shortens or lengthens the grace.
 
 ## Consumer context: every MOGWAI item in broadarrow's todo
 

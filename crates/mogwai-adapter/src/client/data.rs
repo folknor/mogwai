@@ -451,6 +451,7 @@ impl DataClient for MogwaiDataClient {
             self.http_quota.clone(),
             http_base_url.clone(),
             self.config.expected_run_seed,
+            "data",
         );
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
