@@ -155,6 +155,11 @@ pub struct StubState {
     pub trades_hits: AtomicUsize,
     /// Count of WS `/ws` upgrades (the polling profile must never open one).
     pub ws_hits: AtomicUsize,
+    /// The request LINE of every `/ws` upgrade this stub was offered, in order.
+    /// Carries the query string, and therefore the account id a client
+    /// disclosed - which is what makes "what did the stranger learn" an
+    /// assertable question rather than an inference from a counter.
+    pub ws_requests: Mutex<Vec<String>>,
     /// Number of upgraded sockets whose handler is still alive.
     pub active_ws: AtomicUsize,
     /// When true, `serve_ws` drops the connection before completing the upgrade,
@@ -422,6 +427,18 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
 
     state.ws_handshakes.fetch_add(1, Ordering::Relaxed);
     state.ws_hits.fetch_add(1, Ordering::Relaxed);
+
+    // The REQUEST LINE, recorded before anything is served. A stub that only
+    // counts upgrades cannot answer what a client DISCLOSED to whoever was
+    // holding the port - the account id rides this query string - so counting
+    // alone would leave the port-reuse question unanswerable from this side.
+    if let Some(request_line) = head.lines().next() {
+        state
+            .ws_requests
+            .lock()
+            .expect("ws request mutex")
+            .push(request_line.to_owned());
+    }
 
     // Model a venue that refuses the socket: the TCP dial succeeded (counted
     // above) but the WebSocket upgrade never completes, so the client treats the

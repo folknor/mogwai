@@ -562,6 +562,72 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
     );
 }
 
+/// THE PORT-REUSE QUESTION, ANSWERED - and the answer is narrower than the
+/// question assumed. An external QA pass showed the adapter dials a dead
+/// venue's address and that a stranger holding the reused port accepts the
+/// connection, but their stranger was a bare TCP listener that accepted and
+/// closed, so nothing past the dial was ever demonstrated.
+///
+/// The stranger here speaks the wire. With NO `expected_run_seed` the client
+/// dials blind and establishes a FULL SESSION against a venue serving an
+/// entirely different run, and nothing notices. That is the cost of the blind
+/// default, now measured rather than assumed: not a dial that fails fast, but a
+/// live client consuming a stranger's market data as though it were its own
+/// venue's - which silently corrupts a forward run rather than failing it.
+///
+/// WHAT IS NOT REACHABLE, and it is why the original framing of this question
+/// cannot be answered as posed: the account id cannot be "stamped onto the
+/// stranger's state", because this adapter never discloses one. It POSTs no
+/// account and its `/ws` query carries only an optional `symbol`; the account
+/// id it holds is a NAUTILUS-side label. So the exposure is what the client
+/// CONSUMES, not what it reveals. If the adapter ever adopts the account
+/// surface, this test is where the disclosure half gets asserted - the stub
+/// records each upgrade's request line for exactly that.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
+    let state = Arc::new(StubState::default());
+    // A stranger serving some other run. A client that checked would refuse it.
+    state.run_seed.store(4242, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-042"),
+        base_url,
+        symbol: None,
+        havoc: None,
+        // The undecided default: no identity to check against.
+        expected_run_seed: None,
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs the data-event sink");
+    client.connect().await.expect("connect is spawned");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // A FULL SESSION, not a dial that failed fast.
+    assert!(
+        !client.is_disconnected(),
+        "dialing blind establishes a session against a stranger"
+    );
+    let requests = state.ws_requests.lock().expect("ws request mutex").clone();
+    assert!(
+        !requests.is_empty(),
+        "the stranger completed at least one upgrade"
+    );
+    // The disclosure half, pinned as the NEGATIVE it currently is: nothing the
+    // client sends names an account. If this ever starts failing, the adapter
+    // has adopted the account surface and the exposure grew from what a run
+    // consumes to what it reveals - which is the moment the blind default needs
+    // re-deciding rather than merely documenting.
+    assert!(
+        requests.iter().all(|line| !line.contains("account")),
+        "the adapter discloses no account id today: {requests:?}"
+    );
+}
+
 /// An identity check the venue cannot answer is NOT a mismatch. A probe fails
 /// for the same transport reasons a socket does, and refusing on that would turn
 /// a blip into a dead client - so a venue with no `/health` is used, not judged.
