@@ -637,9 +637,19 @@ impl GeneratedSource {
     /// stretched gap wildly overshoots the closed window (share 1e-6 turns a
     /// ~7 s draw into ~80 days) and an extreme share saturates the f64->u64
     /// cast at u64::MAX, pinning the parent clock there so every later parent
-    /// carries the same `ts_event`. Parent advancement is the real invariant:
-    /// quote/first-child and sibling ties are intentional, while distinct
-    /// parents must advance until the u64 representation itself is exhausted.
+    /// carries the same `ts_event`.
+    ///
+    /// CLOCK ADVANCEMENT IS THE REAL INVARIANT, and it is stronger than this
+    /// comment used to claim. The old wording said "quote/first-child and
+    /// SIBLING ties are intentional"; siblings do not tie and must not - they
+    /// are stamped `parent + emitted * INTRA_EVENT_STEP_NS`, a 1 us stride, and
+    /// the arrival kernel floors a parent's own advance at that same stride. So
+    /// the TRADE stream is strictly increasing until the u64 nanosecond epoch is
+    /// exhausted, and a consumer paging history by a timestamp-only cursor
+    /// depends on that (see `a_river_never_prints_two_trades_at_one_instant`,
+    /// which is what would catch a change here). Only the quote and its first
+    /// child share an instant, deliberately and harmlessly: they are served on
+    /// separate pages, so the tie can never cut one.
     ///
     /// Here the draw is instead treated as a BUDGET of un-modulated seconds
     /// and converted to wall time by integrating the piecewise-constant

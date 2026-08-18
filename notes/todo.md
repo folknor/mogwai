@@ -217,6 +217,82 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- TRIAGE EVERY TEST FOR PARALLEL SAFETY, AND KILL EVERY FIXED DURATION AND
+  WAIT. Filed 2026-08-18, after `[test.profiles.gate]` took `test_threads = 8`
+  and cut `brokkr check --gate` from 3m01s to about 1m00s. That setting is a
+  measured compromise, not a resolution, and this item is the resolution.
+
+  WHAT THE MEASUREMENT ACTUALLY FOUND. Serial, the gate spent 164s executing
+  1,608 tests, and the top 20 of them were 54% of it while the other 1,451 came
+  to 3.8s combined. Almost none of that concentration is computation. The
+  lifecycle gates spend a declared `--duration` in WALL TIME - three of them
+  cost 2.2s each because they ask for `2s` and then wait for it - and the
+  reconnect ladders spend their attempts the same way. The genuinely CPU-bound
+  tests are the tape walks, and they are the minority.
+
+  WHY 8 AND NOT MORE, WHICH IS THE WHOLE REASON THIS ITEM EXISTS. At 16 the run
+  goes RED, and not as a watchdog timeout on a starved test:
+  `venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline`
+  fails on "the run announces its completion on the wire" at 2.016s against its
+  usual 2.215s - it finished EARLY having never seen the frame. A test that
+  asserts a timing contract fails as a WRONG ANSWER when the host is crowded, so
+  the ceiling is set by our least robust test rather than by the machine. Every
+  fixed wall-clock wait in the suite is a piece of that ceiling.
+
+  THE WORK, and it is triage before it is repair. Go through every test and ask
+  two things: can it run beside its siblings, and does it wait on a duration
+  rather than on a CONDITION. A test that waits for a state to be reached, with
+  a generous deadline as the failure path, is both parallel-safe and fast; a
+  test that sleeps a fixed span is neither, and it silently prices the whole
+  gate. The lifecycle family is the obvious start - `completion.rs`,
+  `serving.rs`, `lifecycle.rs`, and the adapter's four socket binaries - but the
+  sweep is EVERY test, because the point is a property of the suite rather than
+  a fix to the tests we happen to have caught.
+
+  WHAT THIS UNLOCKS. `test_threads` can then go to 0 (num_cpus) with the cliff
+  gone rather than merely avoided, and the floor stops being the sum of a few
+  tests' patience. Note the shape that is NOT the answer, already measured and
+  rejected in `brokkr.toml`: a serial lane for the socket-backed tests has a
+  floor of 74s, worse than the 53s the flat setting costs, because those tests
+  are the best parallel citizens in the suite precisely BECAUSE they are idle.
+  Fixing the waits is the only thing that actually moves the floor.
+
+  THE PARKED LIST, and un-parking it is what this item IS. Tests caught racing
+  under parallel execution get `#[ignore]`d at the source and added to the gate's
+  `skip` list in `brokkr.toml`, so the gate stays honest while the debt stays
+  visible in one place. Parked so far, both in `crates/mogwai-cli/tests/completion.rs`:
+
+  - `venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline`
+  - `run_complete_reaches_every_open_socket`
+
+  EXPECT THAT LIST TO GROW - the two above surfaced one after the other, each
+  only once the one before it was parked, so the honest reading is that the
+  family is not yet fully enumerated and every parallel run is still discovering
+  it. Parking is a holding action, not the fix. The list is done when it is
+  empty.
+
+  THEY ALL HAVE ONE SHAPE. The venue gets a fixed `--duration` measured from
+  readiness, and the test then bets that the client's connect beats that
+  deadline. Under parallel execution the connect can lose, the run completes and
+  closes before the socket sees the frame, and the assertion fails on not having
+  seen it - a WRONG ANSWER, not a timeout, which is exactly why each one reads
+  like a real regression when it fires. The fix is the same every time: wait for
+  a CONDITION - socket established, then the frame - instead of betting on a
+  fixed span.
+
+  AND NOTE HOW THESE WERE FOUND, because the method matters more than the two
+  names. `test_threads = 8` went red after three green runs at 8, having already
+  gone red at 16. Three passes are not evidence about an intermittent race; a
+  failure RATE is. Anything parked or un-parked here needs repeated runs before
+  it is called settled, and "the gate went green" is the weakest possible
+  evidence for this class of defect.
+
+  Check the fixed-path unit tests while triaging, too. Nothing collides today -
+  every one writes a distinct `target/...` name and ports are kernel-assigned,
+  which is why the flat setting was viable at all - but that is an unstated
+  property currently held by convention, and one duplicated literal breaks it in
+  a way that only shows up under load.
+
 - OWNER GATE JUDGED 2026-08-18: SLICE 1 FAILED. The owner viewed the two Asia
   charts and rejected both as unusable - 300-point moves inside the session
   body over one-to-twenty-minute spans, which happen at an open and never in

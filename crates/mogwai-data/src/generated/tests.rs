@@ -2034,6 +2034,71 @@ fn dwell_is_bounded_across_run_seeds() {
     }
 }
 
+/// No two TRADES on one river share a `ts_event`, and a CONSUMER'S CORRECTNESS
+/// RESTS ON IT even though nothing here said so until this test.
+///
+/// The history endpoints page by row count and the cursor that walks them is
+/// timestamp-only, so a page cut in the middle of an instant cannot be advanced
+/// past without either losing rows or repeating them. `mogwai-adapter` handles
+/// that honestly - it keeps the complete prefix and re-requests from the
+/// trailing group's own timestamp - but the case where the WHOLE page shares one
+/// timestamp has no complete prefix and no safe advance, so it can only stop and
+/// report a short history. A bar-folding consumer cannot distinguish that from a
+/// window that legitimately ended, which is how it reaches a strategy: as a
+/// silently short warmup rather than an error. broadarrow filed exactly that
+/// hazard on 2026-08-18.
+///
+/// It is unreachable, and this test is what keeps it unreachable. Children are
+/// stamped `parent + emitted * INTRA_EVENT_STEP_NS` at a stride of 1 us, and the
+/// arrival kernel floors a parent's advance at the same stride, so the trade
+/// stream is strictly increasing until the u64 nanosecond epoch is exhausted
+/// (~580 years). Measured over a real walk before this landed: 1.1 M BTCUSDT
+/// trades, zero ties, smallest gap 27 ns.
+///
+/// So the assertion is deliberately STRICT rather than non-decreasing. A change
+/// that made ties possible - collapsing the child stride, stamping a burst at
+/// one instant - would be a legitimate-looking generator change that breaks a
+/// consumer nowhere near it, and this is the only thing that would say so. The
+/// quote stream ties with its first child by design and that is fine: `/trades`
+/// and `/quotes` are separate pages, so a tie ACROSS them can never cut either.
+#[test]
+fn a_river_never_prints_two_trades_at_one_instant() {
+    let fp = Fingerprint::from_repo_json();
+    let def = mogwai_protocol::default_instruments()
+        .into_iter()
+        .find(|def| def.symbol.as_ref() == "BTCUSDT")
+        .expect("the default instrument set carries BTCUSDT");
+    let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp);
+    scalars.modal_tick = def.price_increment;
+    scalars.price_decimals = u32::from(def.price_precision);
+    let seed = mogwai_protocol::RunSeeds::from_run_seed(42).tape_for("BTCUSDT");
+    let mut src = GeneratedSource::new(scalars, seed, 0, &fp, None);
+
+    let mut prior: Option<u64> = None;
+    let mut trades = 0_u32;
+    // Enough to cross many parent bursts at the fitted child counts, without
+    // making this one of the multi-second walks the gate already carries.
+    while trades < 200_000 {
+        let Some(tick) = src.next_tick() else { break };
+        let TickEvent::Trade(trade) = tick else {
+            continue;
+        };
+        if let Some(prior) = prior {
+            assert!(
+                trade.ts_event > prior,
+                "two trades share instant {prior}: a history page can be cut inside it, and a \
+                 consumer paging by a timestamp cursor then reports a silently short window"
+            );
+        }
+        prior = Some(trade.ts_event);
+        trades += 1;
+    }
+    assert_eq!(
+        trades, 200_000,
+        "the walk produced the trades it was asked for"
+    );
+}
+
 fn assert_run_seed_dwell_is_bounded(run_seed: u64) {
     assert_run_seed_dwell_is_bounded_with_draw(run_seed, DRAW);
 }

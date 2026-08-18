@@ -73,7 +73,7 @@ async fn drain_to_completion(
 /// The declared duration is a contract: the venue serves exactly that much sim
 /// time, says so, and exits 0 on its own without anybody signalling it.
 #[tokio::test]
-#[ignore = "binds a loopback listener"]
+#[ignore = "binds a loopback listener, and races its own 2s deadline under load - see notes/todo.md"]
 async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline() {
     let mut venue = spawn(&["--config", &fast_config(), "--duration", "2s"]);
     assert_eq!(
@@ -180,7 +180,7 @@ fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
 /// The `watch` fanout is the thing under test: with no registry of connections,
 /// every open socket must still see the announcement.
 #[tokio::test]
-#[ignore = "binds a loopback listener"]
+#[ignore = "binds a loopback listener, and races its own declared deadline under load - see notes/todo.md"]
 async fn run_complete_reaches_every_open_socket() {
     let mut venue = spawn(&["--config", &fast_config(), "--duration", "2s"]);
 

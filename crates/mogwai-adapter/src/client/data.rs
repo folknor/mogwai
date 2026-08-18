@@ -1681,6 +1681,27 @@ async fn fetch_trades_windowed(
         if group_start == 0 {
             // The whole page shares one timestamp, so there is no complete
             // prefix and no advance that discloses the rest. Stop visibly.
+            //
+            // LOUD, because "visibly" was not true where it matters. This
+            // returns a SHORT history with no error, and a consumer that folds
+            // bars from trades cannot tell that from a window which legitimately
+            // ended - it reaches a strategy as a quiet warmup, which is the
+            // shape this venue has been caught in twice already (the masked
+            // history refusal, and `FeedLagged` having no channel but a log).
+            // The venue's own tape cannot produce this - trades on one river are
+            // strictly increasing at a 1 us child stride, pinned by
+            // `a_river_never_prints_two_trades_at_one_instant` in `mogwai-data` -
+            // so reaching here means either that invariant broke or the caller
+            // asked for a page of one row. Both are worth an operator seeing,
+            // and neither is worth failing the request over: the rows are real.
+            tracing::error!(
+                symbol = %fetch.symbol,
+                rows = out.len() + page.len(),
+                page_limit,
+                ts_event = page[0].ts_event,
+                "history page is one whole timestamp, so paging cannot advance without losing \
+                 rows; returning a SHORT history that will look like a quiet window"
+            );
             out.extend(page);
             return Ok((out, true));
         }
