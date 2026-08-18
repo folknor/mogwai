@@ -865,20 +865,17 @@ required eventually, since both modes must be supported.
   section 17 amendment through review, not an edit, so it is recorded
   here rather than taken.
 
-- TWO STRUCTURAL OBSERVATIONS from that diagnosis, neither with a known
-  reproduction, both worth a decision before the serving path grows.
-  (a) PUBLICATION ORDER IS NOT MUTATION ORDER. `dispatch_command` releases the
-  engine lock inside `process_order_cmd` and only afterwards calls
-  `lanes.submit_produced`, so between an order becoming visible to the sweeper
-  and its `OrderAccepted` reaching the connection's outbound sequence there is
-  a window in which a sweep can commit a causally dependent fill first. The
-  engine mutex establishes mutation order and not publication order. The
-  invariant it wants: for every connection, execution-event publication
-  preserves the causal order of committed engine transitions, so if B can
-  occur only because A committed, A's complete batch is committed to that
-  connection's stream before B's. LATENT - the test above was its only cited
-  evidence and does not in fact show it, so nothing currently demonstrates the
-  window is reachable.
+- ONE STRUCTURAL OBSERVATION from that diagnosis. Its sibling - publication
+  order is not mutation order - was investigated 2026-08-18 and closed to a code
+  comment: the invariant is real and unenforced, but it is unreachable by a
+  margin the structure explains, so the finding is a NOTE AT THE SITE rather
+  than a fix. Detail is the comment on the `submit_produced` call in
+  `ws::dispatch_command`; the short version is that publication order is enqueue
+  order, the sweeper must walk the tape before it can enqueue anything, and the
+  competing stretch is three synchronous calls with no yield point - so the
+  ordering is protected by timing rather than by design, and one `.await` added
+  there would open it. `DelayAcks` cannot open it: the exec pump sleeps in-line
+  and is head-of-line, so a delayed accept holds the fill behind it.
   (b) SWEEP BATCHES REACHED EVERY BOUND LANE with no submitting-connection
   ownership check, so a socket received `OrderFilled` for orders another
   connection submitted. Was recorded as a decision - contract to state, or

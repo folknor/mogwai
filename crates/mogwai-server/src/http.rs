@@ -542,6 +542,12 @@ pub(crate) async fn process_order_cmd(
         });
     };
     let events = engine.process_with_market_on_clock(order_cmd, ts, market_px, sim);
+    // RELEASED BEFORE THESE EVENTS ARE PUBLISHED, which makes the order visible
+    // to the sweeper while its own `OrderAccepted` is still in this vec. The
+    // engine mutex establishes MUTATION order; it does not establish
+    // PUBLICATION order, and nothing else does either. See the note at the
+    // `submit_produced` call in `ws::dispatch_command` for why that is currently
+    // harmless and what would stop it being so.
     drop(engine);
     OrderOutcome::Produced {
         events,

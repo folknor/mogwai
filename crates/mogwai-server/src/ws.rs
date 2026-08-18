@@ -280,6 +280,26 @@ async fn dispatch_command(
             //
             // Claim first, then scope: a submit that is immediately queried in
             // the same batch would otherwise have its own row dropped.
+            //
+            // DO NOT PUT AN `.await` BETWEEN HERE AND `submit_produced`, and the
+            // reason is not style. `process_order_cmd` released the engine lock
+            // before returning, so the order below is ALREADY VISIBLE to the
+            // sweeper while its `OrderAccepted` is still unpublished. Publication
+            // order is enqueue order and nothing else: `submit_produced` appends
+            // in call order, and the exec pump is one sequential task that sleeps
+            // in-line, so it is head-of-line and cannot reorder. A sweep that
+            // enqueued a fill for this order first would therefore hand the
+            // client a fill for an order it was never told was accepted.
+            //
+            // That does not happen today, and the protection is TIMING rather
+            // than design. The sweeper must gather `pending_scans`, WALK THE
+            // TAPE - the dominant cost in the system - re-lock and apply before
+            // it can deliver, while this stretch is three cheap synchronous
+            // calls that never yield. Inverting them needs this thread preempted
+            // for milliseconds inside a window with no yield point in it. Add an
+            // await here and that window becomes a scheduling decision instead,
+            // at which point the fix is to enqueue while still holding the engine
+            // guard rather than to hope.
             let account = passenger.account_id.as_str();
             state.run.track_ownership(&events, account);
             state.run.scope_query_rows(&mut events, account);
