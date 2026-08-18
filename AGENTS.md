@@ -238,10 +238,18 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   regression shipped through that gap and stayed red across four commits -
   eviction on the default account closing a client's own second socket, which
   only the socket suite surfaced. `brokkr check --gate` is the invocation that
-  covers them and is currently RED for an unrelated coverage-audit reason (see
-  `notes/todo.md`), so run them by name meanwhile:
+  covers them, and it is the one to run. It was red on master through
+  2026-08-16 for a coverage-audit reason that was never a property of this
+  workspace - a brokkr bug reporting every `mogwai-data` test as orphaned under
+  the `instrumented` sweep - and a brokkr build dated 2026-08-17 fixed it. If it
+  ever goes red that way again, suspect the tool before the tree, and run the
+  socket suites by name meanwhile:
   `brokkr test -p mogwai-adapter "" --debug` and
   `brokkr test -p mogwai-cli socket --debug`.
+- COMMIT OR STASH BEFORE READING A `brokkr test -p mogwai-cli ""` RESULT. That
+  filter catches `arrival_control_refuses_a_tree_that_changed_during_the_run`,
+  which refuses a DIRTY TREE by design and FAILS rather than skips, so at a
+  glance it is indistinguishable from a real regression.
 - AUDIT THE SEAM ITSELF: a test double must be verified against the real
   endpoint's semantics, not against what the test needs. A stub that replays
   queued responses whatever the client asked for is blind by construction;
@@ -249,6 +257,25 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   request sequence too.
 - A test observing only an ERROR cannot distinguish a bound from a check
   performed after the damage; assert on the resource the finding named.
+- TWO IMPLEMENTATIONS A GATE COMPARES ARE PINNED BY ONE SHARED FIXTURE, never
+  by a hand-built case list on either side. Where a gate holds a corpus
+  measurement against a synthetic one, the quantity is computed TWICE, and if
+  the two conventions drift the gate silently compares different quantities and
+  still passes - the failure is invisible because both halves are green. A
+  fixture built on one side cannot catch this: it pins that implementation
+  against ITSELF. The convention, two instances so far, is a versioned
+  language-neutral JSON fixture under `analysis/` carrying a `_doc`, `units`
+  and `rules` block and stating the contract in a form neither side's units
+  privilege, `include_str!`d by both: `spread_conformance.json` for the
+  stratified Roll estimator, `dwell_conformance.json` for the empty-hour dwell
+  statistics. Keep the implementations separate - collapsing them usually means
+  a dependency in the wrong direction - and keep the fixture shared. A rule one
+  side genuinely owns (the lab dwell's era clamp) stays a local test beside it,
+  because a shared fixture that cannot express it must not imply it was
+  checked.
+  NOTHING DETECTS A MISSING FIXTURE. The next cross-implementation gate is
+  caught by this habit or not at all, which is the same shape as the open item
+  on durable prose asserting a live fact.
 - A test on a `/ws` socket may never assert on THE NEXT frame: every socket
   is attached to the live tape on upgrade, so drain to a deadline.
 - A consensus review gate converges to the verifier's utility function; a

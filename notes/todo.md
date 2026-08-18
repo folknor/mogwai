@@ -1454,59 +1454,6 @@ required eventually, since both modes must be supported.
   carry positive return variance and come nowhere near the degenerate case, so
   nothing currently depends on this being fixed.
 
-- The dwell definition is computed TWICE and the gate compares one against
-  the other. `dwell_stats` (now `crates/mogwai-lab/src/characterize/mod.rs`,
-  ported from `analysis/characterize.py`) measures the corpus;
-  `empty_hour_stats_over` in `crates/mogwai-data/src/generated/tests.rs`
-  measures the synthetic tape. If the two hour-bucket conventions ever drift -
-  inclusive end boundary, the era-start ceiling, which trade closes a gap - the
-  gate silently compares two different quantities and still passes. Surfaced
-  2026-08-02 landing the drought elimination.
-
-  The Python-test-harness half of this item is CLOSED by the rewrite: both
-  implementations are Rust now, so there is no second toolchain to decide about
-  and `analysis/test_characterize.py` dissolves at phase 4b. What survives is
-  the twice-computed definition itself, which the port did NOT collapse - it
-  moved one copy from Python to Rust and left the other where it was.
-
-  Two ways to close it: have the generator test call
-  `mogwai_lab::characterize::dwell_stats` directly (mogwai-data would gain a
-  dev-dependency on mogwai-lab, which is the wrong dependency direction and may
-  not be acceptable), or keep both and pin them against one shared fixture the
-  way `roll_estimator`/`spread_conformance.json` does. The second is cheaper and
-  matches existing precedent.
-
-  STALE CITATION to fix whichever way it goes: `tests.rs` names
-  `analysis/characterize.py` as the counterpart it must match, at its
-  `empty_hour_stats_over` doc comment and again in
-  `empty_hour_stats_use_complete_utc_buckets`. That file retires at 4b; the
-  comment should name the Rust `dwell_stats` instead.
-
-- `brokkr check --gate` IS RED ON MASTER, and not for a reason any code change
-  made. Found 2026-08-16 and verified against a clean stashed tree at `9664f41`,
-  so it predates the order-list, tick-resolution, freeze and equity landings.
-  The test lanes themselves pass; what fails is the profile's own COVERAGE
-  AUDIT, with 416 orphaned `(build shape, test)` pairs - every `mogwai-data`
-  test reported as "run nowhere, quarantined nowhere" under the `instrumented`
-  sweep. The gate is the only invocation that runs the four socket-backed
-  adapter binaries, so while it is red the pre-commit rule in `CLAUDE.md` cannot
-  be followed as written.
-  THE WORKING PROCEDURE UNTIL IT IS FIXED, and it is what this session used:
-  run the socket suites BY NAME - `brokkr test -p mogwai-adapter "" --debug` for
-  all four adapter binaries and `brokkr test -p mogwai-cli socket --debug` for
-  the server-side ones. Both are fast and both were green at every landing.
-  Note `brokkr test -p mogwai-cli ""` additionally trips
-  `arrival_control_refuses_a_tree_that_changed_during_the_run`, which refuses a
-  DIRTY TREE by design and fails rather than skips - indistinguishable from a
-  real regression at a glance, so commit or stash before reading its result.
-  WHERE TO LOOK: `[test.profiles.gate]` in `brokkr.toml` names `sweeps =
-  ["workspace", "instrumented"]` with `certifies = "complete"`, and the
-  instrumented sweep is package-scoped to `mogwai-data` and `mogwai-lab`. The
-  audit appears to expect the instrumented lane to run tests that only the
-  workspace lane does. Whether the fix is a brokkr change, a profile change or a
-  quarantine entry is undecided, and it is a tooling question rather than a venue
-  one - which is why it is recorded here rather than acted on.
-
 - REPAIR the `brokkr check --gate` profile mismatch for
   `tape_lateness_under_acceleration`. The gate runs the workspace test pass in
   DEBUG profile, and that test asserts a 50ms p99 WALL-CLOCK pacing bound the

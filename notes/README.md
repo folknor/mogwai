@@ -158,6 +158,13 @@ Cheap to state, expensive to rediscover.
   preregistration's sections 7.1 and 8 are what actually scope it, and they
   say something no summary carried. Read the deciding document, not the
   document that cites it.
+- **Pinning an implementation against itself.** Where a gate compares a corpus
+  measurement to a synthetic one, the quantity is computed twice, and a
+  hand-built fixture on one side proves only that that side is self-consistent
+  - if the two conventions drift the gate compares different quantities and
+  still passes, green on both halves. One shared fixture, run by both, is the
+  convention; `AGENTS.md` carries it and `analysis/dwell_conformance.json` and
+  `spread_conformance.json` are the two instances.
 - **Verifying a fix against the artifacts instead of the contract.** The
   rewrite's recurring failure shape: a closure that held on the committed
   corpus and failed one layer below where its gate looked. A bound established

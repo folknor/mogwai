@@ -299,3 +299,112 @@ fn a_price_decimals_tie_keeps_the_first_count_seen() {
     let report = characterize(&path).expect("characterizes");
     assert_eq!(report["returns"]["price_decimals_mode"], 2);
 }
+
+/// THE SHARED DWELL FIXTURE. `dwell_stats` here measures the corpus and
+/// `empty_hour_stats_over` in `mogwai-data`'s generator tests measures the
+/// synthetic tape, and a realism gate compares one against the other. Nothing
+/// held the two bucket conventions equal: they work in different units, they
+/// were written apart, and if either drifted - an inclusive end boundary, a
+/// different ceiling, which print closes a gap - the gate would silently
+/// compare two different quantities and still pass. This side had no test at
+/// all until the fixture landed.
+///
+/// `analysis/dwell_conformance.json` is that fixture and both sides run it.
+/// Cases are stated as offsets from the dwell era start so the clamp is a
+/// no-op for every one of them; the clamp is pinned separately below, because
+/// it is lab-local and the fixture structurally cannot express it.
+#[test]
+fn dwell_stats_matches_the_shared_conformance_fixture() {
+    #[derive(serde::Deserialize)]
+    struct Expect {
+        empty_hour_frac: f64,
+        max_empty_hour_run_h: i64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        first_ts_s: f64,
+        last_ts_s: f64,
+        occupied_hours: Vec<i64>,
+        expect: Expect,
+    }
+    #[derive(serde::Deserialize)]
+    struct Epoch {
+        seconds: i64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Spec {
+        version: u32,
+        tolerance: f64,
+        epoch: Epoch,
+        cases: Vec<Case>,
+    }
+
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../analysis/dwell_conformance.json"
+    ));
+    let spec: Spec = serde_json::from_str(raw).expect("conformance fixture parses");
+    assert_eq!(spec.version, 1, "fixture version changed; re-read it");
+    assert_eq!(
+        spec.epoch.seconds, DWELL_ERA_START_TS,
+        "the fixture's epoch is the era start, which is what makes the clamp a no-op here"
+    );
+    let epoch_hour = spec.epoch.seconds / 3600;
+
+    for case in &spec.cases {
+        let seen: std::collections::HashSet<i64> = case
+            .occupied_hours
+            .iter()
+            .map(|hour| epoch_hour + hour)
+            .collect();
+        let (frac, run) = dwell_stats(
+            Some(spec.epoch.seconds as f64 + case.first_ts_s),
+            Some(spec.epoch.seconds as f64 + case.last_ts_s),
+            &seen,
+        );
+        assert!(
+            (frac - case.expect.empty_hour_frac).abs() <= spec.tolerance,
+            "{}: empty_hour_frac {frac} != {}",
+            case.name,
+            case.expect.empty_hour_frac
+        );
+        assert_eq!(
+            run, case.expect.max_empty_hour_run_h,
+            "{}: max_empty_hour_run_h",
+            case.name
+        );
+    }
+}
+
+/// The one rule the shared fixture cannot carry, because the generated tape
+/// has no era to clamp to: a corpus reaching back before `DWELL_ERA_START_TS`
+/// starts its population AT the era, so pre-era hours are neither counted nor
+/// reported empty. Without the clamp an old archive's dwell fraction would be
+/// dominated by hours nobody claims to have measured.
+#[test]
+fn dwell_stats_clamps_the_population_to_the_era_start() {
+    let era_hour = DWELL_ERA_START_TS / 3600;
+    // A full day of complete hours BEFORE the era holding nothing, then three
+    // complete hours from the era on, of which only the first is occupied.
+    let seen: std::collections::HashSet<i64> = [era_hour].into_iter().collect();
+    let (frac, run) = dwell_stats(
+        Some(DWELL_ERA_START_TS as f64 - 86_400.0),
+        Some(DWELL_ERA_START_TS as f64 + 3.0 * 3600.0),
+        &seen,
+    );
+    // The population is the three hours from the era on, not the 24 before it:
+    // two of the three are empty. Unclamped this would read 26 empty of 27,
+    // with a 24-hour run, so the clamp is what this asserts.
+    assert!((frac - 2.0 / 3.0).abs() < 1e-12, "empty_hour_frac {frac}");
+    assert_eq!(run, 2);
+}
+
+/// A pass that produced no print at all is total rather than fallible, which
+/// is what lets the streaming characterization report an empty pair.
+#[test]
+fn dwell_stats_of_an_empty_pass_is_zero() {
+    let seen = std::collections::HashSet::new();
+    assert_eq!(dwell_stats(None, None, &seen), (0.0, 0));
+    assert_eq!(dwell_stats(Some(0.0), None, &seen), (0.0, 0));
+}

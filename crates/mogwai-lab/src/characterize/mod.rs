@@ -7,7 +7,9 @@
 //! fraction, per-second counts. This module is the estimand layer the
 //! synthesis modules (`fingerprint`, `cadence`) build on. It is a byte-level
 //! port; every constant and formula below is named after its Python
-//! counterpart in `analysis/characterize.py`.
+//! counterpart in `analysis/characterize.py`. That file is RETIRED and no
+//! longer in the tree - the names are the record of how the port was proven,
+//! not a pointer to something a reader can open.
 //!
 //! The Kraken corpus itself lives outside this repository (phase-3a brief),
 //! so this module has no corpus-level parity gate: it is verified by unit

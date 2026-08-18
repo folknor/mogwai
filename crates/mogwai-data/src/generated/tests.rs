@@ -2297,7 +2297,7 @@ fn measure(src: &mut GeneratedSource, scalars: &GeneratorScalars, draw: usize) -
     }
 }
 
-/// Slice-shaped front for the fixture test below. `measure` streams and calls
+/// Slice-shaped front for the slice test below. `measure` streams and calls
 /// `empty_hour_stats_over` directly, because holding 17M print timestamps only
 /// to bucket them is the allocation the streaming rewrite exists to remove.
 fn empty_hour_stats(timestamps_ns: &[u64]) -> (f64, f64) {
@@ -2310,9 +2310,12 @@ fn empty_hour_stats(timestamps_ns: &[u64]) -> (f64, f64) {
 
 fn empty_hour_stats_over(first: u64, last: u64, seen: &HashSet<u64>) -> (f64, f64) {
     // Population: every whole UTC hour bucket lying fully inside [first, last],
-    // matching `dwell_stats` in analysis/characterize.py bucket for bucket so
-    // the gate compares like with like. A span holding no complete bucket
-    // defines both statistics as 0, which keeps the helper total.
+    // matching `mogwai_lab::characterize::dwell_stats` bucket for bucket so the
+    // realism gate compares like with like. The two are held equal by
+    // `analysis/dwell_conformance.json`, which both sides run - see
+    // `empty_hour_stats_match_the_shared_conformance_fixture` below. A span
+    // holding no complete bucket defines both statistics as 0, which keeps the
+    // helper total.
     let first_complete = first.div_ceil(NS_PER_HOUR);
     let after_last_complete = last / NS_PER_HOUR;
     if first_complete >= after_last_complete {
@@ -2334,18 +2337,98 @@ fn empty_hour_stats_over(first: u64, last: u64, seen: &HashSet<u64>) -> (f64, f6
     (empty as f64 / total as f64, max_run as f64)
 }
 
+/// THE SHARED DWELL FIXTURE, replacing the hand-built cases that used to sit
+/// here. This helper measures the synthetic tape and
+/// `mogwai_lab::characterize::dwell_stats` measures the corpus, and a realism
+/// gate compares one against the other - so if the two hour-bucket conventions
+/// ever drift, the gate silently compares two different quantities and still
+/// passes. A hand-built fixture on one side cannot catch that, because it
+/// pins this implementation against ITSELF.
+///
+/// `analysis/dwell_conformance.json` is run by both sides instead. The two
+/// implementations stay separate deliberately: this one streams nanoseconds
+/// and the lab one takes seconds with an era clamp, and collapsing them would
+/// put a `mogwai-data` dev-dependency on `mogwai-lab`, which is the wrong
+/// direction - `mogwai-lab` depends on `mogwai-data`.
 #[test]
-fn empty_hour_stats_use_complete_utc_buckets() {
+fn empty_hour_stats_match_the_shared_conformance_fixture() {
+    #[derive(serde::Deserialize)]
+    struct Expect {
+        empty_hour_frac: f64,
+        max_empty_hour_run_h: f64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        first_ts_s: f64,
+        last_ts_s: f64,
+        occupied_hours: Vec<u64>,
+        expect: Expect,
+    }
+    #[derive(serde::Deserialize)]
+    struct Epoch {
+        seconds: u64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Spec {
+        version: u32,
+        tolerance: f64,
+        epoch: Epoch,
+        cases: Vec<Case>,
+    }
+
+    let raw = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../analysis/dwell_conformance.json"
+    ));
+    let spec: Spec = serde_json::from_str(raw).expect("conformance fixture parses");
+    assert_eq!(spec.version, 1, "fixture version changed; re-read it");
+
+    // The fixture states seconds after an epoch; this side works in absolute
+    // nanoseconds, so the epoch is what makes one set of cases drive both.
+    let epoch_ns = spec.epoch.seconds * 1_000_000_000;
+    let epoch_hour = epoch_ns / NS_PER_HOUR;
+    assert_eq!(
+        epoch_hour * NS_PER_HOUR,
+        epoch_ns,
+        "the fixture's epoch must land on an hour boundary for the offsets to be hour offsets"
+    );
+
+    for case in &spec.cases {
+        let seen: HashSet<u64> = case
+            .occupied_hours
+            .iter()
+            .map(|hour| epoch_hour + hour)
+            .collect();
+        let to_ns = |offset_s: f64| epoch_ns + (offset_s * 1_000_000_000.0) as u64;
+        let (frac, run) =
+            empty_hour_stats_over(to_ns(case.first_ts_s), to_ns(case.last_ts_s), &seen);
+        assert!(
+            (frac - case.expect.empty_hour_frac).abs() <= spec.tolerance,
+            "{}: empty_hour_frac {frac} != {}",
+            case.name,
+            case.expect.empty_hour_frac
+        );
+        assert!(
+            (run - case.expect.max_empty_hour_run_h).abs() <= spec.tolerance,
+            "{}: max_empty_hour_run_h {run} != {}",
+            case.name,
+            case.expect.max_empty_hour_run_h
+        );
+    }
+}
+
+/// The slice-shaped front is what `measure` does NOT use, so it gets its own
+/// check that it buckets and brackets a timestamp slice the same way.
+#[test]
+fn empty_hour_stats_bucket_a_timestamp_slice() {
     let h = NS_PER_HOUR;
-    // Hand-built fixture for the rule `dwell_stats` implements on the Python
-    // side; keep the two in step or the gate compares different populations.
     // Buckets 1 and 2 are complete, bucket 2 is empty.
     assert_eq!(empty_hour_stats(&[h / 2, h + 1, 4 * h - 1]), (0.5, 1.0));
     // No complete bucket inside the span at all.
     assert_eq!(empty_hour_stats(&[h / 2, h + 1, 2 * h - 1]), (0.0, 0.0));
-    // Buckets 0 through 4 are complete (the last one ends exactly on the final
-    // trade, so it counts) and only bucket 0 is occupied: a four-hour desert.
-    assert_eq!(empty_hour_stats(&[0, 5 * h]), (0.8, 4.0));
+    // An empty slice is total, like the streaming path on a pair with no print.
+    assert_eq!(empty_hour_stats(&[]), (0.0, 0.0));
 }
 
 fn durations(src: &mut GeneratedSource, draw: usize) -> Vec<f64> {

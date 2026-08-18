@@ -1,0 +1,88 @@
+{
+  "_doc": "Language-neutral conformance fixture for the empty-hour dwell statistics. The corpus side (mogwai-lab's `characterize::dwell_stats`) measures the archives and the synthetic side (mogwai-data's `empty_hour_stats_over`) measures the generated tape, and a realism gate compares one against the other. The two implementations are deliberately separate - they work in different units and the lab side carries an era clamp the generator has no use for - so 'the gate compares like with like' would otherwise rest on two implementations happening to agree bucket for bucket. Running this fixture through both turns that into a tested contract. Keep the implementations separate; keep this fixture shared.",
+  "version": 1,
+  "units": {
+    "first_ts_s": "seconds after `epoch`, the instant of the first print",
+    "last_ts_s": "seconds after `epoch`, the instant of the last print",
+    "occupied_hours": "whole-hour indices after `epoch`, one per hour holding at least one print",
+    "empty_hour_frac": "empty complete hours divided by complete hours",
+    "max_empty_hour_run_h": "hours in the longest unbroken run of empty complete hours"
+  },
+  "epoch": {
+    "seconds": 1546300800,
+    "why": "the dwell era start, 2019-01-01T00:00:00Z, and an exact multiple of 3600. Cases are stated as offsets from it so that the lab side's clamp of `first_ts` to the era start is a no-op for every case here, which is what lets one fixture drive an implementation that clamps and one that does not. The clamp itself is lab-local and is pinned lab-side."
+  },
+  "rules": {
+    "population": "every COMPLETE hour bucket lying fully inside [first_ts, last_ts]: the first is ceil(first_ts/3600) and the last is floor(last_ts/3600) - 1",
+    "partial_buckets": "the buckets holding first_ts and last_ts are excluded from the population unless they happen to be complete, and prints inside an excluded bucket are ignored entirely - they neither occupy nor count",
+    "empty_span": "a span holding no complete bucket defines BOTH statistics as zero, which keeps the helper total rather than fallible",
+    "run_length": "the longest run is a maximum over runs, so a later shorter run never displaces it, and a run still open at the last complete hour counts at its full length"
+  },
+  "tolerance": 1e-12,
+  "cases": [
+    {
+      "name": "partial_edges_are_excluded",
+      "why": "the base case: prints straddle both edges, so the population is the two whole hours between them",
+      "first_ts_s": 1800.0,
+      "last_ts_s": 14399.0,
+      "occupied_hours": [0, 1, 3],
+      "expect": { "empty_hour_frac": 0.5, "max_empty_hour_run_h": 1 }
+    },
+    {
+      "name": "no_complete_bucket_in_the_span",
+      "why": "under an hour of complete coverage defines both statistics as zero rather than dividing by zero",
+      "first_ts_s": 1800.0,
+      "last_ts_s": 7199.0,
+      "occupied_hours": [0, 1],
+      "expect": { "empty_hour_frac": 0.0, "max_empty_hour_run_h": 0 }
+    },
+    {
+      "name": "last_bucket_ends_exactly_on_the_final_print",
+      "why": "a final print landing exactly on an hour boundary completes the bucket before it, so hours 0 through 4 are the population and only hour 0 is occupied",
+      "first_ts_s": 0.0,
+      "last_ts_s": 18000.0,
+      "occupied_hours": [0],
+      "expect": { "empty_hour_frac": 0.8, "max_empty_hour_run_h": 4 }
+    },
+    {
+      "name": "every_complete_hour_occupied",
+      "why": "a dense tape reports no emptiness and no run at all",
+      "first_ts_s": 0.0,
+      "last_ts_s": 18000.0,
+      "occupied_hours": [0, 1, 2, 3, 4],
+      "expect": { "empty_hour_frac": 0.0, "max_empty_hour_run_h": 0 }
+    },
+    {
+      "name": "longest_run_is_a_maximum_not_the_last",
+      "why": "a three-hour desert followed by a two-hour one must report three; an implementation reporting the most recent run reports two",
+      "first_ts_s": 0.0,
+      "last_ts_s": 28800.0,
+      "occupied_hours": [0, 4, 7],
+      "expect": { "empty_hour_frac": 0.625, "max_empty_hour_run_h": 3 }
+    },
+    {
+      "name": "a_run_open_at_the_end_counts_in_full",
+      "why": "the final run is never closed by a subsequent occupied hour, so an implementation that only records a run when it ends loses it",
+      "first_ts_s": 0.0,
+      "last_ts_s": 21600.0,
+      "occupied_hours": [0, 1, 3],
+      "expect": { "empty_hour_frac": 0.5, "max_empty_hour_run_h": 2 }
+    },
+    {
+      "name": "single_complete_bucket",
+      "why": "the minimal non-degenerate population, and it is entirely empty",
+      "first_ts_s": 1800.0,
+      "last_ts_s": 7200.0,
+      "occupied_hours": [0, 2],
+      "expect": { "empty_hour_frac": 1.0, "max_empty_hour_run_h": 1 }
+    },
+    {
+      "name": "prints_in_the_partial_buckets_do_not_occupy",
+      "why": "occupancy is read only over the population; prints in the excluded edge buckets must not rescue the complete hours between them from being empty",
+      "first_ts_s": 1800.0,
+      "last_ts_s": 12600.0,
+      "occupied_hours": [0, 3],
+      "expect": { "empty_hour_frac": 1.0, "max_empty_hour_run_h": 2 }
+    }
+  ]
+}
