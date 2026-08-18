@@ -194,6 +194,26 @@ because the CONSUMER asserts it: a nautilus host holds an account of its own
 naming and compares it against what the venue reports, so a venue insisting on
 its own label is a venue that host cannot use.
 
+WHO OWES AN ACCOUNT ID, stated as the usage contract it is, because the answer
+differs by how you run the venue and the venue cannot tell which you meant.
+
+- A SHARED VENUE - one `mogwai serve` whose address you hand to several clients
+  at once - REQUIRES every client to name its own account. This is on you, not
+  on the venue: an id identifies a TRADER, and two clients presenting one id ARE
+  one trader as far as the venue can tell. It will hand the account to whichever
+  connected most recently, which is the same mechanism that lets a dropped client
+  reconnect to its own book. Leave them all on the default and they will take
+  each other's ledger in turn.
+- AN EPHEMERAL VENUE - spawned for one run, dying with the client that owns it -
+  owes nothing. One connection has nobody to collide with, so naming an id would
+  be ceremony. This is what the default exists for.
+
+The contract also bounds what a misdial can cost. Distinct ids mean a client that
+reaches the wrong venue - a recycled ephemeral port, say - presents an id that
+venue has never seen and opens a fresh account there, rather than displacing
+somebody's live session. Shared ids on a shared venue are the case where a wrong
+address becomes another run's problem instead of only your own.
+
 The value must have the `ISSUER-NUMBER` shape, and boot is refused otherwise.
 That is a nautilus rule rather than a wire rule - mogwai's own account type
 accepts a bare word - but a nautilus `AccountId` cannot be constructed from one,

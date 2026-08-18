@@ -1487,7 +1487,16 @@ mogwai landing.
 OWED: TELL THEM, and expect their build to break. Nobody has, and the whole
 account surface moved under them - they set no `account_type`, inherit
 `MOGWAI-001`, POST no account, and have no handling for a run that ends by
-LIQUIDATION. That break is DESIGNED (see the account-policy item's consumer
+LIQUIDATION.
+THE ACCOUNT-ID CONTRACT RIDES WITH THAT MESSAGE, ruled by the owner 2026-08-18
+and stated in `docs/config.md`: a client on a SHARED venue must name its own
+account, and a client that spawns its own ephemeral venue owes nothing. It is a
+usage contract, not a venue problem - the venue cannot tell the two modes apart,
+and two clients presenting one id ARE one trader from its side, which is the
+same mechanism that makes reconnection work. It matters to them because their
+orchestrator runs the shared shape: 50 subagents inheriting `MOGWAI-001` would
+take each other's ledger in turn. Their per-subagent account TOMLs are where the
+id belongs. That break is DESIGNED (see the account-policy item's consumer
 paragraph), but designed-to-break only works if the other side is told it is
 coming. Several entries below are now stale IN THEIR FAVOUR and should go in the
 same message: trailing stops are served, the full order-type surface is served,
