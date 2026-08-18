@@ -183,6 +183,21 @@ already accepted. Atomic admission therefore covers everything the venue can
 decide in advance and not a balance the group's own fills moved; a group whose
 members are jointly affordable at submission never meets it.
 
+THE TWO PASSES ARE ONLY AS GOOD AS THEIR AGREEMENT, and asserting that they
+agree is what keeps them honest. The standing invariant is that NO REFUSAL MAY
+REACH A SUBMIT FROM OUTSIDE `Engine::dry_refusal` - the dry pass and the real
+path ask that one function, so a refusal added to only one of them is the whole
+defect family in a single line. Three atomicity bugs came from it being
+unwritten: a hedging `position_id` rule that lived outside the validator, a link
+validated without the group's own ids on the second pass, and a non-idempotent
+`Ouo` applied twice. Because nothing can detect the NEXT such divergence by
+construction, the group checks itself instead: a member refused on pass two
+re-asks the dry question against the state as it now stands, and a dry pass that
+would ADMIT what the real path just refused is a defect rather than the funds
+carve-out, reported as an error and asserted on in debug builds. The
+discrimination is deliberately not a match on the reason text, which would pin
+the check to today's wording and stay silent about a refusal added tomorrow.
+
 A STOP and a TOUCHED order are the same machinery with opposite comparisons. A
 stop protects - buy above the market, sell below - and fires when price runs
 AWAY. A touched order enters - buy below, sell above - and fires when price comes

@@ -125,21 +125,7 @@ impl Engine {
         // funds carve-out on `ClientMessage::SubmitOrderGroup` exists and is
         // stated there rather than papered over here.
         for order in &orders {
-            let mut candidate = order.clone();
-            // Asked BEFORE `validate_submit` because that is where pass two
-            // asks it. It is the one refusal that lives outside the validator,
-            // so a dry pass built only from the validator cannot see it.
-            if let Some(reason) = self.hedging_refusal(order) {
-                return reject_all(&reason, Some(&order.client_order_id));
-            }
-            // The derived trailing limit is what `risk_px` and therefore the
-            // funds check read, so a dry pass that skipped the derivation would
-            // judge a `TrailingStopLimit` against its trigger rather than its
-            // limit and could pass a member pass two then refuses.
-            if let Err(reason) = self.derive_trailing_limit(&mut candidate) {
-                return reject_all(&reason, Some(&order.client_order_id));
-            }
-            if let Err(reason) = self.validate_submit(&candidate, ts, false, &ids) {
+            if let Some(reason) = self.dry_refusal(order, ts, &ids) {
                 return reject_all(&reason, Some(&order.client_order_id));
             }
         }
@@ -149,6 +135,20 @@ impl Engine {
         let mut filled: Vec<(SubmitOrder, Decimal)> = Vec::new();
         for order in orders {
             let events = self.on_submit_from(order.clone(), ts, reading, true, &ids);
+            // Pass one said every member was admissible, so a refusal here is
+            // either the disclosed funds carve-out or a hole in the dry pass.
+            // Which one it is decides whether this is a warning or a defect,
+            // and nothing else in the system can tell them apart afterwards.
+            if let Some(reason) = events.iter().find_map(|event| match event {
+                ServerMessage::OrderRejected {
+                    client_order_id,
+                    reason,
+                    ..
+                } if *client_order_id == order.client_order_id => Some(reason.clone()),
+                _ => None,
+            }) {
+                self.report_group_member_refusal(&order, &reason, ts, &ids);
+            }
             let member_filled: Decimal = events
                 .iter()
                 .filter_map(|event| match event {
@@ -184,6 +184,89 @@ impl Engine {
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
         out
+    }
+
+    /// EVERY REFUSAL A SUBMIT CAN MEET, asked as one pure question.
+    ///
+    /// This exists so the group's dry pass and the group's own self-check ask
+    /// the SAME question, and so the standing invariant has somewhere to live:
+    /// NO REFUSAL MAY REACH A SUBMIT FROM OUTSIDE THIS FUNCTION. Three
+    /// atomicity bugs came from that invariant being unwritten - the dry pass
+    /// was built from `validate_submit` alone while the real path also refused
+    /// on the hedging `position_id` rule and on a link validated without the
+    /// group's ids, so a group could pass admission whole and lose a member on
+    /// the second pass with its siblings already accepted.
+    ///
+    /// Pure: it clones what it must mutate and touches no engine state, which
+    /// is what lets it run twice per member without the second run meaning
+    /// anything different from the first.
+    fn dry_refusal(&self, order: &SubmitOrder, ts: u64, group: &[ClientOrderId]) -> Option<String> {
+        if let Some(reason) = self.hedging_refusal(order) {
+            return Some(reason);
+        }
+        let mut candidate = order.clone();
+        // The derived trailing limit is what `risk_px` and therefore the funds
+        // check read, so a dry pass that skipped the derivation would judge a
+        // `TrailingStopLimit` against its trigger rather than its limit and
+        // could pass a member pass two then refuses.
+        if let Err(reason) = self.derive_trailing_limit(&mut candidate) {
+            return Some(reason);
+        }
+        if let Err(reason) = self.validate_submit(&candidate, ts, false, group) {
+            return Some(reason);
+        }
+        None
+    }
+
+    /// A group member was REFUSED on pass two, which the dry pass was supposed
+    /// to have made impossible. Decide which of the two causes it was and say
+    /// so, because they are a disclosed limit and a defect respectively.
+    ///
+    /// The discriminator is to ask the dry question AGAIN, now, after the
+    /// refusal:
+    ///
+    /// - It still refuses. Then the two passes agree and the STATE moved under
+    ///   them - an earlier member's fill spent the balance this one needed.
+    ///   That is the disclosed funds carve-out on `SubmitOrderGroup`: the dry
+    ///   pass reads the book before the group runs and cannot see money the
+    ///   group is about to spend. A warning, not a defect.
+    /// - It passes. Then the two passes DISAGREE about the same state, which is
+    ///   the defect family this whole split exists to prevent: a refusal
+    ///   reachable from the real path and invisible to the dry one. Loud, and a
+    ///   `debug_assert` so it cannot survive a single dev run of the path.
+    ///
+    /// Deliberately not a classification of the REASON STRING. Matching text
+    /// would pin the check to today's wording and would say nothing about a
+    /// refusal added later, which is exactly the case that needs catching.
+    fn report_group_member_refusal(
+        &self,
+        order: &SubmitOrder,
+        reason: &str,
+        ts: u64,
+        group: &[ClientOrderId],
+    ) {
+        if self.dry_refusal(order, ts, group).is_some() {
+            tracing::warn!(
+                client_order_id = %order.client_order_id,
+                %reason,
+                "order group member refused after admission: an earlier member's fill moved the \
+                 balance it needed - the disclosed funds carve-out, not an admission hole",
+            );
+            return;
+        }
+        tracing::error!(
+            client_order_id = %order.client_order_id,
+            %reason,
+            "ATOMICITY DEFECT: an order group member was refused by the submit path that the dry \
+             pass admits against this same state, so the group was broken open with earlier \
+             members already accepted - a refusal exists outside Engine::dry_refusal",
+        );
+        debug_assert!(
+            false,
+            "order group member {} refused on pass two ({reason}) but the dry pass admits it: a \
+             refusal reachable from on_submit_from is missing from dry_refusal",
+            order.client_order_id,
+        );
     }
 
     /// A trailing stop limit's LIMIT is derived, never stated - the wire refuses

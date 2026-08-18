@@ -6291,6 +6291,72 @@ mod tests {
         assert!(e.open.is_empty(), "and nothing rests");
     }
 
+    /// THE DISCLOSED CARVE-OUT, and the test that keeps it distinguishable from
+    /// a defect. Two members are individually affordable against the balance the
+    /// dry pass reads, and jointly are not - so the first fills, spends the
+    /// money, and the second is refused on the second pass.
+    ///
+    /// The group is right to refuse it and right NOT to call it an atomicity
+    /// defect: both passes agree about the state, and it was the state that
+    /// moved. `report_group_member_refusal` decides that by re-asking the dry
+    /// question rather than by reading the reason text, and the `debug_assert`
+    /// on the other branch is what this test is really pinning - a classifier
+    /// that called this a defect would panic here.
+    ///
+    /// Gated on `debug_assertions` because that is where the assertion it pins
+    /// is compiled in; in release the classifier's other branch is a log line
+    /// and the test would pass without bite.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_group_member_defunded_by_its_own_group_is_the_disclosed_carve_out() {
+        // Tight enough that either member alone is affordable and the two
+        // together are not.
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([
+                ("USDT".to_string(), Decimal::from(400)),
+                ("BTC".to_string(), Decimal::from(100)),
+            ]),
+            fill_seed: 7,
+        });
+        let mut first = limit_order("FIRST", 1);
+        first.price = Some(Decimal::from(300));
+        let first = linked(
+            first,
+            link_of(mogwai_protocol::Contingency::Ouo, &["SECOND"], None),
+        );
+        let mut second = limit_order("SECOND", 1);
+        second.price = Some(Decimal::from(300));
+        let second = linked(
+            second,
+            link_of(mogwai_protocol::Contingency::Ouo, &["FIRST"], None),
+        );
+
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![first, second],
+            },
+            1,
+            Some(away_reading()),
+        );
+
+        assert!(
+            out.iter().any(|event| matches!(
+                event,
+                ServerMessage::OrderFilled(fill) if fill.client_order_id == "FIRST"
+            )),
+            "the first member filled and spent the balance: {out:?}"
+        );
+        assert!(
+            out.iter().any(|event| matches!(
+                event,
+                ServerMessage::OrderRejected { client_order_id, .. } if client_order_id == "SECOND"
+            )),
+            "and the second could no longer be funded: {out:?}"
+        );
+    }
+
     /// A CHILD LISTED BEFORE ITS PARENT. Nothing requires a group to list
     /// parents first, so the group context has to travel into the SECOND pass
     /// as well as the dry one - a pass that dropped it refused the child for an
