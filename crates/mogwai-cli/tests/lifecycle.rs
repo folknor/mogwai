@@ -119,7 +119,10 @@ fn serve_exits_nonzero_when_the_readiness_line_cannot_be_written() {
         .expect("spawn venue");
     drop(child.stdout.take().expect("venue stdout is piped"));
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // Inside the test's budget rather than a flat minute: a venue that keeps
+    // serving a run nobody can reach must be reported by the panic below, which
+    // names that, and not by the per-test watchdog, which names nothing.
+    let deadline = common::wall_deadline(Duration::from_secs(10));
     let status = loop {
         match child.try_wait().expect("poll venue") {
             Some(status) => break status,
@@ -147,14 +150,27 @@ fn sigterm_stops_the_venue_within_the_shutdown_grace() {
         i32::try_from(venue.record.pid).expect("a pid fits in the signal type"),
     );
 
+    // THE BOUND IS THE GRACE THIS TEST IS NAMED FOR, not an arbitrary round
+    // number twice its size. `serve.rs`'s `SHUTDOWN_GRACE` is five seconds - the
+    // window a completed or signalled venue gives its live connections to drain
+    // before exiting regardless - and this venue holds no connection at all, so
+    // the docstring's property is that it does not need that window. Ten seconds
+    // asserted something weaker than the sentence above it. Measured at 0.2 s, so
+    // five is still twenty-five times the observed cost; if the shutdown path
+    // ever grows a drain that an IDLE venue waits on, this is supposed to fail.
+    const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
     let sent = Instant::now();
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("signal the venue");
-    let status = venue.wait_for_exit(Duration::from_secs(20));
+    // Looser than the assertion below, deliberately: a venue that never exits at
+    // all has to be reported by this wait, naming the venue, rather than by the
+    // per-test watchdog naming the whole test. Both are inside the test's budget.
+    let status = venue.wait_for_exit(Duration::from_secs(10));
     let elapsed = sent.elapsed();
 
     assert!(
-        elapsed < Duration::from_secs(10),
-        "SIGTERM took {elapsed:?}; the venue must stop within its shutdown grace"
+        elapsed < SHUTDOWN_GRACE,
+        "SIGTERM took {elapsed:?}; an idle venue must stop without needing its \
+         {SHUTDOWN_GRACE:?} shutdown grace"
     );
     assert!(
         status.success || status.code.is_none(),

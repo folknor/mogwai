@@ -200,43 +200,161 @@ the boundary row bites hard - 13780 prints became 9187.
 
 ## C. Wall-clock budgets
 
-11. **`tape_lateness_under_acceleration`** asserts p99 at most 50 ms. Already
-    excluded from the gate lane with a long and honest comment, but the comment
-    itself records a RELEASE failure at 311 ms with load average 1.46. This is
-    not a code gate, it is a host-capability gate with no admission test - it
-    belongs in `brokkr mogwai` as a benchmark row, not in the test suite.
-    Structural recommendation: move it.
+Findings 11-14 were fixed on 2026-08-18 and are removed, along with the
+deadline sweep the round owned. What landed, so a later round does not
+re-derive it:
 
-12. **`lifecycle::sigterm_stops_the_venue_within_the_shutdown_grace`** asserts
-    `elapsed < 10s`. The only wall budget in lifecycle.rs; generous, but it is a
-    budget and it will be the first thing that goes if the shutdown path ever
-    grows a drain.
+- THE 20 SECOND FIGURE IS CONFIRMED, from the tool's own reference rather than
+  from the comments in `brokkr.toml`: the parallel lane keeps "the same per-test
+  20s hang watchdog" as the serial one, attributes it by name and kills the
+  process group. The before/after was demonstrated on one test with an injected
+  never-satisfied condition: at the old 30 s deadline the run reported
+  `exceeding the 20s per-test timeout ... killed cargo process group`, with no
+  message, no file and no line from the test at all; under the budget it
+  reported `the venue pushes its tape unbidden: Elapsed(())` at serving.rs:494
+  in 16.2 s.
+- The sweep is a HARNESS MECHANISM, not 36 retuned constants, because a test
+  with several sequential phases overruns by summing generous per-phase bounds
+  even when each one is legal. `common` carries `HANG_WATCHDOG`,
+  `TEST_WALL_BUDGET` (16 s) and `deadline` / `wall_deadline`, which clamp any
+  requested cap to a ceiling anchored at the test's FIRST LAUNCH.
+  `TEST_WALL_BUDGET` is DERIVED from `HANG_WATCHDOG` minus a
+  `WATCHDOG_HEADROOM` of four seconds rather than written down beside it, so the
+  stated relationship cannot drift; four rather than one because the panic, the
+  unwind and the venue teardowns all run after the deadline fires.
+  `Venue::wait_for_exit` and the harness's blocking HTTP reads clamp the same
+  way; the slowest gate in these files measures 9.7 s.
+  TWO SITES ARE DELIBERATELY NOT CLAMPED and say so in place: the armed-blackout
+  quiet window and the three-valued `observe` window are OBSERVATION LENGTHS,
+  where shortening does not fail sooner, it passes on less evidence.
 
-13. **`a_slow_connection_is_dropped_with_feed_lagged`** (serving.rs:569) - its own
-    comment says "keeping the stall for the whole loop made this gate pass alone
-    and fail under load", so it has already been patched once for this. It still
-    has a FIXED 2 s INNER TIMEOUT INSIDE A 15 s OUTER BUDGET: if the venue stalls
-    over 2 s under 8-way load before emitting the lag report, the loop `break`s
-    and `lagged.expect(...)` panics with "the venue names the frames it lost
-    rather than serving a hole" - again a wrong answer. The inner timeout should
-    be the outer deadline.
+  THREE HOLES IN THE FIRST PASS AT THAT, found by cold review of its own diff
+  and closed the same day:
 
-14. **`websocket_command_work_is_bounded_without_an_act_delay`**
-    (serving.rs:2030) - with `pending_command_acts = 1` and no act delay, whether
-    50 submits ever overflow the queue depends on send rate beating drain rate.
-    It is a race with no controlling condition. It happens to get MORE reliable
-    under load, which is the worst kind of reliability.
+  - SEQUENTIAL PHASES SUMMED AGAINST ONE BUDGET WITH NO RESERVATION, so the LAST
+    phase absorbed every shortfall - a drain legitimately running to 15 s left
+    `wait_for_exit` a second and the test then reported "venue did not exit
+    within 20s", which is a false statement about the VENUE manufactured by the
+    phase before it. `TEARDOWN_RESERVE` is three of the sixteen seconds:
+    `wall_deadline` clamps to the budget minus it, `teardown_deadline` clamps to
+    the whole budget, so the wait that reports on an exit always has its own
+    wall. And the clamp now REFUSES rather than handing back an instant in the
+    past - a spent ceiling used to make every `timeout_at` below it fire on its
+    first poll, and each one then reported whatever it was named for.
+    Bite-checked by widening the reserve to the whole budget: every bound
+    refuses with "this test spent its 6s wall budget before this 10s bound was
+    even taken ... an earlier phase used the whole budget", which names the
+    budget rather than the venue.
+  - THE HTTP READ TIMEOUT WAS NOT THE BOUND IT CLAIMED. `set_read_timeout`
+    bounds ONE `read` syscall and the body was consumed by `read_to_end`, which
+    issues many, so a venue dribbling a byte at a time reset it forever and the
+    route was unbounded. It is a deadline loop now, and it names the route:
+    bite-checked by forcing the deadline to `Instant::now()`, which reports "the
+    test's wall budget expired while reading /health; 0 bytes arrived first"
+    where the old shape would have said `read response: Resource temporarily
+    unavailable`, naming neither the route nor the budget.
+  - `Venue::Drop` COULD HAVE ABORTED THE PROCESS. It reads the captured log only
+    when the thread is panicking, and `snapshot` took the lock with `expect`, so
+    a capture thread that had panicked while holding it would turn the triage
+    dump into a panic during unwinding - an abort, replacing the real assertion
+    failure with an unattributed crash. All three readers go through one
+    `read()` that takes `PoisonError::into_inner`. Not bite-checkable without
+    poisoning the lock on purpose; it is closed by construction instead, since
+    that path can no longer panic, and a poisoned buffer still holds every line
+    captured before the poisoning, which is what triage wants.
+
+  ONE COLD-REVIEW FINDING WAS REFUSED, and the refusal is the round's most
+  useful fact. It held that `BUDGET_ANCHOR` is shared across every test in a
+  binary, because libtest's `run_tests` special-cases `concurrency == 1` and
+  runs each test INLINE on the calling thread - which would make the anchor
+  stale from the second test onward and fail the whole suite wholesale under
+  the very invocation AGENTS.md prescribes. THAT IS OLD LIBTEST. Today's
+  `run_test` spawns a named thread per test whenever the platform supports
+  threads, regardless of the concurrency level, and the measurement says so
+  directly: with the reset deliberately disabled and the budget shrunk to six
+  seconds, all fourteen tests of a 5.96 s serial run passed, and the anchors
+  they reported were 140 ns and 200 ns old rather than seconds. The prescribed
+  serial invocation was run before and after and is green.
+
+  THE MECHANISM WAS BUILT ANYWAY, because the premise is a libtest
+  implementation detail that has already changed once and nothing in this tree
+  would detect it changing back - the failure mode is silent and wholesale.
+  `spawn` re-anchors when no venue is live and `Venue`'s `Drop` clears the
+  anchor when the last one goes, so the budget is per-test by the harness's own
+  bookkeeping. No test in these files drops a venue and carries on, which is
+  what keeps a mid-test re-anchor - which would push the ceiling PAST the
+  watchdog - out of reach. Bite-checked by disabling both halves under a
+  six-second budget, where a genuinely shared anchor fails from the fourth test
+  on.
+- 11 WAS MOVED RATHER THAN RETUNED. It is now `examples/tape_lateness_bench.rs`
+  and the `tape_lateness` target, launching the shipped binary through the
+  shipped launcher and reporting `frames`, `sample_ms`, `p50/p99/max_lateness_ns`
+  as scraped counters. It is gone from the `timing` sweep's `only` and from the
+  gate's `skip`, and `reference/performance.md` carries the first reading under
+  the new shape: 11,893 frames, p99 42.9 ms on a quiet host - which is how
+  little room the retired 50 ms threshold had even when it passed.
+
+  ITS READ LOOP INHERITED THE RETIRED TEST'S TRUNCATION, found by cold review
+  and closed: `while let Ok(Some(Ok(Message::Text(_))))` ENDS on a Ping, a Pong
+  or a Binary frame, so `frames` - the declared WORK SIZE - would silently
+  understate the sample and p99 would be taken over a prefix. It is the same
+  rule finding 13 imposed on the drains one section up, and it matters more here
+  because a recorded number is compared against later ones: the loop now
+  `continue`s on a control frame, counts `non_trade_text` and `control_frames`
+  apart, and REPORTS `ending` - `sample_complete`, `stream_ended` or
+  `transport_error` - so two frame counts are only ever compared when both loops
+  ended the same way. Measured rather than assumed: at 3 s on `accelerated.toml`
+  the venue sends NO control frames, so the truncation was latent and the
+  recorded reading stands. What the same runs did show is a large run-to-run
+  spread - 9,186 against 11,659 frames minutes apart - which is on the record
+  now, because it is the thing a single reading would have hidden.
+- 12 was TIGHTENED, not left. The bound is now `serve.rs`'s own five-second
+  `SHUTDOWN_GRACE`, which is the sentence the docstring already made, rather
+  than an arbitrary ten; the wait that backstops it is ten seconds, so a venue
+  that never exits is reported by the wait rather than by the watchdog.
+  Bite-checked with a six-second sleep injected into `shutdown_signal`: the old
+  ten-second bound would have passed that regression, the new one fails at
+  6.2 s naming the grace.
+- 13's inner timeout is now the outer deadline, and the loop RECORDS HOW IT
+  ENDED - timeout, clean end and transport error are three separate messages,
+  and none of them is allowed to reach the old `expect` that blamed the venue
+  for serving a hole. Bite-checked by suppressing the `FeedLagged` capture: the
+  failure now says "either the venue served a hole ... or this reader never fell
+  behind the ring at all" instead of asserting the first.
+- 14 was rebuilt on SUSTAINED PRESSURE rather than a bigger burst. One task
+  sends continuously while another drains - the old shape fired all 50 sends
+  before reading a byte, so the venue's writer could be backpressured by the
+  test that was waiting to hear from it - and the loop ends on the refusal, the
+  deadline or a blast-radius cap, reporting which. Bite-checked by widening
+  `pending_command_acts` to 8192 in the fixture: 5,000 commands sent, no refusal,
+  and the failure names both counts instead of timing out anonymously.
 
 ## D. Harness
 
-15. **`common::spec`'s doc comment lies**: "with the log captured so a boot
-    failure can report why" - it sets `StderrSink::Discard`.
-    `LaunchError::NoRecord` carries stderr independently (which is why
-    `a_boot_failure_reports_no_record_and_says_why` works), but any venue that
-    dies AFTER readiness - which is most of the failure modes above - discards
-    its diagnostics. Every one of these tests would be easier to triage with
-    `StderrSink::Lines` into an `Arc<Mutex<Vec<String>>>` printed on panic.
-    Recommend making that the harness default.
+15. FIXED on 2026-08-18: `spawn` now captures every venue's stderr into
+    `Venue::log` and PRINTS THE TAIL ON PANIC, `spawn_capturing_stderr` is gone
+    into it rather than left as a second path, and both of round 2's guards came
+    across - `RUST_LOG=mogwai=info` is pinned on every venue, and
+    `CapturedLog::await_positive_control` is unchanged and still owed by any
+    caller concluding something from an absence. The pin is now load-bearing for
+    triage as well as for scoring: an ambient `mogwai=error` would hand a failing
+    test an EMPTY diagnostic dump, which is the same vacuity in another costume.
+    `common::spec` keeps `Discard` and its doc comment now says so - it is the
+    launcher-contract spec for the two gates that read `LaunchError` themselves,
+    where `NoRecord` carries the stderr independently. Kept as a shape: the
+    triage dump was confirmed by a real failure, which printed the venue's last
+    23 lines through `mogwai listening` and `socket bound to river`.
+
+    THE FOLD LEFT TWO DANGLING REFERENCES, both closed the same day. A comment
+    in `serving.rs` still credited `spawn_capturing_stderr` for pinning
+    `RUST_LOG` - a function that no longer exists - and `Venue::ready_at`
+    survived with NO READERS AT ALL, kept alive only by the module's
+    `#![allow(dead_code)]`, still documented as the instant "the acceleration
+    gate measures the served run from" when that gate had been deleted in the
+    same diff. The comment names `common::spawn` and the field is gone. Worth
+    keeping as a shape: a blanket `allow(dead_code)` on a shared test module
+    means nothing detects a field that lost its last reader, so a deletion has
+    to carry the sweep with it.
 
 16. **`common::boot_symbol` pins the venue against itself.** It resolves
     `venue.symbol` by calling `mogwai_server::config::Config::load` +
@@ -249,6 +367,30 @@ the boundary row bites hard - 13780 prints became 9187.
     against a literal (`"MNQ"`). The right shape is for the readiness record to
     carry the boot symbol - the harness comment even notes "a venue reports no
     symbol", which is the actual defect.
+
+    REFUSED on 2026-08-18, on the ground that the recommendation reverses a
+    recorded ruling rather than fixing an oversight, and that direction is not
+    this loop's to take. Commit `0f12796` removed `symbol` from the readiness
+    record two days before this report was written, as slice 2 of the grand
+    design, and stated the reason: "a venue has no symbol under the boatyard
+    model, so the readiness record's symbol field could only lie", with
+    `ReadyRecord::VERSION` 6 as the designed loud break for consumers still
+    parsing it. The same commit put `common::boot_symbol` here ON PURPOSE, and
+    created `preset_only_config_resolves_the_boot_river` as its literal pin,
+    "whose bite was proven". Putting the field back is a program decision for
+    the owner, and it would cost a schema version and every consumer of the
+    record; the fix pass does not get to make it from a test-hygiene finding.
+
+    The complaint is also weaker than filed. The AGENTS.md rule is about a GATE
+    that COMPARES two computations of one quantity, and no test here gates on
+    the boot symbol: they use it to address requests. The one place the
+    resolution is asserted is the preset-only test, against a literal, which is
+    exactly the shared-fixture shape the rule asks for. What was missing was the
+    RECORD of any of that at the harness, which is why the resolution looked
+    like an accident to a reader; `Venue::symbol` and `boot_symbol` now carry
+    the ruling, the reason the raw config key cannot be used, and the
+    instruction not to remove the pin. Reopening this needs an owner decision,
+    not another reading of the same code.
 
 17. **`lifecycle::venue_dies_when_its_launcher_is_killed_without_cleanup`** -
     `reader.read_line()` is UNBOUNDED; if the venue never writes, this hangs

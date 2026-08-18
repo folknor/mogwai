@@ -390,6 +390,17 @@ Currently registered:
 |---|---|---|
 | `arrival_walk` | `mogwai-data/arrival_walk_bench` | `hotpath` |
 | `screen_projection` | `mogwai-lab/screen_projection_bench` | `hotpath` |
+| `ring_sizing` | `mogwai-lab/ring_sizing` | `hotpath` |
+| `stage_a_batch` | `mogwai-lab/stage_a_batch_bench` | none |
+| `envelope_evaluation` | `mogwai-lab/envelope_evaluation_bench` | none |
+| `tag_decode_probe` | `mogwai-protocol/tag_decode_probe` | none |
+| `tape_lateness` | `mogwai-cli/tape_lateness_bench` | none |
+
+`tape_lateness` is the one that used to be a TEST. It asserted a 50 ms p99 on
+paced delivery, which is a statement about the host rather than about the code,
+and it was excluded from every lane that would have run it. The reading is worth
+recording every run; the threshold was never portable. That is the general
+shape: a wall-clock budget with no admission test is a measurement, not a gate.
 
 ### The three modes, uniform over both surfaces
 

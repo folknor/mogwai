@@ -41,7 +41,10 @@ async fn drain_to_completion(
 ) -> (Option<(u64, u64)>, bool) {
     let mut completion = None;
     let mut closed = false;
-    let deadline = tokio::time::Instant::now() + timeout;
+    // Clamped to the test's remaining budget: a 30 s bound inside a 20 s per-test
+    // watchdog cannot report anything, because the watchdog reaches it first and
+    // the failure arrives as an unattributed kill.
+    let deadline = common::deadline(timeout);
     while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
         match message {
             Message::Text(text) => {
@@ -150,7 +153,7 @@ fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
         ..LaunchSpec::default()
     })
     .expect("fault venue reaches readiness");
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let deadline = common::wall_deadline(Duration::from_secs(10));
     let exit = loop {
         if let Some(exit) = faulted.exited() {
             break exit;
@@ -248,11 +251,14 @@ async fn sigterm_closes_without_announcing_run_complete() {
     // meant a slow host signalled a socket that was not attached yet, and the
     // absent `RunComplete` below - the whole point of the test - would then have
     // been the race rather than the venue's behaviour.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = common::deadline(Duration::from_secs(10));
     loop {
         let message = tokio::time::timeout_at(deadline, socket.next())
             .await
-            .expect("the socket is served a frame within 30 s of upgrade")
+            .expect(
+                "the socket was never served a frame, so the signal below would land on a \
+                     socket that was not attached and the absent RunComplete would be that race",
+            )
             .expect("the venue closed the socket before serving it anything")
             .expect("a well-formed frame");
         if matches!(message, Message::Text(_)) {

@@ -251,14 +251,37 @@ every rule here should be traceable to a run.
   yet an error bar: two runs minutes apart on a quiet host is the best case, and
   nothing has yet tested the same cell across a day, a thermal state, or a
   loaded host.
-- **A wall-clock contract on this host is not yet trustworthy.**
-  `tape_lateness_under_acceleration` asserts a 50 ms p99 pacing bound and failed
-  at 311 ms p99 on 2026-08-08 with a load average of 1.46 across 32 visible
-  CPUs, so load average alone is not a sufficient admission test. The bound is
-  unchanged and authoritative; what is unresolved is the environment under which
-  it can be evaluated, which is why the test stays `#[ignore]`d and directly
-  runnable (`brokkr test -p mogwai-cli tape_lateness_under_acceleration`)
-  rather than gated in a check lane.
+- **Tape lateness is a MEASUREMENT, not a gate, and that is a ruling about what
+  a wall-clock threshold can mean.** It was `tape_lateness_under_acceleration`,
+  a test asserting a 50 ms p99 pacing bound, and it failed at 311 ms p99 on
+  2026-08-08 with a load average of 1.46 across 32 visible CPUs - so load
+  average alone is not a sufficient admission test, and no admission test yet
+  distinguishes a host that can judge 50 ms from one that cannot. A threshold
+  nobody can evaluate had to be excluded from the debug lane for being a latency
+  budget and from the release lane for being unjudgeable under load, leaving a
+  gate that no lane ran. It is now the `tape_lateness` target
+  (`brokkr mogwai tape_lateness`, argv `[config] [sample_seconds]`), which
+  records `frames`, `non_trade_text`, `control_frames`, `ending`,
+  `p50_lateness_ns`, `p99_lateness_ns` and `max_lateness_ns`
+  against the machine and the commit that produced them. A series of readings
+  shows a regression; a portable threshold never existed to show one.
+  - First reading under the new shape, host `bygg`, release, 3 s sample on
+    `accelerated.toml`: 11,893 frames, p50 0.226 ms, p99 42.9 ms, max 43.2 ms.
+    Consistent with the old test's passing runs, and note how little room the
+    retired 50 ms bound had on a QUIET host - which is the whole finding.
+  - `ending` IS PART OF THE READING, not decoration. Only `sample_complete`
+    means `frames` covers the whole `sample_ms`; a stream that ended or faulted
+    early leaves a PREFIX, and two frame counts are not comparable unless both
+    loops ended the same way. The loop that produced the reading above ended on
+    the first non-text frame, which is why it is recorded here and not fixed
+    silently: the sample was truncatable by a Ping. Measured on 2026-08-19 at
+    3 s on this venue, `control_frames` is 0 - no Ping, Pong or Binary frame
+    arrives inside a sample - so the truncation was latent rather than active
+    and the recorded numbers stand.
+  - Run-to-run spread on a quiet host is LARGE: two 3 s debug-build samples
+    minutes apart, 2026-08-19, returned 9,186 and 11,659 frames with p99
+    0.79 ms and 1.63 ms. Read a single reading as a sample of a distribution,
+    not as this host's number.
 - **Read counters before crediting a wall.** Every surface emits its work size
   beside its timing. A cell whose wall moved while `parents` or `prints` moved
   did different work, and the wall comparison is void rather than interesting.
