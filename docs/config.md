@@ -208,6 +208,29 @@ differs by how you run the venue and the venue cannot tell which you meant.
   owes nothing. One connection has nobody to collide with, so naming an id would
   be ceremony. This is what the default exists for.
 
+A CLIENT IS NOT A SOCKET, and `/ws?session=` is what says so. One client
+routinely holds several sockets on one ledger - a nautilus host dials `/ws`
+twice, once for market data and once for execution, and both legs name the same
+account by construction - so eviction keyed on the account id alone would make
+that host's second dial disconnect its own first. A session id is the client's
+own string: sockets presenting the SAME one are one client and coexist, and a
+different one is a new client and takes the ledger over, closing every socket the
+old client held.
+
+Absent means EVICT, on both sides. A socket that names no session has made no
+claim to be the incumbent, so it displaces whoever is there and is displaced in
+turn - which is exactly what every socket did before sessions existed. Coexisting
+is therefore opt-in, and the safe reading is what you get by saying nothing.
+
+The venue reads nothing into the string beyond equality. What it needs is a value
+stable across one client's sockets and their redials, and fresh in a restarted
+process - `mogwai-adapter` mints one per process from the pid and the start
+instant and puts it on both its clients, so a nautilus host configures nothing and
+a restarted worker correctly reclaims its ledger from the sockets of the dead one.
+Like the account id it is a bearer token: anyone who knows the pair joins that
+ledger rather than displacing it, which is acceptable on a loopback venue and is
+stated rather than assumed.
+
 The contract also bounds what a misdial can cost. Distinct ids mean a client that
 reaches the wrong venue - a recycled ephemeral port, say - presents an id that
 venue has never seen and opens a fresh account there, rather than displacing

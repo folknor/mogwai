@@ -193,6 +193,31 @@ pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Maximum byte length of a client session id on the wire. Same reasoning as
+/// `MAX_SYMBOL_LEN`, and generous enough for a uuid-shaped value.
+pub const MAX_SESSION_LEN: usize = 64;
+
+/// Validate the `/ws?session=` client identity, which shares the URL alphabet
+/// with a wire symbol and is bounded for the same reason: it is carried in a
+/// query string with no percent encoding, and it is retained per socket for the
+/// life of the connection.
+///
+/// Empty is REFUSED rather than treated as absent. A client that sends
+/// `session=` has said something, and reading an empty string as "no opinion"
+/// would silently give it the always-evict behaviour it was trying to leave.
+pub fn validate_session_id(session: &str) -> Result<(), &'static str> {
+    if session.is_empty() || session.len() > MAX_SESSION_LEN {
+        return Err("session ids are 1 to 64 characters");
+    }
+    if !session
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err("session ids use only ASCII letters, digits, dot, dash or underscore");
+    }
+    Ok(())
+}
+
 /// Maximum byte length of a server-generated `reason` string. Constructors
 /// truncate to this on a char boundary rather than rejecting: a reason is
 /// diagnostic prose, and a truncated diagnostic is still truthful about what

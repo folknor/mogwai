@@ -12,14 +12,51 @@ use nautilus_model::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Default local Nautilus account label. Mogwai has one ledger per run and
-/// carries no account identity on the wire.
+/// Default account label, used both as the Nautilus account identity and as the
+/// ledger this client names on the venue's `/ws?account=`. It matches the
+/// venue's own default account id, so an ephemeral one-run venue that was never
+/// told about accounts serves exactly the ledger it always did.
 pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
+
+/// This PROCESS's client identity, presented on `/ws?session=` by every client
+/// this adapter builds.
+///
+/// The venue seats one client per ledger and evicts a second one, because from
+/// its side a socket presenting an already-seated account is indistinguishable
+/// from that client reconnecting. A nautilus host holds TWO sockets on one
+/// ledger by construction - the data client and the execution client - so
+/// without a shared identity the second dial would evict the first and the host
+/// would disconnect itself before it ever traded.
+///
+/// PER PROCESS is the right granularity, and it is the whole design. One worker
+/// process is one client: its two legs share this value, and so does every
+/// redial either of them makes, so neither can evict the other. A RESTARTED
+/// worker gets a fresh one, which is exactly when eviction is wanted - the
+/// venue's frozen ledger is being reclaimed by a genuinely new process, and the
+/// stale sockets of the dead one must go.
+///
+/// It is derived from the pid and the process's start instant rather than
+/// randomly, so it is stable for the life of the process without any state to
+/// keep, and two processes cannot collide: a reused pid arrives with a later
+/// start instant.
+fn process_session_id() -> &'static str {
+    static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SESSION.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        format!("mogwai-{pid}-{nanos}", pid = std::process::id())
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MogwaiDataClientConfig {
-    /// Local Nautilus account label attached to client metadata.
+    /// The account this client trades under, both as the Nautilus label
+    /// attached to client metadata and as the venue ledger named on
+    /// `/ws?account=`. The two are deliberately one field: a host whose feed
+    /// and execution named different ledgers would arm divergences on one and
+    /// read frames from the other.
     pub account_id: AccountId,
     /// Base URL of the running mogwai-server.
     ///
@@ -33,6 +70,13 @@ pub struct MogwaiDataClientConfig {
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
+    /// The CLIENT identity presented on `/ws?session=`, so this process's
+    /// several sockets on one ledger are not read as several clients. Defaults
+    /// to [`process_session_id`] and should stay there; see it for why. `None`
+    /// sends no session and takes the venue's always-evict reading, which is
+    /// what a host wants only if it holds exactly one socket per ledger.
+    #[serde(default = "default_session")]
+    pub session: Option<String>,
     /// The run this client belongs to, checked on every connect.
     ///
     /// `None` keeps the historical behaviour: dial the address and trust
@@ -51,9 +95,15 @@ impl Default for MogwaiDataClientConfig {
             base_url: String::new(),
             symbol: None,
             havoc: None,
+            session: default_session(),
             expected_run_seed: None,
         }
     }
+}
+
+/// Serde default for both configs' `session`: this process's identity.
+fn default_session() -> Option<String> {
+    Some(process_session_id().to_owned())
 }
 
 impl MogwaiDataClientConfig {
@@ -70,9 +120,7 @@ impl MogwaiDataClientConfig {
         Self {
             account_id,
             base_url: format!("ws://{addr}"),
-            symbol: None,
-            havoc: None,
-            expected_run_seed: None,
+            ..Self::default()
         }
     }
 
@@ -114,6 +162,17 @@ impl MogwaiDataClientConfig {
         self
     }
 
+    /// Override the client identity presented on `/ws?session=`. The default is
+    /// this process's, which is what a host wants; set it only to make two
+    /// clients in ONE process deliberately distinct clients of one ledger -
+    /// which is a request to have them evict each other - or to `None` to take
+    /// the venue's always-evict reading.
+    #[must_use]
+    pub fn with_session(mut self, session: Option<String>) -> Self {
+        self.session = session;
+        self
+    }
+
     /// Validates config invariants.
     ///
     /// # Errors
@@ -125,6 +184,7 @@ impl MogwaiDataClientConfig {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
+        validate_session(self.session.as_deref())?;
         validate_havoc(&self.havoc)
     }
 
@@ -136,15 +196,16 @@ impl MogwaiDataClientConfig {
     /// never-connects-with-no-diagnostic failure mode (D.4) the validator
     /// exists to rule out.
     ///
-    /// A configured `symbol` is appended raw and needs no percent encoding:
-    /// `validate` refuses every byte outside the wire alphabet first. An absent
-    /// symbol takes the server's boot river.
+    /// The symbol, account and session are appended raw and need no percent
+    /// encoding: `validate` refuses every byte outside their wire alphabets
+    /// first. An absent symbol takes the server's boot river.
     #[must_use]
     pub fn ws_url(&self) -> String {
-        let base = self.base_url.trim().trim_end_matches('/');
-        self.symbol.as_ref().map_or_else(
-            || format!("{base}/ws"),
-            |symbol| format!("{base}/ws?symbol={symbol}"),
+        ws_url(
+            &self.base_url,
+            self.symbol.as_deref(),
+            &self.account_id,
+            self.session.as_deref(),
         )
     }
 
@@ -188,6 +249,11 @@ pub struct MogwaiExecClientConfig {
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
+    /// The CLIENT identity presented on `/ws?session=`. See
+    /// [`MogwaiDataClientConfig::session`]; both legs must carry the SAME one,
+    /// which is what stops them evicting each other off their shared ledger.
+    #[serde(default = "default_session")]
+    pub session: Option<String>,
     /// The run this client belongs to. See
     /// [`MogwaiDataClientConfig::expected_run_seed`]; both legs should carry the
     /// same one, for the same reason they carry the same account.
@@ -213,6 +279,7 @@ impl Default for MogwaiExecClientConfig {
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
             havoc: None,
+            session: default_session(),
             expected_run_seed: None,
         }
     }
@@ -263,6 +330,15 @@ impl MogwaiExecClientConfig {
         self
     }
 
+    /// Override the client identity presented on `/ws?session=`. See
+    /// [`MogwaiDataClientConfig::with_session`]; the two legs of one host must
+    /// agree, so overriding one means overriding both.
+    #[must_use]
+    pub fn with_session(mut self, session: Option<String>) -> Self {
+        self.session = session;
+        self
+    }
+
     /// Set the trader id. [`Self::for_addr`] leaves it at this crate's default,
     /// which is a mogwai-flavoured placeholder rather than the host's identity,
     /// so a host with its own trader id sets it here.
@@ -297,19 +373,21 @@ impl MogwaiExecClientConfig {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
+        validate_session(self.session.as_deref())?;
         validate_havoc(&self.havoc)
     }
 
     /// Returns the ws/wss URL to hand to the transport, trimmed of
     /// surrounding whitespace. See `MogwaiDataClientConfig::ws_url` for why
     /// the trim matters (a padded URL passes validation but never connects),
-    /// and for why a configured symbol is appended without encoding.
+    /// and for why the query values are appended without encoding.
     #[must_use]
     pub fn ws_url(&self) -> String {
-        let base = self.base_url.trim().trim_end_matches('/');
-        self.symbol.as_ref().map_or_else(
-            || format!("{base}/ws"),
-            |symbol| format!("{base}/ws?symbol={symbol}"),
+        ws_url(
+            &self.base_url,
+            self.symbol.as_deref(),
+            &self.account_id,
+            self.session.as_deref(),
         )
     }
 
@@ -321,6 +399,50 @@ impl MogwaiExecClientConfig {
     pub fn http_base_url(&self) -> String {
         http_base_url(&self.base_url)
     }
+}
+
+/// Build the `/ws` upgrade URL both clients dial.
+///
+/// THE ACCOUNT IS ALWAYS NAMED, which is the whole point of it being here. The
+/// venue resolves accounts totally - a socket naming none is served under the
+/// venue's default - so an unnamed socket silently traded whatever ledger the
+/// venue happened to call default, whatever the host's config said. That was
+/// invisible on the wire and made every attached worker share one book. Naming
+/// it makes the host's configured id the ledger it actually gets, and costs an
+/// ephemeral single-client venue nothing because the default id on both sides
+/// is the same string.
+///
+/// The session rides with it for the reason [`process_session_id`] states: the
+/// two clients of one host name one account, and the venue would otherwise read
+/// the second dial as a stranger claiming the ledger.
+fn ws_url(
+    base_url: &str,
+    symbol: Option<&str>,
+    account_id: &AccountId,
+    session: Option<&str>,
+) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let mut url = format!("{base}/ws?account={account}", account = account_id.as_ref());
+    if let Some(symbol) = symbol {
+        url.push_str(&format!("&symbol={symbol}"));
+    }
+    if let Some(session) = session {
+        url.push_str(&format!("&session={session}"));
+    }
+    url
+}
+
+/// Refuse a session id the `/ws` URL cannot carry, by the rule the server
+/// judges the decoded value with, so the two ends cannot drift.
+fn validate_session(session: Option<&str>) -> anyhow::Result<()> {
+    if let Some(session) = session
+        && let Err(reason) = mogwai_protocol::validate_session_id(session)
+    {
+        anyhow::bail!(
+            "session {session:?} cannot be carried directly in a websocket URL: {reason}"
+        );
+    }
+    Ok(())
 }
 
 /// Refuse a symbol the `/ws` URL cannot carry.
@@ -374,8 +496,10 @@ fn validate_base_url(base_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validates the local Nautilus account label against mogwai's wire-safe
-/// charset. The label is not sent to the one-ledger venue.
+/// Validates the account label against mogwai's wire-safe charset. It IS sent -
+/// it names the venue ledger on `/ws?account=` - so this is a URL-carriage
+/// check as much as a Nautilus one, and it is the venue's own `AccountId::parse`
+/// so the two ends cannot judge it differently.
 fn validate_account_id(account_id: &AccountId) -> anyhow::Result<()> {
     mogwai_protocol::AccountId::parse(account_id.as_ref())?;
     Ok(())
@@ -467,18 +591,81 @@ mod tests {
         let config = MogwaiDataClientConfig {
             base_url: "ws://127.0.0.1:1".into(),
             symbol: Some("MNQ".into()),
+            session: None,
             ..MogwaiDataClientConfig::default()
         };
-        assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws?symbol=MNQ");
+        assert_eq!(
+            config.ws_url(),
+            "ws://127.0.0.1:1/ws?account=MOGWAI-001&symbol=MNQ"
+        );
     }
 
     #[test]
     fn ws_url_omits_an_absent_symbol() {
         let config = MogwaiExecClientConfig {
             base_url: "ws://127.0.0.1:1".into(),
+            session: None,
             ..MogwaiExecClientConfig::default()
         };
-        assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws");
+        assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws?account=MOGWAI-001");
+    }
+
+    /// The ledger is NAMED, and it is the configured one rather than whatever
+    /// the venue calls default. This is the whole of the consumer-visible fix:
+    /// without it every attached worker seated one shared book.
+    #[test]
+    fn ws_url_names_the_configured_account_on_both_legs() {
+        let data = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            account_id: AccountId::from("CLAUDETTE-07"),
+            session: None,
+            ..MogwaiDataClientConfig::default()
+        };
+        let exec = MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            account_id: AccountId::from("CLAUDETTE-07"),
+            session: None,
+            ..MogwaiExecClientConfig::default()
+        };
+        assert_eq!(data.ws_url(), "ws://127.0.0.1:1/ws?account=CLAUDETTE-07");
+        assert_eq!(exec.ws_url(), "ws://127.0.0.1:1/ws?account=CLAUDETTE-07");
+    }
+
+    /// The two legs of one host present ONE client identity, which is what
+    /// stops the venue reading the second dial as a stranger claiming the
+    /// ledger and evicting the first.
+    #[test]
+    fn both_legs_default_to_the_same_process_session() {
+        let data = MogwaiDataClientConfig::default();
+        let exec = MogwaiExecClientConfig::default();
+        assert_eq!(data.session, exec.session);
+        assert!(
+            data.session.is_some(),
+            "a host that configures nothing still gets an identity"
+        );
+        let config = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            ..MogwaiDataClientConfig::default()
+        };
+        let session = config.session.clone().expect("a default session");
+        assert!(config.ws_url().ends_with(&format!("&session={session}")));
+        config.validate().expect("the minted session is wire-legal");
+    }
+
+    #[test]
+    fn validate_refuses_a_session_needing_percent_encoding() {
+        let config = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            session: Some("a b".into()),
+            ..MogwaiDataClientConfig::default()
+        };
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("carried directly")
+        );
     }
 
     #[test]
@@ -494,8 +681,8 @@ mod tests {
             .with_symbol("MNQ");
         assert_eq!(data.symbol.as_deref(), Some("MNQ"));
         assert_eq!(exec.symbol.as_deref(), Some("MNQ"));
-        assert!(data.ws_url().ends_with("/ws?symbol=MNQ"));
-        assert!(exec.ws_url().ends_with("/ws?symbol=MNQ"));
+        assert!(data.ws_url().contains("&symbol=MNQ"));
+        assert!(exec.ws_url().contains("&symbol=MNQ"));
     }
 
     #[test]
@@ -519,8 +706,12 @@ mod tests {
         let config = MogwaiExecClientConfig {
             base_url: "  ws://127.0.0.1:1/  ".into(),
             symbol: Some("MNQ".into()),
+            session: None,
             ..MogwaiExecClientConfig::default()
         };
-        assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws?symbol=MNQ");
+        assert_eq!(
+            config.ws_url(),
+            "ws://127.0.0.1:1/ws?account=MOGWAI-001&symbol=MNQ"
+        );
     }
 }

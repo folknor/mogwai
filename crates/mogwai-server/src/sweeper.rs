@@ -813,8 +813,8 @@ mod tests {
         let run = crate::run::test_run();
         let (mine, mut my_rx) = ExecLanes::detached();
         let (theirs, mut their_rx) = ExecLanes::detached();
-        run.bind_lanes(mine.clone(), "MOGWAI-001");
-        run.bind_lanes(theirs.clone(), "MOGWAI-002");
+        run.bind_lanes(mine.clone(), "MOGWAI-001", None);
+        run.bind_lanes(theirs.clone(), "MOGWAI-002", None);
         let order: mogwai_protocol::VenueOrderId = "V-1".into();
         run.claim_order(order.clone(), "MOGWAI-001");
 

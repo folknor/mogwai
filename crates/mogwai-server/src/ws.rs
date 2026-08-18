@@ -74,6 +74,23 @@ pub(crate) struct SocketQuery {
     /// assumed.
     #[serde(default)]
     account: Option<String>,
+    /// The CLIENT presenting the account, so one client's several sockets on
+    /// one ledger are not read as several clients fighting over it.
+    ///
+    /// A nautilus host dials `/ws` twice - market data and execution - and both
+    /// legs carry the same `account` by construction, so without this the second
+    /// dial evicts the first and the host disconnects itself. Sockets sharing a
+    /// session coexist; a socket presenting a different one, or none, is a new
+    /// client and takes the ledger. Absent on both sides is therefore exactly
+    /// the pre-session behaviour.
+    ///
+    /// It is the CLIENT'S string and the venue reads nothing into it beyond
+    /// equality: stable across a client's sockets and their redials, fresh in a
+    /// restarted process. Like the account id it is a bearer token - anyone who
+    /// knows the pair can join that ledger rather than displace it - which is
+    /// acceptable on a loopback venue and is stated rather than assumed.
+    #[serde(default)]
+    session: Option<String>,
 }
 
 /// What one connection is bound to, decided before the upgrade completes and
@@ -90,6 +107,10 @@ pub(crate) struct SocketSession {
     /// The ledger this connection trades on. Resolved before the upgrade, so a
     /// frame cannot reach a handler before the account it books into exists.
     pub(crate) passenger: Arc<crate::run::Passenger>,
+    /// The client identity this socket presented, kept on the bound lane so a
+    /// later claim on the same account can tell this client's other sockets
+    /// from a stranger's. See `Run::evict_account`.
+    pub(crate) client_session: Option<String>,
 }
 
 /// THE SEAT IS RELEASED HERE, and it has to be here rather than at the freeze.
@@ -136,9 +157,22 @@ pub(crate) async fn ws_upgrade(
     // holds it, because a ledger is never read from two sockets at once and a
     // second socket presenting an id is indistinguishable from that client
     // reconnecting.
+    // Bounded and charset-checked before it is stored or compared: it arrives
+    // in a URL, is echoed in no frame, and an unbounded one would be per-socket
+    // memory a client sets for free.
+    if let Some(session) = query.session.as_deref()
+        && let Err(reason) = mogwai_protocol::validate_session_id(session)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("session id is not usable: {reason}"),
+        )
+            .into_response();
+    }
+    let session = query.session.as_deref();
     let passenger = match &query.account {
         Some(named) => match mogwai_protocol::AccountId::parse(named) {
-            Ok(account_id) => state.run.seat(&account_id, true),
+            Ok(account_id) => state.run.seat(&account_id, true, session),
             Err(error) => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -147,7 +181,9 @@ pub(crate) async fn ws_upgrade(
                     .into_response();
             }
         },
-        None => state.run.seat(&state.run.default_account_id(), false),
+        None => state
+            .run
+            .seat(&state.run.default_account_id(), false, session),
     };
     // The bind-time shape refusal: an invalid resolved shape or a
     // funding-barred one is a CONFIGURATION error, named here and before any
@@ -230,6 +266,7 @@ pub(crate) async fn ws_upgrade(
         ticket,
         duration_ms: query.duration_ms,
         passenger,
+        client_session: query.session.clone(),
     };
     ws.max_message_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
         .max_frame_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
@@ -466,9 +503,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
     // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for
     // as long as this connection lives.
-    let lane_id = state
-        .run
-        .bind_lanes(lanes.clone(), session.passenger.account_id.as_str());
+    let lane_id = state.run.bind_lanes(
+        lanes.clone(),
+        session.passenger.account_id.as_str(),
+        session.client_session.as_deref(),
+    );
     // ATTACHED from here, which is what un-freezes the account and puts it back
     // in the sweep. Bound AFTER the lane, so anything the resume retires has a
     // lane to be delivered on; a returning socket learns what its absence cost

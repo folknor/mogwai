@@ -354,8 +354,21 @@ default no longer sets the venue's memory bound; an oversized frame ends the
 connection. A WebSocket carries its whole binding in the upgrade query string,
 which `deny_unknown_fields` rejects any other key on: the optional, case-exact
 `symbol` names its one river, the optional `speed` names the pacing multiple,
-the optional `duration_ms` names a passenger-local simulated deadline, and the
-optional `account` names the ledger it trades.
+the optional `duration_ms` names a passenger-local simulated deadline, the
+optional `account` names the ledger it trades, and the optional `session` names
+the CLIENT trading it.
+
+That last one exists because a client is not a socket. An account is on at most
+one client at a time and a second claim evicts the incumbent - which is how a
+reconnect works, since the venue cannot distinguish a returning client from a
+stranger - but one client legitimately holds several sockets on one ledger, and a
+nautilus host always does: its data and execution legs name one account by
+construction. Sockets presenting the same session are that one client and
+coexist; a different session evicts every socket the old client held, and so
+does an absent one, which keeps silence meaning what it always meant. The venue
+reads nothing into the string beyond equality, and `mogwai-adapter` mints one per
+PROCESS from the pid and start instant so a host configures nothing and a
+restarted worker still reclaims its ledger from the sockets of the dead one.
 Absent, they default to the run's boot symbol and the configured `speed`, and
 to an indefinite passenger. The key is known before any tasks or bytes exist,
 a refusal - an illegal label, a shape that does not validate, a funding-barred

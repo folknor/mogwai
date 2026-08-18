@@ -558,15 +558,22 @@ impl Run {
     /// the ledger or a clean one.
     ///
     /// The whole reconnection story in one call. A second socket presenting a
-    /// seated id is indistinguishable from that client returning, so the venue
-    /// does not try to tell them apart: the incumbent is closed and the newcomer
-    /// gets the account. Whether it gets that account's HISTORY is the operator's
-    /// `reset_account_on_reconnect` choice, reported in the readiness record so
-    /// nobody has to guess which way a venue is set.
+    /// seated id under a DIFFERENT session is indistinguishable from that client
+    /// returning, so the venue does not try to tell them apart: the incumbent is
+    /// closed and the newcomer gets the account. Whether it gets that account's
+    /// HISTORY is the operator's `reset_account_on_reconnect` choice, reported
+    /// in the readiness record so nobody has to guess which way a venue is set.
+    ///
+    /// A socket presenting the same session as a sitting one is the SAME CLIENT
+    /// dialling again - a nautilus host's data and execution legs, which name
+    /// one account by construction - so it neither evicts nor resets. Resetting
+    /// there would discard the ledger the client's own first socket is trading
+    /// on, which is the reset knob eating a live book rather than a stale one.
     pub(crate) fn seat(
         &self,
         account_id: &mogwai_protocol::AccountId,
         claimed: bool,
+        session: Option<&str>,
     ) -> Arc<Passenger> {
         // ONLY A CLAIMED ACCOUNT EVICTS. Naming an id is a statement about
         // identity - "this ledger is mine, hand it over" - and eviction is the
@@ -577,8 +584,12 @@ impl Run {
         // client opening two sockets on two symbols names no account on either,
         // so both land on the default and the second closed the first - which
         // is a client evicting itself.
+        // Read BEFORE the eviction, which may retire lanes: this asks whether
+        // the claiming client is already here, and a lane list the eviction has
+        // already pruned could no longer answer it.
+        let rejoining = claimed && self.has_client_on(account_id.as_str(), session);
         let displaced = if claimed {
-            self.evict_account(account_id.as_str())
+            self.evict_account(account_id.as_str(), session)
         } else {
             0
         };
@@ -590,7 +601,7 @@ impl Run {
                 "a new connection claimed a seated account",
             );
         }
-        if claimed && self.reset_account_on_reconnect {
+        if claimed && !rejoining && self.reset_account_on_reconnect {
             self.reopen(account_id);
         }
         self.passenger(account_id)
@@ -877,11 +888,17 @@ impl Run {
     /// here. That is what lets `process_order_cmd` - which is handed the lanes
     /// and nothing else naming the connection - record who owns an order it just
     /// saw accepted.
-    pub(crate) fn bind_lanes(&self, lanes: ExecLanes, account_id: &str) -> u64 {
+    pub(crate) fn bind_lanes(
+        &self,
+        lanes: ExecLanes,
+        account_id: &str,
+        session: Option<&str>,
+    ) -> u64 {
         let id = lanes.id();
         self.locked_lanes().push(BoundLane {
             id,
             account_id: account_id.to_owned(),
+            session: session.map(str::to_owned),
             lanes,
         });
         id
@@ -962,13 +979,28 @@ impl Run {
         events
     }
 
-    /// Close every connection already trading `account_id`, because a newer one
-    /// has claimed it.
+    /// Close every connection already trading `account_id` under a DIFFERENT
+    /// session than the newcomer's, because a newer client has claimed it.
     ///
-    /// AN ACCOUNT IS ON AT MOST ONE RIVER AT A TIME. Two sockets on one id would
-    /// be one ledger read and written from two places, with a trailing drawdown
-    /// computed across two instruments, so the venue evicts rather than
+    /// AN ACCOUNT IS ON AT MOST ONE CLIENT AT A TIME. Two clients on one id
+    /// would be one ledger read and written from two places, with a trailing
+    /// drawdown computed across two instruments, so the venue evicts rather than
     /// admitting the second alongside the first.
+    ///
+    /// A CLIENT IS NOT A SOCKET, which is what `session` exists to say. One
+    /// client routinely holds several sockets on one ledger - a nautilus host
+    /// dials `/ws` twice, once for market data and once for execution, and both
+    /// legs name the same account by construction - and evicting on the bare id
+    /// would make that client evict itself on its second dial. A session id is
+    /// the client's own, stable across its sockets and across their redials, and
+    /// fresh in a restarted process: sockets presenting the SAME one are one
+    /// client and coexist, and a different one is a new client and evicts.
+    ///
+    /// AN ABSENT SESSION ALWAYS EVICTS, which keeps the pre-session contract
+    /// exactly: a client that says nothing about its identity has made no claim
+    /// to be the incumbent, and reading silence as "same client" would let a
+    /// stranger quietly share a ledger. So the coexistence is opt-in and the
+    /// safe reading is the default.
     ///
     /// The evicted socket is closed NORMALLY, not faulted: from the venue's side
     /// a second connection presenting an id is indistinguishable from that
@@ -977,11 +1009,27 @@ impl Run {
     /// would evict whatever evicted it.
     ///
     /// Returns how many were displaced, so the caller can say so.
-    pub(crate) fn evict_account(&self, account_id: &str) -> usize {
+    /// Whether a socket of THIS client is already bound to `account_id`. A
+    /// client that named no session is never "already here": silence is not a
+    /// claim to be the incumbent, which is the same reading
+    /// [`Run::evict_account`] takes of it.
+    pub(crate) fn has_client_on(&self, account_id: &str, session: Option<&str>) -> bool {
+        let Some(session) = session else {
+            return false;
+        };
+        self.locked_lanes().iter().any(|bound| {
+            bound.account_id == account_id && bound.session.as_deref() == Some(session)
+        })
+    }
+
+    pub(crate) fn evict_account(&self, account_id: &str, session: Option<&str>) -> usize {
+        let same_client = |bound: &BoundLane| {
+            session.is_some_and(|session| bound.session.as_deref() == Some(session))
+        };
         let displaced: Vec<BoundLane> = self
             .locked_lanes()
             .iter()
-            .filter(|bound| bound.account_id == account_id)
+            .filter(|bound| bound.account_id == account_id && !same_client(bound))
             .cloned()
             .collect();
         for bound in &displaced {
@@ -990,7 +1038,7 @@ impl Run {
                     .lanes
                     .send_close(crate::admission::CloseSpec::evicted(format!(
                         "another connection claimed account {account_id}; a ledger is never read \
-                     from two sockets at once"
+                     from two clients at once"
                     ))),
             );
         }
@@ -999,7 +1047,7 @@ impl Run {
         // instant it takes them to notice the close, or its first batch would
         // be delivered to a socket that is on its way out.
         self.locked_lanes()
-            .retain(|bound| bound.account_id != account_id);
+            .retain(|bound| bound.account_id != account_id || same_client(bound));
         displaced.len()
     }
 
@@ -1149,6 +1197,11 @@ impl std::fmt::Display for AccountRefusal {
 pub(crate) struct BoundLane {
     pub(crate) id: u64,
     pub(crate) account_id: String,
+    /// The CLIENT this socket belongs to, as the client named itself on the
+    /// upgrade. `None` for a socket that named none, which is every socket
+    /// predating the carrier and every one that has no opinion. See
+    /// [`Run::evict_account`] for what it buys and why absent means "evict".
+    pub(crate) session: Option<String>,
     pub(crate) lanes: ExecLanes,
 }
 
@@ -1360,7 +1413,7 @@ mod tests {
         );
 
         let (first, _first_rx) = crate::admission::ExecLanes::detached();
-        let first_id = run.bind_lanes(first, account.as_str());
+        let first_id = run.bind_lanes(first, account.as_str(), None);
         passenger.attach();
         assert!(!passenger.is_frozen());
 
@@ -1368,7 +1421,7 @@ mod tests {
         // freeze an account somebody is still reading. This is the eviction
         // shape, where the incumbent is retired while the newcomer binds.
         let (second, _second_rx) = crate::admission::ExecLanes::detached();
-        let second_id = run.bind_lanes(second, account.as_str());
+        let second_id = run.bind_lanes(second, account.as_str(), None);
         run.release_lanes(first_id);
         assert!(
             !passenger.is_frozen(),
@@ -1453,6 +1506,74 @@ mod tests {
             .expect("a new cadence on a river nobody is riding is not a conflict");
     }
 
+    /// A CLIENT IS NOT A SOCKET. The nautilus host that drives this venue holds
+    /// two sockets on one ledger - data and execution - and both name the same
+    /// account, so eviction keyed on the bare id made the host's second dial
+    /// disconnect its own first. Sockets presenting one session are one client
+    /// and coexist; a different session is a different client and takes over.
+    #[test]
+    fn one_clients_sockets_share_a_ledger_and_a_stranger_evicts_them_all() {
+        let run = run(1_000, 400, None);
+        let account = mogwai_protocol::AccountId::parse("CLAUDETTE-07").unwrap();
+
+        let (data, _data_rx) = crate::admission::ExecLanes::detached();
+        let (exec, _exec_rx) = crate::admission::ExecLanes::detached();
+        run.seat(&account, true, Some("worker-1"));
+        run.bind_lanes(data, account.as_str(), Some("worker-1"));
+        assert_eq!(
+            run.evict_account(account.as_str(), Some("worker-1")),
+            0,
+            "the host's second leg is the same client, not a claimant"
+        );
+        run.seat(&account, true, Some("worker-1"));
+        run.bind_lanes(exec, account.as_str(), Some("worker-1"));
+        assert_eq!(
+            run.bound_lanes()
+                .iter()
+                .filter(|bound| bound.account_id == "CLAUDETTE-07")
+                .count(),
+            2,
+            "both legs are reading the ledger they were configured for"
+        );
+
+        // A RESTARTED worker is a genuinely new client, and it takes the whole
+        // ledger: both stale sockets go, which is the reconnection story the
+        // eviction exists for.
+        assert_eq!(
+            run.evict_account(account.as_str(), Some("worker-2")),
+            2,
+            "a different client displaces every socket of the old one"
+        );
+        assert!(
+            run.bound_lanes()
+                .iter()
+                .all(|bound| bound.account_id != "CLAUDETTE-07"),
+        );
+    }
+
+    /// An absent session keeps the pre-session contract exactly: silence is not
+    /// a claim to be the incumbent, so it always evicts and is always evicted.
+    #[test]
+    fn a_socket_naming_no_session_evicts_and_is_evicted() {
+        let run = run(1_000, 400, None);
+        let account = mogwai_protocol::AccountId::parse("QUIET-001").unwrap();
+        let (first, _first_rx) = crate::admission::ExecLanes::detached();
+        let (second, _second_rx) = crate::admission::ExecLanes::detached();
+
+        run.bind_lanes(first, account.as_str(), None);
+        assert_eq!(
+            run.evict_account(account.as_str(), None),
+            1,
+            "an unidentified newcomer takes the ledger, as it always did"
+        );
+        run.bind_lanes(second, account.as_str(), Some("worker-1"));
+        assert_eq!(
+            run.evict_account(account.as_str(), None),
+            1,
+            "and an unidentified newcomer displaces an identified incumbent too"
+        );
+    }
+
     /// The TTL, which is the only thing that ever removes an account: a frozen
     /// ledger is otherwise state with no lifecycle.
     #[test]
@@ -1463,7 +1584,7 @@ mod tests {
         run.passenger(&abandoned);
         let held_passenger = run.passenger(&held);
         let (lanes, _rx) = crate::admission::ExecLanes::detached();
-        run.bind_lanes(lanes, held.as_str());
+        run.bind_lanes(lanes, held.as_str(), None);
         held_passenger.attach();
 
         // A TTL nothing has outlived yet spares even the unattended account,

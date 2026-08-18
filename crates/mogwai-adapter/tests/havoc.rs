@@ -63,6 +63,7 @@ async fn subscribed_data_client(
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
+        session: None,
         havoc,
         expected_run_seed: None,
     };
@@ -119,6 +120,7 @@ async fn connect_data_client(
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
+        session: None,
         havoc,
         expected_run_seed: None,
     };
@@ -240,6 +242,7 @@ async fn submit_stop_exec_client(
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
+        session: None,
         havoc: Some(havoc),
         ..MogwaiExecClientConfig::default()
     };
@@ -335,6 +338,7 @@ async fn ships_server_havoc() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
+        session: None,
         havoc: Some(havoc),
         expected_run_seed: None,
     };
@@ -536,6 +540,7 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
+        session: None,
         havoc: None,
         // Bound to a run this stub is not serving.
         expected_run_seed: Some(7),
@@ -575,14 +580,20 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
 /// live client consuming a stranger's market data as though it were its own
 /// venue's - which silently corrupts a forward run rather than failing it.
 ///
-/// WHAT IS NOT REACHABLE, and it is why the original framing of this question
-/// cannot be answered as posed: the account id cannot be "stamped onto the
-/// stranger's state", because this adapter never discloses one. It POSTs no
-/// account and its `/ws` query carries only an optional `symbol`; the account
-/// id it holds is a NAUTILUS-side label. So the exposure is what the client
-/// CONSUMES, not what it reveals. If the adapter ever adopts the account
-/// surface, this test is where the disclosure half gets asserted - the stub
-/// records each upgrade's request line for exactly that.
+/// THE DISCLOSURE HALF IS NOW LIVE, and this test is where it was reserved to
+/// be asserted. The original framing said the account id could not be "stamped
+/// onto the stranger's state" because the adapter disclosed none - its `/ws`
+/// query carried only an optional `symbol` and the id was a nautilus-side
+/// label. That stopped being true when the adapter started naming its ledger,
+/// which it must, or every worker attached to a shared venue seats one book.
+///
+/// So the exposure of a blind dial is now what the client REVEALS as well as
+/// what it consumes: dialling a stranger OPENS AN ACCOUNT THERE under this
+/// run's id, and trades it. That does not change the remedy - `expected_run_seed`
+/// is what makes a blind dial impossible, and it is set by `for_run`, which is
+/// the constructor a launched or attached venue always has the record for - but
+/// it does raise the cost of not setting it, and this test is the measurement
+/// rather than the assumption.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
@@ -597,6 +608,7 @@ async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
         account_id: AccountId::from("MOGWAI-042"),
         base_url,
         symbol: None,
+        session: None,
         havoc: None,
         // The undecided default: no identity to check against.
         expected_run_seed: None,
@@ -617,14 +629,16 @@ async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
         !requests.is_empty(),
         "the stranger completed at least one upgrade"
     );
-    // The disclosure half, pinned as the NEGATIVE it currently is: nothing the
-    // client sends names an account. If this ever starts failing, the adapter
-    // has adopted the account surface and the exposure grew from what a run
-    // consumes to what it reveals - which is the moment the blind default needs
-    // re-deciding rather than merely documenting.
+    // The disclosure half, pinned as the POSITIVE it now is: the upgrade names
+    // this run's ledger, so a blind dial opens that account on a stranger's
+    // venue. Asserted on the CONFIGURED id rather than on the substring
+    // `account`, so a future query key that merely contains the word cannot
+    // stand in for the disclosure this is measuring.
     assert!(
-        requests.iter().all(|line| !line.contains("account")),
-        "the adapter discloses no account id today: {requests:?}"
+        requests
+            .iter()
+            .all(|line| line.contains("account=MOGWAI-042")),
+        "every upgrade names the configured ledger: {requests:?}"
     );
 }
 
@@ -645,6 +659,7 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
+        session: None,
         havoc: None,
         expected_run_seed: Some(7),
     };
@@ -679,6 +694,7 @@ async fn conn_reconnect_respects_max_attempts() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
+        session: None,
         havoc: Some(conn_havoc(ConnHavoc {
             reconnect_max_attempts: Some(3),
             reconnect_delay_initial_ms: 30,
