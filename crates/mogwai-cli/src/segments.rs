@@ -53,6 +53,12 @@ pub(crate) struct CutArgs {
     /// Timezone authority the session calendar resolves against.
     #[arg(long, default_value = "analysis/tz-america-chicago-2026c.json")]
     tz_authority: PathBuf,
+    /// Drop a session carrying fewer ticks than this fraction of the month's
+    /// median session. Holiday half-sessions are non-empty but compose as
+    /// stubs, and sampling draws them as often as a full day. 0 keeps every
+    /// non-empty slice.
+    #[arg(long, default_value_t = mogwai_lab::segments::DEFAULT_MIN_TICKS_FRACTION)]
+    min_ticks_fraction: f64,
     /// Where to write the library JSON.
     #[arg(long)]
     out: PathBuf,
@@ -135,7 +141,24 @@ fn cut(args: CutArgs) -> anyhow::Result<()> {
         window.name,
         dir.display()
     );
-    let library = segments::cut(&dir, &args.symbol, &args.month, window, &frame)?;
+    let (library, dropped) = segments::cut_with(
+        &dir,
+        &args.symbol,
+        &args.month,
+        window,
+        &frame,
+        args.min_ticks_fraction,
+    )?;
+
+    // Named, not counted. A month losing a session is something the operator
+    // has to be able to check against the calendar, and a bare count cannot be
+    // checked against anything.
+    for drop in &dropped {
+        eprintln!(
+            "dropped {} ({} ticks): {}",
+            drop.trade_date, drop.trade_count, drop.reason
+        );
+    }
 
     // The work size, on stderr as a sidecar-shaped counter: a wall alone cannot
     // distinguish a faster cut from a smaller one.
@@ -148,6 +171,7 @@ fn cut(args: CutArgs) -> anyhow::Result<()> {
     eprintln!("segments_cut={}", library.segments.len());
     eprintln!("segment_ticks={ticks}");
     eprintln!("segments_with_measured_open_gap={gapped}");
+    eprintln!("segments_dropped_as_thin={}", dropped.len());
 
     if let Some(parent) = args.out.parent()
         && !parent.as_os_str().is_empty()

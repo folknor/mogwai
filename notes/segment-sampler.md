@@ -78,6 +78,27 @@ rather than a calendar, so a REAL but thin session would survive the
 same rule. A caller wanting only genuine sessions needs a
 minimum-trade threshold, not this assumption.
 
+All four session windows of the product statement are cuttable:
+`asia`, `london`, `ny-morning` (09:00 New York to lunch, with the
+lead-in the statement asks for) and `ny-afternoon` (10:30 to the cash
+close). The fifth config - a 4-year full-calendar tape, all sessions -
+is not built and is a different shape: it wants segments SEQUENCED on a
+real calendar rather than looped, which is the composer's other mode.
+
+A window overlapping the 15:15 halt is refused at the window table. It
+would otherwise carry the halt's hole invisibly into every loop, and
+nothing downstream could detect it.
+
+THIN SESSIONS ARE DROPPED, and this was a real find rather than a
+precaution. The 2026-04-03 ny-morning slice is Good Friday: 4,408 ticks
+against a 400,000-tick typical day, non-empty and so invisible to the
+empty-segment rule, and sampled uniformly it would inject a
+thirty-minute stub into an endless tape as often as a full session. The
+rule is a fraction of the month's median session, defaulting to a fifth,
+and every drop is named on stderr. This is exactly the failure the
+earlier "a real but thin session would survive the same rule" caveat
+predicted, found by cutting a second window rather than by reasoning.
+
 STILL OPEN from the list below: the seam is one second of dead time by
 default rather than real calendar time, since an endless-Asia tape
 elides the fifteen non-Asia hours by construction. Feature injectors

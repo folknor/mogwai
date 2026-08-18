@@ -126,6 +126,75 @@ required eventually, since both modes must be supported.
 
 ## Open issues
 
+- OWNER GATE PENDING: LOOK AT THE ENDLESS-ASIA CHART. Slice 1 of the
+  session-segment sampler landed 2026-08-18 and its acceptance is the owner's
+  eye on a rendered chart, which is a standing gate for any change to tape
+  generation. The owner was at work and on a different host when it landed, so
+  nothing has been judged yet. NOTHING FURTHER SHOULD BE BUILT ON THE COMPOSED
+  TAPE UNTIL THIS IS LOOKED AT - in particular the serving wiring, which is a
+  real refactor (`CheckpointIndex` is typed on `GeneratedSource`, so a composed
+  river means generalizing the checkpoint and resume path) and must not go ahead
+  of the gate.
+
+  FIVE CHARTS are rendered and waiting, all MNQ 2026-04 at seed 42. They are
+  gitignored and live on the build host only, so they either get viewed there
+  or regenerated locally.
+
+  | chart | what it is | bars |
+  |---|---|---|
+  | `analysis/out/asia-endless.html` | endless Asia, reopen gaps ON | 11,889 |
+  | `analysis/out/asia-endless-nogaps.html` | the same tape, gaps OFF - the A/B | 11,889 |
+  | `analysis/out/london-endless.html` | endless London | 8,237 |
+  | `analysis/out/ny-morning-endless.html` | endless NY morning, 09:00 to lunch | 1,681 |
+  | `analysis/out/ny-afternoon-endless.html` | endless NY afternoon, 10:30 to close | 2,824 |
+
+  START WITH THE FIRST TWO SIDE BY SIDE. They are the same segments, the same
+  seed, differing only in whether the measured reopen gap lands at each seam,
+  so the difference between them IS the feature this slice was built for.
+
+  Regenerating one, end to end - substitute the window name and the library
+  path for the others:
+
+  ```text
+  brokkr run mogwai -- segments cut --symbol MNQ --month 2026-04 --window asia --out analysis/out/asia-mnq-2026-04.json
+  brokkr run mogwai -- segments tape --library analysis/out/asia-mnq-2026-04.json --type bars --interval-s 60 --ticks 3000000 --seed 42 --out analysis/out/asia-endless.csv
+  python3 analysis/plot_tape.py --csv analysis/out/asia-endless.csv --out analysis/out/asia-endless.html --title "Endless Asia, MNQ 2026-04 segments, seed 42"
+  ```
+
+  The cut needs the delivered corpus at
+  `research/market-data/databento/mnqv/2026-04.manifest.tbbo`, which is out of
+  git. What April yielded per window: asia 22 segments and 2,976,377 ticks,
+  london 22 and 2,492,576, ny-morning 21 and 8,396,328, ny-afternoon 21 and
+  9,572,450.
+
+  WHAT TO LOOK FOR, against the observed defect list in
+  `notes/segment-sampler.md`. Defect 2 is the one this slice was meant to fix:
+  reopen gaps should now be VISIBLE at the segment seams, drawn from real
+  measurements rather than a model - the largest measured gap in April is
+  -1.31 %, about 261 points at a 20,000 level, which is the same scale as the
+  owner's 2026-04-10 example. The A/B is the same compose with
+  `--no-reopen-gaps`, which yields a continuous tape with no gaps at all, the
+  way the fitted generator behaves today. Worth judging at the same time:
+  whether the within-session texture reads as real, since carrying that texture
+  from real data is the whole argument for resampled segments over generated
+  ones.
+
+  Times in these charts are NOT wall-clock UTC: a composed tape starts at unix
+  ns 0 and elides the hours between one session and the next, so the x axis is
+  composed tape time, not a calendar. One Asia segment is about nine hours of
+  it, one NY-morning segment three.
+
+  A LATERAL FINDING WORTH THE OWNER'S EYE, surfaced by cutting all four
+  windows. The per-hour trade density across windows is enormously uneven in
+  the real data: NY afternoon carries 9,572,450 ticks in 5.5 hours against
+  Asia's 2,976,377 in 9, which is roughly a 5x ratio per hour. That is the
+  observed shape of defect 3 - the suspicion that generated volume looks
+  uniform across all sessions. Measuring the generator against this was
+  explicitly waived by the owner on 2026-08-18 and is NOT being carried as
+  work; it is recorded only because the segment cut produced the observed side
+  of the comparison for free, and a future decision about the session profile
+  would otherwise have to buy it again.
+
 - NAUTILUS HAS NO CHANNEL FOR A DECLARED FEED GAP, so mogwai's `FeedLagged`
   can only reach a host as a log line. CROSS-REPO, and written for a reader who
   has not seen the bug loop.

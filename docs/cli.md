@@ -338,8 +338,20 @@ segment library:
 brokkr run mogwai -- segments cut --symbol MNQ --month 2026-04 --window asia --out analysis/out/asia-mnq-2026-04.json
 ```
 
-`--window` is `asia` (the first nine hours of the CME session, 17:00 to 02:00
-exchange-local) or `london` (the six after it). The corpus directory is
+`--window` is one of four, each stated in EXCHANGE-LOCAL time and anchored on
+the trade date's own 17:00 reopen, so all four are DST-correct without a second
+calendar:
+
+| window | exchange-local | New York |
+|---|---|---|
+| `asia` | 17:00 to 02:00 | 18:00 to 03:00 |
+| `london` | 02:00 to 08:00 | 03:00 to 09:00 |
+| `ny-morning` | 08:00 to 11:00 | 09:00 to 12:00, cash open with a lead-in, to lunch |
+| `ny-afternoon` | 09:30 to 15:00 | 10:30 to 16:00, to the cash close |
+
+A window overlapping the 15:15 trading halt is REFUSED rather than cut: it
+would carry the halt's fifteen-minute hole invisibly into every loop of the
+composed tape. The corpus directory is
 resolved under `--root` from the conventional
 `<symbol>v/<month>.<state>.tbbo` layout, or named outright with `--dir`. The
 library holds NO absolute prices: every segment is a sequence of log returns
@@ -347,6 +359,13 @@ against its own previous trade, plus one measured `open_gap_ret` recording the
 jump from the last print before the window to the first print inside it. Stderr
 reports the work size - segments cut, ticks in them, and how many carried a
 measured open gap.
+
+A holiday half-session is dropped, by name, on stderr. `--min-ticks-fraction`
+is the rule: a session carrying less than that fraction of the month's MEDIAN
+session is a stub rather than a session, and sampling would otherwise draw it
+as often as a full day. The 2026-04-03 `ny-morning` slice is the worked
+example - Good Friday, 4,408 ticks against a 400,000-tick typical day, non-empty
+and so invisible to every other rule. Pass 0 to keep every non-empty slice.
 
 `segments tape` composes that library into an endless single-session tape and
 dumps it as CSV:

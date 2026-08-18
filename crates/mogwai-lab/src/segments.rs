@@ -80,8 +80,37 @@ pub const LONDON: SessionWindow = SessionWindow {
     length_ns: 6 * NS_PER_HOUR,
 };
 
+/// NY morning: exchange-local 08:00 to 11:00, which is 09:00 to 12:00 New York
+/// - the cash open with a half-hour lead-in, run to NY lunch.
+///
+/// The lead-in is the point, not padding: the direction note asks for an NY
+/// tape that starts before the open so a strategy can PREPARE, and the cash
+/// open at 08:30 local sits half an hour into this window rather than at its
+/// edge. That also puts the owner's defect 1 - the generator smearing the
+/// 09:30 New York open across its hour because the session profile is hourly -
+/// inside a window where it can actually be looked at.
+pub const NY_MORNING: SessionWindow = SessionWindow {
+    name: "ny-morning",
+    offset_ns: 15 * NS_PER_HOUR,
+    length_ns: 3 * NS_PER_HOUR,
+};
+
+/// NY afternoon: exchange-local 09:30 to 15:00, which is 10:30 to 16:00 New
+/// York - the second half of the cash session, ending at the cash close.
+///
+/// It ends at the CASH close (15:00 local), not the session close (16:00
+/// local), and so stops an hour and a quarter short of the 15:15 halt. A
+/// window that ran to the session close would carry the halt's fifteen-minute
+/// hole and the settlement flurry, which is a different tape from the one this
+/// name promises.
+pub const NY_AFTERNOON: SessionWindow = SessionWindow {
+    name: "ny-afternoon",
+    offset_ns: 16 * NS_PER_HOUR + NS_PER_HOUR / 2,
+    length_ns: 5 * NS_PER_HOUR + NS_PER_HOUR / 2,
+};
+
 /// The windows this module can cut by name.
-pub const WINDOWS: [SessionWindow; 2] = [ASIA, LONDON];
+pub const WINDOWS: [SessionWindow; 4] = [ASIA, LONDON, NY_MORNING, NY_AFTERNOON];
 
 /// Resolves a window by its `name`.
 pub fn window_by_name(name: &str) -> LabResult<SessionWindow> {
@@ -267,6 +296,37 @@ fn nano_log_return(from: i64, to: i64) -> LabResult<i64> {
 /// One pass matters: a delivered month is multiple GB decompressed, so the
 /// windows are resolved per trade date up front and the stream is classified
 /// against them as it flows, rather than re-read once per session.
+/// A segment kept out of the library, and why. Reported rather than silently
+/// discarded: a month that loses half its sessions to a thin-session rule is
+/// something the operator has to see.
+#[derive(Clone, Debug)]
+pub struct DroppedSegment {
+    pub trade_date: String,
+    pub trade_count: usize,
+    pub reason: &'static str,
+}
+
+/// The default thin-session threshold, as a fraction of the month's MEDIAN
+/// segment size.
+///
+/// A holiday half-session is the case this exists for. CME equity index futures
+/// trade a shortened Good Friday, so the 2026-04-03 `ny-morning` slice carries
+/// 4,408 ticks against a 400,000-tick typical day - non-empty, so the
+/// empty-segment rule keeps it, and indistinguishable from a real session to
+/// everything downstream. Sampled uniformly it would then inject a
+/// thirty-minute stub into an endless tape as often as a full session, which is
+/// a realism defect the composer cannot detect and the owner would see on a
+/// chart.
+///
+/// A fraction of the median rather than an absolute count, because the right
+/// number differs by an order of magnitude between windows (an Asia hour and an
+/// NY hour are not the same market) and by instrument. A fifth is
+/// deliberately loose: it separates a half-session stub from a quiet-but-real
+/// day without pretending to know where a session stops being a session.
+pub const DEFAULT_MIN_TICKS_FRACTION: f64 = 0.2;
+
+/// Cuts every `window` slice of `month` out of the TBBO files under
+/// `source_dir`, in ONE streaming pass, keeping the default thin-session rule.
 pub fn cut(
     source_dir: &Path,
     symbol: &str,
@@ -274,6 +334,33 @@ pub fn cut(
     window: SessionWindow,
     frame: &ScheduleFrame,
 ) -> LabResult<SegmentLibrary> {
+    cut_with(
+        source_dir,
+        symbol,
+        month,
+        window,
+        frame,
+        DEFAULT_MIN_TICKS_FRACTION,
+    )
+    .map(|(library, _)| library)
+}
+
+/// [`cut`], with the thin-session threshold exposed and the dropped segments
+/// returned. `min_ticks_fraction` of 0 keeps every non-empty slice.
+pub fn cut_with(
+    source_dir: &Path,
+    symbol: &str,
+    month: &str,
+    window: SessionWindow,
+    frame: &ScheduleFrame,
+    min_ticks_fraction: f64,
+) -> LabResult<(SegmentLibrary, Vec<DroppedSegment>)> {
+    if !(0.0..1.0).contains(&min_ticks_fraction) {
+        return Err(LabError::refusal(format!(
+            "thin-session fraction {min_ticks_fraction} is not in [0, 1); at 1 or above \
+             the median session drops itself and the library empties"
+        )));
+    }
     let paths = data_files(source_dir)?;
     let bounds = window_bounds(month, window, frame)?;
 
@@ -362,10 +449,47 @@ pub fn cut(
     if let Some(cutting) = open.take() {
         done.push(cutting.finish());
     }
+    let mut dropped: Vec<DroppedSegment> = Vec::new();
+
     // An empty segment cannot be composed and would fail `validate` on read;
     // drop it here, at the site that knows a session simply had no prints in
-    // the window, rather than failing the whole cut.
+    // the window, rather than failing the whole cut. Weekends and full holidays
+    // leave this way and are NOT reported: a Saturday is not a session that
+    // went missing, it is a day the window table never should have offered.
     done.retain(|s| s.trade_count > 0);
+
+    // The thin-session rule, over the median of what survived. Computed AFTER
+    // the empty drop so the closed days cannot drag the median down and take
+    // real sessions with them.
+    let threshold = {
+        let mut counts: Vec<usize> = done.iter().map(|s| s.trade_count).collect();
+        counts.sort_unstable();
+        let median = counts.get(counts.len() / 2).copied().unwrap_or(0);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a session tick count is far inside f64's exact integer range"
+        )]
+        let scaled = median as f64 * min_ticks_fraction;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the fraction is in [0, 1) and the median is non-negative"
+        )]
+        let threshold = scaled as usize;
+        threshold
+    };
+    done.retain(|segment| {
+        if segment.trade_count >= threshold {
+            return true;
+        }
+        dropped.push(DroppedSegment {
+            trade_date: segment.trade_date.clone(),
+            trade_count: segment.trade_count,
+            reason: "thinner than the month's thin-session threshold; a holiday \
+                     half-session composes as a stub, not as a session",
+        });
+        false
+    });
 
     let library = SegmentLibrary {
         doc: format!(
@@ -392,7 +516,7 @@ pub fn cut(
         segments: done,
     };
     library.validate()?;
-    Ok(library)
+    Ok((library, dropped))
 }
 
 /// `[start, end)` UTC-ns bounds of `window` for every trade date in `month`.
@@ -433,6 +557,18 @@ fn window_bounds(
             return Err(LabError::refusal(format!(
                 "window {} runs past the {label} session close; the window table and the \
                  session calendar disagree",
+                window.name
+            )));
+        }
+        // A window overlapping the daily halt would carry its fifteen-minute
+        // hole INVISIBLY: the cut would still produce a non-empty segment, the
+        // composer would loop it happily, and the only symptom would be a dead
+        // stretch in the middle of every looped session that no test asks
+        // about. Refuse at the table instead, where the window is defined.
+        if start < bounds.halt_end_ns && end > bounds.halt_start_ns {
+            return Err(LabError::refusal(format!(
+                "window {} overlaps the {label} trading halt; a window spanning the halt \
+                 would silently carry its hole into every loop of the composed tape",
                 window.name
             )));
         }
@@ -530,6 +666,71 @@ mod tests {
         assert_eq!(ASIA.offset_ns + ASIA.length_ns, LONDON.offset_ns);
     }
 
+    /// The four windows are stated as offsets from the 17:00 reopen, which is
+    /// not how anyone thinks about them. This pins each one back to the civil
+    /// exchange-local hours its name and doc claim, so a future edit to an
+    /// offset cannot quietly move "the NY open" somewhere else.
+    #[test]
+    fn every_window_lands_on_the_exchange_local_hours_its_name_claims() {
+        let local_hour = |offset_ns: u64| {
+            // 17:00 local plus the offset, wrapped to a civil day.
+            let minutes = 17 * 60 + offset_ns / (NS_PER_HOUR / 60);
+            (minutes / 60 % 24, minutes % 60)
+        };
+        assert_eq!(local_hour(ASIA.offset_ns), (17, 0), "asia opens at 17:00");
+        assert_eq!(
+            local_hour(ASIA.offset_ns + ASIA.length_ns),
+            (2, 0),
+            "asia ends at 02:00"
+        );
+        assert_eq!(local_hour(LONDON.offset_ns), (2, 0));
+        assert_eq!(local_hour(LONDON.offset_ns + LONDON.length_ns), (8, 0));
+        // 08:00 local is 09:00 New York: the cash open with a lead-in.
+        assert_eq!(local_hour(NY_MORNING.offset_ns), (8, 0));
+        assert_eq!(
+            local_hour(NY_MORNING.offset_ns + NY_MORNING.length_ns),
+            (11, 0),
+            "ny-morning ends at NY lunch"
+        );
+        assert_eq!(local_hour(NY_AFTERNOON.offset_ns), (9, 30));
+        assert_eq!(
+            local_hour(NY_AFTERNOON.offset_ns + NY_AFTERNOON.length_ns),
+            (15, 0),
+            "ny-afternoon ends at the CASH close, not the session close"
+        );
+    }
+
+    #[test]
+    fn every_shipped_window_clears_the_halt_and_the_session_close() {
+        let authority = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../analysis/tz-america-chicago-2026c.json");
+        let frame = ScheduleFrame::stage_m(&authority).expect("frozen authority");
+        for window in WINDOWS {
+            window_bounds("2026-04", window, &frame)
+                .unwrap_or_else(|e| panic!("shipped window {} must be cuttable: {e}", window.name));
+        }
+    }
+
+    /// The halt guard, checked against a window built to trip it rather than
+    /// against a shipped one - a shipped window that clears the halt proves
+    /// only that it clears the halt.
+    #[test]
+    fn a_window_spanning_the_halt_is_refused() {
+        let authority = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../analysis/tz-america-chicago-2026c.json");
+        let frame = ScheduleFrame::stage_m(&authority).expect("frozen authority");
+        // 14:00 to 16:00 exchange-local, straight through the 15:15 halt.
+        let straddles = SessionWindow {
+            name: "straddles-halt",
+            offset_ns: 21 * NS_PER_HOUR,
+            length_ns: 2 * NS_PER_HOUR,
+        };
+        let err = window_bounds("2026-04", straddles, &frame)
+            .expect_err("a window over the halt is refused")
+            .to_string();
+        assert!(err.contains("overlaps"), "{err}");
+    }
+
     #[test]
     fn window_by_name_refuses_an_unknown_window() {
         assert_eq!(window_by_name("asia").unwrap(), ASIA);
@@ -591,6 +792,19 @@ mod tests {
         let again: SegmentLibrary = serde_json::from_str(&text).expect("round trip");
         again.validate().expect("a valid round trip");
         assert_eq!(again.segments.len(), library.segments.len());
+    }
+
+    #[test]
+    fn the_thin_session_fraction_is_range_checked() {
+        let dir = Path::new("/nonexistent");
+        // The range check must fire BEFORE any file is opened, otherwise a bad
+        // fraction reports a missing corpus and hides the real fault.
+        for bad in [1.0, 1.5, -0.1] {
+            let err = cut_with(dir, "MNQ", "2026-04", ASIA, &ScheduleFrame::JulyFixed, bad)
+                .expect_err("an out-of-range fraction is refused")
+                .to_string();
+            assert!(err.contains("thin-session fraction"), "{err}");
+        }
     }
 
     #[test]
