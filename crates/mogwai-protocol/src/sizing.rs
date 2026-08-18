@@ -195,6 +195,34 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
                     ..*shape
                 })
         }
+        // A GROUP is its members' worst cases summed, against a shape widened
+        // per member for the same reason `swept_fill_max_bytes` widens per
+        // order: each member can be the first fill in a new pair. Summing the
+        // single-submit bound rather than deriving a tighter one is deliberate -
+        // a group runs as one batch and this is an upper bound, and
+        // `MAX_GROUP_ORDERS` is what keeps the sum finite.
+        //
+        // The linkage allowance is charged per member too, and it is not
+        // double-counting: the group-closing pass applies the rule of EVERY
+        // member that filled, against siblings admitted after it, so a group of
+        // N filling members can emit N linkages in the one batch.
+        ClientMessage::SubmitOrderGroup { orders } => {
+            let members = orders.len();
+            // Each member runs the ordinary submit path and takes its OWN
+            // snapshot, and the group-closing linkage pass takes one more, so
+            // the account is charged `members + 1` times against a shape
+            // widened for the whole group. Charging one snapshot for the batch
+            // - which is what a SWEEP owes, because a sweep snapshots once -
+            // would under-reserve a group by a factor of its size.
+            members * (5 * ORDER_EVENT_MAX_BYTES + LINKAGE_MAX_BYTES)
+                + (members + 1)
+                    * account_state_max_bytes(&BookShape {
+                        balances: shape.balances + 2 * members,
+                        positions: shape.positions + members,
+                        margins: shape.margins + members,
+                        ..*shape
+                    })
+        }
         // One order event (the cancel/update, or its rejection) plus the
         // account state that follows a book mutation - and, for a cancel, the
         // linkage allowance: cancelling a parent that never filled reaps its

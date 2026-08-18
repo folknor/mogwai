@@ -157,6 +157,23 @@ most `MAX_LINKED_ORDERS` children - is what keeps a cancel's byte reservation
 computable: reaping is one generation, so `sizing::LINKAGE_MAX_BYTES` bounds it
 in advance. See `docs/order-lists.md` for the consumer-facing rules.
 
+ADMISSION IS ATOMIC, AND A LINKED ORDER MAY NOT TRAVEL ALONE. A group arrives as
+one `ClientMessage::SubmitOrderGroup` and a linked bare `SubmitOrder` is refused
+at the protocol boundary. That refusal is the load-bearing half: applying a rule
+where the fill is committed bounds nothing if a SIBLING HAS NOT BEEN ADMITTED
+YET, which is exactly what per-leg dispatch produces - the entry fills, the
+shrink adjusts an order that is not on the book, and the stop then arrives at
+full size beside an open position, so a two-leg `Ouo` pair's aggregate fill is
+twice the bracket quantity. The group runs in two passes under one lock: a DRY
+VALIDATION of every member against the book and against the group's own ids,
+which mutates nothing and refuses the whole frame on one bad member, then the
+ordinary submit path per member at one instant against one reading. A CLOSING
+LINKAGE PASS then re-applies the rule of every member that filled, against the
+whole group, before the call returns - which is what covers the siblings
+admitted after the fill that adjusts them. The residual is funds and is stated
+as such: a member whose money an earlier member's fill spent is CANCELLED, the
+same reading a triggered order that outruns its account already gets.
+
 A STOP and a TOUCHED order are the same machinery with opposite comparisons. A
 stop protects - buy above the market, sell below - and fires when price runs
 AWAY. A touched order enters - buy below, sell above - and fires when price comes

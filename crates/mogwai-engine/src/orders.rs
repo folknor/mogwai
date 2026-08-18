@@ -25,7 +25,154 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
-        self.on_submit_from(order, ts, reading, true)
+        self.on_submit_from(order, ts, reading, true, false)
+    }
+
+    /// Submit a LINKED GROUP: every member admitted, or none of them.
+    ///
+    /// TWO PASSES, and the split is the whole mechanism.
+    ///
+    /// PASS ONE is a DRY VALIDATION of every member against the current book and
+    /// against the rest of the group - the group's own ids count as known, so a
+    /// child may name a parent that has not been accepted yet. It mutates
+    /// nothing and consumes no divergence arm. If any member would be refused,
+    /// the group is refused: one `OrderRejected` per member, the failing one
+    /// carrying its own reason and the others naming it, and NO `OrderAccepted`
+    /// for anything. That is the atomic-admission guarantee, and it is cheap
+    /// precisely because `validate_submit` is a pure read.
+    ///
+    /// PASS TWO submits each member through the ordinary path, in the order the
+    /// client sent them, at ONE instant against ONE market reading. So no tape
+    /// advances between members and no member meets a market a sibling did not.
+    ///
+    /// THEN THE CLOSING LINKAGE PASS, which is what makes the guarantee bite
+    /// rather than merely sound good. A member that FILLS during pass two
+    /// applies its rule where the fill is committed - but only to siblings
+    /// already on the book, and its later siblings are not there yet. That is
+    /// the exact hazard the group frame exists to close: an `Ouo` entry filling
+    /// before its stop is admitted would leave the stop at FULL size, so the
+    /// pair's aggregate fill would be twice the bracket quantity and a crossed
+    /// slice would reverse the account. The closing pass re-applies the rule of
+    /// every member that filled, against the whole group, before this call
+    /// returns - and it returns under the engine lock, so no sweep can have
+    /// looked at any of them in between.
+    ///
+    /// `RejectNextSubmit` is consumed ONCE, for the group, before pass one.
+    /// Spending it per member would refuse one leg of an atomic group, which is
+    /// the shape this whole path exists to make impossible.
+    pub(crate) fn on_submit_group(
+        &mut self,
+        orders: Vec<SubmitOrder>,
+        ts: u64,
+        reading: Option<MarketReading>,
+    ) -> Vec<ServerMessage> {
+        let ids: Vec<ClientOrderId> = orders
+            .iter()
+            .map(|order| order.client_order_id.clone())
+            .collect();
+        let reject_all = |reason: &str, blame: Option<&str>| {
+            ids.iter()
+                .map(|id| ServerMessage::OrderRejected {
+                    client_order_id: id.clone(),
+                    reason: mogwai_protocol::truncate_reason(match blame {
+                        Some(blamed) if blamed != id => format!(
+                            "order group rejected whole: {blamed} was refused because {reason}"
+                        ),
+                        _ => reason.to_owned(),
+                    }),
+                    ts_event: ts,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if let Some(Divergence::RejectNextSubmit { reason }) =
+            self.take_armed(|d| matches!(d, Divergence::RejectNextSubmit { .. }))
+        {
+            return reject_all(&reason, None);
+        }
+
+        // PASS ONE. Note it validates each member against the book as it is
+        // NOW, not as it will be after earlier members fill - which is why the
+        // funds carve-out on `ClientMessage::SubmitOrderGroup` exists and is
+        // stated there rather than papered over here.
+        for order in &orders {
+            let mut candidate = order.clone();
+            // The derived trailing limit is what `risk_px` and therefore the
+            // funds check read, so a dry pass that skipped the derivation would
+            // judge a `TrailingStopLimit` against its trigger rather than its
+            // limit and could pass a member pass two then refuses.
+            if let Err(reason) = self.derive_trailing_limit(&mut candidate) {
+                return reject_all(&reason, Some(&order.client_order_id));
+            }
+            if let Err(reason) = self.validate_submit(&candidate, ts, false, &ids) {
+                return reject_all(&reason, Some(&order.client_order_id));
+            }
+        }
+
+        // PASS TWO.
+        let mut out = Vec::new();
+        let mut filled: Vec<(SubmitOrder, Decimal)> = Vec::new();
+        for order in orders {
+            let events = self.on_submit_from(order.clone(), ts, reading, true, true);
+            let member_filled: Decimal = events
+                .iter()
+                .filter_map(|event| match event {
+                    ServerMessage::OrderFilled(fill)
+                        if fill.client_order_id == order.client_order_id =>
+                    {
+                        Some(fill.last_qty)
+                    }
+                    _ => None,
+                })
+                .sum();
+            if member_filled > Decimal::ZERO {
+                filled.push((order, member_filled));
+            }
+            out.extend(events);
+        }
+
+        // THE CLOSING PASS. Re-applying a rule already applied in pass two is
+        // harmless and is what keeps this simple: `Oco` finds the sibling
+        // already off the book and does nothing, and `Ouo` shrinks only what is
+        // still resting. What it CATCHES is the sibling that was not on the
+        // book when its sibling filled.
+        let mut closing = Vec::new();
+        for (order, qty) in filled {
+            closing.extend(self.apply_linkage_after_fill(&order, qty, ts));
+        }
+        if !closing.is_empty() {
+            out.extend(closing);
+            out.push(ServerMessage::AccountState(self.snapshot(ts)));
+        }
+        out
+    }
+
+    /// A trailing stop limit's LIMIT is derived, never stated - the wire refuses
+    /// a price on this type for exactly that reason. Deriving it before
+    /// `risk_px` reads it is what makes the reservation the one the limit
+    /// implies rather than the one the trigger implies; the ratchet re-derives
+    /// it through the same function so the two cannot disagree about which side
+    /// of the trigger the limit sits on.
+    ///
+    /// A no-op for every other order type, so callers run it unconditionally.
+    fn derive_trailing_limit(&self, order: &mut SubmitOrder) -> Result<(), String> {
+        if order.order_type != OrderType::TrailingStopLimit {
+            return Ok(());
+        }
+        let trigger = order
+            .trigger_price
+            .ok_or_else(|| "conditional order must carry trigger_price".to_string())?;
+        let offset = order
+            .limit_offset
+            .ok_or_else(|| "TrailingStopLimit must carry limit_offset".to_string())?;
+        let Some(limit) = OrderType::trailing_limit_px(order.side, trigger, offset) else {
+            return Err("limit_offset overflows the trigger price".into());
+        };
+        if limit <= Decimal::ZERO {
+            return Err("limit_offset puts the derived limit at or below zero".into());
+        }
+        order.price = Some(limit);
+        Ok(())
     }
 
     pub(crate) fn on_submit_from(
@@ -34,6 +181,7 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
         apply_divergences: bool,
+        group_member: bool,
     ) -> Vec<ServerMessage> {
         if self.oms_type == mogwai_protocol::OmsType::Hedging && order.position_id.is_none() {
             if order.reduce_only {
@@ -46,46 +194,29 @@ impl Engine {
             self.position_seq = self.position_seq.saturating_add(1);
             order.position_id = Some(format!("{}-{}", order.symbol, self.position_seq));
         }
-        if let Err(reason) = self.validate_submit(&order, ts, apply_divergences) {
+        if let Err(reason) = self.validate_submit(&order, ts, apply_divergences, &[]) {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
                 ts_event: ts,
             }];
         }
-        // A trailing stop limit's LIMIT is derived, never stated - the wire
-        // refuses a price on this type for exactly that reason. Deriving it
-        // HERE, before `risk_px` reads it, is what makes the reservation the
-        // one the limit implies rather than the one the trigger implies; the
-        // ratchet re-derives it through the same function so the two cannot
-        // disagree about which side of the trigger the limit sits on.
-        if order.order_type == OrderType::TrailingStopLimit {
-            let trigger = order
-                .trigger_price
-                .expect("validated conditional carries a trigger");
-            let offset = order
-                .limit_offset
-                .expect("validated TrailingStopLimit carries limit_offset");
-            let Some(limit) = OrderType::trailing_limit_px(order.side, trigger, offset) else {
-                return vec![ServerMessage::OrderRejected {
-                    client_order_id: order.client_order_id,
-                    reason: "limit_offset overflows the trigger price".into(),
-                    ts_event: ts,
-                }];
-            };
-            if limit <= Decimal::ZERO {
-                return vec![ServerMessage::OrderRejected {
-                    client_order_id: order.client_order_id,
-                    reason: "limit_offset puts the derived limit at or below zero".into(),
-                    ts_event: ts,
-                }];
-            }
-            order.price = Some(limit);
+        if let Err(reason) = self.derive_trailing_limit(&mut order) {
+            return vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id,
+                reason,
+                ts_event: ts,
+            }];
         }
 
         // Divergence: reject the next submit outright. `RejectNextSubmit`
         // carries no target, so it applies to whatever submit arrives next.
+        //
+        // NOT for a group member: `on_submit_group` consumed the arm once for
+        // the whole group, because spending it per member would refuse one leg
+        // of a group whose whole promise is that its legs share a fate.
         if apply_divergences
+            && !group_member
             && let Some(Divergence::RejectNextSubmit { reason }) =
                 self.take_armed(|d| matches!(d, Divergence::RejectNextSubmit { .. }))
         {
@@ -1010,6 +1141,7 @@ impl Engine {
             Contingency::Oco => {
                 for sibling in &link.linked_order_ids {
                     let Some(pos) = self.open.position(sibling) else {
+                        self.note_absent_sibling(&order.client_order_id, sibling, "Oco");
                         continue;
                     };
                     let canceled = self.take_open(pos);
@@ -1032,6 +1164,7 @@ impl Engine {
             Contingency::Ouo => {
                 for sibling in &link.linked_order_ids {
                     let Some(pos) = self.open.position(sibling) else {
+                        self.note_absent_sibling(&order.client_order_id, sibling, "Ouo");
                         continue;
                     };
                     let before = self.open[pos].clone();
@@ -1078,6 +1211,37 @@ impl Engine {
             }
         }
         out
+    }
+
+    /// A linkage rule found a sibling it names NOT ON THE BOOK, which used to be
+    /// a silent `continue` and is now said out loud.
+    ///
+    /// There are two causes and they are not equally innocent. The ordinary one
+    /// is a sibling already terminal - filled, cancelled, or reaped by an
+    /// earlier rule in this same batch - and there is genuinely nothing to do,
+    /// which is why this is a `debug` and not a warning. The DANGEROUS one is a
+    /// sibling that has not been ADMITTED yet, which is what a per-leg
+    /// submission of a bracket produces: the rule adjusts nothing, and the
+    /// sibling then arrives at full size with the position already open. That
+    /// second case is what `ClientMessage::SubmitOrderGroup` exists to make
+    /// unreachable, and this line is what makes it visible when a client takes
+    /// the per-leg route anyway.
+    ///
+    /// It is a log rather than a refusal because a rule cannot tell the two
+    /// causes apart from where it stands - both look like an id that is not in
+    /// `open` - and refusing the innocent one would break every ordinary
+    /// bracket at its second leg.
+    fn note_absent_sibling(&self, filled: &str, sibling: &str, rule: &str) {
+        let terminal = self.closed.contains_key(sibling);
+        tracing::debug!(
+            %filled,
+            %sibling,
+            %rule,
+            terminal,
+            "linkage named a sibling that is not on the book; if it was never admitted, the rule \
+             adjusted nothing and the sibling will arrive at full size - submit linked orders as \
+             one SubmitOrderGroup",
+        );
     }
 
     /// Promote a held child to the state it would have rested in had it been
@@ -1626,13 +1790,33 @@ impl Engine {
     /// One generation, capped at `MAX_LINKED_ORDERS`, is what
     /// `sizing::LINKAGE_MAX_BYTES` bounds - and it costs nothing real, because a
     /// bracket is one entry and its exits.
-    fn validate_link(&self, link: &mogwai_protocol::OrderLink) -> Result<(), String> {
+    /// `group` names the members of the `SubmitOrderGroup` this order arrived
+    /// in, empty for a standalone submit. A parent that is a group member is
+    /// KNOWN even before it has been accepted, which is the point of the group
+    /// frame: the members are admitted together, so a child may name a parent
+    /// that is one frame's worth of work away rather than one round trip.
+    /// `validate_submit_group` has already checked that every named id IS a
+    /// member and that no member is both a parent and a child, so the depth and
+    /// existence rules below still hold for the group as a whole.
+    fn validate_link(
+        &self,
+        link: &mogwai_protocol::OrderLink,
+        group: &[ClientOrderId],
+    ) -> Result<(), String> {
         if matches!(link.contingency, Contingency::Oto) && link.linked_order_ids.is_empty() {
             return Err("Oto must name the orders it triggers".into());
         }
         let Some(parent) = link.parent_order_id.as_ref() else {
             return Ok(());
         };
+        // A parent the venue has not accepted YET but which travels in this
+        // group is known: the frame admits every member, so it will exist by
+        // the time this child does. Narrowed to the existence question alone -
+        // every rule below still runs once the parent is really on the book,
+        // which it is on the second pass.
+        if group.contains(parent) && !self.seen_client_order_ids.contains_key(parent.as_str()) {
+            return Ok(());
+        }
         if !self.seen_client_order_ids.contains_key(parent.as_str()) {
             return Err(
                 "unknown parent order: an order list's parent is submitted before its children"
@@ -1671,6 +1855,7 @@ impl Engine {
         order: &SubmitOrder,
         ts: u64,
         apply_divergences: bool,
+        group: &[ClientOrderId],
     ) -> Result<(), String> {
         if order.client_order_id.trim().is_empty() {
             return Err("empty client_order_id".into());
@@ -1690,7 +1875,7 @@ impl Engine {
         }
 
         if let Some(link) = order.link.as_ref() {
-            self.validate_link(link)?;
+            self.validate_link(link, group)?;
         }
 
         let Some(instrument) = self.instruments.get(&order.symbol) else {

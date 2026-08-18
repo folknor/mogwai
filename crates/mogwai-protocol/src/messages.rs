@@ -496,6 +496,46 @@ impl TimeInForce {
 #[serde(tag = "type")]
 pub enum ClientMessage {
     SubmitOrder(SubmitOrder),
+    /// Submit a LINKED GROUP in one step: every member accepted, or the whole
+    /// group rejected and nothing on the book.
+    ///
+    /// WHY THE WIRE NEEDS THIS AT ALL, because a client can obviously send the
+    /// legs one at a time and the venue will take them. It can, and that is the
+    /// hazard. A two-leg `Ouo` bracket dispatched per leg lets leg one FILL
+    /// before leg two has been admitted: the shrink runs against a sibling that
+    /// is not on the book yet, so leg two arrives at FULL size and the pair's
+    /// aggregate fill is unbounded at twice the intended quantity. For a
+    /// crossed slice that is an account reversal, which is exactly what a
+    /// consumer consumes bracket linkage to prevent, so the guarantee it needs
+    /// is not "the venue serves Ouo" but "the venue admits the group before any
+    /// member can fill". Per-leg submission cannot state that and this can.
+    ///
+    /// WHAT IS GUARANTEED, stated precisely so a consumer can cite it:
+    ///
+    /// 1. ATOMIC ADMISSION. Every member is validated against the book and
+    ///    against the rest of the group BEFORE any of them is accepted. One
+    ///    unacceptable member rejects the whole group, and the client sees one
+    ///    `OrderRejected` per member and no `OrderAccepted` at all.
+    /// 2. NO TAPE ADVANCE BETWEEN MEMBERS. The whole group is one engine call at
+    ///    one instant against one market reading, so no member meets a market
+    ///    a sibling did not.
+    /// 3. FILL-ATOMIC LINKAGE. A member that fills during the group has its rule
+    ///    applied to every sibling, including the ones admitted AFTER it, before
+    ///    the group returns and therefore before any sweep can look at them.
+    ///
+    /// THE ONE CARVE-OUT, and it is economics rather than admission: a member
+    /// whose funds an EARLIER member's fill consumed is CANCELLED rather than
+    /// rejected, which is the same reading the venue already takes of a
+    /// triggered order that outruns its account. It was admitted; it then could
+    /// not pay. That does not weaken guarantee 1, which is about what the venue
+    /// refuses, and a bracket's exits are reduce-only and reserve nothing.
+    ///
+    /// The group is SELF-CONTAINED: every id a member names must be another
+    /// member, which is what makes "admit the group" and "admit every sibling"
+    /// the same statement.
+    SubmitOrderGroup {
+        orders: Vec<SubmitOrder>,
+    },
     CancelOrder {
         client_order_id: ClientOrderId,
     },
@@ -575,7 +615,9 @@ impl CommandClass {
     #[must_use]
     pub fn of(cmd: &ClientMessage) -> Option<Self> {
         match cmd {
-            ClientMessage::SubmitOrder(_) => Some(Self::Submit),
+            ClientMessage::SubmitOrder(_) | ClientMessage::SubmitOrderGroup { .. } => {
+                Some(Self::Submit)
+            }
             ClientMessage::ModifyOrder { .. } => Some(Self::Modify),
             ClientMessage::CancelOrder { .. } => Some(Self::Cancel),
             _ => None,
@@ -754,6 +796,96 @@ pub struct SubmitOrder {
 /// because every named sibling is a frame the fill that cancels or shrinks it
 /// can emit, and `sizing` has to bound that in advance.
 pub const MAX_LINKED_ORDERS: usize = 8;
+
+/// How many orders one `SubmitOrderGroup` may carry.
+///
+/// A bracket is two or three. The cap exists for the same reason
+/// `MAX_LINKED_ORDERS` does: a group is admitted and executed as ONE batch, so
+/// its worst-case output has to be bounded before the batch runs, and the bound
+/// is per member. One more than `MAX_LINKED_ORDERS`, so a parent naming the
+/// maximum number of siblings can travel with all of them.
+pub const MAX_GROUP_ORDERS: usize = MAX_LINKED_ORDERS + 1;
+
+/// The wire-shape guard for a `SubmitOrderGroup`, which is
+/// `validate_submit_order` for every member plus the rules that only exist
+/// because the members arrived TOGETHER.
+///
+/// Those rules are what make the atomicity guarantee statable:
+///
+/// - THE GROUP IS SELF-CONTAINED. Every `linked_order_ids` entry and every
+///   `parent_order_id` must name another member. A group naming an outsider
+///   could not promise that admitting the group admits every sibling, which is
+///   the whole guarantee - the outsider might be rejected, or might already be
+///   filled, and the client would have a bracket with a leg missing.
+/// - EVERY MEMBER IS LINKED, and to the SAME list. An unlinked order in a group
+///   frame is a standalone order asking for a guarantee that means nothing for
+///   it; two list ids in one frame are two groups, and admitting them together
+///   would promise an atomicity neither one asked for.
+/// - IDS ARE UNIQUE WITHIN THE GROUP. Two members under one id cannot both be
+///   admitted, and deciding which one wins is a choice the venue must not make.
+/// - ONE SYMBOL. Atomic admission is a property of ONE book at ONE instant, and
+///   a cross-symbol group would need two, so it is refused rather than served
+///   with a guarantee that quietly does not hold across the pair.
+/// - NO `Ioc` OR `Fok`. A now-or-never order's fate is decided by the market
+///   rather than by admission, so it cannot be part of a promise about
+///   admission; and it is the one verdict the venue cannot reach before it has
+///   already accepted the members beside it.
+pub fn validate_submit_group(orders: &[SubmitOrder]) -> Result<(), &'static str> {
+    if orders.is_empty() {
+        return Err("an order group must carry at least one order");
+    }
+    if orders.len() > MAX_GROUP_ORDERS {
+        return Err("order group exceeds MAX_GROUP_ORDERS");
+    }
+    for order in orders {
+        validate_submit_order(order)?;
+        if matches!(order.time_in_force, TimeInForce::Ioc | TimeInForce::Fok) {
+            return Err(
+                "an order-group member cannot be immediate-or-cancel: a now-or-never order's fate \
+                 is not decided by admission",
+            );
+        }
+    }
+    let Some(list_id) = orders[0].link.as_ref().map(|link| &link.order_list_id) else {
+        return Err("every order-group member must carry a link");
+    };
+    let symbol = &orders[0].symbol;
+    for order in orders {
+        let Some(link) = order.link.as_ref() else {
+            return Err("every order-group member must carry a link");
+        };
+        if &link.order_list_id != list_id {
+            return Err("every order-group member must name the same order_list_id");
+        }
+        if &order.symbol != symbol {
+            return Err("every order-group member must name the same symbol");
+        }
+    }
+    for (index, order) in orders.iter().enumerate() {
+        if orders[..index]
+            .iter()
+            .any(|earlier| earlier.client_order_id == order.client_order_id)
+        {
+            return Err("duplicate client_order_id within the order group");
+        }
+    }
+    let names_member =
+        |id: &ClientOrderId| orders.iter().any(|member| &member.client_order_id == id);
+    for order in orders {
+        let link = order.link.as_ref().expect("checked above");
+        if !link.linked_order_ids.iter().all(&names_member) {
+            return Err("an order group may only link its own members");
+        }
+        if link
+            .parent_order_id
+            .as_ref()
+            .is_some_and(|parent| !names_member(parent))
+        {
+            return Err("an order group's parent must be a member of the group");
+        }
+    }
+    Ok(())
+}
 
 /// What one order's membership of an order list means.
 ///
@@ -1012,6 +1144,14 @@ pub enum AdmissionSubject {
     Submit {
         client_order_id: ClientOrderId,
     },
+    /// A whole `SubmitOrderGroup`, named by its LIST id rather than by its
+    /// members. One id keeps the frame bounded the way every other subject is,
+    /// and it loses nothing: a group is admitted or refused whole, so naming
+    /// one member would be as wrong as naming none, and the client knows which
+    /// orders it sent under that list id.
+    SubmitGroup {
+        order_list_id: String,
+    },
     Cancel {
         client_order_id: ClientOrderId,
     },
@@ -1056,6 +1196,9 @@ impl Serialize for AdmissionSubject {
             Submit {
                 client_order_id: &'a str,
             },
+            SubmitGroup {
+                order_list_id: &'a str,
+            },
             Cancel {
                 client_order_id: &'a str,
             },
@@ -1081,6 +1224,9 @@ impl Serialize for AdmissionSubject {
         match self {
             Self::Submit { client_order_id } => BoundedSubject::Submit {
                 client_order_id: bounded(client_order_id),
+            },
+            Self::SubmitGroup { order_list_id } => BoundedSubject::SubmitGroup {
+                order_list_id: bounded(order_list_id),
             },
             Self::Cancel { client_order_id } => BoundedSubject::Cancel {
                 client_order_id: bounded(client_order_id),

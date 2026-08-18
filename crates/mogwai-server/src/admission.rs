@@ -488,11 +488,18 @@ impl ExecLanes {
             ))
     }
 
-    /// Reserve capacity for a protocol-boundary refusal, whose worst case is a
-    /// constant because it is one order-shaped frame and no `AccountState`.
-    /// Used by the pre-engine refusal paths, which have no `BookShape` in hand.
-    pub(crate) fn try_reserve_boundary(&self) -> Option<Reservation> {
-        self.held_budget.try_reserve(BOUNDARY_REFUSAL_BYTES)
+    /// Reserve capacity for `frames` protocol-boundary refusals, whose worst
+    /// case is a constant PER FRAME because each is one order-shaped frame and
+    /// no `AccountState`. Used by the pre-engine refusal paths, which have no
+    /// `BookShape` in hand.
+    ///
+    /// A `SubmitOrderGroup` is refused
+    /// WHOLE, so its refusal is one frame per member rather than one frame -
+    /// and the count is bounded by `MAX_GROUP_ORDERS`, which is what keeps this
+    /// a reservation rather than an unbounded write.
+    pub(crate) fn try_reserve_boundary_frames(&self, frames: usize) -> Option<Reservation> {
+        self.held_budget
+            .try_reserve(frames.max(1) * BOUNDARY_REFUSAL_BYTES)
     }
 
     /// Reserve one priority-lane QUEUE slot. `None` is the overload condition.

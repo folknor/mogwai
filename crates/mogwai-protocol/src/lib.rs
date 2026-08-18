@@ -40,12 +40,13 @@ pub use messages::{
     ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,
     AdmissionSubject, AggressorSide, Balance, ClientMessage, CommandClass, Contingency,
     FillSnapshot, Hit, JSON_ESCAPE_FACTOR, LiquiditySide, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN,
-    MAX_CLIENT_MESSAGE_BYTES, MAX_CURRENCY_LEN, MAX_LINKED_ORDERS, MAX_REASON_LEN, MAX_SESSION_LEN,
-    MAX_SYMBOL_LEN, OrderFilled, OrderLink, OrderStatusInfo, OrderStatusSnapshot, OrderType,
-    Position, PostedMargin, QueryKind, QuoteTick, ScanKind, ServerMessage, Side, SubmitOrder,
-    TimeInForce, TradeTick, WireOrderStatus, touches_toward, touches_trigger, trades_through,
-    truncate_client_id, truncate_reason, validate_client_order_id, validate_modify_order,
-    validate_request_id, validate_session_id, validate_submit_order, validate_wire_symbol,
+    MAX_CLIENT_MESSAGE_BYTES, MAX_CURRENCY_LEN, MAX_GROUP_ORDERS, MAX_LINKED_ORDERS,
+    MAX_REASON_LEN, MAX_SESSION_LEN, MAX_SYMBOL_LEN, OrderFilled, OrderLink, OrderStatusInfo,
+    OrderStatusSnapshot, OrderType, Position, PostedMargin, QueryKind, QuoteTick, ScanKind,
+    ServerMessage, Side, SubmitOrder, TimeInForce, TradeTick, WireOrderStatus, touches_toward,
+    touches_trigger, trades_through, truncate_client_id, truncate_reason, validate_client_order_id,
+    validate_modify_order, validate_request_id, validate_session_id, validate_submit_group,
+    validate_submit_order, validate_wire_symbol,
 };
 pub use ready::ReadyRecord;
 pub use seeds::RunSeeds;

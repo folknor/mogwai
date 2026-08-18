@@ -375,12 +375,17 @@ async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
     assert!(submit.contains(r#""reduce_only":true"#), "{submit}");
 }
 
-/// An ORDER LIST reaching the wire as linked legs, in the list's own order.
+/// An ORDER LIST reaching the wire as ONE `SubmitOrderGroup`, its legs in the
+/// list's own order and each carrying its own rule.
 ///
 /// The venue models a linkage rather than a list object, so what has to arrive
-/// is each leg carrying its own rule: the entry naming what it triggers, the
-/// exit naming the entry as its parent. Both legs must be dispatched - half a
-/// bracket is the failure this path exists to prevent.
+/// is each leg's rule: the entry naming what it triggers, the exit naming the
+/// entry as its parent. What must NOT arrive is two separate submits - and this
+/// test used to assert exactly that, because the adapter used to send them.
+/// Per-leg dispatch lets the entry FILL before the exit is admitted, at which
+/// point the entry's rule adjusts a sibling that is not on the book and the
+/// exit arrives at full size. One frame is what makes the admission atomic, and
+/// the venue now refuses a linked bare submit outright.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn an_order_list_reaches_the_wire_as_linked_legs() {
@@ -441,22 +446,34 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
             .filter(|text| text.contains("SubmitOrder"))
             .cloned()
             .collect();
-        if seen.len() >= 2 || std::time::Instant::now() >= deadline {
+        if !seen.is_empty() || std::time::Instant::now() >= deadline {
             break seen;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
-    assert_eq!(submits.len(), 2, "both legs are dispatched: {submits:?}");
+    assert_eq!(
+        submits.len(),
+        1,
+        "the list is ONE frame, not one per leg: {submits:?}"
+    );
+    let group = &submits[0];
     assert!(
-        submits[0].contains(r#""contingency":"Oto""#)
-            && submits[0].contains(r#""order_list_id":"OL-1""#),
-        "the entry carries its rule and its list: {}",
-        submits[0]
+        group.contains(r#""type":"SubmitOrderGroup""#),
+        "and it is the group frame: {group}"
     );
     assert!(
-        submits[1].contains(r#""parent_order_id":"O-1""#),
-        "the exit names the entry as its parent: {}",
-        submits[1]
+        group.contains(r#""contingency":"Oto""#) && group.contains(r#""order_list_id":"OL-1""#),
+        "the entry carries its rule and its list: {group}"
+    );
+    assert!(
+        group.contains(r#""parent_order_id":"O-1""#),
+        "the exit names the entry as its parent: {group}"
+    );
+    // ORDER MATTERS and is the list's own: a child must follow the parent it
+    // names, which is the order nautilus's `OrderList` already puts them in.
+    assert!(
+        group.find(r#""client_order_id":"O-1""#) < group.find(r#""client_order_id":"O-STOP""#),
+        "the legs keep the list's order: {group}"
     );
 }
 

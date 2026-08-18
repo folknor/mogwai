@@ -1053,6 +1053,7 @@ impl Engine {
                     band_ticks: self.liquidation_band_ticks,
                 }),
                 false,
+                false,
             ));
             originated += 1;
         }
@@ -1130,6 +1131,7 @@ impl Engine {
                     ts_ns: ts,
                     band_ticks: self.liquidation_band_ticks,
                 }),
+                false,
                 false,
             ));
             originated += 1;
@@ -1311,6 +1313,7 @@ impl Engine {
                 ts_ns: ts,
                 band_ticks: self.liquidation_band_ticks,
             }),
+            false,
             false,
         )
     }
@@ -1603,6 +1606,7 @@ impl Engine {
         }
         let events = match msg {
             ClientMessage::SubmitOrder(order) => self.on_submit(order, ts, reading),
+            ClientMessage::SubmitOrderGroup { orders } => self.on_submit_group(orders, ts, reading),
             ClientMessage::CancelOrder { client_order_id } => self.on_cancel(client_order_id, ts),
             ClientMessage::ModifyOrder {
                 client_order_id,
@@ -6067,6 +6071,213 @@ mod tests {
         assert!(e.open.is_empty());
     }
 
+    /// THE HAZARD THE GROUP FRAME EXISTS TO CLOSE, driven per leg so it is
+    /// visible, and then closed by the group frame in the test below.
+    ///
+    /// A two-leg `Ouo` bracket sent as two submits: the entry is marketable and
+    /// FILLS on arrival, and the shrink its rule owes runs against a sibling
+    /// that has not been submitted yet, so it adjusts nothing. The stop then
+    /// arrives at FULL size beside a position that is already open, and the
+    /// pair's aggregate exposure is twice one bracket's.
+    ///
+    /// This is not a bug in the linkage - the rule cannot shrink an order the
+    /// venue has never seen - it is a property of PER-LEG DISPATCH, which is
+    /// why the fix is a frame and not an arithmetic change. The wire refuses
+    /// this route now; the ENGINE still serves it, so the hazard stays
+    /// reachable here and stays measured.
+    #[test]
+    fn per_leg_dispatch_lets_an_entry_fill_before_its_stop_is_admitted() {
+        let mut e = linked_engine();
+        let mut entry = limit_order("ENTRY", 2);
+        entry.price = Some(Decimal::from(300));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Ouo, &["STOP"], None),
+        );
+        let out = e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(fill) if fill.client_order_id == "ENTRY")),
+            "a buy limit at 300 against a market at 200 fills on arrival: {out:?}"
+        );
+
+        let mut stop = limit_order("STOP", 2);
+        stop.side = Side::Sell;
+        stop.price = Some(Decimal::from(400));
+        let stop = linked(
+            stop,
+            link_of(mogwai_protocol::Contingency::Ouo, &["ENTRY"], None),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(stop), 2, Some(away_reading()));
+
+        let resting = e
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == "STOP")
+            .expect("the stop rests");
+        assert_eq!(
+            resting.leaves_qty,
+            Decimal::from(2),
+            "the stop arrived at FULL size: its sibling's fill shrank nothing, because the stop \
+             was not on the book when it happened"
+        );
+    }
+
+    /// The same bracket as ONE group, and the guarantee the consumer cites: the
+    /// entry fills during the group and the stop is shrunk by that fill before
+    /// the call returns, so the pair's aggregate fill is bounded at one bracket
+    /// quantity rather than two.
+    ///
+    /// The shrink here is the CLOSING PASS doing its job - at the instant the
+    /// entry filled, the stop had not been admitted yet, exactly as in the
+    /// per-leg test above. What differs is that the group has not returned, so
+    /// nothing has been able to look at the stop in between.
+    #[test]
+    fn a_group_shrinks_a_sibling_admitted_after_the_fill_that_shrinks_it() {
+        let mut e = linked_engine();
+        let mut entry = limit_order("ENTRY", 2);
+        entry.price = Some(Decimal::from(300));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Ouo, &["STOP"], None),
+        );
+        let mut stop = limit_order("STOP", 2);
+        stop.side = Side::Sell;
+        stop.price = Some(Decimal::from(400));
+        let stop = linked(
+            stop,
+            link_of(mogwai_protocol::Contingency::Ouo, &["ENTRY"], None),
+        );
+
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![entry, stop],
+            },
+            1,
+            Some(away_reading()),
+        );
+        let filled: Decimal = out
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::OrderFilled(fill) => Some(fill.last_qty),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(filled, Decimal::from(2), "the entry filled whole: {out:?}");
+
+        // Shrunk by the whole filled quantity, which takes it to zero, which is
+        // a cancel. The bracket's aggregate exposure is therefore ONE bracket
+        // quantity - the per-leg route above leaves it at two.
+        assert_eq!(
+            canceled_ids(&out),
+            ["STOP"],
+            "the entry's fill shrank the stop to nothing even though the stop was admitted after \
+             it: {out:?}"
+        );
+        assert!(
+            e.open.is_empty(),
+            "nothing is left resting beside the filled entry"
+        );
+    }
+
+    /// ATOMIC ADMISSION, which is the other half. One unacceptable member
+    /// rejects the whole group and leaves NOTHING on the book - not the members
+    /// that were fine, and not an `OrderAccepted` for any of them.
+    #[test]
+    fn one_bad_member_rejects_a_whole_group_and_accepts_nothing() {
+        let mut e = linked_engine();
+        let mut good = limit_order("GOOD", 1);
+        good.price = Some(Decimal::from(100));
+        let good = linked(
+            good,
+            link_of(mogwai_protocol::Contingency::Oco, &["BAD"], None),
+        );
+        // Priced off the grid, which `validate_submit` refuses.
+        let mut bad = limit_order("BAD", 1);
+        bad.price = Some(Decimal::from(100));
+        bad.symbol = "NOSUCH".into();
+        let bad = linked(
+            bad,
+            link_of(mogwai_protocol::Contingency::Oco, &["GOOD"], None),
+        );
+
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![good, bad],
+            },
+            1,
+            Some(away_reading()),
+        );
+        let rejected: Vec<&str> = out
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::OrderRejected {
+                    client_order_id, ..
+                } => Some(client_order_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rejected,
+            ["GOOD", "BAD"],
+            "every member is refused, including the one that was fine: {out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderAccepted { .. })),
+            "and nothing was accepted first: {out:?}"
+        );
+        assert!(e.open.is_empty(), "nothing rests");
+    }
+
+    /// A CHILD MAY NAME A PARENT THAT TRAVELS WITH IT. Sent per leg the child
+    /// would have to follow its parent by a round trip; in one group they are
+    /// admitted together, so the dry pass has to treat the group's own ids as
+    /// known or the whole frame would refuse itself.
+    #[test]
+    fn a_group_admits_a_child_whose_parent_is_in_the_same_frame() {
+        let mut e = linked_engine();
+        let mut entry = limit_order("ENTRY", 1);
+        entry.price = Some(Decimal::from(100));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
+        );
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(300));
+        let exit = linked(
+            exit,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![entry, exit],
+            },
+            1,
+            Some(away_reading()),
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|event| matches!(event, ServerMessage::OrderAccepted { .. }))
+                .count(),
+            2,
+            "both legs were admitted: {out:?}"
+        );
+        assert!(
+            e.open
+                .iter()
+                .any(|order| order.submit.client_order_id == "EXIT"
+                    && matches!(order.resting, Resting::Held)),
+            "and the child is held, waiting on the parent it arrived with"
+        );
+    }
+
     /// One-triggers-the-other: the child is accepted, holds nothing, is scanned
     /// by nothing, and goes live at its parent's fill.
     #[test]
@@ -7697,6 +7908,33 @@ mod tests {
             client_order_id: None,
         };
 
+        // A `MAX_GROUP_ORDERS`-sized group of marketable, mutually-linked legs
+        // with adversarially escaped ids: the widest `SubmitOrderGroup` the
+        // wire admits. `Ouo` rather than `Oco` so the linkage really runs on
+        // each fill rather than reaping the rest of the group at the first one.
+        let mut group_book = Engine::new();
+        let group_ids: Vec<String> = (0..mogwai_protocol::MAX_GROUP_ORDERS)
+            .map(|i| format!("{esc_id}{i}"))
+            .collect();
+        let group_members: Vec<SubmitOrder> = group_ids
+            .iter()
+            .map(|id| {
+                let mut leg =
+                    order_with(id, Side::Buy, "BTCUSDT", 1, Some(Decimal::from(1_000_000)));
+                leg.link = Some(mogwai_protocol::OrderLink {
+                    order_list_id: esc_id.clone(),
+                    contingency: mogwai_protocol::Contingency::Ouo,
+                    linked_order_ids: group_ids
+                        .iter()
+                        .filter(|other| *other != id)
+                        .cloned()
+                        .collect(),
+                    parent_order_id: None,
+                });
+                leg
+            })
+            .collect();
+
         let cases: Vec<(&str, &mut Engine, Vec<ClientMessage>)> = vec![
             (
                 "fresh book, first fill in a new pair",
@@ -7755,6 +7993,18 @@ mod tests {
                 "duplicate + partial + IOC remainder",
                 &mut widest,
                 vec![ClientMessage::SubmitOrder(ioc), query_fills],
+            ),
+            // A GROUP is the one command whose output scales with the command
+            // rather than with the book, so its bound is the one most easily
+            // written a factor too small - and a single-submit-sized
+            // reservation would be under by the group's size. Marketable legs,
+            // so every member really fills and really snapshots.
+            (
+                "a full-size marketable group on a fresh book",
+                &mut group_book,
+                vec![ClientMessage::SubmitOrderGroup {
+                    orders: group_members,
+                }],
             ),
         ];
 

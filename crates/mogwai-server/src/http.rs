@@ -100,6 +100,17 @@ pub(crate) fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
         ClientMessage::SubmitOrder(o) => AdmissionSubject::Submit {
             client_order_id: o.client_order_id.clone(),
         },
+        // Named by the LIST, because a group is admitted or refused whole.
+        // A group whose first member carries no link is one
+        // `validate_submit_group` refuses anyway, so the empty id here is a
+        // subject for a frame that only ever accompanies that refusal.
+        ClientMessage::SubmitOrderGroup { orders } => AdmissionSubject::SubmitGroup {
+            order_list_id: orders
+                .first()
+                .and_then(|order| order.link.as_ref())
+                .map(|link| link.order_list_id.clone())
+                .unwrap_or_default(),
+        },
         ClientMessage::CancelOrder { client_order_id } => AdmissionSubject::Cancel {
             client_order_id: client_order_id.clone(),
         },
@@ -124,7 +135,31 @@ pub(crate) fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
 /// checks that were always here, because both are malformed-request failures.
 pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
     match cmd {
-        ClientMessage::SubmitOrder(order) => validate_submit_order(order).err(),
+        // A LINKED order may not arrive alone on the wire, and this is the
+        // refusal that makes the group frame's guarantee worth anything.
+        //
+        // Per-leg dispatch of a bracket is the whole hazard: leg one can FILL
+        // before leg two is admitted, the rule adjusts a sibling that is not
+        // there, and leg two then arrives at full size - so a two-leg `Ouo`
+        // pair's aggregate fill is twice the bracket quantity, which for a
+        // crossed slice reverses the account. A venue that served that route
+        // beside the atomic one could not state the atomicity as a property of
+        // linkage at all, only as a property of one code path, and a consumer
+        // cannot cite that.
+        //
+        // The ENGINE still accepts a linked standalone submit: it is the
+        // in-process API the group path itself is built on, and the venue's own
+        // liquidation submits go through it. This is a WIRE rule, refused where
+        // the client's choice of route is actually made.
+        ClientMessage::SubmitOrder(order) => validate_submit_order(order).err().or_else(|| {
+            order.link.is_some().then_some(
+                "a linked order must be submitted as part of a SubmitOrderGroup: sent alone, a \
+                 sibling can fill before the rest of the group is admitted",
+            )
+        }),
+        ClientMessage::SubmitOrderGroup { orders } => {
+            mogwai_protocol::validate_submit_group(orders).err()
+        }
         ClientMessage::ModifyOrder {
             client_order_id,
             price,
@@ -157,13 +192,19 @@ pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
     }
 }
 
-/// The refusal frame for a malformed order-entry command, echoing the offending
-/// id TRUNCATED to `MAX_CLIENT_ID_LEN`. Echoing it at full length would turn an
-/// 8 MiB `client_order_id` into an 8 MiB `OrderRejected`, recreating exactly
-/// the unbounded frame the cap exists to prevent; a truncated echo cannot be
-/// mistaken for a live correlation because the venue would never have accepted
-/// the id under either spelling, and the reason says so.
-fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> ServerMessage {
+/// The refusal frames for a malformed order-entry command, echoing the
+/// offending id TRUNCATED to `MAX_CLIENT_ID_LEN`. Echoing it at full length
+/// would turn an 8 MiB `client_order_id` into an 8 MiB `OrderRejected`,
+/// recreating exactly the unbounded frame the cap exists to prevent; a
+/// truncated echo cannot be mistaken for a live correlation because the venue
+/// would never have accepted the id under either spelling, and the reason says
+/// so.
+///
+/// A VEC rather than one frame, because a `SubmitOrderGroup` is refused whole
+/// and owes every member its own rejection. Every other command answers with
+/// exactly one, which is what `boundary_frame_count` states and what the
+/// reservation is sized from.
+fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<ServerMessage> {
     let note = |id: &str| {
         if id.len() > mogwai_protocol::MAX_CLIENT_ID_LEN {
             format!(
@@ -177,29 +218,124 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> ServerMessage
     match cmd {
         ClientMessage::ModifyOrder {
             client_order_id, ..
-        } => ServerMessage::OrderModifyRejected {
+        } => vec![ServerMessage::OrderModifyRejected {
             client_order_id: truncate_client_id(client_order_id.clone()),
             venue_order_id: None,
             reason: note(client_order_id),
             ts_event: ts,
-        },
-        ClientMessage::CancelOrder { client_order_id } => ServerMessage::OrderCancelRejected {
-            client_order_id: truncate_client_id(client_order_id.clone()),
-            venue_order_id: None,
-            reason: note(client_order_id),
-            ts_event: ts,
-        },
-        ClientMessage::SubmitOrder(order) => ServerMessage::OrderRejected {
+        }],
+        ClientMessage::CancelOrder { client_order_id } => {
+            vec![ServerMessage::OrderCancelRejected {
+                client_order_id: truncate_client_id(client_order_id.clone()),
+                venue_order_id: None,
+                reason: note(client_order_id),
+                ts_event: ts,
+            }]
+        }
+        ClientMessage::SubmitOrder(order) => vec![ServerMessage::OrderRejected {
             client_order_id: truncate_client_id(order.client_order_id.clone()),
             reason: note(&order.client_order_id),
             ts_event: ts,
-        },
+        }],
+        // A group is refused WHOLE, so every member gets its own rejection.
+        // Answering with one frame naming one member would leave the client
+        // waiting on the others, and answering with none would leave it waiting
+        // on all of them. An EMPTY group has no member to answer, so it falls
+        // through to the untargeted diagnostic like a malformed query.
+        ClientMessage::SubmitOrderGroup { orders } if !orders.is_empty() => orders
+            .iter()
+            .map(|order| ServerMessage::OrderRejected {
+                client_order_id: truncate_client_id(order.client_order_id.clone()),
+                reason: note(&order.client_order_id),
+                ts_event: ts,
+            })
+            .collect(),
         // Queries have no order-shaped rejection frame; the caller answers
         // these with the untargeted diagnostic instead.
-        _ => ServerMessage::ProtocolError {
+        _ => vec![ServerMessage::ProtocolError {
             reason: reason.to_string(),
             ts_event: ts,
-        },
+        }],
+    }
+}
+
+/// The orders a command SUBMITS: one for a `SubmitOrder`, every member for a
+/// `SubmitOrderGroup`, none for anything else.
+///
+/// It exists so the pre-engine refusals below - bound symbol, policy currency,
+/// locked account, position cap, market synthesis, session closed - are written
+/// ONCE over both carriers. A guard that only looked at `SubmitOrder` would let
+/// a group walk past it, and every one of those guards is a rule about capital
+/// rather than a formality.
+fn submitted_orders(cmd: &ClientMessage) -> &[mogwai_protocol::SubmitOrder] {
+    match cmd {
+        ClientMessage::SubmitOrder(order) => std::slice::from_ref(order),
+        ClientMessage::SubmitOrderGroup { orders } => orders,
+        _ => &[],
+    }
+}
+
+/// Refuse everything a command submitted, blaming `blamed` for the reason.
+///
+/// A group is refused WHOLE, so one bad member rejects all of them - which is
+/// the same rule the atomic-admission guarantee states, applied at the pre-engine
+/// guards rather than inside the engine. Each frame names the member it is
+/// addressed to, and a group's frames say which member was actually at fault so
+/// a client is not left guessing which leg to fix.
+fn refuse_submitted(
+    cmd: &ClientMessage,
+    blamed: &str,
+    reason: &str,
+    ts: u64,
+) -> Vec<ServerMessage> {
+    let orders = submitted_orders(cmd);
+    orders
+        .iter()
+        .map(|order| ServerMessage::OrderRejected {
+            client_order_id: order.client_order_id.clone(),
+            reason: truncate_reason(if orders.len() > 1 && order.client_order_id != blamed {
+                format!("order group rejected whole: {blamed} was refused because {reason}")
+            } else {
+                reason.to_owned()
+            }),
+            ts_event: ts,
+        })
+        .collect()
+}
+
+/// Reserve for, and build, the refusal of everything `cmd` submitted.
+///
+/// One place rather than one per guard, because each guard owes exactly the
+/// same three steps - reserve for as many frames as there are members, refuse
+/// them all, blame the offender - and writing them out six times is how a group
+/// ends up refused with one frame and a client left waiting on the rest.
+fn refuse_all(
+    cmd: &ClientMessage,
+    lanes: &ExecLanes,
+    blamed: &str,
+    reason: &str,
+    ts: u64,
+) -> OrderOutcome {
+    let Some(reservation) = lanes.try_reserve_boundary_frames(submitted_orders(cmd).len()) else {
+        return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+            subject: admission_subject(cmd),
+            reason: "execution output admission budget exhausted".into(),
+            ts_event: ts,
+        });
+    };
+    OrderOutcome::Refused {
+        events: refuse_submitted(cmd, blamed, reason, ts),
+        reservation,
+    }
+}
+
+/// How many boundary refusal frames `cmd` can produce, which is what its
+/// reservation is sized from. One for everything except a group, which owes one
+/// per member and is bounded by `MAX_GROUP_ORDERS`.
+fn boundary_frame_count(cmd: &ClientMessage) -> usize {
+    match cmd {
+        ClientMessage::SubmitOrderGroup { orders } => orders.len().max(1),
+        _ => 1,
     }
 }
 
@@ -229,7 +365,8 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> ServerMessage
 /// means the command cleared the protocol boundary.
 fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Option<OrderOutcome> {
     let reason = boundary_error(order_cmd)?;
-    let Some(reservation) = lanes.try_reserve_boundary() else {
+    let Some(reservation) = lanes.try_reserve_boundary_frames(boundary_frame_count(order_cmd))
+    else {
         return Some(OrderOutcome::NotAdmitted(
             ServerMessage::AdmissionRejected {
                 subject: admission_subject(order_cmd),
@@ -238,15 +375,15 @@ fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Op
             },
         ));
     };
-    let event = boundary_refusal(order_cmd, reason, ts);
-    if matches!(event, ServerMessage::ProtocolError { .. }) {
+    let mut events = boundary_refusal(order_cmd, reason, ts);
+    if events.len() == 1 && matches!(events[0], ServerMessage::ProtocolError { .. }) {
         // The reservation is not needed after all: nothing goes on the
         // held lane, so drop it and give the bytes straight back.
         drop(reservation);
-        return Some(OrderOutcome::Diagnostic(event));
+        return Some(OrderOutcome::Diagnostic(events.remove(0)));
     }
     Some(OrderOutcome::Refused {
-        events: vec![event],
+        events,
         reservation,
     })
 }
@@ -281,27 +418,26 @@ pub(crate) async fn process_order_cmd(
     // The frame is `OrderRejected`, NOT `AdmissionRejected`: a mismatch is a
     // client error, and `AdmissionRejected` reads as a capacity signal at every
     // observer. Only the failure to reserve a boundary slot is capacity.
-    if let ClientMessage::SubmitOrder(order) = &order_cmd
-        && order.symbol.as_ref() != socket_symbol.as_ref()
+    //
+    // EVERY member of a group is checked, and one mismatch refuses all of them.
+    // The same is true of every guard below: a group is refused whole, which is
+    // the atomic-admission rule applied at the pre-engine gates rather than only
+    // inside the engine.
+    if let Some(order) = submitted_orders(&order_cmd)
+        .iter()
+        .find(|order| order.symbol.as_ref() != socket_symbol.as_ref())
     {
-        let Some(reservation) = lanes.try_reserve_boundary() else {
-            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
-                subject: admission_subject(&order_cmd),
-                reason: "execution output admission budget exhausted".into(),
-                ts_event: ts,
-            });
-        };
         let echoed: String = order.symbol.chars().take(MAX_ECHOED_SYMBOL).collect();
-        return OrderOutcome::Refused {
-            events: vec![ServerMessage::OrderRejected {
-                client_order_id: order.client_order_id.clone(),
-                reason: truncate_reason(format!(
-                    "order symbol {echoed} does not match the symbol this connection is bound to ({socket_symbol})"
-                )),
-                ts_event: ts,
-            }],
-            reservation,
-        };
+        return refuse_all(
+            &order_cmd,
+            lanes,
+            &order.client_order_id.clone(),
+            &format!(
+                "order symbol {echoed} does not match the symbol this connection is bound to \
+                 ({socket_symbol})"
+            ),
+            ts,
+        );
     }
     // A POLICED ACCOUNT TRADES ONLY WHAT ITS POLICY CAN VALUE, refused here
     // rather than discovered as a mis-valued threshold later.
@@ -313,37 +449,31 @@ pub(crate) async fn process_order_cmd(
     // can value. What does not qualify is a shape that would leave a holding
     // nothing prices in the policy currency, and asking for one is a client
     // error with a reason that says why.
-    if let ClientMessage::SubmitOrder(order) = &order_cmd
-        && let Some(currency) = passenger
-            .risk
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .currency()
-            .map(str::to_owned)
-        && let Ok(profile) = run.rivers.resolve_profile(&order.symbol)
-        && !settles_only_in(&profile.def, &currency)
+    if let Some(currency) = passenger
+        .risk
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .currency()
+        .map(str::to_owned)
+        && let Some(order) = submitted_orders(&order_cmd).iter().find(|order| {
+            run.rivers
+                .resolve_profile(&order.symbol)
+                .is_ok_and(|profile| !settles_only_in(&profile.def, &currency))
+        })
     {
-        let Some(reservation) = lanes.try_reserve_boundary() else {
-            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
-                subject: admission_subject(&order_cmd),
-                reason: "execution output admission budget exhausted".into(),
-                ts_event: ts,
-            });
-        };
         let echoed: String = order.symbol.chars().take(MAX_ECHOED_SYMBOL).collect();
-        return OrderOutcome::Refused {
-            events: vec![ServerMessage::OrderRejected {
-                client_order_id: order.client_order_id.clone(),
-                reason: truncate_reason(format!(
-                    "account {account} is policed in {currency} and {echoed} would make it hold \
-                     another currency; the venue has no rate to state its equity with, so a \
-                     policed account trades only shapes settling in its own currency",
-                    account = passenger.account_id.as_str()
-                )),
-                ts_event: ts,
-            }],
-            reservation,
-        };
+        return refuse_all(
+            &order_cmd,
+            lanes,
+            &order.client_order_id.clone(),
+            &format!(
+                "account {account} is policed in {currency} and {echoed} would make it hold \
+                 another currency; the venue has no rate to state its equity with, so a policed \
+                 account trades only shapes settling in its own currency",
+                account = passenger.account_id.as_str()
+            ),
+            ts,
+        );
     }
     // A LOCKED ACCOUNT OPENS NOTHING. This is the other half of enforcement: the
     // breach flattened the book, and this is what stops the strategy putting it
@@ -354,38 +484,33 @@ pub(crate) async fn process_order_cmd(
     // Cancels and queries are deliberately still served: a locked client must
     // still be able to see and tidy its own book, and refusing a query would
     // make a locked account indistinguishable from a broken one.
-    if let ClientMessage::SubmitOrder(order) = &order_cmd
+    if let Some(order) = submitted_orders(&order_cmd).first()
         && passenger
             .risk
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_locked()
     {
-        let Some(reservation) = lanes.try_reserve_boundary() else {
-            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
-                subject: admission_subject(&order_cmd),
-                reason: "execution output admission budget exhausted".into(),
-                ts_event: ts,
-            });
-        };
-        return OrderOutcome::Refused {
-            events: vec![ServerMessage::OrderRejected {
-                client_order_id: order.client_order_id.clone(),
-                reason: truncate_reason(format!(
-                    "account {account} breached its risk policy and may not open a position",
-                    account = passenger.account_id.as_str()
-                )),
-                ts_event: ts,
-            }],
-            reservation,
-        };
+        return refuse_all(
+            &order_cmd,
+            lanes,
+            &order.client_order_id.clone(),
+            &format!(
+                "account {account} breached its risk policy and may not open a position",
+                account = passenger.account_id.as_str()
+            ),
+            ts,
+        );
     }
     // Register the symbol lazily, BEFORE the act delay and any market reading.
     // A `false` here means no profile resolves the symbol; fall through rather
     // than short-circuit, so an unconfigured symbol still meets the engine's
     // existing unknown-instrument rejection with its existing wording instead of
     // a second one invented here.
-    if let ClientMessage::SubmitOrder(order) = &order_cmd {
+    //
+    // A group names ONE symbol - `validate_submit_group` refuses anything else -
+    // so registering the first member's registers the group's.
+    if let Some(order) = submitted_orders(&order_cmd).first() {
         let _configured = run.ensure_instrument(passenger, &order.symbol).await;
     }
     // A POSITION CAP is refused here, by name, before the act delay. An
@@ -401,40 +526,44 @@ pub(crate) async fn process_order_cmd(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .max_position();
-    if let ClientMessage::SubmitOrder(order) = &order_cmd
-        && !order.reduce_only
-        && let Some(cap) = position_cap
-    {
-        let additional = match order.side {
-            mogwai_protocol::Side::Buy => order.quantity,
-            mogwai_protocol::Side::Sell => -order.quantity,
-        };
-        let projected = passenger
-            .engine
-            .lock()
-            .await
-            .projected_qty(&order.symbol, additional);
-        if projected > cap {
-            let Some(reservation) = lanes.try_reserve_boundary() else {
-                return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
-                    subject: admission_subject(&order_cmd),
-                    reason: "execution output admission budget exhausted".into(),
-                    ts_event: ts,
-                });
-            };
-            return OrderOutcome::Refused {
-                events: vec![ServerMessage::OrderRejected {
-                    client_order_id: order.client_order_id.clone(),
-                    reason: truncate_reason(format!(
+    //
+    // A GROUP IS JUDGED ON ITS WHOLE WORST CASE, not member by member. Every
+    // opening member's quantity is summed onto the projection before the cap is
+    // compared, because the members are admitted together and the venue must not
+    // admit a pair that individually fits and jointly does not - which is the
+    // same worst-case-fill-order reading the cap already takes of a working
+    // book. Reduce-only members contribute nothing, since they never grow it.
+    if let Some(cap) = position_cap {
+        let additional: rust_decimal::Decimal = submitted_orders(&order_cmd)
+            .iter()
+            .filter(|order| !order.reduce_only)
+            .map(|order| match order.side {
+                mogwai_protocol::Side::Buy => order.quantity,
+                mogwai_protocol::Side::Sell => -order.quantity,
+            })
+            .sum();
+        if let Some(order) = submitted_orders(&order_cmd).first()
+            && !additional.is_zero()
+        {
+            let projected = passenger
+                .engine
+                .lock()
+                .await
+                .projected_qty(&order.symbol, additional);
+            if projected > cap {
+                return refuse_all(
+                    &order_cmd,
+                    lanes,
+                    &order.client_order_id.clone(),
+                    &format!(
                         "account {account} may not carry more than {cap} of {symbol}; this order \
                          would take the book to {projected}",
                         account = passenger.account_id.as_str(),
                         symbol = order.symbol,
-                    )),
-                    ts_event: ts,
-                }],
-                reservation,
-            };
+                    ),
+                    ts,
+                );
+            }
         }
     }
     // The venue's ACT delay sits BETWEEN the protocol boundary and the market
@@ -476,59 +605,43 @@ pub(crate) async fn process_order_cmd(
     // the engine checks instrument existence before the price, so its "unknown
     // instrument" rejection tells that story unaltered. Resolution is otherwise
     // total, so "does the venue list it" is now "did the resolve succeed".
-    if let ClientMessage::SubmitOrder(order) = &order_cmd
-        && order.order_type == OrderType::Market
-        && order.price.is_none()
-        && state.rivers.resolve_profile(&order.symbol).is_ok()
-    {
+    if let Some(order) = submitted_orders(&order_cmd).iter().find(|order| {
+        order.order_type == OrderType::Market
+            && order.price.is_none()
+            && state.rivers.resolve_profile(&order.symbol).is_ok()
+    }) {
         tracing::warn!(
             symbol = %order.symbol,
             client_order_id = %order.client_order_id,
             "rejecting price-less market order: market price synthesis failed"
         );
-        let Some(reservation) = lanes.try_reserve_boundary() else {
-            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
-                subject: admission_subject(&order_cmd),
-                reason: "execution output admission budget exhausted".into(),
-                ts_event: ts,
-            });
-        };
-        return OrderOutcome::Refused {
-            events: vec![ServerMessage::OrderRejected {
-                client_order_id: order.client_order_id.clone(),
-                reason: "venue could not synthesize a market price at sim-now".to_string(),
-                ts_event: ts,
-            }],
-            reservation,
-        };
+        return refuse_all(
+            &order_cmd,
+            lanes,
+            &order.client_order_id.clone(),
+            "venue could not synthesize a market price at sim-now",
+            ts,
+        );
     }
-    if let ClientMessage::SubmitOrder(order) = &order_cmd
+    if let Some(order) = submitted_orders(&order_cmd).iter().find(|order| {
         // The RESOLVED shape's calendar, not the configured map's: a symbol
         // nobody configured is served on a resolved bundle whose tape is
         // generated with that calendar, so its orders owe the same
         // session-closed refusal.
-        && let Some(calendar) = state
+        state
             .rivers
             .resolve_profile(&order.symbol)
             .ok()
             .and_then(|profile| profile.calendar.clone())
-        && reject_while_closed(&calendar, ts, order, market_px)
-    {
-        let Some(reservation) = lanes.try_reserve_boundary() else {
-            return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
-                subject: admission_subject(&order_cmd),
-                reason: "execution output admission budget exhausted".into(),
-                ts_event: ts,
-            });
-        };
-        return OrderOutcome::Refused {
-            events: vec![ServerMessage::OrderRejected {
-                client_order_id: order.client_order_id.clone(),
-                reason: "market closed".into(),
-                ts_event: ts,
-            }],
-            reservation,
-        };
+            .is_some_and(|calendar| reject_while_closed(&calendar, ts, order, market_px))
+    }) {
+        return refuse_all(
+            &order_cmd,
+            lanes,
+            &order.client_order_id.clone(),
+            "market closed",
+            ts,
+        );
     }
     let mut engine = passenger.engine.lock().await;
     let shape = engine.book_shape();
@@ -1400,8 +1513,10 @@ async fn market_reading(
     // `read_last` fallback below therefore take the boat's own river, so the
     // two cannot name different rivers even if that resolution ever changes.
     let needs_reading = match &msg {
-        ClientMessage::SubmitOrder(order) => {
-            debug_assert_eq!(order.symbol.as_ref(), boat.symbol());
+        ClientMessage::SubmitOrder(_) | ClientMessage::SubmitOrderGroup { .. } => {
+            for order in submitted_orders(&msg) {
+                debug_assert_eq!(order.symbol.as_ref(), boat.symbol());
+            }
             true
         }
         // An amend names no symbol on the wire, so it resolves to the river
@@ -1434,12 +1549,23 @@ async fn market_reading(
             tracing::error!(%e, "market reading task failed");
             (None, None)
         });
-        let msg = match msg {
-            ClientMessage::SubmitOrder(mut order)
-                if order.order_type == OrderType::Market && order.price.is_none() =>
-            {
+        // EVERY member of a group is stamped, off the SAME reading. A bracket
+        // whose market entry took one price while a sibling took another would
+        // have met two markets in one atomic admission, which is the property
+        // the group frame exists to guarantee against.
+        let stamp = |order: &mut mogwai_protocol::SubmitOrder| {
+            if order.order_type == OrderType::Market && order.price.is_none() {
                 order.price = last_px;
+            }
+        };
+        let msg = match msg {
+            ClientMessage::SubmitOrder(mut order) => {
+                stamp(&mut order);
                 ClientMessage::SubmitOrder(order)
+            }
+            ClientMessage::SubmitOrderGroup { mut orders } => {
+                orders.iter_mut().for_each(stamp);
+                ClientMessage::SubmitOrderGroup { orders }
             }
             other => other,
         };
@@ -2261,5 +2387,88 @@ mod calendar_tests {
             reject_while_closed(&calendar, closed, &marketable, reading),
             "a limit marketable against the stale print is refused with the market orders"
         );
+    }
+
+    fn linked_leg(id: &str, siblings: &[&str]) -> SubmitOrder {
+        SubmitOrder {
+            client_order_id: id.into(),
+            symbol: "MNQ".into(),
+            position_id: None,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            quantity: Decimal::ONE,
+            price: Some(Decimal::from(100)),
+            trigger_price: None,
+            trail_offset: None,
+            limit_offset: None,
+            reduce_only: false,
+            post_only: false,
+            time_in_force: TimeInForce::Gtc,
+            expire_time: None,
+            link: Some(mogwai_protocol::OrderLink {
+                order_list_id: "OL-1".into(),
+                contingency: mogwai_protocol::Contingency::Ouo,
+                linked_order_ids: siblings.iter().map(|id| (*id).to_string()).collect(),
+                parent_order_id: None,
+            }),
+        }
+    }
+
+    /// THE WIRE RULE that makes the group frame's guarantee worth anything: a
+    /// linked order sent ALONE is refused, because the per-leg route is what
+    /// lets leg one fill before leg two is admitted.
+    #[test]
+    fn a_linked_order_may_not_be_submitted_alone() {
+        let reason = boundary_error(&ClientMessage::SubmitOrder(linked_leg("A", &["B"])))
+            .expect("a linked bare submit is refused");
+        assert!(reason.contains("SubmitOrderGroup"), "{reason}");
+
+        // The negative, without which the assertion above holds for a boundary
+        // that refuses every submit: an UNLINKED order still goes alone, which
+        // is every order this venue served before linkage existed.
+        let mut standalone = linked_leg("A", &[]);
+        standalone.link = None;
+        assert!(boundary_error(&ClientMessage::SubmitOrder(standalone)).is_none());
+    }
+
+    /// A group is self-contained, and the boundary is where that is enforced:
+    /// a member naming an outsider could not be promised that admitting the
+    /// group admits every sibling.
+    #[test]
+    fn a_group_may_not_link_outside_itself() {
+        let group = ClientMessage::SubmitOrderGroup {
+            orders: vec![linked_leg("A", &["B"]), linked_leg("B", &["OUTSIDER"])],
+        };
+        assert!(boundary_error(&group).is_some_and(|reason| reason.contains("own members")));
+
+        let legal = ClientMessage::SubmitOrderGroup {
+            orders: vec![linked_leg("A", &["B"]), linked_leg("B", &["A"])],
+        };
+        assert!(
+            boundary_error(&legal).is_none(),
+            "a self-contained pair is admitted"
+        );
+    }
+
+    /// A refused group answers EVERY member. One frame naming one member would
+    /// leave the client waiting on the rest of a bracket the venue has already
+    /// refused whole.
+    #[test]
+    fn a_refused_group_answers_every_member() {
+        let group = ClientMessage::SubmitOrderGroup {
+            orders: vec![linked_leg("A", &["B"]), linked_leg("B", &["OUTSIDER"])],
+        };
+        let frames = boundary_refusal(&group, "no", 7);
+        let ids: Vec<&str> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                mogwai_protocol::ServerMessage::OrderRejected {
+                    client_order_id, ..
+                } => Some(client_order_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["A", "B"], "{frames:?}");
+        assert_eq!(boundary_frame_count(&group), 2);
     }
 }

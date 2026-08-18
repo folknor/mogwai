@@ -1167,6 +1167,14 @@ impl ExecutionClient for MogwaiExecutionClient {
                 )?,
             ));
         }
+        // ANNOUNCE EVERY LEG FIRST, then dispatch ONE frame. The announcement
+        // is nautilus-side bookkeeping and has to precede the venue's answer;
+        // the dispatch is a single `SubmitOrderGroup`, because per-leg submits
+        // are what let leg one fill before leg two is admitted. That is the
+        // hazard the group frame exists to close, and the venue now refuses the
+        // per-leg route for linked orders outright.
+        let mut orders = Vec::with_capacity(wires.len());
+        let mut members = Vec::with_capacity(wires.len());
         for ((client_order_id, wire), init) in wires.into_iter().zip(&cmd.order_inits) {
             self.announce_submitted(
                 &client_order_id,
@@ -1175,9 +1183,22 @@ impl ExecutionClient for MogwaiExecutionClient {
                 init,
                 cmd.ts_init,
             )?;
-            self.dispatch_order(&ExecWsCommand::Submit(wire))?;
+            members.push(client_order_id);
+            orders.push(wire);
         }
-        Ok(())
+        // Remembered so an `AdmissionSubject::SubmitGroup` refusal - which names
+        // the LIST rather than its members, because a group is refused whole -
+        // can be turned back into one `OrderRejected` per leg. Without it a
+        // refused bracket would leave every leg of it waiting on an answer the
+        // venue has already given.
+        if let Some(list_id) = orders
+            .first()
+            .and_then(|order| order.link.as_ref())
+            .map(|link| link.order_list_id.clone())
+        {
+            lock_recover(&self.state, "exec state").remember_group(list_id, members);
+        }
+        self.dispatch_order(&ExecWsCommand::SubmitGroup(orders))
     }
 
     fn modify_order(&self, cmd: ModifyOrder) -> anyhow::Result<()> {
@@ -1560,6 +1581,14 @@ impl ExecutionClient for MogwaiExecutionClient {
 #[derive(Debug, Clone)]
 enum ExecWsCommand {
     Submit(mogwai_protocol::SubmitOrder),
+    /// A whole linked group in ONE frame, which is the only way a bracket may
+    /// reach this venue. Sending the legs as separate `Submit`s lets leg one
+    /// FILL before leg two is admitted - the `Ouo` shrink then adjusts a
+    /// sibling that is not on the book, leg two arrives at full size, and the
+    /// pair's aggregate fill is twice the bracket quantity. The venue refuses a
+    /// linked bare `Submit` for exactly that reason, so this is not merely the
+    /// preferred route, it is the route.
+    SubmitGroup(Vec<mogwai_protocol::SubmitOrder>),
     Cancel {
         client_order_id: String,
     },
@@ -1586,6 +1615,7 @@ enum ExecWsCommand {
 fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
     match cmd {
         ExecWsCommand::Submit(order) => ClientMessage::SubmitOrder(order),
+        ExecWsCommand::SubmitGroup(orders) => ClientMessage::SubmitOrderGroup { orders },
         ExecWsCommand::Cancel { client_order_id } => ClientMessage::CancelOrder { client_order_id },
         ExecWsCommand::Modify {
             client_order_id,
@@ -1645,6 +1675,10 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> Server
             "cancel transport failures are reported via emit_cancel_rejected, \
              not reject_for (client_order_id={client_order_id})"
         ),
+        ExecWsCommand::SubmitGroup(_) => unreachable!(
+            "a group's transport failure rejects every leg and is handled in \
+             synthesize_transport_reject, which cannot be expressed as one frame"
+        ),
         ExecWsCommand::QueryOrders { .. } | ExecWsCommand::QueryFills { .. } => unreachable!(
             "queries never pass through dispatch_order; their transport \
              failures surface as errors from VenueQuery itself"
@@ -1671,6 +1705,22 @@ fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &E
                 None,
                 err.to_string(),
                 now_unix_nanos(ctx.sim),
+                ctx,
+            );
+        }
+    } else if let ExecWsCommand::SubmitGroup(orders) = cmd {
+        // EVERY leg, because the frame carrying them all never left. A group is
+        // dispatched as one send, so its transport failure is one failure with
+        // as many wedged orders as it had members, and rejecting one would
+        // leave the rest in `Submitted` forever.
+        let ts_event = now_unix_nanos(ctx.sim).as_u64();
+        for order in orders {
+            handle_exec_message(
+                ServerMessage::OrderRejected {
+                    client_order_id: order.client_order_id.clone(),
+                    reason: err.to_string(),
+                    ts_event,
+                },
                 ctx,
             );
         }
@@ -1768,6 +1818,35 @@ struct ExecState {
     /// `DropNextAccountUpdate` divergence exists to make exactly that copy
     /// wrong.
     account_ts_last: UnixNanos,
+    /// Which legs went out under which `order_list_id`, so a group refusal that
+    /// names only the LIST can be answered per leg.
+    ///
+    /// Bounded and FIFO rather than a growing map: the entry is wanted for the
+    /// round trip between a group's dispatch and the venue's answer, which is
+    /// one command's worth of time, and a long forward run must not accumulate
+    /// one row per bracket it ever sent. Losing an old row costs a refusal's
+    /// legibility and nothing else - the ERROR still names the list.
+    groups: std::collections::VecDeque<(String, Vec<ClientOrderId>)>,
+}
+
+/// How many dispatched order groups are remembered for refusal attribution.
+/// Generous for the in-flight window it actually covers, which is one round
+/// trip, and small enough that the memory is a rounding error.
+const REMEMBERED_GROUPS: usize = 64;
+
+impl ExecState {
+    fn remember_group(&mut self, order_list_id: String, members: Vec<ClientOrderId>) {
+        self.groups.retain(|(id, _)| id != &order_list_id);
+        self.groups.push_back((order_list_id, members));
+        while self.groups.len() > REMEMBERED_GROUPS {
+            self.groups.pop_front();
+        }
+    }
+
+    fn take_group(&mut self, order_list_id: &str) -> Option<Vec<ClientOrderId>> {
+        let index = self.groups.iter().position(|(id, _)| id == order_list_id)?;
+        self.groups.remove(index).map(|(_, members)| members)
+    }
 }
 
 /// Cap on retained terminal order records. Open orders are never pruned (they
@@ -2364,6 +2443,38 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     },
                     ctx,
                 );
+            }
+            mogwai_protocol::AdmissionSubject::SubmitGroup { order_list_id } => {
+                // The venue refused the whole group and named the LIST, because
+                // a group is admitted or refused whole and naming one member
+                // would be as wrong as naming none. Fan it back out to every
+                // leg: nautilus has no order-list-scoped rejection event, so a
+                // leg that got no answer would sit in the strategy's book
+                // forever waiting on one.
+                let members = lock_recover(&ctx.state, "exec state").take_group(&order_list_id);
+                match members {
+                    Some(members) if !members.is_empty() => {
+                        for client_order_id in members {
+                            handle_exec_message(
+                                ServerMessage::OrderRejected {
+                                    client_order_id: client_order_id.to_string(),
+                                    reason: reason.clone(),
+                                    ts_event,
+                                },
+                                ctx,
+                            );
+                        }
+                    }
+                    // The dispatch record aged out of the bounded ring, or this
+                    // client never sent that list. Nothing can be attributed,
+                    // so say so loudly rather than swallow a refusal.
+                    _ => tracing::error!(
+                        %order_list_id,
+                        %reason,
+                        "venue refused an order group this client cannot attribute to its legs; \
+                         those orders will not receive a rejection"
+                    ),
+                }
             }
             mogwai_protocol::AdmissionSubject::Cancel { client_order_id } => {
                 handle_exec_message(

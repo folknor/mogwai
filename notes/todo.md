@@ -124,6 +124,51 @@ default. It is not enough for the optional SHARED-EXCHANGE mode, where those two
 axes are still open - see the section named below. Neither is urgent; both are
 required eventually, since both modes must be supported.
 
+## Two consumer asks landed 2026-08-18, and what broadarrow owes back
+
+Both were filed in `../broadarrow/notes/todo.md` against the 2026-08-18 survey of
+the "be an exchange" landing. Both are DONE here; the entries stay only for what
+the consumer side still owes and for the one design decision that outran the ask.
+
+**THE ACCOUNT CARRIER.** `mogwai-adapter` built `{base}/ws?symbol={symbol}` and
+never sent `?account=`, so every broadarrow socket seated the venue's DEFAULT
+ledger whatever the host's config said - silently, because account resolution is
+total. Both client configs now name their configured ledger. THE ASK DID NOT
+ANTICIPATE THE CONSEQUENCE and it is worth knowing: a nautilus host holds TWO
+sockets on one account, and a claimed account EVICTS its incumbent, so naming the
+account alone would have made every host disconnect its own data leg on its exec
+dial. `/ws?session=` is the answer - one client's sockets coexist, a different or
+absent session evicts - and the adapter mints one per process from the pid and
+start instant, so a host configures nothing. Durable: `docs/config.md`,
+`reference/architecture.md`.
+
+WHAT BROADARROW OWES: `POST /accounts` at run-prep preflight, so each worker
+opens its own ledger with its own balances before the node is built. Nothing here
+blocks it.
+
+**ATOMIC GROUP ADMISSION.** `ClientMessage::SubmitOrderGroup` landed, which is
+the ask's preferred option 1 rather than the deferred-activation fallback. The
+two smaller asks landed with it: `apply_linkage_after_fill`'s silent skip past an
+absent sibling is now a `debug` line naming the hazard, and a linked bare
+`SubmitOrder` is REFUSED at the wire boundary. `docs/order-lists.md` states the
+admission guarantee explicitly, which is the sentence their capability bit was
+waiting to cite, and `a_group_shrinks_a_sibling_admitted_after_the_fill_that_shrinks_it`
+is the test they asked for - it fills leg one on the same call that admits leg
+two and shows the aggregate bounded at one bracket quantity. Its negative twin,
+`per_leg_dispatch_lets_an_entry_fill_before_its_stop_is_admitted`, keeps the
+hazard measured rather than merely described.
+
+WHAT BROADARROW OWES: their profile row becomes `AtomicOuo` and brick 3 of
+`notes/venue-order-list-oco-spec.md` lands. Note the one carve-out they must read
+before citing the guarantee - a member whose funds an earlier member's fill
+consumed is CANCELLED rather than rejected, which is economics on a live order
+and not a hole in admission. Their bracket exits are reduce-only and reserve
+nothing, so the ordinary shapes never meet it.
+
+NOT DONE, and it is theirs to decide rather than ours: the `submit_order_list`
+path is the only thing that emits a group frame. A consumer wanting an atomic
+group by any other route has no API for it, and none is owed until one is wanted.
+
 ## Open issues
 
 - OWNER GATE PENDING: LOOK AT THE FIVE COMPOSED-TAPE CHARTS. Slice 1 of the

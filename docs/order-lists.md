@@ -5,6 +5,56 @@ venue serves all three linkage rules, so a bracket - an entry with a take-profit
 and a stop that reap each other - is a real primitive here rather than two
 independent legs a strategy has to reconcile itself.
 
+## Admission is atomic, and a linked order may not travel alone
+
+**Every member of a group is accepted, or the whole group is rejected and
+nothing reaches the book.** A group is submitted as one `SubmitOrderGroup`
+frame, and the venue validates every member - against the book and against the
+rest of the group - before it accepts any of them. A refusal answers each member
+with its own `OrderRejected` and emits no `OrderAccepted` at all.
+
+Three things are guaranteed, and they are meant to be cited:
+
+1. **Atomic admission**, as above.
+2. **No tape advance between members.** The group is one engine call at one
+   instant against one market reading, so no member meets a market a sibling did
+   not, and a market member takes the same synthesized price as its siblings.
+3. **Fill-atomic linkage.** A member that fills during the group has its rule
+   applied to every sibling **including the ones admitted after it**, before the
+   call returns and therefore before any sweep can look at them.
+
+The third is the one that costs something to implement and is the reason the
+frame exists at all. Sent leg by leg, a two-leg `Ouo` bracket lets the entry
+FILL before the stop has been admitted: the shrink runs against a sibling that
+is not on the book, adjusts nothing, and the stop then arrives at full size
+beside a position that is already open. The pair's aggregate fill is twice the
+bracket quantity, which for a crossed slice reverses the account. So:
+
+**A LINKED ORDER SENT AS A BARE `SubmitOrder` IS REFUSED.** Not deprecated -
+refused, at the protocol boundary, naming the group frame as the remedy. A venue
+that served both routes could only promise atomicity for one code path, and a
+consumer cannot build a safety argument on which path a client happened to take.
+
+What a group frame must satisfy, all refused at the boundary:
+
+- **Self-contained.** Every `linked_order_ids` entry and every
+  `parent_order_id` names another member. Admitting the group and admitting
+  every sibling have to be the same statement.
+- **One list, one symbol, unique ids.** Two list ids in one frame are two
+  groups; a cross-symbol group would need two books at one instant.
+- **Every member linked.** A standalone order in a group frame is asking for a
+  guarantee that means nothing for it.
+- **No `Ioc` or `Fok`.** A now-or-never order's fate is decided by the market
+  rather than by admission.
+- At most `MAX_GROUP_ORDERS` members, which is `MAX_LINKED_ORDERS` plus one, so
+  a parent can travel with the maximum number of siblings.
+
+**The one carve-out, and it is economics rather than admission.** A member whose
+funds an earlier member's fill consumed is CANCELLED rather than rejected -
+the same reading the venue already takes of a triggered order that outruns its
+account. It was admitted; it then could not pay. A bracket's exits are
+reduce-only and reserve nothing, so the ordinary shapes never meet it.
+
 ## The model
 
 A linkage is a GROUP ID plus a RULE, carried by each member. The venue holds no
@@ -91,11 +141,17 @@ that can never come would rest for the life of the run.
 
 ## From nautilus
 
-A host submits an `OrderList` and the adapter sends its legs as ordinary submits
-carrying their linkage, in the list's own order. A leg that fails conversion
-aborts the whole list before anything is dispatched: half a bracket is worse
-than none, and a strategy that gets a rejection for its entry can retry, while
-one whose stop silently never reached the venue cannot.
+A host submits an `OrderList` and the adapter sends its legs as ONE
+`SubmitOrderGroup`, in the list's own order, each carrying its own linkage. A
+leg that fails conversion aborts the whole list before anything is dispatched:
+half a bracket is worse than none, and a strategy that gets a rejection for its
+entry can retry, while one whose stop silently never reached the venue cannot.
+
+A group refusal names the LIST rather than a member, since a group is refused
+whole; the adapter remembers which legs it dispatched under which list id and
+fans the refusal back out as one `OrderRejected` per leg, because nautilus has
+no order-list-scoped rejection event and a leg with no answer would wait on one
+forever.
 
 Nautilus's `ContingencyType` maps across unchanged, and a linked order must name
 its `order_list_id` - the adapter refuses a contingency, a link or a parent
