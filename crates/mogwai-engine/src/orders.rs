@@ -572,18 +572,22 @@ impl Engine {
                 continue;
             };
             let order = self.take_open(pos);
-            self.record_closed(&order, WireOrderStatus::Canceled, ts);
-            // CANCELED rather than a status of its own: nautilus models expiry
-            // as a distinct `Expired` transition, but the wire's status set has
-            // no such member and adding one would break every consumer's match
-            // for a distinction nothing downstream acts on differently. The
-            // reason is in the log line, not in the wire status.
+            self.record_closed(&order, WireOrderStatus::Expired, ts);
+            // EXPIRED, not Canceled. Nobody cancelled this order: the client
+            // stated its lifetime at submit and the clock reached the end of
+            // it. Reporting a cancel says an actor pulled the order, which is
+            // a different fact about the venue and the one a host would act on
+            // when reconciling. This used to report `Canceled` on the argument
+            // that no consumer matched the difference; that argument is the
+            // one the order-type completeness ruling overturned, since the
+            // venue's surface is not sized against a consumer's current
+            // catalog.
             tracing::debug!(
                 client_order_id = %order.submit.client_order_id,
                 time_in_force = ?order.submit.time_in_force,
                 "resting order expired",
             );
-            out.push(ServerMessage::OrderCanceled {
+            out.push(ServerMessage::OrderExpired {
                 client_order_id: order.submit.client_order_id.clone(),
                 venue_order_id: order.venue_order_id.clone(),
                 ts_event: ts,

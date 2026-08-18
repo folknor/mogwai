@@ -41,8 +41,8 @@ use nautilus_model::{
     },
     events::{
         AccountState as NautilusAccountState, OrderAccepted, OrderCancelRejected, OrderCanceled,
-        OrderEventAny, OrderFilled, OrderModifyRejected, OrderRejected, OrderSubmitted,
-        OrderTriggered, OrderUpdated,
+        OrderEventAny, OrderExpired, OrderFilled, OrderModifyRejected, OrderRejected,
+        OrderSubmitted, OrderTriggered, OrderUpdated,
     },
     identifiers::{
         AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, TradeId, Venue, VenueOrderId,
@@ -2011,6 +2011,63 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 Some(ctx.account_id),
             );
             ctx.emitter.send_order_event(OrderEventAny::Canceled(event));
+        }
+        // Deliberately a copy of the Canceled arm rather than a shared helper
+        // over both: the two are the same SHAPE and different FACTS, and the
+        // pressure to fold them is what collapsed expiry into cancellation in
+        // the first place. Everything below - the terminal-state guard, the
+        // forward-only `ts_last`, the A.11 unknown-order warning - is the same
+        // rule for the same reasons; only the status and the emitted event
+        // differ.
+        ServerMessage::OrderExpired {
+            client_order_id,
+            venue_order_id,
+            ts_event,
+        } => {
+            let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
+                return;
+            };
+            let Some(venue_order_id) = wire_venue_order_id(&venue_order_id) else {
+                return;
+            };
+            let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
+                let stale = record.status.is_closed();
+                if !stale {
+                    record.status = OrderStatus::Expired;
+                    record.venue_order_id = Some(venue_order_id);
+                    record.ts_last = record.ts_last.max(UnixNanos::from(ts_event));
+                }
+                (record.clone(), stale)
+            }) else {
+                tracing::warn!(
+                    order = %client_order_id,
+                    venue_order_id = %venue_order_id,
+                    "order expired for an order the mirror does not know; \
+                     event not surfaced to nautilus (A.11)"
+                );
+                return;
+            };
+            if stale {
+                tracing::warn!(
+                    order = %client_order_id,
+                    status = ?record.status,
+                    "expired event for a terminal mirror record; keeping the \
+                     terminal status (reordered or duplicated event)"
+                );
+            }
+            let event = OrderExpired::new(
+                ctx.trader_id,
+                record.strategy_id,
+                record.instrument_id,
+                client_order_id,
+                UUID4::new(),
+                UnixNanos::from(ts_event),
+                now_unix_nanos(ctx.sim),
+                false,
+                Some(venue_order_id),
+                Some(ctx.account_id),
+            );
+            ctx.emitter.send_order_event(OrderEventAny::Expired(event));
         }
         ServerMessage::OrderUpdated {
             client_order_id,

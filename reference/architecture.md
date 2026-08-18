@@ -174,6 +174,18 @@ shut. An instrument with no calendar supplies no such instant, so a day order on
 a 24/7 symbol rests like a Gtc - the honest answer, since inventing midnight UTC
 would expire orders at a time that market has never heard of.
 
+AN EXPIRY IS NOT A CANCEL, and the wire says so: expiry ends an order with
+`ServerMessage::OrderExpired` and a terminal `Expired` status, never
+`OrderCanceled`. A cancel is an actor's decision - a client's, or the venue's
+under havoc or a risk breach - while an expiry is the clock reaching a lifetime
+the client itself stated at submit. A host reconciling the two acts on them
+differently, and nautilus carries the same distinction as `OrderStatus::Expired`
+and an `OrderExpired` event, so the adapter maps it straight through rather than
+collapsing it at the last seam that could keep it. This reported `Canceled`
+until 2026-08-18, on the argument that no consumer matched the difference; that
+is the argument the order-type completeness ruling overturned, since the venue's
+surface is not sized against a consumer's current catalog.
+
 THE LEDGER MODELS FIVE INSTRUMENT CLASSES, split by SETTLEMENT SHAPE rather
 than by asset class, because the shape is what decides how holding one moves the
 ledger.

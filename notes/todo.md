@@ -1313,10 +1313,11 @@ required eventually, since both modes must be supported.
   asking the calendar whether the swept span crossed from open to shut. An
   instrument with no calendar supplies no instant, so a day order on a 24/7
   symbol rests like a Gtc rather than expiring at an invented hour.
-  STILL OPEN: nautilus models expiry as
-  its own `Expired` transition and the wire reports `Canceled`, which is a
-  distinction nothing downstream currently acts on but is a real difference from
-  what a nautilus host would see at a real venue.
+  LANDED 2026-08-18: an expiry reports `OrderExpired` with a terminal `Expired`
+  status, and the adapter maps it to nautilus's own `OrderStatus::Expired` and
+  `OrderExpired` event. It reported `Canceled` until then, on the argument that
+  nothing downstream matched the difference - the argument the order-type
+  completeness ruling overturned. See `reference/architecture.md`.
 
 - A trigger-act latency havoc arm, if a scenario ever needs a trigger fired
   later than the sweep interval already allows. Deliberately not built with
@@ -1526,6 +1527,12 @@ same message: trailing stops are served, the full order-type surface is served,
 ORDER LISTS are served so the two-independent-legs workaround is no longer
 required, and `RejectNextCancel` exists - so their three unrun scenario files can
 now be written against a venue that produces the shapes they need.
+ONE MORE BREAK FOR THE SAME MESSAGE, 2026-08-18: an expired order now reports
+`ServerMessage::OrderExpired` with a terminal `Expired` status where it reported
+`OrderCanceled` before. A consumer matching the wire enum exhaustively stops
+compiling, and one matching loosely stops seeing its `Day` and `Gtd` orders end
+at all - the second is the dangerous reading and the reason this belongs in the
+message rather than in a changelog nobody diffs.
 
 ### MOGWAI is the test venue, by decision (broadarrow, 2026-08-14)
 

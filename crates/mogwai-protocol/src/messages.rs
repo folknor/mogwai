@@ -533,6 +533,15 @@ pub enum WireOrderStatus {
     /// Terminal: canceled (client cancel, IOC remainder, or a server-side
     /// havoc cancel).
     Canceled,
+    /// Terminal: the order's own time in force ended it - a `Gtd` reaching its
+    /// instant, or a `Day` whose session closed. DISTINCT FROM `Canceled`
+    /// because nobody cancelled it: a cancel is an actor's decision and an
+    /// expiry is the clock, and a venue that reports one as the other tells a
+    /// client its order was pulled when the client's own stated lifetime
+    /// simply ran out. Nautilus carries the same distinction as
+    /// `OrderStatus::Expired` and an `OrderExpired` event, so the fidelity is
+    /// available end to end rather than collapsing at the adapter.
+    Expired,
     /// Terminal: refused AFTER acceptance - today only a post-only stop-limit
     /// that would take liquidity against its own triggering print. A
     /// pre-acceptance refusal never becomes a truth-store row at all.
@@ -1077,6 +1086,22 @@ pub enum ServerMessage {
         venue_order_id: VenueOrderId,
         ts_event: u64,
     },
+    /// A resting order's own time in force ended it: a `Gtd` reaching its
+    /// instant, or a `Day` whose session closed. Carries no reason string,
+    /// because the order's own `time_in_force` already says which clock ran
+    /// out and the venue has nothing to add.
+    ///
+    /// A SEPARATE FRAME rather than an `OrderCanceled` with a flag: a consumer
+    /// matching on the frame is the one that has to act differently, and a
+    /// flag on the cancel arm is a distinction every consumer must remember to
+    /// read. It is not duplicated by `DuplicateNextFill` for the same reason
+    /// `OrderTriggered` is not - it is not a fill, and a duplicated expiry is
+    /// a transition no client FSM has an arm for.
+    OrderExpired {
+        client_order_id: ClientOrderId,
+        venue_order_id: VenueOrderId,
+        ts_event: u64,
+    },
     OrderUpdated {
         client_order_id: ClientOrderId,
         venue_order_id: VenueOrderId,
@@ -1252,6 +1277,7 @@ impl ServerMessage {
             | ServerMessage::OrderTriggered { .. }
             | ServerMessage::OrderRejected { .. }
             | ServerMessage::OrderCanceled { .. }
+            | ServerMessage::OrderExpired { .. }
             | ServerMessage::OrderUpdated { .. }
             | ServerMessage::OrderModifyRejected { .. }
             | ServerMessage::OrderCancelRejected { .. } => EventKind::Exec,

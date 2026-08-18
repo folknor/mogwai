@@ -6181,10 +6181,23 @@ mod tests {
         let out = e.expire_orders(500, None, 500);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+                .any(|event| matches!(event, ServerMessage::OrderExpired { .. })),
             "the order expires at its instant: {out:?}"
         );
+        // EXPIRED, never Canceled: nobody pulled this order, its stated
+        // lifetime ran out, and a host reconciling the two facts acts on them
+        // differently.
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+            "expiry must not also report a cancel: {out:?}"
+        );
         assert!(e.open.is_empty());
+        assert_eq!(
+            e.closed.get("G1").map(|info| info.status),
+            Some(WireOrderStatus::Expired),
+            "the truth-store row an order query answers from carries the expiry too"
+        );
     }
 
     /// A `Day` order expires when ITS OWN symbol's session closes, and a
@@ -6220,9 +6233,19 @@ mod tests {
                 .is_empty(),
             "another instrument's close must not expire this order"
         );
+        let out = e.expire_orders(1_000, Some("BTCUSDT"), 1_000);
         assert!(
-            !e.expire_orders(1_000, Some("BTCUSDT"), 1_000).is_empty(),
-            "its own session closing expires it"
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderExpired { .. })),
+            "its own session closing expires it: {out:?}"
+        );
+        // A session close ends the order's stated lifetime; it is not the
+        // venue cancelling anyone's order, and the two reach a host as
+        // different facts.
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+            "a session close must not report a cancel: {out:?}"
         );
     }
 

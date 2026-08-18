@@ -36,8 +36,10 @@ pub struct BookShape {
 const ESC: usize = JSON_ESCAPE_FACTOR;
 
 /// Any single order-lifecycle frame (`OrderAccepted`, `OrderRejected`,
-/// `OrderCanceled`, `OrderUpdated`, `OrderFilled`, the two modify/cancel
-/// rejections). Widest shape is `OrderFilled`: `type`, `client_order_id`,
+/// `OrderCanceled`, `OrderExpired`, `OrderUpdated`, `OrderFilled`, the two
+/// modify/cancel rejections). `OrderExpired` carries `OrderCanceled`'s exact
+/// three fields, so it needs no bound of its own. Widest shape is
+/// `OrderFilled`: `type`, `client_order_id`,
 /// `venue_order_id`, `trade_id`, `position_id`, `symbol`, `side`, `last_qty`,
 /// `last_px`, `leaves_qty`, `commission`, `currency`, `liquidity`, `ts_event`.
 /// The fixed addend covers ~190 bytes

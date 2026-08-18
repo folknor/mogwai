@@ -231,6 +231,7 @@ pub(crate) fn nautilus_order_status(status: WireOrderStatus) -> OrderStatus {
         WireOrderStatus::PartiallyFilled => OrderStatus::PartiallyFilled,
         WireOrderStatus::Filled => OrderStatus::Filled,
         WireOrderStatus::Canceled => OrderStatus::Canceled,
+        WireOrderStatus::Expired => OrderStatus::Expired,
         WireOrderStatus::Rejected => OrderStatus::Rejected,
     }
 }
@@ -819,6 +820,23 @@ mod tests {
         assert!(
             err.is_err(),
             "rounds-to-zero size must be rejected, not panic"
+        );
+    }
+
+    /// An expired order reaches nautilus AS EXPIRED. The venue expires `Gtd`
+    /// and `Day` orders on their own clocks, and nautilus carries a matching
+    /// `OrderStatus::Expired`, so collapsing it onto `Canceled` here would
+    /// throw the distinction away at the last seam that could keep it - and
+    /// tell a host an order was pulled when its stated lifetime simply ended.
+    #[test]
+    fn an_expired_order_status_does_not_collapse_onto_canceled() {
+        assert_eq!(
+            nautilus_order_status(WireOrderStatus::Expired),
+            OrderStatus::Expired
+        );
+        assert_eq!(
+            nautilus_order_status(WireOrderStatus::Canceled),
+            OrderStatus::Canceled
         );
     }
 }

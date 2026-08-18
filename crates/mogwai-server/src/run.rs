@@ -1169,6 +1169,7 @@ pub(crate) fn addressed_order(
         M::OrderAccepted { venue_order_id, .. }
         | M::OrderTriggered { venue_order_id, .. }
         | M::OrderCanceled { venue_order_id, .. }
+        | M::OrderExpired { venue_order_id, .. }
         | M::OrderUpdated { venue_order_id, .. } => Some(venue_order_id),
         M::OrderModifyRejected { venue_order_id, .. }
         | M::OrderCancelRejected { venue_order_id, .. } => venue_order_id.as_ref(),

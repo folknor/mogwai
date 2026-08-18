@@ -32,6 +32,13 @@ trigger. `Gtd` carries an `expire_time`; `Day` does not, because its expiry is
 the instrument's own session close rather than anything a client states, and an
 instrument with no calendar never expires one.
 
+AN EXPIRED ORDER REPORTS `OrderExpired`, not `OrderCanceled`, and its terminal
+status on an order query is `Expired`. Match on it: an order you cancelled and
+an order whose stated lifetime ran out are different outcomes, and a client that
+folds both into "cancelled" cannot tell a venue action from its own time in
+force. A nautilus host sees the distinction as `OrderStatus::Expired` and an
+`OrderExpired` event.
+
 A hedging reduce-only order must name the `position_id` it reduces. Without
 one, "reduce whatever I have" is ambiguous when several independent or
 opposing positions exist, so the venue rejects the submit instead of assigning
