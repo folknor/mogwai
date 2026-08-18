@@ -168,11 +168,20 @@ twice the bracket quantity. The group runs in two passes under one lock: a DRY
 VALIDATION of every member against the book and against the group's own ids,
 which mutates nothing and refuses the whole frame on one bad member, then the
 ordinary submit path per member at one instant against one reading. A CLOSING
-LINKAGE PASS then re-applies the rule of every member that filled, against the
+LINKAGE PASS then applies the rule of every member that filled, against the
 whole group, before the call returns - which is what covers the siblings
-admitted after the fill that adjusts them. The residual is funds and is stated
-as such: a member whose money an earlier member's fill spent is CANCELLED, the
-same reading a triggered order that outruns its account already gets.
+admitted after the fill that adjusts them. That pass is the SOLE application of
+a member's linkage: the submit path suppresses its own, because `Ouo` subtracts
+the filled quantity rather than setting a target, so applying it at the fill and
+again at the close would shrink an already-resting sibling twice and cancel a
+stop-first bracket's stop outright.
+
+The residual is funds. The dry pass reads the book as it is before the group
+runs, so a member the venue can no longer fund once an earlier member's fill has
+spent the balance is REJECTED on the second pass, with its earlier siblings
+already accepted. Atomic admission therefore covers everything the venue can
+decide in advance and not a balance the group's own fills moved; a group whose
+members are jointly affordable at submission never meets it.
 
 A STOP and a TOUCHED order are the same machinery with opposite comparisons. A
 stop protects - buy above the market, sell below - and fires when price runs

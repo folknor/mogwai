@@ -25,7 +25,28 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
-        self.on_submit_from(order, ts, reading, true, false)
+        self.on_submit_from(order, ts, reading, true, &[])
+    }
+
+    /// The one refusal `on_submit_from` makes BEFORE `validate_submit`, lifted
+    /// out so the group's dry pass can make it too.
+    ///
+    /// It has to be a separate function rather than a rule inside
+    /// `validate_submit`, because its sibling branch MUTATES - a hedging order
+    /// with no `position_id` that is not reduce-only gets a fresh one assigned -
+    /// and `validate_submit` is a pure read that the dry pass depends on staying
+    /// pure. Splitting the refusal from the assignment is what lets both passes
+    /// ask the same question.
+    ///
+    /// A dry pass that skipped this admitted a group whose hedging reduce-only
+    /// member was then refused in pass two, with its siblings already accepted
+    /// and possibly filled - the exact atomicity break the group frame exists to
+    /// prevent, in the mode a bracket's exits are most likely to be written for.
+    fn hedging_refusal(&self, order: &SubmitOrder) -> Option<String> {
+        (self.oms_type == mogwai_protocol::OmsType::Hedging
+            && order.position_id.is_none()
+            && order.reduce_only)
+            .then(|| "hedging reduce-only order requires a position_id".to_string())
     }
 
     /// Submit a LINKED GROUP: every member admitted, or none of them.
@@ -46,16 +67,24 @@ impl Engine {
     /// advances between members and no member meets a market a sibling did not.
     ///
     /// THEN THE CLOSING LINKAGE PASS, which is what makes the guarantee bite
-    /// rather than merely sound good. A member that FILLS during pass two
-    /// applies its rule where the fill is committed - but only to siblings
-    /// already on the book, and its later siblings are not there yet. That is
-    /// the exact hazard the group frame exists to close: an `Ouo` entry filling
-    /// before its stop is admitted would leave the stop at FULL size, so the
-    /// pair's aggregate fill would be twice the bracket quantity and a crossed
-    /// slice would reverse the account. The closing pass re-applies the rule of
-    /// every member that filled, against the whole group, before this call
-    /// returns - and it returns under the engine lock, so no sweep can have
-    /// looked at any of them in between.
+    /// rather than merely sound good, and which is the SOLE application of a
+    /// member's linkage - pass two suppresses the one `on_submit_from` would
+    /// otherwise do at the fill.
+    ///
+    /// Applying it at the fill covers only siblings already on the book, and a
+    /// filling member's later siblings are not there yet. That is the hazard
+    /// the group frame exists to close: an `Ouo` entry filling before its stop
+    /// is admitted would leave the stop at FULL size, so the pair's aggregate
+    /// fill would be twice the bracket quantity and a crossed slice would
+    /// reverse the account. Applying it at the fill AND again here would fix
+    /// that one and introduce its mirror, because `Ouo` subtracts the filled
+    /// quantity rather than setting a target: a sibling that WAS on the book
+    /// would be shrunk twice, and a two-leg bracket sent stop-first would have
+    /// its stop driven to zero leaves and cancelled outright. Hence exactly
+    /// once, here, with every member admitted.
+    ///
+    /// It runs before this call returns, under the engine lock, so no sweep can
+    /// have looked at any member in between.
     ///
     /// `RejectNextSubmit` is consumed ONCE, for the group, before pass one.
     /// Spending it per member would refuse one leg of an atomic group, which is
@@ -97,6 +126,12 @@ impl Engine {
         // stated there rather than papered over here.
         for order in &orders {
             let mut candidate = order.clone();
+            // Asked BEFORE `validate_submit` because that is where pass two
+            // asks it. It is the one refusal that lives outside the validator,
+            // so a dry pass built only from the validator cannot see it.
+            if let Some(reason) = self.hedging_refusal(order) {
+                return reject_all(&reason, Some(&order.client_order_id));
+            }
             // The derived trailing limit is what `risk_px` and therefore the
             // funds check read, so a dry pass that skipped the derivation would
             // judge a `TrailingStopLimit` against its trigger rather than its
@@ -113,7 +148,7 @@ impl Engine {
         let mut out = Vec::new();
         let mut filled: Vec<(SubmitOrder, Decimal)> = Vec::new();
         for order in orders {
-            let events = self.on_submit_from(order.clone(), ts, reading, true, true);
+            let events = self.on_submit_from(order.clone(), ts, reading, true, &ids);
             let member_filled: Decimal = events
                 .iter()
                 .filter_map(|event| match event {
@@ -131,11 +166,15 @@ impl Engine {
             out.extend(events);
         }
 
-        // THE CLOSING PASS. Re-applying a rule already applied in pass two is
-        // harmless and is what keeps this simple: `Oco` finds the sibling
-        // already off the book and does nothing, and `Ouo` shrinks only what is
-        // still resting. What it CATCHES is the sibling that was not on the
-        // book when its sibling filled.
+        // THE CLOSING PASS, and it is the ONLY place a group member's linkage
+        // is applied - `on_submit_from` skips its own application for a member,
+        // because `Ouo` subtracts rather than sets and applying it twice would
+        // shrink an already-resting sibling by twice the fill. Running it here
+        // and only here means each filled member's rule is applied exactly
+        // once, against every member, with all of them on the book - which is
+        // both halves of the guarantee at one stroke: the sibling admitted
+        // after the fill is covered, and the sibling admitted before it is not
+        // adjusted twice.
         let mut closing = Vec::new();
         for (order, qty) in filled {
             closing.extend(self.apply_linkage_after_fill(&order, qty, ts));
@@ -181,20 +220,26 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
         apply_divergences: bool,
-        group_member: bool,
+        group: &[ClientOrderId],
     ) -> Vec<ServerMessage> {
+        if let Some(reason) = self.hedging_refusal(&order) {
+            return vec![ServerMessage::OrderRejected {
+                client_order_id: order.client_order_id,
+                reason,
+                ts_event: ts,
+            }];
+        }
         if self.oms_type == mogwai_protocol::OmsType::Hedging && order.position_id.is_none() {
-            if order.reduce_only {
-                return vec![ServerMessage::OrderRejected {
-                    client_order_id: order.client_order_id,
-                    reason: "hedging reduce-only order requires a position_id".into(),
-                    ts_event: ts,
-                }];
-            }
             self.position_seq = self.position_seq.saturating_add(1);
             order.position_id = Some(format!("{}-{}", order.symbol, self.position_seq));
         }
-        if let Err(reason) = self.validate_submit(&order, ts, apply_divergences, &[]) {
+        // The group's ids travel into `validate_link` on THIS pass too, not just
+        // the dry one. A child may name a parent that has not been accepted yet,
+        // and a group is not required to list parents before children - so a
+        // pass that dropped the group context here refused a forward parent
+        // reference that pass one had already passed, breaking the group open
+        // with its earlier members accepted.
+        if let Err(reason) = self.validate_submit(&order, ts, apply_divergences, group) {
             return vec![ServerMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
@@ -216,7 +261,7 @@ impl Engine {
         // the whole group, because spending it per member would refuse one leg
         // of a group whose whole promise is that its legs share a fate.
         if apply_divergences
-            && !group_member
+            && group.is_empty()
             && let Some(Divergence::RejectNextSubmit { reason }) =
                 self.take_armed(|d| matches!(d, Divergence::RejectNextSubmit { .. }))
         {
@@ -572,7 +617,21 @@ impl Engine {
             // Before this order is routed to rest or close: a sibling reaped
             // here is off the book by the time anything else looks at it, and
             // the order's own record is untouched by the linkage.
-            out.extend(self.apply_linkage_after_fill(&order, last_qty, ts));
+            //
+            // NOT FOR A GROUP MEMBER, and this is load-bearing rather than an
+            // optimization. `Ouo` SUBTRACTS the filled quantity from each
+            // sibling still resting, so it is not idempotent: applying it here
+            // and again in `on_submit_group`'s closing pass shrinks a sibling
+            // that was already on the book by TWICE the fill. For a two-leg
+            // bracket sent stop-first that drove the stop's leaves to zero and
+            // CANCELLED it, leaving the position naked - the mirror image of
+            // the hazard the group frame was built to close, and reachable only
+            // through one of the two member orderings. The group applies every
+            // filled member's rule exactly once, in the closing pass, once all
+            // members are on the book.
+            if group.is_empty() {
+                out.extend(self.apply_linkage_after_fill(&order, last_qty, ts));
+            }
         }
 
         // Freeze the accepted order's state once, then route it: rest it

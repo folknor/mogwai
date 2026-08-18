@@ -523,12 +523,20 @@ pub enum ClientMessage {
     ///    applied to every sibling, including the ones admitted AFTER it, before
     ///    the group returns and therefore before any sweep can look at them.
     ///
-    /// THE ONE CARVE-OUT, and it is economics rather than admission: a member
-    /// whose funds an EARLIER member's fill consumed is CANCELLED rather than
-    /// rejected, which is the same reading the venue already takes of a
-    /// triggered order that outruns its account. It was admitted; it then could
-    /// not pay. That does not weaken guarantee 1, which is about what the venue
-    /// refuses, and a bracket's exits are reduce-only and reserve nothing.
+    /// THE ONE CARVE-OUT, and it is funds. The dry pass judges every member
+    /// against the book as it is BEFORE the group runs, so it cannot see money
+    /// an earlier member's fill is about to spend. A member the venue can no
+    /// longer fund when its own turn comes is REJECTED on the second pass, with
+    /// its earlier siblings already accepted - so on this one axis guarantee 1
+    /// holds for everything the venue can decide in advance and not for a
+    /// balance the group's own fills moved.
+    ///
+    /// Whether your group can meet it is a question about YOUR orders. A
+    /// reduce-only member reserves nothing and cannot meet it; a member without
+    /// that flag reserves like any other order, and whether an exit CAN be
+    /// reduce-only depends on the run's `oms_type` and is on your side of the
+    /// wire. Size a group so its members are jointly affordable against the
+    /// balance the venue holds at submission, and the carve-out is unreachable.
     ///
     /// The group is SELF-CONTAINED: every id a member names must be another
     /// member, which is what makes "admit the group" and "admit every sibling"

@@ -198,9 +198,18 @@ hazard measured rather than merely described.
 WHAT BROADARROW OWES: their profile row becomes `AtomicOuo` and brick 3 of
 `notes/venue-order-list-oco-spec.md` lands. Note the one carve-out they must read
 before citing the guarantee - a member whose funds an earlier member's fill
-consumed is CANCELLED rather than rejected, which is economics on a live order
-and not a hole in admission. Their bracket exits are reduce-only and reserve
-nothing, so the ordinary shapes never meet it.
+consumed is REJECTED on the second pass with its earlier siblings already
+accepted, so admission is atomic for everything the venue can decide in advance
+and not for a balance the group's own fills moved. Whether their own exits meet
+it depends on the run's `oms_type` and is theirs to know, not ours to assert: a
+reduce-only exit reserves nothing and never meets it, while one submitted
+without the flag takes initial margin per resting contract at admission and is
+not clamped to a position. Two earlier drafts here were wrong and are recorded
+so they do not come back: that their exits are reduce-only and reserve nothing
+was a guess about a consumer's order shape, and that the unfunded member is
+CANCELLED was a claim about an event the submit path does not emit - the cancel
+reading belongs to a TRIGGERED order that outruns its account, which is a
+different path.
 
 NOT DONE, and it is theirs to decide rather than ours: the `submit_order_list`
 path is the only thing that emits a group frame. A consumer wanting an atomic

@@ -1053,7 +1053,7 @@ impl Engine {
                     band_ticks: self.liquidation_band_ticks,
                 }),
                 false,
-                false,
+                &[],
             ));
             originated += 1;
         }
@@ -1132,7 +1132,7 @@ impl Engine {
                     band_ticks: self.liquidation_band_ticks,
                 }),
                 false,
-                false,
+                &[],
             ));
             originated += 1;
         }
@@ -1314,7 +1314,7 @@ impl Engine {
                 band_ticks: self.liquidation_band_ticks,
             }),
             false,
-            false,
+            &[],
         )
     }
 
@@ -6177,6 +6177,164 @@ mod tests {
         assert!(
             e.open.is_empty(),
             "nothing is left resting beside the filled entry"
+        );
+    }
+
+    /// THE MIRROR OF THE TEST ABOVE, and the one the closing pass got wrong.
+    /// There the sibling was admitted AFTER the fill, so only the closing pass
+    /// could adjust it. Here the sibling is admitted BEFORE, by sending the
+    /// group stop-first - so the submit path's own linkage would adjust it too,
+    /// and `Ouo` SUBTRACTS rather than sets, so applying both shrank it twice.
+    ///
+    /// The quantities are deliberately unequal: with a 2-lot stop and a 1-lot
+    /// entry, one shrink leaves 1 resting and two shrinks reach zero and CANCEL
+    /// the stop outright. An equal-sized bracket cannot tell the two apart -
+    /// both readings end at zero - which is exactly why the equal-sized test
+    /// above passed against the double application.
+    #[test]
+    fn a_group_shrinks_a_sibling_admitted_before_the_fill_exactly_once() {
+        let mut e = linked_engine();
+        let mut stop = limit_order("STOP", 2);
+        stop.side = Side::Sell;
+        stop.price = Some(Decimal::from(400));
+        let stop = linked(
+            stop,
+            link_of(mogwai_protocol::Contingency::Ouo, &["ENTRY"], None),
+        );
+        let mut entry = limit_order("ENTRY", 1);
+        entry.price = Some(Decimal::from(300));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Ouo, &["STOP"], None),
+        );
+
+        // Stop FIRST, so it is resting by the time the entry fills.
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![stop, entry],
+            },
+            1,
+            Some(away_reading()),
+        );
+        let filled: Decimal = out
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::OrderFilled(fill) => Some(fill.last_qty),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(filled, Decimal::from(1), "the entry filled whole: {out:?}");
+
+        assert!(
+            !canceled_ids(&out).contains(&"STOP"),
+            "the stop was shrunk, not cancelled: a second application of the same Ouo rule takes \
+             its leaves to zero and reaps it, leaving the filled position with no exit: {out:?}"
+        );
+        let resting = e
+            .open
+            .iter()
+            .find(|order| order.submit.client_order_id == "STOP")
+            .expect("the stop is still resting");
+        assert_eq!(
+            resting.leaves_qty,
+            Decimal::from(1),
+            "shrunk by the fill ONCE - 2 less 1 - rather than by twice it: {out:?}"
+        );
+    }
+
+    /// A hedging reduce-only member naming no `position_id` is refused, and the
+    /// refusal reaches the DRY pass rather than pass two.
+    ///
+    /// That refusal is the one `on_submit_from` makes before `validate_submit`,
+    /// so a dry pass built only from the validator could not see it: the group
+    /// passed admission whole and then lost one member on the second pass, with
+    /// its siblings already accepted. It is the likeliest shape to hit it - a
+    /// bracket's exits are the orders written reduce-only.
+    #[test]
+    fn a_group_refuses_a_hedging_reduce_only_member_before_admitting_anything() {
+        let mut e = linked_engine();
+        e.set_oms_type(mogwai_protocol::OmsType::Hedging);
+        let mut entry = limit_order("ENTRY", 1);
+        entry.price = Some(Decimal::from(100));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Ouo, &["EXIT"], None),
+        );
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(300));
+        exit.reduce_only = true;
+        let exit = linked(
+            exit,
+            link_of(mogwai_protocol::Contingency::Ouo, &["ENTRY"], None),
+        );
+
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![entry, exit],
+            },
+            1,
+            Some(away_reading()),
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderAccepted { .. })),
+            "the group is refused whole, with no member admitted first: {out:?}"
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|event| matches!(event, ServerMessage::OrderRejected { .. }))
+                .count(),
+            2,
+            "one rejection per member: {out:?}"
+        );
+        assert!(e.open.is_empty(), "and nothing rests");
+    }
+
+    /// A CHILD LISTED BEFORE ITS PARENT. Nothing requires a group to list
+    /// parents first, so the group context has to travel into the SECOND pass
+    /// as well as the dry one - a pass that dropped it refused the child for an
+    /// unknown parent after the parent's siblings had been accepted.
+    #[test]
+    fn a_group_admits_a_child_listed_before_the_parent_it_names() {
+        let mut e = linked_engine();
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(300));
+        let exit = linked(
+            exit,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+        let mut entry = limit_order("ENTRY", 1);
+        entry.price = Some(Decimal::from(100));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
+        );
+
+        // Child FIRST.
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![exit, entry],
+            },
+            1,
+            Some(away_reading()),
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|event| matches!(event, ServerMessage::OrderAccepted { .. }))
+                .count(),
+            2,
+            "both legs were admitted despite the child preceding its parent: {out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "and nothing was rejected for an unknown parent: {out:?}"
         );
     }
 

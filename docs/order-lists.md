@@ -49,11 +49,26 @@ What a group frame must satisfy, all refused at the boundary:
 - At most `MAX_GROUP_ORDERS` members, which is `MAX_LINKED_ORDERS` plus one, so
   a parent can travel with the maximum number of siblings.
 
-**The one carve-out, and it is economics rather than admission.** A member whose
-funds an earlier member's fill consumed is CANCELLED rather than rejected -
-the same reading the venue already takes of a triggered order that outruns its
-account. It was admitted; it then could not pay. A bracket's exits are
-reduce-only and reserve nothing, so the ordinary shapes never meet it.
+**The one carve-out, and it is funds.** The admission pass judges every member
+against the book as it is BEFORE the group runs, so it cannot see money an
+earlier member's fill is about to spend. A member the venue can no longer fund
+when its own turn comes is REJECTED, with its earlier siblings already accepted.
+On that one axis the guarantee covers everything the venue can decide in
+advance, and not a balance the group's own fills moved.
+
+Whether your own group meets it is a question about YOUR orders, not about
+brackets in general. A reduce-only order reserves nothing, so a group whose
+exits are reduce-only never meets the carve-out. Whether an exit CAN be
+reduce-only depends on the run's `oms_type` and is on your side of the wire:
+under hedging an exit names the `position_id` it reduces and caps against that
+position, while under netting the cap is taken against the account net, which
+is a different number from a slice a client tracks locally. An exit that is not
+reduce-only reserves like any other order - it takes initial margin per resting
+contract at admission, and nothing clamps its fill to a position. See
+[Netting and hedging](oms-types.md).
+
+Size a group so its members are jointly affordable against the balance the venue
+holds at submission and the carve-out is unreachable.
 
 ## The model
 
