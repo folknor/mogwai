@@ -317,6 +317,9 @@ async fn serve_async(
         history_requests: Arc::new(tokio::sync::Semaphore::new(
             http::MAX_CONCURRENT_HISTORY_REQUESTS,
         )),
+        history_queue: Arc::new(tokio::sync::Semaphore::new(
+            http::MAX_QUEUED_HISTORY_REQUESTS,
+        )),
     };
     let completing_run = Arc::clone(&state.run);
     let (fault_shutdown_tx, mut fault_shutdown_rx) = tokio::sync::oneshot::channel();

@@ -787,6 +787,7 @@ fn refuse(
         ServerMessage::AdmissionRejected {
             subject,
             reason: "execution output admission budget exhausted".into(),
+            retryable: true,
             ts_event: ts,
         },
     )

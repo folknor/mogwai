@@ -534,10 +534,12 @@ impl ExecLanes {
             ServerMessage::AdmissionRejected {
                 subject,
                 reason,
+                retryable,
                 ts_event,
             } => ServerMessage::AdmissionRejected {
                 subject,
                 reason: truncate_reason(reason),
+                retryable,
                 ts_event,
             },
             ServerMessage::HavocDiagnostic { reason, sim_now_ns } => {
@@ -634,6 +636,7 @@ mod tests {
         ServerMessage::AdmissionRejected {
             subject: AdmissionSubject::Frame,
             reason: "bad frame".into(),
+            retryable: true,
             ts_event: 1,
         }
     }

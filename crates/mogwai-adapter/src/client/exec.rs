@@ -1686,6 +1686,38 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> Server
     }
 }
 
+/// The prefix a RETRYABLE venue refusal's reason carries, so a consumer can
+/// tell backpressure from a business rejection without reading prose.
+///
+/// This exists because nautilus's `OrderRejected` has one free field - the
+/// reason string - and both kinds of refusal arrive through it. Without a
+/// marker a consumer's only lever is matching the venue's own sentence, which
+/// makes its quarantine path's safety depend on wording nobody promised to
+/// keep. This IS that promise: a public constant, prepended by this adapter and
+/// pinned by a test, so a consumer matches an identifier rather than a phrase.
+///
+/// WHAT IT MEANS is exactly what the wire's `retryable` says: the venue was
+/// FULL, not that it said no, and the same command sent later could succeed. It
+/// says nothing about whether retrying is WISE - that is the consumer's
+/// judgement, and a consumer that prefers to stop when the venue said no is
+/// still right to. Absent the prefix, a rejection is terminal and must be
+/// treated as such.
+///
+/// Chosen to be unmistakable in a reason string and safe to match on a plain
+/// `starts_with`.
+pub const RETRYABLE_REJECT_PREFIX: &str = "[retryable] ";
+
+/// Prepend [`RETRYABLE_REJECT_PREFIX`] to a refusal the venue called retryable,
+/// leaving the venue's own reason after it so an operator reading logs still
+/// learns which refusal it was.
+fn mark_retryable(reason: &str, retryable: bool) -> String {
+    if retryable {
+        format!("{RETRYABLE_REJECT_PREFIX}{reason}")
+    } else {
+        reason.to_owned()
+    }
+}
+
 /// Synthesizes the nautilus reject for a command whose transport failed before
 /// the venue ever saw it - shared by the HTTP POST error path and the WS
 /// send-failure path (AE9). A failed `Cancel` is reported as a `CancelRejected`
@@ -2432,8 +2464,27 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
         ServerMessage::AdmissionRejected {
             subject,
             reason,
+            retryable,
             ts_event,
-        } => match subject {
+        } => {
+            // THE MARKER, and it is the whole reason `retryable` is on the wire.
+            //
+            // Nautilus's `OrderRejected` carries a reason string and nothing
+            // else this adapter may set, so an admission refusal and a business
+            // rejection ("insufficient balance", "market closed") arrive at a
+            // strategy in the same shape. A consumer that wanted to treat
+            // backpressure as retryable had only the venue's WORDING to key on,
+            // and correctly refused to hang a quarantine decision on our prose.
+            //
+            // So the wording stops being prose and becomes a CONTRACT: a
+            // retryable refusal's reason is prefixed with
+            // `RETRYABLE_REJECT_PREFIX`, that prefix is a public constant of
+            // this crate, and `a_retryable_admission_refusal_is_marked_for_the_consumer`
+            // pins it. A consumer matches the constant, not a sentence. The
+            // venue's own reason follows it unchanged, so an operator reading
+            // logs still learns which refusal it was.
+            let reason = mark_retryable(&reason, retryable);
+            match subject {
             mogwai_protocol::AdmissionSubject::Submit { client_order_id } => {
                 handle_exec_message(
                     ServerMessage::OrderRejected {
@@ -2542,7 +2593,8 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     "venue refused a whole execution frame; order events may be missing and the mirror should be reconciled against venue truth"
                 );
             }
-        },
+            }
+        }
         ServerMessage::FeedLagged {
             skipped,
             sim_now_ns,
@@ -2962,6 +3014,38 @@ fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE CONTRACT A CONSUMER MATCHES ON, pinned so it cannot drift into
+    /// prose.
+    ///
+    /// Nautilus's `OrderRejected` gives this adapter one free field, so an
+    /// admission refusal and a business rejection reach a strategy in the same
+    /// shape. The prefix is what makes them separable by an identifier rather
+    /// than by the venue's wording - which is what a consumer refused to hang
+    /// its quarantine path on, correctly. Changing the constant is a breaking
+    /// change to that contract, and this is where that shows up.
+    #[test]
+    fn a_retryable_admission_refusal_is_marked_for_the_consumer() {
+        assert_eq!(RETRYABLE_REJECT_PREFIX, "[retryable] ");
+
+        let marked = mark_retryable("venue command capacity exhausted", true);
+        assert!(
+            marked.starts_with(RETRYABLE_REJECT_PREFIX),
+            "a consumer matches the prefix, not the sentence: {marked}"
+        );
+        assert!(
+            marked.ends_with("venue command capacity exhausted"),
+            "and the venue's own reason survives it, so an operator still \
+             learns which refusal it was: {marked}"
+        );
+
+        // The negative, without which the assertion above holds for a marker
+        // applied to everything: a rejection the venue did NOT call retryable
+        // passes through untouched and stays terminal.
+        let business = mark_retryable("insufficient balance", false);
+        assert_eq!(business, "insufficient balance");
+        assert!(!business.starts_with(RETRYABLE_REJECT_PREFIX));
+    }
 
     #[test]
     fn a_failed_query_send_unregisters_its_waiter() {

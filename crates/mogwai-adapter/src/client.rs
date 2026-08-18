@@ -16,5 +16,5 @@ mod exec;
 mod shared;
 
 pub use data::MogwaiDataClient;
-pub use exec::MogwaiExecutionClient;
+pub use exec::{MogwaiExecutionClient, RETRYABLE_REJECT_PREFIX};
 pub(crate) use shared::join_url;

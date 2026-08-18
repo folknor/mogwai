@@ -124,6 +124,43 @@ default. It is not enough for the optional SHARED-EXCHANGE mode, where those two
 axes are still open - see the section named below. Neither is urgent; both are
 required eventually, since both modes must be supported.
 
+## Two more consumer residuals landed 2026-08-18, both marked "and it is mogwai's"
+
+Filed in `../broadarrow/notes/todo.md` under the dep-drift entries 5 and 6, as
+the two residuals of eight landings that were NOT theirs to close.
+
+**THE HISTORY GATE NOW WAITS.** Entry 6, which they called the worst of the eight
+because it is silent. Four concurrent `/trades` or `/quotes` syntheses, and a
+fifth was REFUSED - but nautilus's historical response types carry no error
+channel, so their adapter's only alternative to an unresolvable hang is to
+resolve the request empty and log why. A refused warmup therefore reached a
+strategy as a quiet window, indistinguishable from a tape that printed nothing.
+The cap bounds RESIDENT pages and a waiter holds no page, so the refusal bought
+the bound nothing: it is now a bounded wait, with a fail-fast queue bound behind
+it so the queue cannot become a way to accept everything and answer nothing.
+Their other suggested option - carry the refusal as something other than
+emptiness - is not available to us, because the missing channel is nautilus's.
+
+**BACKPRESSURE IS NOW A FIELD.** Entry 5b. `AdmissionRejected` carries
+`retryable`, and `mogwai-adapter` carries the distinction across the nautilus
+boundary as `RETRYABLE_REJECT_PREFIX` on the reason - because `OrderRejected`
+has one field an adapter may set, so an admission refusal and a business
+rejection reached a strategy in the same shape. They refused to substring-match
+our prose, correctly; the prefix is a public constant with a test on it, so what
+they match is a contract rather than a sentence.
+
+WHAT BROADARROW OWES: deciding whether to make a marked refusal retryable at
+all. Their standing reasoning - a rejection wrongly treated as retryable is
+worse than a run that stops when the venue said no - is still sound, and the
+marker changes only what the decision RESTS on. Nothing here pushes them either
+way.
+
+STILL OPEN AND NOT OURS, recorded so it is not re-filed: the boot-storm PACING
+half of entry 6 is broadarrow's own item, because their daemon decides when
+workers spawn. The wait makes staggering unnecessary for ordinary paging rather
+than a precondition of correctness, which is the change worth telling them
+about.
+
 ## Two consumer asks landed 2026-08-18, and what broadarrow owes back
 
 Both were filed in `../broadarrow/notes/todo.md` against the 2026-08-18 survey of

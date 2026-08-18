@@ -365,7 +365,23 @@ one bounded sequential dispatcher, so admitted commands reach the market read
 and engine in socket arrival order even when their modeled act latencies differ.
 The queue and a process-wide permit bound parsed command work before it reaches
 the blocking pool or engine mutex, and a full bound is a visible
-`AdmissionRejected` the engine never sees. Inbound frames and reassembled
+`AdmissionRejected` the engine never sees.
+
+THAT FRAME CARRIES `retryable`, AS DATA RATHER THAN AS PROSE, and the reason is
+what happens to it downstream. A consumer's adapter must map it onto its own
+stack's event for the same subject, and nautilus's `OrderRejected` has one field
+an adapter may set - the reason string - so a refused submit reaches a strategy
+in the same shape as "insufficient balance": terminal, and separable only by
+reading the venue's wording. No consumer should hang a quarantine decision on
+our prose, and one correctly refused to. So the wire states it, and
+`mogwai-adapter` carries it across the boundary as its public
+`RETRYABLE_REJECT_PREFIX` on the reason - an identifier this repo versions and
+tests, not a sentence. Every refusal the venue issues today is retryable, which
+is the contract rather than a redundancy: an admission refusal means the venue
+was FULL, not that it said no. Absent decodes `false`, so a client reading an
+older venue takes the safe reading.
+
+Inbound frames and reassembled
 messages are capped at `MAX_CLIENT_MESSAGE_BYTES`, 64 KiB, so a dependency
 default no longer sets the venue's memory bound; an oversized frame ends the
 connection. A WebSocket carries its whole binding in the upgrade query string,

@@ -19,7 +19,7 @@ mod convert;
 mod factories;
 mod lifecycle;
 
-pub use client::{MogwaiDataClient, MogwaiExecutionClient};
+pub use client::{MogwaiDataClient, MogwaiExecutionClient, RETRYABLE_REJECT_PREFIX};
 pub use clock::{MogwaiClock, mogwai_clock_factory};
 pub use config::{DEFAULT_ACCOUNT_ID, MogwaiDataClientConfig, MogwaiExecClientConfig};
 pub use factories::{MogwaiDataClientFactory, MogwaiExecutionClientFactory};

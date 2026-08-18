@@ -1304,9 +1304,36 @@ pub enum ServerMessage {
     /// `reason` is server-generated and truncated to `MAX_REASON_LEN`, which
     /// with the identifier caps is what bounds this frame by
     /// `ADMISSION_FRAME_MAX_BYTES`.
+    /// The venue could not admit a command or a frame, and said so instead of
+    /// dropping it.
+    ///
+    /// EVERY ADMISSION REFUSAL IS BACKPRESSURE, which is what `retryable` says
+    /// as DATA rather than as prose. It matters because of what happens to this
+    /// frame downstream: a consumer's adapter has to map it onto its own stack's
+    /// event for the same subject, and nautilus's `OrderRejected` carries a
+    /// reason string and nothing else - so a refused submit reaches a strategy
+    /// looking exactly like a business rejection ("insufficient balance",
+    /// "market closed"), terminal, with the two distinguishable only by reading
+    /// the venue's wording. A consumer will not, and should not, hang its
+    /// quarantine decision on our prose, so the honest thing is to make the
+    /// distinction a field.
+    ///
+    /// `true` on every variant this venue constructs today, and the field is not
+    /// therefore pointless: it is the CONTRACT that an admission refusal means
+    /// "the venue was full, not that it said no", stated where a consumer can
+    /// read it. A future refusal on this frame that is genuinely not retryable
+    /// sets it `false` and no consumer has to be told.
+    ///
+    /// `#[serde(default)]` because absent must mean the safe reading, which is
+    /// NOT retryable: a client that infers retryability from a venue predating
+    /// the field would retry against a refusal nobody promised was transient.
     AdmissionRejected {
         subject: AdmissionSubject,
         reason: String,
+        /// Whether the same command, sent again later, could succeed. See the
+        /// variant's own note for why this is a field and not a prose contract.
+        #[serde(default)]
+        retryable: bool,
         ts_event: u64,
     },
     OrderAccepted {
@@ -1897,6 +1924,7 @@ mod tests {
                 client_order_id: worst_id.clone(),
             },
             reason: worst_reason.clone(),
+            retryable: true,
             ts_event: u64::MAX,
         };
         let widest_len = serde_json::to_string(&widest).expect("serialize").len();
@@ -1938,6 +1966,7 @@ mod tests {
                 client_order_id: "x".repeat(MAX_CLIENT_ID_LEN + 10_000),
             },
             reason: "capacity exhausted".into(),
+            retryable: true,
             ts_event: 1,
         };
         let json = serde_json::to_string(&frame).expect("serialize");

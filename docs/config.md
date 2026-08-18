@@ -83,14 +83,32 @@ While a client is ATTACHED, an order on a symbol no cursor is reading is
 cancelled rather than left resting: nothing could ever fill or expire it, and
 the client is there to be told.
 
-History synthesis is admitted fail-fast at four concurrent `/trades` or
-`/quotes` requests per run. A fifth request receives `503` with `history
-request capacity exhausted`; it is not queued ahead of order-entry market
-readings on the runtime's blocking pool. A slot is held until the response has
-been written, not merely until synthesis finishes, so the ceiling bounds
-resident response bytes as well as CPU - near 41 MB across four full pages.
-A client that pages history concurrently should retry a `503` rather than
-treat it as fatal.
+History synthesis runs four `/trades` or `/quotes` requests at a time per run. A
+slot is held until the response has been WRITTEN, not merely until synthesis
+finishes, so the ceiling bounds resident response bytes as well as CPU - near
+41 MB across four full pages.
+
+**A fifth request WAITS for a slot rather than being refused**, for up to 30
+seconds. The cap bounds resident pages, and a waiter holds no page, so waiting
+costs the bound nothing - while refusing cost the consumer a great deal. This is
+not a preference about politeness: a nautilus host's historical-response types
+carry no error channel, so an adapter's only alternative to an unresolvable hang
+is to resolve the request EMPTY and log why. A refused warmup therefore reaches
+a strategy as a QUIET WINDOW, indistinguishable from a tape that genuinely
+printed nothing, and the run reasons about a market it was never shown.
+
+That mattered more than the headline suggested, because one warmup is not one
+request: the venue serves no bars, so a client pages `/trades` and aggregates
+locally, and the attach topology exists to point tens of runs at one venue. A
+boot storm is dozens of runs taking dozens of sequential pages against four
+slots, so ordinary paging fired the gate constantly and silently.
+
+Two things still answer `503 history request capacity exhausted`, and both mean
+the venue is genuinely saturated rather than merely busy: a wait that outlives
+its 30 seconds, and more than 128 requests in the building at once (synthesizing
+or waiting), which is the fail-fast bound that keeps the queue from becoming a
+way to accept everything and answer nothing. A client that sees one should treat
+it as real overload - stagger its boots - and never as an empty window.
 
 The fill band is `fill_band_vol_mult` and `fill_band_max_ticks`. Every resting
 limit draws a trigger price uniformly from `0 ..= band_ticks` ticks away from
@@ -429,6 +447,23 @@ applied to each boat's own ring; the remaining settings are run-wide:
 commands across the run. A full bound produces a visible `AdmissionRejected`
 without letting the engine see the command. There are no
 account, tape-cap, subscription, or transport-profile configuration keys.
+
+`AdmissionRejected` carries `retryable`, and it is the field to key on rather
+than the reason text. Every refusal the venue issues today sets it `true`, and
+that is the point: an admission refusal means the venue was FULL, not that it
+said no, and stating that as data rather than as prose is what lets a consumer
+act on it. A refusal that is genuinely not retryable would set it `false`, and
+absent - a venue predating the field - decodes as `false`, so the safe reading is
+what a client gets by not knowing.
+
+The distinction survives the trip into a nautilus host, which is where it was
+being lost. Nautilus's `OrderRejected` carries a reason string and nothing else
+an adapter may set, so a refused submit used to reach a strategy looking exactly
+like "insufficient balance", terminal, separable only by reading our wording.
+`mogwai-adapter` now prefixes a retryable refusal's reason with its public
+`RETRYABLE_REJECT_PREFIX` constant (`[retryable] `), leaving the venue's own
+reason after it. A consumer matches the constant; nobody has to depend on a
+sentence.
 
 The built-in generator profile expresses cadence with
 `mean_event_duration_s`, `children_mean`, `children_single_frac`, and

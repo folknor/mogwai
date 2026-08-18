@@ -320,6 +320,7 @@ fn refuse_all(
         return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
             subject: admission_subject(cmd),
             reason: "execution output admission budget exhausted".into(),
+            retryable: true,
             ts_event: ts,
         });
     };
@@ -371,6 +372,7 @@ fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Op
             ServerMessage::AdmissionRejected {
                 subject: admission_subject(order_cmd),
                 reason: "execution output admission budget exhausted".into(),
+                retryable: true,
                 ts_event: ts,
             },
         ));
@@ -651,6 +653,7 @@ pub(crate) async fn process_order_cmd(
         return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
             subject: admission_subject(&order_cmd),
             reason: "execution output admission budget exhausted".into(),
+            retryable: true,
             ts_event: ts,
         });
     };
@@ -695,7 +698,12 @@ pub(crate) struct AppState {
     /// Process-wide ceiling on websocket commands sleeping out an armed ACT
     /// delay. The per-connection lane bounds one client; this bounds the run.
     pub(crate) pending_commands: Arc<tokio::sync::Semaphore>,
+    /// Slots for history syntheses IN FLIGHT, which is what bounds resident
+    /// page memory. A caller over the cap WAITS for one; see `admit_history`.
     pub(crate) history_requests: Arc<tokio::sync::Semaphore>,
+    /// Callers in the building at all - synthesizing or waiting. This is the
+    /// fail-fast half, and the only one that still refuses on contention.
+    pub(crate) history_queue: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Serialize)]
@@ -1586,7 +1594,7 @@ pub(crate) async fn trades(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let history_slot = admit_history(&state.history_requests)?;
+    let history_slot = admit_history(&state.history_requests, &state.history_queue).await?;
     // No `regime` parameter: the market regime is boot config for the whole run
     // now, so history and the live tape are the same realization by
     // construction rather than by a client remembering to ask for the same one.
@@ -1685,7 +1693,7 @@ pub(crate) async fn quotes(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let history_slot = admit_history(&state.history_requests)?;
+    let history_slot = admit_history(&state.history_requests, &state.history_queue).await?;
     let limit = normalize_limit(query.limit);
     let rivers = Arc::clone(&state.rivers);
     let data_origin = source::TAPE_ORIGIN_NS;
@@ -1811,19 +1819,89 @@ fn history_page(
     response
 }
 
+/// How long a history request WAITS for a slot before the venue refuses it.
+///
+/// The gate was fail-fast, and that was wrong for the topology this venue is
+/// for. The cap exists to bound RESIDENT MEMORY - four multi-megabyte pages -
+/// and a request that is merely waiting holds no page, so refusing it bought
+/// the memory bound nothing and cost the consumer everything: nautilus's
+/// historical response types carry no error channel, so an adapter's only
+/// alternative to an unresolvable hang is to resolve the request EMPTY and log
+/// why. A refused warmup therefore reaches the consumer as a QUIET WINDOW,
+/// indistinguishable from a tape that genuinely printed nothing, and the run
+/// then reasons about a market it was never shown.
+///
+/// That was survivable when one client owned one venue. It is not survivable in
+/// the attach topology, which exists to point tens of runs at one venue: one
+/// warmup is not one request, because the venue serves no bars and the adapter
+/// pages `/trades` and aggregates locally, so a boot storm is dozens of runs
+/// each taking dozens of sequential pages against four slots. Ordinary paging
+/// would fire the gate constantly, and silently.
+///
+/// WAITING FIXES THAT WITHOUT WEAKENING THE BOUND. Four syntheses are resident
+/// at once whatever the queue does, so the measured ~41 MB ceiling is untouched;
+/// what changes is that the fifth caller is SERVED LATE instead of told nothing
+/// happened. The deadline is what keeps "late" from becoming "never": a client
+/// that waits this long is looking at a venue that is genuinely saturated rather
+/// than merely busy, and a refusal it can see beats a hang it cannot.
+///
+/// Generous on purpose. A full page synthesis is the dominant cost, so the wait
+/// has to cover several of them ahead in the queue; sizing it to one would
+/// reintroduce the refusal for exactly the paging this exists to absorb.
+pub(crate) const HISTORY_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many history requests may be in the building at once - being synthesized
+/// OR waiting for a slot.
+///
+/// The wait above needs its own bound or it is not a bound at all: an unbounded
+/// queue turns a saturated venue into one that accepts everything and answers
+/// nothing, holding a connection and a task per waiter. This is what stays
+/// fail-fast, and it is the refusal an operator should read as real overload
+/// rather than as ordinary contention. Sized well above the concurrency so a
+/// mass-attach boot storm queues rather than trips it, and far below anything
+/// that could exhaust the listener.
+pub(crate) const MAX_QUEUED_HISTORY_REQUESTS: usize = 128;
+
 /// The one admission decision both history endpoints make, so the cap and its
-/// refusal cannot drift apart between `/trades` and `/quotes`. Fail-fast by
-/// construction: `try_acquire_owned` never waits, so an over-capacity request
-/// is answered immediately rather than queued behind four syntheses.
-fn admit_history(
+/// refusal cannot drift apart between `/trades` and `/quotes`.
+///
+/// TWO GATES, and they answer different questions. `queue` is fail-fast and asks
+/// whether the venue is genuinely overloaded; `gate` is a bounded WAIT and asks
+/// only whether a slot is free yet. See [`HISTORY_ADMISSION_WAIT`] for why the
+/// second is a wait rather than a refusal.
+///
+/// The queue permit is dropped as soon as a slot is won: it counts callers in
+/// the building, and a caller holding a slot has stopped queueing. The returned
+/// permit is the SLOT, which travels with the finished bytes.
+async fn admit_history(
     gate: &Arc<tokio::sync::Semaphore>,
+    queue: &Arc<tokio::sync::Semaphore>,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, String)> {
-    Arc::clone(gate).try_acquire_owned().map_err(|_| {
+    let queued = Arc::clone(queue).try_acquire_owned().map_err(|_| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "history request capacity exhausted".to_owned(),
         )
-    })
+    })?;
+    let slot = tokio::time::timeout(HISTORY_ADMISSION_WAIT, Arc::clone(gate).acquire_owned())
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "history request capacity exhausted".to_owned(),
+            )
+        })?
+        // The semaphore is never closed - it lives as long as the process - so
+        // the only `acquire_owned` error is closure, and reaching it would mean
+        // the venue is already tearing down.
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "history request capacity exhausted".to_owned(),
+            )
+        })?;
+    drop(queued);
+    Ok(slot)
 }
 
 /// A caller-supplied symbol cut to what any log line or body may echo.
@@ -1967,24 +2045,101 @@ mod health_fault_tests {
 mod history_admission_tests {
     use super::*;
 
+    fn gates() -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        (
+            Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HISTORY_REQUESTS)),
+            Arc::new(tokio::sync::Semaphore::new(MAX_QUEUED_HISTORY_REQUESTS)),
+        )
+    }
+
+    /// THE FIFTH REQUEST WAITS, and this is the whole point of the change.
+    ///
+    /// It used to be refused, and a refusal reaches the consumer as an EMPTY
+    /// window rather than as an error - nautilus's historical response types
+    /// carry no error channel - so a run read a refused warmup as a market that
+    /// printed nothing. The cap bounds RESIDENT pages, and a waiter holds no
+    /// page, so waiting costs the bound nothing.
+    ///
     /// Drives the endpoints' own admission decision rather than a semaphore of
-    /// its own: `admit_history` is what both handlers call, so widening the cap
-    /// or turning the refusal into a wait is visible here. Disclosed residual -
+    /// its own: `admit_history` is what both handlers call. Disclosed residual -
     /// this pins the decision, not that a handler still makes it; the handlers
     /// call it on their first line, and no in-crate test can build an
     /// `AppState` cheaply enough to prove the call site.
-    #[test]
-    fn history_concurrency_refuses_instead_of_queueing() {
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_history_request_over_the_cap_waits_for_a_slot_rather_than_being_refused() {
         assert_eq!(MAX_CONCURRENT_HISTORY_REQUESTS, 4);
-        let gate = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HISTORY_REQUESTS));
-        let held = (0..MAX_CONCURRENT_HISTORY_REQUESTS)
-            .map(|_| admit_history(&gate).expect("slot"))
-            .collect::<Vec<_>>();
-        let (status, reason) = admit_history(&gate).expect_err("the fifth request is refused");
+        let (gate, queue) = gates();
+        let held = futures_util::future::join_all(
+            (0..MAX_CONCURRENT_HISTORY_REQUESTS).map(|_| admit_history(&gate, &queue)),
+        )
+        .await
+        .into_iter()
+        .map(|slot| slot.expect("slot"))
+        .collect::<Vec<_>>();
+
+        // The fifth is still waiting after a span that would have covered any
+        // number of immediate refusals.
+        let mut fifth = Box::pin(admit_history(&gate, &queue));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut fifth)
+                .await
+                .is_err(),
+            "the fifth request waits rather than being answered"
+        );
+
+        // And it is SERVED when a slot returns, which is what the consumer gets
+        // instead of a silently empty window.
+        drop(held);
+        assert!(fifth.await.is_ok(), "a returned slot wakes the waiter");
+    }
+
+    /// The wait is bounded, or it is not a bound. A venue that never frees a
+    /// slot answers with the refusal rather than holding the caller forever: a
+    /// refusal it can see beats a hang it cannot.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_wait_that_outlives_its_deadline_is_still_refused() {
+        let (gate, queue) = gates();
+        let _held = futures_util::future::join_all(
+            (0..MAX_CONCURRENT_HISTORY_REQUESTS).map(|_| admit_history(&gate, &queue)),
+        )
+        .await
+        .into_iter()
+        .map(|slot| slot.expect("slot"))
+        .collect::<Vec<_>>();
+
+        let (status, reason) = admit_history(&gate, &queue)
+            .await
+            .expect_err("the deadline expires");
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(reason, "history request capacity exhausted");
-        drop(held);
-        assert!(admit_history(&gate).is_ok(), "a returned slot is reusable");
+    }
+
+    /// The queue has its own bound, and it is the one that still fails FAST. An
+    /// unbounded queue would turn a saturated venue into one that accepts
+    /// everything and answers nothing, holding a task per waiter.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_queue_itself_is_bounded_and_refuses_immediately() {
+        let (gate, queue) = gates();
+        // Every queue permit taken and none of them released, which is the
+        // saturated venue this refusal is for.
+        let _queued = (0..MAX_QUEUED_HISTORY_REQUESTS)
+            .map(|_| {
+                Arc::clone(&queue)
+                    .try_acquire_owned()
+                    .expect("a queue slot")
+            })
+            .collect::<Vec<_>>();
+
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            admit_history(&gate, &queue),
+        )
+        .await
+        .expect("the queue refusal does not wait out the admission deadline");
+        assert_eq!(
+            refused.expect_err("refused").0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[test]

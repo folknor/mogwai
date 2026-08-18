@@ -731,6 +731,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, session: SocketSessio
                                 drop(send_admission(&lanes, ServerMessage::AdmissionRejected {
                                     subject,
                                     reason: "venue command capacity exhausted".into(),
+                                    retryable: true,
                                     ts_event: sim_now_ns(boat_sim),
                                 }));
                             }
