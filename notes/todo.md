@@ -800,27 +800,6 @@ required eventually, since both modes must be supported.
   requested label, and the `RiverKey` widens to that label in the same
   change, which is what makes sharing sound under it. Detail is git history.
 
-- GATE DURABLE PROSE THAT ASSERTS A LIVE FACT. The tape-version half of this
-  item is CLOSED, 2026-08-16: `crates/mogwai-data/tests/tape_version_prose.rs`
-  walks every markdown file in the repository - the set from a walk, never a
-  hardcoded list, because the third occurrence was in `notes/` - and checks two
-  claim forms against the live constant. The convention is stated in AGENTS.md
-  under Tape protocol version. It bit on its first run, finding the 12b spec's
-  index preamble still claiming the live identity was 11.
-  WHAT REMAINS OPEN is the general kind, and it is why a narrow version-only
-  gate was only a partial fix. `reference/architecture.md` carried a 12.6 ms market-reading cost that a
-  stride change had superseded; `checkpoint.rs` argued its safety from a
-  `BoundedSeek` type that had been deleted from the tree, in three separate
-  comments; `tick_composition_ratios.rs` claimed to decide `CHECKPOINT_K`,
-  which stopped being true when that constant became a latency tradeoff rather
-  than a reach ceiling. A gate on a named constant catches the first kind. The
-  general kind - durable prose asserting a measured number or a live type -
-  wants either a citation convention that can be checked (a symbol name a test
-  can resolve) or a review habit of grepping the identifier before deleting it.
-  Neither is built. The version gate's shape is the available precedent: a
-  claim form a test can recognize, applied to prose that means to assert a live
-  fact, leaving every historical record alone.
-
 - DECIDE whether the protocol-12b Stage A refinement pass should run at
   all. Deferred by the owner on 2026-08-09 rather than settled, so the
   frozen pass stands and the budgets were raised to fund it.

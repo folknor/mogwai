@@ -16,6 +16,7 @@ mod characterize;
 mod r#gen;
 mod man;
 mod preflight;
+mod segments;
 mod select_windows;
 mod session_profile;
 mod synth;
@@ -99,6 +100,12 @@ enum Command {
     /// The L0 structural-proceed verdict over a cadence measurement, plus the
     /// Markov density feasibility gate.
     CadenceFeasible(synth::CadenceFeasibleArgs),
+    /// The session-segment sampler: cut real session slices out of a delivered
+    /// TBBO month, and compose them into an endless single-session tape.
+    Segments {
+        #[command(subcommand)]
+        command: segments::SegmentsCommand,
+    },
 }
 
 #[derive(Args)]
@@ -187,5 +194,6 @@ fn main() -> anyhow::Result<()> {
         Command::SessionProfile { command } => session_profile::run(command),
         Command::Synth { command } => synth::run(command),
         Command::CadenceFeasible(args) => synth::run_cadence_feasible(args),
+        Command::Segments { command } => segments::run(command),
     }
 }

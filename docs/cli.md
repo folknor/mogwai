@@ -328,6 +328,50 @@ chooses between reading historical civil labels against the preset's fixed
 offset (`civil`, the default, so CST and CDT land on the same session phase)
 and reading them as instants.
 
+`segments` is the session-segment sampler: it builds a tape out of REAL
+session slices instead of synthesizing one. Two halves, both offline.
+
+`segments cut` carves one session window out of a delivered TBBO month into a
+segment library:
+
+```text
+brokkr run mogwai -- segments cut --symbol MNQ --month 2026-04 --window asia --out analysis/out/asia-mnq-2026-04.json
+```
+
+`--window` is `asia` (the first nine hours of the CME session, 17:00 to 02:00
+exchange-local) or `london` (the six after it). The corpus directory is
+resolved under `--root` from the conventional
+`<symbol>v/<month>.<state>.tbbo` layout, or named outright with `--dir`. The
+library holds NO absolute prices: every segment is a sequence of log returns
+against its own previous trade, plus one measured `open_gap_ret` recording the
+jump from the last print before the window to the first print inside it. Stderr
+reports the work size - segments cut, ticks in them, and how many carried a
+measured open gap.
+
+`segments tape` composes that library into an endless single-session tape and
+dumps it as CSV:
+
+```text
+brokkr run mogwai -- segments tape --library analysis/out/asia-mnq-2026-04.json --type bars --interval-s 60 --ticks 3000000 --out analysis/out/asia-endless.csv
+```
+
+Because the library is in returns space, composing is integration: the tape
+carries a running price each stored return multiplies, so a segment boundary
+needs no level reconciliation and any slice can follow any other. `--start-price`
+is therefore an integration constant that scales the whole tape and changes no
+return. `--seed` fixes the draw order, `--in-order` cycles the library instead
+of sampling it with replacement, and `--no-reopen-gaps` suppresses the measured
+gap at each seam - which is the A/B against the fitted generator, since that
+generator produces no reopen gaps at all. The source is endless, so a dump is
+bounded by `--ticks` rather than by exhaustion.
+
+The bars output carries the same header `gen --type bars` emits, so one tool
+charts either:
+
+```text
+python3 analysis/plot_tape.py --csv analysis/out/asia-endless.csv --out analysis/out/asia-endless.html
+```
+
 `preflight` runs the fail-closed TBBO corpus contract check against a
 delivered corpus directory and writes a hash-bound preflight artifact -
 `--corpus`, `--ledger` (read-only) and `--out` all default to the paths

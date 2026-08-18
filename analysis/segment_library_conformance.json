@@ -1,0 +1,60 @@
+{
+  "_doc": "Shared conformance fixture for the session-segment library format. mogwai-lab WRITES this shape (mogwai_lab::segments) and mogwai-data READS it (mogwai_data::segment); neither can depend on the other's type, because mogwai-lab depends on mogwai-data and never the reverse. Both crates parse THIS file in their own tests, so a format drift fails one side instead of leaving both green against a private idea of the shape. Hand-written, not cut from corpus: the numbers are shaped to exercise the contract, not to be realistic.",
+  "units": {
+    "ret": "nano-log-returns: round(ln(p / p_prev) * 1e9), against the previous trade in the same segment",
+    "open_gap_ret": "nano-log-returns from the last real print BEFORE the window to this segment's first print, or null when no prior print existed",
+    "dt_ns": "nanoseconds since the previous trade; dt_ns[0] is measured from the window start",
+    "size": "contracts",
+    "side": "DBN aggressor alphabet: B taker-buy, A taker-sell, N unsided",
+    "tick_size": "decimal string, the instrument's price increment"
+  },
+  "rules": [
+    "dt_ns, ret, size and side are PARALLEL arrays, all of length trade_count. Both readers refuse a library where they disagree.",
+    "ret[0] is always 0: the first trade of a segment is its own anchor, and its displacement from the previous session lives in open_gap_ret.",
+    "A segment carries NO absolute price. Absolute level is an integration constant the composer supplies, which is what lets any segment follow any other without a level discontinuity.",
+    "trade_count is never 0: an empty segment would advance the loop without advancing the tape.",
+    "version must equal the reader's SEGMENT_LIBRARY_VERSION; a mismatch is refused rather than interpreted."
+  ],
+  "version": 1,
+  "window": "asia",
+  "tick_size": "0.25",
+  "provenance": {
+    "symbol": "MNQ",
+    "month": "0000-00",
+    "source_dir": "(hand-written fixture, not cut from a delivery)",
+    "source_files": [],
+    "cut_at": "0000-00"
+  },
+  "segments": [
+    {
+      "trade_date": "0000-00-01",
+      "window_start_ns": 0,
+      "trade_count": 5,
+      "open_gap_ret": null,
+      "dt_ns": [1500000000, 250000000, 12000000, 3000000000, 40000000],
+      "ret": [0, 124300, -87200, 512900, -49100],
+      "size": [3, 1, 12, 2, 7],
+      "side": ["B", "B", "A", "N", "A"]
+    },
+    {
+      "trade_date": "0000-00-02",
+      "window_start_ns": 86400000000000,
+      "trade_count": 4,
+      "open_gap_ret": -4210000,
+      "dt_ns": [900000000, 75000000, 640000000, 18000000],
+      "ret": [0, -311400, 96800, 204500],
+      "size": [1, 5, 1, 9],
+      "side": ["A", "A", "B", "B"]
+    },
+    {
+      "trade_date": "0000-00-03",
+      "window_start_ns": 172800000000000,
+      "trade_count": 3,
+      "open_gap_ret": 8830000,
+      "dt_ns": [2100000000, 33000000, 410000000],
+      "ret": [0, 71600, -15200],
+      "size": [4, 2, 6],
+      "side": ["B", "N", "B"]
+    }
+  ]
+}

@@ -34,6 +34,7 @@
 
 mod bars;
 mod generated;
+pub mod segment;
 mod trigger;
 
 use std::{
@@ -98,7 +99,14 @@ pub use trigger::{
 /// `mogwai-lab` and `mogwai-cli` generation does not move because those paths
 /// pass literal or command-line seeds directly to `GeneratedSource`; none uses
 /// `RunSeeds`. The arrival-mechanism reservation remains 15.
-pub const TAPE_PROTOCOL_VERSION: u32 = 19;
+/// 20 lands the session-segment sampler's composer, `segment::SegmentSource` -
+/// a second tape ORIGIN beside `GeneratedSource`, drawing its returns from real
+/// cut session slices rather than from the fitted fingerprint. No generated
+/// byte moves: the composer is a new source and touches none of the generator's
+/// draws. The bump is taken anyway because the rule is unconditional and a tape
+/// can now come from somewhere it could not come from before, which is exactly
+/// the thing this constant identifies.
+pub const TAPE_PROTOCOL_VERSION: u32 = 20;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.
