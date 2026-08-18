@@ -139,6 +139,18 @@ pub struct LaunchSpec {
     pub ready_timeout: Option<Duration>,
     /// What to do with the venue's log stream.
     pub stderr: StderrSink,
+    /// Environment variables SET on the venue process, on top of the inherited
+    /// environment. Empty by default, which is plain inheritance.
+    ///
+    /// This exists because inheritance is not a neutral default for one
+    /// variable in particular: `RUST_LOG`. The venue's own filter is
+    /// `mogwai=info` only when `RUST_LOG` is ABSENT, so a caller that reads the
+    /// venue's log to decide something has its conclusion silently rewritten by
+    /// whatever the surrounding process happened to export. A test scoring an
+    /// ABSENCE of a log line is the dangerous case: under `RUST_LOG=mogwai=error`
+    /// the line can never appear, and the absence then means nothing while still
+    /// reading as a pass. Pin the variable here rather than inheriting it.
+    pub env: Vec<(OsString, OsString)>,
 }
 
 impl LaunchSpec {
@@ -401,7 +413,9 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
     if timeout.is_zero() {
         return Err(LaunchError::ZeroReadyTimeout);
     }
-    let LaunchSpec { stderr: sink, .. } = spec;
+    let LaunchSpec {
+        stderr: sink, env, ..
+    } = spec;
 
     let exit = Arc::new(Mutex::new(None));
     let stderr = Arc::new(Mutex::new(VecDeque::new()));
@@ -422,6 +436,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
                 own_venue(
                     &binary,
                     &argv,
+                    &env,
                     sink,
                     timeout,
                     &boot_tx,
@@ -552,6 +567,7 @@ fn snapshot(ring: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
 fn own_venue(
     binary: &OsStr,
     argv: &[OsString],
+    env: &[(OsString, OsString)],
     sink: StderrSink,
     ready_timeout: Duration,
     boot_tx: &SyncSender<Result<ReadyRecord, LaunchError>>,
@@ -564,6 +580,7 @@ fn own_venue(
     let mut command = Command::new(binary);
     command
         .args(argv)
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(if captures_stderr {

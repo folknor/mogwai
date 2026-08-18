@@ -24,6 +24,7 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::PathBuf,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -128,6 +129,119 @@ pub fn spawn(extra_args: &[&str]) -> Venue {
         symbol,
         inner,
         ready_at,
+    }
+}
+
+/// As `spawn`, but the venue's stderr is CAPTURED LINE BY LINE into the returned
+/// buffer instead of discarded.
+///
+/// For the one property no wire surface states. A venue decision that is only
+/// visible as a log line - `market order has no market reading` is the case this
+/// was added for - cannot be observed through `/ws` or any route, and a test
+/// that settles for a nearby wire observable ends up asserting something the
+/// defect it names would not break. Reading the venue's own log is the honest
+/// alternative, so it is offered rather than hidden.
+///
+/// Prefer a wire observable wherever one exists: a log line is not a contract,
+/// and a test keyed on one is refactor-fragile in a way an assertion on a
+/// `ServerMessage` is not. The line this is used for is named in the test.
+///
+/// THE FILTER IS PINNED, not inherited. `init_stderr_logging` falls back to
+/// `mogwai=info` only when `RUST_LOG` is ABSENT, so a developer or a CI job
+/// exporting `RUST_LOG=mogwai=error` would silence every line a caller here
+/// scores on - and a caller scoring an ABSENCE would then pass vacuously, which
+/// is the exact defect class this capture was added to close. `RUST_LOG` is
+/// therefore SET on the venue rather than left to the ambient environment, and
+/// [`CapturedLog::await_positive_control`] proves the plumbing separately.
+pub fn spawn_capturing_stderr(extra_args: &[&str]) -> (Venue, CapturedLog) {
+    let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&log);
+    let mut spec = spec(extra_args);
+    spec.env
+        .push((OsString::from("RUST_LOG"), OsString::from(CAPTURED_FILTER)));
+    // The callback runs on the draining thread, so it stays a push onto a
+    // `Vec` - anything blocking here reintroduces the wedge `StderrSink` exists
+    // to prevent.
+    spec.stderr = StderrSink::Lines(Box::new(move |line| {
+        if let Ok(mut lines) = sink.lock() {
+            lines.push(line);
+        }
+    }));
+    let symbol = boot_symbol(spec.config.as_deref());
+    let inner = launch(spec).expect("the venue launches and reports ready");
+    let ready_at = Instant::now();
+    (
+        Venue {
+            record: inner.record().clone(),
+            symbol,
+            inner,
+            ready_at,
+        },
+        CapturedLog { lines: log },
+    )
+}
+
+/// The filter pinned on a venue whose log is read. Matches
+/// `init_stderr_logging`'s own no-`RUST_LOG` fallback, so a captured venue logs
+/// exactly what an uncaptured one does - the pin removes the ambient
+/// environment's vote, it does not raise the level.
+const CAPTURED_FILTER: &str = "mogwai=info";
+
+/// The venue's stderr, line by line, as [`spawn_capturing_stderr`] captured it.
+pub struct CapturedLog {
+    lines: std::sync::Arc<Mutex<Vec<String>>>,
+}
+
+impl CapturedLog {
+    /// A line the venue is KNOWN to emit, so that an absence elsewhere in this
+    /// buffer means the venue did not say it rather than that nothing was ever
+    /// captured. Emitted after the readiness line goes out on stdout, so it is
+    /// polled to a deadline rather than read once.
+    ///
+    /// Every conclusion drawn from an ABSENCE in this buffer owes a call to
+    /// this first. Without it a broken filter, a broken pipe or a dead capture
+    /// thread all render as "the venue never warned", which is indistinguishable
+    /// from the property holding.
+    pub fn await_positive_control(&self) {
+        const CONTROL: &str = "mogwai listening";
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if self.contains(CONTROL) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "the venue's log never carried `{CONTROL}` under RUST_LOG={CAPTURED_FILTER}, so this \
+             capture is empty for a reason that has nothing to do with the property under test, \
+             and no absence in it means anything. Captured: {:?}",
+            self.snapshot()
+        );
+    }
+
+    /// Whether any captured line contains `needle`.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.lines
+            .lock()
+            .expect("the log buffer")
+            .iter()
+            .any(|line| line.contains(needle))
+    }
+
+    /// Whether any captured line contains BOTH needles - the shape a per-order
+    /// log query takes, where the message names the decision and a field names
+    /// which order it was about.
+    pub fn contains_both(&self, first: &str, second: &str) -> bool {
+        self.lines
+            .lock()
+            .expect("the log buffer")
+            .iter()
+            .any(|line| line.contains(first) && line.contains(second))
+    }
+
+    /// Everything captured so far, for a panic message.
+    pub fn snapshot(&self) -> Vec<String> {
+        self.lines.lock().expect("the log buffer").clone()
     }
 }
 

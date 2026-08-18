@@ -217,6 +217,36 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- NOTHING ON THE WIRE SAYS WHETHER A SUBMIT TOOK A MARKET READING, which forces
+  one integration test to read the venue's LOG instead. Filed 2026-08-18 by the
+  lifecycle-test fix pass.
+
+  `market_reading` in `mogwai-server`'s command path takes a `MarketReading` for
+  every submit and passes it to the engine. When `read_market` refuses - a cold
+  volatility estimator, a truncated walk - the engine falls back to the order's
+  stated price with no slippage and logs a WARN. Whether the reading happened is
+  therefore invisible on the wire in one specific and important case: a
+  PRICE-LESS market order, where the venue stamps the order with the last print
+  either way, so the fill lands on the tape whether a reading was taken or not.
+  That is exactly the path the venue used to get wrong (it returned early with a
+  stamped price and no reading at all), and
+  `serving::a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`
+  is the gate against it.
+
+  WHAT THE VENUE WOULD HAVE TO SHIP: the reading's own instant, or a bare
+  "reading taken" flag, on `OrderFilled`. Two things follow at once. The gate
+  stops reading logs, and the adverse-slippage invariant - a market buy fills at
+  or above the print the venue read - becomes an EXACT per-fill statement instead
+  of the bracket it is now. The bracket exists only because the reading instant
+  is unidentifiable from outside: it is neither the acceptance instant nor the
+  fill instant, and `MarketReadingCache` buckets it further.
+
+  WHAT WAS DONE INSTEAD. The test captures the venue's stderr through a new
+  `common::spawn_capturing_stderr` and scores each attempt on whether the WARN
+  named its client order id. On the priced arm the log and the fill price are
+  cross-checked against each other, so neither observable is trusted alone. It
+  works and it bites, but it keys a gate on a log line, which is not a contract.
+
 - THE VENUE COUNTS SWEEP PASSES FOR NOBODY, which is the missing observable
   behind the last fixed sleeps in the item below. Filed 2026-08-18 by the
   lifecycle-test fix pass.

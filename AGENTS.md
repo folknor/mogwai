@@ -202,9 +202,14 @@ constraint on new or optimized code:
 
 ### Standing lessons from the 2026-08 bug-hunt loop
 
-The seven-document loop closed with zero open findings. Its round-by-round
-carry-forward document is retired; what recurred enough to bind future work is
-kept here. Two DEFECT FAMILIES accounted for most of the serious finds:
+The seven-document loop closed with zero open findings. What recurred enough to
+bind future work is kept here; its own round-by-round carry-forward document
+was retired once that distillation landed. A LIVE ARC KEEPS A LIVE ONE - the
+orchestration loop needs somewhere to put state no agent in it can see, since no
+agent observes any round but its own - so `notes/bug-loop-carry-forward.md`
+existing is the normal state during an arc, and it is deleted when that arc
+closes and whatever still binds has been folded in here. Two DEFECT FAMILIES
+accounted for most of the serious finds:
 
 - THE FRONTIER FAMILY, five instances. A watermark, cursor or frontier may
   only advance over work whose success the same expression checked. A lookup

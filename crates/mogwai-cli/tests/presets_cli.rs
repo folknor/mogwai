@@ -53,9 +53,23 @@ fn every_listed_preset_is_fetchable_by_name() {
         .arg("presets")
         .output()
         .expect("running presets");
+    // The listing's own exit status and non-emptiness are checked FIRST. The
+    // body of this test is a `for` over its lines, so a failing or empty listing
+    // made it vacuously green - which is precisely the "the listing went stale"
+    // defect class this file exists for, passing by producing nothing to check.
+    assert!(
+        output.status.success(),
+        "presets exited {:?}",
+        output.status
+    );
     let listing = String::from_utf8(output.stdout).expect("the listing is utf-8");
+    let names: Vec<&str> = listing.lines().collect();
+    assert!(
+        !names.is_empty(),
+        "the listing named no preset at all, so this test would check nothing"
+    );
 
-    for name in listing.lines() {
+    for name in names {
         let fetched = Command::new(common::venue_binary())
             .arg("presets")
             .arg(name)

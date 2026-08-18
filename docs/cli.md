@@ -125,6 +125,12 @@ deciding to report a timeout. Point it at the binary, or at a wrapper that
 `exec`s it, all the same: only then does killing the child close stdout, and only
 then is the readiness read released by the kill rather than by the timeout.
 
+The venue otherwise inherits the launcher's environment. `LaunchSpec::env` sets
+variables on top of it, and the one that usually wants setting is `RUST_LOG`: the
+venue's `mogwai=info` default applies only when `RUST_LOG` is unset, so a caller
+that READS the venue's log has its filter chosen by whatever the surrounding
+process exported. Pin it rather than inherit it.
+
 The launcher starts `mogwai serve` as its direct child with stdout captured,
 reads exactly one JSON `ReadyRecord` line, checks `version`, and uses `addr` for
 both clients. It takes any required river name from its own configuration. That

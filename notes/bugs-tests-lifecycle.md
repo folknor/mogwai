@@ -89,46 +89,114 @@ Remaining, with reasons:
 
 ## B. Tests that cannot fail, or fail for free
 
-5. **`a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`**
-   (serving.rs:1681) - the PRICELESS ARM IS LIKELY GREEN BY CONSTRUCTION. The
-   reading-detector is `fill.last_px < last * 2`, which works for the priced arm
-   because the no-reading fallback stamps the absurd `9000000`. In the priceless
-   arm there IS no stated price, so a fill decided off no reading at all still
-   lands near the tape and satisfies the same test. The arm this test's docstring
-   says it exists for ("the price-less one that used to return early with a
-   stamped price and no reading at all") is the arm whose discriminator does not
-   discriminate. Needs a different signal - the `read_market` WARN on stderr, or
-   the reading instant on `OrderFilled`.
+Findings 5-10 were fixed on 2026-08-18 and are removed. Every one reproduced;
+none was refused. What landed, and the parts a later round would otherwise
+re-derive:
 
-6. **`an_armed_divergence_reaches_every_connection`** (serving.rs:1510) -
-   `armed_at` is read from the UNNAMED `/clock`, which
-   `clock_answers_per_boat_when_a_symbol_is_named` establishes is the venue-clock
-   fallback (`boat_clock: false`), and
-   `history_is_bounded_by_the_rivers_own_boat...` establishes runs AHEAD of any
-   boat. So the ceiling `ts <= armed_at` is systematically generous against the
-   boot boat's own frames: post-arm boat data can still be stamped below
-   `armed_at` and pass. Compare against `/clock?symbol=<boot>` instead.
+- THE SUBSTRING FAMILY (8, 9, 10) is closed by parsing structure, never by a
+  better substring. The two websocket refusals now destructure
+  `tungstenite::Error::Http`, assert `status() == 400` AND read the body -
+  tungstenite does carry the refusal body through the failed handshake, which
+  was the open question. Each asserts the REASON that names it (`already
+  seated` plus the sitting speed; the whole phrase `not funded in USDT`), so
+  a 400 raised by any other check on the same route no longer satisfies it.
+  The divergence ack is PROSE, not JSON as the report assumed, so `1000` is read
+  out of it by splitting the sentence and parsing the token, and the trailing
+  origin is compared against the readiness record's `run_start_ns`.
 
-7. **`presets_cli::every_listed_preset_is_fetchable_by_name`** - never checks the
-   listing command's exit status, and the whole body is
-   `for name in listing.lines()`. An empty or failing listing makes this test
-   vacuously green, which is precisely the "the listing went stale" defect class
-   the file was written for.
+  THE FIRST PASS AT THAT SHIPPED TWO SUBSTRING DEFECTS OF ITS OWN, both found by
+  cold review of its own diff and closed the same day, and both are the family
+  they were fixing, re-entering through the repair. `body.contains("USDT")` was
+  commented as the currency asserted AS A LITERAL - but the boot river is the
+  default preset BTCUSDT, `USDT` is a substring of it, and the symbol assertion
+  standing beside it therefore IMPLIED the currency one. A venue echoing the
+  ACCOUNT's own currency back - `not funded in JPY, which is what BTCUSDT
+  settles in`, a plausible real bug - satisfied it. That text was injected into
+  `ws.rs`: the old pair passed it, the whole-phrase assertion refuses it. And
+  the surge origin was BRACKETED against `[data_origin_ns, server_now_ns]` when
+  it is an exact number the test already holds - `run.started_ns` is
+  `data_origin + warmup`, and the readiness record reports it as `run_start_ns`,
+  so a regression arming anywhere inside the warmup sat in the bracket. Arming
+  at the raw data origin was injected: it passed the bracket and fails the
+  equality, 0 against 300000000000.
+- FINDING 5 WAS WORSE THAN FILED - not "likely" green by construction but
+  provably so, and the bite-check demonstrated the asymmetry directly. Both
+  market paths go through ONE `market_reading`; the price-less arm differs only
+  in that the order is stamped with the last print, which
+  `fills::read_last` supplies when `read_market` refuses. Both outcomes land on
+  the tape, so `fill.last_px < last * 2` cannot separate them. The gate now
+  scores each attempt on the engine's `market order has no market reading` WARN,
+  captured through a new `common::spawn_capturing_stderr`, and cross-checks the
+  log against the fill price on the priced arm so neither is trusted alone.
+  Keying a gate on a log line is not a contract; the wire observable it wants -
+  a reading instant on `OrderFilled` - is filed in `notes/todo.md`.
 
-8. **`an_account_funded_in_the_wrong_currency_is_refused_at_bind`**
-   (serving.rs:1402) - `rendered.contains("400") || rendered.contains("HTTP")`.
-   `"HTTP"` matches essentially any tungstenite error including a connection
-   refusal or a 500. The test is close to unfalsifiable; the reason the finding
-   names ("naming the currency") is never asserted at all despite the docstring.
-   Assert `Error::Http(r)` with `r.status() == 400` and the currency in the body.
+  READING A LOG BUYS A NEW WAY TO BE GREEN BY CONSTRUCTION, and the first pass
+  walked into it: the score is an ABSENCE of the WARN, and the venue INHERITED
+  the test process's environment, where `init_stderr_logging` falls back to
+  `mogwai=info` only when `RUST_LOG` is unset. Under `RUST_LOG=mogwai=error` no
+  WARN can be emitted, every attempt reads as having taken a reading, and
+  `warned.len() < attempts.len()` is `0 < 6` - the price-less arm, the entire
+  reason for the rewrite, unfalsifiable again. Closed on both sides: `LaunchSpec`
+  grew an `env` field and `spawn_capturing_stderr` PINS `RUST_LOG=mogwai=info`
+  on the venue, and `CapturedLog::await_positive_control` refuses to let any
+  conclusion be drawn from an absence until a line the venue is known to emit
+  has actually arrived in the buffer. Bite-checked by pinning the hostile filter
+  instead: the test refuses with "no absence in it means anything" rather than
+  passing, which also proves the env reaches the child, since an ambient-free
+  venue would have logged at info.
 
-9. **`a_generator_arm_on_an_unboated_river_is_accepted`** (serving.rs:2202) -
-   `body.contains("1000")` to check the armed span. `1000` is a substring of any
-   nanosecond timestamp in that ack. Parse the JSON.
+  The attempt count and the inter-attempt sleep are the FLAKE MARGIN on that
+  assertion, whose false-failure mode is every attempt legitimately refusing a
+  reading. The first pass cut them from 8 and 500 ms to 6 and 300 ms while
+  making every attempt scored rather than one; nothing compensated, so both are
+  restored. The test runs in about 10 s at 8 attempts, inside the gate's budget.
+- FINDING 6 IS REAL IN DIRECTION AND SMALL IN MAGNITUDE, and the fix pass
+  measured it rather than assuming: on `paced.toml` the venue clock ran
+  40-73 ms of SIM time ahead of the boot boat, so the old ceiling was generous
+  by that much and a total suppression failure (which overshoots by two sim
+  MINUTES in the two-second window) would have been caught anyway. It is fixed
+  because the quantity was wrong, not because the slack was dangerous: the boat
+  lag it admits is unbounded in principle - it grows with how late the boat was
+  placed - while the new ceiling's slack is one arming round trip. The read is
+  now `/clock?symbol=`, asserts `boat_clock`, and happens AFTER the ack.
 
-10. **`a_second_speed_on_the_same_account_is_refused`** (serving.rs:1310) -
-    `contains("400") || contains("already seated")` admits any 400 for any
-    reason, including the illegal-symbol path.
+  ITS RATIONALE FOR READING AFTER THE ACK WAS WRONG and is corrected here, since
+  the comment would otherwise teach the next reader to preserve slack for a
+  reason that does not exist: `ws.rs` gates at SEND time, not at publish time, so
+  a frame published before the arm and still queued when it lands is dropped too.
+  Nothing is legitimately in flight past an armed blackout. The read is after the
+  ack for the CEILING'S freshness instead - the boat moves during the round trip,
+  and a ceiling read before it sits below the last instant the venue was still
+  entitled to publish at.
+- FINDING 7 was exactly as filed and is a two-line fix.
+
+ONE DEFECT FOUND WHILE FIXING 5, worth keeping because it is a measurement
+artifact nothing else in the tree guards: the adverse-slippage floor in that
+test was computed over a `/trades` page that was TRUNCATED. `bounded_trades`
+fills its page from the START of the window and breaks at the limit, so a
+300 s lookback at `limit=10000` returned the window's OLDEST prints - and the
+floor was then taken over stale water the market had since fallen through, and
+asserted as favourable slippage that never happened. It had never fired because
+the assertion ran on at most one attempt per arm before the loop broke; running
+it on every attempt exposed it immediately, deterministically, at seed 42. The
+window is now 60 s anchored on a PRE-SUBMIT boat clock (the acceptance instant
+is not a lower bound on the reading instant either).
+
+THE FIRST REPAIR GUARDED IT WITH `trades.len() < MAX_HISTORY_LIMIT`, which is a
+self-inflicted flake rather than a fix: the window is not 60 s but
+`[before - 60s, reading_ts]`, and `reading_ts` derives from the acceptance
+instant, so at speed 100 a slow round trip widens it without bound and the test
+then fails naming stale water on a run where nothing is wrong. The window is now
+PAGED instead, by `trade_window`, so truncation is not a condition to detect at
+all. Its cursor obeys the frontier rule - a full page's last instant may be cut
+in half, so that instant is dropped and the next query resumes AT it, never past
+it - and `a_paged_tape_window_equals_the_same_window_read_in_one_query` pins the
+walk against a single unlimited query at page size 3. That test is honest about
+what it does not cover: this tape stamps every print at a distinct nanosecond
+(it asserts so), so the colliding half of the cursor rule is unreachable on it,
+and advancing past the boundary was tried as a bite-check and PASSED. Dropping
+the boundary row bites hard - 13780 prints became 9187.
 
 ## C. Wall-clock budgets
 

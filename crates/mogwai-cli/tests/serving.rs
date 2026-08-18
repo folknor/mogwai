@@ -1464,10 +1464,28 @@ async fn a_second_speed_on_the_same_account_is_refused() {
     let Err(error) = refused else {
         panic!("a second cadence on one ledger must not upgrade");
     };
-    let rendered = format!("{error}");
+    // The REASON, not merely a 400. `contains("400") || contains("already
+    // seated")` admitted any bad request on this route - the illegal-symbol
+    // refusal, an unfunded-account refusal, a malformed speed - so a venue that
+    // had stopped checking the seat entirely could still turn this green by
+    // refusing for some other reason. The status and the body are read off the
+    // structured refusal instead.
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("the refusal is an HTTP status before the upgrade, got {error}");
+    };
+    assert_eq!(
+        response.status(),
+        400,
+        "a second cadence is refused before the 101: {response:?}"
+    );
+    let body = String::from_utf8_lossy(response.body().as_deref().unwrap_or_default()).into_owned();
     assert!(
-        rendered.contains("400") || rendered.contains("already seated"),
-        "the refusal names the sitting cadence: {rendered}"
+        body.contains("already seated"),
+        "the refusal is the seat check rather than some other 400: {body}"
+    );
+    assert!(
+        body.contains(&*venue.symbol) && body.contains("speed 2"),
+        "the refusal names the river and the SITTING cadence, not the asked one: {body}"
     );
 }
 
@@ -1556,10 +1574,41 @@ async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
     let Err(error) = refused else {
         panic!("the bind is refused, not served");
     };
-    let rendered = format!("{error}");
+    // `contains("400") || contains("HTTP")` was close to unfalsifiable: the
+    // second arm matches the Display of essentially every tungstenite error,
+    // a connection refusal and a 500 included, and the docstring's own claim -
+    // that the refusal NAMES THE CURRENCY - was never asserted at all. Both are
+    // read off the structured response now.
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("the refusal is an HTTP status before the upgrade, got {error}");
+    };
+    assert_eq!(
+        response.status(),
+        400,
+        "the refusal is a status before the 101: {response:?}"
+    );
+    let body = String::from_utf8_lossy(response.body().as_deref().unwrap_or_default()).into_owned();
     assert!(
-        rendered.contains("400") || rendered.contains("HTTP"),
-        "the refusal is a status before the upgrade: {rendered}"
+        body.contains("WYRD-600") && body.contains("not funded in"),
+        "the refusal is the funding check rather than some other 400: {body}"
+    );
+    // USDT as a LITERAL, not resolved through the same config code the venue
+    // runs: this is the settlement currency of the default boot river, and a
+    // derived expectation would compare the server's answer to itself.
+    //
+    // THE WHOLE PHRASE, not `contains("USDT")`. The boot river here is the
+    // default preset BTCUSDT, and "USDT" is a substring of "BTCUSDT" - so a bare
+    // `contains("USDT")` was implied by the symbol assertion beside it and said
+    // nothing on its own. A venue that had regressed to echoing the ACCOUNT's
+    // own currency back - "not funded in JPY, which is what BTCUSDT settles in",
+    // a plausible real bug - would have satisfied it.
+    assert!(
+        body.contains("not funded in USDT"),
+        "the refusal names the SETTLEMENT currency, not the account's own: {body}"
+    );
+    assert!(
+        body.contains(&*venue.symbol),
+        "the refusal names the river whose settlement it is: {body}"
     );
 }
 
@@ -1731,11 +1780,38 @@ async fn an_armed_divergence_reaches_every_connection() {
 
     // Arm a blackout over the control plane. It is armed against the RUN, not
     // against an account, so it must gate this socket's market data.
-    let (_, arm_clock_body) = http_get(&venue.http_base(), "/clock");
-    let arm_clock: serde_json::Value = serde_json::from_str(&arm_clock_body).expect("arm clock");
-    let armed_at = arm_clock["server_now_ns"].as_u64().expect("arm instant");
     let armed = post_divergence(&venue.http_base(), r#"{"type":"StallData","ms":180000}"#);
     assert_eq!(armed, 202, "the divergence is accepted");
+    // The ceiling comes from THIS RIVER'S BOAT, and is read AFTER the ack.
+    //
+    // Read from the UNNAMED `/clock` it was the venue-clock fallback, which is
+    // a look-ahead oracle for every boat: a boat publishes the last tick it
+    // actually delivered, so the venue clock runs ahead of it and the ceiling
+    // was systematically generous - post-arm water could still be stamped below
+    // it and pass. `?symbol=` answers for the boat, and `boat_clock` is asserted
+    // so a fallback answer cannot quietly reinstate the generous ceiling.
+    //
+    // AFTER the ack rather than before it, and NOT because in-flight tape needs
+    // slack: `ws.rs` gates at SEND time, not at publish time, so a frame
+    // published before the arm and still queued when it lands is dropped too.
+    // Nothing is legitimately in flight past an armed blackout. Reading after
+    // the ack is instead about the CEILING'S OWN FRESHNESS - the boat has moved
+    // during the round trip, and a ceiling read before it would be lower than
+    // the last instant the venue was entitled to publish at, failing a working
+    // blackout on its own last pre-arm frame. The slack that buys is one round
+    // trip; a blackout that failed outright keeps publishing for the whole
+    // two-second window, which at speed 60 is two sim MINUTES past this ceiling.
+    let (_, arm_clock_body) = http_get(
+        &venue.http_base(),
+        &format!("/clock?symbol={}", venue.symbol),
+    );
+    let arm_clock: mogwai_protocol::ServerClock =
+        serde_json::from_str(&arm_clock_body).expect("arm clock");
+    assert!(
+        arm_clock.boat_clock,
+        "the ceiling must be the boat's own instant, not the venue clock: {arm_clock_body}"
+    );
+    let armed_at = arm_clock.server_now_ns;
 
     // Within the window no market data may arrive on this socket.
     let quiet_until = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -1749,7 +1825,8 @@ async fn an_armed_divergence_reaches_every_connection() {
             };
             assert!(
                 event_ts.is_none_or(|ts| ts <= armed_at),
-                "market data generated after an armed StallData window arrived"
+                "market data generated after an armed StallData window arrived: \
+                 ts_event {event_ts:?} is past the boat's arming instant {armed_at}"
             );
         }
     }
@@ -1864,23 +1941,46 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
 /// engine that slips perfectly would otherwise never receive a reading in
 /// production while every engine-side unit test passed.
 ///
-/// Proven by the fill PRICE: a market order priced absurdly far from the market
-/// fills near the tape rather than at its own number, which is only possible if
-/// the venue read the tape. Adverse-or-equal is asserted on the tape-priced
-/// fill in the same breath.
+/// THE FILL PRICE CANNOT PROVE IT ON THE PRICE-LESS ARM, which is why this test
+/// reads the venue's log. On the priced arm the price is evidence: the order
+/// states an absurd 9000000, the no-reading fallback fills at that stated price,
+/// and a fill near the tape is therefore only possible if the venue read. On the
+/// price-less arm there is no stated price to be absurd - `market_reading`
+/// stamps the order with the last print either way, from the reading when there
+/// is one and from `fills::read_last` when there is not, and the engine's
+/// no-reading branch then fills at that same stamp. Both outcomes land on the
+/// tape, so `fill.last_px < last * 2` is satisfied by a fill decided off NO
+/// READING AT ALL - it was green by construction for the very arm the docstring
+/// says this test exists for.
+///
+/// The one observable that separates them is the engine's own WARN, `market
+/// order has no market reading; using its stated price`, emitted with the
+/// client order id. An attempt whose id never appears in it took a reading.
+/// The two evidences are cross-checked against each other on the priced arm,
+/// so neither the log nor the wire is trusted alone.
 ///
 /// Retried, because `read_market` legitimately REFUSES at any instant whose
 /// trailing window carries fewer than `MIN_VOL_SAMPLES` returns, and the fitted
 /// BTCUSDT tape does that at a substantial fraction of instants. A refused
 /// reading is the documented fallback - stated price, no slippage, WARN - so a
 /// single attempt would be a coin flip. What is pinned is that a reading IS
-/// taken on both paths: every attempt filling at its own number would mean the
-/// path never reads at all, which is the defect this test exists for.
+/// taken on both paths: every attempt warning would mean the path never reads at
+/// all, which is the defect this test exists for.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths() {
     const ATTEMPTS: usize = 8;
-    let venue = spawn(&["--config", &band_config()]);
+    /// The engine's no-reading fallback, verbatim from `orders.rs`.
+    const NO_READING: &str = "market order has no market reading";
+    let (venue, log) = common::spawn_capturing_stderr(&["--config", &band_config()]);
+    // BEFORE anything is concluded from an absence in that buffer. The property
+    // below is scored on attempts whose id does NOT appear beside the WARN, and
+    // an empty buffer satisfies that for every attempt - a silenced filter, a
+    // dead capture thread or a closed pipe would all render as "the venue always
+    // took a reading". `spawn_capturing_stderr` pins `RUST_LOG` so the ambient
+    // environment cannot silence it, and this proves the pin took effect and the
+    // lines actually arrive here.
+    log.await_positive_control();
     let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("open the order socket");
@@ -1891,9 +1991,28 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
         } else {
             ""
         };
-        let mut read_the_tape = false;
+        // (id, whether the fill landed on the tape rather than at 9000000).
+        let mut attempts: Vec<(String, bool)> = Vec::new();
         for attempt in 0..ATTEMPTS {
             let id = format!("MKT-{path}-{attempt}");
+            // The LOWER end of the bracket the floor below is taken over, read
+            // before the submit goes out. The boat's published instant is
+            // monotone and lags its own projection, so the instant the handler
+            // reads the tape at is at or after this - which is what makes the
+            // floor a real bound rather than a guess. Anchoring the window on
+            // the ACCEPTANCE instant instead, which is what this did, put the
+            // window's start AFTER prints the reading could legitimately have
+            // been taken at, and the floor then rejected honest fills.
+            let (_, before_body) = http_get(
+                &venue.http_base(),
+                &format!("/clock?symbol={}", venue.symbol),
+            );
+            let before: mogwai_protocol::ServerClock =
+                serde_json::from_str(&before_body).expect("the pre-submit clock");
+            assert!(
+                before.boat_clock,
+                "the bracket needs this river's boat, not the venue clock: {before_body}"
+            );
             let submit = format!(
                 r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01"{price},"time_in_force":"Gtc"}}"#,
                 venue.symbol
@@ -1946,28 +2065,33 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
             // asserted is therefore the strongest statement that survives the
             // bracket: the reading's print lies somewhere in the lookback below,
             // and the fill band is adverse, so a market BUY must fill at or
-            // above the LOWEST price in that window. A fill decided off no
-            // reading at all - the defect this test exists for - breaks it.
-            // Recovering the exact per-fill statement means putting the reading
-            // instant on the `OrderFilled` event or dropping the cache's
-            // bucketing; neither is this test's call to make.
+            // above the LOWEST price in that window. Recovering the exact
+            // per-fill statement means putting the reading instant on the
+            // `OrderFilled` event or dropping the cache's bucketing; neither is
+            // this test's call to make.
             const BUCKET_NS: u64 = 10_000_000;
             let reading_ts = accepted_ts.unwrap_or(fill.ts_event) / BUCKET_NS * BUCKET_NS;
-            let (_, body) = http_get(
+            // A 60 s lookback BELOW the pre-submit instant, not below the
+            // acceptance one, so the window covers every print the reading could
+            // have named. Not 1 s, because the arrival clock's quiet state runs a
+            // mean gap of several seconds and a one-second window is legitimately
+            // empty often enough to make this flaky for a reason that has nothing
+            // to do with fills.
+            //
+            // Fetched through `trade_window`, which PAGES. A single `/trades`
+            // query returns the window's OLDEST prints when the page fills, and
+            // the floor was then taken over stale water the market had since
+            // fallen through - asserted as favourable slippage that never
+            // happened. Guarding that with `trades.len() < PAGE` instead would
+            // have turned a slow round trip, which widens this window without
+            // bound at speed 100, into a red test on a run where nothing is
+            // wrong.
+            let trades = trade_window(
                 &venue.http_base(),
-                &format!(
-                    "/trades?symbol={}&start={}&end={}&limit=10000",
-                    venue.symbol,
-                    // A 300 s lookback, not a 1 s one: the arrival clock's quiet
-                    // state runs a mean gap of several seconds, so a one-second
-                    // window is legitimately empty often enough to make this
-                    // test flaky for a reason that has nothing to do with fills.
-                    reading_ts.saturating_sub(300_000_000_000),
-                    reading_ts
-                ),
+                &venue.symbol,
+                before.server_now_ns.saturating_sub(60_000_000_000),
+                reading_ts,
             );
-            let trades: Vec<TradeTick> =
-                serde_json::from_str(&body).expect("tape at the reading instant");
             let last = trades
                 .last()
                 .expect("a print at or before the reading")
@@ -1977,24 +2101,58 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
                 .map(|trade| trade.price)
                 .min()
                 .expect("a print in the lookback");
-            if fill.last_px < last * rust_decimal::Decimal::TWO {
-                read_the_tape = true;
+            let on_the_tape = fill.last_px < last * rust_decimal::Decimal::TWO;
+            if on_the_tape {
                 assert!(
                     fill.last_px >= floor,
                     "a market buy filled below every print it could have read: {} < {floor}",
                     fill.last_px
                 );
-                break;
             }
-            // The refusal fallback fired. Let the clock move so the next
-            // attempt reads a genuinely different window - at speed 100 this is
-            // fifty sim seconds of fresh tape.
+            attempts.push((id, on_the_tape));
+            // Let the clock move so the next attempt reads a genuinely different
+            // window - at speed 100 this is fifty sim seconds of fresh tape.
+            // Unconditional now: every attempt is scored, so there is no early
+            // exit to skip it. The count and this gap are the whole flake margin
+            // on the assertion below, whose false-failure mode is every attempt
+            // legitimately refusing, so neither may be trimmed for wall time
+            // without something else compensating.
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+
+        // The venue writes the WARN before it emits the fill, but that is its
+        // stderr pipe and this is a websocket, so the draining thread is allowed
+        // a settle. Bounded because the question is an ABSENCE, which nothing
+        // can signal; the loop's own last inter-attempt sleep already gave it
+        // 500 ms, and this adds a second one rather than betting on a single.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let warned: Vec<&(String, bool)> = attempts
+            .iter()
+            .filter(|(id, _)| log.contains_both(NO_READING, id))
+            .collect();
         assert!(
-            read_the_tape,
-            "the {path} market path never took a tape reading in {ATTEMPTS} attempts"
+            warned.len() < attempts.len(),
+            "the {path} market path warned `{NO_READING}` on all {} attempts, so it never took \
+             a reading at all",
+            attempts.len()
         );
+        // The log and the wire must AGREE, which is what keeps this from being
+        // a test of the log alone. On the priced arm the two are independently
+        // observable: an attempt that did not warn took a reading, and a fill
+        // that took a reading cannot have landed on the order's own absurd
+        // 9000000. If they disagree, one of the two observables is lying and
+        // the other findings resting on either are worthless.
+        if path == "priced" {
+            for (id, on_the_tape) in &attempts {
+                let warned = warned.iter().any(|(warned_id, _)| warned_id == id);
+                assert_eq!(
+                    !warned,
+                    *on_the_tape,
+                    "{id}: the venue's log says a reading was {} while its fill says the opposite",
+                    if warned { "NOT taken" } else { "taken" }
+                );
+            }
+        }
     }
 }
 
@@ -2391,6 +2549,151 @@ async fn await_acceptance(socket: &mut WsSocket, client_order_id: &str) {
     }
 }
 
+/// EVERY trade in `[start, end]`, paged - never a prefix of them.
+///
+/// `/trades` fills its page from the OLDEST end of the window and stops at the
+/// limit, so one query over a window wider than a page returns the window's
+/// oldest prints and says nothing about it. A statistic taken over that - a
+/// minimum, a last price - is then a statistic over stale water the market has
+/// since moved through, and it is silently wrong rather than absent. Round 2 of
+/// the test hunt found a live instance asserting favourable slippage that never
+/// happened.
+///
+/// The cursor obeys the frontier rule: a full page's LAST INSTANT may be cut off
+/// mid-instant, so that whole instant is dropped and the next query resumes AT
+/// it rather than past it. A timestamp-only cursor may only advance onto an
+/// instant once every row at that instant has been seen.
+fn trade_window(base: &str, symbol: &str, start: u64, end: u64) -> Vec<TradeTick> {
+    trade_window_paged(base, symbol, start, end, mogwai_protocol::MAX_HISTORY_LIMIT)
+}
+
+/// [`trade_window`] with the page size named, so the paging itself can be
+/// exercised on a window a real page would swallow whole.
+fn trade_window_paged(
+    base: &str,
+    symbol: &str,
+    start: u64,
+    end: u64,
+    page_size: usize,
+) -> Vec<TradeTick> {
+    let page_size = page_size.max(1);
+    let mut out: Vec<TradeTick> = Vec::new();
+    let mut cursor = start;
+    loop {
+        let (status, body) = http_get(
+            base,
+            &format!("/trades?symbol={symbol}&start={cursor}&end={end}&limit={page_size}"),
+        );
+        assert_eq!(status, 200, "the tape window answers: {body}");
+        let page: Vec<TradeTick> = serde_json::from_str(&body).expect("a page of tape");
+        if page.len() < page_size {
+            out.extend(page);
+            return out;
+        }
+        let boundary = page.last().expect("a full page is non-empty").ts_event;
+        let kept: Vec<TradeTick> = page
+            .into_iter()
+            .filter(|trade| trade.ts_event < boundary)
+            .collect();
+        // A full page carrying ONE instant cannot be paged by a timestamp
+        // cursor at all, and silently advancing past it would drop rows. It
+        // cannot happen on a generated tape - said out loud rather than
+        // absorbed, because absorbing it is the defect this helper exists for.
+        assert!(
+            !kept.is_empty(),
+            "a whole {page_size}-row page sits at the single instant {boundary}, so this window \
+             cannot be paged by timestamp"
+        );
+        cursor = boundary;
+        out.extend(kept);
+    }
+}
+
+/// The helper the slippage floor rests on is itself checked, against the venue.
+///
+/// `trade_window` exists because a single `/trades` query silently returns the
+/// window's OLDEST prints once the page fills, and a statistic over that is
+/// wrong rather than absent. That is a claim about paging, and a helper whose
+/// paging is wrong fails the same way its caller did - quietly, with a plausible
+/// number. So it is pinned against the answer the venue gives when the page
+/// cannot truncate at all: a window small enough for one full page, fetched at
+/// page size 3, must equal the same window fetched in one query.
+///
+/// The three-row page is what makes this bite. It forces thousands of cursor
+/// advances over a window a real page swallows whole, so a cursor that drops or
+/// duplicates a row at a page boundary shows up here where `MAX_HISTORY_LIMIT`
+/// would never exercise the loop at all - measured, dropping the boundary row
+/// turned 13780 prints into 9187.
+///
+/// WHAT THIS DOES NOT COVER, stated because a green test is otherwise read as
+/// covering everything: the COLLIDING half of the cursor rule. `trade_window`
+/// resumes AT a full page's last instant rather than past it, because rows at
+/// that instant may have been cut off - but this tape stamps every print at a
+/// distinct nanosecond, asserted below, so the two forms are indistinguishable
+/// on it. Advancing past the boundary was tried as a bite-check and PASSED. The
+/// defensive form is kept because a merged river or a coarser tape would collide
+/// and nothing here would say so.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_paged_tape_window_equals_the_same_window_read_in_one_query() {
+    let venue = spawn(&["--config", &fast_config()]);
+    // The venue clock, not a boat's: nothing has connected, so no boat is
+    // seated, and this is only a window bound rather than a claim about who
+    // published what.
+    let (_, clock_body) = http_get(&venue.http_base(), "/clock");
+    let clock: mogwai_protocol::ServerClock =
+        serde_json::from_str(&clock_body).expect("the venue clock");
+    let end = clock.server_now_ns;
+    let start = venue.record.data_origin_ns;
+
+    let (status, body) = http_get(
+        &venue.http_base(),
+        &format!(
+            "/trades?symbol={}&start={start}&end={end}&limit={}",
+            venue.symbol,
+            mogwai_protocol::MAX_HISTORY_LIMIT
+        ),
+    );
+    assert_eq!(status, 200, "the whole window answers: {body}");
+    let whole: Vec<TradeTick> = serde_json::from_str(&body).expect("the whole window");
+    // The premise: this window fits one page, so the single query is the truth
+    // to compare against. If a wider tape breaks that, the comparison would be
+    // against a truncated answer and would pass by agreeing with a wrong one.
+    assert!(
+        whole.len() < mogwai_protocol::MAX_HISTORY_LIMIT,
+        "this window no longer fits one page, so the single query is not a reference answer"
+    );
+    assert!(
+        whole.len() > 3,
+        "the window carries {} prints, too few to page at all",
+        whole.len()
+    );
+
+    // The premise of the paragraph above: distinct instants. If this ever
+    // fails, the colliding half of the cursor rule became reachable and owes a
+    // gate of its own rather than the docstring's disclaimer.
+    assert!(
+        whole
+            .windows(2)
+            .all(|pair| pair[0].ts_event < pair[1].ts_event),
+        "two prints share an instant, so the page boundary can now cut an instant in half"
+    );
+
+    let paged = trade_window_paged(&venue.http_base(), &venue.symbol, start, end, 3);
+    assert_eq!(
+        paged.len(),
+        whole.len(),
+        "paging the window at three rows a page neither dropped nor duplicated prints"
+    );
+    for (index, (paged, whole)) in paged.iter().zip(whole.iter()).enumerate() {
+        assert_eq!(
+            (paged.ts_event, paged.price),
+            (whole.ts_event, whole.price),
+            "print {index} differs between the paged read and the single query"
+        );
+    }
+}
+
 /// The named boat's own `server_now_ns`, so a test can wait on the venue's clock
 /// instead of on the host's.
 fn venue_sim_now(base: &str, clock_path: &str) -> u64 {
@@ -2658,9 +2961,42 @@ fn a_generator_arm_on_an_unboated_river_is_accepted() {
     // WHAT was armed against WHICH origin: the window opens at the river's
     // origin, so the boat placed afterwards gets the whole span rather than a
     // window already closed in its past.
-    assert!(
-        body.contains("1000") && body.contains("MNQ"),
-        "the ack names the armed span and river: {body}"
+    //
+    // The span is READ OUT of the ack rather than looked for as a substring.
+    // `body.contains("1000")` passed on any ack at all, because the origin is a
+    // nanosecond instant and "1000" is a substring of essentially every one of
+    // them - the ack could have named a 5 ms span, or no span, and still matched.
+    // The ack is prose, not JSON, so the structure is its shape: a duration
+    // token that parses, a symbol, and a trailing origin that parses.
+    let (span, tail) = body
+        .strip_prefix("armed a ")
+        .and_then(|rest| rest.split_once(" ms simulated surge on "))
+        .unwrap_or_else(|| panic!("the ack states an armed span: {body}"));
+    assert_eq!(
+        span.parse::<u64>().ok(),
+        Some(1000),
+        "the ack names the span that was ARMED: {body}"
+    );
+    let (symbol, origin) = tail
+        .split_once(", opening at the river origin ")
+        .unwrap_or_else(|| panic!("the ack states the origin it opens at: {body}"));
+    assert_eq!(symbol, "MNQ", "the ack names the armed river: {body}");
+    let origin: u64 = origin
+        .trim()
+        .parse()
+        .unwrap_or_else(|err| panic!("the origin is a sim instant: {body} ({err})"));
+    // The window opens at the RUN ORIGIN - `run.started_ns`, which every boat
+    // placed on this river will anchor its own `sim_epoch_ns` at. That is an
+    // EXACT number this test already holds: the launcher's readiness record
+    // reports it as `run_start_ns`. Bracketing it against
+    // `[data_origin_ns, server_now_ns]` instead, which is what this did, is far
+    // looser than the claim - `run.started_ns` is `data_origin + warmup`, so a
+    // regression arming at the raw data origin, or anywhere in the warmup span,
+    // sat inside the bracket and passed.
+    assert_eq!(
+        origin, venue.record.run_start_ns,
+        "the armed window opens at the RUN origin a late boat will anchor on, \
+         not somewhere inside the warmup: {body}"
     );
 }
 
