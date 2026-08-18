@@ -16,6 +16,21 @@ opening a fresh one. The venue cannot distinguish a reconnect from a stranger
 claiming the id and does not try, so an account id is effectively a bearer
 token.
 
+DELIVERY IS ATTRIBUTED, NOT BROADCAST, which is what makes the per-passenger
+ledger worth having on the wire as well as in memory. A sweep executes one engine
+pass per passenger, and each frame it produces reaches only the connections it is
+about: an order-scoped frame goes to the account that submitted the order, and an
+`AccountState` goes to the account it NAMES. What reaches every connection is
+what is genuinely about the venue - a fault, a run completion, a feed gap.
+
+The account snapshot was the last frame to get this, and until it did, an
+N-account venue sent every client all N snapshots on every pass. A client that
+believes them sizes against a stranger's equity, and a consumer has no reason to
+suspect it: the snapshot carries its own account id, but a client told the venue
+serves one ledger per run has no reason to read it. If a consumer's own adapter
+skips that comparison on the strength of the one-ledger-per-run premise, the
+shared-venue topology breaks the premise, so the venue is what has to be right.
+
 AN ACCOUNT IS ON AT MOST ONE RIVER, WITH ONE READER. A second socket presenting
 a seated account id EVICTS the first, because a ledger read and written from two
 places is one ledger with two notions of its own state. The evicted socket is

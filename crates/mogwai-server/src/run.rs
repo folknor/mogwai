@@ -1205,9 +1205,36 @@ pub(crate) struct BoundLane {
     pub(crate) lanes: ExecLanes,
 }
 
+/// The account a frame is ABOUT when it says so ITSELF, rather than through an
+/// order the run has to look up. `None` means the frame carries no account
+/// identity and attribution falls to [`addressed_order`].
+///
+/// `AccountState` is the whole of it today, and it is not a curiosity: the sweep
+/// runs one engine pass PER PASSENGER, so an N-account venue produces N account
+/// snapshots per pass, each true of exactly one ledger. Attributing them by
+/// order ownership - which is what delivery did before this existed - finds no
+/// order, reads them as venue-wide, and hands every passenger every other
+/// passenger's balances and positions. A consumer has no way to tell: the
+/// snapshot names its account, but a client that was promised one ledger per run
+/// has no reason to check, and the known nautilus adapter deliberately does not.
+/// Sizing off a sibling's equity is the consequence, and it moves capital.
+///
+/// Attribution here is by the frame's OWN field rather than by which passenger
+/// the sweep was iterating, deliberately: delivery is a pure function of the
+/// batch, and a frame that cannot say who it belongs to must not be attributed
+/// by ambient context that a later refactor can silently change.
+pub(crate) fn addressed_account(
+    event: &mogwai_protocol::ServerMessage,
+) -> Option<&mogwai_protocol::AccountId> {
+    match event {
+        mogwai_protocol::ServerMessage::AccountState(state) => Some(&state.account_id),
+        _ => None,
+    }
+}
+
 /// The order a frame is ABOUT, for account attribution. `None` means the
-/// frame is not order-scoped - a venue fault, a completion, the account
-/// snapshot - and belongs to every connection.
+/// frame is not order-scoped - a venue fault, a completion - and belongs to
+/// every connection unless [`addressed_account`] claims it for one.
 ///
 /// The two `Option<VenueOrderId>` rejections are addressed only when the venue
 /// recognized the order: a rejection naming an id the venue never issued cannot

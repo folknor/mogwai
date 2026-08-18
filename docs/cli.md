@@ -107,6 +107,24 @@ gates drive the venue through it, so it cannot drift from the binary it launches
 The prose remains because a launcher in another language still has to implement
 it.
 
+Three details of that guard are worth stating, because a caller writes code
+against each and cannot see any of them from the signature. `shutdown()` reports
+a venue that would NOT die - a failed signal or a failed reap comes back as
+`LaunchError::Teardown`, so the "shut it down and report a failure to do so"
+check callers write is real, and a caller that ignores it may launch a
+replacement into an address the old venue still holds. `exited()` records the
+child's status whenever the guard reaps one, including on the shutdown path, so
+a bounded run that completed just before teardown reports its successful exit
+rather than `None`; a `None` from a guard that has been shut down means the venue
+was killed while still serving. And the readiness bound holds even against a
+child that misbehaves: on expiry the launcher reports the timeout without waiting
+on its own reader thread, so a `LaunchSpec::binary` naming a wrapper script that
+starts the venue without `exec` - leaving a grandchild holding the inherited
+stdout - costs a leaked thread rather than a launcher hung immediately after
+deciding to report a timeout. Point it at the binary, or at a wrapper that
+`exec`s it, all the same: only then does killing the child close stdout, and only
+then is the readiness read released by the kill rather than by the timeout.
+
 The launcher starts `mogwai serve` as its direct child with stdout captured,
 reads exactly one JSON `ReadyRecord` line, checks `version`, and uses `addr` for
 both clients. It takes any required river name from its own configuration. That

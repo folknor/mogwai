@@ -12,7 +12,7 @@ the two things it contracts against outside itself (`mogwai-cli`'s `serve` argv
 parsing and `mogwai-server`'s `arm_parent_death_signal`), to check the
 launcher's claims rather than assume them. No edits made.
 
-## A. Launcher: a natural exit racing shutdown is silently destroyed
+## A. Launcher: a natural exit racing shutdown is silently destroyed - FIXED 2026-08-18
 
 `own_venue`, the parking loop:
 
@@ -47,7 +47,14 @@ Confidence: high. This is a frontier-family shape in the sense `AGENTS.md` names
 - a terminal-state record that is only written on one of two paths out of the
 loop.
 
-## B. Launcher: `shutdown()` cannot report the thing its doc says it exists to report
+FIXED by the second form: the `try_wait` now runs on every path out of the loop,
+with the shutdown signal recorded as a flag that breaks AFTER the reap attempt
+rather than instead of it. So a bounded run that ended inside the last poll
+window is recorded as the successful exit it was, and `exited() == None` after a
+shutdown now means what a caller reads it as - the venue was still serving when
+it was killed.
+
+## B. Launcher: `shutdown()` cannot report the thing its doc says it exists to report - FIXED 2026-08-18
 
 ```rust
 /// `Drop` does the same and ignores the outcome, which is right for an
@@ -70,6 +77,15 @@ delete the claim from the doc. The hunter would give it the channel -
 `shutdown()` returning a typed result is the whole reason it is separate from
 `Drop`.
 
+FIXED with the channel, for that reason. The owner thread records a failed kill
+or a failed reap into a shared slot, and `terminate` reads it AFTER the join -
+before the join would race the write - and returns the new
+`LaunchError::Teardown`. The detail is taken rather than copied, so the `Drop`
+that follows an explicit `shutdown` does not report the same failure twice. Note
+what is deliberately NOT reported: a child already reaped by the loop above makes
+kill and wait fail harmlessly, so the record is only kept when nothing was
+reaped.
+
 ## C. Launcher: `Drop` blocks a runtime worker, in a module whose premise is async hosts
 
 The module doc's first load-bearing property is about async applications ("in an
@@ -87,7 +103,7 @@ and learn about a natural child exit via SIGCHLD or a dedicated waiter, so
 shutdown latency is a wakeup rather than a poll interval. Given pre-1.0, the
 hunter would do that rather than shrink `OWNER_POLL` and call it addressed.
 
-## D. Launcher: the readiness wall-clock guarantee is conditional on no descendant holding stdout
+## D. Launcher: the readiness wall-clock guarantee is conditional on no descendant holding stdout - FIXED 2026-08-18
 
 `the_ready_bound_returns_on_time_against_a_silent_venue` pins that `launch`
 returns on its own bound. It holds because on timeout the owner does
@@ -111,6 +127,18 @@ the owner thread so the read is released regardless of who holds the writer.
 
 Confidence: high that the mechanism is real, medium that it is reachable in
 current use.
+
+FIXED by neither of the hunter's two robust forms, and the choice is worth
+stating. The timeout arm no longer joins the reader at all: the kill is still
+issued, because it releases the reader in every case where the child itself holds
+the write end, but the bound is now unconditional rather than contingent on that
+working. A stranded reader is one leaked thread, which is the trade the stderr
+drain in the same function already makes and for the same reason - the process
+gets to keep its promise. `killpg` is the better answer for the venue's own
+descendants if it ever grows any, and is still open; it is a bigger change and it
+does not help against a wrapper's grandchild that has left the process group.
+`docs/cli.md` now states the supported shape (name the binary, or a wrapper that
+`exec`s it) and what it costs when a caller does not.
 
 ## E. Launcher: the venue is now forbidden from ever writing to stdout again, and nothing says so
 

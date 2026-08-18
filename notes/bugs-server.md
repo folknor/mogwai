@@ -12,7 +12,7 @@ The hunter read `ws`, `run`, `http`, `serve`, `sweeper`, `admission`,
 `boatyard`, `extremes` plus the `SimClock` contract they ride on. Nothing was
 built or run.
 
-## 1. Every connection receives every other account's `AccountState` (high confidence, serious)
+## 1. Every connection receives every other account's `AccountState` (high confidence, serious) - FIXED 2026-08-18
 
 `sweeper.rs::deliver` filters by `run::addressed_order`, which returns `None`
 for anything that is not order-scoped - including `ServerMessage::AccountState`.
@@ -44,6 +44,19 @@ scope non-order-scoped, ledger-owned frames to it. Genuinely venue-wide frames
 `addressed_order` doesn't recognise". The hunter would make that an explicit
 enum on the frame rather than a fallthrough, because the fallthrough is what
 silently mis-classified `AccountState` in the first place.
+
+FIXED, by the frame's own field rather than by the producing passenger's id.
+`run::addressed_account` reads `AccountState.account_id`, and `deliver` consults
+it before falling back to order ownership. That is deliberately not the "take the
+producing passenger's account id" shape the hunter proposed: delivery stays a
+pure function of the batch, so a frame is attributed by what it SAYS rather than
+by which passenger the sweep happened to be iterating, and a later refactor of
+the loop cannot silently re-point it. The hunter's deeper point stands and is not
+closed here - "unattributed means everyone" is still a fallthrough rather than a
+declared class, so the next ledger-owned frame joins the broadcast set exactly
+the way this one did. Findings 6 and the second half of 12 keep that open.
+`a_swept_account_snapshot_reaches_only_that_account` pins the fix and was
+bite-checked against the reported symptom.
 
 ## 2. `/ws` evicts the incumbent before it has decided whether to admit the newcomer (high confidence)
 

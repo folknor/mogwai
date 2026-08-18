@@ -178,6 +178,10 @@ pub enum LaunchError {
     Version { reported: u32, understood: u32 },
     /// The owning thread died before reporting, which means it panicked.
     OwnerDied,
+    /// The venue would not die: signalling it or reaping it failed at the OS
+    /// level. The caller's process keeps running, so a venue still holding its
+    /// port is the caller's problem to report rather than ours to swallow.
+    Teardown { detail: String },
     /// The readiness bound was zero, which no venue can meet.
     ZeroReadyTimeout,
 }
@@ -226,6 +230,11 @@ impl std::fmt::Display for LaunchError {
             Self::OwnerDied => {
                 f.write_str("the thread owning the venue died before reporting readiness")
             }
+            Self::Teardown { detail } => write!(
+                f,
+                "the venue could not be brought down: {detail}. It may still be running and \
+                 holding its port; check for a stray process before launching another"
+            ),
             Self::ZeroReadyTimeout => f.write_str(
                 "the readiness bound is zero, which no venue can meet: readiness comes after \
                  warmup generation, which is never instantaneous. Leave it unset for the \
@@ -272,6 +281,9 @@ pub struct LaunchedVenue {
     record: ReadyRecord,
     exit: Arc<Mutex<Option<VenueExit>>>,
     stderr: Arc<Mutex<VecDeque<String>>>,
+    /// What went wrong bringing the venue down, written by the owning thread on
+    /// its way out and read by [`LaunchedVenue::shutdown`] after the join.
+    teardown: Arc<Mutex<Option<String>>>,
     /// Dropping the sender tells the owning thread to bring the venue down.
     shutdown: Option<SyncSender<()>>,
     owner: Option<JoinHandle<()>>,
@@ -331,15 +343,34 @@ impl LaunchedVenue {
     ///
     /// # Errors
     ///
-    /// Returns an error if the owning thread panicked.
+    /// [`LaunchError::OwnerDied`] if the owning thread panicked, and
+    /// [`LaunchError::Teardown`] if the venue would not die - signalling or
+    /// reaping the child failed at the OS level.
+    ///
+    /// THE SECOND ARM IS WHY THIS RETURNS A RESULT AT ALL. It used to report
+    /// only a panicked owner, so the "shut it down and report a failure to do
+    /// so" check every caller writes against it was vacuous: a failed kill and a
+    /// wedged child both returned `Ok(())`, and a venue still holding its port
+    /// was announced as an orderly shutdown. A caller that ignores this may
+    /// launch its replacement into an address the old one still owns.
     pub fn shutdown(mut self) -> Result<(), LaunchError> {
         self.terminate()
     }
 
     fn terminate(&mut self) -> Result<(), LaunchError> {
         drop(self.shutdown.take());
-        match self.owner.take() {
-            Some(owner) => owner.join().map_err(|_| LaunchError::OwnerDied),
+        if let Some(owner) = self.owner.take() {
+            owner.join().map_err(|_| LaunchError::OwnerDied)?;
+        }
+        // AFTER the join, which is what makes the read sound: the owning thread
+        // writes this slot on its way out, so reading it before the join could
+        // race the write and report a clean teardown of a venue that would not
+        // die. Taken rather than copied, so a second call - `Drop` after an
+        // explicit `shutdown`, which is the ordinary path - does not report the
+        // same failure twice.
+        let detail = self.teardown.lock().ok().and_then(|mut slot| slot.take());
+        match detail {
+            Some(detail) => Err(LaunchError::Teardown { detail }),
             None => Ok(()),
         }
     }
@@ -374,6 +405,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
 
     let exit = Arc::new(Mutex::new(None));
     let stderr = Arc::new(Mutex::new(VecDeque::new()));
+    let teardown: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let (boot_tx, boot_rx) = sync_channel::<Result<ReadyRecord, LaunchError>>(1);
     let (shutdown_tx, shutdown_rx) = sync_channel::<()>(1);
 
@@ -383,6 +415,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
     let owner = {
         let exit = Arc::clone(&exit);
         let stderr = Arc::clone(&stderr);
+        let teardown = Arc::clone(&teardown);
         std::thread::Builder::new()
             .name("mogwai-venue".to_owned())
             .spawn(move || {
@@ -395,6 +428,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
                     &shutdown_rx,
                     &exit,
                     &stderr,
+                    &teardown,
                 );
             })
             .map_err(|source| LaunchError::Spawn {
@@ -434,6 +468,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
                 record,
                 exit,
                 stderr,
+                teardown,
                 shutdown: Some(shutdown_tx),
                 owner: Some(owner),
             })
@@ -523,6 +558,7 @@ fn own_venue(
     shutdown_rx: &Receiver<()>,
     exit: &Arc<Mutex<Option<VenueExit>>>,
     stderr_ring: &Arc<Mutex<VecDeque<String>>>,
+    teardown: &Arc<Mutex<Option<String>>>,
 ) {
     let captures_stderr = !matches!(sink, StderrSink::Inherit);
     let mut command = Command::new(binary);
@@ -597,22 +633,42 @@ fn own_venue(
             source,
         }),
         Ok(reader) => {
-            let outcome = match line_rx.recv_timeout(ready_timeout) {
-                Ok(booted) => booted,
+            let (outcome, reader_is_released) = match line_rx.recv_timeout(ready_timeout) {
+                // The reader sent, so it is at or past the send and will end.
+                Ok(booted) => (booted, true),
                 Err(RecvTimeoutError::Timeout) => {
-                    // Kill first, so the reader is released and this thread can
-                    // be joined by a caller that is now returning an error.
+                    // Kill first, which closes stdout and releases the reader in
+                    // every case where the child itself holds the write end.
                     drop(child.kill());
-                    Err(LaunchError::Timeout {
-                        waited: ready_timeout,
-                        stderr: snapshot(stderr_ring),
-                    })
+                    (
+                        Err(LaunchError::Timeout {
+                            waited: ready_timeout,
+                            stderr: snapshot(stderr_ring),
+                        }),
+                        false,
+                    )
                 }
-                Err(RecvTimeoutError::Disconnected) => Err(LaunchError::Read(
-                    std::io::Error::other("the readiness reader died without reporting"),
-                )),
+                // The sender was dropped, so the reader thread is over.
+                Err(RecvTimeoutError::Disconnected) => (
+                    Err(LaunchError::Read(std::io::Error::other(
+                        "the readiness reader died without reporting",
+                    ))),
+                    true,
+                ),
             };
-            drop(reader.join());
+            // THE TIMEOUT PATH DOES NOT JOIN, and that is the difference between
+            // reporting a timeout and hanging inside one. Killing the child
+            // closes stdout only while the CHILD holds the write end: a
+            // `BA_MOGWAI_BIN` naming a wrapper script that launches the venue
+            // without `exec` leaves the grandchild holding an inherited copy, so
+            // `read_line` never returns, and joining here blocked the launcher
+            // forever immediately after it had decided to report a timeout. The
+            // bound has to hold against a child that misbehaves, or it is not a
+            // bound. A stranded reader is one leaked thread, which is the same
+            // trade the stderr drain below makes and for the same reason.
+            if reader_is_released {
+                drop(reader.join());
+            }
             outcome
         }
     };
@@ -636,11 +692,21 @@ fn own_venue(
     if serving {
         // Park for the run, waking only often enough to notice the venue ending
         // on its own - which a run with a declared duration does, successfully.
+        //
+        // THE REAP IS UNCONDITIONAL ON THE WAY OUT, including the arm where the
+        // caller asked for shutdown. It used to run only on the poll arm, so a
+        // venue that finished its declared run inside the last poll window - the
+        // ordinary ending for a bounded run whose caller then tears down - was
+        // reaped with no `VenueExit` recorded, reporting `exited() == None` and
+        // reading to every caller as a venue killed while healthy. That made the
+        // run-complete probe and the teardown disclosure both wrong about a
+        // clean ending, which is the worst direction for a signal whose entire
+        // job is telling a planned exit from a death.
         loop {
-            match shutdown_rx.recv_timeout(OWNER_POLL) {
-                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => {}
-            }
+            let asked_to_stop = match shutdown_rx.recv_timeout(OWNER_POLL) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => true,
+                Err(RecvTimeoutError::Timeout) => false,
+            };
             if let Ok(Some(status)) = child.try_wait() {
                 if let Ok(mut exit) = exit.lock() {
                     *exit = Some(VenueExit {
@@ -650,11 +716,29 @@ fn own_venue(
                 }
                 break;
             }
+            if asked_to_stop {
+                break;
+            }
         }
     }
 
-    drop(child.kill());
-    drop(child.wait());
+    // What the kill and the reap actually did, so `shutdown` can report a venue
+    // that would not die instead of returning `Ok(())` for it. A child already
+    // reaped above makes both of these fail harmlessly, which is why the record
+    // is only kept when nothing was reaped.
+    let reaped = exit.lock().is_ok_and(|exit| exit.is_some());
+    let killed = child.kill();
+    let waited = child.wait();
+    if !reaped {
+        let failure = match (killed, waited) {
+            (Err(e), _) => Some(format!("signalling the venue failed: {e}")),
+            (Ok(()), Err(e)) => Some(format!("reaping the venue failed: {e}")),
+            (Ok(()), Ok(_)) => None,
+        };
+        if let (Some(detail), Ok(mut slot)) = (failure, teardown.lock()) {
+            *slot = Some(detail);
+        }
+    }
     // The drain thread is NOT joined. It runs a caller-supplied callback once
     // per log line, and joining it here would put arbitrary user code in the
     // path of `LaunchedVenue::drop` - a callback that blocks on a mutex the

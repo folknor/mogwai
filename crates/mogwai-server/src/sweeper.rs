@@ -332,7 +332,9 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // books its own fills, settles its own positions and marks its
                 // own exposure against the same prices - which is what makes the
                 // tape common and the money private. Deliveries are separate
-                // too, since `deliver` attributes by order ownership anyway.
+                // too, since `deliver` attributes each frame to the account it
+                // is about - by the frame's own account id where it has one, and
+                // by order ownership otherwise.
                 //
                 // The settlement marks are cloned per passenger rather than
                 // moved: a settlement instant belongs to the CALENDAR, so every
@@ -599,12 +601,19 @@ fn apply_engine_pass_on_clock(
 /// once a batch outgrew the fixed per-connection budget.
 ///
 /// ATTRIBUTED, not broadcast. An order-scoped frame reaches only the connection
-/// that submitted the order; everything else - the account snapshot, anything
-/// the venue says about itself - still reaches all of them. This used to
+/// that submitted the order, and an account-scoped one only the connections
+/// bound to that account; what reaches everyone is what is genuinely about the
+/// VENUE - a fault, a completion, a feed gap. This used to
 /// broadcast unconditionally, so a socket received `OrderFilled` for orders
 /// another socket placed. That was invisible while one connection per venue was
-/// the only shape, and it is the first of the three channels through which
-/// passengers can currently observe one another.
+/// the only shape.
+///
+/// THE ACCOUNT SNAPSHOT WAS THE RESIDUAL HOLE, and it was the expensive one.
+/// Order attribution alone left `AccountState` unaddressed, so it fanned to
+/// every lane - and the sweep takes one engine pass per passenger, so an
+/// N-account venue sent each client N snapshots per pass, N-1 of them somebody
+/// else's balances and positions. See [`crate::run::addressed_account`] for what
+/// that costs a client that believes them.
 ///
 /// The reservation is taken against the UNFILTERED batch size, so a connection
 /// reserves for frames it may not receive. Over-reserving is the safe direction:
@@ -626,7 +635,14 @@ fn deliver(
     // otherwise take it N times for the same answers.
     let owners: Vec<Option<String>> = events
         .iter()
-        .map(|event| crate::run::addressed_order(event).and_then(|id| run.order_owner(id)))
+        .map(|event| {
+            // The frame's own account id first, because it is authoritative and
+            // needs no lookup; the submitting order's owner second, for the
+            // order-scoped frames that carry no account of their own.
+            crate::run::addressed_account(event)
+                .map(|account| account.as_str().to_owned())
+                .or_else(|| crate::run::addressed_order(event).and_then(|id| run.order_owner(id)))
+        })
         .collect();
     for bound in run.bound_lanes() {
         let mine: Vec<ServerMessage> = events
@@ -859,6 +875,61 @@ mod tests {
         assert!(
             their_rx.held_rx.try_recv().is_err(),
             "a connection that submitted nothing must not learn about another's fill"
+        );
+    }
+
+    /// An account snapshot reaches only the connections bound to that account.
+    ///
+    /// The residual half of the same attribution: `AccountState` names no order,
+    /// so order-only attribution read it as venue-wide and fanned one
+    /// passenger's balances and positions to every other passenger. The sweep
+    /// takes a pass per passenger, so this happened on every pass rather than at
+    /// some edge. Asserting on the FRAME rather than on receipt is the point -
+    /// the wrong lane receiving something is only a bug because of what the
+    /// something is.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_swept_account_snapshot_reaches_only_that_account() {
+        let run = crate::run::test_run();
+        let (mine, mut my_rx) = ExecLanes::detached();
+        let (theirs, mut their_rx) = ExecLanes::detached();
+        run.bind_lanes(mine.clone(), "MOGWAI-001", None);
+        run.bind_lanes(theirs.clone(), "MOGWAI-002", None);
+
+        let events = vec![ServerMessage::AccountState(mogwai_protocol::AccountState {
+            account_id: AccountId::parse("MOGWAI-002").expect("a legal account label"),
+            balances: vec![mogwai_protocol::Balance {
+                currency: "USDT".into(),
+                total: Decimal::from(100_000),
+                free: Decimal::from(100_000),
+                locked: Decimal::ZERO,
+            }],
+            positions: Vec::new(),
+            margins: Vec::new(),
+            ts_event: 1,
+        })];
+        deliver(
+            &run,
+            &mogwai_protocol::sizing::BookShape {
+                balances: 1,
+                positions: 1,
+                margins: 1,
+                open_orders: 1,
+                closed_orders: 1,
+                recorded_fills: 1,
+            },
+            &events,
+            1,
+            0,
+            1,
+        );
+
+        assert!(
+            their_rx.held_rx.try_recv().is_ok(),
+            "the account the snapshot is about must receive it"
+        );
+        assert!(
+            my_rx.held_rx.try_recv().is_err(),
+            "a connection on another account must not receive its balances"
         );
     }
 
