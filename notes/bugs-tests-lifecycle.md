@@ -508,40 +508,257 @@ rather than kept as a second layer.
     the sweep had just visited. The loop records its ending now, in four
     distinguishable forms, and the assertion carries it.
 
-## E. Structural - the thing the hunter would actually fix first
+## E. Structural
 
-**`serving.rs` calls `spawn(...)` 54 times.** Cargo runs test BINARIES
-sequentially and `--test-threads=8` parallelizes only within one, so the gate's
-wall floor is this single binary booting 54 venues - and `accelerated.toml`
-materializes 6 simulated hours of warmup, `band.toml` 1 hour, and `band.toml` is
-spawned 4 times. Eight of those generating tape concurrently is EXACTLY the load
-that makes every timing assertion in sections A and C flake. The two problems are
-the same problem.
+Closed on 2026-08-19. The spawn count was confirmed and everything the finding
+inferred FROM it was measured and refused; the one move that survived was
+rebuilt on a different mechanism than the one proposed. Nothing here is open.
 
-Three moves, in order of payoff:
+THE COUNT IS RIGHT AND THE CONCLUSION DRAWN FROM IT IS NOT. `serving.rs` does
+call `spawn` 54 times, verified. The premise that this is the gate's wall floor
+was measured and is FALSE, in three independent ways:
 
-- **Share venues by config where the test is a read-only observer.** About 32 of
-  the 54 spawns use `fast.toml`, and a large fraction of those only issue HTTP
-  GETs (`a_pulled_account_snapshot_is_labeled_venue_clock`,
-  `an_account_naming_no_policy_is_unpoliced`,
-  `history_refuses_an_illegal_symbol_...`,
-  `the_full_warmup_span_is_servable_at_readiness`,
-  `trades_after_sim_now_are_refused_with_400`, the `/clock` tests). One leaked
-  `OnceLock<Venue>` per config serves all of them. The tests that ARM RUN-SCOPED
-  DIVERGENCES (`CommandLatency`, `StallData`, `GoDark`, `FlowSurge`) or MUTATE
-  ACCOUNT STATE must keep owning a venue - that split is the design, and it is
-  worth stating explicitly in the harness so the next test lands on the right
-  side of it.
-- **Split the binary along that same line.** `serving_readonly.rs` (shared venue,
-  fast, safe at any thread count) vs `serving_owned.rs` (one venue each). Right
-  now `serving.rs` is a 2351-line grab bag whose only organizing principle is
-  "L3-L6", which no longer means anything.
-- **Then re-examine the parked pair.** Both fail because the client's connect
-  races a `--duration` measured from readiness. If the venue exposed a
-  passenger-scoped duration for these (which
-  `a_passenger_duration_closes_one_socket...` proves exists: `?duration_ms=`),
-  the deadline starts at UPGRADE and the race is structurally gone rather than
-  parked. That would unpark both without a fixed wait anywhere.
+- A `fast.toml` venue costs about 10 ms end to end. That is a process launch, a
+  bind, 300 s of warmup materialized and one HTTP round trip, measured as the
+  whole wall of `a_pulled_account_snapshot_is_labeled_venue_clock` (0.061 s
+  including cargo's own startup, 0.01 s as libtest reports the test). These
+  tests build under an OPTIMIZED profile - `test` here is
+  `optimized + debuginfo`, which is easy to miss when reasoning about a "debug
+  lane" - and 300 simulated seconds of the fitted BTCUSDT arrival process is
+  about 15,000 ticks, which the venue's own log projects at 5 ms of synthesis.
+  54 boots is under a second of the binary's 9.77.
+- THE BINARY'S WALL IS ONE TEST. `serving.rs` at `--test-threads=8` runs in
+  9.77 s (9.77 / 9.75 / 9.72 over three runs) and
+  `a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths` runs
+  in 9.63 s ALONE. There is no venue-sharing scheme that moves a floor made of
+  one test, and that test's duration is the flake margin section B restored on
+  purpose - eight scored attempts with a 500 ms gap - which may not be trimmed
+  for wall time without something else compensating.
+- THE LOAD THESIS DOES NOT SURVIVE EITHER. Serial the binary is 29.71 s, so
+  8 threads buy 3x rather than 8x and there is real contention - but raising the
+  count to 16 leaves the wall at 9.77 s, unchanged to two decimals. Contention
+  is not what the floor is made of.
+
+MOVE 1, SHARING VENUES, IS REFUSED, and it would have been the wrong shape even
+if the wall had been worth chasing. Only SIX of the 54 tests are GET-only, not
+the "large fraction" the finding estimated, and two of those six cannot share a
+venue for reasons that have nothing to do with writing:
+
+- `history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one`
+  MATERIALIZES rivers - `NOT-A-SYMBOL`, and the lowercased boot symbol - and
+  `RiverRegistry::instrument_defs` advertises every materialized symbol
+  alongside the configured ones. A GET-only test is not a read-only test.
+- `a_paged_tape_window_equals_the_same_window_read_in_one_query` asserts as its
+  PREMISE that its window still fits one page. The window runs from the data
+  origin to sim-now and the venue clock is wall-rated, so on a venue shared
+  across a binary's lifetime that premise decays with age and the test would
+  begin comparing a paged read against a truncated one - passing by agreeing
+  with a wrong answer.
+
+That leaves four tests worth about 40 ms, bought with an order-dependence class
+that nothing in this tree detects. The refusal is the round-4 hazard applied
+exactly as it was left: an absence asserted about a shared venue is a wrong
+answer waiting for a neighbour, and `unconfigured_symbol.rs` is not the only
+place it lives.
+
+MOVE 2, SPLITTING THE BINARY, IS REFUSED WITH IT. Its axis was move 1's split,
+which no longer exists, and cargo runs test binaries SEQUENTIALLY - so dividing
+one 9.77 s binary into a 0.05 s half and a 9.7 s half gives 9.75 s plus a second
+link and process. The stale organizing principle was real and is fixed where it
+lived: `serving.rs`'s module docstring said "L3-L6 gates", an index from a
+retired plan, and now describes what the file actually holds plus this refusal,
+so the next reader does not re-derive it.
+
+MOVE 3 LANDED, ON A DIFFERENT MECHANISM THAN THE ONE PROPOSED, AND WENT FURTHER
+THAN THE PAIR. The passenger-scoped `?duration_ms=` the finding suggested does
+remove the race - that deadline starts at UPGRADE - but it closes ONE SOCKET and
+leaves the run going, which is the property
+`a_passenger_duration_closes_one_socket_and_leaves_the_boat_running` exists to
+pin. Neither parked test is about a passenger:
+`venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline` is
+about the VENUE exiting 0 at its deadline, which a passenger duration does not
+cause, and `run_complete_reaches_every_open_socket` is about the run-wide
+announcement reaching EVERY socket, which a per-socket deadline cannot express.
+Substituting it would have left both names attached to different properties.
+
+What landed instead is `watch_a_bounded_run` in `completion.rs`. It launches the
+bounded venue, opens the named sockets, drains every one of them to completion
+concurrently, and DISCARDS the whole run - relaunching - unless every socket saw
+at least one frame. A longer declared duration was refused on the way: a margin
+is exactly what a crowded host takes away, which is why the family was parked
+rather than retuned in the first place.
+
+THE FIRST VERSION OF THAT HELPER WAS WRONG AND THE GATE CAUGHT IT, which is the
+most useful thing this round produced. It checked a different premise - that the
+socket attached while the venue clock was still below
+`run_start_ns + run_duration_ns` - which is the obvious reading of the race and
+is not the defect. `ws.rs` evaluates `already_complete` when a session STARTS and
+announces to a socket that arrived after the run finished, so attaching late is
+served. What produces nothing is a connection accepted by a venue already
+tearing down, which never becomes a session at all. That version passed locally,
+passed the completion binary at 8 and 16 threads, and then failed
+`brokkr check --gate` on exactly the test it was written to fix - a green
+targeted run is not evidence, which this arc has now been taught four times.
+The premise is "this socket was a live session", the only sound evidence for it
+is the venue having written SOMETHING on that socket, and `Watched::frames`
+carries that count so the failure message can state it.
+
+AND THE TRUTHFUL MESSAGE THEN EXPOSED A THIRD DEFECT, WHICH IS THE POINT OF
+MAKING FAILURES TRUTHFUL. With the premise right, the gate failed again - but now
+saying "the run announced no completion on a socket the venue had already served
+1475111 frames on", which is a different claim entirely and an actionable one.
+The mechanism: `fast.toml` is `speed = 0.0`, so delivery is UNPACED and the run
+generates flat out for its whole declared span; `RunComplete` is written at the
+deadline and queued BEHIND that entire backlog. The client drains about 111,000
+frames a second, the backlog is 1.4 MILLION, and clearing it takes essentially
+the whole 13 s wall budget - so under gate load the announcement never arrives
+and the test blames the venue. It had been passing at 2.2 s only because two of
+the four family members were skipped; running all four multiplied the firehose
+sockets and tipped it over.
+
+The fix is `tests/configs/bounded-run.toml`, reached through
+`common::bounded_run_config`, and it is one line of difference from `fast.toml`:
+`speed = 1.0`. Nothing about `RunComplete` is a claim about unpaced delivery, so
+the firehose was pure cost and pure risk; at real time a declared 2 s carries
+about a hundred frames and the announcement lands immediately behind them. IT IS
+A NEW FIXTURE RATHER THAN AN EDIT TO `fast.toml`, because the serving gates
+assert on WHAT arrives rather than on its cadence and pacing them would make
+every one of them wait out real inter-trade gaps for nothing. The file carries
+the whole reasoning, including the measured numbers, so the next person to reach
+for `fast.toml` here knows why not. `drain_to_completion` also pre-filters on the
+`RunComplete` substring before parsing - a throughput measure only, with the
+candidate still parsed and destructured, so nothing is concluded from the
+substring.
+
+Three more things that fell out of building it, all worth keeping:
+
+- IT COVERS FOUR TESTS, NOT TWO. `run_complete_is_stamped_on_the_receiving
+  _sockets_clock` and `a_short_accelerated_run_is_not_over_before_it_is_ready`
+  have the identical shape and were never parked only because they had not lost
+  yet - and the second is the TIGHTEST window in the family, 30 declared
+  simulated seconds at speed 100 being 0.3 s of wall. Its
+  `expect("the run was still serving when the launcher connected")` was the
+  premise wearing the property's clothes. `notes/todo.md` predicted the family
+  was under-enumerated; it was, by two.
+- THE DISCARDED VENUES ARE KEPT ALIVE, and that is the budget mechanism's rule
+  rather than tidiness: `common` re-anchors the wall budget when the LAST live
+  venue drops, so releasing a loser mid-test would restart the budget and push
+  the ceiling past the hang watchdog. They exit on their own at their own
+  deadlines.
+- `common/mod.rs` IS UNCHANGED. The refused first version needed a fallible
+  `try_http_get` and a split `read_response`; the version that landed asks the
+  SOCKET rather than the venue, so both were removed rather than left as helpers
+  with no reader - which is the decay a blanket `allow(dead_code)` on that module
+  cannot detect, and which this document has already caught once.
+
+BITE-CHECKED IN THREE DIRECTIONS. Disabling the frame count - `frames += 0` as a
+text edit - makes every attempt read as a socket that was never a session, and
+the test refuses after four launches naming exactly that, so the gate is keyed on
+the count rather than merely standing beside it. Injecting a 3 s sleep before the
+connect on a 2 s run makes every attempt lose the attach outright, which the same
+refusal names instead of blaming the announcement - where the old shape said "the
+run announces its completion on the wire", the wrong answer this removes. With
+that sleep on the FIRST attempt only the test passes in 5.22 s, attempt one
+losing and attempt two winning, so the retry RECOVERS rather than merely
+detecting.
+
+THE FIREHOSE IS NOW QUANTIFIED, and it is worth carrying beyond this document: a
+`speed = 0.0` socket receives OVER A MILLION FRAMES in 2 s of wall, and a test
+draining one manages about 111,000 a second. That is the unpaced delivery several
+tests in section A already work around by draining, with a number on it for the
+first time. It is exactly the pressure behind the defect section A found in the
+passenger-duration test's unbounded channel, and any future test that buffers per
+frame on such a socket, or that waits for a frame queued behind the tape, is
+sitting on the same trap.
+
+BOTH ARE OUT OF `brokkr.toml`'s `skip` LIST and carry the ordinary
+`#[ignore = "binds a loopback listener"]` their neighbours do, so the gate runs
+them: 1181 tests where the baseline was 1179, 63 ignored where it was 65, 17
+skips where it was 19, 0 orphaned. THREE CONSECUTIVE GREEN GATES at 57.8s, 1m05s
+and 1m05s against a 1m05s baseline - two more tests for no measurable wall, which
+is the paced fixture paying for itself. The `notes/todo.md` parked list is empty.
+The whole suite was then run at `--test-threads=16` - the count the historical
+cliff was measured at, where this exact test failed at 2.016 s having finished
+early - and at 32, with no failures at either, and the completion binary runs
+green serially at `--test-threads=1` in 9.54 s.
+
+`test_threads` STAYS AT 8 REGARDLESS. One removed cause is not evidence that the
+cliff had only one, which is that todo item's own standard for this class, and
+raising it is a program decision rather than a test-hygiene one.
+
+THE HELPER SHIPPED THE DISEASE IT TREATS, TWICE, both found by cold review of its
+own diff and closed the same day. The shape is the one this whole document keeps
+finding - A GUARD THAT REPORTS SUCCESS ON THE BRANCH IT WAS BUILT TO CATCH - and
+it re-entered through the repair, which is now the fourth time in this arc:
+
+- THE SUCCESS TEST WAS MEASURED AGAINST WHAT THE ATTEMPT ACHIEVED. It compared
+  the drained count against `sockets.len()`, so on the losing branch it exists to
+  detect - the declared span already elapsed, the very first `connect_async`
+  refused, `sockets` empty - it reduced to `0 == 0` AND `all` over an EMPTY
+  ITERATOR, which is `true`. The helper returned immediately, with no retry and
+  no assert, carrying an empty `seen`, and all four callers then panicked
+  `index out of bounds: the len is 0 but the index is 0`: exactly the
+  unattributed failure the helper was written to eliminate, reachable on exactly
+  the race its own docstring describes. The wanted count comes from the REQUEST
+  now, and a request for no sockets is refused rather than satisfied vacuously.
+  Bite-checked in both directions with the empty branch forced as a text edit:
+  with the fix the helper refuses after 784 launches naming the load, and with
+  the achieved-count comparison restored beside it the test dies at
+  `completion.rs:288` on the index panic.
+- `frames` COUNTED CONTROL FRAMES, so the premise it establishes did not hold. It
+  incremented BEFORE the match, so a connection upgraded and then closed by a
+  venue already tearing down - no session ever run - counted one frame, and a
+  peer Ping did the same. The watcher accepted that as a live session and the
+  caller panicked with "the venue had already served 1 frames on, so this was a
+  live session and not a connect that lost a race", ASSERTING THE EXACT FALSEHOOD
+  the counter was added to rule out. It is `content_frames` now, `Message::Text`
+  only, which is the venue's whole session vocabulary. Bite-checked by
+  suppressing the Text arm as a text edit: counting every frame reports "17
+  content frames ... so this was a live session" while counting content frames
+  discards each run and gives up naming host load, in 6.24 s.
+
+TWO SMALLER CORRECTIONS FROM THE SAME REVIEW:
+
+- THE RETRY BUDGET WAS CHECKED BETWEEN ATTEMPTS AND NOT AGAINST ONE. The 8 s
+  attach budget sits inside the 13 s wall clamp, and
+  `a_short_accelerated_run_is_not_over_before_it_is_ready` re-boots six simulated
+  hours of warmup per attempt - so "still under budget, go again" could admit an
+  attempt the clamp then refused, replacing the watcher's message with "this test
+  spent its wall budget before this bound was even taken" and contradicting the
+  budget constant's own doc comment. The assertion carries the LAST ATTEMPT'S
+  MEASURED COST, so another attempt is started only if one of the same size fits.
+  Visible in the bite-check above: three launches at 2.007 s each, refused by the
+  watcher rather than by the clamp.
+- `drain_to_completion`'s PRE-FILTER COMMENT WAS STALE. It still said "these
+  venues are `speed = 0.0`" when three of the four callers moved to
+  `bounded-run.toml` at 1.0; the sigterm gate on `fast_config` is the only
+  unpaced caller left, so the filter is load-bearing there and free everywhere
+  else. The filter was fine; the reasoning attached to it was false, which in a
+  file this document keeps citing is the more expensive half.
+
+THE NEW FIXTURE'S RATIONALE FOR ITS SECOND RIVER WAS ALSO FALSE, and it is worth
+recording because it was a claim about a MECHANISM rather than a comment slip. It
+said the MNQ river "is placed at a different speed by the test's own query
+string" - but the file is `speed = 1.0` and the query asks `speed=1`, the same
+number. What actually separates the two boats is their WALL ANCHOR:
+`boatyard.rs` gives every boat `sim_epoch_ns = origin_ns`, identical, and
+`wall_anchor_ns = now_ns()` at boat construction, so two boats built at different
+instants read different sim-now at one wall instant. The `assert_ne!` still bites
+a shared-clock regression; the stated reason for it did not exist. Both the
+fixture and the test now carry the real mechanism.
+
+AND THE LIVENESS QUESTION PACING RAISES WAS MEASURED RATHER THAN ARGUED, which is
+this round's standard. Under `speed = 0.0` every socket was flooded, so
+`content_frames > 0` was free; at 1.0 a river too quiet to print inside the
+declared 2 s would make the watcher discard every run and report host load - a
+wrong answer of the same family arriving by a fourth route. Six runs at seed 42,
+deterministic to the millisecond: MNQ serves 89 content frames, the first 171 ms
+after attach, longest gap 519 ms. THE SUSPECTED SOCKET IS NOT THE EXPOSED ONE:
+the BTCUSDT boot river is the sparser of the two at 16 frames, its first arriving
+1.031 s after attach, which is also its longest gap. Both fit the window, the
+boot river with about a second to spare, and that second is the real margin here.
+The numbers are written into the fixture and the test rather than left in this
+document, because they are the reason the fixture may not be made quieter.
 
 ## F. Out of scope but noticed
 

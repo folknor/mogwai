@@ -545,6 +545,20 @@ pub fn band_config() -> String {
     format!("{}/tests/configs/band.toml", env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The declared-duration gates' venue: PACED at real time, and two rivers.
+///
+/// Paced because those gates wait on a socket for the `RunComplete` the venue
+/// writes at its deadline, and on an unpaced venue that frame is queued behind
+/// the entire backlog the run generated flat out - over 1.4 million frames in
+/// the 2 s of a declared run, measured - which the client then cannot drain
+/// inside its wall budget. The file itself carries the reasoning.
+pub fn bounded_run_config() -> String {
+    format!(
+        "{}/tests/configs/bounded-run.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 /// A venue with a large warmup and an accelerated clock, for the slow-start gate.
 pub fn accelerated_config() -> String {
     format!(

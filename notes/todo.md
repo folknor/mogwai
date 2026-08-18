@@ -301,6 +301,12 @@ group by any other route has no API for it, and none is owed until one is wanted
   the ceiling is set by our least robust test rather than by the machine. Every
   fixed wall-clock wait in the suite is a piece of that ceiling.
 
+  THAT PARTICULAR CLIFF IS GONE as of 2026-08-19 - the declared-deadline family
+  below no longer bets on a margin at all - but `test_threads` STAYS AT 8 until
+  someone measures 16 again. One removed cause is not evidence that the cliff had
+  only one, and this item's own closing note is that three green runs are not
+  evidence about an intermittent race.
+
   THE WORK, and it is triage before it is repair. Go through every test and ask
   two things: can it run beside its siblings, and does it wait on a duration
   rather than on a CONDITION. A test that waits for a state to be reached, with
@@ -319,28 +325,68 @@ group by any other route has no API for it, and none is owed until one is wanted
   are the best parallel citizens in the suite precisely BECAUSE they are idle.
   Fixing the waits is the only thing that actually moves the floor.
 
-  THE PARKED LIST, and un-parking it is what this item IS. Tests caught racing
-  under parallel execution get `#[ignore]`d at the source and added to the gate's
-  `skip` list in `brokkr.toml`, so the gate stays honest while the debt stays
-  visible in one place. Parked so far, both in `crates/mogwai-cli/tests/completion.rs`:
+  THE PARKED LIST IS EMPTY, as of 2026-08-19. Both entries were
+  `crates/mogwai-cli/tests/completion.rs` gates and both are un-parked: they are
+  out of `brokkr.toml`'s `skip` list, they carry the ordinary
+  `#[ignore = "binds a loopback listener"]` their neighbours do, and the gate
+  runs them. Tests caught racing under parallel execution still get parked the
+  same way while they are being fixed; there is simply nothing on the list today.
 
-  - `venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline`
-  - `run_complete_reaches_every_open_socket`
+  THEY ALL HAD ONE SHAPE. The venue gets a fixed `--duration` measured from
+  readiness - `serve.rs` sleeps `sim.wall_duration(remaining)` and then completes
+  the run - and the launcher returns AT readiness, so the test connects into a
+  span already running down. Under parallel execution the connect can lose, the
+  run completes and closes before the socket exists, and the assertion fails on
+  not having seen the frame: a WRONG ANSWER, not a timeout, which is why each one
+  read like a real regression when it fired.
 
-  EXPECT THAT LIST TO GROW - the two above surfaced one after the other, each
-  only once the one before it was parked, so the honest reading is that the
-  family is not yet fully enumerated and every parallel run is still discovering
-  it. Parking is a holding action, not the fix. The list is done when it is
-  empty.
+  WHAT ACTUALLY FIXED IT, because "wait for a condition instead of a fixed span"
+  - what this item said before - does not apply here. There is no condition to
+  wait for: the frame the test wants may already have been sent to nobody by the
+  time the test exists, and no amount of patience recovers it. Two other answers
+  are also wrong. A longer declared duration is a bigger margin, and a margin is
+  precisely what a crowded host takes away. A passenger-scoped `?duration_ms=`
+  does remove the race - that deadline starts at UPGRADE - but it closes one
+  socket and leaves the run going, so it cannot express either property here:
+  one gate is about the VENUE exiting 0 at its deadline, the other about the
+  run-wide announcement reaching EVERY socket.
 
-  THEY ALL HAVE ONE SHAPE. The venue gets a fixed `--duration` measured from
-  readiness, and the test then bets that the client's connect beats that
-  deadline. Under parallel execution the connect can lose, the run completes and
-  closes before the socket sees the frame, and the assertion fails on not having
-  seen it - a WRONG ANSWER, not a timeout, which is exactly why each one reads
-  like a real regression when it fires. The fix is the same every time: wait for
-  a CONDITION - socket established, then the frame - instead of betting on a
-  fixed span.
+  What works is asserting the PREMISE and discarding the runs where it fails,
+  and the premise is "this socket was a LIVE SESSION" rather than "this socket
+  attached in time". The obvious phrasing was built first and is wrong: `ws.rs`
+  evaluates `already_complete` when a session starts and announces to a socket
+  that arrived after the run finished, so attaching late is served. What produces
+  nothing is a connection accepted by a venue already tearing down, which never
+  becomes a session at all, and the only evidence either way is the venue having
+  written something on that socket. `watch_a_bounded_run` therefore launches,
+  connects, drains every socket to completion, and throws the whole run away
+  unless each saw at least one frame - within a retry budget that gives up naming
+  the loss rather than blaming the venue. The test can then only ever make a
+  statement about a run it was actually watching. The same treatment went to
+  `run_complete_is_stamped_on_the_receiving_sockets_clock` and
+  `a_short_accelerated_run_is_not_over_before_it_is_ready`, which had the
+  identical shape and had simply not lost yet - the second of them is the
+  tightest window in the family, 30 declared simulated seconds at speed 100
+  being 0.3 s of wall.
+
+  THE LOSERS ARE KEPT ALIVE rather than dropped as they are discarded, and that
+  is not tidiness: `common`'s wall budget re-anchors when the last live venue
+  goes away, so dropping one mid-test would restart the budget and push the
+  ceiling past the hang watchdog.
+
+  AND A SECOND, DEEPER CAUSE SURFACED THE MOMENT THE FAILURES BECAME TRUTHFUL,
+  which is the argument for making them truthful. With the premise right the gate
+  failed again, now saying the run announced nothing on a socket the venue had
+  already served 1,475,111 frames on. `fast.toml` is `speed = 0.0`, so delivery
+  is UNPACED and the run generates flat out for its whole span; `RunComplete` is
+  written at the deadline and queued BEHIND that backlog, and a client draining
+  about 111,000 frames a second cannot clear 1.4 million inside its wall budget.
+  It had been passing only because two of the four family members were skipped.
+  The family now runs on `tests/configs/bounded-run.toml`, which is `fast.toml`
+  with `speed = 1.0`: nothing about `RunComplete` is a claim about unpaced
+  delivery, so the firehose was pure cost. THIS IS THE GENERAL FORM AND IT IS NOT
+  CONFINED TO THIS FAMILY: any test waiting for something the venue writes at the
+  TAIL of a span of unpaced tape is on the same trap.
 
   AND NOTE HOW THESE WERE FOUND, because the method matters more than the two
   names. `test_threads = 8` went red after three green runs at 8, having already

@@ -1,9 +1,37 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! L3-L6 gates: the history floor, the boot river's warmup span servable at
-//! readiness, the
-//! subscription-free feed, and the single ledger every connection shares.
+//! The serving gates: what the venue answers over HTTP and `/ws` while a run is
+//! in flight - the history ceilings and floor, the boot river's warmup span
+//! servable at readiness, the subscription-free feed, the per-account ledgers
+//! and their policies, the seat and eviction rules, and the divergence control
+//! plane.
+//!
+//! IT USED TO SAY "L3-L6 gates" AND THAT MEANT NOTHING ANY MORE, which is worth
+//! recording rather than silently replacing: those layer numbers came from a
+//! retired plan, and a file organized by a vanished index reads as unorganized.
+//!
+//! WHAT WAS CONSIDERED AND REFUSED, so the next reader does not re-derive it.
+//! A 2026-08-18 report proposed splitting this file into a `serving_readonly.rs`
+//! sharing one leaked venue per config and a `serving_owned.rs` launching one
+//! each, on the premise that the binary's wall floor is 54 venue boots under
+//! parallel load. THE PREMISE WAS MEASURED AND IS FALSE. A `fast.toml` venue -
+//! process launch, bind, 300 s of warmup materialized, one HTTP round trip -
+//! costs about 10 ms in the profile these tests build under, and the binary's
+//! whole wall at `--test-threads=8` is 9.77 s against a SINGLE test,
+//! `a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`, at
+//! 9.63 s. The floor is that one test's deliberate flake margin - eight scored
+//! attempts with a 500 ms gap, which section B of the report ruled may not be
+//! trimmed for wall time - and no amount of venue sharing moves it.
+//!
+//! The split's own axis does not survive either. Only six tests here are
+//! GET-only, and two of those cannot share a venue for reasons that have nothing
+//! to do with writing: `history_refuses_an_illegal_symbol_and_serves_an
+//! _unconfigured_one` MATERIALIZES rivers, which `/instruments` then advertises,
+//! and `a_paged_tape_window_equals_the_same_window_read_in_one_query` asserts
+//! that its window still fits one page, which a longer-lived venue's growing
+//! tape falsifies. Sharing four venues to save 40 ms is not worth an
+//! order-dependence class nothing in this tree would detect.
 
 mod common;
 

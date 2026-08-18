@@ -5,7 +5,9 @@ observes any round but its own, so every brief carries the relevant slice of
 this forward. Not a history: when an entry stops binding future work, delete it.
 
 Arc in progress: the eleven `notes/bugs-*.md` reports, worked one document at a
-time in this order - `bugs-tests-lifecycle`, `bugs-tests-adapter`,
+time in this order. `bugs-tests-lifecycle` CLOSED on 2026-08-19 after five
+rounds, with no open findings; `bugs-tests-adapter` is next. The order is
+`bugs-tests-lifecycle`, `bugs-tests-adapter`,
 `bugs-tests-tape`, `bugs-tests-engine-protocol`, `bugs-tests-lab-cli`, then
 `bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
 `bugs-adapter`. Tests before production, because a report full of tests that
@@ -140,6 +142,92 @@ trusts yet.
     EXEMPTION IS BOUNDED BY A TEST IN THE FILE, `the_excluded_file_spawns_no
     _subprocess`, because an exemption justified by contents and keyed on a path
     decays into the hole the rule was written for.
+- `crates/mogwai-cli/tests/completion.rs` carries `watch_a_bounded_run`, and
+  every test that gives a venue a `--duration` and then wants a socket onto that
+  run must go through it. THE DEFECT IT REMOVES IS THE ADAPTER DOCUMENT'S TOO,
+  because the shape is the LAUNCHER'S rather than this file's: a declared
+  duration is a WALL sleep started at readiness (`serve.rs` sleeps
+  `sim.wall_duration(remaining)`, then completes the run) and `launch` returns AT
+  readiness, so every such test connects into a span already running down.
+  Losing that race is a WRONG ANSWER - the test fails on not having seen the
+  announcement - which is why it reads like a regression.
+  - THE PREMISE IS "THIS SOCKET WAS A LIVE SESSION", and getting this wrong cost
+    a whole cycle, so take it as given rather than re-deriving it. ATTACHING LATE
+    IS NOT THE DEFECT: `ws.rs` evaluates `already_complete` when a session
+    STARTS and announces to a socket that arrived after the run finished. What
+    produces nothing is a connection accepted by a venue already tearing down,
+    which never becomes a session. The only sound evidence either way is the
+    venue having WRITTEN SOMETHING on that socket, so the helper drains every
+    socket and discards the whole run unless each saw at least one frame.
+    A premise phrased as "attached before `run_start_ns + run_duration_ns`" was
+    built first, passed locally and passed the binary at 8 and 16 threads, and
+    then failed the full gate on the very test it was written to fix.
+  - IT IS A PREMISE, NOT A MARGIN. A longer duration was refused explicitly: a
+    margin is what a crowded host takes away, and the family had already been
+    parked rather than retuned for that reason. A passenger-scoped
+    `?duration_ms=` was refused too - it does start at upgrade and the race
+    really is gone, but it closes ONE socket and leaves the run going, so it
+    cannot express "the venue exits 0 at its deadline" or "the announcement
+    reaches every socket".
+  - THE DISCARDED VENUES ARE HELD, NOT DROPPED. `common` re-anchors the wall
+    budget when the LAST live venue drops, so releasing a loser mid-test restarts
+    the budget and pushes the ceiling PAST the watchdog. Any test that holds
+    several venues owes the same care.
+  - It covered FOUR tests, not the two that were parked:
+    `run_complete_is_stamped_on_the_receiving_sockets_clock` and
+    `a_short_accelerated_run_is_not_over_before_it_is_ready` had the same shape
+    and had simply not lost yet, the latter with 0.3 s of wall - the tightest
+    window in the family.
+  - AND THE FAMILY IS PACED NOW, through `common::bounded_run_config` and
+    `tests/configs/bounded-run.toml`, which is `fast.toml` with `speed = 1.0`.
+    THIS IS THE ONE TO CARRY TO THE ADAPTER DOCUMENT, because it is a property of
+    the venue rather than of these tests: on an unpaced venue the terminal frame
+    is queued BEHIND the whole backlog the run generated flat out, and a client
+    has to drain the backlog before it can see the frame. With the premise fixed
+    the gate failed again, truthfully, naming 1,475,111 frames served on a socket
+    that never got its announcement. Any test that waits for a frame the venue
+    writes AFTER a span of unpaced tape is on this trap - a terminal frame, a
+    late execution report, anything at the tail.
+  - THE HELPER SHIPPED THE DISEASE IT TREATS, TWICE, and cold review caught both
+    the same day. Carry the SHAPES, because the adapter's socket binaries will
+    be written by the same hands:
+    - A GUARD MAY NOT MEASURE SUCCESS AGAINST WHAT IT ACHIEVED. The first
+      version compared the drained count against `sockets.len()`, so on the
+      losing branch it exists to detect - the very first connect refused, so no
+      sockets at all - the test reduced to `0 == 0` with `all` over an EMPTY
+      ITERATOR, which is `true`. It returned success carrying nothing and every
+      caller index-panicked on `seen[0]`, which is the unattributed failure the
+      helper was written to remove, reachable on exactly the race its docstring
+      describes. THE WANTED COUNT COMES FROM THE REQUEST, and an empty request
+      is refused rather than passed. `all`/`any` over a collection whose
+      emptiness is the failure mode is a defect on sight.
+    - CONTROL FRAMES ARE NOT SESSION EVIDENCE. The counter incremented before
+      the match, so a `Close` from a venue already tearing down - or a peer Ping
+      - counted as one frame and the caller then asserted "the venue had already
+      served 1 frames on, so this was a live session", the precise falsehood the
+      counter exists to rule out. It counts `Message::Text` only. Bite-checked
+      both ways: with Text frames suppressed the old counting reports "17 content
+      frames ... live session" while the fixed counting discards every run and
+      names host load.
+    - A RETRY BUDGET CHECKED BETWEEN ATTEMPTS IS NOT A CEILING ON THE LAST
+      ATTEMPT. The 8 s attach budget sits inside a 13 s wall clamp, and an
+      attempt that re-boots a six-simulated-hour warmup costs seconds, so
+      "still under budget, go again" admits an attempt the clamp then refuses -
+      replacing this helper's message with the clamp's. The check carries the
+      LAST ATTEMPT'S MEASURED COST.
+  - WHAT SEPARATES TWO BOATS IS THEIR WALL ANCHOR, NOT THEIR SPEED.
+    `boatyard.rs` gives every boat the same `sim_epoch_ns = origin_ns` and a
+    `wall_anchor_ns = now_ns()` taken AT BOAT CONSTRUCTION, so two boats built at
+    different instants read different sim-now at one wall instant.
+    `bounded-run.toml` had claimed its second river was "placed at a different
+    speed", which was false on its face - both are 1.0.
+  - PACING BUYS A LIVENESS REQUIREMENT, so it was measured. Six runs at seed 42,
+    deterministic to the millisecond: MNQ prints 89 content frames in a declared
+    2 s, the first 171 ms after attach, longest gap 519 ms; the BTCUSDT boot
+    river is the SPARSER of the two at 16, the first 1.031 s after attach, which
+    is also its longest gap. The thin margin is the boot river's, about a second,
+    not the second river's - which is where it was suspected. Any paced fixture
+    whose test needs a frame inside a declared window owes the same measurement.
 - The rule those helpers encode, which recurred often enough to be the round's
   main lesson: A DRAIN THAT DOES NOT RECORD HOW THE STREAM ENDED IS NOT A DRAIN.
   It is the guard-scope family in a new costume - the drain outlives nothing it
@@ -179,6 +267,14 @@ trusts yet.
   that describes the run. This is why an eventual-consistency poll on `/account`
   does not weaken a test that also asserts `breached`: a transient collapse
   crosses the floor and STICKS, so the poll cannot wait it out.
+- AN UNPACED VENUE IS A FIREHOSE, WITH A NUMBER ON IT NOW: a `speed = 0.0`
+  socket receives OVER A MILLION FRAMES in 2 s of wall, and a test draining one
+  manages about 111,000 a second. That is why so many tests in these files have
+  to drain concurrently, why an unread socket is ejected by the bounded fanout
+  ring so readily, and why anything the venue writes at the TAIL of a span -
+  `RunComplete` is the case that bit - can be unreachable inside a test's wall
+  budget. Round 5 measured it while fixing exactly that. Pace the venue when the
+  property is not about cadence; drain hard when it is.
 - `/trades` PAGES FROM THE OLDEST END. `bounded_trades` walks the window from
   `start` and breaks when the page is full, so a truncated page is the window's
   OLDEST prints - `trades.last()` is then NOT the last print before `end`, and a
@@ -231,9 +327,16 @@ trusts yet.
   touching the harness; it is the invocation AGENTS.md prescribes and the only
   one that exercises `--test-threads=1`.
 - `brokkr check` is blind to the socket-backed suites; `brokkr check --gate` is
-  the invocation. Baseline at the end of round 4: 1173 workspace + 442
-  instrumented, in 1m05s, with 65 ignored and 0 orphaned pairs. It was 1171 at
-  the end of round 3; the two are `gate_skip_list.rs`'s pair.
+  the invocation. Baseline at the end of round 5: 1181 workspace + 442
+  instrumented, in 1m02s, with 63 ignored, 17 skips and 0 orphaned pairs. It was
+  1179 / 65 / 19 / 1m05s at the end of round 4, and the difference is the two
+  completion gates round 5 un-parked, which now RUN rather than being skipped.
+- THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
+  parked list is empty. What remains in `skip` is cost and environment, which is
+  what that list is for. `test_threads` STAYS AT 8 even so: the cliff at 16 was
+  attributed to one of the un-parked tests, and the whole suite now passes at 16
+  and at 32, twice each - but one removed cause is not evidence the cliff had
+  only one, which is that todo item's own standard for this class of defect.
 - `brokkr check --profile timing` is a SEPARATE lane and round 3 changed it. It
   now names one test, `read_market_latency_stays_within_submit_budget`; run it
   after touching either list, because `brokkr.toml`'s `only` and the gate's
@@ -264,13 +367,38 @@ trusts yet.
 - `unconfigured_symbol.rs` KEEPS `FOOBAR` / `BARFOO`. Round 4 refused the
   rename: `FOOBAR` is the workspace idiom for an unconfigured label, used by
   `config.rs`, `source.rs`, `seeds.rs` and `configs/unmatched-symbol.toml`, and
-  a shared literal across SEPARATE BINARIES costs nothing. THE HAZARD IS NOT THE
-  LITERAL AND ROUND 5 SHOULD READ IT THAT WAY: both tests in that file assert an
-  ABSENCE first (`!advertises(..)`), which is sound only on a venue nothing else
-  has touched, so they belong on the OWNED side of the shared-venue split, not
-  the read-only side. The same question is worth asking of every test the split
-  moves - an absence asserted about a shared venue is a wrong answer waiting for
-  a neighbour, not a flake.
+  a shared literal across SEPARATE BINARIES costs nothing. The hazard round 4
+  named instead - that both tests assert an ABSENCE first, which is sound only on
+  a venue nothing else has touched - is now moot for this file and live as a
+  general rule: round 5 refused the shared-venue split outright, so nothing here
+  shares a venue with anything.
+- NO TEST BINARY IN THIS WORKSPACE SHARES A VENUE, and round 5 refused the
+  proposal to start rather than deferring it. THE MEASUREMENTS THAT DECIDED IT,
+  because the next document in the arc covers the adapter's four socket-backed
+  binaries and will be offered the same idea: a `fast.toml` venue costs about
+  10 ms end to end - launch, bind, 300 s of warmup, one round trip - because
+  these tests build under an OPTIMIZED profile and 300 simulated seconds is
+  ~15,000 ticks; `serving.rs`'s whole wall at `--test-threads=8` is 9.77 s
+  against a SINGLE test at 9.63 s, so its floor is one test's deliberate flake
+  margin and not 54 boots; and raising the thread count to 16 leaves that wall
+  unchanged, so contention is not the floor either. A venue is not the expensive
+  thing. Measure before accepting that it is.
+  - AND "READ-ONLY" IS NOT "GET-ONLY". Only six of `serving.rs`'s 54 tests issue
+    GETs alone, and two of those still cannot share:
+    `history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one`
+    MATERIALIZES rivers, which `instrument_defs` then advertises, and
+    `a_paged_tape_window_equals_the_same_window_read_in_one_query` asserts its
+    window still fits one page, which a longer-lived venue's growing tape
+    falsifies. Ask what a test assumes about the venue's HISTORY, not whether it
+    writes.
+  - THE BUDGET QUESTION A SHARED VENUE RAISES IS THEREFORE UNANSWERED AND DOES
+    NOT NEED ANSWERING: `spawn` re-anchors only when no venue is live, so a
+    leaked `OnceLock<Venue>` would pin `LIVE_VENUES` above zero forever and every
+    test after the first would inherit a spent budget and be refused by the
+    clamp. Anyone reviving the idea owes that mechanism a redesign, plus a
+    replacement for the panic-path log dump and the guard's kill-and-reap, which
+    a leaked venue never runs (`PR_SET_PDEATHSIG` is what would still reap the
+    process).
 - A SHELL SPAWNED FROM A TEST LEAKS ITS GRANDCHILDREN. `Child::kill` reaches the
   shell and nothing it forked; `/bin/sh -c "... & sleep 3600"` orphans the sleep
   onto init on the SUCCESS path, and nine of them had accumulated on the machine
