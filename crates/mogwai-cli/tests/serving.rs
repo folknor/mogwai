@@ -1044,7 +1044,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    drain.stop("the policed account's socket");
+    drain.stop("the policed account's socket").await;
     // The RETRY above cannot hide a transient mispricing, and that is a property
     // of the breach rather than of the loop. `RiskLedger::breach` is LATCHED -
     // `observe` returns early once it is set, and the first breach is the one
@@ -1727,7 +1727,7 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
     tokio::time::sleep(Duration::from_millis(3_000)).await;
     let (_, after) = http_get(&venue.http_base(), "/account");
     let after = balance_of(&after);
-    drain.stop("the perpetual socket");
+    drain.stop("the perpetual socket").await;
 
     assert!(
         after < before,
@@ -2397,7 +2397,7 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    drain.stop("the order socket");
+    drain.stop("the order socket").await;
 
     let (status, after) = http_get(&venue.http_base(), &path);
     assert_eq!(status, 200);
@@ -2455,6 +2455,16 @@ impl BackgroundDrain {
 
     /// Panics naming `subject` if the venue ended the stream while it drained.
     /// Call this BEFORE asserting the property the wait was for.
+    ///
+    /// IT READS A RECORD ANOTHER TASK WRITES, so a silent return means "nothing
+    /// recorded YET" rather than "the stream is alive" - the drain runs on its
+    /// own task and only writes after it has been polled. That is why [`stop`]
+    /// yields first and why the fixture below yields a hundred times before
+    /// checking. Every call site here sits downstream of a real await, so the
+    /// drain has run; a call placed after a stretch of BLOCKING work on the
+    /// runtime thread would be reading a record nothing had a chance to write.
+    ///
+    /// [`stop`]: BackgroundDrain::stop
     fn assert_still_serving(&self, subject: &str) {
         if let Some(why) = self
             .ended
@@ -2470,7 +2480,17 @@ impl BackgroundDrain {
     }
 
     /// Checks the ending one last time, then stops draining.
-    fn stop(self, subject: &str) {
+    ///
+    /// IT YIELDS BEFORE IT CHECKS, and the yield is the whole difference between
+    /// a guard and a decoration. The last thing before a `stop` is often a
+    /// BLOCKING `http_get`, which holds the runtime thread, so a close frame
+    /// that arrived during it is sitting unpolled: checking straight through
+    /// would report "still serving" on exactly the branch this exists to catch,
+    /// and the caller's assertion would then blame the property. Best-effort
+    /// rather than proof - nothing can prove a socket is alive - but it costs one
+    /// scheduler turn and removes the reachable half.
+    async fn stop(self, subject: &str) {
+        tokio::task::yield_now().await;
         self.assert_still_serving(subject);
         self.handle.abort();
     }
@@ -2528,6 +2548,18 @@ async fn a_background_drain_names_a_close_instead_of_swallowing_it() {
     drain.assert_still_serving("the fabricated socket");
 }
 
+/// `stop`'s own yield, pinned. Nothing awaits between the spawn and the stop
+/// here, which is the shape at every call site: the last thing before a `stop`
+/// is a BLOCKING `http_get`, so a close that arrived during it is sitting
+/// unpolled and a check placed straight through reports "still serving" on
+/// precisely the branch this machinery exists to catch.
+#[tokio::test]
+#[should_panic(expected = "the venue sent a close frame")]
+async fn stopping_a_drain_sees_a_close_that_no_await_gave_it_a_chance_to_record() {
+    let drain = BackgroundDrain::spawn(futures_util::stream::iter(vec![Ok(Message::Close(None))]));
+    drain.stop("the fabricated socket").await;
+}
+
 #[tokio::test]
 async fn a_background_drain_says_nothing_about_a_stream_that_is_still_running() {
     let drain = BackgroundDrain::spawn(futures_util::stream::pending::<
@@ -2536,7 +2568,7 @@ async fn a_background_drain_says_nothing_about_a_stream_that_is_still_running() 
     for _ in 0..100 {
         tokio::task::yield_now().await;
     }
-    drain.stop("the fabricated socket");
+    drain.stop("the fabricated socket").await;
 }
 
 #[tokio::test]

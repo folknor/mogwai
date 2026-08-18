@@ -265,23 +265,33 @@ every rule here should be traceable to a run.
   `p50_lateness_ns`, `p99_lateness_ns` and `max_lateness_ns`
   against the machine and the commit that produced them. A series of readings
   shows a regression; a portable threshold never existed to show one.
-  - First reading under the new shape, host `bygg`, release, 3 s sample on
-    `accelerated.toml`: 11,893 frames, p50 0.226 ms, p99 42.9 ms, max 43.2 ms.
-    Consistent with the old test's passing runs, and note how little room the
-    retired 50 ms bound had on a QUIET host - which is the whole finding.
+  - Baseline, host `bygg`, `brokkr mogwai tape_lateness -- "" 3` at `62c2501`,
+    three consecutive 3 s samples on `accelerated.toml`, all
+    `ending=sample_complete` and all `control_frames=0`:
+
+    | frames | p50 | p99 | max |
+    |---|---|---|---|
+    | 15,718 | 0.407 ms | 9.36 ms | 42.8 ms |
+    | 15,433 | 0.420 ms | 12.4 ms | 43.2 ms |
+    | 16,987 | 0.301 ms | 28.3 ms | 41.5 ms |
+
+    THE TAIL IS THE UNSTABLE PART AND THE BODY IS NOT. p50 holds inside a third
+    of a millisecond across all three while p99 moves threefold, and the MAX is
+    the steadiest figure of the four - about 42 ms every time, which is what the
+    retired 50 ms p99 bound was really sitting against. A threshold placed on
+    p99 was therefore being judged by the quantile with the widest spread here.
+    Read one reading as a sample of a distribution, never as this host's number.
   - `ending` IS PART OF THE READING, not decoration. Only `sample_complete`
     means `frames` covers the whole `sample_ms`; a stream that ended or faulted
     early leaves a PREFIX, and two frame counts are not comparable unless both
-    loops ended the same way. The loop that produced the reading above ended on
-    the first non-text frame, which is why it is recorded here and not fixed
-    silently: the sample was truncatable by a Ping. Measured on 2026-08-19 at
-    3 s on this venue, `control_frames` is 0 - no Ping, Pong or Binary frame
-    arrives inside a sample - so the truncation was latent rather than active
-    and the recorded numbers stand.
-  - Run-to-run spread on a quiet host is LARGE: two 3 s debug-build samples
-    minutes apart, 2026-08-19, returned 9,186 and 11,659 frames with p99
-    0.79 ms and 1.63 ms. Read a single reading as a sample of a distribution,
-    not as this host's number.
+    loops ended the same way. THAT IS NOT HYPOTHETICAL: an earlier reading
+    recorded here - 11,893 frames, p99 42.9 ms - was taken with a draft loop
+    that stopped on the first non-text frame, and its "p99" landed on the max
+    because the truncated sample had too few points to separate them. It has been
+    dropped rather than annotated, since the number the shipped instrument
+    reports for that quantile is a third of it. `control_frames` is 0 in every
+    sample above, so the truncation was latent rather than active - which is
+    exactly why it survived to be recorded as a fact.
 - **Read counters before crediting a wall.** Every surface emits its work size
   beside its timing. A cell whose wall moved while `parents` or `prints` moved
   did different work, and the wall comparison is void rather than interesting.

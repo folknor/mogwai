@@ -241,9 +241,12 @@ group by any other route has no API for it, and none is owed until one is wanted
   is unidentifiable from outside: it is neither the acceptance instant nor the
   fill instant, and `MarketReadingCache` buckets it further.
 
-  WHAT WAS DONE INSTEAD. The test captures the venue's stderr through a new
-  `common::spawn_capturing_stderr` and scores each attempt on whether the WARN
-  named its client order id. On the priced arm the log and the fill price are
+  WHAT WAS DONE INSTEAD. The test reads the venue's stderr through
+  `common::Venue::log` - every venue the harness spawns is captured, under a
+  PINNED `RUST_LOG`, and a conclusion drawn from an absence in that buffer owes
+  `CapturedLog::await_positive_control` first - and scores each attempt on
+  whether the WARN named its client order id. On the priced arm the log and the
+  fill price are
   cross-checked against each other, so neither observable is trusted alone. It
   works and it bites, but it keys a gate on a log line, which is not a contract.
 
@@ -1744,34 +1747,6 @@ group by any other route has no API for it, and none is owed until one is wanted
   the fingerprint must be refitted, not the code change. Real monthly series
   carry positive return variance and come nowhere near the degenerate case, so
   nothing currently depends on this being fixed.
-
-- REPAIR the `brokkr check --gate` profile mismatch for
-  `tape_lateness_under_acceleration`. The gate runs the workspace test pass in
-  DEBUG profile, and that test asserts a 50ms p99 WALL-CLOCK pacing bound the
-  debug server cannot reliably meet (measured 2026-08-05: debug p99 106-330ms
-  across trees whose release builds pass at 38-43ms on a quiet box). The test
-  is also load-sensitive even in release: with a second workspace building
-  (load average 1.0), 4 of 5 release repetitions failed at ~250ms on BOTH the
-  protocol-9 parent and the protocol-10 candidate - indistinguishable paired
-  distributions, recorded in `notes/protocol-landings.md` (protocol 10) as a
-  reviewed gate exception. The 50ms release threshold stays authoritative and
-  unrelaxed.
-
-  HALF DONE, 2026-08-08. The debug-lane half is closed: the test is now
-  excluded from the `gate` profile BY FULL NAME, on the argument that running
-  a release wall-clock contract against a debug binary is already a changed
-  measuring instrument, so that lane's red result was never evidence about
-  the property. The assertion is untouched and the test stays directly
-  runnable. Excluding it makes no claim that this host meets the budget.
-
-  WHAT REMAINS is the environment sensitivity, and it is worse than the
-  original note implies: a release rerun on 2026-08-08 failed at 311 ms p99
-  with a load average of only 1.46 across 32 visible CPUs. So a load-average
-  precheck is NOT a sufficient admission test - the earlier "load average 1.0"
-  reading suggested one might be. Whatever admits this test needs to be a
-  property of the machine that actually predicts the failure, and nobody has
-  found it. Until then a release run of this test is informative when it
-  passes and ambiguous when it fails.
 
 
 ## Consumer context: every MOGWAI item in broadarrow's todo

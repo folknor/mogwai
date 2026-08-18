@@ -96,8 +96,10 @@ thread_local! {
     /// then reports whatever its own bound was named for. Nothing detects that,
     /// so the budget does not rest on the detail.
     ///
-    /// [`spawn`] therefore RE-ANCHORS whenever no venue is live, and [`Venue`]'s
-    /// `Drop` CLEARS the anchor when the last one goes.
+    /// [`Venue`]'s `Drop` therefore CLEARS the anchor when the last venue goes,
+    /// and [`spawn`] sets it when it finds none. Note the asymmetry, which
+    /// [`open_budget`] argues in full: the clear is what makes a test boundary,
+    /// and the set never MOVES an anchor that is already running.
     static BUDGET_ANCHOR: Cell<Option<Instant>> = const { Cell::new(None) };
     /// Venues alive on this thread. A 0 here means no test is mid-flight, which
     /// is what makes the anchor reset above a test boundary rather than a guess.
@@ -123,10 +125,36 @@ fn budget_anchor() -> Instant {
 /// Begins a test's budget if none is running. Called by [`spawn`] before it
 /// launches, so the anchor is the launching test's own start rather than an
 /// earlier test's.
+///
+/// IT ONLY EVER SETS AN ABSENT ANCHOR, and never moves one forward. Moving one
+/// forward is the failure this whole mechanism exists to prevent, wearing the
+/// costume of the reset that prevents it: a re-anchor mid-test puts the ceiling
+/// PAST [`HANG_WATCHDOG`], so the bound that should have reported arrives as an
+/// unattributed kill instead. The carry-forward's rule - "a test must not drop a
+/// venue and then carry on" - covered only the tracked case, and there is an
+/// untracked one it cannot see: `a_faulted_venue_exits_nonzero_and_an_exhausted_
+/// one_does_not` drives two venues through `launch` DIRECTLY, so [`LIVE_VENUES`]
+/// never leaves zero while up to ten seconds of budget are spent, and the
+/// `spawn` that follows would have re-anchored onto a test already most of the
+/// way through its watchdog. Bookkeeping that counts only what it was told about
+/// cannot be the sole guard; refusing to move the anchor at all does not need to
+/// be told.
+///
+/// WHAT THIS GIVES UP is the cross-test reset for a test that takes a deadline
+/// and NEVER spawns - `Venue`'s `Drop` is what clears the anchor, so such a test
+/// leaves one behind. That direction is deliberately the one to lose: under
+/// today's libtest each test gets its own thread and its own thread-local, so it
+/// is unreachable; and if that ever changes, an inherited anchor fails LOUDLY
+/// through [`bounded`]'s refusal, naming the budget, while a forward-moved one
+/// fails silently as a kill.
 fn open_budget() {
     LIVE_VENUES.with(|live| {
         if live.get() == 0 {
-            BUDGET_ANCHOR.with(|cell| cell.set(Some(Instant::now())));
+            BUDGET_ANCHOR.with(|cell| {
+                if cell.get().is_none() {
+                    cell.set(Some(Instant::now()));
+                }
+            });
         }
     });
 }

@@ -6,7 +6,8 @@ this forward. Not a history: when an entry stops binding future work, delete it.
 
 Arc in progress: the eleven `notes/bugs-*.md` reports, worked one document at a
 time in this order. `bugs-tests-lifecycle` CLOSED on 2026-08-19 after five
-rounds, with no open findings; `bugs-tests-adapter` is next. The order is
+rounds plus a close pass over the whole commit arc, with no open findings;
+`bugs-tests-adapter` is next. The order is
 `bugs-tests-lifecycle`, `bugs-tests-adapter`,
 `bugs-tests-tape`, `bugs-tests-engine-protocol`, `bugs-tests-lab-cli`, then
 `bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
@@ -25,6 +26,17 @@ trusts yet.
   `tokio::spawn(async move { while s.next().await.is_some() {} })` with an
   `abort()`ed handle, where a close frame, a transport error and a clean end
   were indistinguishable and unobservable.
+  - `stop` IS ASYNC AND YIELDS BEFORE IT CHECKS, found in round 6. The ending is
+    written by ANOTHER TASK, so a silent return means "nothing recorded yet",
+    not "the stream is alive" - and the last thing before a `stop` is typically a
+    BLOCKING `http_get` holding the runtime thread, so a close that arrived
+    during it was sitting unpolled and the guard reported success on exactly the
+    branch it was built to catch. One scheduler turn removes the reachable half;
+    nothing can make it proof. Pinned by
+    `stopping_a_drain_sees_a_close_that_no_await_gave_it_a_chance_to_record`,
+    which has NO await between the spawn and the stop and fails without the
+    yield. CARRY THE SHAPE TO THE ADAPTER DOCUMENT: a guard reading a record
+    another task writes owes that task a chance to write it.
 - `crates/mogwai-cli/tests/common/mod.rs` CAPTURES EVERY VENUE'S STDERR. `spawn`
   sets `StderrSink::Lines` into `Venue::log`, a `CapturedLog`, and `Venue`'s
   `Drop` prints the last 40 lines WHEN THE THREAD IS PANICKING. There is no
@@ -69,11 +81,22 @@ trusts yet.
     less evidence. Both say so in place. Judge which kind a new wait is before
     reaching for the helper.
   - THE BUDGET IS PER-TEST BY THE HARNESS'S OWN BOOKKEEPING, not by the
-    thread-local it lives in: `spawn` re-anchors when no venue is live,
-    `Venue::drop` clears the anchor when the last one goes. See the libtest fact
-    below for why that is not redundant. A test in these files must not drop a
-    venue and then carry on - a mid-test re-anchor pushes the ceiling PAST the
-    watchdog, which is the failure this whole mechanism exists to prevent.
+    thread-local it lives in: `Venue::drop` CLEARS the anchor when the last live
+    venue goes, and `spawn` SETS it when it finds none. See the libtest fact
+    below for why that is not redundant.
+    THE ASYMMETRY IS THE FIX AND IT COST A ROUND-6 FINDING. `spawn` used to
+    re-anchor on a zero venue count, which is the watchdog overrun the mechanism
+    exists to prevent wearing the costume of the reset that prevents it. The
+    carry-forward's own rule for it - "a test must not drop a venue and then
+    carry on" - covered only the TRACKED case, and
+    `a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not` is an untracked
+    one: it drives two venues through `launch` DIRECTLY, so the counter never
+    leaves zero while up to ten seconds of budget is spent, and the `spawn` after
+    them re-anchored a test already most of the way through its watchdog.
+    BOOKKEEPING THAT COUNTS ONLY WHAT IT WAS TOLD ABOUT CANNOT BE THE SOLE GUARD;
+    refusing to move an anchor at all does not need to be told. Pinned by
+    `a_venue_launched_after_untracked_work_inherits_that_works_budget` in
+    `lifecycle.rs`, bite-checked at 250 ms of ceiling drift.
 - `serving.rs` also carries `trade_window` / `trade_window_paged`, and no test
   in the file may query `/trades` for a statistic without going through them.
   A single query returns the window's OLDEST prints once the page fills, silently
@@ -92,6 +115,13 @@ trusts yet.
     on a Ping and truncates the sample silently - the drain rule below, in the
     measurement's costume. Control frames are counted, not fatal; measured at
     zero in a 3 s sample, so the truncation was latent.
+  - AND THE FIRST READING WAS TAKEN WITH THE PRE-FIX DRAFT, which round 6 caught
+    in `reference/performance.md`: its recorded p99 of 42.9 ms had landed on the
+    MAX, because a truncated sample has too few points to separate the two. The
+    shipped instrument reports p99 9-28 ms over three consecutive 3 s samples,
+    with max steady at 42-43 ms. A NUMBER RECORDED FROM A DRAFT OF THE
+    INSTRUMENT IS NOT A READING, and the round's own second half is where to
+    look for it: the fix and the number it invalidated landed in one commit.
 - `common::scratch(name)` OWNS EVERY SCRATCH DIRECTORY THE `mogwai-cli` TEST
   BINARIES WRITE, and none of them may hand-roll a `CARGO_TARGET_TMPDIR` path
   again. SCOPED TO THOSE BINARIES DELIBERATELY: `mogwai-lab`'s
@@ -327,10 +357,12 @@ trusts yet.
   touching the harness; it is the invocation AGENTS.md prescribes and the only
   one that exercises `--test-threads=1`.
 - `brokkr check` is blind to the socket-backed suites; `brokkr check --gate` is
-  the invocation. Baseline at the end of round 5: 1181 workspace + 442
-  instrumented, in 1m02s, with 63 ignored, 17 skips and 0 orphaned pairs. It was
-  1179 / 65 / 19 / 1m05s at the end of round 4, and the difference is the two
-  completion gates round 5 un-parked, which now RUN rather than being skipped.
+  the invocation. Baseline after the close pass: 1183 workspace + 442
+  instrumented, in 1m06s, with 63 ignored, 17 skips and 0 orphaned pairs. It was
+  1181 at the end of round 5 and 1179 / 65 / 19 at the end of round 4: the
+  round-5 difference is the two completion gates it un-parked, which now RUN
+  rather than being skipped, and the close pass's is its two new harness pins.
+  Serial socket suite green in 6.5s.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is
   what that list is for. `test_threads` STAYS AT 8 even so: the cliff at 16 was
@@ -414,6 +446,16 @@ trusts yet.
   cold review, which the generic workflow assigns to codex. The cold review must
   stay genuinely cold: an impoverished prompt, no findings, no claims, no
   checklist.
+- THE SECOND HALF OF EVERY COMMIT IS UNREVIEWED, and a close pass over the whole
+  arc is what catches it. The round shape is fix pass, gate, cold review, then a
+  fix-and-commit agent that closes the review's findings AND commits - so that
+  agent's own fixes, its new tests and its doc edits reach master with no
+  independent eye, in an arc where the first half of every single round contained
+  a hole one layer up from what it was closing. Round 6 found two there: the wall
+  budget's own reset moving an anchor forward, and a durable performance number
+  recorded from a draft of the instrument that the same commit then fixed. BOTH
+  WERE IN THE UNREVIEWED HALF. Budget a close pass per arc, and point it there
+  first.
 - Any ADJUDICATOR launched in this arc reads `notes/todo.md` and `brokkr.toml`
   in addition to its fork framing and the usual contracts. Owner instruction.
   `brokkr.toml` carries the gate profile's parallelism and skip list, which

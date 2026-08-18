@@ -179,6 +179,41 @@ fn sigterm_stops_the_venue_within_the_shutdown_grace() {
     );
 }
 
+/// The harness's own wall budget, pinned where it is weakest: a test that spends
+/// budget BEFORE the harness has a venue to count.
+///
+/// `spawn` opens the budget when no venue is live, and `Venue`'s `Drop` clears
+/// the anchor when the last one goes - bookkeeping that only ever sees venues
+/// the harness launched. `a_faulted_venue_exits_nonzero_and_an_exhausted_one_
+/// does_not` drives two through `launch` DIRECTLY and then calls `spawn`, so the
+/// counter has never left zero while up to ten seconds of the test's budget is
+/// gone. An `open_budget` that re-anchored on a zero count would restart the
+/// budget there and put the ceiling PAST `HANG_WATCHDOG`, which is the one
+/// failure the whole mechanism exists to prevent: the deadline that should have
+/// reported arrives as an unattributed kill instead.
+///
+/// THE CEILING IS WHAT IS ASSERTED, not the anchor, because the ceiling is what
+/// a bound is clamped to. Both bounds ask for the whole budget, so both are the
+/// clamp rather than the cap, and a re-anchor between them moves the second one
+/// forward by however long the untracked phase took.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_venue_launched_after_untracked_work_inherits_that_works_budget() {
+    // Anchors the budget without the harness knowing a thing about it - the
+    // blocking HTTP helpers do exactly this against a directly-launched venue.
+    let before = common::wall_deadline(common::TEST_WALL_BUDGET);
+    std::thread::sleep(Duration::from_millis(250));
+
+    let _venue = spawn(&["--config", &fast_config()]);
+    let after = common::wall_deadline(common::TEST_WALL_BUDGET);
+
+    assert_eq!(
+        before, after,
+        "launching a venue moved this test's wall ceiling forward, so the budget restarted \
+         mid-test and every bound below it may now outlive the per-test hang watchdog"
+    );
+}
+
 /// The intermediate launcher's whole PROCESS GROUP, killed on drop.
 ///
 /// A GROUP RATHER THAN A CHILD, because the child is not what leaks. The venue
