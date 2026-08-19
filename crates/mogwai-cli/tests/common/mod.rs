@@ -521,6 +521,16 @@ pub fn fast_config() -> String {
     format!("{}/tests/configs/fast.toml", env!("CARGO_MANIFEST_DIR"))
 }
 
+/// A venue whose unattended accounts are TTL-collected within a few hundred
+/// milliseconds, so the freeze has an observable consequence a socket test can
+/// read.
+pub fn account_ttl_config() -> String {
+    format!(
+        "{}/tests/configs/account-ttl.toml",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 pub fn two_symbols_config() -> String {
     format!(
         "{}/tests/configs/two-symbols.toml",

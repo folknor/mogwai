@@ -43,6 +43,15 @@ book. `reset_account_on_reconnect` hands it a clean ledger instead, and the
 readiness record reports which way the venue is set so a launcher never has to
 infer it.
 
+EVICTION IS THE LAST THING AN UPGRADE DOES. Every refusal `/ws` can make - an
+unresolvable shape, an account unfunded in the settlement currency, a
+non-finite speed, a boat that could not be placed, a second cadence on one
+ledger - is decided BEFORE the claim, because claiming closes the incumbent's
+sockets and, under `reset_account_on_reconnect`, discards its ledger. A refused
+upgrade must cost the incumbent nothing; the alternative made a single
+unauthenticated request a way to disconnect a live client and wipe its book
+without ever connecting.
+
 AN UNATTENDED ACCOUNT FREEZES. The moment its last connection goes away it is
 not swept, not marked, not funded and not judged against its policy, and a
 socket returning with the same id resumes it. This is a deliberate departure
@@ -51,6 +60,22 @@ exists to exercise a client's live path rather than to simulate an account
 nobody is trading. THE CONSEQUENCE TO STATE IN ANY CLAIM is that a run spanning
 a disconnect has a gap in its risk history.
 
+"ITS LAST CONNECTION" IS COUNTED FROM ADMISSION, not from the outbound lane a
+socket binds after its upgrade completes. The lane table alone cannot answer
+whether anybody is reading an account: an eviction retires the incumbent's lane
+immediately, while the newcomer binds its own only once its handler runs - and
+never at all if it abandons the upgrade. A socket is therefore counted onto its
+account before the 101 and off it when its lane is released - or when its
+session is dropped, if it never bound one, which is what covers the abandoned
+upgrade. The two are deliberately not the same instant: the writer's close
+frame outlives the lane, and holding the account counted-in for that grace would
+keep it in the sweep after nothing is reading it. The freeze fires when neither
+a lane nor an admission is left. Without that count the evicted incumbent's
+teardown found no
+lane, resolved no account and simply returned, leaving the ledger attached with
+zero connections: never TTL-collected, and still swept while holding no seat,
+which cancelled the very resting orders the freeze exists to preserve.
+
 RESUMING RE-BASES THE BOOK, because a returning boat is not the one that left. A
 cursor is placed at its river's origin, so a frozen order's scan frontier - the
 instant the departed boat had reached - sits in the new boat's FUTURE, and an
@@ -58,6 +83,20 @@ order left carrying it would wait for the new cursor to cover ground the old one
 had already covered. Every surviving order therefore resumes scanning from the
 returning boat's own clock. Nothing is owed for the span in between: nobody was
 reading the account, which is the same statement the freeze makes.
+
+THIS DOES NOT APPLY TO AN EVICTION, and the boundary is the freeze rather than
+the reconnection. Re-basing and retirement run only for a RETURNING account -
+one the venue found frozen - and a newcomer that claims a seated account is
+counted onto it before the incumbent is closed, so the account never freezes in
+that window and the newcomer resumes a LIVE ledger: no retirement, no re-base.
+That is deliberate. The book being taken over was never left behind by a
+departed boat, so its scan frontiers are the frontiers of a river something is
+still reading, and retiring off it would cancel resting orders and close
+positions the previous session had every reason to expect to survive its own
+reconnect. The alternative was worse than a rule: before the count existed the
+incumbent's teardown could win the race and freeze the account first, so
+whether the newcomer's book was retired depended on which task got there
+first.
 
 WHAT THE ACCOUNT HELD OFF THE JOINED RIVER IS RETIRED at that moment - resting
 orders cancelled, positions closed at their last mark. A returning socket may

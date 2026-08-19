@@ -217,6 +217,55 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- OWNER CALL: SHOULD AN EVICTION-RECONNECT RETIRE THE BOOK IT TAKES OVER? The
+  `notes/bugs-server.md` round-1 fixes count a newcomer onto an account BEFORE
+  the incumbent is evicted, so the account never freezes in that window and
+  `resume` sees `returning == false`: an eviction-reconnect now gets no
+  `retire_off_river` and no `rebase_scans`, deterministically. That is right for
+  the case it was aimed at - a client's own reconnect, where retiring would
+  discard a live book - and it silently changes the STRANGER case, where a
+  claimer connecting on a different symbol inherits the previous session's
+  off-river position rather than having it retired. Before the fix the outcome
+  was a race, so no behaviour was lost; what is owed is a ruling on whether the
+  stranger case wants the retirement back, which would need eviction to be
+  distinguishable from reconnection at `resume` rather than inferred from the
+  freeze. Stated in `reference/architecture.md` as it stands.
+
+- THE ABANDONED-UPGRADE PATH HAS NO SOCKET-LEVEL TEST, and no client behaviour
+  found so far reaches it. `Passenger::admitted` exists for the upgrade a client
+  walks away from before `handle_socket` runs - no lane bound, no lane released
+  - and that branch is pinned only by `run.rs` unit tests that drop an
+  `Admission` directly. Sixteen connections writing a well-formed upgrade
+  request and then resetting with `SO_LINGER` at zero all landed on the handled
+  path instead: on loopback the venue has read the request, written the 101 and
+  started the handler before the reset arrives. The race is inside hyper's
+  upgrade handoff, so parameterizing an interval - the arc's usual remedy - has
+  nothing to take hold of. Closing it needs a seam the venue does not have, most
+  plausibly a test-only delay or counter between the response and the handoff.
+
+- THE CONNECTION LIFECYCLE IS STILL FOUR MUTABLE STRUCTURES rather than one
+  derived registry. `Run::lanes`, `Passenger::frozen_since`,
+  `Passenger::seated_on` and now `Passenger::admitted` each carry part of the
+  answer to "is anybody reading this account", with the consistency rules in
+  prose. The `notes/bugs-server.md` round-1 fixes closed the two live holes -
+  eviction now happens after every refusal, and the freeze is decided by one
+  predicate over the lane table and the admission count - but they closed them
+  by adding a fourth structure, not by removing the possibility. NOTHING
+  DETECTS the next lifecycle path that updates three of the four. The hunter's
+  proposal stands: one registry keyed by account holding the live connections,
+  with `is_frozen` and `is_seated_on` as derived queries. Not attempted in
+  round 1 because it is a rewrite of `run.rs` rather than a fix, and the two
+  holes were live.
+
+- ONE `/ws` REFUSAL STILL SITS AFTER THE EVICTION, and only one: the cadence
+  check re-run on a ledger the seat MINTED OR RESET, which can lose to another
+  upgrade racing the same account inside that window. The pre-seat check that
+  covers every other case cannot cover this one, because the ledger it would
+  ask about does not exist yet. Closing it means making eviction and admission
+  one transaction under the lane lock - which is the registry item above, not a
+  local fix - so it is filed rather than papered over. It needs two upgrades on
+  one account interleaved inside a few microseconds to fire.
+
 - PRODUCT CALL: IS A ZERO PRICE LEGAL ON AN INVERSE INSTRUMENT? Raised by the
   `notes/bugs-engine.md` round-2 cold review and answered locally rather than
   ruled on. An `Inverse` contract's value is `1/price`, which has no value at

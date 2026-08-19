@@ -58,79 +58,6 @@ the way this one did. Findings 6 and the second half of 12 keep that open.
 `a_swept_account_snapshot_reaches_only_that_account` pins the fix and was
 bite-checked against the reported symptom.
 
-## 2. `/ws` evicts the incumbent before it has decided whether to admit the newcomer (high confidence)
-
-`ws_upgrade` calls `state.run.seat(&account_id, true, session)` - which closes
-every socket of the incumbent client and, under `reset_account_on_reconnect`,
-discards the ledger - and only THEN runs:
-
-- `ensure_instrument` (400 on an unresolvable shape),
-- the settlement-currency funding check (400),
-- `speed.is_finite() && speed >= 0.0` (400),
-- `boatyard.board` (400 on placement failure),
-- `passenger.try_sit` (400 on a second cadence).
-
-Any of those returns a 400 with the incumbent already destroyed.
-`GET /ws?account=X&speed=NaN` is a one-request, unauthenticated way to
-disconnect a live client and, with the reset knob on, wipe its position book,
-while itself never connecting. Eviction should be the LAST thing that happens
-before the 101, after every refusal has been decided.
-
-## 3. That same path leaves an account permanently un-frozen and un-collectable (high confidence)
-
-Follow-on to finding 2, but independent enough to state separately.
-`Passenger::attach()` is called from exactly one place (`Run::resume`, inside
-`handle_socket`) and `freeze()` from exactly one (`Run::release_lanes`).
-`evict_account` removes the incumbent's `BoundLane` EAGERLY, so when the evicted
-socket finally tears down, `release_lanes(id)` finds no matching lane, resolves
-`account` to `None`, and returns before `freeze()`.
-
-Normally the newcomer binds and its own later release freezes the account. But
-whenever the newcomer never reaches `bind_lanes` - any of the five refusals in
-finding 2, or a client that abandons the upgrade after the 101 handshake
-response - the account is left with `frozen_since = None` and zero connections.
-Consequences:
-
-- `collect_expired_accounts` filters on `frozen_for().is_some()`, so the account
-  is NEVER TTL-collected. Unbounded ledger accumulation, driven by a client that
-  only ever sends refused upgrades.
-- The sweeper's `seated` filter (`!passenger.is_frozen()`) keeps sweeping it.
-  Because it holds no seat, `cancel_unreadable_orders(&readable, venue_now)`
-  will cancel its resting orders on the first pass where the river's boat is
-  gone - which is precisely the "a frozen account's book survives for the socket
-  that returns" contract, violated.
-
-The structural fix is to make attachment a count derived from the lane table
-rather than a separately-mutated flag: `is_frozen()` should be "no lane is bound
-to this account id", computed, not stored. The current two-variable encoding
-(lane list plus `frozen_since`) has exactly one consistency rule and one path
-that skips it.
-
-## 4. A failed mark read destroys the interval's price extremes (high confidence, frontier family)
-
-In `spawn_fill_sweeper`:
-
-```
-let span = boat.extremes.take();          // destructive
-let Some((marks, settlement_marks)) = reads else { continue; };
-```
-
-`PriceExtremes::take` bumps the epoch and clears the published span - it is a
-CONSUMING read. `frontier_after` correctly refuses to advance `last_swept_ns`
-when `reads` is `None`, and the comment above the `continue` explains that the
-settlement instants must be retried. But `take()` already ran, so the high and
-low the tape reached over that interval are gone permanently. The next pass's
-span starts from its own first print.
-
-`extremes.rs`'s entire reason for existing is that "a spike that opened and
-closed between two passes never happened as far as the account was concerned,
-and the account kept room it should have lost." On a failed-read pass, that is
-exactly what happens again - for the interval that is then REPLAYED for
-settlement, so the account is marked over a span whose extremes were silently
-dropped. This is the guard-scope rule stated in `AGENTS.md` applied to a
-destructive read rather than a watermark: the take must be sequenced after the
-pass has committed, or the span must be pushed back on failure.
-
 ## 5. `FeeSurcharge` and the engine-armed divergences do not reach accounts that connect later (high confidence, contract vs code)
 
 `arm_divergence`'s `FeeSurcharge` arm carries this comment:
@@ -324,14 +251,35 @@ verdict: one failure in two runs on one host.
 
 ## What the hunter would actually rewrite
 
-Findings 1, 2 and 3 are all the same underlying problem: THE ACCOUNT AND
-CONNECTION LIFECYCLE IS ENCODED ACROSS THREE MUTABLE STRUCTURES - `Run::lanes`,
-`Passenger::frozen_since`, and `Passenger::seated_on` - with the consistency
-rules living in prose. Each has a path that skips one of the others. Collapse
+Findings 1, 2 and 3 - all three now fixed - were the same underlying problem:
+THE ACCOUNT AND CONNECTION LIFECYCLE IS ENCODED ACROSS SEVERAL MUTABLE
+STRUCTURES - `Run::lanes`, `Passenger::frozen_since`, `Passenger::seated_on`,
+and now `Passenger::admitted` - with the consistency rules living in prose. Each
+has a path that skips one of the others. The hunter's proposal was to collapse
 them: one registry keyed by account, holding the live connections; `is_frozen`
 and `is_seated_on` become derived queries; eviction becomes a transition on that
-registry taken at the last possible moment before the 101. That also gives
-`deliver` the account scope it currently lacks, which is finding 1 for free.
+registry taken at the last possible moment before the 101.
+
+THE SECOND HALF OF THAT LANDED AND THE FIRST DID NOT, which is worth stating so
+a later round does not read the fixes as the rewrite. Eviction IS now the last
+step before the 101, and the freeze IS now decided by one predicate over the
+lane table and the admission count rather than by whichever call site happened
+to notice - but the state is still spread over four structures rather than
+derived from one registry, and `admitted` is a FOURTH of them. It closes the
+hole by making the missing reader visible instead of by removing the
+possibility, so the next lifecycle path that forgets one of the four is not
+detected by anything.
+
+THE CLOSE PASS ADDED ONE THING TO THAT READING, 2026-08-19. `Passenger::admitted`
+is reached ONLY through an `Admission` guard now - `Run::admit` returns one and
+`Run::depart` is private - because the first shape of the fix raised the count
+and constructed the guard as two statements, which leaks the count permanently
+on a panic or on axum cancelling the handler. So the fourth structure at least
+cannot be left inconsistent by a path that forgets to lower it; it can still be
+left inconsistent by a path that never raises it, which is the item filed in
+`notes/todo.md`. And the freeze on the ordinary teardown is now owed entirely by
+the admission's departure: `handle_socket` releases its lane while still holding
+its admission, so the lane release finds the account counted-in and declines.
 
 Second, `deliver`'s "unattributed means everyone" default is the wrong direction
 now that the ledger is per-passenger. It should be an exhaustive match on frame

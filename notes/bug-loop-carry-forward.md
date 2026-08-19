@@ -4409,3 +4409,148 @@ each citing the test or the reason that makes it one; the `MarketToLimit`
 owner-question closure, which the 2026-08-16 completeness ruling in
 `reference/architecture.md` does support; and `docs/order-lists.md`, whose
 round-1 regression is genuinely reverted.
+
+## The server document, round 1: the `/ws` admission order and the destructive read
+
+Findings 2, 3 and 4 of `notes/bugs-server.md`. All three reproduced and all
+three are DEFECTS - none refused. Nothing here touches tape generation, so no
+`TAPE_PROTOCOL_VERSION` bump is owed.
+
+- FINDINGS 2 AND 3 WERE ONE PATH WITH TWO CONSEQUENCES, exactly as the report
+  said, but they are not one fix. `/ws` seated - evicting the incumbent and,
+  under `reset_account_on_reconnect`, discarding its ledger - and only then ran
+  its five refusals, so `GET /ws?account=X&speed=NaN` disconnected a live client
+  and wiped its book while never connecting. Reordering closes finding 2 alone.
+  Finding 3 SURVIVES the reorder, because a client can also abandon the upgrade
+  after the 101, at which point no refusal is involved and the account is still
+  left with no lane, no admission and `frozen_since = None`.
+- THE FIX'S SHAPE, and the two constraints that decided it. Every refusal is
+  decided before the seat, which needs `ensure_instrument` split into a fallible
+  VENUE-side resolve and an infallible LEDGER-side register, and the funding
+  check asked of the ledger the connection WILL get - under the reset knob that
+  is the venue template, not what the account holds, and `open_account` makes
+  those genuinely differ. The cadence seat is TAKEN before the eviction rather
+  than tested, and skipped entirely when the seat will reset, because a reset
+  ledger holds no seat and asking the outgoing one would refuse the very
+  reconnect-at-a-new-speed the knob exists to serve.
+- `Passenger::admitted` IS THE NEW MACHINERY AND IT IS LOAD-BEARING. A socket is
+  counted onto its account before the 101 and off it when its `SocketSession`
+  drops, which runs on the abandoned-upgrade path too; the freeze fires when
+  neither a lane nor an admission is left. The lane table alone cannot answer
+  the question - it reads "attached" one instant too long for an evicted socket
+  and one too short for an admitted one.
+- THE FIX OPENED A HOLE ONE LAYER UP AND IT WAS CLOSED IN THE SAME PASS, which
+  is the failure mode this stage keeps producing. Freezing on the incumbent's
+  teardown created a race the old code did not have: if the incumbent won it,
+  the newcomer's `resume` would read the account as FROZEN and retire its book
+  off other rivers - a nondeterministic behaviour change, not a refusal. Closed
+  by taking the admission BEFORE the eviction on the non-resetting path. The
+  resetting path needs none, because the ledger it produces is fresh and a
+  freeze in that window retires nothing.
+- THE DURABLE DOC WAS RIGHT AND THE CODE WAS WRONG, a fifth instance of this
+  arc's reverse finding. `reference/architecture.md` already said "AN
+  UNATTENDED ACCOUNT FREEZES. The moment its last connection goes away" - which
+  is precisely what finding 3 says the code does not do.
+- FINDING 4 IS THE FRONTIER RULE APPLIED TO A DESTRUCTIVE READ.
+  `PriceExtremes::take` bumps the epoch and clears the published span, so it
+  retires the interval's high and low exactly the way `last_swept_ns` retires a
+  settlement interval - and it ran BEFORE the failed-read `continue`, over an
+  interval the unadvanced watermark then makes the next pass re-sweep. Closed by
+  `commit_pass`, which consumes the span only after the reading is checked; the
+  two steps are one expression a reordering has to delete rather than move.
+- THE FIRST BITE-CHECK OF THE SOCKET TEST DID NOT BITE, and why is worth
+  carrying. `while_draining` returns the instant its work future resolves, so a
+  close the eviction had already queued was never read - the test proved
+  nothing. Two additions fixed it: WAIT FOR A FRAME BEFORE CLAIMING THE ACCOUNT
+  (a `connect_async` returns at the 101, and the lane the eviction must find is
+  bound after that, so the eviction had nothing to close), and KEEP READING
+  AFTER THE REFUSAL. Reading frames is the observable, not a sleep: the close
+  rides the priority lane and the writer is biased to it, so an evicted socket's
+  very next frame is that close.
+- Gate green: 1286 + 466, 0 orphaned, 56.5 s. Neither lead 9 nor lead 10 fired
+  on this run.
+
+### The server document, round 1, close pass: what the cold review moved
+
+The review named nothing a blocker and confirmed the three defects. What it
+found is the arc's own two families again, both inside the fix that closed
+them.
+
+- THE GUARD-SCOPE FAMILY, INSIDE A GUARD-SCOPE FIX, and this is the purest
+  instance the arc has produced. `ws_upgrade` raised `Run::admit`'s count in
+  either branch, then ran an `await`, and only then constructed the `Admission`
+  that lowers it. A panic or a future cancellation - and axum drops this handler
+  on client disconnect - between the two leaked the count permanently, which is
+  a permanently-attended account: exactly the failure the counter exists to
+  close. Closed by making `admit` RETURN the guard and `depart` private to
+  `run.rs`, so raising the count without owning the thing that lowers it is
+  unrepresentable rather than merely discouraged. The lesson generalizes: a
+  counter whose correctness argument is "every raise has a matching lower"
+  should hand out the lower, never expose it.
+- A VALUE READ TWICE AGAINST TWO STATES OF THE VENUE. `resetting` was computed
+  in `ws_upgrade` and again inside `seat`, both from `has_client_on`, which
+  reads the lane table - so this client's other lane dropping in the window made
+  them disagree about whether the ledger the funding and cadence checks were
+  taken against is the ledger `seat` returns. The `!carried` branch happened to
+  behave safely, but only because reset always removes the map entry, which is
+  incidental. Closed by evaluating it ONCE and passing it in. The residual
+  divergence - another upgrade racing the same account - is now the only way
+  `carried` can be false, and the `carried` site states why the seat stranded on
+  the discarded ledger is harmless rather than leaving it to be re-derived.
+- THE SATURATING LOOP NOW ASSERTS THE INVARIANT IT DISTRUSTS.
+  `Passenger::depart` saturates at zero so an unbalanced departure cannot wrap
+  the count to `usize::MAX`; that is right for production and silently absorbs
+  the bug in every build. A `debug_assert` on the pre-decrement value keeps the
+  floor and makes the imbalance visible. `debug_assert` and not `assert`,
+  because the workspace runs its tests in both profiles and a release abort of
+  the serving path is not an acceptable way to report a counting error.
+- `peek_passenger` CLAIMED AN INVARIANT ITS OWN CALLER BREAKS - instance 35 of
+  the signature defect. Its doc said a check taken before admission must not
+  leave an account behind, and the non-resetting path calls `Run::passenger`,
+  which MINTS, a few lines later and can still refuse with the cadence 400. The
+  comment now claims only what the method does. The minting behaviour itself is
+  finding 8's, left to round 2 rather than closed here, so the two are not
+  entangled.
+
+THE TEST GAP THE REVIEW NAMED IS PARTLY CLOSED, and the honest account matters
+more than the test.
+
+- `a_departing_socket_freezes_its_account_into_collection` is new and BITES on
+  its own assertion: perturbing `Run::depart` to skip the freeze leaves the
+  account answering 409 to a second `POST /accounts` for the whole poll window.
+  That is a real find in itself - the LANE RELEASE DOES NOT FREEZE ANYTHING on
+  the ordinary path, because `handle_socket` releases its lane while still
+  holding its admission, so the freeze is owed entirely by the admission's
+  departure a moment later. Nothing tested that before.
+- TWO EARLIER SHAPES OF THAT TEST WERE DISCARDED FOR NOT BITING, and both
+  failures are worth carrying. The first perturbed `freeze_if_unattended` to
+  ignore the admission count and stayed GREEN, because `release_lanes` still
+  froze the account on the handled path. The second disabled BOTH freezers and
+  still stayed green - the assertion was vacuous, because an account is born
+  FROZEN by `open_account` and by first sight alike, so watching one be
+  collected was watching the birth freeze age out. The fix was to DRAIN TO A
+  FRAME FIRST, which proves the socket bound its lane and `resume` unfroze the
+  account, so collection can only follow a freeze the teardown performed. A
+  lifecycle test whose subject is born in the state it asserts is vacuous until
+  it leaves that state first.
+- THE ABANDONED-UPGRADE BRANCH IS STILL UNTESTED FROM A SOCKET, and it is not
+  for want of trying. Sixteen connections that wrote a well-formed upgrade
+  request and then reset the connection with `SO_LINGER` at zero ALL landed on
+  the handled path: on loopback the venue has read the request, written the 101
+  and started the handler before the reset arrives. No client behaviour reaches
+  the window, and the race lives inside hyper, so the arc's usual remedy - make
+  the interval a parameter - has nothing to take hold of. Pinned only by
+  `run.rs`'s unit tests, which drop an `Admission` directly. Filed.
+- A BEHAVIOURAL CHANGE THE FIX MADE AND THE DIFF DID NOT NAME is now in
+  `reference/architecture.md`: because the newcomer is counted on before the
+  eviction, the account never freezes in that window, so `resume` sees
+  `returning == false` and an eviction-reconnect gets NO retirement and NO
+  re-base. Previously that outcome was racy. It is right for the same-client
+  case and it silently changes the stranger case, where a claimer connecting on
+  a different symbol now inherits the previous session's off-river position
+  instead of having it retired. Filed as an owner question rather than decided.
+- The review also checked LOCK DISCIPLINE and found no inversion, and read
+  `commit_pass` as a thin wrapper whose comment does the work - acceptable, and
+  a `MarkReads` type that yields the span is the shape to reach for if it
+  recurs. Neither was changed. No tape-generation path is touched, so no
+  `TAPE_PROTOCOL_VERSION` bump is owed.

@@ -38,8 +38,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    band_config, fast_config, http_get, http_post_json, mnq_preset_config, paced_config,
-    perpetual_config, spawn, tiny_fanout_config, two_symbols_config,
+    account_ttl_config, band_config, fast_config, http_get, http_post_json, mnq_preset_config,
+    paced_config, perpetual_config, spawn, tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{LiquiditySide, ServerMessage, TradeTick};
@@ -1517,6 +1517,211 @@ async fn a_second_speed_on_the_same_account_is_refused() {
     assert!(
         body.contains(&*venue.symbol) && body.contains("speed 2"),
         "the refusal names the river and the SITTING cadence, not the asked one: {body}"
+    );
+}
+
+/// A REFUSED upgrade does not evict the incumbent it was refused instead of
+/// replacing.
+///
+/// `/ws` used to seat - which closes every socket of the incumbent client and,
+/// under the reset knob, discards its ledger - and only then run its five
+/// refusals, so `?account=X&speed=NaN` was a one-request, unauthenticated way
+/// to disconnect a live client while never connecting at all.
+///
+/// TWO PHASES, AND THE SECOND IS THE POINT. The refusal path and the admission
+/// path differ in exactly one character of the query string, so the incumbent
+/// surviving phase one can only mean the refusal spared it: phase two runs the
+/// same claim on the same account under the same new session with a legal
+/// speed, and the incumbent must then be evicted. Without it, a venue that had
+/// stopped evicting altogether - or one whose eviction never reached this
+/// socket - would pass phase one for the wrong reason.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_refused_upgrade_leaves_the_incumbent_connected() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut incumbent, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-820&session=alpha&speed=1",
+        venue.ws_url_for(&venue.symbol)
+    ))
+    .await
+    .expect("the incumbent claims the account");
+
+    // WAIT FOR THE INCUMBENT TO BE BOUND BEFORE CLAIMING ITS ACCOUNT, and read
+    // an observable rather than sleeping: a `connect_async` returns at the 101,
+    // and `handle_socket` binds the lane the eviction has to find only after
+    // that. A market-data frame is written by the feed task, which is spawned
+    // AFTER `bind_lanes`, so one frame proves the lane is there - and without
+    // this the eviction has nothing to close and the test passes for a reason
+    // that has nothing to do with the ordering under test.
+    let bound = common::deadline(Duration::from_secs(10));
+    loop {
+        match tokio::time::timeout_at(bound, incumbent.next()).await {
+            Err(_) => panic!("the incumbent never received a frame, so it never bound its lane"),
+            Ok(Some(Ok(Message::Text(_)))) => break,
+            Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => {
+                panic!("the venue ended the incumbent's socket before the test began")
+            }
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+
+    // A DIFFERENT session, so this is a stranger claiming the id - the shape
+    // that evicts - and it is refused for the speed alone.
+    let refused = while_draining(
+        &mut incumbent,
+        tokio_tungstenite::connect_async(format!(
+            "{}&account=WYRD-820&session=beta&speed=NaN",
+            venue.ws_url_for(&venue.symbol)
+        )),
+        "the incumbent socket",
+    )
+    .await;
+    let Err(error) = refused else {
+        panic!("a non-finite speed must not upgrade");
+    };
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("the refusal is an HTTP status before the upgrade, got {error}");
+    };
+    assert_eq!(response.status(), 400, "the speed is refused: {response:?}");
+    let body = String::from_utf8_lossy(response.body().as_deref().unwrap_or_default()).into_owned();
+    assert!(
+        body.contains("speed must be finite"),
+        "the refusal is the speed check rather than some other 400: {body}"
+    );
+
+    // AND THE INCUMBENT IS STILL BEING SERVED AFTERWARDS. `while_draining`
+    // returns the instant the refusal resolves, so a close the eviction had
+    // already queued would never be read - the drain has to keep going. Read
+    // FRAMES rather than wait a while: the close rides the priority lane and
+    // the writer is biased to it, so if this socket had been evicted the very
+    // next frame would be that close rather than more market data.
+    let alive = common::deadline(Duration::from_secs(10));
+    for _ in 0..5 {
+        loop {
+            match tokio::time::timeout_at(alive, incumbent.next()).await {
+                Err(_) => panic!("the incumbent stopped being served after the refused upgrade"),
+                Ok(Some(Ok(Message::Text(_)))) => break,
+                Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => panic!(
+                    "the venue ended the incumbent's socket on an upgrade it REFUSED, so a 400 \
+                     disconnects a live client"
+                ),
+                Ok(Some(Ok(_))) => {}
+            }
+        }
+    }
+
+    // The positive control: the same claim, legal this time, DOES take the
+    // account - so the survival above is the refusal sparing the incumbent
+    // rather than eviction being broken or unobservable on this socket.
+    let (_newcomer, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-820&session=beta&speed=1",
+        venue.ws_url_for(&venue.symbol)
+    ))
+    .await
+    .expect("a legal claim on a seated account is admitted");
+    let deadline = common::deadline(Duration::from_secs(10));
+    let evicted = loop {
+        match tokio::time::timeout_at(deadline, incumbent.next()).await {
+            Err(_) => break false,
+            Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => break true,
+            Ok(Some(Ok(_))) => {}
+        }
+    };
+    assert!(
+        evicted,
+        "the incumbent is evicted by a claim the venue ACCEPTS, which is what makes its survival \
+         of the refused one meaningful"
+    );
+}
+
+/// A SOCKET GOING AWAY FREES ITS ACCOUNT ALL THE WAY TO COLLECTION, and the
+/// thing that frees it is the ADMISSION being given up rather than the lane
+/// being released.
+///
+/// A socket is counted onto its account before the 101 and off it when its
+/// session is done, because the lane table alone cannot answer whether anybody
+/// is reading an account: an eviction retires the incumbent's lane immediately,
+/// and a newcomer binds its own only once its handler runs. The consequence
+/// that matters here is one of ORDER. `handle_socket` releases its lane while
+/// still holding its admission, so the lane release finds the account still
+/// counted-in and declines to freeze; the freeze is owed by the admission's own
+/// departure a moment later. An account that never freezes is never
+/// TTL-collected and is still swept while holding no seat.
+///
+/// THE OBSERVABLE IS COLLECTION, not a flag. `POST /accounts` refuses an id the
+/// venue still holds a ledger for with a 409 and answers 201 once that ledger
+/// has been collected, so a second open is a direct read of whether the freeze
+/// ever happened. Nothing else about a frozen account is visible from outside.
+///
+/// THE ACCOUNT IS ATTACHED BEFORE IT IS ABANDONED, which is what stops this
+/// from passing vacuously. An account is born FROZEN - `POST /accounts` and
+/// first sight alike - so a gate that opened one and then watched it be
+/// collected would be watching the birth freeze age out and would stay green
+/// with every freeze in the venue disabled. Draining to a frame first proves
+/// the socket bound its lane and `resume` unfroze the account, so the only way
+/// back to collectable is a freeze this teardown performed.
+///
+/// WHAT IT STILL DOES NOT REACH, stated because a bite-check went looking. The
+/// case the admission count was ADDED for is the upgrade abandoned before
+/// `handle_socket` ever runs - no lane bound, no lane released - and no client
+/// behaviour reaches it from outside: writing the request and resetting the
+/// connection at once still loses to the venue, which has read the request,
+/// written the 101 and started the handler by the time the reset lands.
+/// Sixteen such attempts all landed on the handled path. That branch is pinned
+/// by `run.rs`'s unit tests, which drop an `Admission` directly; pinning it
+/// from a socket needs a scheduling lever the venue does not expose.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_departing_socket_freezes_its_account_into_collection() {
+    let venue = spawn(&["--config", &account_ttl_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "{}&account=WYRD-830&session=alpha&speed=1",
+        venue.ws_url_for(&venue.symbol)
+    ))
+    .await
+    .expect("the account is claimed");
+
+    // An observable rather than a sleep: `connect_async` returns at the 101,
+    // and the feed task that writes this frame is spawned after `bind_lanes`
+    // and after `resume`. One frame therefore proves the account is ATTACHED,
+    // which is the premise the assertion below rests on.
+    let bound = common::deadline(Duration::from_secs(10));
+    loop {
+        match tokio::time::timeout_at(bound, socket.next()).await {
+            Err(_) => panic!("the socket never received a frame, so it never bound its lane"),
+            Ok(Some(Ok(Message::Text(_)))) => break,
+            Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => {
+                panic!("the venue ended the socket before the test began")
+            }
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+    drop(socket);
+
+    // Collected, not merely collectable: the reaper sweeps at a fraction of the
+    // configured TTL, so this polls to a deadline rather than sleeping once.
+    let deadline = common::wall_deadline(Duration::from_secs(5));
+    let mut last = String::new();
+    let reopened = loop {
+        let (status, body) = http_post_json(
+            &venue.http_base(),
+            "/accounts",
+            r#"{"account_id":"WYRD-830","balances":{"USDT":"1000"}}"#,
+        );
+        if status == 201 {
+            break true;
+        }
+        last = format!("{status}: {body}");
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        reopened,
+        "the account outlived the socket that was reading it: nothing froze it when that socket \
+         departed, so it is never TTL-collected and is still swept while holding no seat (last \
+         answer {last})"
     );
 }
 

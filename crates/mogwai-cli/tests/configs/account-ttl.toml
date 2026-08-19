@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 folknor
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# fast.toml with the TTL reaper armed and a short lifetime, so a gate can watch
+# an unattended account actually be COLLECTED rather than merely inspect the
+# flag that makes it collectable. That is the only externally visible
+# consequence of the freeze: a collected id can be opened again, and an id whose
+# ledger is still on the venue answers a second open with a conflict.
+
+seed = 42
+
+# Five simulated minutes of history, materialized at boot.
+warmup_ns = 300000000000
+
+# Unthrottled: the gates assert on WHAT arrives, not on its cadence.
+speed = 0.0
+
+# Short enough that a gate need not wait, long enough that it is not racing the
+# reaper's own 50 ms floor on the sweep cadence.
+account_ttl_ms = 300

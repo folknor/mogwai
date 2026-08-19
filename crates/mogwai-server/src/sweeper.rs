@@ -312,13 +312,8 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let frontier = frontier_after(last_swept_ns, to_ns, reads.is_some());
                 boat.last_swept_ns
                     .store(frontier, std::sync::atomic::Ordering::Release);
-                // The high and low this river actually reached since the last
-                // pass, taken from the tape thread. Taken AFTER the mark read,
-                // so the span it closes is the one the mark closes too, and
-                // taken once per pass whatever the passenger count - it is a
-                // property of the water, like the walk.
-                let span = boat.extremes.take();
-                let Some((marks, settlement_marks)) = reads else {
+                let Some(((marks, settlement_marks), span)) = commit_pass(reads, &boat.extremes)
+                else {
                     // The reading task died, or one of this span's settlement
                     // instants had no readable price. Abandoning the whole pass is
                     // the only safe response either way: the scan results are
@@ -478,6 +473,30 @@ fn read_marks(
 /// where neither door can bypass it.
 fn frontier_after(last_swept_ns: u64, to_ns: u64, read: bool) -> u64 {
     if read { to_ns } else { last_swept_ns }
+}
+
+/// Commit one pass to the reading it just took, and only then CONSUME the
+/// river's price span.
+///
+/// THE FRONTIER RULE APPLIED TO A DESTRUCTIVE READ. `PriceExtremes::take` bumps
+/// the epoch and clears the published span, so it retires the high and the low
+/// the tape reached exactly the way `last_swept_ns` retires a settlement
+/// interval - and it may therefore only run over a pass that is going to USE
+/// them. Taking it before the reading was checked threw the extremes away on a
+/// failed pass, over an interval the unadvanced watermark then makes the next
+/// pass re-sweep: the account was marked across that span with its extremes
+/// silently dropped and the next span starting from its own first print, which
+/// is precisely the spike-between-two-passes hole `extremes.rs` exists to
+/// close, reopened on the failure path.
+///
+/// Ordering alone is what enforces this, so the two steps are HERE, in one
+/// expression a reordering has to delete rather than move.
+fn commit_pass(
+    reads: Option<MarkReads>,
+    extremes: &crate::extremes::PriceExtremes,
+) -> Option<(MarkReads, Option<crate::extremes::PriceSpan>)> {
+    let reads = reads?;
+    Some((reads, extremes.take()))
 }
 
 async fn run_blocking<F, T>(work: F) -> Option<T>
@@ -991,6 +1010,40 @@ mod tests {
             crossed_to,
             "a pass that did read its prices advances normally"
         );
+    }
+
+    /// The DESTRUCTIVE-READ half of the same guard: a pass that abandons its
+    /// interval must not have consumed that interval's price extremes.
+    ///
+    /// `take` is a consuming read, so taking it before the reading was checked
+    /// left the high and the low of an interval the venue then RE-SWEPT gone
+    /// permanently - the account marked over a span whose extremes had been
+    /// dropped, which is the hole `extremes.rs` exists to close.
+    #[test]
+    fn an_unread_pass_leaves_its_price_extremes_owed() {
+        let extremes = crate::extremes::PriceExtremes::default();
+        let mut writer = crate::extremes::SpanWriter::default();
+        extremes.record(&mut writer, rust_decimal::Decimal::from(140), 1);
+        extremes.record(&mut writer, rust_decimal::Decimal::from(90), 2);
+
+        assert!(
+            commit_pass(None, &extremes).is_none(),
+            "a failed reading abandons the pass"
+        );
+
+        // The next pass re-sweeps the same interval, and must still find the
+        // spike the tape actually printed in it.
+        let (_reads, span) =
+            commit_pass(Some((Vec::new(), Vec::new())), &extremes).expect("the reading succeeded");
+        let span = span.expect("the tape printed in this interval");
+        assert_eq!(span.high_px, rust_decimal::Decimal::from(140));
+        assert_eq!(span.low_px, rust_decimal::Decimal::from(90));
+
+        // And a committed pass DOES consume it, so the next span starts from
+        // its own prints rather than re-ratcheting a peak already spent.
+        let (_reads, span) =
+            commit_pass(Some((Vec::new(), Vec::new())), &extremes).expect("the reading succeeded");
+        assert!(span.is_none(), "a committed pass consumes the span");
     }
 
     /// The settlement half of the frontier guard, at the layer that decides it.
