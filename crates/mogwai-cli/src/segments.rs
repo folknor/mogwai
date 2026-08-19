@@ -40,10 +40,10 @@ pub(crate) struct CutArgs {
     /// Delivered month, `YYYY-MM`.
     #[arg(long)]
     month: String,
-    /// Session window to cut. `asia` is the first nine hours of the CME
-    /// session, `london` the six after it.
-    #[arg(long, default_value = "asia")]
-    window: String,
+    /// Session window to cut, as a slice of the CME session measured from the
+    /// reopen.
+    #[arg(long, value_enum, default_value_t = WindowArg::Asia)]
+    window: WindowArg,
     /// Corpus root holding `<symbol>v/<month>.<state>.tbbo`.
     #[arg(long, default_value = "research/market-data/databento")]
     root: PathBuf,
@@ -62,6 +62,40 @@ pub(crate) struct CutArgs {
     /// Where to write the library JSON.
     #[arg(long)]
     out: PathBuf,
+}
+
+/// The CLI spelling of `mogwai_lab::segments::WINDOWS`.
+///
+/// A separate type rather than a `ValueEnum` on `SessionWindow` because
+/// `mogwai-lab` carries no clap dependency, and because `SessionWindow` is a
+/// struct of offsets rather than an enum. The two lists cannot drift:
+/// `every_cuttable_window_has_a_command_line_spelling` holds this enum's
+/// resolved names against `WINDOWS` in both directions, which is the pinning
+/// the previous `String` plus `window_by_name` had no way to do - an added
+/// window was simply unreachable from `--window`, and `--help` enumerated
+/// nothing at all.
+#[derive(Copy, Clone, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub(crate) enum WindowArg {
+    /// The first nine hours of the session, exchange-local 17:00 to 02:00.
+    Asia,
+    /// Exchange-local 02:00 to 08:00, the six hours after Asia.
+    London,
+    /// Exchange-local 08:00 to 11:00, the cash open with a half-hour lead-in.
+    NyMorning,
+    /// Exchange-local 09:30 to 15:00, the second half of the cash session.
+    NyAfternoon,
+}
+
+impl WindowArg {
+    fn resolve(self) -> segments::SessionWindow {
+        match self {
+            WindowArg::Asia => segments::ASIA,
+            WindowArg::London => segments::LONDON,
+            WindowArg::NyMorning => segments::NY_MORNING,
+            WindowArg::NyAfternoon => segments::NY_AFTERNOON,
+        }
+    }
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -122,7 +156,7 @@ pub(crate) fn run(command: SegmentsCommand) -> anyhow::Result<()> {
 }
 
 fn cut(args: CutArgs) -> anyhow::Result<()> {
-    let window = segments::window_by_name(&args.window)?;
+    let window = args.window.resolve();
     let dir = match args.dir {
         Some(dir) => dir,
         None => segments::corpus_dir(&args.root, &args.symbol, &args.month)?,
@@ -348,4 +382,64 @@ fn emit_bar(bar: &BarAcc, interval: NonZeroU64, out: &mut impl Write) -> anyhow:
         bar.count
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::ValueEnum;
+    use mogwai_lab::segments;
+
+    use super::WindowArg;
+
+    /// The `--window` enum and `WINDOWS` are one list written twice, so the
+    /// identity between them is asserted rather than assumed. BOTH DIRECTIONS
+    /// MATTER and they fail differently: a `WindowArg` naming a window the lab
+    /// does not have is an argument that parses and then refuses at run time,
+    /// while a `WINDOWS` entry with no `WindowArg` is a cuttable window that
+    /// `--window` cannot reach and `--help` does not list. The second is what
+    /// the previous `String` argument shipped - `ny-morning` and
+    /// `ny-afternoon` were cuttable but undocumented on the command line, and
+    /// the argument's own help text named only two of the four.
+    #[test]
+    fn every_cuttable_window_has_a_command_line_spelling() {
+        let spelled: Vec<&str> = WindowArg::value_variants()
+            .iter()
+            .map(|arg| arg.resolve().name)
+            .collect();
+        for name in &spelled {
+            segments::window_by_name(name).unwrap_or_else(|e| {
+                panic!("--window {name} must name a window the lab can cut: {e}")
+            });
+        }
+        for window in segments::WINDOWS {
+            assert!(
+                spelled.contains(&window.name),
+                "the cuttable window {} has no --window spelling, so nothing can ask for it",
+                window.name
+            );
+        }
+        assert_eq!(
+            spelled.len(),
+            segments::WINDOWS.len(),
+            "--window must spell exactly the cuttable windows, no more and no fewer"
+        );
+    }
+
+    /// The kebab-case rename is load-bearing: `NyMorning` resolves to the lab's
+    /// `ny-morning`, and clap must ACCEPT that same string, or the enum's
+    /// variant name and the lab's name would be two different command-line
+    /// spellings with only one of them documented.
+    #[test]
+    fn the_command_line_spelling_is_the_labs_own_name() {
+        for arg in WindowArg::value_variants() {
+            let name = arg.resolve().name;
+            let parsed = WindowArg::from_str(name, true)
+                .unwrap_or_else(|e| panic!("clap must accept --window {name}: {e}"));
+            assert_eq!(
+                parsed.resolve().name,
+                name,
+                "--window {name} must parse back to the window it names"
+            );
+        }
+    }
 }

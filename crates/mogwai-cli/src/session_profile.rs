@@ -18,8 +18,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand};
-use mogwai_lab::session_profile::Alignment;
+use clap::{Args, Subcommand, ValueEnum};
+use mogwai_lab::session_profile::{Alignment, MODEL_CLOCK_ALIGNMENT_DEFAULT};
 
 #[derive(Subcommand)]
 pub(crate) enum SessionProfileCommand {
@@ -41,24 +41,57 @@ pub(crate) struct SessionProfileArgs {
     /// it, so this decides what the fit means.
     #[arg(long, default_value = "MNQ")]
     preset: String,
-    /// Read historical civil labels against the preset's fixed offset
-    /// (`civil`, the default) or as instants (`instant`). Civil is the
-    /// default because it lands CST and CDT observations on the same
-    /// canonical session phase, so no season disproportionately supplies the
-    /// boundary buckets.
-    #[arg(long, default_value = "civil")]
-    alignment: String,
+    /// How historical labels are read. Civil is the default because it lands
+    /// CST and CDT observations on the same canonical session phase, so no
+    /// season disproportionately supplies the boundary buckets.
+    // NOT A DOC COMMENT: this is for the next maintainer, not the operator
+    // reading `--help`. The default is the lab's
+    // `MODEL_CLOCK_ALIGNMENT_DEFAULT` rather than a second declaration of it -
+    // the alignment the model runs on is the lab's fact. Until 2026-08-20 it
+    // was stated in both places, dead in the lab and live here.
+    #[arg(long, value_enum, default_value_t = AlignmentArg::of(MODEL_CLOCK_ALIGNMENT_DEFAULT))]
+    alignment: AlignmentArg,
+}
+
+/// The CLI spelling of [`Alignment`].
+///
+/// It is a separate type rather than a `ValueEnum` derive on the lab's enum
+/// because `mogwai-lab` carries no clap dependency and must not grow one to
+/// describe an argument. The pair cannot drift: [`AlignmentArg::resolve`] is
+/// total in one direction and [`AlignmentArg::of`] matches EXHAUSTIVELY on
+/// `Alignment` in the other, so a variant added to the lab fails to compile
+/// here rather than becoming unreachable from the command line. The DEFAULT
+/// is not a third encoding: `of` is what carries the lab's
+/// `MODEL_CLOCK_ALIGNMENT_DEFAULT` onto the command line.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub(crate) enum AlignmentArg {
+    /// Read historical civil labels against the preset's fixed offset.
+    Civil,
+    /// Read historical labels as instants.
+    Instant,
+}
+
+impl AlignmentArg {
+    /// The spelling of a lab alignment. EXHAUSTIVE BY CONSTRUCTION: a variant
+    /// added to `Alignment` fails this match to compile, so the new alignment
+    /// cannot ship without a command-line name.
+    const fn of(alignment: Alignment) -> Self {
+        match alignment {
+            Alignment::Civil => AlignmentArg::Civil,
+            Alignment::Instant => AlignmentArg::Instant,
+        }
+    }
+
+    fn resolve(self) -> Alignment {
+        match self {
+            AlignmentArg::Civil => Alignment::Civil,
+            AlignmentArg::Instant => Alignment::Instant,
+        }
+    }
 }
 
 const DEFAULT_ARCHIVE: &str = "research/market-data/nq-1m_bk.zip";
-
-fn alignment_of(name: &str) -> anyhow::Result<Alignment> {
-    match name {
-        "civil" => Ok(Alignment::Civil),
-        "instant" => Ok(Alignment::Instant),
-        other => anyhow::bail!("unknown alignment {other}; expected civil or instant"),
-    }
-}
 
 pub(crate) fn run(command: SessionProfileCommand) -> anyhow::Result<()> {
     let (args, is_fit) = match command {
@@ -68,7 +101,7 @@ pub(crate) fn run(command: SessionProfileCommand) -> anyhow::Result<()> {
     let archive = args
         .archive
         .unwrap_or_else(|| PathBuf::from(DEFAULT_ARCHIVE));
-    let alignment = alignment_of(&args.alignment)?;
+    let alignment = args.alignment.resolve();
     let report = if is_fit {
         mogwai_lab::session_profile::fit_report(&archive, alignment, &args.preset)
     } else {
@@ -77,4 +110,44 @@ pub(crate) fn run(command: SessionProfileCommand) -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("session profile refused: {e}"))?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::ValueEnum;
+    use mogwai_lab::session_profile::Alignment;
+
+    use super::AlignmentArg;
+
+    /// `AlignmentArg::of` IS THE GATE, not the assertions here.
+    ///
+    /// `AlignmentArg` and `Alignment` are two spellings of one quantity, and
+    /// the VARIANTS are the half neither side can derive from the other - a
+    /// clap name is not computable from a Rust identifier - so the identity is
+    /// asserted. `of` is exhaustive over `Alignment`, so adding a variant to
+    /// the lab breaks the COMPILE rather than silently leaving the new
+    /// alignment with no command-line spelling, which is the failure mode the
+    /// hand-rolled `match` on a `String` had, where an unknown name was a
+    /// runtime bail and a new alignment was simply unreachable.
+    ///
+    /// The DEFAULT is a different case and is NOT asserted here, because it is
+    /// derivable and therefore derived: the argument's `default_value_t` reads
+    /// the lab's `MODEL_CLOCK_ALIGNMENT_DEFAULT` through `of`. Until 2026-08-20
+    /// that constant had zero readers workspace-wide while the CLI declared
+    /// `Civil` a second time, so the quantity had three encodings and a gate on
+    /// two of them.
+    #[test]
+    fn every_alignment_has_a_command_line_spelling() {
+        for alignment in [Alignment::Civil, Alignment::Instant] {
+            assert!(
+                AlignmentArg::of(alignment).resolve() == alignment,
+                "the command-line spelling must resolve back to the alignment it names"
+            );
+        }
+        assert_eq!(
+            AlignmentArg::value_variants().len(),
+            2,
+            "every AlignmentArg variant must be covered by the exhaustive match above"
+        );
+    }
 }

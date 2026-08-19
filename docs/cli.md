@@ -479,15 +479,15 @@ dirty working tree because the artifact's `binding.harness_tree_commit` must
 name exactly the code that ran. `fit` runs the protocol-11 session
 calibration - the observed corpus pass, the closed-form session refits, the
 CRN `vol_scalar` solve and the family probes - under the same clean-tree
-binding, writing under `target/` by default rather than over the committed
-`analysis/mnq-fit.json`.
+binding, writing to `analysis/out/mnq-fit.json` by default rather than over the
+committed `analysis/mnq-fit.json`.
 
 `synth fingerprint` and `synth cadence` are the fingerprint and cadence
 synthesis paths (`analysis/build_fingerprint.py`/`build_cadence.py`):
 `fingerprint` reads `char_<PAIR>.json` reports plus a cadence measurement,
 `cadence` streams raw Binance trade archives. Neither writes into
 `analysis/` unless `--out` names a path there explicitly - the bare default
-is a `target/mogwai-synth/` scratch path. `cadence-feasible` reads a cadence
+is `analysis/out/`, which is gitignored. `cadence-feasible` reads a cadence
 measurement and prints the `check_cadence_feasible.py` L0
 structural-proceed verdict (PROCEED/CLOSE/STOP AND ASK) read off its
 `children_mean`/`children_single_frac` anchors, exiting nonzero on anything

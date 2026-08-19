@@ -3,7 +3,8 @@
 
 //! `mogwai man [TOPIC]` - the bundled reference docs.
 //!
-//! The durable `reference/*.md` docs are compiled into the binary with
+//! The durable `docs/*.md` and `reference/*.md` documents are compiled into
+//! the binary with
 //! `include_str!` and rendered to the terminal through the markdown->ANSI
 //! renderer in `render`. With no topic, list what is available; with a topic,
 //! render it (colour auto-disabled when stdout is not a TTY or `NO_COLOR` is
@@ -75,7 +76,11 @@ fn summary(topic: ManTopic) -> &'static str {
 }
 
 /// The bundled markdown for a topic, compiled into the binary. Each topic maps
-/// to one `reference/*.md`.
+/// to exactly one durable document: five under `docs/` and two under
+/// `reference/`, per the split the `ManTopic` doc above states. It is NOT
+/// `reference/*.md` throughout, which this comment claimed until 2026-08-20 -
+/// most of what an operator needs is `docs/`, which is the folder that
+/// documents how the venue is USED.
 fn content(topic: ManTopic) -> &'static str {
     match topic {
         ManTopic::Cli => include_str!("../../../docs/cli.md"),

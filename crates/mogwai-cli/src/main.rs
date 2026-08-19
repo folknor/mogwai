@@ -143,6 +143,20 @@ struct ServeArgs {
     launcher_pid: Option<i32>,
 }
 
+/// A preset document as `mogwai presets <name>` prints it: the document with
+/// exactly one trailing newline, whatever the bundled file carries.
+///
+/// The dispatcher used a bare `print!` of the document, so the trailing newline
+/// was a property of the INCLUDED FILE rather than of the command. A preset
+/// saved without a final newline left the shell prompt mid-line; one saved with
+/// a blank line at the end printed two. Every shipped preset happens to end in
+/// exactly one newline today, so nothing in this workspace can currently
+/// observe the difference - which is why this is a function with its own unit
+/// tests rather than a one-liner at the call site.
+fn preset_output(document: &str) -> String {
+    format!("{}\n", document.trim_end_matches('\n'))
+}
+
 fn main() -> anyhow::Result<()> {
     // FIRST, before the argv parse: the benchmark marker timeline is measured
     // from here, so anything ahead of this line is invisible to a phase
@@ -160,7 +174,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(name) = args.name {
                 let document = config::preset_document(&name)
                     .ok_or_else(|| anyhow::anyhow!("unknown preset {name}"))?;
-                print!("{document}");
+                print!("{}", preset_output(document));
             } else {
                 for name in config::preset_names() {
                     println!("{name}");
@@ -211,7 +225,40 @@ mod tests {
     use clap::Parser;
     use mogwai_protocol::launch::{LaunchSpec, serve_argv};
 
-    use super::{Cli, Command, r#gen};
+    use super::{Cli, Command, r#gen, preset_output};
+
+    /// The three endings a preset FILE can have, normalized to the one ending
+    /// the terminal needs.
+    ///
+    /// The middle case is the one the shipped presets exercise and is
+    /// therefore the only one the end-to-end test in `presets_cli.rs` can see;
+    /// the other two are the ones the old `print!` got wrong and no committed
+    /// preset can produce. Asserting the empty document too pins that the
+    /// normalization does not invent a document out of nothing - it emits the
+    /// bare newline, not a blank line plus one.
+    #[test]
+    fn a_preset_document_prints_with_exactly_one_trailing_newline() {
+        assert_eq!(
+            preset_output("symbol = \"MNQ\""),
+            "symbol = \"MNQ\"\n",
+            "a document with no trailing newline must not leave the prompt mid-line"
+        );
+        assert_eq!(
+            preset_output("symbol = \"MNQ\"\n"),
+            "symbol = \"MNQ\"\n",
+            "a document already ending in one newline must pass through unchanged"
+        );
+        assert_eq!(
+            preset_output("symbol = \"MNQ\"\n\n\n"),
+            "symbol = \"MNQ\"\n",
+            "trailing blank lines must not reach the terminal"
+        );
+        assert_eq!(
+            preset_output(""),
+            "\n",
+            "an empty document prints one newline, not a blank line plus one"
+        );
+    }
 
     /// THE LAUNCHER'S RENDERING AND THE VENUE'S PARSER ARE ONE CONTRACT, AND
     /// THIS IS THE ONLY PLACE THE TWO MEET.

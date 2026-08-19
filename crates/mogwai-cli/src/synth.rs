@@ -8,8 +8,9 @@
 //! CWD-relative, matching `mogwai measure`/`mogwai preflight`; everything is
 //! overridable. NONE of these subcommands overwrite the committed
 //! `analysis/fingerprint.json`/`analysis/cadence.json` by default - `--out`
-//! must be given explicitly to write anywhere inside `analysis/`, and the
-//! default `--out` for both is a `target/` scratch path.
+//! must be given explicitly to write over either, and the default `--out` for
+//! both is under `analysis/out/`, this repository's gitignored output
+//! directory.
 
 use std::path::PathBuf;
 
@@ -34,9 +35,8 @@ pub(crate) struct FingerprintArgs {
     /// The cadence measurement to fold in. Defaults to `analysis/cadence.json`.
     #[arg(long, value_name = "PATH")]
     cadence: Option<PathBuf>,
-    /// Where to write the fingerprint. Defaults to a `target/` scratch
-    /// path - never the committed `analysis/fingerprint.json` unless given
-    /// explicitly.
+    /// Where to write the fingerprint. Defaults to `analysis/out/` - never
+    /// the committed `analysis/fingerprint.json` unless given explicitly.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,
 }
@@ -47,7 +47,13 @@ const DEFAULT_CADENCE: &str = "analysis/cadence.json";
 /// consults. Distinct from `DEFAULT_FINGERPRINT_OUT`, which is where synthesis
 /// WRITES so a bare invocation cannot clobber the committed artifact.
 const DEFAULT_FINGERPRINT_IN: &str = "analysis/fingerprint.json";
-const DEFAULT_FINGERPRINT_OUT: &str = "target/mogwai-synth/fingerprint.json";
+/// `analysis/out/`, this repository's gitignored output directory, for the
+/// reason spelled out on `fit`'s `DEFAULT_OUT`: it was `target/mogwai-synth/`
+/// until 2026-08-20, and `artifact_path` resolves a bare default against the
+/// WORKING DIRECTORY, so a synth run from elsewhere created a directory called
+/// `target` under the operator's feet. The point of the default is only that it
+/// is not `DEFAULT_FINGERPRINT_IN`.
+const DEFAULT_FINGERPRINT_OUT: &str = "analysis/out/fingerprint.json";
 
 #[derive(Args)]
 pub(crate) struct CadenceArgs {
@@ -56,15 +62,14 @@ pub(crate) struct CadenceArgs {
     /// to `research/market-data/`.
     #[arg(long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
-    /// Where to write the cadence measurement. Defaults to a `target/`
-    /// scratch path - never the committed `analysis/cadence.json` unless
-    /// given explicitly.
+    /// Where to write the cadence measurement. Defaults to `analysis/out/` -
+    /// never the committed `analysis/cadence.json` unless given explicitly.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,
 }
 
 const DEFAULT_DATA_DIR: &str = "research/market-data";
-const DEFAULT_CADENCE_OUT: &str = "target/mogwai-synth/cadence.json";
+const DEFAULT_CADENCE_OUT: &str = "analysis/out/cadence.json";
 
 pub(crate) fn run(command: SynthCommand) -> anyhow::Result<()> {
     match command {

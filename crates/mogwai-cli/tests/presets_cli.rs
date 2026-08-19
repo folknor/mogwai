@@ -85,3 +85,43 @@ fn every_listed_preset_is_fetchable_by_name() {
         );
     }
 }
+
+/// A fetched preset ends in exactly one newline, whatever the bundled file
+/// carries.
+///
+/// The dispatcher used `print!`, so the trailing newline was a property of the
+/// included document rather than of the command: a preset file saved without a
+/// final newline left the shell prompt mid-line, and one saved with a blank
+/// line at the end printed two. Every shipped preset happens to end in one
+/// newline today, WHICH IS EXACTLY WHY THIS NEEDS A TEST RATHER THAN AN
+/// EYEBALL - the defect is invisible until someone edits a preset file, and
+/// then it is invisible in every automated check too.
+///
+/// Asserting "exactly one" rather than "at least one" is what makes it bite in
+/// both directions: `print!` on a document with a trailing blank line already
+/// emits two, so a test demanding only a non-empty ending would have passed on
+/// the broken dispatcher for every preset in the tree.
+#[test]
+fn a_fetched_preset_ends_in_exactly_one_newline() {
+    for name in mogwai_server::config::preset_names() {
+        let fetched = Command::new(common::venue_binary())
+            .arg("presets")
+            .arg(name)
+            .output()
+            .expect("fetching a preset");
+        assert!(
+            fetched.status.success(),
+            "presets {name} exited {:?}",
+            fetched.status
+        );
+        let text = String::from_utf8(fetched.stdout).expect("the document is utf-8");
+        assert!(
+            text.ends_with('\n'),
+            "presets {name} left the terminal mid-line: the output has no trailing newline"
+        );
+        assert!(
+            !text.ends_with("\n\n"),
+            "presets {name} emitted a blank line at the end; the command normalizes to one"
+        );
+    }
+}

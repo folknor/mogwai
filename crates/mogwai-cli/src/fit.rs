@@ -26,7 +26,20 @@ const DEFAULT_PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
 /// The Python-era scratch directory whose `cache/` subdirectory holds the
 /// protocol-11 run's walk summaries.
 const DEFAULT_PYTHON_CACHE_DIR: &str = "analysis/out/mnq-fit-scratch";
-const DEFAULT_OUT: &str = "target/mogwai-fit/mnq-fit.json";
+/// Deliberately NOT the committed `analysis/mnq-fit.json`: a bare `fit` run
+/// must not overwrite the blessed artifact.
+///
+/// It named `target/mogwai-fit/` until 2026-08-20, which got the "not the
+/// committed artifact" half right and the directory half wrong twice over.
+/// `artifact_path` resolves a bare default against the WORKING DIRECTORY by
+/// design - an artifact is the operator's file and is deliberately never
+/// cached - so a fit run from anywhere but the repository root created a
+/// directory literally called `target` under the operator's feet, reading as a
+/// build directory that `cargo clean` would take. `analysis/out/` is this
+/// repository's gitignored output directory and is what `preflight` and
+/// `measure` already default into, so the whole repo-scoped toolbox now writes
+/// its unblessed output to one honestly repo-shaped place.
+const DEFAULT_OUT: &str = "analysis/out/mnq-fit.json";
 
 #[derive(Args)]
 pub struct FitArgs {
@@ -53,8 +66,9 @@ pub struct FitArgs {
     #[arg(long, value_name = "SHA")]
     cache_commit: Option<String>,
     /// Where to write the fit artifact. An ARTIFACT (storage policy): never
-    /// cached, never auto-deleted. Defaults UNDER `target/` so a bare
-    /// invocation can never clobber the committed `analysis/mnq-fit.json`.
+    /// cached, never auto-deleted. Defaults to `analysis/out/mnq-fit.json`,
+    /// a distinct path in this repository's gitignored output directory, so a
+    /// bare invocation can never clobber the committed `analysis/mnq-fit.json`.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,
 }

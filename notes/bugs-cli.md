@@ -6,7 +6,14 @@ subcommands, the thin `serve` hand-off, and the socket-backed integration tests
 that live in this crate.
 
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
-Confidence labels are the hunter's own.
+Confidence labels are the hunter's own, and they were worth discounting: FOUR
+OF THE EIGHT FINDINGS WERE WHOLLY OR PARTLY STALE - already fixed in the tree
+the hunter read - and finding 8 argued from a subcommand count, a set of line
+counts and a reading of `run_b1` that none of them survived checking.
+
+EXHAUSTED as of round 3, 2026-08-20. All eight findings are closed: seven
+fixed, finding 8's binary split refused with its evidence recorded in place so
+a later reader does not re-derive it.
 
 The hunter reports editing nothing, and verified its claims against the tape
 constant, the committed artifacts' recorded versions (11 and 14), and cargo's
@@ -338,42 +345,210 @@ refusal alone fails the test on `a calendar out of ascending order must be
 refused`, with the duplicate, count and type arms still green - so the ordering
 half is selected by the perturbation and by the message both.
 
-## 8. Structural: the shipped venue binary carries roughly 13,000 lines of retired-protocol evidence tooling
+## 8. RESOLVED 2026-08-20 (fix pass, round 3): the split is REFUSED, the four smaller notes are FIXED
 
-`main.rs` dispatches 25 subcommands. `serve` - the only one the launcher, the
-adapter, and every consumer ever invokes - is three lines of hand-off. The other
-24 include `stage-m` (1604 lines plus 1550 for tier2), `ordered-counts` (1298),
-`count-curve` (691), `arrival-screen` (742), `arrival-control` (636),
-`slow-geometry` (701): one-shot drivers for specific numbered bricks of
-protocols 11, 12a and 12b, several of which exist to reproduce a Python script
-that no longer exists. Every one of them is linked into
-`target/release/mogwai`, the binary `PR_SET_PDEATHSIG` and the shipped launcher
-exec, and into every consumer's `cargo install mogwai-cli`.
+THE BINARY SPLIT IS REFUSED, with the evidence below so a later reader does not
+re-derive it. The four smaller structural notes it carried are independent of
+the split and are all fixed. The deferred `notes/todo.md` question about
+repo-shaped artifact defaults, which was explicitly parked "decide it with
+finding 8", is decided and closed.
 
-This has concrete costs beyond size. `arrival_control::run_b1` refuses unless
-`current_exe()` ends with `target/release/mogwai` - the research driver and the
-venue binary are the same executable, so B1's "exec the shipped binary" trick
-works only in a release build from the repo root, and the driver has to defend
-against being itself. `mogwai man` exists specifically because an installed
-binary has no source tree beside it, yet half the subcommands hardcode
-`research/market-data/databento/mnqv/2026-07.full.tbbo` and `analysis/...` as
-CWD-relative defaults and are meaningless anywhere but this checkout.
+THE REFUSAL RESTS ON THREE THINGS, and a re-proposal has to answer all three:
+the finding READS `run_b1` BACKWARDS and its strongest concrete cost is an
+argument against the split; the size benefit is ALREADY BANKED, because the
+method is `mogwai-lab` and the lab stays linked into the venue binary whatever
+moves; and the cost is two hundred path rewrites plus a NEW build-identity
+mechanism to replace the one the split destroys. Two things that could have
+sunk the refusal independently were checked and did NOT - there is no
+dependency cycle and the `test-seam` mechanism survives a move - so the
+refusal is not a build obstacle wearing an argument's clothes. All three, and
+both checks, are written out below.
 
-The hunter would split this: `mogwai` keeps `serve`, `gen`, `presets`, `man`,
-`config` - the things a consumer of the venue uses - and a second binary
-(`mogwai-lab`, in the crate that already owns the method library) takes the
-whole intake and measurement and brick toolbox. That also puts the
-repo-relative default paths in a binary that is honestly repo-scoped, and lets
-the lab binary depend on git and on the corpus without the venue doing so.
-Pre-1.0, this costs a rename in `brokkr.toml`'s bench targets and a doc pass;
-the bin TARGET name `mogwai` that `AGENTS.md` flags as load-bearing stays on the
-venue half, so nothing that keys on it breaks.
+### What reproduced, and what did not
 
-Smaller structural notes in the same direction: `session_profile --alignment`
-and `segments cut --window` are stringly-typed with hand-rolled `match`
-validation where every other enum-shaped flag in the crate is a clap
-`ValueEnum` (so they get no `--help` enumeration and no shell completion);
-`man.rs`'s `content()` doc says "Each topic maps to one `reference/*.md`" when
-five of the seven are `docs/*.md`; and `presets <name>` uses `print!` rather
-than `println!`, so a preset document without a trailing newline leaves the
-shell prompt mid-line.
+- THE SUBCOMMAND COUNT IS 22, NOT 25, and one of the five the proposal wants
+  the venue half to keep - `config` - IS NOT A SUBCOMMAND AT ALL. `mogwai`
+  dispatches Serve, Gen, Presets, TickComposition, Man, Preflight, Measure,
+  CountCurve, StageM, Fit, MinuteRangeEnvelope, ArrivalControl, ArrivalScreen,
+  ArrivalEnvelopeDiagnostic, Cache, Characterize, SelectWindows,
+  TickCompositionRatios, SessionProfile, Synth, CadenceFeasible and Segments.
+  `mogwai_server::config` is a MODULE the `presets` arm calls, not a command
+  line. Several line counts are understated too: count-curve is 817 not 691,
+  arrival-screen 831 not 742, arrival-control 812 not 636. `serve` being a
+  three-line hand-off reproduces exactly.
+- THE CWD-RELATIVE DEFAULTS REPRODUCE, and there are more than the finding
+  implies: `research/market-data/...` or `analysis/...` defaults appear in
+  `preflight`, `measure`, `fit`, `minute_range_envelope`, `arrival_control`,
+  `arrival_screen`, `arrival_envelope_diagnostic`, `select_windows`,
+  `session_profile`, `segments` and `synth`.
+- THE `current_exe` REFUSAL REPRODUCES VERBATIM, AND THE FINDING READS IT
+  BACKWARDS. `run_b1` bails unless `current_exe()` ends with
+  `target/release/mogwai`, and the finding calls this "the driver having to
+  defend against being itself". Being itself is the DESIGN, and the doc comment
+  above it says why: B1 execs `gen --type trades` and compares the bytes
+  against pre-landing tapes, so the binary that generates the comparison must
+  be the binary under test, "since the driver IS the shipped binary and so
+  cannot disagree with itself about which build ran". SPLITTING BREAKS THIS
+  OUTRIGHT: `gen` is a venue-half subcommand, so a lab binary running B1 has no
+  `gen` to exec and must locate the venue binary by path or by argument -
+  reintroducing precisely the build-identity ambiguity the current form
+  forecloses. The finding's strongest concrete cost is an argument AGAINST the
+  split.
+- THE SIZE ARGUMENT IS MOSTLY ALREADY BANKED, which the finding does not
+  account for. The METHOD is already a separate crate: `mogwai-lab` carries
+  `measure12a`, `arrival_screen`, `arrival_control`, `fit`, `characterize`,
+  `select_windows`, `session_profile`, `segments`, `stage_a_batch` and the rest.
+  What sits in `mogwai-cli` is the DRIVER layer over it - argv parsing, artifact
+  assembly, JSON writing. And `mogwai-lab` stays a dependency of the venue
+  binary whatever moves, because `gen` reaches into it eighteen times and
+  `main` calls `sidecar::init` before the argv parse. So the split relocates
+  drivers while the intake method it is meant to unship remains linked.
+- THE COST IS NOT "a rename in `brokkr.toml`'s bench targets and a doc pass".
+  It is roughly two hundred `mogwai_lab::` paths rewritten to `crate::` across
+  about twelve thousand lines of one-shot brick drivers, several of which have
+  no test at all; six integration test files relocated; the `attestation.rs`
+  source roster and its keying moved with them; a NEW build-identity mechanism
+  for B1 to replace the one the split destroys; and the durable prose in
+  `AGENTS.md`, `docs/cli.md` and `reference/architecture.md`. The arc's
+  signature defect, forty instances deep, is A THING THAT READS AS GATED AND IS
+  NOT, and this is the largest single opportunity in the arc to manufacture one,
+  bought with a benefit that is largely already banked and paid for with a
+  regression in the one gate the finding cites as its motivation.
+
+Two things the fix pass checked because they could have sunk the split
+independently, and neither did - recorded so the refusal is not read as resting
+on them. `mogwai-lab` CAN host a binary: it already depends on `mogwai-data`,
+`mogwai-protocol` and `mogwai-server` and none of the three depends on it, so
+the direction holds. And the `test-seam` mechanism SURVIVES a move: the lab's
+seam is `#[cfg(any(test, feature = "test-seam"))]`, so moved unit tests would
+reach it through `cfg(test)` within the crate while a lab BINARY target, which
+sets neither, would still have no installation point. The refusal rests on the
+B1 inversion, the already-banked size, and the cost, not on a build obstacle.
+
+### The four smaller notes, all fixed
+
+- `session_profile --alignment` IS A `ValueEnum` NOW. A CLI-side `AlignmentArg`
+  rather than a derive on the lab's `Alignment`, because `mogwai-lab` carries no
+  clap dependency and must not grow one to describe an argument. The two
+  spellings are pinned by `every_alignment_has_a_command_line_spelling`, whose
+  gate is a match EXHAUSTIVE over `Alignment`: an alignment added to the lab
+  fails this test's compile rather than becoming silently unreachable from the
+  command line. ITS BITE IS THEREFORE A COMPILE FAILURE, not a red assertion,
+  and no run-time perturbation demonstrates it - said plainly rather than
+  described as a cleaner check than was run.
+- `segments cut --window` IS A `ValueEnum` NOW, AND IT WAS WORSE THAN REPORTED.
+  The hand-rolled `String` plus `window_by_name` meant `--help` enumerated
+  nothing, and the argument's OWN help text named only `asia` and `london` when
+  `WINDOWS` carries four - so `ny-morning` and `ny-afternoon` were cuttable and
+  undocumented on the command line. Two gates, both bite-checked as text edits:
+  deleting the `NyAfternoon` variant and its `resolve` arm failed
+  `every_cuttable_window_has_a_command_line_spelling` on `the cuttable window
+  ny-afternoon has no --window spelling, so nothing can ask for it` - the
+  unreachable-window direction by name, which is the one that matters, since
+  the other direction is a run-time refusal rather than a silent hole. And
+  editing the lab's `NY_MORNING.name` to `ny_morning` failed
+  `the_command_line_spelling_is_the_labs_own_name` on `clap must accept
+  --window ny_morning: invalid variant`, which pins that the kebab-case rename
+  and the lab's own name are one string rather than two.
+- `man.rs` NO LONGER CLAIMS `reference/*.md`. Both the `content()` doc and the
+  module doc said it; five of the seven topics are `docs/*.md`, which is the
+  folder documenting how the venue is USED and therefore exactly the right
+  source for a bundled operator manual. Corrected in both places, stating the
+  five-and-two split the `ManTopic` doc already described.
+- `presets <name>` NORMALIZES ITS TRAILING NEWLINE. The `print!` made the
+  ending a property of the included FILE rather than of the command: a preset
+  saved without a final newline left the prompt mid-line, one saved with a
+  blank line printed two. THE GATE ON THE DISPATCHER IS THE UNIT TEST ALONE.
+  `a_fetched_preset_ends_in_exactly_one_newline` in `presets_cli.rs` is an
+  end-to-end test through the shipped binary and IT CANNOT BITE TODAY: every
+  shipped preset happens to end in exactly one newline, so it passed unchanged
+  against the broken dispatcher when it was run against it. Do not read it as
+  the gate - it is a FORWARD GUARD on the preset FILES, which will bite the day
+  a preset is saved with the wrong ending. What actually gates the dispatcher
+  is the `preset_output` helper with `a_preset_document_prints_with_exactly_one
+  _trailing_newline` beside it, bite-checked as a text edit: reverting the
+  helper to the identity failed it on `a document with no trailing newline must
+  not leave the prompt mid-line`, `left: "symbol = \"MNQ\"", right: "symbol =
+  \"MNQ\"\n"`.
+
+### The deferred artifact-path question, decided
+
+`notes/todo.md` parked "whether `artifact_path` should refuse a non-bare default
+or whether these commands should name a directory" explicitly to be decided with
+this finding. DECIDED: the commands name a directory, and it is
+`analysis/out/`. `fit`'s `DEFAULT_OUT` and both `synth` outputs named
+`target/mogwai-fit/` and `target/mogwai-synth/`, and since `artifact_path`
+resolves a bare default against the WORKING DIRECTORY by design, a run from
+anywhere but the repository root created a directory literally called `target`
+under the operator's feet - reading as a build directory that a `cargo clean`
+would take. `analysis/out/` is this repository's gitignored output directory and
+is already where `preflight` and `measure` default, so the whole repo-scoped
+toolbox now writes unblessed output to one honestly repo-shaped place. The
+defaults' actual purpose - not clobbering the committed `analysis/mnq-fit.json`
+or `analysis/fingerprint.json` - is preserved, and it is stated in place on both
+constants. `artifact_path` is NOT changed: refusing a non-bare default would
+break `preflight`, `measure`, `arrival_control`, `arrival_screen` and
+`minute_range_envelope`, every one of which is honestly repo-scoped already.
+The item is removed from `notes/todo.md`. `docs/cli.md` stopped naming
+`target/` in both places.
+
+NO TAPE VERSION BUMP IS OWED. Nothing on the tape generation path moved: the
+`ValueEnum` conversions resolve to the identical `SessionWindow` constants and
+the identical `Alignment`, the preset newline is terminal output, and the three
+artifact defaults name where an OFFLINE artifact lands rather than what a walk
+draws. `TAPE_PROTOCOL_VERSION` is 22.
+
+### Cold review of the round-3 fix pass, closed 2026-08-20
+
+The review confirmed the refusal's central argument independently, and
+confirmed the mechanics of all four smaller fixes - all four `WindowArg` names
+match `mogwai_lab::segments::WINDOWS` with help text matching the lab's offsets
+and lengths, both `--window` gates bite, the `AlignmentArg` exhaustive match is
+the compile-time gate it claims to be, `analysis/out/` is gitignored and both
+writers `create_dir_all` their parent so the new defaults work from a fresh
+clone, `man.rs`'s five-and-two split is right, and `docs/cli.md` already said
+`--window` "is one of four" so there was no doc drift to fix. Two findings, both
+real, both closed:
+
+- THE FIX REPRODUCED ITS OWN DEFECT CLASS TWO FILES OVER. Finding 8's list
+  included "a doc comment claiming the wrong folder"; the constants moved to
+  `analysis/out/` and THREE clap/module doc comments did not, so `mogwai fit
+  --help` and `mogwai synth fingerprint --help` named `target/` and lied to the
+  operator. `CadenceArgs::out` in the same file had been updated, which is what
+  makes the others oversights rather than intent. All three corrected:
+  `fit.rs`'s `out` field, `synth.rs`'s `FingerprintArgs::out`, and `synth.rs`'s
+  MODULE doc, which the review did not name and which said the same thing.
+  THE `fit.rs` SENTENCE'S CLAIM SURVIVES THE MOVE and was checked rather than
+  reworded around: the claim is that a bare invocation cannot clobber the
+  committed `analysis/mnq-fit.json`, and the default is now
+  `analysis/out/mnq-fit.json` - a DIFFERENT path, in a directory `.gitignore`
+  covers as `/analysis/out/`, while `analysis/mnq-fit.json` is tracked. The
+  reasoning is no longer "under `target/`" but "a distinct path in the
+  gitignored output directory", and the comment says that now.
+- `MODEL_CLOCK_ALIGNMENT_DEFAULT` WAS A DEAD THIRD ENCODING, instance 41 of the
+  arc's signature defect and the sharpest form of it yet: a test whose doc
+  claimed to pin two encodings "where neither side can be derived from the
+  other" while a THIRD, derivable, zero-reader encoding sat in the lab. Closed
+  by WIRING rather than deleting, because the constant is where the fact
+  belongs - the alignment the model runs on is the lab's, not the CLI's. The
+  exhaustive match moved out of the test and into production as
+  `AlignmentArg::of`, and the argument is now
+  `default_value_t = AlignmentArg::of(MODEL_CLOCK_ALIGNMENT_DEFAULT)`, so the
+  default has ONE encoding and `of` is both the compile gate and the carrier.
+  The test's doc no longer claims what it does not do: it says the VARIANTS are
+  the underivable half it asserts, and that the DEFAULT is deliberately not
+  asserted BECAUSE it is derived. NOT BITE-CHECKED, AND IT CANNOT BE by a
+  run-time perturbation - `of`'s bite is a compile failure, exactly as
+  `every_alignment_has_a_command_line_spelling`'s was before it, and changing
+  the lab constant now changes the CLI default by construction rather than
+  producing a red assertion. Said plainly rather than described as a cleaner
+  check than was run.
+
+The review's three minor notes were judged and LEFT. `#[clap(rename_all =
+"kebab-case")]` is a no-op on both new enums, but it is pinned deliberately on
+`WindowArg` by `the_command_line_spelling_is_the_labs_own_name`, and carrying
+it on `AlignmentArg` too keeps the two new enums stating the same thing the
+same way; `segments.rs`'s `TapeType` lacking it is pre-existing cosmetics.
+`fit.rs`'s `create_dir_all` ahead of `write_json_atomic` is redundant and
+pre-existing, and removing it would couple the fit path to an implementation
+detail of the writer for no gain.
