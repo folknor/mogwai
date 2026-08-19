@@ -340,6 +340,18 @@ group by any other route has no API for it, and none is owed until one is wanted
   match over the file: the module's tests carry the same four strings as
   expected values, so grep reports eight.
 
+  A SECOND INSTANCE, found by the close pass over the same arc and worth fixing
+  in the same edit: `messages::validate_wire_symbol` refuses with "symbols are 1
+  to 32 characters" while the bound it compares against is `MAX_SYMBOL_LEN`.
+  It also says CHARACTERS where the check is `symbol.len()`, which is BYTES -
+  harmless only because the alphabet arm below it admits ASCII alone, so the two
+  cannot disagree today. This one is worth more than the divergence texts
+  because round 4 of `bugs-protocol` routed ORDER ENTRY through this function,
+  so the message is now what a client sees when its symbol is refused at the
+  venue's front door. Both refusals return `&'static str`, so interpolating the
+  constant means changing the return type or reaching for a `const` formatter -
+  which is why neither was fixed in passing.
+
 - NOTHING ON THE WIRE SAYS WHETHER A SUBMIT TOOK A MARKET READING, which forces
   one integration test to read the venue's LOG instead. Filed 2026-08-18 by the
   lifecycle-test fix pass.

@@ -20,7 +20,9 @@ number three different ways. ITS CLOSE PASS RAN ON 2026-08-19 AND WAS THE LAST
 OF THE TEST DOCUMENTS' - one finding, a runtime guard installed at two of six
 call sites; see that section. `bugs-protocol`, THE FIRST PRODUCTION-CODE REPORT OF THE ARC, CLOSED on
 2026-08-19 after five rounds, with no open findings apart from three recorded
-refusals - C, L and M - and five deferrals filed in `notes/todo.md`. `bugs-data`
+refusals - C, L and M - and five deferrals filed in `notes/todo.md`, AND A CLOSE
+PASS OVER ITS FIVE COMMITS on the same day - see that section near the end,
+which also states plainly what is closed and what remains. `bugs-data`
 starts next. From here the findings are about shipped behaviour rather than
 about the gates that watch it, and "the test cannot fail" stops being the
 default diagnosis.
@@ -2750,6 +2752,8 @@ the VENUE - a boat whose completion frame is not written to every attached
 socket before teardown closes them - not about the test's premises, which is
 why it belongs to a production round. Reproduce it before believing it: one in
 two here, and `bugs-tests-lifecycle` is closed, so nothing else is watching.
+NOW ALSO FILED IN `notes/bugs-server.md` AS ITS SECTION 9, which is where the
+round that works it will actually look; this paragraph dies with this section.
 
 Everything else held. The AGENTS.md edits were verified against the tree (the
 shared-fixture count really is three and `segment_library_conformance.json`
@@ -3652,6 +3656,90 @@ generalises:
   the lab/cli round-5 item about a refusal text hardcoding its cap - a live fact
   asserted inside a string literal, where no prose gate reaches. Worth folding
   into whichever round next touches those messages.
+
+## The protocol document, close pass: what the five commits left
+
+Ran 2026-08-19 over `c5c2209^..HEAD`, five commits. THE ARC'S FIRST
+PRODUCTION-CODE DOCUMENT, so the close pass had shipped behaviour to check and
+not only gates. ONE FINDING, and it is the arc's signature defect for the
+twenty-seventh time - A THING THAT READS AS SCOPED NARROWER THAN IT IS - in the
+unreviewed half of the round-4 commit, which is where all five previous close
+passes found theirs.
+
+- `validate_wire_symbol`'S DOC STILL SAID IT WAS A URL RULE. Round 4 routed
+  ORDER ENTRY through it - `validate_submit_order` calls it, and
+  `validate_submit_group` reaches it per member - and left the function's own
+  doc comment reading "validate a symbol that is carried directly in a URL query
+  string", with the alphabet justified entirely by percent encoding. So the one
+  place a reader looks before relaxing the rule described a blast radius of two
+  HTTP query params, while the real one now includes the venue's order carrier.
+  A caller widening the alphabet for a URL reason would have widened order entry
+  without knowing it. The doc now names every caller, says which ingress does
+  NOT use it (`config.rs`'s instrument `symbol`, the recorded asymmetry), and
+  states that relaxing it relaxes order entry.
+  - THE GENERAL SHAPE, and it is worth a habit: WHEN A FIX GIVES AN EXISTING
+    FUNCTION A NEW CALLER OF A DIFFERENT KIND, THE FUNCTION'S OWN DOC IS PART OF
+    THE FIX. Its old scope sentence does not become false gradually - it becomes
+    false at the moment the call lands, and nothing in the toolchain reads it.
+    The round wrote the new coupling down in three durable places
+    (`reference/performance.md`, `notes/todo.md`, the test's doc comment) and
+    not in the one a reader of the validator would reach.
+
+Everything else held, and the production changes were re-derived against source
+rather than read:
+
+- THE DECIMAL WIRE. Counted rather than trusted: `messages.rs` carries 35 serde
+  `Decimal` annotations - 25 `rust_decimal::serde::str` and 10
+  `crate::decimal::str_option` - and the hand-maintained table's rows cover
+  exactly those 35 fields across the ten named shapes. The count the round
+  wrote down is the count in the file. `str_option`'s `visit_some` really does
+  delegate to the dependency's `str` deserializer, so the optional rule cannot
+  drift from the required one, and `str_map` builds its map through the same
+  deserializer for the same reason.
+- THE POST-ONLY ORDER. The claim that both gates reach the rule in the same
+  position is TRUE, and it is stronger than the comments state: at the wire the
+  post-only arm sits after the whole type/price-shape match and before the
+  conditional-IOC arm, and `Engine::validate_submit` now has it in exactly that
+  slot - after its own shape match, before its conditional-IOC check. Moving it
+  up displaced nothing else.
+- THE WIRE/ENGINE DISAGREEMENT THAT LOOKS LIKE THE NEXT ONE IS NOT ONE. The wire
+  admits a priceless `Market` order and the engine rejects it with "submit price
+  required". That is a documented two-phase split, not drift: `validate_submit_order`
+  gates the PRE-stamp wire (a nautilus MARKET order carries no price there) and
+  the server stamps a synthetic execution price before the engine sees the
+  order. Recorded here because it is the first thing a reader auditing the
+  post-only unification will trip over.
+- `ADMISSION_FRAME_MAX_BYTES`. The corrected derivation computes:
+  `6 * (64 + 512) + 256` is 3712, and the next power of two is 4096.
+- THE LAUNCHER. `LaunchError::Thread`'s "no venue is left running" is true at
+  both sites - the owner-thread site never reaches the spawn, and the
+  reader-thread site falls through to `own_venue`'s unconditional kill-and-reap.
+  `read_ready` takes the handle by reference, so the stdout drain resumes on the
+  same handle; the bytes its `BufReader` pulled past the newline are lost, which
+  is correct for a reader that discards the rest. `docs/cli.md` promises FOUR
+  details of the guard and delivers four.
+
+## What is closed and what remains
+
+Six of the eleven `bugs-*` documents are CLOSED as of 2026-08-19, each after
+five rounds plus a close pass over its own commit arc:
+`bugs-tests-lifecycle`, `bugs-tests-adapter`, `bugs-tests-tape`,
+`bugs-tests-engine-protocol`, `bugs-tests-lab-cli` and `bugs-protocol`.
+
+FIVE REMAIN, in this order: `bugs-data`, `bugs-engine`, `bugs-server`,
+`bugs-cli`, `bugs-adapter`. All five are production-code documents, so the test
+arc's default diagnosis - "the test cannot fail" - is no longer the first thing
+to reach for; what carries from it is everything about the tests a production
+fix WRITES.
+
+THE DEFERRALS THE PROTOCOL ARC FILED live in `notes/todo.md` and each names the
+document that owes it: the `MarketToLimit` defect (one defect, two symptoms,
+owner-level, `bugs-engine`), `config.rs`'s instrument `symbol` alphabet
+asymmetry (owner-level, `mogwai-server`), the unrouted wall-clock budget
+(owner-level if anyone wants it mechanised), the launcher's single-process kill
+and its `killpg` remedy, and the refusal texts spelling their own ceilings as
+literals. The `run_complete_is_stamped_on_the_receiving_sockets_clock` lead is
+in `notes/bugs-server.md` section 9.
 
 ## Loop conventions for this arc
 

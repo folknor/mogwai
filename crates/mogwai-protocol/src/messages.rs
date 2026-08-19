@@ -176,10 +176,22 @@ impl<'de> Deserialize<'de> for AccountId {
 /// `MAX_CLIENT_ID_LEN`.
 pub const MAX_SYMBOL_LEN: usize = 32;
 
-/// Validate a symbol that is carried directly in a URL query string.
+/// Validate a CLIENT-INBOUND symbol, wherever one arrives.
 ///
-/// The accepted alphabet needs no percent encoding and is shared by the
-/// adapter constructing the URL and the server validating its decoded value.
+/// The alphabet was chosen for the URL ingresses - it needs no percent encoding,
+/// and is shared by the adapter constructing the URL and the server validating
+/// its decoded value - but the rule is no longer scoped to them. As of
+/// 2026-08-19 [`validate_submit_order`] calls this too, so order entry and the
+/// `/trades`, `/quotes` and `source` query strings judge a symbol by ONE rule.
+/// That is what makes "a symbol is 1 to 32 bytes of the URL-safe alphabet" a
+/// sentence about the venue rather than about two of its three doors.
+///
+/// SO RELAXING THIS FOR A URL REASON WOULD RELAX ORDER ENTRY WITH IT. The
+/// callers are `validate_submit_order` (and `validate_submit_group` through it),
+/// `mogwai-server`'s `http.rs` and `source.rs`, `config.rs` for an instrument's
+/// `index_symbol`, and `mogwai-adapter`'s config check. `config.rs` does NOT
+/// apply it to an instrument's own `symbol`, which is a recorded asymmetry
+/// rather than an oversight.
 pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
     if symbol.is_empty() || symbol.len() > MAX_SYMBOL_LEN {
         return Err("symbols are 1 to 32 characters");

@@ -218,6 +218,33 @@ implies.
   `submitted_orders(...).first()`, but the `max(1)` is papering over a shape
   that should be `NonZeroUsize`.
 
+## 9. LEAD, not a finding: a completion announcement that reached one socket and not another
+
+Filed 2026-08-19 from the `bugs-tests-lab-cli` close pass, and repeated here
+because that document is CLOSED and its carry-forward section will be trimmed.
+Nothing else is watching this.
+
+`crates/mogwai-cli/tests/completion.rs`'s
+`run_complete_is_stamped_on_the_receiving_sockets_clock` failed ONE of that
+pass's two full `brokkr check --gate` runs and passed the other, on
+`.expect("second boat receives completion")`.
+
+WHY THAT IS A VENUE LEAD RATHER THAN A FLAKY TEST. The whole family of
+attach-race failures in that file was closed by `watch_a_bounded_run`, and the
+`expect` sits PAST every premise that helper checks: it launches, attaches a
+socket per boat, drains each, and DISCARDS the whole run unless every socket
+saw at least one `Message::Text` frame and its drain ended cleanly rather than
+on the deadline. So reaching the `expect` at all establishes that the second
+socket was a live session, that the venue served content on it, and that the
+drain ran to a clean end - and the announcement still was not there. The
+remaining explanations are venue-side: a bounded run whose completion frame is
+not written to every attached socket before teardown closes them. Suspect the
+per-socket writer's ordering against the deadline task rather than the test.
+
+REPRODUCE BEFORE BELIEVING IT: one failure in two full gate runs on this host,
+and it has not been seen since. A round that cannot reproduce it should say so
+rather than close it.
+
 ## What the hunter would actually rewrite
 
 Findings 1, 2 and 3 are all the same underlying problem: THE ACCOUNT AND
