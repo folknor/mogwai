@@ -218,6 +218,29 @@ implies.
   `submitted_orders(...).first()`, but the `max(1)` is papering over a shape
   that should be `NonZeroUsize`.
 
+- `reject_while_closed` JUDGES MARKETABILITY AGAINST THE STATED PRICE while the
+  engine judges it against the BAND-DRAWN trigger, so the two can disagree by up
+  to the fill band in either direction: an order the server admits as
+  non-marketable can be marketable to the engine (and fills off the stale print
+  the guard exists to refuse), and one the server refuses can be one the engine
+  would have rested. The engine's `draw_trigger` needs the order's `band_ticks`
+  and the run's `fill_seed`, neither of which the HTTP boundary holds, so
+  closing this properly means asking the engine the question rather than
+  re-deriving it - `Engine::worst_case_leaves` is the precedent for that shape.
+  Filed 2026-08-19 by the `bugs-engine` round-3 fix pass, which found the gap
+  while widening the guard to cover `MarketToLimit`; the widening did not create
+  the gap, it doubled the number of types standing on it.
+
+- AN `OrderType::Market` ORDER-LIST CHILD IS REFUSED and a `MarketToLimit` one
+  is not, which is now worth a second look. `validate_order_link` refuses a
+  Market child on the argument that "a released child rests, and a market order
+  has nothing to rest on". As of 2026-08-19 a `MarketToLimit` TAKES THE MARKET
+  on release, so a bracket exit stated that way executes the instant its parent
+  fills rather than resting - which is coherent (its remainder does rest, so the
+  stated argument does not reach it) but is not what the rule's prose leads a
+  reader to expect. Noted rather than filed as a defect: no behaviour here is
+  wrong, the rule's stated ground is just narrower than the rule.
+
 ## 9. LEAD, not a finding: a completion announcement that reached one socket and not another
 
 Filed 2026-08-19 from the `bugs-tests-lab-cli` close pass, and repeated here

@@ -35,7 +35,10 @@ refused, at the protocol boundary, naming the group frame as the remedy. A venue
 that served both routes could only promise atomicity for one code path, and a
 consumer cannot build a safety argument on which path a client happened to take.
 
-What a group frame must satisfy, all refused at the boundary:
+What a group frame must satisfy, refused at the protocol boundary and again by
+the exchange core itself - the same validator, called from both, so the
+guarantee below is a property of the venue rather than of the route a frame
+took to reach it:
 
 - **Self-contained.** Every `linked_order_ids` entry and every
   `parent_order_id` names another member. Admitting the group and admitting

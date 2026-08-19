@@ -342,45 +342,6 @@ group by any other route has no API for it, and none is owed until one is wanted
   inside an `assert!` would be the crude form, and would have to justify its
   false-positive rate against a repository full of legitimate loose bounds.
 
-- `MarketToLimit` IS UNIMPLEMENTED IN BOTH HALVES OF ITS NAME: it takes no
-  market, and its remainder rests inert. ONE DEFECT WITH TWO SYMPTOMS - do not
-  fix either alone, because the first is why the second is unreachable today.
-  Filed 2026-08-19 by the `bugs-protocol` round-2 fix pass, which measured the
-  remainder while settling finding I and had the fill price handed to it by
-  that round's cold review; it belongs to `bugs-engine` rather than to the wire.
-
-  FIRST SYMPTOM, THE FILL PRICE. `orders.rs` draws a slipped market price only
-  for `OrderType::Market`; every other type fills at `risk_px(&order)`, its own
-  stated price. `marketable` is computed on the submit path and then consulted
-  only for `OrderType::Limit`. So a buy `MarketToLimit` limited at 200 against a
-  last print of 100 takes 100% of its quantity AT 200 - a hundred points worse
-  than the market, with no reference to the reading at all. A market-to-limit's
-  defining act is to take what the touch offers; this takes nothing and pays the
-  client's own worst price. That the type fills completely on the clean path is
-  a CONSEQUENCE of this, not a property of the venue's fill model, and
-  `docs/oms-types.md` briefly said otherwise before the same review caught it.
-
-  SECOND SYMPTOM, THE REMAINDER. The submit path sets
-  `resting = Resting::Limit { .. }` only when
-  `order_type == OrderType::Limit`, and `Resting::Inert` for everything else -
-  `MarketToLimit` included. So a `Gtc` market-to-limit whose remainder survives
-  acceptance is on the book with a positive `leaves_qty`, offered to no sweep,
-  and can never fill or expire. The same `if` at the partial-remainder tranche
-  redraw excludes it too, so even the band draw is not refreshed.
-
-  It is UNREACHABLE ON THE CLEAN PATH TODAY, which is why it has not bitten -
-  and the first symptom is the reason: a fill that takes the whole quantity at
-  the order's own price leaves nothing behind. A remainder exists only
-  where an armed `PartialFillNext` manufactures one - which is a divergence the
-  venue ships precisely so a client can be made to face this shape.
-
-  `a_market_to_limit_remainder_is_governed_by_its_time_in_force` in
-  `mogwai-engine` pins today's behaviour, INERT included, and says in place that
-  it must be updated rather than deleted when this lands. The fix is presumably
-  the two `== OrderType::Limit` tests becoming "rests as a limit once accepted",
-  but it owes its own thinking about the band draw and about what a
-  market-to-limit's `fill_trigger_px` should be.
-
 - A CONFIGURED INSTRUMENT MAY CARRY A SYMBOL ORDER ENTRY NOW REFUSES. Filed
   2026-08-19 by the `bugs-protocol` round-4 fix-and-commit pass, which closed the
   order-entry half and stopped there. `validate_submit_order` runs
@@ -398,6 +359,12 @@ group by any other route has no API for it, and none is owed until one is wanted
   narrows what an operator may list; leaving it means the venue can serve a tape
   under a symbol no client can trade or fetch over HTTP. Whichever way it goes,
   the two validators should stop being able to disagree silently.
+  THE SURFACE WIDENED ON 2026-08-19 and the defect did not change: the engine's
+  `on_submit_group` now CALLS `mogwai_protocol::validate_submit_group`, which
+  reaches the same wire-symbol alphabet, so a group naming such a symbol is now
+  refused WHOLE at the engine boundary rather than member by member at the
+  server's. Same policy question, one more caller; nothing here is a reason to
+  answer it differently.
 
 - THE LAUNCHER KILLS ONE PROCESS, NOT A PROCESS GROUP, so a venue with any
   descendant leaks a reader thread on the readiness-timeout path. Filed

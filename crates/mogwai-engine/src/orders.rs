@@ -89,6 +89,58 @@ impl Engine {
     /// `RejectNextSubmit` is consumed ONCE, for the group, before pass one.
     /// Spending it per member would refuse one leg of an atomic group, which is
     /// the shape this whole path exists to make impossible.
+    ///
+    /// THE WIRE-SHAPE VALIDATOR RUNS HERE, before anything else, because the
+    /// atomicity guarantee must not be contingent on a caller. Two of its rules
+    /// are unreachable from the dry pass by construction: a DUPLICATE ID WITHIN
+    /// THE GROUP cannot be seen by `validate_submit`, whose duplicate test reads
+    /// `seen_client_order_ids` and no member is in it yet, so pass one admitted
+    /// the group whole and pass two refused the second copy with its sibling
+    /// already accepted and possibly filled; and an `Ioc`/`Fok` MEMBER is a
+    /// now-or-never order whose fate admission does not decide. `mogwai-server`
+    /// runs the same validator at the boundary, so nothing arriving over the
+    /// wire changes verdict - what changes is that a caller reaching
+    /// `process_with_market` directly (a test, a bench, a future gateway) can no
+    /// longer break the group open. It is called rather than copied: one arm of
+    /// a validator re-spelled here would read as the rule's home while
+    /// implementing a fraction of it, which is the defect this file's structural
+    /// note names.
+    /// THE ONE HOME OF THE CLOSING-SNAPSHOT RULE, and every batch that ends in
+    /// an `AccountState` goes through it.
+    ///
+    /// The rule has two halves and both are load-bearing. A batch that MOVED
+    /// THE LEDGER owes a snapshot, and that snapshot is exactly what
+    /// `DropNextAccountUpdate` exists to hide - so an armed drop takes it and
+    /// the client is left to notice. A batch that moved NOTHING (a bare
+    /// acceptance, a held child taking no reservation) still reports the
+    /// account, because there is nothing to hide and spending the arm on it
+    /// would burn a divergence the operator armed against a real fill.
+    ///
+    /// Spelled once because it was hand-rolled at five sites and two of them
+    /// pushed unconditionally - the group's closing pass and this - which made
+    /// them the paths where an operator could arm the arm and the client be
+    /// told the truth anyway. A site that genuinely must not consult the arm
+    /// says so in place and calls neither half; there are three, all marked -
+    /// the resting-limit acceptance, the held-child acceptance and `on_modify`.
+    ///
+    /// A caller that must ALSO stay silent on a batch that moved nothing - the
+    /// clock-driven sweep, which runs on every tick - tests `account_changed`
+    /// itself before calling and gets the arm half from here. An EMPTY batch is
+    /// no batch and reports nothing.
+    fn push_account_snapshot(&mut self, out: &mut Vec<ServerMessage>, ts: u64) {
+        if out.is_empty() {
+            return;
+        }
+        if account_changed(out)
+            && self
+                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                .is_some()
+        {
+            return;
+        }
+        out.push(ServerMessage::AccountState(self.snapshot(ts)));
+    }
+
     pub(crate) fn on_submit_group(
         &mut self,
         orders: &[SubmitOrder],
@@ -113,6 +165,12 @@ impl Engine {
                 })
                 .collect::<Vec<_>>()
         };
+
+        // Before the divergence arm: a malformed group is not a submit the
+        // author armed against, and spending the arm on one would hide it.
+        if let Err(reason) = mogwai_protocol::validate_submit_group(orders) {
+            return reject_all(reason, None);
+        }
 
         if let Some(Divergence::RejectNextSubmit { reason }) =
             self.take_armed(|d| matches!(d, Divergence::RejectNextSubmit { .. }))
@@ -183,8 +241,14 @@ impl Engine {
             closing.extend(self.apply_linkage_after_fill(&order, qty, ts));
         }
         if !closing.is_empty() {
+            // The rule is asked of THE CLOSING PASS ALONE, not of `out`: every
+            // member's own batch already took its own snapshot decision, and
+            // re-reading their fills here would make this pass owe a second
+            // snapshot for a ledger move somebody else already reported and
+            // already paid an arm for.
+            let mut closing = closing;
+            self.push_account_snapshot(&mut closing, ts);
             out.extend(closing);
-            out.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
         out
     }
@@ -403,6 +467,11 @@ impl Engine {
             let venue_order_id = self.next_venue_order_id();
             self.seen_client_order_ids
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
+            // MARKED EXEMPTION FROM `push_account_snapshot`, two of three, and
+            // for the same reason as the resting-limit one: a held child takes
+            // no reservation and books no balance, so there is no update for
+            // `DropNextAccountUpdate` to hide and spending the arm here would
+            // burn it on an order that cannot fill until its parent does.
             let out = vec![
                 ServerMessage::OrderAccepted {
                     client_order_id: order.client_order_id.clone(),
@@ -429,7 +498,19 @@ impl Engine {
         }
 
         let trigger_px = draw_trigger(self.fill_seed, &order, stated_px, increment, band_ticks, 0);
-        let fill_px = if order.order_type == OrderType::Market {
+        // A MARKET-TO-LIMIT TAKES THE MARKET, and its stated price is the limit
+        // that bounds what it will pay and the price its remainder rests at -
+        // not, as this used to read, the price it fills its whole quantity at.
+        // It shares the market order's draw for the part that executes and the
+        // limit order's marketability test for whether any of it does, which is
+        // both halves of the type's name. It filled at its own limit with no
+        // reference to the tape until 2026-08-19: a buy limited at 200 against a
+        // last print of 100 paid 200.
+        let takes_the_market = matches!(
+            order.order_type,
+            OrderType::Market | OrderType::MarketToLimit
+        );
+        let fill_px = if takes_the_market {
             reading.map_or_else(
                 || {
                     tracing::warn!(client_order_id = %order.client_order_id, "market order has no market reading; using its stated price");
@@ -450,6 +531,19 @@ impl Engine {
         } else {
             stated_px
         };
+        // THE LIMIT HALF OF THE NAME. The band's adverse slip is drawn against
+        // the last print and can carry a market-to-limit past its own stated
+        // price; the limit is the one thing the client asked the venue to
+        // respect, so it bounds the fill rather than the other way round. A
+        // plain market order has no such bound and is left alone.
+        let fill_px = if order.order_type == OrderType::MarketToLimit {
+            match order.side {
+                Side::Buy => fill_px.min(stated_px),
+                Side::Sell => fill_px.max(stated_px),
+            }
+        } else {
+            fill_px
+        };
         if !order.reduce_only
             && let Err(reason) = self.validate_fill_funds(
                 &order,
@@ -467,6 +561,9 @@ impl Engine {
                 ts_event: ts,
             }];
         }
+        // A market order is marketable by definition; every type that states a
+        // limit - `MarketToLimit` included, which is what the type's first act
+        // is judged by - has to have been traded through.
         let marketable = order.order_type == OrderType::Market
             || reading.is_some_and(|value| trades_through(order.side, trigger_px, value.last_px));
 
@@ -523,13 +620,7 @@ impl Engine {
             // A trigger that booked a fill or freed a reservation owes its
             // snapshot under the same `DropNextAccountUpdate` rule as any other
             // fill; a bare acceptance moves no balance and leaves the arm alone.
-            if !account_changed(&out)
-                || self
-                    .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
-                    .is_none()
-            {
-                out.push(ServerMessage::AccountState(self.snapshot(ts)));
-            }
+            self.push_account_snapshot(&mut out, ts);
             return out;
         }
 
@@ -541,7 +632,18 @@ impl Engine {
             }];
         }
 
-        if order.order_type == OrderType::Limit && !marketable {
+        // THE TYPES THAT REST AS A LIMIT once accepted: the limit itself, and
+        // the market-to-limit, whose whole remainder rests at its stated price
+        // when the touch is short of it and whose partial remainder rests there
+        // when the touch takes only part of it. Spelled once and read at all
+        // three decisions below, because a hand-rolled `== Limit` at each is how
+        // the market-to-limit came to rest `Inert` - on the book with a positive
+        // `leaves_qty`, offered to no sweep, unable to fill or expire.
+        let rests_as_limit = matches!(
+            order.order_type,
+            OrderType::Limit | OrderType::MarketToLimit
+        );
+        if rests_as_limit && !marketable {
             if order.time_in_force == TimeInForce::Fok {
                 // `plan_fill` is called for its CONSUMING effect and its plan
                 // thrown away. A targeted `PartialFillNext` which is the very
@@ -596,10 +698,15 @@ impl Engine {
                 }
                 TimeInForce::Fok => unreachable!("FOK rejected above"),
             }
+            // MARKED EXEMPTION FROM `push_account_snapshot`, one of three.
             // Deliberately does NOT consume `DropNextAccountUpdate`, and does
             // not call `plan_fill`, so neither that divergence nor a targeted
             // `PartialFillNext` is spent here: both are armed against the FILL,
-            // and a resting order has not had one yet.
+            // and a resting order has not had one yet. The helper would reach
+            // the same verdict today, because an acceptance-and-rest batch
+            // moves no ledger - but it would do so INCIDENTALLY, and a future
+            // event in this batch that did move one must not silently start
+            // spending the arm on an order that has never traded.
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
             return out;
         }
@@ -681,7 +788,7 @@ impl Engine {
                 ts_event: ts,
             });
             out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
-            out.push(ServerMessage::AccountState(self.snapshot(ts)));
+            self.push_account_snapshot(&mut out, ts);
             return out;
         }
 
@@ -731,7 +838,7 @@ impl Engine {
         // (GTC remainder), or close it into the terminal truth store (full
         // fill, or an IOC's canceled remainder) so a `QueryOrders` reply can
         // attest to it after it leaves the book.
-        let resting = if order.order_type == OrderType::Limit {
+        let resting = if rests_as_limit {
             Resting::Limit {
                 fill_trigger_px: trigger_px,
             }
@@ -764,7 +871,7 @@ impl Engine {
             // short by an armed `PartialFillNext` leaves a remainder that is a
             // NEW tranche, so it draws a fresh queue position around the
             // unchanged price with the band it was accepted under.
-            if last_qty > Decimal::ZERO && record.submit.order_type == OrderType::Limit {
+            if last_qty > Decimal::ZERO && rests_as_limit {
                 record.band_draw = 1;
                 record.resting = Resting::Limit {
                     fill_trigger_px: draw_trigger(
@@ -909,7 +1016,13 @@ impl Engine {
             out.extend(reaped);
         }
         if !out.is_empty() {
-            out.push(ServerMessage::AccountState(self.snapshot(ts)));
+            // An expiry FREES A RESERVATION, so this batch moves the ledger and
+            // owes the snapshot under the same rule a fill does - including the
+            // `DropNextAccountUpdate` half, which this site used to skip. It
+            // was the last unconditional push outside the two marked
+            // exemptions: an operator could arm the arm, watch a GTD order
+            // expire, and be handed the fresh balances anyway.
+            self.push_account_snapshot(&mut out, ts);
         }
         out
     }
@@ -1211,13 +1324,14 @@ impl Engine {
         // whose only transitions were reservation-freeing cancels still owes
         // it, so the test is "did anything move the ledger", not "did anything
         // fill".
+        // THE OUTER TEST IS NOT REDUNDANT WITH THE HELPER'S. A sweep pass runs
+        // on every clock tick and routinely produces events that move nothing -
+        // an `OrderTriggered`, an acceptance - and this path must stay silent
+        // for those rather than stamp an unchanged account onto every tick,
+        // which is what `swept_fill_max_bytes` sizes against. What the helper
+        // owns here is the `DropNextAccountUpdate` half.
         if account_changed(&out) {
-            let drop_update = self
-                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
-                .is_some();
-            if !drop_update {
-                out.push(ServerMessage::AccountState(self.snapshot(ts)));
-            }
+            self.push_account_snapshot(&mut out, ts);
         }
         if cfg!(debug_assertions) {
             self.reconcile_order_locked();
@@ -1682,6 +1796,20 @@ impl Engine {
                     out.extend(reaped);
                 } else {
                     order.resting = Resting::Inert;
+                    // The frontier and the revision move even though nothing
+                    // scans an inert remainder, and that is not bookkeeping for
+                    // its own sake: `apply_scans_on_clock` admits a result whose
+                    // `from_ns` and `revision` still match the order, and this
+                    // record's pair still named the walk that TRIGGERED it. A
+                    // second delivery of that same result would therefore be
+                    // applied to an order that is no longer conditional, fall
+                    // through to the resting-limit arm, and panic on a
+                    // market-on-trigger order's absent price. The staleness
+                    // guard is what makes a duplicate or late result harmless,
+                    // so every record that outlives its walk has to invalidate
+                    // it - the same bump the limit remainder below already does.
+                    order.scanned_ns = frontier;
+                    order.revision = order.revision.saturating_add(1);
                     self.rest_open(order);
                 }
             }
@@ -2071,7 +2199,11 @@ impl Engine {
         if order.client_order_id.trim().is_empty() {
             return Err("empty client_order_id".into());
         }
-        if apply_divergences && order.client_order_id.starts_with("LQ-") {
+        if apply_divergences
+            && crate::RESERVED_ID_PREFIXES
+                .iter()
+                .any(|prefix| order.client_order_id.starts_with(prefix))
+        {
             return Err("client_order_id uses reserved liquidation prefix".into());
         }
 
@@ -3052,6 +3184,16 @@ impl Engine {
         };
         self.refresh_open_reservation(pos, &before);
 
+        // MARKED EXEMPTION FROM `push_account_snapshot`, three of three, and the
+        // only one whose batch genuinely DOES move the ledger -
+        // `refresh_open_reservation` above just moved the hold. It is exempt by
+        // an existing ruling rather than by the helper's rule:
+        // `modify_does_not_consume_armed_drop` pins the arm SURVIVING an amend
+        // so it lands on the next FILL, which is what an author arming
+        // `DropNextAccountUpdate` was pointing at. Routing this site through the
+        // helper is therefore a deliberate behaviour change and an owner
+        // question, not a bug fix - the cold review that proposed it had not
+        // seen the test.
         vec![
             ServerMessage::OrderUpdated {
                 client_order_id,
@@ -3202,14 +3344,41 @@ fn risk_px(order: &SubmitOrder) -> Decimal {
 /// no-fill transition that FREES a reservation - a cap-zero reduce-only cancel,
 /// a post-only trigger rejection, a trigger-time funds cancel - owes one just
 /// as a fill does.
-fn account_changed(out: &[ServerMessage]) -> bool {
-    out.iter().any(|event| {
-        matches!(
-            event,
-            ServerMessage::OrderFilled(_)
-                | ServerMessage::OrderCanceled { .. }
-                | ServerMessage::OrderRejected { .. }
-        )
+/// EXHAUSTIVE OVER `ServerMessage` deliberately: the predicate claims to answer
+/// "did anything move the ledger", and a `matches!` over a hand-written list
+/// answers "is it one of the ones I thought of". A variant added later must be
+/// classified here rather than inherit `false` silently - which is how
+/// `OrderUpdated` and `OrderExpired` came to be missing. An `Ouo` shrink plainly
+/// moves the hold, and an expiry releases one; neither is reachable today
+/// without an accompanying fill or cancel at either call site, so closing the
+/// gap changes no behaviour now and cannot open one later.
+pub(crate) fn account_changed(out: &[ServerMessage]) -> bool {
+    out.iter().any(|event| match event {
+        ServerMessage::OrderFilled(_)
+        | ServerMessage::OrderCanceled { .. }
+        | ServerMessage::OrderRejected { .. }
+        | ServerMessage::OrderUpdated { .. }
+        | ServerMessage::OrderExpired { .. } => true,
+        // Accepted, triggered and the modify/cancel REFUSALS move nothing: the
+        // order is answerable but no balance has changed hands. `AccountState`
+        // itself is the snapshot, not a reason to take one.
+        ServerMessage::OrderAccepted { .. }
+        | ServerMessage::OrderTriggered { .. }
+        | ServerMessage::OrderModifyRejected { .. }
+        | ServerMessage::OrderCancelRejected { .. }
+        | ServerMessage::AccountState(_)
+        // Not order lifecycle at all: replies, tape frames and transport
+        // notices, none of which an engine batch books a balance through.
+        | ServerMessage::RunComplete { .. }
+        | ServerMessage::AdmissionRejected { .. }
+        | ServerMessage::OrderStatusSnapshot(_)
+        | ServerMessage::FillSnapshot(_)
+        | ServerMessage::Trade(_)
+        | ServerMessage::Quote(_)
+        | ServerMessage::Heartbeat { .. }
+        | ServerMessage::FeedLagged { .. }
+        | ServerMessage::HavocDiagnostic { .. }
+        | ServerMessage::ProtocolError { .. } => false,
     })
 }
 

@@ -71,16 +71,27 @@ exists because an IOC market cannot rest a remainder; that argues about why the
 type exists, not about which time in force it may carry, so the combination is
 admitted rather than refused.
 
-MARKET-TO-LIMIT IS THE ONE TYPE THIS VENUE DOES NOT YET SERVE FAITHFULLY, and
-the gap is stated here rather than papered over, because a client testing
-against it will see the divergence. Two symptoms, one open engine defect: the
-fill takes the WHOLE quantity at the order's own stated limit price with no
-reference to the tape - a buy limited at 200 against a last print of 100 fills
-at 200, rather than taking what the touch offers - so no remainder arises on
-the clean path at all; and where an armed `PartialFillNext` manufactures one,
-the kept remainder rests inert, offered to no sweep, so it can never fill or
-expire. Neither is intended behaviour. Every other type behaves as described
-above.
+A `MarketToLimit` TAKES THE MARKET AND KEEPS THE LIMIT, which is both halves of
+its name. Its first act is priced off the tape exactly as a market order's is -
+the last print, slipped adversely by the fill band - except that its own stated
+price BOUNDS what it pays: a buy never fills above its limit, a sell never below
+it. If the touch is short of the limit - a buy limited at 100 against a print of
+101 - nothing is taken and the whole quantity rests, because the client asked not
+to trade through that price. Marketability is judged against the BAND-DRAWN
+trigger rather than the stated price, exactly as a `Limit`'s is, so a touch
+inside the limit but outside that draw also rests; the two types answer the
+question the same way on purpose, and neither promises the stated price alone
+decides it. Whatever is not taken rests as an
+ordinary limit at the stated price and is swept, filled and expired like one,
+subject to the time in force above.
+
+That is a change of behaviour as of 2026-08-19, and it is stated rather than
+quietly corrected because a client testing against the old venue saw the
+divergence: the fill used to take the WHOLE quantity at the order's own stated
+limit with no reference to the tape - a buy limited at 200 against a last print
+of 100 filled at 200 - so no remainder arose on the clean path at all, and where
+an armed `PartialFillNext` manufactured one, the kept remainder rested inert,
+offered to no sweep, unable to fill or expire.
 
 ORDER LISTS are served, so a genuine bracket needs no workaround. See
 [Order lists](order-lists.md) for the rules and what each one does.

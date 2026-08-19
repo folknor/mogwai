@@ -4104,8 +4104,10 @@ MACHINERY LATER ROUNDS MAY BUILD ON AND MUST NOT BREAK:
   cancelled order.
 - `on_modify`'s promotion guard excludes `Conditional | Held`. Held is excluded
   RATHER than switching to a `Limit`-only test, because that would also change
-  `Inert` remainder behaviour and collide with the `MarketToLimit` item still
-  open in `notes/todo.md` for this document's round 3.
+  `Inert` remainder behaviour, which round 3 owned. Round 3 landed the
+  `MarketToLimit` fix and the guard is unchanged: an `Inert` remainder is now
+  only a `Market` remainder or a cap-clamped one, and a price amend still
+  promotes it.
 
 FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
 
@@ -4217,3 +4219,115 @@ FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
   `order_reservation_entry`) re-derives it when the order actually rests. A
   future reviewer noticing it dropped in `on_modify` should read the comment
   there before calling it a defect.
+
+
+## The engine document, round 3: finding 10 and `MarketToLimit` - DOCUMENT EXHAUSTED
+
+`notes/bugs-engine.md` has nothing open. Finding 10's six bullets: five fixed,
+one refused (the `draw_key` collision surface, which the bullet itself called
+documented-and-accepted). The `MarketToLimit` item routed here from
+`notes/todo.md` landed as section 12 and its todo entry is removed. What remains
+in that document is one withdrawal (section 11), that one refusal, and the
+equity-sell reservation residual filed in `notes/todo.md`. Full gate green,
+both socket suites green.
+
+THE OWNER QUESTION THE `MarketToLimit` FILING RAISED WAS ALREADY ANSWERED IN THE
+TREE, which is why no ruling was sought. Serve-or-refuse is settled by the
+order-type completeness ruling of 2026-08-16 plus `docs/oms-types.md` and
+`reference/architecture.md`, all three of which state the type as SERVED.
+Refusing it would have contradicted a standing ruling and two durable documents.
+BEFORE ESCALATING A "PRODUCT QUESTION", CHECK WHETHER A RULING AND THE DURABLE
+DOCS HAVE ALREADY DECIDED IT.
+
+MACHINERY LATER ROUNDS MAY BUILD ON AND MUST NOT BREAK:
+
+- `on_submit_group` CALLS `mogwai_protocol::validate_submit_group`, before the
+  `RejectNextSubmit` arm, and refuses the group whole with the validator's own
+  reason. The atomicity guarantee is now the engine's own rather than a courtesy
+  the caller performs. Do not re-spell any of its rules in the engine: two of
+  them (intra-group duplicate id, `Ioc`/`Fok` member) are unreachable from the
+  dry pass by construction, which is the whole reason the call exists.
+- `on_submit_from` spells `takes_the_market` (`Market | MarketToLimit`) and
+  `rests_as_limit` (`Limit | MarketToLimit`) ONCE EACH and reads them at every
+  decision that used to hand-roll `== OrderType::Limit` - the fill price draw,
+  the unmarketable-on-arrival rest, the frozen `Resting`, and the partial
+  remainder's tranche redraw. A `MarketToLimit`'s stated price BOUNDS its fill
+  (buy never above, sell never below) and a touch short of the limit takes
+  nothing. `a_market_to_limit_remainder_is_governed_by_its_time_in_force` pins
+  all of it. The round-1 constraint on `on_modify`'s promotion guard is
+  DISCHARGED: an `Inert` remainder is now only a `Market` remainder or a
+  cap-clamped one.
+- `RESERVED_ID_PREFIXES` in `mogwai-engine`'s `lib.rs` is the one list of
+  venue-minted client order id prefixes, read by `validate_submit` and by the
+  three minting sites. Its test names `LQ-` and `RISK-` LITERALLY as well as
+  looping the constant, because a test that only reads the constant shrinks with
+  it.
+- `orders::account_changed` is EXHAUSTIVE over `ServerMessage`. A new variant
+  must be classified there rather than inherit `false`.
+- `Engine::push_account_snapshot` IS THE ONE HOME OF THE CLOSING-SNAPSHOT RULE.
+  Nothing may hand-roll `account_changed` plus `take_armed` plus a push again.
+  Two sites are MARKED EXEMPTIONS that push directly and say why in place - the
+  resting-limit acceptance and the held-child acceptance, both of which take no
+  hold and so must not spend an arm pointed at a fill. `apply_scans_on_clock`
+  calls the helper BEHIND its own `account_changed` test, because a sweep runs
+  every tick and must stay silent on a pass that moved nothing; that outer test
+  is not redundant and is commented as such.
+
+FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
+
+- NO TAPE VERSION BUMP WAS OWED and this is the reasoning to reuse: the engine's
+  fill draw is keyed on `fill_seed`, `mogwai-engine` does not depend on
+  `mogwai-data` and cannot see `TAPE_PROTOCOL_VERSION`, and the generator's
+  stream is deliberately separate so the tape is not a function of client
+  behaviour. `AGENTS.md`'s "the fill band's draw" clause names the tape-side
+  band model, not the per-order draw. `TAPE_PROTOCOL_VERSION` is 22.
+- THE TRIGGERED `StopMarket` REMAINDER WAS NOT HARMLESS, contrary to finding
+  10's own reading. It kept the pre-trigger `scanned_ns` and `revision`, so the
+  result that TRIGGERED it still satisfied `apply_scans_on_clock`'s staleness
+  guard; a duplicate delivery found a non-`Conditional` order, fell through to
+  the resting-limit arm and PANICKED on the absent price. The bite-check
+  reproduces the panic. GENERAL FORM: a record that outlives its walk must
+  invalidate that walk's result, and "nothing scans it today" is a property of a
+  different field.
+- ADDING AN EARLIER GATE SILENTLY WEAKENS THE TESTS BEHIND IT, which is this
+  round's instance of the fix-that-opens-a-hole-one-layer-up failure mode - and
+  it is invisible, because the tests stay GREEN. Two engine group tests were
+  refused by the new validator for reasons other than the ones they are named
+  after (`one_bad_member_rejects_a_whole_group_and_accepts_nothing` used an
+  unknown symbol, `a_group_of_two_equity_sells_over_one_holding_is_refused_whole`
+  sent unlinked members) and both were repaired in the same change. AFTER
+  ADDING A GATE, RE-READ EVERY TEST THAT REACHES IT and ask which rule now
+  refuses.
+- THE GROUP'S CLOSING SNAPSHOT NEEDS TWO ARMED `DropNextAccountUpdate`s to
+  exercise, because the filling member spends the first on its own snapshot.
+  That is also why the gap never bit.
+
+WHAT THE COLD REVIEW ADDED, and it is the third consecutive round of this
+document whose review found a hole the fix opened one layer up:
+
+- `reject_while_closed` IN `mogwai-server` WAS A REGRESSION THIS ROUND CAUSED.
+  It enumerates order types, and before this round a `MarketToLimit` never
+  referenced the tape, so its absence from the enumeration was defensible. The
+  moment it started taking the market, a marketable one submitted into a closed
+  session was ADMITTED AND FILLED off a stale print - the one thing that guard
+  exists to prevent. Fixed in the same commit even though `mogwai-server` is a
+  later document's territory. THE RULE: after changing what a TYPE MEANS, re-read
+  every site that ENUMERATES THAT TYPE'S FAMILY, across crates. The other
+  candidates were enumerated and cleared - the price-less-market stamp and
+  refusal in `http.rs` are safe because `validate_submit` requires a price on a
+  `MarketToLimit`, and the adapter's `wire_order_type` is an exhaustive match.
+- THE COMMENT AT THE GROUP SNAPSHOT CLAIMED A UNIVERSAL ITS NEIGHBOUR VIOLATED,
+  which is the arc's signature defect wearing durable prose. `expire_orders` and
+  `on_modify` both still pushed unconditionally, and both MOVE A HOLD - an
+  expiry frees one, an amend refreshes one - so an operator could arm
+  `DropNextAccountUpdate`, watch a GTD expire or amend an order, and be handed
+  the fresh balances anyway with the arm still loaded. Closed by installing the
+  helper rather than by narrowing the comment, per the build-don't-defer rule.
+  `an_expiry_and_an_amend_both_obey_drop_next_account_update` pins both, each
+  with its unarmed twin so the assertion cannot pass on a vanished snapshot.
+- AN ID-ONLY GROUP ASSERTION IS ONE GATE FROM CHANGING SUBJECT AGAIN.
+  `one_bad_member_rejects_a_whole_group_and_accepts_nothing` had been repaired
+  this round for exactly that failure and left asserting `["GOOD", "BAD"]`; it
+  now asserts both REASON STRINGS, which also pins the blame-forwarding shape
+  (`order group rejected whole: BAD was refused because ...` on the innocent
+  member, the bare reason on the blamed one).

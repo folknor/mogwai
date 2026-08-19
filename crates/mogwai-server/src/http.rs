@@ -671,15 +671,40 @@ pub(crate) async fn process_order_cmd(
     }
 }
 
+/// Would this order execute off a print the closure has made stale?
+///
+/// THIS ENUMERATES ORDER TYPES, so a type whose semantics change owes this
+/// function a re-read. `MarketToLimit` cost exactly that on 2026-08-19: it used
+/// to fill at its own stated price with no reference to the tape, so its
+/// absence here was defensible, and the moment it started taking the market it
+/// became at least as aggressive as a marketable limit and at most as
+/// aggressive as a market order - a marketable one would have been admitted and
+/// filled against a stale reading, which is the one thing this guard exists to
+/// prevent.
+///
+/// Marketability is judged against the STATED price, while the engine judges it
+/// against the band-drawn trigger. The two can disagree by up to the band, so
+/// this is an approximation in both directions; it is the pre-existing
+/// `Limit` behaviour and is not made worse by sharing it. See
+/// `notes/bugs-server.md` for the widened form of that gap.
 fn reject_while_closed(
     calendar: &mogwai_data::SessionCalendar,
     ts: u64,
     order: &mogwai_protocol::SubmitOrder,
     market_px: Option<mogwai_engine::MarketReading>,
 ) -> bool {
+    // A market order takes whatever the tape last said, so a closure refuses it
+    // outright. Every type that STATES A LIMIT - the limit itself and the
+    // market-to-limit, whose first act is judged by its limit exactly as a
+    // limit's is - is refused only when that limit is marketable against the
+    // stale print, and rests through the closure otherwise.
+    let states_a_limit = matches!(
+        order.order_type,
+        OrderType::Limit | OrderType::MarketToLimit
+    );
     !calendar.is_open(ts)
         && (order.order_type == OrderType::Market
-            || (order.order_type == OrderType::Limit
+            || (states_a_limit
                 && order.price.is_some_and(|price| {
                     market_px
                         .is_some_and(|reading| trades_through(order.side, price, reading.last_px))
@@ -2598,6 +2623,24 @@ mod calendar_tests {
         assert!(
             reject_while_closed(&calendar, closed, &marketable, reading),
             "a limit marketable against the stale print is refused with the market orders"
+        );
+
+        // A MARKET-TO-LIMIT TAKES THE MARKET, so it owes the same refusal as the
+        // marketable limit above. The two cases run the IDENTICAL order but for
+        // the stated price, so the refusal cannot be coming from the type alone:
+        // the non-marketable one must still be admitted, exactly as its limit
+        // sibling is.
+        let mut mtl_resting = resting.clone();
+        mtl_resting.order_type = OrderType::MarketToLimit;
+        assert!(
+            !reject_while_closed(&calendar, closed, &mtl_resting, reading),
+            "a market-to-limit short of the stale print rests through a closure"
+        );
+        let mut mtl_marketable = mtl_resting.clone();
+        mtl_marketable.price = Some(Decimal::from(30_000));
+        assert!(
+            reject_while_closed(&calendar, closed, &mtl_marketable, reading),
+            "a marketable market-to-limit would fill off the stale print and must be refused"
         );
     }
 

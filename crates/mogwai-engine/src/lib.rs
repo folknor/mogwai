@@ -168,6 +168,21 @@ pub struct EngineConfig {
 /// default, so an engine built standalone behaves like a default venue.
 pub const DEFAULT_LIQUIDATION_BAND_TICKS: u32 = 200;
 
+/// THE CLIENT ORDER ID PREFIXES THE VENUE MINTS FOR ITSELF, and therefore the
+/// ones a client may not submit under. Both are venue-originated reduce-only
+/// closes: `LQ-` is a margin-maintenance liquidation, `RISK-` an account-policy
+/// flatten. The reservation is not cosmetic - a client that claims one of these
+/// ids burns it in `seen_client_order_ids`, and the forced close that later
+/// mints the same id is refused as a duplicate, so pre-claiming ids is a way to
+/// make the venue unable to liquidate you. `RISK-` was minted without being
+/// reserved, which is why the list is stated once here and read by both the
+/// minting sites and the admission check rather than spelled at each.
+pub const LIQUIDATION_ID_PREFIX: &str = "LQ-";
+/// The account-policy flatten's prefix. See `RESERVED_ID_PREFIXES`.
+pub const RISK_FLATTEN_ID_PREFIX: &str = "RISK-";
+/// See `LIQUIDATION_ID_PREFIX`.
+pub const RESERVED_ID_PREFIXES: [&str; 2] = [LIQUIDATION_ID_PREFIX, RISK_FLATTEN_ID_PREFIX];
+
 /// Per-instrument collateral policy. The settlement SCHEDULE is not here: it
 /// is the session calendar's `settlement_minute_of_day`, read in exchange-local
 /// time, and the sweeper strikes each instant it names.
@@ -1151,7 +1166,10 @@ impl Engine {
         for (symbol, position_id, qty, mark) in liquidate {
             self.liquidation_seq = self.liquidation_seq.saturating_add(1);
             let order = SubmitOrder {
-                client_order_id: format!("LQ-{}-{}", symbol, self.liquidation_seq),
+                client_order_id: format!(
+                    "{LIQUIDATION_ID_PREFIX}{}-{}",
+                    symbol, self.liquidation_seq
+                ),
                 symbol,
                 position_id,
                 side: if qty > Decimal::ZERO {
@@ -1236,7 +1254,10 @@ impl Engine {
         for (symbol, position_id, qty, mark) in positions {
             self.liquidation_seq = self.liquidation_seq.saturating_add(1);
             let order = SubmitOrder {
-                client_order_id: format!("RISK-{}-{}", symbol, self.liquidation_seq),
+                client_order_id: format!(
+                    "{RISK_FLATTEN_ID_PREFIX}{}-{}",
+                    symbol, self.liquidation_seq
+                ),
                 symbol,
                 position_id,
                 side: if qty > Decimal::ZERO {
@@ -1420,7 +1441,7 @@ impl Engine {
     ) -> Vec<ServerMessage> {
         self.liquidation_seq = self.liquidation_seq.saturating_add(1);
         let order = SubmitOrder {
-            client_order_id: format!("LQ-{}-{}", symbol, self.liquidation_seq),
+            client_order_id: format!("{LIQUIDATION_ID_PREFIX}{}-{}", symbol, self.liquidation_seq),
             symbol: Symbol::clone(symbol),
             position_id,
             side: if qty > Decimal::ZERO {
@@ -2349,6 +2370,57 @@ mod tests {
         );
     }
 
+    /// A RECORD THAT OUTLIVES ITS WALK MUST INVALIDATE THAT WALK'S RESULT.
+    ///
+    /// `apply_scans_on_clock` admits a result only while the order's
+    /// `revision` and `scanned_ns` still equal the pair the walk was planned
+    /// against - that is the whole staleness guard, and it is what makes a
+    /// duplicate or late delivery harmless. A triggered stop-market whose
+    /// partial remainder rests `Inert` used to keep BOTH values from before the
+    /// trigger, so the very result that triggered it still matched. Applied a
+    /// second time it found an order that is no longer `Conditional`, fell
+    /// through to the resting-limit arm, and panicked on a market-on-trigger
+    /// order's absent price.
+    #[test]
+    fn a_triggered_remainder_does_not_match_the_result_that_triggered_it() {
+        let mut e = banded(8);
+        let mut stop = stop_order("dup-stop", Side::Sell, OrderType::StopMarket, 90, None);
+        stop.quantity = Decimal::from(2);
+        e.arm(Divergence::PartialFillNext {
+            client_order_id: "dup-stop".into(),
+            fraction: Decimal::new(5, 1),
+        });
+        e.process_with_market(ClientMessage::SubmitOrder(stop), 10, Some(reading(0)));
+        let scan = e.pending_scans().remove(0);
+        let results = [ScanResult {
+            client_order_id: scan.client_order_id,
+            from_ns: scan.from_ns,
+            revision: scan.revision,
+            hit: Some(Hit {
+                ts_ns: 11,
+                px: Decimal::from(90),
+            }),
+            scanned_to_ns: 11,
+        }];
+        let (out, _) = e.apply_scans(&results, 11);
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "the trigger fills half: {out:?}"
+        );
+        assert_eq!(e.open[0].leaves_qty, Decimal::ONE, "and rests the rest");
+
+        // THE SAME RESULT AGAIN. Nothing may happen: the walk it reports was
+        // already spent on the trigger.
+        let (again, emitted) = e.apply_scans(&results, 12);
+        assert_eq!(emitted, 0, "a spent result emits nothing: {again:?}");
+        assert!(
+            again.is_empty(),
+            "and books nothing against the remainder: {again:?}"
+        );
+        assert_eq!(e.open[0].leaves_qty, Decimal::ONE);
+    }
+
     #[test]
     fn a_stop_triggers_on_a_print_exactly_at_its_stop_price() {
         let mut e = banded(8);
@@ -2780,15 +2852,21 @@ mod tests {
     /// would otherwise argue over: THE TIME IN FORCE GOVERNS THE REMAINDER.
     ///
     /// The type's own doc says it rests the remainder and an IOC's says it
-    /// cancels one, which reads as a contradiction the venue admits. Measured,
-    /// there is nothing to arbitrate on the clean path - though for a REASON
-    /// that is itself an open defect rather than the model: the submit path
-    /// fills every non-`Market` type at the order's own stated price with no
-    /// reference to the tape, so a `MarketToLimit` takes its whole quantity at
-    /// its limit and leaves nothing behind. A remainder exists only where an
-    /// armed `PartialFillNext` manufactures one, and there the time in force
-    /// decides it, which is why the combination is admitted rather than
-    /// refused.
+    /// cancels one, which reads as a contradiction the venue admits. It is not
+    /// one: the type says what happens to a remainder, the time in force says
+    /// whether there is one to keep, which is why the combination is admitted
+    /// rather than refused.
+    ///
+    /// BOTH HALVES OF THE TYPE ARE PINNED HERE, because until 2026-08-19 it
+    /// implemented neither and this test recorded that. It filled its whole
+    /// quantity at its own stated limit with no reference to the tape - so no
+    /// remainder arose on the clean path at all, and the only way to reach the
+    /// remainder question was to manufacture one with an armed
+    /// `PartialFillNext`, which is what this test still does because it is also
+    /// the cheapest way to reach it. The fill price assertion is the first half:
+    /// the market here is 99 against a limit of 100, so a fill AT 100 is the old
+    /// behaviour and a fill at 99 is the type taking what the touch offers. The
+    /// GTC arm is the second half.
     #[test]
     fn a_market_to_limit_remainder_is_governed_by_its_time_in_force() {
         let armed = |id: &str, tif| {
@@ -2828,21 +2906,57 @@ mod tests {
         assert!(engine.open.is_empty(), "an IOC remainder does not rest");
         assert_eq!(engine.closed["mtl-ioc"].status, WireOrderStatus::Canceled);
 
-        // GTC keeps the remainder on the book. WHAT IT DOES NOT DO IS REST IT AS
-        // A LIMIT: the record's `resting` is `Inert`, so the remainder is
-        // scanned by nothing and can never fill. That is the type's documented
-        // behaviour unimplemented, filed as an open engine defect rather than
-        // closed here - this assertion pins today's truth so a later fix has to
-        // be deliberate, and must be UPDATED rather than deleted when it lands.
+        // GTC keeps the remainder, and it rests AS A LIMIT at the order's own
+        // stated price - which is what makes keeping it mean anything. An inert
+        // remainder is on the book with a positive `leaves_qty` and offered to
+        // no sweep, so it can neither fill nor expire.
         let (engine, out) = armed("mtl-gtc", TimeInForce::Gtc);
-        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
+        let fill = out
+            .iter()
+            .find_map(|event| match event {
+                ServerMessage::OrderFilled(fill) => Some(fill),
+                _ => None,
+            })
+            .expect("the market-to-limit takes the touch");
+        assert_eq!(
+            fill.last_px,
+            Decimal::from(99),
+            "a market-to-limit takes the market, not its own limit of 100"
+        );
         assert_eq!(engine.open.len(), 1);
         assert_eq!(engine.open[0].leaves_qty, Decimal::ONE);
-        assert!(matches!(engine.open[0].resting, Resting::Inert));
-        assert!(
-            engine.pending_scans().is_empty(),
-            "an inert remainder is offered to no sweep"
+        assert!(matches!(engine.open[0].resting, Resting::Limit { .. }));
+        assert_eq!(
+            engine.pending_scans().len(),
+            1,
+            "a kept remainder is offered to the sweep"
         );
+
+        // AND THE LIMIT BINDS THE FIRST ACT TOO. A market at 101 is short of a
+        // buy limit of 100, so there is nothing to take: the whole quantity
+        // rests rather than filling at a price the client refused. This is the
+        // arm that separates "takes the market" from "fills at the market
+        // whatever it is", and it needs no divergence to reach.
+        let mut submit = order("mtl-away", 2);
+        submit.order_type = OrderType::MarketToLimit;
+        let mut engine = banded(14);
+        let out = engine.process_with_market(
+            ClientMessage::SubmitOrder(submit),
+            10,
+            Some(MarketReading {
+                last_px: Decimal::from(101),
+                ts_ns: 0,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+            "a market-to-limit does not trade through its own limit: {out:?}"
+        );
+        assert_eq!(engine.open.len(), 1);
+        assert_eq!(engine.open[0].leaves_qty, Decimal::from(2));
+        assert!(matches!(engine.open[0].resting, Resting::Limit { .. }));
     }
 
     #[test]
@@ -7092,10 +7206,14 @@ mod tests {
             good,
             link_of(mogwai_protocol::Contingency::Oco, &["BAD"], None),
         );
-        // Priced off the grid, which `validate_submit` refuses.
+        // Priced off the grid, which `validate_submit` refuses - and the ENGINE
+        // is the only gate that can, since the price increment is an instrument
+        // fact `mogwai_protocol::validate_submit_group` does not hold. The
+        // member used to be bad by naming an unknown SYMBOL, which the group
+        // validator now refuses one step earlier for disagreeing with its
+        // siblings, leaving this test green while testing a different rule.
         let mut bad = limit_order("BAD", 1);
-        bad.price = Some(Decimal::from(100));
-        bad.symbol = "NOSUCH".into();
+        bad.price = Some(Decimal::new(100_001, 3));
         let bad = linked(
             bad,
             link_of(mogwai_protocol::Contingency::Oco, &["GOOD"], None),
@@ -7108,19 +7226,31 @@ mod tests {
             1,
             Some(away_reading()),
         );
-        let rejected: Vec<&str> = out
+        // THE REASON IS ASSERTED, NOT JUST THE IDS. An id-only assertion cannot
+        // tell the off-grid refusal this test is named for from whatever rule
+        // refuses the group next - which is exactly how this test came to be
+        // testing an unknown symbol instead.
+        let rejected: Vec<(&str, &str)> = out
             .iter()
             .filter_map(|event| match event {
                 ServerMessage::OrderRejected {
-                    client_order_id, ..
-                } => Some(client_order_id.as_str()),
+                    client_order_id,
+                    reason,
+                    ..
+                } => Some((client_order_id.as_str(), reason.as_str())),
                 _ => None,
             })
             .collect();
         assert_eq!(
             rejected,
-            ["GOOD", "BAD"],
-            "every member is refused, including the one that was fine: {out:?}"
+            [
+                (
+                    "GOOD",
+                    "order group rejected whole: BAD was refused because price violates price increment"
+                ),
+                ("BAD", "price violates price increment")
+            ],
+            "every member is refused for the BAD member's off-grid price, including the one that was fine: {out:?}"
         );
         assert!(
             !out.iter()
@@ -7128,6 +7258,156 @@ mod tests {
             "and nothing was accepted first: {out:?}"
         );
         assert!(e.open.is_empty(), "nothing rests");
+    }
+
+    /// THE GROUP'S CLOSING SNAPSHOT OBEYS `DropNextAccountUpdate`, because it
+    /// goes through `push_account_snapshot` like every site that is not one of
+    /// the two marked exemptions. It used to be pushed unconditionally, which
+    /// made the group one of three paths where a client could arm the
+    /// divergence and still be told the truth about its balances; the other two
+    /// were `expire_orders` and `on_modify`, closed alongside it.
+    ///
+    /// TWO ARMS, because the closing pass runs after pass two: the filling
+    /// member spends the first on its own snapshot, and the second is the one
+    /// this test is about. The unarmed run is what makes the assertion
+    /// discriminating - the same group, the same closing linkage, and the
+    /// snapshot present - so a missing frame can only be the arm.
+    #[test]
+    fn the_groups_closing_snapshot_can_be_dropped() {
+        let bracket = || {
+            let mut entry = limit_order("ENTRY", 2);
+            entry.price = Some(Decimal::from(300));
+            let entry = linked(
+                entry,
+                link_of(mogwai_protocol::Contingency::Ouo, &["STOP"], None),
+            );
+            let mut stop = limit_order("STOP", 2);
+            stop.side = Side::Sell;
+            stop.price = Some(Decimal::from(400));
+            let stop = linked(
+                stop,
+                link_of(mogwai_protocol::Contingency::Ouo, &["ENTRY"], None),
+            );
+            vec![entry, stop]
+        };
+
+        let mut plain = linked_engine();
+        let out = plain.process_with_market(
+            ClientMessage::SubmitOrderGroup { orders: bracket() },
+            1,
+            Some(away_reading()),
+        );
+        assert!(
+            out.iter().any(|event| matches!(
+                event,
+                ServerMessage::OrderCanceled { client_order_id, .. } if client_order_id == "STOP"
+            )),
+            "the closing pass reaped the sibling: {out:?}"
+        );
+        assert!(
+            matches!(out.last(), Some(ServerMessage::AccountState(_))),
+            "and reported the ledger it moved: {out:?}"
+        );
+
+        let mut armed = linked_engine();
+        armed.arm(Divergence::DropNextAccountUpdate);
+        armed.arm(Divergence::DropNextAccountUpdate);
+        let out = armed.process_with_market(
+            ClientMessage::SubmitOrderGroup { orders: bracket() },
+            1,
+            Some(away_reading()),
+        );
+        assert!(
+            out.iter().any(|event| matches!(
+                event,
+                ServerMessage::OrderCanceled { client_order_id, .. } if client_order_id == "STOP"
+            )),
+            "the same closing pass ran: {out:?}"
+        );
+        assert!(
+            !matches!(out.last(), Some(ServerMessage::AccountState(_))),
+            "and its snapshot was dropped: {out:?}"
+        );
+    }
+
+    /// THE GROUP'S WIRE-SHAPE RULES ARE THE ENGINE'S OWN, not a courtesy the
+    /// caller performs first.
+    ///
+    /// Both rules here are UNREACHABLE from the dry pass by construction, which
+    /// is why the engine has to call `validate_submit_group` rather than trust
+    /// what reached it: `validate_submit`'s duplicate test reads
+    /// `seen_client_order_ids`, and on pass one no member is in it, so a group
+    /// carrying the same id twice was admitted whole and then broke open on
+    /// pass two with the first copy already accepted and possibly filled - the
+    /// exact atomicity break the two-pass split exists to prevent. And an
+    /// `Ioc`/`Fok` member is a now-or-never order whose fate admission does not
+    /// decide, which no per-member check would ever have caught.
+    ///
+    /// Each case asserts ITS OWN refusal text, because the group rejects whole
+    /// under every one of these rules and an id-only assertion could not tell
+    /// them apart.
+    #[test]
+    fn the_engine_refuses_a_group_the_wire_shape_rules_refuse() {
+        let cases: [(&str, [&str; 2], TimeInForce, &str); 2] = [
+            (
+                "duplicate id within the group",
+                ["SAME", "SAME"],
+                TimeInForce::Gtc,
+                "duplicate client_order_id within the order group",
+            ),
+            (
+                "an immediate-or-cancel member",
+                ["A", "B"],
+                TimeInForce::Ioc,
+                "an order-group member cannot be immediate-or-cancel",
+            ),
+        ];
+        for (name, ids, tif, expected) in cases {
+            let mut e = linked_engine();
+            let orders: Vec<SubmitOrder> = ids
+                .iter()
+                .map(|id| {
+                    let mut leg = limit_order(id, 1);
+                    leg.price = Some(Decimal::from(100));
+                    leg.time_in_force = tif;
+                    linked(
+                        leg,
+                        link_of(mogwai_protocol::Contingency::NoContingency, &[], None),
+                    )
+                })
+                .collect();
+            let out = e.process_with_market(
+                ClientMessage::SubmitOrderGroup { orders },
+                1,
+                Some(away_reading()),
+            );
+            let reasons: Vec<&str> = out
+                .iter()
+                .filter_map(|event| match event {
+                    ServerMessage::OrderRejected { reason, .. } => Some(reason.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                reasons.len(),
+                2,
+                "{name}: one rejection per member: {out:?}"
+            );
+            assert!(
+                reasons.iter().all(|reason| reason.contains(expected)),
+                "{name}: refused by its own rule: {reasons:?}"
+            );
+            assert!(
+                !out.iter()
+                    .any(|event| matches!(event, ServerMessage::OrderAccepted { .. })),
+                "{name}: and nothing was accepted first: {out:?}"
+            );
+            assert!(e.open.is_empty(), "{name}: nothing rests");
+            assert!(
+                e.seen_client_order_ids.is_empty(),
+                "{name}: no id was burned"
+            );
+        }
     }
 
     /// A CHILD MAY NAME A PARENT THAT TRAVELS WITH IT. Sent per leg the child
@@ -9889,12 +10169,86 @@ mod tests {
         assert_eq!(fill.position_id.as_deref(), Some("BTCUSDT-1"));
     }
 
+    /// "DID ANYTHING MOVE THE LEDGER" MEANS EVERY EVENT THAT DOES.
+    ///
+    /// `account_changed` gates the account snapshot a batch owes and the
+    /// `DropNextAccountUpdate` arm it spends. It listed fills, cancels and
+    /// rejections only, so an `Ouo` shrink - which changes the hold on the
+    /// shrunk sibling - and an expiry - which releases one - read as "nothing
+    /// happened". Neither is reachable today without an accompanying fill or
+    /// cancel at any call site, which is why this test is over the predicate
+    /// rather than over a venue transition: the gap is latent, and the point is
+    /// that it cannot become live.
+    #[test]
+    fn a_ledger_moving_event_is_one_the_snapshot_gate_can_see() {
+        let updated = ServerMessage::OrderUpdated {
+            client_order_id: "U".into(),
+            venue_order_id: "V-1".into(),
+            quantity: Decimal::ONE,
+            price: Some(Decimal::from(100)),
+            trigger_price: None,
+            leaves_qty: Decimal::ONE,
+            ts_event: 1,
+        };
+        let expired = ServerMessage::OrderExpired {
+            client_order_id: "E".into(),
+            venue_order_id: "V-2".into(),
+            ts_event: 1,
+        };
+        let accepted = ServerMessage::OrderAccepted {
+            client_order_id: "A".into(),
+            venue_order_id: "V-3".into(),
+            ts_event: 1,
+        };
+        assert!(crate::orders::account_changed(&[updated]), "an Ouo shrink");
+        assert!(crate::orders::account_changed(&[expired]), "an expiry");
+        assert!(
+            !crate::orders::account_changed(&[accepted]),
+            "a bare acceptance moves nothing"
+        );
+    }
+
+    /// EVERY PREFIX THE VENUE MINTS IS RESERVED, not just the first one.
+    ///
+    /// The reservation is not cosmetic: a client that claims one of these ids
+    /// burns it in `seen_client_order_ids`, so the forced close that later mints
+    /// the same id is refused as a duplicate and the venue cannot liquidate the
+    /// account that pre-claimed it. `RISK-`, which `liquidate_all` mints, was
+    /// unreserved until 2026-08-19.
+    ///
+    /// The loop runs over the constant the MINTING SITES read, so a prefix added
+    /// later is covered by this test the moment it exists.
     #[test]
     fn client_cannot_claim_the_liquidation_order_namespace() {
-        let out = Engine::new().process(ClientMessage::SubmitOrder(order("LQ-MNQ-1", 1)), 1);
-        assert_eq!(
-            reject_reason(&out),
-            "client_order_id uses reserved liquidation prefix"
+        // The two prefixes are named LITERALLY as well as looped over, because a
+        // test that only reads the constant shrinks with it: deleting a prefix
+        // from the list would delete the case that proves it reserved.
+        for prefix in ["LQ-", "RISK-"] {
+            assert!(
+                RESERVED_ID_PREFIXES.contains(&prefix),
+                "{prefix} is minted by the venue and must stay reserved"
+            );
+        }
+        for prefix in RESERVED_ID_PREFIXES {
+            let out = Engine::new().process(
+                ClientMessage::SubmitOrder(order(&format!("{prefix}MNQ-1"), 1)),
+                1,
+            );
+            assert_eq!(
+                reject_reason(&out),
+                "client_order_id uses reserved liquidation prefix",
+                "{prefix}"
+            );
+        }
+        // AND ONLY THE PREFIX IS RESERVED. An id that merely starts with the
+        // same letters is an ordinary client id - which is what makes the
+        // refusals above a statement about the reserved namespace rather than
+        // about ids that look vaguely like it.
+        let out = Engine::new().process(ClientMessage::SubmitOrder(order("RISKY-MNQ-1", 1)), 1);
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "an id outside the reserved prefixes is ordinary: {out:?}"
         );
     }
 
@@ -10082,6 +10436,62 @@ mod tests {
             "the cancel that frees the hold is where the arm lands"
         );
         assert!(e.armed.is_empty());
+    }
+
+    /// The last site that pushed its closing snapshot unconditionally, found
+    /// one function away from the group's after that one was closed.
+    ///
+    /// An expiry FREES A HOLD, which is exactly what `DropNextAccountUpdate` is
+    /// armed against, and this path handed the client the fresh balances anyway
+    /// while leaving the arm loaded for a later fill. The unarmed half is what
+    /// makes the assertion discriminating: the same order, the same expiry, and
+    /// the snapshot present.
+    ///
+    /// `on_modify` is NOT here even though it also moves a hold:
+    /// `modify_does_not_consume_armed_drop` rules the other way for it on
+    /// purpose, and is cited at that site.
+    #[test]
+    fn an_expiry_obeys_drop_next_account_update() {
+        let gtd = || {
+            let mut order = limit_order("gtd-expires", 1);
+            order.time_in_force = TimeInForce::Gtd;
+            order.expire_time = Some(50);
+            order
+        };
+
+        let mut plain = banded(1);
+        plain.process(ClientMessage::SubmitOrder(gtd()), 1);
+        let expired = plain.expire_orders(60, None, 60);
+        assert!(
+            expired
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderExpired { .. })),
+            "the order expired: {expired:?}"
+        );
+        assert!(
+            expired
+                .iter()
+                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+            "and reported the hold it freed: {expired:?}"
+        );
+
+        let mut armed = banded(1);
+        armed.process(ClientMessage::SubmitOrder(gtd()), 1);
+        armed.arm(Divergence::DropNextAccountUpdate);
+        let expired = armed.expire_orders(60, None, 60);
+        assert!(
+            expired
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderExpired { .. })),
+            "the same expiry ran: {expired:?}"
+        );
+        assert!(
+            !expired
+                .iter()
+                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+            "but the arm hid the update it freed: {expired:?}"
+        );
+        assert!(armed.armed.is_empty(), "and the arm was spent, not left");
     }
 
     /// The default seed's grid, read off the ENGINE rather than off the
@@ -10600,10 +11010,22 @@ mod tests {
     fn a_group_of_two_equity_sells_over_one_holding_is_refused_whole() {
         let mut e = equity_engine(&Shares::default());
         trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
+        // Linked, but with no contingency between them: two INDEPENDENT sells
+        // that happen to travel in one frame. The link is not decoration - a
+        // member without one is refused by `validate_submit_group` before the
+        // equity check this test is about is ever reached.
         let mut first = order_with("G1", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
         first.order_type = OrderType::Limit;
+        let first = linked(
+            first,
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], None),
+        );
         let mut second = order_with("G2", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
         second.order_type = OrderType::Limit;
+        let second = linked(
+            second,
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], None),
+        );
         let out = e.process_with_market(
             ClientMessage::SubmitOrderGroup {
                 orders: vec![first, second],
@@ -10615,7 +11037,7 @@ mod tests {
                 band_ticks: 0,
             }),
         );
-        let rejected: Vec<&str> = out
+        let rejected: Vec<(&str, &str)> = out
             .iter()
             .filter_map(|event| match event {
                 ServerMessage::OrderRejected {
@@ -10625,12 +11047,22 @@ mod tests {
                 } => Some((client_order_id.as_str(), reason.as_str())),
                 _ => None,
             })
-            .map(|(id, _)| id)
             .collect();
         assert_eq!(
-            rejected,
+            rejected.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec!["G1", "G2"],
             "pass one refuses the group whole: {out:?}"
+        );
+        // AND FOR THE RIGHT RULE. Every wire-shape refusal the group validator
+        // makes also refuses the group whole with these same two ids, so an
+        // id-only assertion cannot tell this test's subject - the equity short
+        // check reading the working book - from a link or symbol rule tripping
+        // first.
+        assert!(
+            rejected
+                .iter()
+                .all(|(_, reason)| reason.contains("cannot sell AAPL short")),
+            "refused for the equity short rule, not a wire-shape rule: {rejected:?}"
         );
         assert!(
             e.open.is_empty(),

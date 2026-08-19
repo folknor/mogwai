@@ -107,45 +107,83 @@ RESERVATION still hands the same held shares to every resting sell, because
 `order_locked` cache depends on that independence. Admission is now correct; the
 hold a margin equity account carries while several sells rest is not.
 
+FINDING 10 IS CLOSED AND FINDING 12 - the `MarketToLimit` item routed here from
+`notes/todo.md` - LANDED WITH IT, both in round 3. Five of finding 10's six
+bullets reproduced and are fixed; one is refused with its reasoning recorded.
+With that THE DOCUMENT IS EXHAUSTED: nothing here is open, and what remains is
+one withdrawal (section 11), one refusal (inside section 10) and one residual
+filed in `notes/todo.md`.
+
 The hunter read all four source files (`orders.rs`, `account.rs`, `lib.rs`
 non-test region, `divergence.rs`) plus the protocol-side helpers the engine
 leans on (`InstrumentDef::unrealized`, `validate_submit_group`,
 `InstrumentClass`). No files modified.
 
-## 10. Smaller and lower-confidence
+## 10. Smaller and lower-confidence - CLOSED
 
-- Group closing pass ignores `DropNextAccountUpdate`. `on_submit_group`
-  unconditionally pushes an `AccountState` when the closing linkage produced
-  anything, while every other snapshot site consults the arm. It also emits that
-  snapshot IN ADDITION TO the per-member snapshots pass two already emitted, so
-  one group can produce N+1 account states.
-- `account_changed` omits `OrderExpired` and `OrderUpdated`. Today no reachable
-  batch emits either without an accompanying fill or cancel, but the predicate
-  claims to answer "did anything move the ledger" and an OUO shrink
-  (`OrderUpdated`) plainly does. A latent gap of the same shape as the ones
-  above.
-- Liquidation id prefixes are half-guarded. `validate_submit` reserves `"LQ-"`,
-  but `liquidate_all` mints `"RISK-..."`, which no rule reserves. A client can
-  submit `RISK-MNQ-1` and collide with a risk-breach close.
-- `on_trigger`'s `StopMarket` remainder rests with a stale `scanned_ns` and an
-  unbumped `revision`. It rests `Inert` so nothing scans it today, but the
-  frontier is left pointing at pre-trigger tape - the frontier family's shape,
-  currently harmless only because of a property of a different field.
-- `draw_key` collision surface. Documented as accepted, so not a finding, but
-  worth restating: the trigger is a pure function of client-controlled fields,
-  so a strategy can re-roll its queue position by cancel-and-resubmit under a
-  new id. Fine for strategies, not fine if this venue is ever used to score
-  anything adversarial.
-- The group's atomicity guarantee is contingent on an external validator.
-  `on_submit_group` never calls `validate_submit_group`; the
-  duplicate-id-within-group and IOC/FOK-member rules live only in
-  `mogwai-server/src/http.rs`. The dry pass cannot catch an intra-group
-  duplicate on its own (no member is in `seen_client_order_ids` yet), so a
-  caller reaching `process_with_market` directly - tests, benches, a future
-  gateway - breaks the group open on pass two. Given how much documentation in
-  this file is devoted to "no refusal may reach a submit from outside
-  `dry_refusal`", having a whole class of refusals live in another crate is a
-  structural weak point. `on_submit_group` should call the validator itself.
+All six bullets settled by the round-3 fix pass. Five reproduced and are fixed;
+one was never a finding and its refusal is recorded here so a later round does
+not re-derive it.
+
+- THE GROUP'S ATOMICITY GUARANTEE IS NO LONGER CONTINGENT ON AN EXTERNAL
+  VALIDATOR, which is the one bullet section 11 routed here as the engine's real
+  exposure. `on_submit_group` now calls `mogwai_protocol::validate_submit_group`
+  itself, before the `RejectNextSubmit` arm, and refuses the group whole with
+  that validator's own reason. Called, not copied: one arm re-spelled in the
+  engine would read as the rule's home while implementing a fraction of it,
+  which is what round 1 declined to do and why it left this open.
+  MEASURED BLAST RADIUS BEFORE LANDING, at the call sites rather than by
+  grepping. Two of the validator's rules are unreachable from the dry pass by
+  construction - an intra-group DUPLICATE ID (`validate_submit` reads
+  `seen_client_order_ids`, and on pass one no member is in it) and an
+  `Ioc`/`Fok` MEMBER - and the duplicate case is a genuine atomicity break: the
+  bite-check shows the first copy ACCEPTED and RESTING and the second refused.
+  Everything else the validator asks was already true of every group the engine
+  admits, verified by the suite: no test changed verdict.
+  TWO ENGINE TESTS WERE WEAKENED BY IT AND WERE REPAIRED IN THE SAME CHANGE,
+  which is the hazard of adding an earlier gate.
+  `one_bad_member_rejects_a_whole_group_and_accepts_nothing` made its bad member
+  bad by naming an unknown SYMBOL, which the group validator now refuses one
+  step earlier for disagreeing with its siblings; it is now bad by an off-grid
+  PRICE, which only the engine holds the increment to judge.
+  `a_group_of_two_equity_sells_over_one_holding_is_refused_whole` sent UNLINKED
+  members, which are now refused for the missing link rather than for the equity
+  short check the test is named after; its members carry a `NoContingency` link
+  and it asserts the refusal TEXT, since every wire-shape rule also refuses the
+  group whole with the same two ids.
+- THE GROUP'S CLOSING SNAPSHOT NOW CONSULTS `DropNextAccountUpdate`, like every
+  other snapshot site. It also consults `account_changed` first, so a closing
+  pass that moved nothing does not spend an arm. The N+1 half of the bullet is
+  NOT a defect and was not changed: the per-member snapshots report pass two and
+  the closing snapshot reports the linkage, which is a later state.
+  The test arms the divergence TWICE, because the filling member spends the
+  first on its own snapshot - which is also why the gap never bit.
+- `account_changed` IS NOW EXHAUSTIVE OVER `ServerMessage`, with `OrderUpdated`
+  and `OrderExpired` counted. Confirmed latent rather than live before changing
+  it: at both call sites an `Ouo` shrink only ever accompanies the fill that
+  caused it, and no expiry reaches either. The match is exhaustive so the next
+  variant must be classified rather than inherit `false`, which is how these two
+  were lost. This closes the last member of the structural note's family.
+- BOTH LIQUIDATION PREFIXES ARE RESERVED. `RESERVED_ID_PREFIXES` in
+  `mogwai-engine`'s `lib.rs` is the one list, read by `validate_submit` and by
+  the three minting sites. The bullet understated the consequence: a client
+  claiming `RISK-MNQ-1` does not merely collide, it BURNS the id in
+  `seen_client_order_ids`, so the account-policy flatten that later mints it is
+  refused as a duplicate and the venue cannot liquidate the account that
+  pre-claimed it.
+- THE TRIGGERED `StopMarket` REMAINDER NOW INVALIDATES ITS OWN WALK. The bullet
+  called it harmless-for-now; it was not. Keeping the pre-trigger `scanned_ns`
+  and `revision` means the result that TRIGGERED the order still satisfies
+  `apply_scans_on_clock`'s staleness guard, so a duplicate or late delivery of
+  that result finds an order that is no longer `Conditional`, falls through to
+  the resting-limit arm, and PANICS on a market-on-trigger order's absent price.
+  The remainder now advances the frontier to where the walk reached and bumps
+  the revision, exactly as the limit remainder beside it already did.
+- REFUSED: the `draw_key` collision surface. Not a defect and the bullet says so
+  itself - the behaviour is documented and accepted. A strategy re-rolling its
+  queue position by cancel-and-resubmit under a new id is what a keyed draw
+  means; making it adversarially sound would be a design change, and there is no
+  claim in the tree that it is.
 
 ## Structural note
 
@@ -168,8 +206,61 @@ sat next to one implementation while the others drifted, which is why the fixes
 were collapses rather than corrections: correcting a copy leaves the next drift
 undetectable, and collapsing it makes the stated invariant true by construction.
 
-Only the `account_changed` gap in finding 10 is left of this family, and it is
-open below.
+The `account_changed` gap was the last of this family and closed in round 3,
+by making the predicate exhaustive over `ServerMessage` rather than by adding
+the two missing variants to a hand-written list. The family is now empty.
+
+## 12. `MarketToLimit`, routed here from `notes/todo.md` - FIXED
+
+Not a finding of this report. Filed by the `bugs-protocol` round-2 fix pass as
+ONE DEFECT WITH TWO SYMPTOMS and routed to this document; the round-3 fix pass
+closed both, and the todo entry is removed.
+
+WHAT THE VENUE DID, end to end. `wire_order_type` has no refusal arm, so the
+type reaches the engine over `/ws` and through the adapter unimpeded;
+`validate_submit_order` requires it to carry a price and no trigger; the submit
+path drew a slipped market price ONLY for `OrderType::Market`, so a
+`MarketToLimit` filled its whole quantity at `risk_px` - its own stated limit -
+with no reference to the tape, and `marketable` was computed and then consulted
+only for `Limit`. A remainder therefore never arose on the clean path, and where
+an armed `PartialFillNext` manufactured one it rested `Resting::Inert`: on the
+book with a positive `leaves_qty`, offered to no sweep, unable to fill or
+expire.
+
+WHY NO OWNER RULING WAS NEEDED, which is what the filing flagged as
+owner-level. The product question - serve the type faithfully or refuse it - is
+already answered in the tree, twice. The ORDER-TYPE COMPLETENESS RULING of
+2026-08-16 says the venue serves the full nautilus surface and curates nothing,
+and `docs/oms-types.md` and `reference/architecture.md` both state the type as
+SERVED. Refusing it would contradict a standing ruling and two durable
+documents; serving it properly contradicts nothing. So the honest close was to
+implement it, and the fix pass did rather than sharpening the filing.
+
+WHAT LANDED. `on_submit_from` now spells two predicates once each and reads them
+at every decision that used to hand-roll `== OrderType::Limit`:
+`takes_the_market` (`Market | MarketToLimit`) prices the executed part off the
+last print through the same band draw a market order uses, and `rests_as_limit`
+(`Limit | MarketToLimit`) governs the unmarketable-on-arrival rest, the
+`Resting` the record is frozen with, and the partial remainder's tranche
+redraw. The stated price BOUNDS the fill - a buy never above it, a sell never
+below - because the band's adverse slip can otherwise carry the order past the
+one price the client asked the venue to respect. A touch short of the limit
+takes nothing and rests the whole quantity, which is `marketable` finally being
+consulted for the type it was computed for.
+`a_market_to_limit_remainder_is_governed_by_its_time_in_force` was UPDATED, not
+deleted, as it asked to be: it pins the fill price at the market (99) rather
+than the limit (100), the remainder resting as a limit and offered to the sweep,
+and a new arm with the market ABOVE a buy limit that needs no divergence to
+reach.
+
+NO TAPE VERSION BUMP IS OWED, and the reasoning is recorded because the filing
+named `draw_market_price` and `AGENTS.md` lists "the fill band's draw" among the
+things that owe one. `mogwai-engine` does not depend on `mogwai-data` and cannot
+see `TAPE_PROTOCOL_VERSION`; the fill draw is keyed on `fill_seed`, which the
+generator's stream is deliberately kept separate from so that the tape is not a
+function of client behaviour. No generated byte moves, and the clause names the
+tape-side band model rather than the engine's per-order draw.
+`TAPE_PROTOCOL_VERSION` is 22.
 
 ## 11. WITHDRAWN, and finding 4 with it: both rested on a misreading
 
