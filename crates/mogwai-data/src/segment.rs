@@ -38,8 +38,10 @@ use mogwai_protocol::{AggressorSide, Symbol, TradeTick};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
 
+use crate::generated::MID_CEILING;
 use crate::{TickEvent, TickSource};
 
 /// The library format version this build reads. Must track
@@ -153,6 +155,33 @@ impl SegmentLibrary {
                     segment.side.len()
                 )));
             }
+            // Rule 2 of the conformance fixture, and the one that makes a seam
+            // level-continuous: the incoming segment's first return must not
+            // move the price, because its displacement lives in `open_gap_ret`.
+            // A nonzero `ret[0]` puts a silent extra jump at EVERY seam, on top
+            // of or instead of the reopen gap, so `reopen_gaps: false` would
+            // stop meaning "no gap at the seam" - and the composer's own
+            // `a_seam_without_a_reopen_gap_moves_no_price` would keep passing,
+            // because its fixture happens to satisfy the rule the code did not
+            // check.
+            if segment.ret[0] != 0 {
+                return Err(SegmentError::Refusal(format!(
+                    "segment {} opens with ret[0]={}; a segment's first trade is \
+                     its own anchor and its displacement belongs in open_gap_ret",
+                    segment.trade_date, segment.ret[0]
+                )));
+            }
+            // The `units` block's aggressor alphabet. Without this an
+            // unrecognised char is composed as `NoAggressor`, so a typo in a
+            // hand-edited library reads as a legitimately unsided print. The
+            // corpus parser already refuses anything outside B/A/N on the way
+            // in; this is the file boundary saying the same thing.
+            if let Some(bad) = segment.side.iter().find(|c| !matches!(c, 'B' | 'A' | 'N')) {
+                return Err(SegmentError::Refusal(format!(
+                    "segment {} carries side {bad:?}, outside the DBN alphabet B/A/N",
+                    segment.trade_date
+                )));
+            }
         }
         Ok(())
     }
@@ -174,8 +203,17 @@ pub struct SegmentCompose {
     /// Dead time inserted between the last trade of one segment and the window
     /// start of the next. Real calendar time between two Asia sessions is a
     /// day; an ENDLESS-Asia tape deliberately elides it, so this is the visible
-    /// seam and one second is enough to keep timestamps strictly increasing
-    /// without opening a hole on the chart.
+    /// seam and one second is enough to separate two sessions without opening a
+    /// hole on the chart.
+    ///
+    /// IT BUYS STRICT INCREASE ACROSS SEAMS ONLY, and deliberately so. WITHIN a
+    /// segment the timestamps are the corpus's own: `dt_ns[i] == 0` is a normal
+    /// row, because a sweep across several price levels prints several trades at
+    /// one nanosecond and `mogwai_lab::segments` records the difference
+    /// verbatim. The composed tape is therefore non-decreasing, not strictly
+    /// increasing, and nothing here may be written as if it were - the loader
+    /// does not refuse a zero `dt_ns`, and refusing one would throw away real
+    /// sessions.
     pub seam_gap_ns: u64,
     /// Apply each segment's measured `open_gap_ret` at the seam. Off yields a
     /// continuous tape with no reopen gaps - which is what the fitted generator
@@ -204,14 +242,20 @@ impl SegmentCompose {
 
 /// An endless tape composed from a segment library.
 ///
-/// Never returns `None`: like [`crate::GeneratedSource`] it is effectively
-/// infinite, so a caller bounds it by span rather than by exhaustion.
+/// Effectively infinite: like [`crate::GeneratedSource`] a caller bounds it by
+/// span rather than by exhaustion. It has exactly ONE terminal condition, the
+/// nanosecond clock running out of range ([`SegmentSource::clock_exhausted`]),
+/// so a `None` from this source is never ordinary end-of-stream and a consumer
+/// that reports it as one is reporting the wrong thing.
 #[derive(Debug)]
 pub struct SegmentSource {
     library: SegmentLibrary,
     config: SegmentCompose,
     rng: ChaCha12Rng,
     tick_size: Decimal,
+    /// `tick_size` as the running level's own type - the price floor, mirroring
+    /// the generator's `tick_f64`.
+    tick_f64: f64,
     /// Index into `library.segments` of the segment being played.
     segment: usize,
     /// Cursor into that segment's parallel arrays.
@@ -221,8 +265,20 @@ pub struct SegmentSource {
     price: f64,
     ts: u64,
     /// Set when the next tick opens a segment, so the seam work (gap return,
-    /// seam dead time) happens exactly once per boundary.
+    /// seam dead time) happens exactly once per boundary. FALSE at
+    /// construction: the tape origin is not a seam, so the first segment's
+    /// `open_gap_ret` - a jump measured against a session that is not in this
+    /// tape - must not land there and silently displace `start_price`.
     at_seam: bool,
+    /// How many times the running level hit a rail. Reported rather than
+    /// swallowed: a clamp that fires is the tape telling you the composed walk
+    /// has drifted somewhere the library's returns cannot describe, and a
+    /// silent rail is indistinguishable from a healthy one.
+    clamps: u64,
+    /// Latched when the nanosecond clock cannot advance any further. Terminal:
+    /// `next_tick` returns `None` from then on rather than saturating, which
+    /// would hand every later tick the same `ts_event` forever.
+    clock_exhausted: bool,
 }
 
 impl SegmentSource {
@@ -241,6 +297,15 @@ impl SegmentSource {
                 "segment library tick_size {tick_size} is not positive"
             )));
         }
+        let tick_f64 = tick_size
+            .to_f64()
+            .filter(|t| t.is_finite() && *t > 0.0)
+            .ok_or_else(|| {
+                SegmentError::Refusal(format!(
+                    "segment library tick_size {tick_size} has no positive finite f64 \
+                 image; the running level is integrated in f64 and floored at it"
+                ))
+            })?;
         if !(config.start_price.is_finite() && config.start_price > 0.0) {
             return Err(SegmentError::Refusal(format!(
                 "start price {} is not a positive finite level; returns-space \
@@ -248,15 +313,35 @@ impl SegmentSource {
                 config.start_price
             )));
         }
+        // Refused rather than silently collapsed. The generator clamps a
+        // start_price outside the band on its first tick, which turns a typo
+        // into an ~80 percent crash printed as if it were market data; the
+        // composer says so at the boundary instead.
+        //
+        // THIS CHECK'S POSITION IS LOAD-BEARING, not stylistic. It precedes
+        // every `integrate` call, and `integrate`'s `clamp(tick_f64,
+        // MID_CEILING)` PANICS when the low bound exceeds the high one - so a
+        // library declaring a tick_size above MID_CEILING has to be refused
+        // here, before any level is integrated. Reordering the constructor so
+        // a tick above the ceiling reaches `integrate` reintroduces that panic.
+        if config.start_price < tick_f64 || config.start_price > MID_CEILING {
+            return Err(SegmentError::Refusal(format!(
+                "start price {} is outside the composable band [{tick_f64}, {MID_CEILING}]",
+                config.start_price
+            )));
+        }
         let mut source = Self {
             rng: ChaCha12Rng::seed_from_u64(config.seed),
             tick_size,
+            tick_f64,
             segment: 0,
             cursor: 0,
             played: 0,
             price: config.start_price,
             ts: config.start_ns,
-            at_seam: true,
+            at_seam: false,
+            clamps: 0,
+            clock_exhausted: false,
             library,
             config,
         };
@@ -267,6 +352,62 @@ impl SegmentSource {
     /// The window this tape is composed from, for provenance in a dump header.
     pub fn window(&self) -> &str {
         &self.library.window
+    }
+
+    /// How many times the running level was pinned to a rail. Nonzero means the
+    /// composed walk left the band the library's returns can describe, and the
+    /// prices after that point are the rail rather than the integration.
+    pub fn clamps(&self) -> u64 {
+        self.clamps
+    }
+
+    /// Whether the source stopped because the nanosecond clock ran out of
+    /// range. The ONLY reason this source ever returns `None`.
+    pub fn clock_exhausted(&self) -> bool {
+        self.clock_exhausted
+    }
+
+    /// Integrates one log return into the running level, holding it inside the
+    /// band every emitted price must come from.
+    ///
+    /// WHY A BAND AT ALL. The composer integrates `price *= ret.exp()` forever,
+    /// and an endless tape has no re-anchoring event: a run of negative drift
+    /// walks the level toward zero and a run of positive drift toward infinity.
+    /// Both ends are wrong in a way that is not merely inaccurate. Below half a
+    /// tick, `emit_price` rounds to EXACTLY ZERO and the tape carries
+    /// non-positive prices, which this crate's own Kraken parser refuses on the
+    /// grounds that they poison downstream ln-return math; above `Decimal`'s
+    /// range - about 7.9e28, far below `f64`'s - the level has no decimal image
+    /// at all. The generator was given the same floor and ceiling on the same
+    /// reasoning; the constant is shared so the two bands cannot drift.
+    fn integrate(&mut self, log_return: f64) {
+        let next = self.price * log_return.exp();
+        // A NaN cannot arise from a finite level times a finite factor, but
+        // `clamp` panics on one, so it is handled rather than argued about.
+        let bounded = if next.is_nan() {
+            self.tick_f64
+        } else {
+            next.clamp(self.tick_f64, MID_CEILING)
+        };
+        if bounded != next {
+            self.clamps += 1;
+        }
+        self.price = bounded;
+    }
+
+    /// Advances the clock, or latches exhaustion. Returns false when the tape
+    /// has to end.
+    fn advance_clock(&mut self, by: u64) -> bool {
+        match self.ts.checked_add(by) {
+            Some(ts) => {
+                self.ts = ts;
+                true
+            }
+            None => {
+                self.clock_exhausted = true;
+                false
+            }
+        }
     }
 
     fn draw_segment(&mut self) -> usize {
@@ -281,12 +422,12 @@ impl SegmentSource {
     /// Advances to the next segment, taking the seam. Kept separate from
     /// `next_tick` so the seam's two effects - the dead time and the gap
     /// return - are applied in one place and cannot drift apart.
-    fn take_seam(&mut self) {
+    fn take_seam(&mut self) -> bool {
         self.played += 1;
         self.segment = self.draw_segment();
         self.cursor = 0;
         self.at_seam = true;
-        self.ts = self.ts.saturating_add(self.config.seam_gap_ns);
+        self.advance_clock(self.config.seam_gap_ns)
     }
 
     /// Snaps the running level onto the instrument's grid.
@@ -296,11 +437,20 @@ impl SegmentSource {
     /// every subsequent return, which over an endless tape is a slow drift
     /// rather than a bounded one.
     fn emit_price(&self) -> Decimal {
-        let Some(level) = Decimal::from_f64_retain(self.price) else {
-            // Unreachable for a finite positive price, which the constructor
-            // established and multiplication by a finite factor preserves.
-            return self.tick_size;
-        };
+        // ENFORCED, NOT ARGUED. This used to fall back to `self.tick_size` on a
+        // `None`, which printed a one-tick trade in the middle of a runaway tape
+        // with no error and no log - and `None` is reachable well before `inf`,
+        // because `Decimal` tops out around 7.9e28. `integrate` holds the level
+        // inside [tick, MID_CEILING], which has a decimal image by construction,
+        // so a `None` here means that band was breached and the tape is wrong;
+        // failing loudly beats printing a price nobody can trace.
+        let level = Decimal::from_f64_retain(self.price).unwrap_or_else(|| {
+            panic!(
+                "composed level {} has no decimal image; the [{}, {MID_CEILING}] \
+                 band that guarantees one was breached",
+                self.price, self.tick_f64
+            )
+        });
         let steps = (level / self.tick_size).round();
         (steps * self.tick_size).normalize()
     }
@@ -312,22 +462,34 @@ impl TickSource for SegmentSource {
         // rather than `if`: `validate` forbids an empty segment, so one hop
         // always suffices, but the loop makes that a property of the data
         // rather than an assumption the walk would panic on.
-        while self.cursor >= self.library.segments[self.segment].trade_count {
-            self.take_seam();
+        if self.clock_exhausted {
+            return None;
         }
-        let segment = &self.library.segments[self.segment];
+        while self.cursor >= self.library.segments[self.segment].trade_count {
+            if !self.take_seam() {
+                return None;
+            }
+        }
         let i = self.cursor;
+        // Copied out before any `&mut self` call: `integrate` and
+        // `advance_clock` both need the whole source.
+        let segment = &self.library.segments[self.segment];
+        let open_gap_ret = segment.open_gap_ret;
+        let ret_i = segment.ret[i];
+        let dt_i = segment.dt_ns[i];
+        let size_i = segment.size[i];
+        let side_i = segment.side[i];
 
         if self.at_seam {
             if self.config.reopen_gaps
-                && let Some(gap) = segment.open_gap_ret
+                && let Some(gap) = open_gap_ret
             {
                 #[expect(
                     clippy::cast_precision_loss,
                     reason = "a nano-log-return is far inside f64's exact integer range"
                 )]
                 let gap_ret = gap as f64 * 1e-9;
-                self.price *= gap_ret.exp();
+                self.integrate(gap_ret);
             }
             self.at_seam = false;
         }
@@ -336,17 +498,27 @@ impl TickSource for SegmentSource {
             clippy::cast_precision_loss,
             reason = "a nano-log-return is far inside f64's exact integer range"
         )]
-        let ret = segment.ret[i] as f64 * 1e-9;
-        self.price *= ret.exp();
-        self.ts = self.ts.saturating_add(segment.dt_ns[i]);
+        let ret = ret_i as f64 * 1e-9;
+        self.integrate(ret);
+        if !self.advance_clock(dt_i) {
+            // The level moved and the cursor did not, so the source is left
+            // mid-segment and internally inconsistent. Harmless because the
+            // state is TERMINAL: `clock_exhausted` latches, the guard at the
+            // top of this function returns `None` from here on, and nothing
+            // reads the level again. Anything that ever makes exhaustion
+            // recoverable owes an undo of the integration or a reordering.
+            return None;
+        }
 
         let tick = TradeTick {
             symbol: Symbol::from(self.config.symbol.as_str()),
             price: self.emit_price(),
-            size: Decimal::from(segment.size[i]),
-            aggressor: match segment.side[i] {
+            size: Decimal::from(size_i),
+            aggressor: match side_i {
                 'B' => AggressorSide::Buyer,
                 'A' => AggressorSide::Seller,
+                // `validate` refuses anything outside B/A/N at load, so this
+                // arm is exactly the fixture's `N`.
                 _ => AggressorSide::NoAggressor,
             },
             ts_event: self.ts,
@@ -523,6 +695,239 @@ mod tests {
             .expect_err("an unreadable version is refused")
             .to_string();
         assert!(err.contains("version"), "{err}");
+    }
+
+    /// Finding 3, the floor half: an endless negative drift walks the level
+    /// below half a tick, and `emit_price` then rounds every print to EXACTLY
+    /// zero - a non-positive price this crate's own Kraken parser refuses.
+    #[test]
+    fn a_runaway_negative_drift_never_prints_a_non_positive_price() {
+        let mut config = SegmentCompose::new("MNQ", 4);
+        config.sample = false;
+        config.reopen_gaps = false;
+        config.start_price = 20_000.0;
+        // -0.5 in nano-log-returns, once per segment (the segment's first
+        // return is the mandatory zero anchor): `ln(20000 / 0.125) / 0.5` is
+        // about 24 segments to take 20000 below 0.125, which is half of the
+        // 0.25 tick and the level at which `emit_price` rounds to zero.
+        let mut source = SegmentSource::new(
+            library(vec![segment("d1", None, &[0, -500_000_000])]),
+            config,
+        )
+        .expect("a valid library");
+        for _ in 0..500 {
+            let price = price_of(&source.next_tick().expect("endless"));
+            assert!(price > Decimal::ZERO, "the composer printed {price}");
+        }
+        assert!(
+            source.clamps() > 0,
+            "a walk this steep must reach the floor, or the test proves nothing"
+        );
+    }
+
+    /// Finding 3, the ceiling half - and the report had the mechanism wrong,
+    /// which the bite-check showed. It predicted a silent one-tick print from
+    /// `from_f64_retain` returning `None` above `Decimal`'s roughly 7.9e28
+    /// range. MEASURED, an unbounded rising walk never gets there: with a 0.25
+    /// tick, `level / tick_size` overflows `Decimal` around 1.98e28, so the
+    /// walk PANICS inside rust_decimal's division several factors of e before
+    /// the `None` fallback could ever fire. The silent print is real code but
+    /// unreachable this way; the reachable damage is a panic mid-walk. Without
+    /// the ceiling this test dies on that division, with it every print stays
+    /// on the trajectory.
+    #[test]
+    fn a_runaway_positive_drift_stays_on_the_trajectory() {
+        let mut config = SegmentCompose::new("MNQ", 4);
+        config.sample = false;
+        config.reopen_gaps = false;
+        config.start_price = 20_000.0;
+        let mut source = SegmentSource::new(
+            library(vec![segment("d1", None, &[0, 500_000_000])]),
+            config,
+        )
+        .expect("a valid library");
+        // The ceiling is on the tick grid (1e9 divided by 0.25 is exact), so
+        // the pinned print is the ceiling itself rather than a rounding of it.
+        let ceiling = Decimal::from(1_000_000_000_u64);
+        let mut last = Decimal::ZERO;
+        for _ in 0..500 {
+            let price = price_of(&source.next_tick().expect("endless"));
+            assert!(
+                price >= Decimal::from(20_000) && price <= ceiling,
+                "a monotonically rising tape printed {price}, outside \
+                 [20000, MID_CEILING]"
+            );
+            last = price;
+        }
+        assert_eq!(
+            last, ceiling,
+            "a walk this steep must END pinned to the ceiling; a price below it \
+             after 500 ticks means the rail is not where the band says"
+        );
+        assert!(
+            source.clamps() > 0,
+            "a walk this steep must reach the ceiling"
+        );
+    }
+
+    /// Finding 5: the clock used to `saturating_add`, so a near-max `start_ns`
+    /// froze every later tick at `u64::MAX` and the source became a
+    /// constant-time stream that still claimed to be endless. `--start` is a
+    /// raw u64 an operator types, so this is one command away, not 580 years.
+    ///
+    /// THE `start_ns` IS CHOSEN TO LEAVE ROOM FOR FOUR TICKS, and that is the
+    /// whole design of the test. The helper's `dt_ns` is 1 ms per trade, so
+    /// `u64::MAX - 4_500_000` emits at MAX-3.5ms, -2.5ms, -1.5ms and -0.5ms and
+    /// then cannot advance. A `start_ns` one tick from the end would emit ONE
+    /// timestamp, and the duplicate-timestamp assertion - the one that names
+    /// the defect - would be vacuously true over a single-element vector while
+    /// the test still went red under the bug for an unrelated reason. The loop
+    /// therefore BREAKS at a cap rather than asserting on the count, so the
+    /// frozen-timestamp assertion is reached and fires under `saturating_add`.
+    #[test]
+    fn a_clock_that_cannot_advance_ends_the_tape_instead_of_freezing_it() {
+        let mut config = SegmentCompose::new("MNQ", 8);
+        config.sample = false;
+        config.start_ns = u64::MAX - 4_500_000;
+        let mut source =
+            SegmentSource::new(library(vec![segment("d1", None, &[0, 0, 0, 0])]), config)
+                .expect("a valid library");
+        let mut seen = Vec::new();
+        while let Some(tick) = source.next_tick() {
+            seen.push(tick.ts_event());
+            if seen.len() >= 12 {
+                break;
+            }
+        }
+        let mut deduped = seen.clone();
+        deduped.dedup();
+        assert_eq!(
+            deduped, seen,
+            "no two ticks may share a frozen timestamp; saw {seen:?}"
+        );
+        assert!(
+            seen.len() >= 3,
+            "the fixture must leave room for several ticks or the duplicate \
+             check above proves nothing; saw {}",
+            seen.len()
+        );
+        assert!(
+            source.clock_exhausted(),
+            "the source stopped for a reason it did not name"
+        );
+    }
+
+    /// Finding 4: `ret[0] != 0` is a rule the shared fixture STATES and the
+    /// loader did not check, so a hand-edited library put a silent extra jump
+    /// at every seam while `reopen_gaps: false` still claimed to make none.
+    #[test]
+    fn a_segment_whose_first_return_is_not_zero_is_refused() {
+        let err = SegmentSource::new(
+            library(vec![segment("d1", None, &[17, 0])]),
+            SegmentCompose::new("MNQ", 1),
+        )
+        .expect_err("a non-anchoring first trade is refused")
+        .to_string();
+        assert!(err.contains("ret[0]=17"), "{err}");
+    }
+
+    #[test]
+    fn a_side_outside_the_dbn_alphabet_is_refused_rather_than_read_as_unsided() {
+        let mut typo = segment("d1", None, &[0, 0]);
+        typo.side = vec!['B', 'b'];
+        let err = SegmentSource::new(library(vec![typo]), SegmentCompose::new("MNQ", 1))
+            .expect_err("a typo is not an unsided print")
+            .to_string();
+        assert!(err.contains("outside the DBN alphabet"), "{err}");
+    }
+
+    /// The tape origin is not a seam. A sampled first segment carrying an
+    /// `open_gap_ret` used to apply it before the first print, so the tape
+    /// started somewhere other than `start_price` - a gap measured against a
+    /// session that is not in this tape.
+    #[test]
+    fn the_first_print_sits_at_the_configured_start_price() {
+        let mut config = SegmentCompose::new("MNQ", 2);
+        config.sample = false;
+        config.reopen_gaps = true;
+        config.start_price = 20_000.0;
+        let mut source =
+            SegmentSource::new(library(vec![segment("d1", Some(9_950_331), &[0])]), config)
+                .expect("a valid library");
+        assert_eq!(
+            price_of(&source.next_tick().expect("endless")),
+            Decimal::from(20_000),
+            "the first segment's gap must not displace the tape origin"
+        );
+    }
+
+    /// THE RULE THE FIXTURE STATES MUST BE A RULE SOMETHING CHECKS. Adding a
+    /// sixth `rules` entry to the shared artifact without wiring it to a
+    /// validator is exactly the "nothing detects a missing fixture" hole one
+    /// level down, and nothing but this test would notice it. Each pin names
+    /// where its rule is enforced; a new rule fails here until it has one.
+    ///
+    /// ITS SCOPE IS THE WHOLE CONTRACT, NOT THE `rules` ARRAY ALONE, because a
+    /// gate whose stated scope differs from its real scope is the defect this
+    /// arc keeps finding. `validate` also enforces the aggressor alphabet,
+    /// which the fixture states in `units` rather than in `rules` - so that
+    /// statement is pinned here too, separately and by name, instead of being
+    /// left as a sixth enforcement nobody counted.
+    ///
+    /// MATCHING IS BY SEARCH, NOT BY POSITION. Zipping the two arrays would
+    /// report a REORDER of the JSON as "this rule is no longer enforced", which
+    /// sends the next reader to the wrong place; each pin finds its own rule.
+    #[test]
+    fn every_rule_the_conformance_fixture_states_is_enforced_somewhere() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../analysis/segment_library_conformance.json");
+        let text = std::fs::read_to_string(&path).expect("the committed fixture");
+        let raw: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let rules: Vec<&str> = raw["rules"]
+            .as_array()
+            .expect("a rules array")
+            .iter()
+            .map(|r| r.as_str().expect("a rule string"))
+            .collect();
+        // (rule prefix, where it is enforced)
+        let pinned = [
+            (
+                "dt_ns, ret, size and side are PARALLEL",
+                "validate: length agreement",
+            ),
+            ("ret[0] is always 0", "validate: the anchor refusal"),
+            (
+                "A segment carries NO absolute price",
+                "structural: the reader type has no price field to carry one",
+            ),
+            (
+                "trade_count is never 0",
+                "validate: the empty-segment refusal",
+            ),
+            ("version must equal", "validate: the version refusal"),
+        ];
+        for (prefix, site) in pinned {
+            assert!(
+                rules.iter().any(|rule| rule.starts_with(prefix)),
+                "no fixture rule starts with {prefix:?} any more, but {site} \
+                 still enforces it; the artifact and the validator disagree"
+            );
+        }
+        assert_eq!(
+            rules.len(),
+            pinned.len(),
+            "the fixture states {} rules but only {} are pinned to an enforcement \
+             site; wire the new one up before pinning it here. Rules: {rules:?}",
+            rules.len(),
+            pinned.len()
+        );
+        // The sixth enforcement, stated in `units` rather than in `rules`.
+        let side_units = raw["units"]["side"].as_str().expect("a side unit");
+        assert!(
+            side_units.contains('B') && side_units.contains('A') && side_units.contains('N'),
+            "the fixture's side alphabet {side_units:?} no longer names B/A/N, \
+             which validate's aggressor refusal enforces verbatim"
+        );
     }
 
     /// The shared fixture both crates parse. `mogwai-lab` has the matching

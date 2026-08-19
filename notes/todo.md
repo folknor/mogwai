@@ -217,6 +217,34 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- `SegmentSource` OVERRIDES NEITHER `seek_to` NOR `fault`, so an effectively
+  infinite source inherits the O(distance) default walk `mogwai-data`'s own
+  `TickSource` doc warns about - the same shape `GeneratedSource` needed
+  `CheckpointIndex` for. Harmless today because the only consumer,
+  `mogwai segments tape`, walks forward from the origin and never seeks; it
+  becomes a hang the moment anything serves a composed river or asks it for a
+  window. `fault` is the harder half: the composer's one terminal condition,
+  clock exhaustion, has no `TickFault` variant, and adding one ripples into
+  `mogwai-server`'s `http.rs` fault rendering. Today it is reported through the
+  inherent `SegmentSource::clock_exhausted`, which a `dyn TickSource` consumer
+  cannot see. Filed 2026-08-19 by the `bugs-data` round-2 fix pass; the residual
+  sub-item of that document's finding 4.
+  THE SAME ITEM OWNS `emit_price`'s PANIC. It replaced a silent one-tick print
+  with a named panic, which is right for a today-unreachable band breach in an
+  offline dump - but it panics inside `TickSource::next_tick`, in a library
+  crate, where `GeneratedSource`'s equivalent failures go through `TickFault`.
+  The moment a composed river is served, that panic is a serving-path abort.
+  Giving the composer a `TickFault` closes both halves at once.
+- COMPOSED PRICES CAN SIT ON A RAIL WITH NOBODY WATCHING. The composer now
+  clamps its running level to `[tick, MID_CEILING]` and counts the hits
+  (`SegmentSource::clamps`, printed as `composed_price_clamps=` by
+  `mogwai segments tape`), but nothing REFUSES a tape that spent most of its
+  length pinned - and past the first clamp the printed prices are the rail
+  rather than the integrated walk, which is a different tape than the one the
+  library describes. The counter is the observable; the policy question -
+  whether a long clamped run is a bad library, a bad `start_price`, or a
+  legitimate deep drawdown - is an owner call and has not been made. Filed
+  2026-08-19 alongside the clamp itself.
 - NOTHING ROUTES A NEW WALL-CLOCK BUDGET INTO THE `timing` SWEEP, and the
   workspace has already paid for this shape once. `brokkr.toml` states the
   standing policy for a latency assertion - `#[ignore]` at the source, an entry

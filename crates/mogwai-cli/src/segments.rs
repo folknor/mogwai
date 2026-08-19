@@ -251,6 +251,10 @@ fn tape(args: TapeArgs) -> anyhow::Result<()> {
     }
     sink.flush().context("flushing the CSV")?;
     eprintln!("composed_ticks={}", args.ticks);
+    // A rail that fired is not a detail: past it the printed prices are the
+    // clamp rather than the integrated walk, and a wall or a tick count alone
+    // cannot tell the two tapes apart.
+    eprintln!("composed_price_clamps={}", source.clamps());
     eprintln!("library_load_seconds={load_seconds:.1}");
     eprintln!(
         "compose_seconds={:.1}",
@@ -267,6 +271,14 @@ fn write_trades(
     writeln!(out, "ts_event,price,size,aggressor")?;
     for _ in 0..ticks {
         let Some(TickEvent::Trade(t)) = source.next_tick() else {
+            // The composer has exactly one terminal condition, so name it
+            // rather than reporting an "endless" source as merely exhausted.
+            if source.clock_exhausted() {
+                bail!(
+                    "the composed tape ran the nanosecond clock out of range; \
+                     lower --start or ask for fewer --ticks"
+                );
+            }
             bail!("the composed source ended early; it is meant to be endless");
         };
         writeln!(
@@ -299,6 +311,14 @@ fn write_bars(
     let mut acc: Option<BarAcc> = None;
     for _ in 0..ticks {
         let Some(TickEvent::Trade(t)) = source.next_tick() else {
+            // The composer has exactly one terminal condition, so name it
+            // rather than reporting an "endless" source as merely exhausted.
+            if source.clock_exhausted() {
+                bail!(
+                    "the composed tape ran the nanosecond clock out of range; \
+                     lower --start or ask for fewer --ticks"
+                );
+            }
             bail!("the composed source ended early; it is meant to be endless");
         };
         if let Some(closed) = fold_trade(&mut acc, t.price, t.size, t.ts_event, interval) {

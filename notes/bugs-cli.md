@@ -20,7 +20,7 @@ recorded versions (11 and 14), and cargo's test CWD semantics.
 let version_ok = mogwai_data::TAPE_PROTOCOL_VERSION == 18;
 ```
 
-`TAPE_PROTOCOL_VERSION` is 20. `version_ok` is therefore `false`, and it is
+`TAPE_PROTOCOL_VERSION` is 21. `version_ok` is therefore `false`, and it is
 ANDed into B1's verdict (`"passed": shipping.is_empty() && version_ok`), which
 is ANDed into the run's `failing_gates`. So `mogwai arrival-control` on this
 tree spends its full multi-minute walk set and then writes

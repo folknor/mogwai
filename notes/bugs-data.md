@@ -12,11 +12,11 @@ The hunter read the whole crate (`lib.rs`, `segment.rs`, `trigger.rs`, `bars.rs`
 and all of `generated/`) plus the call sites in `mogwai-server` and `mogwai-lab`
 the findings depend on. No edits made.
 
-FINDINGS 1 AND 2 ARE CLOSED and their text removed; the surviving sections keep
-their ORIGINAL numbers, so this document starts at 3 by design. Later rounds'
+FINDINGS 1 THROUGH 5 ARE CLOSED and their text removed; the surviving sections
+keep their ORIGINAL numbers, so this document starts at 6 by design. Later rounds'
 briefs and `notes/bug-loop-carry-forward.md` cite these findings by number, and
-renumbering would silently break those citations. What 1 and 2 were, and the one
-correction the fix pass made to them:
+renumbering would silently break those citations. What they were, and the
+corrections the fix passes made to them:
 
 - 1 was `GeneratedSource::seek_to` spinning forever on a refused arrival draw,
   and 2 its root cause - `advance_parent` was infallible, so a refusal returned
@@ -30,80 +30,26 @@ correction the fix pass made to them:
   as "candidate walk stalled", aborting the whole run instead of naming the
   refusal and its clock. The structural fix stands on that ground; the
   infinite-loop claim was true of `seek_to` only.
-
-## 3. `SegmentSource`'s running price has no floor, no ceiling, and a silent failure mode
-
-`crates/mogwai-data/src/segment.rs`. The composer integrates `price *= ret.exp()`
-in `f64` forever, with NO counterpart to the generator's
-`(mid * r.exp()).max(tick_f64).min(MID_CEILING)`. Over an endless tape (the
-stated design: "never returns `None`... effectively infinite") a run of negative
-drift walks the level toward zero and a run of positive drift walks it toward
-infinity. Nothing re-anchors it.
-
-Two concrete consequences:
-
-- `emit_price` computes `(level / tick_size).round() * tick_size`. Once the
-  running price falls below half a tick, every emitted price is EXACTLY ZERO - a
-  non-positive price on the tape. `lib.rs`'s own Kraken parser explicitly
-  rejects non-positive prices because "a zero/negative price would poison
-  downstream ln-return math with -inf/NaN"; the composer can manufacture them.
-  `vol_reading`'s `pair[0] == 0.0` guard turns a whole window into a refusal at
-  that point.
-- On overflow, `Decimal::from_f64_retain(self.price)` returns `None` and the
-  `let else` SILENTLY RETURNS `self.tick_size` as the price - a one-tick print in
-  the middle of a runaway tape, with no error, no fault, and no log. The comment
-  calls this "unreachable for a finite positive price, which the constructor
-  established and multiplication by a finite factor preserves", which is only
-  true if you ignore overflow to `inf` (finite times finite can be `inf`) and
-  `Decimal`'s roughly 7.9e28 range, far below `f64`'s.
-
-The generator got a floor and a ceiling on exactly this reasoning; the second
-tape origin shipped without them.
-
-## 4. `SegmentSource` does not validate the invariants its own conformance fixture declares
-
-`analysis/segment_library_conformance.json` states five `rules`.
-`SegmentLibrary::validate` checks three of them (version, non-empty,
-parallel-array lengths) and ignores two:
-
-- "`ret[0]` is always 0" - unchecked. This is the rule that makes a seam
-  level-continuous: the incoming segment's first return must not move the price,
-  because its displacement lives in `open_gap_ret`. A library with a nonzero
-  `ret[0]` produces a silent extra jump at every seam, on top of (or instead of)
-  the reopen gap, and `reopen_gaps: false` no longer means "no gap at the seam".
-  The test `a_seam_without_a_reopen_gap_moves_no_price` only passes because its
-  hand-built fixture happens to set `ret[0] = 0`.
-- `dt_ns` positivity - unchecked, and the doc comment on `seam_gap_ns` claims
-  "one second is enough to keep timestamps strictly increasing". That is only
-  true across seams. Within a segment, `dt_ns[i] == 0` yields two ticks with an
-  identical `ts_event`. That may be fine for `MergeSource`, but the type's own
-  stated property is wrong as written, and
-  `timestamps_are_strictly_increasing_across_seams` cannot catch it (all its
-  `dt_ns` are 1 ms).
-
-The module's whole justification for the shared fixture is "if the shapes drift,
-one side fails on the fixture rather than both staying green" - but a rule the
-fixture STATES and neither side CHECKS is precisely the "nothing detects a
-missing fixture" hole `AGENTS.md` flags, one level down.
-
-Smaller in the same file: `at_seam` is `true` at construction, so the very first
-segment's `open_gap_ret` is applied at tape origin - a gap measured against a
-session that isn't in the tape. `side` chars other than `B` or `A` fall to
-`NoAggressor` silently rather than being refused at load (`N` is legitimate per
-the fixture, but so is a typo). `SegmentSource` overrides neither `seek_to` nor
-`fault`, so an endless source inherits the O(distance) default walk `lib.rs`
-warns about.
-
-## 5. `SegmentCompose::seam_gap_ns` and `saturating_add` can freeze the clock
-
-`take_seam` and `next_tick` both use `self.ts.saturating_add(...)`. On an endless
-tape this is correct until `ts` reaches `u64::MAX`, after which every tick shares
-that timestamp forever and the source silently becomes a constant-time stream.
-The generator's `low_intensity_gap_ns` has a documented, deliberate answer to the
-same question (`MAX_SESSION_GAP_NS` so the clock "advances strictly instead of
-freezing"); the composer has none. Low severity - it needs roughly 580 years of
-sim time - but it is the same defect the generator was explicitly repaired for,
-and the asymmetry is worth knowing about.
+- 3 was the composer's unbounded running price. Both halves reproduced; the
+  running level now clamps to the generator's `[tick, MID_CEILING]` band from
+  the same constant, and `emit_price` panics rather than silently printing one
+  tick. THE REPORT HAD THE CEILING'S MECHANISM WRONG: a rising walk never
+  reaches `from_f64_retain`'s `None`, because `level / tick_size` overflows
+  `Decimal` around 1.98e28 first and PANICS there. The silent one-tick print is
+  real code and unreachable that way; the reachable damage was the panic.
+- 4 was HALF RIGHT. `ret[0] == 0` is a fixture rule neither side checked, and
+  both `validate`s now refuse it (plus the `side` alphabet, on the reader side).
+  `dt_ns` POSITIVITY IS NOT A FIXTURE RULE and must not become one: two prints
+  at one nanosecond are ordinary in a swept book, `mogwai_lab::segments` records
+  the difference verbatim, and refusing a zero would throw away real sessions.
+  The defect there was the `seam_gap_ns` doc comment claiming strict increase;
+  it now says non-decreasing and says why. The origin-is-a-seam sub-item was
+  real and is fixed.
+- 5 was real and UNDERSTATED. The report priced it at 580 years of sim time, but
+  `--start` is a raw `u64` an operator types, so a near-max value froze the
+  clock on the first command. The composer refuses instead of saturating, and
+  `SegmentSource::clock_exhausted` names the one terminal condition it has.
+  The `seek_to` / `fault` sub-item of 4 is NOT closed; see `notes/todo.md`.
 
 ## 6. `ArrivalKernel::next_parent` has a cost cliff of roughly 31.6M iterations per draw
 
@@ -184,6 +130,6 @@ could not construct one, because `RegimeState::new` drops an already-elapsed arm
 and every later frontier advance either consumes the arm or leaves it strictly
 ahead. `SweepShape`'s `single_frac >= 1.0` division-by-zero is correctly
 special-cased in `begin_event` and unreachable from `next_count_scaled`.
-`TAPE_PROTOCOL_VERSION` is 20, `AGENTS.md` says next takes 21, and no markdown
+`TAPE_PROTOCOL_VERSION` is 21, `AGENTS.md` says next takes 22, and no markdown
 carries a stale live-identity claim. `bars.rs` is correct and its out-of-order
 contract is deliberate and tested.

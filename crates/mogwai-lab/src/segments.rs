@@ -233,6 +233,18 @@ impl SegmentLibrary {
                     segment.trade_date
                 )));
             }
+            // The anchor rule, checked on this side too. `cut` guarantees it by
+            // construction, but `load` reads a FILE, and the composer's half of
+            // the contract is that a nonzero first return would put a silent
+            // extra jump at every seam. Both sides refuse it, so a library that
+            // reaches either one is refused wherever it is opened.
+            if segment.ret[0] != 0 {
+                return Err(LabError::refusal(format!(
+                    "segment {} opens with ret[0]={}; a segment's first trade is \
+                     its own anchor and its displacement belongs in open_gap_ret",
+                    segment.trade_date, segment.ret[0]
+                )));
+            }
         }
         Ok(())
     }
@@ -792,6 +804,38 @@ mod tests {
         let again: SegmentLibrary = serde_json::from_str(&text).expect("round trip");
         again.validate().expect("a valid round trip");
         assert_eq!(again.segments.len(), library.segments.len());
+    }
+
+    /// The writer's half of the anchor refusal. `mogwai-data` has the matching
+    /// test on its own reading; the rule is stated in the shared fixture, so
+    /// both readers refuse it rather than one trusting the other.
+    #[test]
+    fn a_segment_whose_first_return_is_not_zero_is_refused() {
+        let library = SegmentLibrary {
+            doc: String::new(),
+            version: SEGMENT_LIBRARY_VERSION,
+            window: "asia".into(),
+            tick_size: "0.25".into(),
+            provenance: LibraryProvenance {
+                symbol: "MNQ".into(),
+                month: "2026-04".into(),
+                source_dir: String::new(),
+                source_files: Vec::new(),
+                cut_at: String::new(),
+            },
+            segments: vec![Segment {
+                trade_date: "2026-04-01".into(),
+                window_start_ns: 0,
+                trade_count: 2,
+                open_gap_ret: None,
+                dt_ns: vec![0, 1],
+                ret: vec![17, 5],
+                size: vec![1, 1],
+                side: vec!['B', 'A'],
+            }],
+        };
+        let err = library.validate().unwrap_err().to_string();
+        assert!(err.contains("ret[0]=17"), "{err}");
     }
 
     #[test]

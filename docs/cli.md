@@ -419,6 +419,19 @@ gap at each seam - which is the A/B against the fitted generator, since that
 generator produces no reopen gaps at all. The source is endless, so a dump is
 bounded by `--ticks` rather than by exhaustion.
 
+Two bounds the composer enforces, both reported. The running level is held
+inside the band the fitted generator uses - the library's own `tick_size` at the
+bottom and the generator's `MID_CEILING` at the top, read from that one constant
+rather than restated here, so no third copy of the number can go stale - because
+an endless integration has nothing to re-anchor it, and an unbounded walk prints
+zeros at the bottom (a non-positive price) and blows up the decimal arithmetic at
+the top. `composed_price_clamps=` on stderr counts the hits: nonzero means the
+prices past that point are the rail rather than the walk, and the tape wants a
+different `--start-price` or a different library rather than a wider band. And
+the tape ends rather than freezing if `--start` plus the composed span leaves the
+nanosecond clock no room, naming that as the reason; the composer has no other
+terminal condition.
+
 The bars output carries the same header `gen --type bars` emits, so one tool
 charts either:
 

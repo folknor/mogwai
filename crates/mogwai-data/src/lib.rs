@@ -106,7 +106,16 @@ pub use trigger::{
 /// draws. The bump is taken anyway because the rule is unconditional and a tape
 /// can now come from somewhere it could not come from before, which is exactly
 /// the thing this constant identifies.
-pub const TAPE_PROTOCOL_VERSION: u32 = 20;
+/// 21 rails the composer's running price. `segment::SegmentSource` integrated
+/// `price *= ret.exp()` with no floor and no ceiling, so an endless walk printed
+/// exactly zero once the level fell below half a tick and panicked inside
+/// `Decimal`'s division once it passed about 1.98e28. It now clamps to the same
+/// `[tick, MID_CEILING]` band the generator uses, from the same constant. Two
+/// smaller composer changes ride along: the tape origin is no longer treated as
+/// a seam, so a first segment's `open_gap_ret` cannot displace `start_price`,
+/// and the clock refuses rather than saturating at `u64::MAX`. Composed tapes
+/// move; nothing the fitted generator produces does.
+pub const TAPE_PROTOCOL_VERSION: u32 = 21;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.

@@ -255,6 +255,37 @@ parallel sweep, which reports every `mogwai-data` test as orphaned - the exact
 ambiguity `AGENTS.md` warns reads as a brokkr coverage bug. Check for a crashed
 test first, and this is the one to expect.
 
+## 10. LEAD, not a finding: a SECOND intermittent lifecycle test, on shutdown rather than completion
+
+Filed 2026-08-19 from the `bugs-data` round-2 close pass. DISTINCT from lead 9 -
+different test, different file, different failure mode - and recorded separately
+so neither absorbs the other.
+
+`crates/mogwai-cli/tests/lifecycle.rs`'s
+`sigterm_stops_the_venue_within_the_shutdown_grace` failed the FIRST of that
+pass's two full unscoped `brokkr check --gate` runs and passed the second, on
+the IDENTICAL tree. The failure was at `crates/mogwai-cli/tests/common/mod.rs`
+in the wait helper: "venue did not exit within 10s (or the test's remaining
+budget)". The tree's changes were confined to `mogwai-data`, `mogwai-cli` and
+markdown - nothing in the serving or shutdown path.
+
+So the venue took longer than the shutdown grace to exit after a SIGTERM, once.
+The candidate readings, none of them checked: a shutdown path that waits on a
+task the signal does not interrupt; the grace being measured against a clock
+that starts before the process is really up; or simple host contention under a
+parallel gate sweep, which is the boring answer and the one to rule out first by
+running the test alone under load.
+
+IT COSTS THE SAME AS LEAD 9 WHEN IT FIRES. Aborting on this test kills the
+instrumented sweep, and the gate then reports all of `mogwai-data`'s tests as
+orphaned - the brokkr-coverage-bug lookalike `AGENTS.md` warns about. The tell
+is that the orphan count equals the missing sweep's pass count. There are now
+TWO tests known to produce that wall; check for a crashed test before suspecting
+the tool.
+
+Not chased by the filing round - out of its scope. Reproduce before believing a
+verdict: one failure in two runs on one host.
+
 ## What the hunter would actually rewrite
 
 Findings 1, 2 and 3 are all the same underlying problem: THE ACCOUNT AND

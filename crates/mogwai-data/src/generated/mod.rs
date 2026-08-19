@@ -46,6 +46,11 @@ pub use arrival::{
 };
 pub use calendar::{CalendarError, SessionCalendar, WeeklyWindow};
 pub use checkpoint::CheckpointIndex;
+/// The price-level ceiling, shared with `crate::segment` so the generator and
+/// the composer clamp against ONE constant rather than two encodings of one
+/// quantity. Crate-visible rather than public: it is an internal rail, not a
+/// wire value.
+pub(crate) use consts::MID_CEILING;
 pub use dynamics::SweepShape;
 pub use fingerprint::{
     AbsReturnAcf, AnchorRange, EmpiricalRanges, Fingerprint, GeneratedSourceError,

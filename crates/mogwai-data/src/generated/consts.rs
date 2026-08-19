@@ -236,7 +236,7 @@ pub(super) const LATENT_SIZE_MIN_RATIO: f64 = 0.01;
 // the matching floor). Hoisted so the two clamp sites and `start_price`
 // validation cannot drift: a `start_price` above this is silently collapsed on
 // the very first tick (a start_price of 5e9 becomes an ~80 percent crash).
-pub(super) const MID_CEILING: f64 = 1_000_000_000.0;
+pub(crate) const MID_CEILING: f64 = 1_000_000_000.0;
 // Session-share sum invariants the modulator relies on. `intensity_hour` and
 // `dow_weight` are per-period FRACTIONS the modulator re-centers on 1.0 by
 // multiplying by the period count (24, 7), so a well-formed curve sums to

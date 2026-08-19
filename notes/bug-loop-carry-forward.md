@@ -1524,7 +1524,7 @@ The tape mechanics die with that document. What generalises, from the six
   the only new binding, and the removed `#[cfg(test)]` update never existed in
   release. No constant, no fingerprint, no artifact moved, and the gate's counts
   are unchanged at 1195 + 440 over 1692 pairs, 0 orphaned - no test added or
-  removed, four rewritten. `TAPE_PROTOCOL_VERSION` next takes 21.
+  removed, four rewritten. No tape-identity bump was owed by that round.
 
 ## The tape document, close pass: what the five commits left
 
@@ -3770,3 +3770,195 @@ in `notes/bugs-server.md` section 9.
   in addition to its fork framing and the usual contracts. Owner instruction.
   `brokkr.toml` carries the gate profile's parallelism and skip list, which
   several findings in these reports turn on directly.
+- `reference/INVENTORY.md` DOES NOT EXIST in this repository. The generic
+  orchestration workflow names it as a mandatory read; it is an unsubstituted
+  project variable from another repo, and nothing in this tree cites it. Do not
+  put it in a brief. The real contracts are `AGENTS.md` and `CLAUDE.md`, then
+  `reference/architecture.md`, `clock.md`, `glossary.md`, `performance.md` and
+  `technical-implementation-spec.md`.
+
+## The data document, round 1: the phantom parent
+
+Landed as `e2e58ee`. Ledger 1248 + 454, 1759 pairs, 1702 run, 57 ignored, 0
+orphaned. Closed findings 1 and 2 of `notes/bugs-data.md`; findings 3 through 7
+remain, UNRENUMBERED and uncompressed, and that document's preamble now records
+why its sections start at 3.
+
+MACHINERY LATER ROUNDS MAY BUILD ON AND MUST NOT BREAK:
+
+- `GeneratedSource::advance_parent` returns `Result<ParentSummary, TickFault>`.
+  It was infallible, and on an `ArrivalRefusal` it fabricated a phantom -
+  `ParentSummary { parent_ts_ns: 0, child_count: 0, .. }` on a fresh source -
+  because `begin_integrated_event` latches `self.fault` and returns WITHOUT
+  touching `burst`. Two guards are needed and both are present: a terminal-fault
+  check on entry, matching `next_tick`, AND a re-check after `begin_event`. The
+  entry guard alone stops the `seek_to` spin, which is why the spin test only
+  goes red with both removed - a half-bite that was caught rather than accepted.
+- Five call sites now handle the refusal: `seek_to` adopts the faulted clone and
+  returns `None`; `CheckpointIndex::extend_toward` adopts the faulted lead and
+  breaks, crediting no `walked` or `since_snapshot` and taking no snapshot;
+  `mogwai-lab`'s `arrival_screen.rs` reports it through the new shared
+  `screen_refusal_from_arrival`, used by BOTH arms; `arrival_envelope.rs` maps it
+  to a `LabError::refusal`; and `mogwai-cli`'s `tick_composition.rs` `measure`
+  panics naming preset, seed and mode, because that function returns `Reading`
+  rather than a `Result` and its loop exits only on timestamps. THAT PANIC IS
+  THE ONE SITE TO REVISIT IF `measure` EVER BECOMES FALLIBLE, and the note
+  saying so lives at the site.
+- `refusing_source_at(origin_ns)` in `generated/tests.rs` is the refusal fixture
+  and it is worth understanding before reusing it. `next_parent` computes
+  `limit = from_ns.saturating_add(MAX_SESSION_GAP_NS)`, so any near-max origin
+  saturates the limit and the kernel refuses `NoOpenExposure` cheaply. But the
+  two origins are NOT interchangeable: at exactly `u64::MAX` the budget walk
+  exits before its first iteration and no calendar is consulted, while at
+  `u64::MAX - 1_000` it takes one iteration and DOES reach `next_segment_end`.
+  Only the near-max origin keeps `extend_toward`'s `lead.clock_ns() < target`
+  guard satisfiable, which is the whole reason the checkpoint arm could be
+  bitten at all.
+
+FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
+
+- THE REPORT'S FINDING 2 WAS RIGHT ABOUT THE DEFECT AND WRONG ABOUT THE DAMAGE.
+  It claimed the lab consumers produce "an endless run of phantom zero-child
+  parents at a frozen timestamp". They do not: both `arrival_screen`'s projection
+  and `arrival_envelope`'s `stats_from_parent_walk` carry stall guards on a
+  non-advancing timestamp. The real damage was MISATTRIBUTION - a refused cell
+  reported as "candidate walk stalled", which aborts the whole run, instead of a
+  recorded refusal verdict. Same family, different blast radius. The structural
+  fix stands on the corrected ground, not the reported one.
+- NO `TAPE_PROTOCOL_VERSION` BUMP WAS OWED and the reasoning is in `e2e58ee`'s
+  message: the added expressions only READ `self.fault`, so on any non-refusing
+  draw the RNG sequence, clock, burst and emitted values are untouched, and the
+  refusal path produced no valid tape to move. Round 2 then took the next
+  identity for the composer's price rails, so `TAPE_PROTOCOL_VERSION` next
+  takes 22. A later data round touching the generator will almost certainly owe
+  one; this round genuinely did not.
+- THE 454-ORPHANED-`mogwai-data` WALL HAS A LIKELIER CAUSE THAN THE BROKKR BUG.
+  `run_complete_is_stamped_on_the_receiving_sockets_clock` is intermittent and
+  real - it failed once more this round at `completion.rs:510` on a tree confined
+  to `mogwai-data`, a comment and markdown, and passed on the immediate re-run.
+  It aborts the parallel sweep, which produces exactly the ambiguity `AGENTS.md`
+  warns reads as a coverage bug. Check for the crashed test FIRST; this cost a
+  cycle. The lead is `notes/bugs-server.md` section 9, now recorded as
+  intermittent rather than "not seen since".
+
+## The data document, round 2: the composer's rails
+
+Closed findings 3, 4 and 5 of `notes/bugs-data.md` - the `SegmentSource` /
+`SegmentCompose` cluster in `crates/mogwai-data/src/segment.rs`. Findings 6 and
+7 remain, unrenumbered.
+
+MACHINERY LATER ROUNDS MAY BUILD ON AND MUST NOT BREAK:
+
+- `MID_CEILING` IS NOW ONE CONSTANT FOR TWO TAPE ORIGINS. It moved from
+  `pub(super)` in `generated/consts.rs` to `pub(crate)`, re-exported from
+  `generated/mod.rs`, and `segment.rs` clamps against it. The generator and the
+  composer are the workspace's two price integrations and they now share their
+  ceiling by construction rather than by two literals agreeing. Anything that
+  gives a third origin a band takes it from here.
+- `SegmentSource::integrate` IS THE ONLY PLACE THE RUNNING LEVEL MOVES, and
+  `SegmentSource::advance_clock` the only place the clock does. Both were open
+  expressions inline in `next_tick` and both were unbounded; keeping them as
+  single funnels is what makes the band and the overflow refusal checkable at
+  all. `next_tick` copies the segment's row out BEFORE calling either, because
+  both need `&mut self`.
+- THE SOURCE HAS EXACTLY ONE TERMINAL CONDITION and it is named:
+  `SegmentSource::clock_exhausted`. A `None` from this source is never ordinary
+  exhaustion. It is an INHERENT method, not a `TickFault`, because the composer
+  has no variant and adding one ripples into `mogwai-server`'s fault rendering -
+  filed in `notes/todo.md` together with the missing `seek_to` override, which
+  is the residual of finding 4 and becomes a hang the moment anything serves a
+  composed river.
+- `every_rule_the_conformance_fixture_states_is_enforced_somewhere` in
+  `segment.rs` PINS THE FIXTURE'S `rules` ARRAY TO ITS ENFORCEMENT SITES, one
+  entry each, and fails on a count mismatch. It exists because finding 4 was
+  the "nothing detects a missing fixture" hole one level down: the fixture
+  STATED `ret[0] == 0` and neither reader checked it. A new rule in
+  `analysis/segment_library_conformance.json` now fails this test until it has
+  a validator. Both `validate`s refuse a nonzero `ret[0]`; the reader also
+  refuses a `side` outside B/A/N. IT MATCHES BY SEARCH, NOT BY POSITION, so a
+  reorder of the JSON is not reported as a lost enforcement, and it pins the
+  `units` side alphabet SEPARATELY - that sixth enforcement is stated in
+  `units` rather than in `rules`, and leaving it uncounted would have been a
+  gate whose stated scope was narrower than its real one.
+
+FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
+
+- THE REPORT HAD FINDING 3'S CEILING MECHANISM WRONG, and only the bite-check
+  showed it. It predicted `Decimal::from_f64_retain` returning `None` above
+  about 7.9e28 and the old `let else` silently printing one tick. MEASURED: a
+  rising walk never gets there, because `emit_price` divides by `tick_size`
+  first and that overflows `Decimal` around 1.98e28, so an unbounded rising
+  composer PANICS inside rust_decimal several factors of e earlier. The silent
+  one-tick print is real code and unreachable by that route. The floor half was
+  exactly as reported - below half a tick every print is exactly zero.
+- `dt_ns` POSITIVITY IS NOT A FIXTURE RULE AND MUST NOT BECOME ONE. The report
+  listed it as a declared-but-unchecked invariant; the fixture's `rules` array
+  does not contain it. Two prints at one nanosecond are ordinary in a swept
+  book - `mogwai_lab::stream` groups on exactly that equality - and
+  `mogwai_lab::segments` records `ts - last_ts` verbatim, so refusing a zero
+  would throw away real sessions. The composed tape is NON-DECREASING, not
+  strictly increasing, and the `seam_gap_ns` doc comment that claimed otherwise
+  now says so and says why. That comment was the actual defect.
+- FINDING 5 WAS UNDERSTATED, NOT OVERSTATED - the one that broke the round-1
+  pattern. The report priced the frozen clock at roughly 580 years of sim time.
+  `mogwai segments tape --start` takes a RAW `u64` from the operator, so a
+  near-max value froze `ts` at `u64::MAX` on the first command and every later
+  tick shared it, silently. `checked_add` plus the latch, not an argument.
+- NO CONSUMER OUTSIDE `mogwai segments tape` TOUCHES THE COMPOSER. No test
+  binary, no script, and nothing in `mogwai-server` constructs a
+  `SegmentSource`, which is why changing its tape bytes cost only the version
+  bump.
+- A `TAPE_PROTOCOL_VERSION` BUMP RE-BLESSES THE STAGE-A MANIFEST, and this is
+  the mechanism to expect on every future bump.
+  `analysis/stage-a-batch-manifest.json` hashes the constant into
+  `plan_sha256`, so a bump moves both the `tape_protocol_version` field and the
+  hash, plus the literal in
+  `stage_a_batch::tests::committed_manifest_is_self_consistent`, whose comment
+  names the identity it was blessed at. Three edits, all mechanical, and the
+  test tells you the new hash.
+
+WHAT THE ROUND-2 CLOSE PASS FOUND, and it is the seventh close pass out of
+seven to find its defect in a NEW TEST rather than in production code:
+
+- `a_clock_that_cannot_advance_ends_the_tape_instead_of_freezing_it` WAS
+  HALF-DECORATIVE, and it is instance 28 of this arc's signature defect. Its
+  `start_ns` of `u64::MAX - 1_500_000` against the helper's 1 ms `dt_ns` left
+  room for exactly ONE tick, so the vector reaching the duplicate-timestamp
+  assertion - THE assertion that names the defect - had one element and the
+  comparison was vacuously true. The test did go red under the old
+  `saturating_add`, but on the loop's `seen.len() < 10` guard, which is a
+  different claim. This is precisely the "read WHICH assertion fired" trap
+  `AGENTS.md` states, and a bite-check that only observes redness cannot see
+  it. Now `u64::MAX - 4_500_000` leaves room for four ticks, the loop BREAKS at
+  a cap instead of asserting on the count so the duplicate check is reached,
+  and the re-bite fires on that check with a twelve-element vector whose last
+  eight are `u64::MAX`. A test whose bite depends on how much room a fixture
+  leaves owes a comment saying so; this one has it.
+- THE GENERAL RULE, worth more than the instance: WHEN A TEST BOUNDS A LOOP
+  WITH AN ASSERTION AND THEN ASSERTS THE REAL PROPERTY AFTER IT, the bound
+  fires first under the bug and the real property is never evaluated. Bound
+  with a `break` and assert the property; the count then becomes its own
+  separate, weaker claim.
+- `a_runaway_positive_drift_stays_on_the_trajectory` asserted only
+  `price >= 20_000` on a monotonically rising walk, which almost any
+  implementation satisfies. It now asserts the price never EXCEEDS
+  `MID_CEILING` and that the walk ends PINNED to it, which is the contract the
+  clamp actually states; bitten by widening the clamp's ceiling by 1e6, which
+  the old assertion could not see.
+
+FILED RATHER THAN FIXED by that pass: `emit_price`'s panic sits inside
+`TickSource::next_tick` in a library crate, where the generator's equivalent
+failures go through `TickFault`. Unreachable today and correct for an offline
+dump, but it becomes a serving-path abort the moment a composed river is
+served - folded into the same `notes/todo.md` item as the missing `seek_to`
+and `fault` overrides, since one `TickFault` variant closes all of it.
+
+A SECOND INTERMITTENT LIFECYCLE TEST SURFACED on this round's gate and is now
+`notes/bugs-server.md` section 10:
+`sigterm_stops_the_venue_within_the_shutdown_grace` failed the first of two
+full unscoped gate runs on an IDENTICAL tree and passed the second, with
+"venue did not exit within 10s". It is distinct from section 9's completion
+lead. Both abort the parallel sweep and both therefore produce the wall of
+orphaned `mogwai-data` pairs that reads as a brokkr coverage bug - THERE ARE
+NOW TWO KNOWN PRODUCERS OF THAT WALL, and the tell is the orphan count equalling
+the missing sweep's pass count.
