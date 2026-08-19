@@ -5103,3 +5103,110 @@ twice in one round.
   bite-check asserted on a substring two messages shared. Split refusals are not
   cosmetic: a multi-condition guard owes one message per condition, or the test
   proving one of them proves nothing in particular.
+
+## The cli document, round 3: a REFUSAL is a deliverable, and the fix that lied in three help texts
+
+Finding 8 proposed splitting `mogwai` into a venue binary and a lab binary. It
+was REFUSED, and the refusal is the round's most valuable artifact, because a
+binary split is the kind of proposal that comes back every time somebody counts
+subcommands. The reasoning is written out in `notes/bugs-cli.md` so nobody
+re-derives it; what belongs HERE is the shape of the refusal, which generalizes.
+
+- A REFUSAL IS ONLY DURABLE IF IT NAMES WHAT WOULD REOPEN IT. This one rests on
+  three legs and says so: the finding read `run_b1` BACKWARDS (it execs
+  `gen --type trades` on `current_exe`, so being itself is the DESIGN, and a lab
+  binary would have to locate the venue binary by path - reintroducing exactly
+  the build-identity ambiguity the finding cited as its strongest cost); the
+  size benefit is ALREADY BANKED, because the method is `mogwai-lab` and the lab
+  stays linked into the venue binary regardless; and the cost is roughly two
+  hundred import rewrites over thinly-tested code plus a replacement B1
+  mechanism. A re-proposal has to answer all three, which is a much cheaper
+  conversation than having the argument again from scratch.
+- AND IT NAMES WHAT DID NOT SINK IT. Two things that could have refused the
+  split for free were checked and did not - `mogwai-lab` can host a binary with
+  no dependency cycle, and the `test-seam` mechanism survives a move - so the
+  refusal is an ARGUMENT, not a build obstacle wearing an argument's clothes.
+  Recording the checks that came back negative is what stops the refusal from
+  being read as "we tried and it did not compile".
+- THE FIX COMMITTED THE SIN THE FINDING NAMED, ONE FILE OVER. Finding 8's own
+  item three was "a doc comment claiming the wrong folder". The round moved
+  `fit`'s and both `synth` artifact defaults off `target/` to `analysis/out/`
+  and left THREE clap/module doc comments naming `target/`, so `mogwai fit
+  --help` and `mogwai synth fingerprint --help` lied to the operator. The cold
+  review caught two and the fix-and-commit agent found the third. THE RULE:
+  A CONSTANT AND ITS `--help` TEXT ARE TWO ENCODINGS OF ONE FACT, and clap doc
+  comments are OPERATOR-VISIBLE DURABLE PROSE - the prose gate cannot see them,
+  the compiler cannot see them, and the only check that exists is reading
+  `--help` on the built binary. The close pass did exactly that for all four
+  changed arguments; do it whenever a default moves.
+- AN ARGUMENT WITH A HAND-ROLLED `String` AND A `name`-LOOKUP IS AN UNDOCUMENTED
+  ENUM. `segments cut --window` took a `String` through
+  `mogwai_lab::segments::window_by_name`, so `--help` enumerated NOTHING and the
+  argument's own help text named two of the four cuttable windows -
+  `ny-morning` and `ny-afternoon` were cuttable and unreachable from any
+  documentation. A `ValueEnum` plus a gate holding the variants against the
+  lab's `WINDOWS` in BOTH directions closes it; the direction that matters is
+  "a cuttable window with no spelling", because the other one is a run-time
+  refusal rather than a silent hole.
+- A THIRD ENCODING HIDES BEHIND A GATE ON THE OTHER TWO.
+  `MODEL_CLOCK_ALIGNMENT_DEFAULT` had zero readers workspace-wide while the CLI
+  declared `Civil` a second time and a test's doc claimed to pin two encodings
+  "where neither side can be derived from the other". Closed by WIRING rather
+  than deleting - the constant is where the fact belongs - with the exhaustive
+  match moved out of the test into production as `AlignmentArg::of`, so the
+  default has one encoding and `of` is both the carrier and the compile gate.
+  Ask of any two-encoding gate whether there is a third the gate does not name.
+- TWO OF THIS ROUND'S GATES BITE AT COMPILE TIME AND SAY SO PLAINLY.
+  `AlignmentArg::of` and `every_alignment_has_a_command_line_spelling` are
+  exhaustive matches: adding a lab variant fails the BUILD, and no run-time
+  perturbation demonstrates them. The record says that rather than describing a
+  cleaner check than was run, which is the right move and the one the arc keeps
+  having to relearn.
+
+## The cli document, close pass: what the three commits left
+
+Tenth close pass. The arc's standing result - the round's own unreviewed half
+carries the defect - held for a tenth time, but WEAKLY: what it carried this
+time was record-keeping rather than code. Every load-bearing claim checked out.
+
+- THE BINARY-SPLIT REFUSAL SURVIVES. Re-derived against the source, not the
+  record: `run_b1` really does `Command::new(current_exe()).args(["gen", ..])`
+  and compare bytes, so the split really would destroy the guard; the
+  dispatcher really carries 22 subcommands and `config` really is a
+  `mogwai_server` module rather than a command line; `mogwai-lab` really is
+  where the method lives. Nothing in it needs reopening.
+- THE TEN-HIT TRIAGE RE-DERIVED CLEAN. Every `let Ok(` in `serving.rs` is a
+  `while let`, an `if let` or a let-chain - eighteen sites, zero let-else - so
+  "all false positives" is right. Workspace-wide there are thirty-odd genuine
+  let-else bindings and none sits in a test body that returns; the two nearest
+  misses (`adapter_smoke.rs`, `common/mod.rs`) `break` and then assert, which
+  is the honest shape. The gate's narrowness - two probe spellings only - is
+  real and is stated in place; no test in the tree uses a third
+  (`try_exists`, `is_file`, `is_dir`), and the ones that touch those assert on
+  them instead of returning.
+- THE `every_tree_attested_writer_re_attests_before_its_write` ROSTER SEES WHAT
+  IT CLAIMS. Five entry-gated guard callers, every one carrying both
+  `fresh_tree_state()` and "the artifact is unbound"; `arrival_envelope
+  _diagnostic` is excluded by taking no entry gate, which is the stated
+  exemption and is true of the source. The pair of rosters covers the set from
+  both directions, and the one hole - a NEW writer that both delegates its
+  serialization like `fit` AND forgets the guard - is named in place as the
+  reviewer's.
+- THE "CANNOT BITE" LABELS ARE ALL TRUE. The `serving.rs` drain conversion (the
+  venue emits no Ping/Pong/Binary), `presets_cli.rs`'s end-to-end newline test
+  (every shipped preset already ends in one newline, so `preset_output`'s unit
+  test is the real gate), and `AlignmentArg::of` (a compile failure) each
+  labelled themselves honestly. An honest "this cannot bite" is worth a great
+  deal and all three earned it.
+- WHAT THE CLOSE PASS ACTUALLY FIXED, and both are record defects: this file
+  had NO round-3 entry at all - the round that produced the refusal, the
+  most re-proposable artifact in the document - and `notes/bugs-cli.md` called
+  `minute_range_envelope` "the seventh writer nobody had counted" when
+  `attestation.rs`'s module doc had listed it among six since before the arc.
+  What went uncounted was the re-attestation half, not the writer. THE SHAPE
+  WORTH CARRYING: a fix-and-commit agent lands the code and the report and is
+  the last hand on both, so the carry-forward - which no agent in the loop
+  reads back - is the artifact most likely to be skipped entirely. A round
+  whose lesson is not here did not happen as far as the next arc is concerned.
+- Numbers: gate green at 1316 plus 466, 1839 pairs, 1782 run, 57 ignored, 0
+  orphaned - the ledger the document opened against, exactly.

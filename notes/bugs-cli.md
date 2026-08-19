@@ -15,6 +15,19 @@ EXHAUSTED as of round 3, 2026-08-20. All eight findings are closed: seven
 fixed, finding 8's binary split refused with its evidence recorded in place so
 a later reader does not re-derive it.
 
+CLOSE PASS, 2026-08-20. Gate green at 1316 + 466, 1839 pairs, 1782 run, 57
+ignored, 0 orphaned. No code defect found across the three commits. Every
+load-bearing claim was re-derived against the source rather than the record:
+THE BINARY-SPLIT REFUSAL STANDS (`run_b1` does exec `gen` on `current_exe`, the
+dispatcher does carry 22 subcommands, the method does live in `mogwai-lab`);
+the class gate's ten-hit triage re-derives clean, with zero genuine let-else
+bindings anywhere in `serving.rs` and no test in the tree using a third
+absence-probe spelling; the re-attestation roster sees all five entry-gated
+writers; and the four moved `--help` texts were verified against the BUILT
+BINARY, not the source, since that is the only check operator-visible clap
+prose has. Two record defects were corrected - the "seventh writer" line below,
+and a missing round-3 entry in `notes/bug-loop-carry-forward.md`.
+
 The hunter reports editing nothing, and verified its claims against the tape
 constant, the committed artifacts' recorded versions (11 and 14), and cargo's
 test CWD semantics. Its transcription of the constant said 20; the tree it read
@@ -141,10 +154,15 @@ not re-derive it:
   behaviour, not the code's) and was corrected.
 - FINDING 4 WAS REAL, AND THERE WERE TWO OF IT. `fit` now re-attests with
   `fresh_tree_state` and refuses "the artifact is unbound", and writes through
-  `write_json_atomic`. Its module doc was RIGHT and needed no edit. The
-  seventh writer nobody had counted, `minute_range_envelope`, had the same
-  defect - an entry gate, a full corpus pass, then `clean_tree: true` written
-  as a constant - and got the same fix. THE CLASS IS GATED:
+  `write_json_atomic`. Its module doc was RIGHT and needed no edit. A SECOND
+  WRITER HAD THE SAME DEFECT, `minute_range_envelope` - an entry gate, a full
+  corpus pass, then `clean_tree: true` written as a constant - and got the same
+  fix. (An earlier draft of this line called it "the seventh writer nobody had
+  counted"; that was wrong and the close pass corrected it. The guard roster is
+  SIX and `attestation.rs`'s module doc has named all six, `minute_range_envelope`
+  among them, since before this arc. What went uncounted was not the writer but
+  the RE-ATTESTATION half of the contract, missing in two writers of six.)
+  THE CLASS IS GATED:
   `every_tree_attested_writer_re_attests_before_its_write` in
   `crates/mogwai-cli/src/attestation.rs` is a second source roster beside the
   existing one, keyed on the GUARD CALL rather than on the binding key, because
