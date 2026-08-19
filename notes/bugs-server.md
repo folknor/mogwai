@@ -58,56 +58,91 @@ the way this one did. Findings 6 and the second half of 12 keep that open.
 `a_swept_account_snapshot_reaches_only_that_account` pins the fix and was
 bite-checked against the reported symptom.
 
-## 5. `FeeSurcharge` and the engine-armed divergences do not reach accounts that connect later (high confidence, contract vs code)
+## 5. FIXED 2026-08-19: arms did not reach accounts that connect later
 
-`arm_divergence`'s `FeeSurcharge` arm carries this comment:
+The report named `FeeSurcharge` and the engine divergences. The hole was wider
+in two directions it did not reach. The four TRANSPORT arms - `GoDark`,
+`StallData`, `DelayAcks`, `CommandLatency` - shared the same helper and had the
+identical hole, which `docs/havoc.md` contradicts twice. And a NAMED account was
+worse than an unqualified one: naming an account filtered the set that existed,
+so arming a blackout on a subagent that had not connected yet matched nothing
+and still answered `202`.
 
-> "a passenger connecting later gets it too - which is why this is stored on the
-> template rather than only applied to the seated set."
+FIXED by `Run::arm`, which records the arm on the run and applies it to the
+ledgers that exist IN ONE CALL, and by both mint sites replaying that record.
+`ArmRecord` is the replayable form; `VenueArms` holds the venue-wide record plus
+the per-account records for names that have not connected yet, which are
+consumed by that account's first mint. `ClearDivergences` lifts the record along
+with the seated ledgers.
 
-It is not stored on the template. The code is
-`for passenger in run.passengers() { ... arm_fee_surcharge(...) }` - a snapshot
-of the accounts that exist NOW. `Run::passenger()` builds a fresh engine from
-`LedgerTemplate`, which carries only balances, fill seed, OMS type and band
-ticks. The same applies to the catch-all `engine_div` arm ("Armed on EVERY
-ledger: the control plane names no account, so an engine divergence is a
-statement about the venue"), and to the eviction-report reasoning that follows
-it ("every ledger holds the same arms and hits the cap together") - which is
-false the moment one ledger was created after an arm.
+TWO THINGS THE FIRST PASS GOT WRONG AND THE COLD REVIEW CAUGHT:
 
-An operator arming a `PartialFillNext` and then starting a subagent gets a run
-that believes it is perturbed and is not. Given the misdiagnosis this same code
-path already cost (the eviction-reporting comment describes it), this is worth
-closing properly: the arms belong on the run, applied at passenger construction
-AND to the live set.
+- `Run::open_account` - the SECOND mint site, reached from `POST /account` and
+  from the sweeper's tests - did not replay anything, so finding 5 survived
+  verbatim for any client that opens its own account. That is also instance 36
+  of this arc's signature defect: the new record's doc asserted an invariant its
+  own second call site broke.
+- The first pass MINTED a ledger for a named arm. That closed the silent no-op
+  by making the client's own `POST /account` answer `409 already open`, on a
+  ledger carrying default balances and no policy. Recording without minting is
+  the shape that keeps the two paths one mechanism and costs the client nothing.
 
-## 6. `deliver`'s worst-case reservation is computed from the producing passenger's book shape (medium confidence)
+A malformed `account` on the request is now a `400` rather than a `202` that
+arms nothing. Pinned by five `run.rs` tests, each bite-checked one perturbation
+at a time; what does and does not bite is stated on the tests themselves.
 
-`deliver` receives one `shape` - the `book_shape()` of the passenger whose pass
-produced the batch - and uses it to `reserve_swept` on EVERY bound lane,
-including lanes belonging to other accounts. The reservation is supposed to
-dominate the frames actually sent. Since finding 1 sends those other accounts
-frames at all, and the shape is not theirs, the dominance argument does not
-hold; `Reservation::split` will `debug_assert!`-fail or hit the release-mode
-`tracing::error!("produced output exceeded its admission reservation")`. Fixing
-finding 1 mostly dissolves this, but the coupling (a run-wide fan-out sized by
-one ledger's shape) is worth removing deliberately rather than incidentally.
+## 6. REFUSED 2026-08-19: `deliver`'s reservation is over-sized, not under-sized
 
-## 7. `/trades` and `/quotes` truncate at `limit` without regard to instant boundaries (medium confidence, structural)
+Recorded rather than deleted so a later round does not re-derive it.
 
-`bounded_trades` and `bounded_quotes` break the moment `out.len() >= limit`,
-mid-instant. The venue exposes no cursor, so any consumer paging this must
-resume from a timestamp - and `AGENTS.md` states the rule the adapter's
-pagination is already held to: "a timestamp-only cursor may advance onto an
-instant only once every row at that instant has been seen." The server makes
-that rule unsatisfiable: resuming at `last_ts` duplicates, resuming at
-`last_ts + 1` drops the tail of that instant. Synthetic tapes produce many
-prints per nanosecond bucket in a burst, so this is reachable, and a dropped
-tail is invisible in the result.
+The finding's live claim was that `Reservation::split` would `debug_assert`-fail
+or log "produced output exceeded its admission reservation", because the batch's
+`shape` belongs to the producing passenger while the frames go to every lane.
+Finding 1's fix dissolves it, and the reason is stronger than "mostly":
 
-Either truncate the page at the last COMPLETE instant (and say so), or ship a
-real opaque cursor. The former is a few lines and is what the contract already
-implies.
+- Every term `swept_batch_max_bytes` derives from `shape` sits inside the ONE
+  `account_state_max_bytes` summand. The per-order terms are
+  `ORDER_EVENT_MAX_BYTES` and `LINKAGE_MAX_BYTES`, both shape-free constants.
+- After finding 1, `run::addressed_account` attributes `AccountState` by the
+  frame's own `account_id`, so the only lane that can receive it is the
+  producing passenger's - whose shape this IS. Another account's lane receives
+  at most the unattributed order-shaped frames, sized by the shape-free terms,
+  and does not receive the account snapshot the shape-dependent term paid for.
+
+So a foreign lane is reserved MORE than it can spend. The dominance argument
+holds; there is no reachable assertion. What is left is an over-reservation
+against a shape that is not the lane's, which is conservative in the only
+direction that matters and is not worth a mechanism.
+
+THE FINDING'S STRUCTURAL POINT IS NOT THIS, and it stays open where finding 1
+already put it: "unattributed means everyone" is a FALLTHROUGH rather than a
+declared frame class, so the next ledger-owned frame type joins the broadcast
+set exactly the way `AccountState` did. That is filed in `notes/todo.md`.
+
+## 7. REFUSED 2026-08-19: the venue never prints two trades at one instant
+
+Recorded rather than deleted, because the finding's MECHANISM is real and a
+later round reading `bounded_trades` will see the same mid-instant break.
+
+The mechanism was filed by broadarrow on 2026-08-18 and ruled on the same day,
+in commit b795d1e. It was measured before being concluded: 1.1 M BTCUSDT trades
+over six simulated hours, zero ties, smallest gap 27 ns. Children are stamped
+`parent + emitted * INTRA_EVENT_STEP_NS` at a 1 us stride and the arrival kernel
+floors a parent's own advance at the same stride, so one river's trade stream is
+strictly increasing until the u64 nanosecond epoch runs out. The report's
+premise - "synthetic tapes produce many prints per nanosecond bucket in a burst"
+- is the one thing that measurement overturned.
+
+`Rivers::history_source` builds a `MergeSource` over exactly ONE child, so no
+tie can enter across children either. A quote ties with its first child only,
+and `/trades` and `/quotes` are separate pages, so that tie cannot cut either.
+
+The property is load-bearing and now PINNED, by `mogwai-data`'s
+`a_river_never_prints_two_trades_at_one_instant`, deliberately strict rather
+than non-decreasing. This fix pass added the citation to `bounded_trades`, so
+the serving side names the generator property its correctness rests on rather
+than leaving it unstated - which is the gap the ruling identified. A change that
+makes ties possible has to break that test first.
 
 ## 8. Smaller things
 

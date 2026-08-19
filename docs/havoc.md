@@ -78,6 +78,20 @@ produces - so on a shared exchange, blacking out or slowing one subagent leaves
 the rest of the batch untouched. Clearing clears every account whatever the
 request names, since a clear means stop everything.
 
+AN ARM DOES NOT WAIT FOR A CONNECTION, in either spelling. Naming an account
+that has not connected yet records the arm against that name, and the account's
+first ledger - whether it is minted by a socket or by the client's own
+`POST /account` - opens carrying it. Naming none records the arm on the RUN, so
+every ledger opened afterwards carries it too, engine divergences and the fee
+surcharge included. Both used to reach only the accounts that happened to exist
+at the instant of the request while answering `202` either way, so arming a
+subagent before starting it did nothing and said nothing. An `account` the venue
+cannot parse as an id is now a `400` rather than a `202` that arms nothing.
+
+Recording an arm does not open an account, deliberately: the client still states
+its own opening balances and policy on `POST /account`, and finds the arm
+standing on the ledger that call returns.
+
 The market REGIMES - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are not
 runtime arms. They are a boot choice made by whoever launches the run, apply to
 the whole run's tape, and enter the tape identity, so a regime run is a

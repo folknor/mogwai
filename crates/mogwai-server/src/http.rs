@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admission::{ExecLanes, Reservation};
 use crate::config::{Config, now_ns, sim_duration_from_millis, sim_now_ns};
-use crate::run::Run;
+use crate::run::{Run, VenueArm};
 use crate::source;
 
 #[derive(Deserialize)]
@@ -56,14 +56,24 @@ pub(crate) struct DivergenceRequest {
 /// creating one. Arming a blackout is not a reason to bring an account into
 /// existence, and a typo that silently created `WYRD-01` would be armed on a
 /// ledger nothing ever connects to.
-fn targeted(run: &Arc<Run>, account: Option<&str>) -> Vec<Arc<crate::run::Passenger>> {
+/// The account a control request targets, as `Run::arm` takes it.
+///
+/// `None` is not "all the ledgers that exist", it is THE VENUE: the arm is
+/// recorded on the run, so a late-connecting account gets it too.
+///
+/// A MALFORMED id IS REFUSED rather than quietly targeting nothing. An id that
+/// cannot be parsed can never be presented by a socket, so no ledger will ever
+/// carry the arm; the arm used to filter to the empty set and answer `202`,
+/// which is the same silent success finding 5 was about. Reading it as
+/// "unqualified" instead would be worse still - a typo would arm the whole
+/// venue - so the request is a `400`, beside the divergence validation, before
+/// anything is stored.
+fn arm_target(account: Option<&str>) -> Result<Option<&str>, String> {
     match account {
-        Some(named) => run
-            .passengers()
-            .into_iter()
-            .filter(|passenger| passenger.account_id.as_str() == named)
-            .collect(),
-        None => run.passengers(),
+        None => Ok(None),
+        Some(named) => mogwai_protocol::AccountId::parse(named)
+            .map(|_| Some(named))
+            .map_err(|err| format!("account: {err}")),
     }
 }
 
@@ -930,6 +940,17 @@ pub(crate) async fn arm_divergence(
         tracing::warn!(?div, err, "rejecting out-of-range divergence");
         return (StatusCode::BAD_REQUEST, err.to_string());
     }
+    let target = match arm_target(request.account.as_deref()) {
+        Ok(target) => target,
+        Err(err) => {
+            tracing::warn!(
+                ?div,
+                err,
+                "rejecting divergence against an unusable account"
+            );
+            return (StatusCode::BAD_REQUEST, err);
+        }
+    };
     let run = &state.run;
     tracing::info!(?div, "arming divergence");
     // Validate at the arming boundary so an out-of-range knob (e.g. a
@@ -938,9 +959,7 @@ pub(crate) async fn arm_divergence(
     // as a degenerate fill downstream.
     match div {
         Divergence::DelayAcks { ms } => {
-            for passenger in targeted(run, request.account.as_deref()) {
-                passenger.delay_ms.store(ms, Ordering::Relaxed);
-            }
+            run.arm(target, VenueArm::DelayAcks { ms }).await;
         }
         // STORE-not-merge, like every other server-owned window: one arm
         // REPLACES all six values, so an omitted field is armed as zero rather
@@ -953,26 +972,18 @@ pub(crate) async fn arm_divergence(
             modify_ack_ms,
             cancel_ack_ms,
         } => {
-            for passenger in targeted(run, request.account.as_deref()) {
-                passenger
-                    .submit_act_ms
-                    .store(submit_act_ms, Ordering::Relaxed);
-                passenger
-                    .modify_act_ms
-                    .store(modify_act_ms, Ordering::Relaxed);
-                passenger
-                    .cancel_act_ms
-                    .store(cancel_act_ms, Ordering::Relaxed);
-                passenger
-                    .submit_ack_ms
-                    .store(submit_ack_ms, Ordering::Relaxed);
-                passenger
-                    .modify_ack_ms
-                    .store(modify_ack_ms, Ordering::Relaxed);
-                passenger
-                    .cancel_ack_ms
-                    .store(cancel_ack_ms, Ordering::Relaxed);
-            }
+            run.arm(
+                target,
+                VenueArm::CommandLatency {
+                    submit_act_ms,
+                    modify_act_ms,
+                    cancel_act_ms,
+                    submit_ack_ms,
+                    modify_ack_ms,
+                    cancel_ack_ms,
+                },
+            )
+            .await;
         }
         // GoDark/StallData windows are STORE-not-extend (S18): each arm replaces
         // the whole armed span under one lock, so re-arming with a SMALLER `ms`
@@ -986,24 +997,23 @@ pub(crate) async fn arm_divergence(
         // passenger may board afterwards, and every reader judges the span on
         // its own boat clock.
         //
-        // TARGETED at one account when the request names one, and at every
-        // account otherwise. Transport havoc rides the PASSENGER, so blacking
-        // out one subagent on a shared exchange must not black out the batch -
-        // and an operator on a single-account venue still writes what it always
-        // did, because naming no account still means everyone.
+        // TARGETED at one account when the request names one, and at the VENUE
+        // otherwise. Transport havoc rides the PASSENGER, so blacking out one
+        // subagent on a shared exchange must not black out the batch - and an
+        // operator on a single-account venue still writes what it always did,
+        // because naming no account still means everyone, now including the
+        // accounts that have not connected yet.
         Divergence::GoDark { ms } => {
-            let armed = now_ns();
-            let span = sim_duration_from_millis(ms);
-            for passenger in targeted(run, request.account.as_deref()) {
-                passenger.dark.arm(armed, span);
-            }
+            let armed_ns = now_ns();
+            let span_ns = sim_duration_from_millis(ms);
+            run.arm(target, VenueArm::GoDark { armed_ns, span_ns })
+                .await;
         }
         Divergence::StallData { ms } => {
-            let armed = now_ns();
-            let span = sim_duration_from_millis(ms);
-            for passenger in targeted(run, request.account.as_deref()) {
-                passenger.stall.arm(armed, span);
-            }
+            let armed_ns = now_ns();
+            let span_ns = sim_duration_from_millis(ms);
+            run.arm(target, VenueArm::StallData { armed_ns, span_ns })
+                .await;
         }
         Divergence::FlowSurge {
             rate_mult,
@@ -1065,20 +1075,23 @@ pub(crate) async fn arm_divergence(
             );
         }
         Divergence::FeeSurcharge { mult, window_ms } => {
-            // Every ledger, because the control plane is an OPERATOR surface
-            // that names no account: a surcharge is a statement about the venue's
-            // fees, so a passenger connecting later gets it too - which is why
-            // this is stored on the template rather than only applied to the
-            // seated set.
-            let armed = now_ns();
-            let window = sim_duration_from_millis(window_ms);
-            for passenger in run.passengers() {
-                passenger
-                    .engine
-                    .lock()
-                    .await
-                    .arm_fee_surcharge(mult, armed, window);
-            }
+            // VENUE-WIDE WHATEVER THE REQUEST NAMED, which is why this passes
+            // `None` rather than `target`: a surcharge is a statement about the
+            // venue's fees, not about one trader's connection, and the wire has
+            // never let a client be charged differently. A passenger connecting
+            // later gets it too - that is what `Run::arm`'s record is for. This
+            // used to walk `run.passengers()` while a comment here claimed the
+            // arm was "stored on the template", which it was not, so an account
+            // minted after the request paid the unmodified fee.
+            run.arm(
+                None,
+                VenueArm::FeeSurcharge {
+                    mult,
+                    armed_ns: now_ns(),
+                    span_ns: sim_duration_from_millis(window_ms),
+                },
+            )
+            .await;
         }
         // Immediate book action, not an armed trigger: cancel the resting
         // order right now, silently (no lifecycle event - that lost event IS
@@ -1163,10 +1176,12 @@ pub(crate) async fn arm_divergence(
                     .filter(|symbol| run.boatyard.boat_for_symbol(symbol).is_none())
                     .collect(),
             };
-            // EVERY account's transport arms, whatever the request named: a
-            // clear is an operator saying "stop everything", and clearing only
-            // one account's would leave a blackout armed somewhere the request
-            // never mentioned.
+            // EVERY account's transport arms and fee surcharge, whatever the
+            // request named: a clear is an operator saying "stop everything",
+            // and clearing only one account's would leave a blackout armed
+            // somewhere the request never mentioned. THE VENUE RECORD IS
+            // CLEARED WITH THEM, or an account connecting after a clear would be
+            // opened from a record the operator already lifted.
             //
             // That covers all six `CommandLatency` fields too. It clears what
             // the venue will do to commands it has NOT started acting on, and
@@ -1174,14 +1189,9 @@ pub(crate) async fn arm_divergence(
             // one per event at dequeue). It does NOT reach into an act delay
             // already being served: that command's sleep was read once, at
             // detach, and a venue that has begun acting does not un-begin.
-            for passenger in run.passengers() {
-                passenger.clear_transport_havoc();
-            }
+            run.clear_venue_arms().await;
             for symbol in clearing {
                 state.rivers.clear_flow_surge(&symbol);
-            }
-            for passenger in run.passengers() {
-                passenger.engine.lock().await.clear_fee_surcharge();
             }
         }
         // Server-ownership contract (pins B.4 / E.11): the EIGHT variants the
@@ -1220,16 +1230,22 @@ pub(crate) async fn arm_divergence(
             // stays `202` because the requested arm WAS accepted; the body is
             // where the collateral damage is named.
             //
-            // Armed on EVERY ledger: the control plane names no account, so an
-            // engine divergence is a statement about the venue. The eviction
-            // report is whichever passenger shed one - every ledger holds the
-            // same arms and hits the cap together, so the first is
-            // representative rather than arbitrary.
-            let mut evicted = None;
-            for passenger in run.passengers() {
-                let shed = passenger.engine.lock().await.arm(engine_div.clone());
-                evicted = evicted.or(shed);
-            }
+            // VENUE-WIDE WHATEVER THE REQUEST NAMED, hence the `None` rather
+            // than `target`: an engine divergence is a statement about the
+            // venue's matching, and the wire has never routed one to a single
+            // account. It reaches every ledger AND THE RUN, so a ledger minted
+            // later opens holding it. Walking only the seated set - which is
+            // what this did - meant an operator could arm a `PartialFillNext`,
+            // start a subagent, and get a run that believed it was perturbed and
+            // was not.
+            //
+            // The eviction report is whichever ledger shed one. That reads as
+            // representative because every ledger holds the same arms and hits
+            // the cap together, which is a claim `Run::arm` makes true rather
+            // than assumes: the run's own record sheds from the oldest end on
+            // the same cap, so a ledger opened mid-run replays the queue a
+            // seated one is holding.
+            let evicted = run.arm(None, VenueArm::Engine(engine_div.clone())).await;
             if let Some(shed) = evicted {
                 let body = format!(
                     "armed; the engine queue was at its {MAX_ARMED_DIVERGENCES}-entry cap, \
@@ -2357,6 +2373,20 @@ pub(crate) fn normalize_limit(limit: Option<usize>) -> usize {
         .min(MAX_HISTORY_LIMIT)
 }
 
+/// A PAGE MAY BE CUT MID-INSTANT, and that is safe ONLY because the generator
+/// never prints two trades at one instant. The rule a consumer is held to -
+/// `AGENTS.md`'s frontier family: a timestamp-only cursor may advance onto an
+/// instant only once every row at that instant has been seen - would be
+/// unsatisfiable against this surface if ties existed, since the venue ships no
+/// opaque cursor and resuming at `last_ts` repeats while `last_ts + 1` drops.
+/// broadarrow filed that hazard on 2026-08-18; it was measured, found
+/// unreachable, and pinned by `mogwai-data`'s
+/// `a_river_never_prints_two_trades_at_one_instant`. Children are stamped at a
+/// 1 us stride and the arrival kernel floors a parent's advance at the same
+/// stride, so one river's trades are strictly increasing. A quote ties with its
+/// FIRST CHILD only, and `/trades` and `/quotes` are separate pages, so no tie
+/// can cut either. Break that generator property and this surface is wrong; the
+/// `mogwai-data` test is what says so.
 pub(crate) fn bounded_trades(
     symbol: &str,
     start: Option<u64>,

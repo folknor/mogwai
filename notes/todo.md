@@ -217,6 +217,45 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- `/control/divergence` ALLOCATES A PENDING ARM RECORD PER NAMED ACCOUNT that
+  has not connected yet, capped at `MAX_PENDING_ACCOUNT_ARMS` (64) and shed from
+  the oldest end. It does NOT mint a ledger - a draft of the round-2 fix did,
+  and that locked the named client out of its own `POST /account` with a `409`
+  while handing it default balances - so the control plane is no longer a second
+  account-creating surface, and finding 8 of `notes/bugs-server.md` can be closed
+  without reference to it. What is left here is the shed: an operator who arms 65
+  distinct names before any of them connects loses the first one's arm silently.
+  The `202` says nothing about it. Whether the control plane should report a shed
+  pending record the way it reports a shed engine divergence is open.
+
+- `ClearDivergences` STILL DOES NOT DRAIN THE ENGINE'S ARMED QUEUE, so an
+  operator has no wire control that disarms a `PartialFillNext`. That is the
+  documented split - `Engine::clear_armed` is crate-local precisely so the wire
+  variant's contract is not widened by accident - and the round-2 venue-arm
+  record MIRRORS the omission rather than fixing it, so a ledger minted after a
+  clear holds exactly what a seated one holds. Whether the wire should get a
+  full reset is a product call nobody has taken; if it does, `ArmRecord::engine`
+  is cleared in the same change or the two halves diverge.
+
+- ENGINE-ARM APPLICATION ORDER IS UNORDERED ACROSS CONCURRENT CONTROL REQUESTS.
+  `Run::arm` records under the passenger map lock, but the engine half is applied
+  after both locks drop because the engine sits behind an async mutex - so two
+  `POST /control/divergence` requests in flight at once can land on two seated
+  ledgers in opposite orders, and a ledger minted between them holds the
+  record's order rather than either. `Run::arm`'s doc states this limit rather
+  than papering over it. Unreachable in practice: the control plane is an
+  operator surface and is serialized in every scenario the venue is driven from.
+  Closing it means serializing the arming path against itself, which costs a
+  second lock on a path that has never contended.
+
+- THE VENUE-WIDE FEE SURCHARGE REPLAY HAS NO DIRECT ASSERTION. It is applied by
+  the line beside the engine-queue replay in `ArmRecord::open_engine` and is
+  covered only by that neighbour biting, because `mogwai-engine` exposes no
+  reader for `fee_surcharge` outside its own crate.
+  `fee_surcharge_multiplier_for` is `pub(crate)`. Closing this means either a
+  public accessor or a socket-level test that fills on a late-connecting
+  account and reads the commission; neither was worth a public API in round 2.
+
 - OWNER CALL: SHOULD AN EVICTION-RECONNECT RETIRE THE BOOK IT TAKES OVER? The
   `notes/bugs-server.md` round-1 fixes count a newcomer onto an account BEFORE
   the incumbent is evicted, so the account never freezes in that window and

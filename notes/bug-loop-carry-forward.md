@@ -39,6 +39,20 @@ trusts yet.
 
 ## Machinery later rounds may build on and must not break
 
+- `mogwai-server` HAS EXACTLY TWO PASSENGER MINT SITES, and anything a ledger
+  must be born holding is owed at BOTH: `Run::passenger` (first sight, and
+  therefore `seat`, `reopen` and `default_passenger`, which all route through it)
+  and `Run::open_account` (`POST /account`). A third one is a new invariant to
+  satisfy, not a convenience. The server round-2 close pass found the venue-arm
+  replay wired to only the first, with a full green gate and a doc asserting it
+  reached both.
+- `Run::arm(account, arm)` IS THE ONE ARMING PATH, and `VenueArms` is the record
+  that makes a late-boarding ledger indistinguishable from a seated one. Both
+  halves of a control request - the record and the live application - are one
+  call by construction, because written apart they drift invisibly. Mirror any
+  change to what a clear touches onto the record, or the invariant stops being
+  true.
+
 - `crates/mogwai-cli/tests/serving.rs` carries two shared helpers, and nothing
   in that file may hand-roll either one again. `BackgroundDrain` reads a socket
   in the background and REMEMBERS HOW THE STREAM ENDED; `assert_still_serving`
@@ -4554,3 +4568,152 @@ more than the test.
   a `MarkReads` type that yields the span is the shape to reach for if it
   recurs. Neither was changed. No tape-generation path is touched, so no
   `TAPE_PROTOCOL_VERSION` bump is owed.
+
+## The server document, round 2: the venue-wide arms, and two refusals
+
+Findings 5, 6 and 7 of `notes/bugs-server.md`. ONE DEFECT of the three. Nothing
+here touches tape generation, so no `TAPE_PROTOCOL_VERSION` bump is owed.
+
+- FINDING 5 REPRODUCED AND IS A SIXTH INSTANCE OF THE DURABLE-DOC-WAS-RIGHT
+  reverse finding, plus another instance of the arc's signature defect. Every
+  unqualified control arm - `FeeSurcharge`, the five engine divergences, and the
+  four TRANSPORT arms the report did not name - walked `run.passengers()`, the
+  accounts that existed at the instant of the request. `docs/havoc.md` states
+  the opposite twice, once for the transport windows and once as the
+  late-boarder rule, and `arm_divergence`'s own comment claimed the fee arm was
+  "stored on the template rather than only applied to the seated set", which it
+  never was. The doc needed NO correction; the code did.
+- THE REPORT UNDERSTATED THE BLAST RADIUS IN TWO DIRECTIONS. The transport arms
+  ride the same `targeted` helper and had the same hole. And a NAMED account was
+  worse than an unqualified one: `targeted` with a name FILTERED the existing
+  set, so arming a blackout on a subagent that had not connected yet matched
+  nothing and still answered `202`. Both are closed.
+- THE FIX IS `Run::venue_arms`, AND THE RECORD AND THE LIVE WALK ARE ONE CALL.
+  `Run::arm` - `arm_venue_wide` as this round first wrote it, renamed by the
+  close pass when it grew the named case - records the arm and applies it to the
+  ledgers that exist in one expression; every mint site replays the record.
+  Written as two calls - store here, walk there - they drift, and the drift is
+  INVISIBLE: the seated set behaves and only the next account to connect does
+  not. `Run::clear_venue_arms` is the same shape for `ClearDivergences`.
+- THE RACE BETWEEN AN ARM AND A MINT IS CLOSED BY LOCK ORDER, and this is the
+  part a later round must not undo. Both paths take `passengers` FIRST and
+  `venue_arms` second, and `Run::arm` RECORDS while holding the passenger
+  map. So a passenger is either in the list the arm walks or was opened from a
+  record that already contains it - never neither. The engine half is applied
+  after both locks drop, because the engine sits behind an async mutex.
+- WHAT THE FIX DOES TO ITS CONSUMER, checked because this stage keeps opening a
+  hole one layer up. `ClearDivergences` clears the transport windows and the fee
+  surcharge on the record because it clears them on every seated ledger, and
+  DELIBERATELY LEAVES THE ENGINE QUEUE STANDING because `Engine::clear_armed` is
+  crate-local by contract and the wire variant has never drained it. The
+  invariant is exact: A LEDGER MINTED NOW IS INDISTINGUISHABLE FROM ONE MINTED
+  AT BOOT THAT RECEIVED EVERY CONTROL REQUEST SINCE. Mirror any future change to
+  one side onto the other or that sentence stops being true.
+- The venue record sheds from the OLDEST end at `MAX_ARMED_DIVERGENCES`, the
+  same cap and direction as `Engine::arm`. That is what makes the eviction
+  report's wording - "every ledger holds the same arms and hits the cap
+  together" - TRUE rather than assumed. It was false before, the moment one
+  ledger was minted after an arm.
+- THE ENGINE QUEUE HAS NO READER OUTSIDE `mogwai-engine`, so the test observes
+  it THROUGH THE CAP: fill the record to `MAX_ARMED_DIVERGENCES` with nobody
+  seated, mint a ledger, arm once more, and assert the arm SHEDS. A replayed
+  ledger is at the cap and sheds; an empty one has room and does not. That
+  observes the mirroring as well as the replay. `fee_surcharge` has no reader
+  either and is NOT asserted - it is applied by the line beside the queue
+  replay, and the honest statement of that is in the test's own doc and in
+  `notes/todo.md`.
+- BITE-CHECKED THREE WAYS, ONE PERTURBATION AT A TIME, and the first attempt
+  taught something worth carrying: COMMENTING OUT A CALL SITE DOES NOT COMPILE
+  when the callee then has no other caller. The deny-by-default dead-code lint
+  fails the build, which is a build error rather than a red assertion and proves
+  nothing. Gut the CALLEE with an early return instead. Each perturbation then
+  fired the assertion it was aimed at and no other: the engine replay failed only
+  the cap assertion, with the two transport assertions above it passing first;
+  the transport replay failed the blackout assertion; the record clear failed the
+  cleared-blackout one.
+- FINDING 6 REFUSED, and the refusal is stronger than the report's own "finding
+  1 mostly dissolves it". Every shape-dependent term in `swept_batch_max_bytes`
+  is inside the ONE account-snapshot summand; the per-order terms are shape-free
+  constants. After finding 1 the account snapshot reaches only the producing
+  passenger's lanes, whose shape it IS, so a foreign lane is reserved MORE than
+  it can spend. No reachable assertion. Recorded in the document rather than
+  deleted.
+- FINDING 7 REFUSED, AND IT WAS ALREADY RULED ON - one day earlier, in commit
+  b795d1e, from broadarrow's filing of the same mechanism. Measured before
+  concluding: 1.1 M BTCUSDT trades, zero ties, smallest gap 27 ns. The report's
+  premise that synthetic tapes burst many prints per nanosecond is exactly what
+  that measurement overturned; children carry a 1 us stride and the arrival
+  kernel floors a parent's advance at the same stride. `Rivers::history_source`
+  builds a merge over exactly ONE child, so no tie enters across children either.
+  CHECK THE LAST WEEK OF `git log` BEFORE BUILDING A FIX FOR A REPORTED FINDING;
+  this one was a full mechanism away from being built and reverted by hand. What
+  the fix pass DID land is the citation: `bounded_trades` now names the generator
+  property its correctness rests on and names the `mogwai-data` test that pins
+  it, which is the gap the original ruling identified.
+- Gate green: 1289 + 466, 0 orphaned, 42.4 s. Neither lead 9 nor lead 10 fired.
+
+### The server document, round 2, close pass: the second mint site
+
+A FULL GREEN GATE DID NOT CATCH EITHER OF THE TWO THINGS THE COLD REVIEW FOUND,
+and both were inside the fix. This is the eighth consecutive close pass to find
+its defect in the machinery installed to abolish that defect family.
+
+- INSTANCE 36 OF THE SIGNATURE DEFECT, and the purest yet: the new `VenueArms`
+  doc asserted "a ledger minted now is indistinguishable from one minted at boot
+  that received every control request since", and `Run::open_account` - THE
+  SECOND MINT SITE, reached from `POST /account` and from `sweeper.rs` - built
+  its ledger with every havoc field at zero and never touched the record. So the
+  exact scenario finding 5 names (operator arms, subagent starts) survived
+  verbatim for any client that opens its own account. THE RULE THAT WOULD HAVE
+  CAUGHT IT IS THE ARC'S MOST-REPEATED ONE: establish a rule's blast radius at
+  the CALL SITES, not by grepping. THERE ARE EXACTLY TWO MINT SITES,
+  `Run::passenger` and `Run::open_account`, both now enumerated in
+  `open_account`'s own doc; `Run::seat` and `Run::reopen` mint THROUGH
+  `passenger` and are not third sites.
+- THE FIX FOR A SILENT NO-OP BECAME A REFUSAL ON A LEGITIMATE PATH, which is
+  this stage's other recurring failure. Arming a NAMED account minted its ledger,
+  so an operator who armed `SUB-01` before the subagent started made that
+  subagent's own `POST /account` answer `409 already open` - and the pre-minted
+  ledger carried default balances and an unpoliced `AccountPolicy`, which is not
+  what the client asked for. RECORDING WITHOUT MINTING is what closed it, and it
+  is the same mechanism the venue-wide path already used, so the two paths are
+  now one: `VenueArms::pending` holds `(account id, ArmRecord)` for names that
+  have not connected, and the account's FIRST MINT consumes it. Consuming is
+  what bounds the list; the cap is `MAX_PENDING_ACCOUNT_ARMS` at 64, shed from
+  the oldest end, and the shed is unreported - filed.
+- `ArmRecord`'S FIELDS ARE OPTIONS, AND THAT IS LOAD-BEARING RATHER THAN TIDY.
+  Two records are replayed onto one ledger - the venue's, then the account's -
+  so "this record said nothing about ack delays" has to be distinguishable from
+  "this record armed a zero ack delay", or the second replay silently disarms
+  the first. A record of STORE-not-merge arms cannot be a plain struct of
+  values.
+- THE ORDERING COUPLING THE REVIEW NAMED IS GONE. `apply_transport` read
+  `CommandLatency` out of the record it had just written, correct only because
+  the caller recorded first; it is now a free function reading THE ARM'S OWN
+  FIELDS, so no call order can break it.
+- THE "INDISTINGUISHABLE" CLAIM IS NOW NARROWED WHERE IT WAS FALSE. The engine
+  half is applied after both locks drop, so two CONCURRENT engine arms can land
+  on two seated ledgers in opposite orders while a ledger minted between them
+  holds the record's order. Unreachable in practice - the control plane is
+  operator-driven and serialized - but the doc said more than the code
+  guaranteed, which is the defect this arc keeps filing. `Run::arm` now states
+  the limit in place and it is filed.
+- A MALFORMED `account` IS A `400` NOW. It used to filter to the empty set and
+  answer `202`, which is the same silent success finding 5 was about; reading it
+  as unqualified instead would arm the whole venue off a typo, which is worse.
+  The validation sits beside the divergence validation, before anything stores.
+- FIVE TESTS, EACH BITE-CHECKED ONE PERTURBATION AT A TIME, and each fired the
+  assertion it was aimed at with the ones above it passing first: the
+  `open_account` transport replay (blackout assertion), the `open_account`
+  engine replay (cap assertion, transport assertions passing first), the pending
+  record (both named tests), the pending record's targeting (the no-other
+  assertion), and the clear's pending drain. ONE ASSERTION IS HONESTLY A GUARD
+  AND SAYS SO: `open_account` succeeding after a named arm cannot be
+  bite-checked, because reproducing the regression means putting a mint back
+  into `Run::arm` and no perturbation of the shipped code produces it.
+- `docs/havoc.md` gained a properly wrapped two-paragraph statement of the
+  late-boarder rule in both spellings, replacing the run-on the fix pass left.
+  The doc still needed no correction of CONTENT - it was right about the
+  contract before the code was.
+- Gate green, and the socket suites with it. No tape-generation path is touched,
+  so no `TAPE_PROTOCOL_VERSION` bump is owed.

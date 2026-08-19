@@ -360,19 +360,25 @@ impl Passenger {
         }
     }
 
-    /// Clear every transport arm this account carries.
-    pub(crate) fn clear_transport_havoc(&self) {
-        self.dark.clear();
-        self.stall.clear();
-        for knob in [
-            &self.delay_ms,
+    /// The six `CommandLatency` knobs in the order that control names them, so
+    /// a walk over them cannot pair a value with the wrong knob.
+    fn latency_knobs(&self) -> [&AtomicU64; 6] {
+        [
             &self.submit_act_ms,
             &self.modify_act_ms,
             &self.cancel_act_ms,
             &self.submit_ack_ms,
             &self.modify_ack_ms,
             &self.cancel_ack_ms,
-        ] {
+        ]
+    }
+
+    /// Clear every transport arm this account carries.
+    pub(crate) fn clear_transport_havoc(&self) {
+        self.dark.clear();
+        self.stall.clear();
+        self.delay_ms.store(0, Ordering::Relaxed);
+        for knob in self.latency_knobs() {
             knob.store(0, Ordering::Relaxed);
         }
     }
@@ -386,6 +392,274 @@ impl std::fmt::Debug for Passenger {
         f.debug_struct("Passenger")
             .field("account_id", &self.account_id.as_str())
             .finish_non_exhaustive()
+    }
+}
+
+/// One arm from the control plane - a `POST /control/divergence`, whether it
+/// named an account or not.
+///
+/// It exists so the arming site can state its effect ONCE. `Run::arm` both
+/// records it and applies it to the ledgers that already exist, and every site
+/// that mints a ledger replays the record onto it, so the two can only agree.
+pub(crate) enum VenueArm {
+    DelayAcks {
+        ms: u64,
+    },
+    CommandLatency {
+        submit_act_ms: u64,
+        modify_act_ms: u64,
+        cancel_act_ms: u64,
+        submit_ack_ms: u64,
+        modify_ack_ms: u64,
+        cancel_ack_ms: u64,
+    },
+    GoDark {
+        armed_ns: u64,
+        span_ns: u64,
+    },
+    StallData {
+        armed_ns: u64,
+        span_ns: u64,
+    },
+    FeeSurcharge {
+        mult: Decimal,
+        armed_ns: u64,
+        span_ns: u64,
+    },
+    Engine(mogwai_protocol::control::Divergence),
+}
+
+/// A folded-up run of arms, replayable onto a ledger that did not exist when
+/// they were posted.
+///
+/// EVERY FIELD IS OPTIONAL AND AN UNSET ONE IS NOT A ZERO. A record is replayed
+/// onto a ledger that may already carry another record's effects - the venue-wide
+/// record then the account's own - so "this run said nothing about ack delays"
+/// has to be distinguishable from "this run armed a zero ack delay", or the
+/// second replay silently disarms the first.
+///
+/// The arm variants are STORE-not-merge on the wire, and this mirrors that
+/// exactly: one `CommandLatency` replaces all six values, one `GoDark` replaces
+/// the whole span.
+#[derive(Default)]
+struct ArmRecord {
+    dark: Option<ArmedSpan>,
+    stall: Option<ArmedSpan>,
+    delay_ms: Option<u64>,
+    /// `submit`, `modify`, `cancel` act delays then the three ack delays, in the
+    /// order `CommandLatency` names them.
+    latency: Option<[u64; 6]>,
+    /// `(mult, wall armed, sim span)`, as `Engine::arm_fee_surcharge` takes it.
+    fee_surcharge: Option<(Decimal, u64, u64)>,
+    /// Engine-armed divergences in arming order, capped and shed from the OLDEST
+    /// end exactly as `Engine::arm` does, so replaying this onto a fresh ledger
+    /// reproduces the queue a seated one holds.
+    engine: Vec<mogwai_protocol::control::Divergence>,
+}
+
+impl ArmRecord {
+    fn record(&mut self, arm: &VenueArm) {
+        match arm {
+            VenueArm::DelayAcks { ms } => self.delay_ms = Some(*ms),
+            VenueArm::CommandLatency {
+                submit_act_ms,
+                modify_act_ms,
+                cancel_act_ms,
+                submit_ack_ms,
+                modify_ack_ms,
+                cancel_ack_ms,
+            } => {
+                self.latency = Some([
+                    *submit_act_ms,
+                    *modify_act_ms,
+                    *cancel_act_ms,
+                    *submit_ack_ms,
+                    *modify_ack_ms,
+                    *cancel_ack_ms,
+                ]);
+            }
+            VenueArm::GoDark { armed_ns, span_ns } => {
+                self.dark = Some(ArmedSpan {
+                    wall_armed_ns: *armed_ns,
+                    sim_span_ns: *span_ns,
+                });
+            }
+            VenueArm::StallData { armed_ns, span_ns } => {
+                self.stall = Some(ArmedSpan {
+                    wall_armed_ns: *armed_ns,
+                    sim_span_ns: *span_ns,
+                });
+            }
+            VenueArm::FeeSurcharge {
+                mult,
+                armed_ns,
+                span_ns,
+            } => self.fee_surcharge = Some((*mult, *armed_ns, *span_ns)),
+            VenueArm::Engine(div) => {
+                if self.engine.len() >= mogwai_engine::MAX_ARMED_DIVERGENCES {
+                    self.engine.remove(0);
+                }
+                self.engine.push(div.clone());
+            }
+        }
+    }
+
+    /// Lift what `ClearDivergences` lifts. The engine queue is deliberately left
+    /// standing; see `VenueArms`.
+    fn clear_transport_and_fee(&mut self) {
+        self.dark = None;
+        self.stall = None;
+        self.delay_ms = None;
+        self.latency = None;
+        self.fee_surcharge = None;
+    }
+
+    /// Replay the transport-side record onto a passenger being opened.
+    fn open_transport(&self, passenger: &Passenger) {
+        if let Some(span) = self.dark {
+            passenger.dark.arm(span.wall_armed_ns, span.sim_span_ns);
+        }
+        if let Some(span) = self.stall {
+            passenger.stall.arm(span.wall_armed_ns, span.sim_span_ns);
+        }
+        if let Some(ms) = self.delay_ms {
+            passenger.delay_ms.store(ms, Ordering::Relaxed);
+        }
+        if let Some(latency) = self.latency {
+            for (knob, ms) in passenger.latency_knobs().into_iter().zip(latency) {
+                knob.store(ms, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Replay the engine-side record onto a ledger being opened.
+    fn open_engine(&self, engine: &mut Engine) {
+        if let Some((mult, armed_ns, span_ns)) = self.fee_surcharge {
+            engine.arm_fee_surcharge(mult, armed_ns, span_ns);
+        }
+        for div in &self.engine {
+            engine.arm(div.clone());
+        }
+    }
+}
+
+/// Apply the transport half of ONE arm to a passenger that already exists.
+///
+/// It reads the ARM'S OWN FIELDS and nothing else. An earlier draft read
+/// `CommandLatency` out of the record it had just written, which was correct
+/// only because the caller recorded first - exactly the ordering coupling a
+/// later edit breaks without a test going red.
+fn apply_transport_arm(arm: &VenueArm, passenger: &Passenger) {
+    match arm {
+        VenueArm::DelayAcks { ms } => passenger.delay_ms.store(*ms, Ordering::Relaxed),
+        VenueArm::CommandLatency {
+            submit_act_ms,
+            modify_act_ms,
+            cancel_act_ms,
+            submit_ack_ms,
+            modify_ack_ms,
+            cancel_ack_ms,
+        } => {
+            let armed = [
+                *submit_act_ms,
+                *modify_act_ms,
+                *cancel_act_ms,
+                *submit_ack_ms,
+                *modify_ack_ms,
+                *cancel_ack_ms,
+            ];
+            for (knob, ms) in passenger.latency_knobs().into_iter().zip(armed) {
+                knob.store(ms, Ordering::Relaxed);
+            }
+        }
+        VenueArm::GoDark { armed_ns, span_ns } => passenger.dark.arm(*armed_ns, *span_ns),
+        VenueArm::StallData { armed_ns, span_ns } => passenger.stall.arm(*armed_ns, *span_ns),
+        VenueArm::FeeSurcharge { .. } | VenueArm::Engine(_) => {}
+    }
+}
+
+/// AN ARM DOES NOT WAIT FOR A CONNECTION. Whatever the control plane has posted
+/// that a ledger minted later still owes.
+///
+/// THE ARMS BELONG TO THE RUN, NOT TO THE SEATED SET. The control plane is an
+/// operator surface, and an unqualified arm is a statement about the venue -
+/// `docs/havoc.md` says so twice, once for the transport windows ("naming none
+/// arms every account") and once for the late boarder ("a passenger that boards
+/// after the arm receives the full declared span from its own boarding
+/// instant"). The arming code walked the passengers that existed at the instant
+/// of the request, so an operator who armed a `PartialFillNext` and then started
+/// a subagent got a run that believed it was perturbed and was not - and the
+/// eviction report's "every ledger holds the same arms and hits the cap
+/// together" was false the moment one ledger was minted after an arm.
+///
+/// THE TWO HALVES DIFFER IN LIFETIME, AND DELIBERATELY. `all` is the venue's
+/// standing state and is replayed onto EVERY ledger this run ever mints.
+/// `pending` holds an arm posted against a NAMED account that does not exist
+/// yet, and is consumed by that account's first mint - which is precisely the
+/// promise a named arm makes ("the arm is standing when the client dials") and
+/// nothing more. Recording rather than minting is what keeps the control plane
+/// from deciding an account's terms: the client's own `POST /account` still
+/// opens the ledger, with its own balances and policy, and finds the arm on it.
+/// A previous draft minted the ledger here, which locked that client out with a
+/// `409` and handed it default balances.
+///
+/// WHAT A CLEAR TOUCHES AND WHAT IT DOES NOT is mirrored here, because a ledger
+/// minted now must be indistinguishable from one minted at boot that received
+/// every control request since - see `Run::arm` for the exact scope of that
+/// claim. `ClearDivergences` lifts the transport windows and the fee surcharge
+/// off every seated ledger and does NOT drain the engine's armed queue, so
+/// `all` does the same. `pending` is dropped WHOLE by a clear, engine entries
+/// included: those arms were never applied to anything, so there is no seated
+/// ledger for them to stay consistent with.
+#[derive(Default)]
+struct VenueArms {
+    all: ArmRecord,
+    /// `(account id, record)` in first-armed order, for accounts that had not
+    /// been minted when the arm arrived. A `Vec` rather than a map because it
+    /// is shed from the OLDEST end at `MAX_PENDING_ACCOUNT_ARMS` - an operator
+    /// surface that allocates per distinct name needs a bound, and this is the
+    /// same shape and direction as the engine's own armed-queue cap.
+    pending: Vec<(String, ArmRecord)>,
+}
+
+/// How many not-yet-minted accounts the run will carry arms for. Operator scale
+/// is a handful of subagents; the cap exists so a typo loop on
+/// `POST /control/divergence` cannot grow the run without bound.
+const MAX_PENDING_ACCOUNT_ARMS: usize = 64;
+
+impl VenueArms {
+    /// Record an arm against a named account that does not exist yet.
+    fn record_pending(&mut self, account_id: &str, arm: &VenueArm) {
+        if let Some((_, record)) = self
+            .pending
+            .iter_mut()
+            .find(|(name, _)| name.as_str() == account_id)
+        {
+            record.record(arm);
+            return;
+        }
+        if self.pending.len() >= MAX_PENDING_ACCOUNT_ARMS {
+            self.pending.remove(0);
+        }
+        let mut record = ArmRecord::default();
+        record.record(arm);
+        self.pending.push((account_id.to_owned(), record));
+    }
+
+    /// Take `account_id`'s pending arms, if any. The caller replays `all` FIRST
+    /// and then this, because a pending arm is by construction later in time
+    /// than every standing one it can overlap.
+    ///
+    /// TAKING RATHER THAN READING is what bounds `pending`, and it is the honest
+    /// lifetime: the arm was a statement about the account's first ledger, and
+    /// once that ledger exists it carries the arm the way any other armed ledger
+    /// does.
+    fn take_pending(&mut self, account_id: &str) -> Option<ArmRecord> {
+        let at = self
+            .pending
+            .iter()
+            .position(|(name, _)| name.as_str() == account_id)?;
+        Some(self.pending.remove(at).1)
     }
 }
 
@@ -455,6 +729,12 @@ pub(crate) struct Run {
     /// is what makes a reconnect a continuation instead of a new trader.
     passengers: Mutex<std::collections::HashMap<String, Arc<Passenger>>>,
     template: LedgerTemplate,
+    /// Every venue-wide arm the control plane has posted. Read whenever a
+    /// ledger is minted, so a late-connecting account carries what the operator
+    /// armed. LOCK ORDER: `passengers` FIRST, then this - both `passenger` and
+    /// `arm_venue_wide` take them that way, which is what makes an arm racing a
+    /// mint land in exactly one of the two paths rather than in neither.
+    venue_arms: Mutex<VenueArms>,
     /// The account a connection that names none is served under. It exists for
     /// the ephemeral single-client venue, where making the one client name an
     /// id would be ceremony; it is NOT the venue's one account.
@@ -565,6 +845,7 @@ impl Run {
                 oms_type,
                 fill_band_max_ticks,
             },
+            venue_arms: Mutex::new(VenueArms::default()),
             default_account_id: account_id,
             reset_account_on_reconnect,
             account_policies,
@@ -612,6 +893,21 @@ impl Run {
         });
         engine.set_oms_type(self.template.oms_type);
         engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
+        // Opened with whatever the operator has armed - venue-wide, and against
+        // this account by name before it existed - so this ledger is
+        // indistinguishable from one that was seated when the arm arrived. Held
+        // across the passenger insert below, under the `passengers` lock this
+        // call already holds, so an arm cannot interleave between the replay and
+        // the moment `Run::arm` can see this passenger.
+        let mut arms = self
+            .venue_arms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = arms.take_pending(account_id.as_str());
+        arms.all.open_engine(&mut engine);
+        if let Some(pending) = &pending {
+            pending.open_engine(&mut engine);
+        }
         let opening = opening_equity(&self.template.opening_balances);
         let seated = Arc::new(Passenger {
             account_id: account_id.clone(),
@@ -640,8 +936,143 @@ impl Run {
             modify_ack_ms: AtomicU64::new(0),
             cancel_ack_ms: AtomicU64::new(0),
         });
+        arms.all.open_transport(&seated);
+        if let Some(pending) = &pending {
+            pending.open_transport(&seated);
+        }
+        drop(arms);
         passengers.insert(account_id.as_str().to_owned(), Arc::clone(&seated));
         seated
+    }
+
+    /// Apply one control-plane arm, to the ledgers that exist AND to the ones
+    /// that do not yet. Returns the divergence an engine queue shed to make
+    /// room, if any.
+    ///
+    /// `account` is the request's optional `account` field. `None` is not "every
+    /// ledger that happens to exist", it is THE VENUE: the arm is recorded on
+    /// the run and replayed onto every ledger minted from here on. `Some(name)`
+    /// reaches exactly that account whether or not it has connected - live if it
+    /// has, from the pending record if it has not.
+    ///
+    /// THE RECORD AND THE LIVE APPLICATION ARE ONE CALL, deliberately. Written
+    /// as two - store it here, walk the passengers there - they drift, and the
+    /// drift is invisible: the seated set behaves and the next account to
+    /// connect does not. `VenueArms` says why this is owed at all.
+    ///
+    /// The record is taken while HOLDING THE PASSENGER MAP, which is what
+    /// resolves the race with a concurrent mint. `Run::passenger` and
+    /// `Run::open_account` read the record under the same map lock, so a
+    /// passenger is either already in the list this walks or was opened from a
+    /// record that includes this arm - never neither.
+    ///
+    /// WHAT "INDISTINGUISHABLE FROM A SEATED LEDGER" DOES NOT COVER: the engine
+    /// half is applied after both locks drop, because the engine sits behind an
+    /// async mutex. Two engine arms posted CONCURRENTLY can therefore land on
+    /// two seated ledgers in opposite orders, and a ledger minted between them
+    /// holds the record's order. The control plane is operator-driven and
+    /// serialized in every scenario the venue is used from, so this is stated
+    /// rather than closed - but it is a real limit on the claim, not a rounding
+    /// error in it.
+    pub(crate) async fn arm(
+        &self,
+        account: Option<&str>,
+        arm: VenueArm,
+    ) -> Option<mogwai_protocol::control::Divergence> {
+        let seated: Vec<Arc<Passenger>> = {
+            let passengers = self
+                .passengers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut arms = self
+                .venue_arms
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match account {
+                None => {
+                    arms.all.record(&arm);
+                    for passenger in passengers.values() {
+                        apply_transport_arm(&arm, passenger);
+                    }
+                    passengers.values().map(Arc::clone).collect()
+                }
+                Some(named) => match passengers.get(named) {
+                    Some(passenger) => {
+                        apply_transport_arm(&arm, passenger);
+                        vec![Arc::clone(passenger)]
+                    }
+                    // NOT MINTED HERE. Recording leaves the client's own
+                    // `POST /account` free to open the ledger on its own terms
+                    // and find the arm already on it; minting would answer that
+                    // request `409 already open` and hand the account default
+                    // balances and no policy.
+                    None => {
+                        arms.record_pending(named, &arm);
+                        Vec::new()
+                    }
+                },
+            }
+        };
+        let mut shed = None;
+        match &arm {
+            VenueArm::FeeSurcharge {
+                mult,
+                armed_ns,
+                span_ns,
+            } => {
+                for passenger in seated {
+                    passenger
+                        .engine
+                        .lock()
+                        .await
+                        .arm_fee_surcharge(*mult, *armed_ns, *span_ns);
+                }
+            }
+            VenueArm::Engine(div) => {
+                for passenger in seated {
+                    let evicted = passenger.engine.lock().await.arm(div.clone());
+                    shed = shed.or(evicted);
+                }
+            }
+            // Transport arms are already applied, synchronously, above.
+            VenueArm::DelayAcks { .. }
+            | VenueArm::CommandLatency { .. }
+            | VenueArm::GoDark { .. }
+            | VenueArm::StallData { .. } => {}
+        }
+        shed
+    }
+
+    /// `ClearDivergences`: lift the transport windows and the fee surcharge off
+    /// every seated ledger AND off the venue record, so an account connecting
+    /// after a clear is not re-armed from a stale record.
+    ///
+    /// The engine's armed queue is untouched on the venue record and on every
+    /// seated ledger. That is not an oversight - a clear has never drained it -
+    /// and mirroring the omission is what keeps a minted ledger identical to a
+    /// seated one. The PENDING per-account records are dropped whole, engine
+    /// entries included: nothing was ever applied from them, so there is no
+    /// seated ledger for them to stay consistent with.
+    pub(crate) async fn clear_venue_arms(&self) {
+        let seated: Vec<Arc<Passenger>> = {
+            let passengers = self
+                .passengers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut arms = self
+                .venue_arms
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            arms.all.clear_transport_and_fee();
+            arms.pending.clear();
+            passengers.values().map(Arc::clone).collect()
+        };
+        for passenger in seated {
+            // EVERY account's transport arms, whatever the request named: a
+            // clear is an operator saying "stop everything".
+            passenger.clear_transport_havoc();
+            passenger.engine.lock().await.clear_fee_surcharge();
+        }
     }
 
     /// The passenger a connection that named no account is served under.
@@ -887,6 +1318,13 @@ impl Run {
     /// and re-sent my config", and the second reading would silently wipe a
     /// live position book. A client that wants a clean ledger names a different
     /// id, which costs it nothing.
+    ///
+    /// THIS IS THE SECOND MINT SITE AND IT OWES THE VENUE ARMS TOO. The client
+    /// states its balances and its policy; it does not get to state whether the
+    /// operator's havoc reaches it. Replaying the record here is what makes
+    /// `VenueArms`'s claim - a ledger minted now is indistinguishable from one
+    /// minted at boot that received every control request since - true on both
+    /// paths rather than only on the one that was written first.
     pub(crate) fn open_account(
         &self,
         account_id: &mogwai_protocol::AccountId,
@@ -909,38 +1347,53 @@ impl Run {
         });
         engine.set_oms_type(self.template.oms_type);
         engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
-        passengers.insert(
-            account_id.as_str().to_owned(),
-            Arc::new(Passenger {
-                account_id: account_id.clone(),
-                engine: AsyncMutex::new(engine),
-                // Anchored at the OPENING balance rather than at the first
-                // observed equity: a trailing floor is stated relative to what
-                // the account started with, and anchoring it at the first mark
-                // would silently forgive whatever was lost before it.
-                risk: Mutex::new(crate::risk::RiskLedger::new(
-                    policy,
-                    opening,
-                    self.started_ns,
-                )),
-                // A POSTed account nobody has connected to yet is unattended
-                // like any other, which is also what makes it collectable: an
-                // account opened and then abandoned must not outlive the TTL
-                // just because no socket ever reached it.
-                frozen_since: Mutex::new(Some(std::time::Instant::now())),
-                seated_on: Mutex::new(HashMap::new()),
-                admitted: AtomicUsize::new(0),
-                dark: HavocWindow::new(),
-                stall: HavocWindow::new(),
-                delay_ms: AtomicU64::new(0),
-                submit_act_ms: AtomicU64::new(0),
-                modify_act_ms: AtomicU64::new(0),
-                cancel_act_ms: AtomicU64::new(0),
-                submit_ack_ms: AtomicU64::new(0),
-                modify_ack_ms: AtomicU64::new(0),
-                cancel_ack_ms: AtomicU64::new(0),
-            }),
-        );
+        // Under the `passengers` lock this call already holds, in the same lock
+        // order `Run::arm` takes, so an arm racing this open lands in exactly
+        // one of the two paths.
+        let mut arms = self
+            .venue_arms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = arms.take_pending(account_id.as_str());
+        arms.all.open_engine(&mut engine);
+        if let Some(pending) = &pending {
+            pending.open_engine(&mut engine);
+        }
+        let opened = Arc::new(Passenger {
+            account_id: account_id.clone(),
+            engine: AsyncMutex::new(engine),
+            // Anchored at the OPENING balance rather than at the first
+            // observed equity: a trailing floor is stated relative to what
+            // the account started with, and anchoring it at the first mark
+            // would silently forgive whatever was lost before it.
+            risk: Mutex::new(crate::risk::RiskLedger::new(
+                policy,
+                opening,
+                self.started_ns,
+            )),
+            // A POSTed account nobody has connected to yet is unattended
+            // like any other, which is also what makes it collectable: an
+            // account opened and then abandoned must not outlive the TTL
+            // just because no socket ever reached it.
+            frozen_since: Mutex::new(Some(std::time::Instant::now())),
+            seated_on: Mutex::new(HashMap::new()),
+            admitted: AtomicUsize::new(0),
+            dark: HavocWindow::new(),
+            stall: HavocWindow::new(),
+            delay_ms: AtomicU64::new(0),
+            submit_act_ms: AtomicU64::new(0),
+            modify_act_ms: AtomicU64::new(0),
+            cancel_act_ms: AtomicU64::new(0),
+            submit_ack_ms: AtomicU64::new(0),
+            modify_ack_ms: AtomicU64::new(0),
+            cancel_ack_ms: AtomicU64::new(0),
+        });
+        arms.all.open_transport(&opened);
+        if let Some(pending) = &pending {
+            pending.open_transport(&opened);
+        }
+        drop(arms);
+        passengers.insert(account_id.as_str().to_owned(), opened);
         Ok(())
     }
 
@@ -1913,6 +2366,238 @@ mod tests {
                 .iter()
                 .all(|bound| bound.account_id != "CLAUDETTE-07"),
         );
+    }
+
+    /// A LEDGER MINTED AFTER AN UNQUALIFIED ARM CARRIES IT. This is the whole of
+    /// finding 5: the control plane walked the passengers that existed at the
+    /// instant of the request, so an operator who armed a `PartialFillNext` and
+    /// then started a subagent got a run that believed it was perturbed and was
+    /// not - while `docs/havoc.md` and `arm_divergence`'s own comment both said
+    /// the arm reaches a passenger that boards later.
+    ///
+    /// THREE OBSERVABLES, one per storage class, because the three are applied
+    /// by three different lines and any of them can be dropped alone.
+    ///
+    /// THE ENGINE QUEUE IS OBSERVED THROUGH THE CAP, which is the only reader
+    /// `mogwai-engine` exposes: fill the venue record to
+    /// `MAX_ARMED_DIVERGENCES` with nobody seated, mint a ledger, and arm once
+    /// more. A ledger that replayed the record is AT the cap and sheds its
+    /// oldest entry, so the arm reports one; a ledger opened empty has room and
+    /// reports nothing. That also pins the mirroring the eviction report's
+    /// wording rests on - "every ledger holds the same arms and hits the cap
+    /// together" - rather than only the fact of a replay.
+    ///
+    /// The fee surcharge is applied by the line beside the queue replay in
+    /// `ArmRecord::open_engine` and is NOT asserted here: the engine exposes no
+    /// reader for it, and inventing one for a test is not worth a public API.
+    #[tokio::test]
+    async fn a_ledger_minted_after_a_venue_wide_arm_carries_it() {
+        let run = run(1_000, 400, None);
+        fill_venue_record(&run).await;
+
+        // The subagent that started after the operator armed.
+        let late = run.passenger(&mogwai_protocol::AccountId::parse("LATE-001").unwrap());
+
+        assert!(
+            late.dark.open_at(SimClock::identity(), 1_000),
+            "a blackout armed venue-wide before this account existed must still black it out"
+        );
+        assert_eq!(
+            late.delay_ms.load(Ordering::Relaxed),
+            37,
+            "an ack delay armed venue-wide must reach a ledger minted afterwards"
+        );
+        let shed = run
+            .arm(
+                None,
+                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+            )
+            .await;
+        assert!(
+            shed.is_some(),
+            "the minted ledger must open holding the venue's armed queue, at the cap with the \
+             ledgers that were already seated"
+        );
+    }
+
+    /// THE SECOND MINT SITE OWES THE SAME REPLAY. `POST /account` builds its own
+    /// ledger from client-named balances, and the cold review found it opening
+    /// that ledger with every havoc field at zero - so a subagent that starts by
+    /// POSTing its account escaped the operator's arms entirely, which is
+    /// verbatim the scenario finding 5 names.
+    ///
+    /// The three observables and the cap trick are `a_ledger_minted_after_a_
+    /// venue_wide_arm_carries_it`'s; what is new here is only the path.
+    #[tokio::test]
+    async fn an_account_opened_by_its_client_carries_the_venue_wide_arms() {
+        let run = run(1_000, 400, None);
+        fill_venue_record(&run).await;
+
+        let posted = mogwai_protocol::AccountId::parse("POST-001").unwrap();
+        run.open_account(
+            &posted,
+            std::collections::HashMap::from([("USD".to_owned(), Decimal::from(50_000))]),
+            mogwai_protocol::risk::AccountPolicy::default(),
+        )
+        .expect("a fresh id opens");
+        let opened = run.peek_passenger(&posted).expect("just opened");
+
+        assert!(
+            opened.dark.open_at(SimClock::identity(), 1_000),
+            "a blackout armed venue-wide must reach an account its client opened afterwards"
+        );
+        assert_eq!(
+            opened.delay_ms.load(Ordering::Relaxed),
+            37,
+            "an ack delay armed venue-wide must reach a client-opened account too"
+        );
+        let shed = run
+            .arm(
+                None,
+                VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+            )
+            .await;
+        assert!(
+            shed.is_some(),
+            "a client-opened ledger must hold the venue's armed queue, at the cap with the \
+             ledgers that were already seated"
+        );
+    }
+
+    /// AN ARM AGAINST AN ACCOUNT THAT HAS NOT CONNECTED MUST NOT COST THAT
+    /// CLIENT ITS OWN ACCOUNT. The arm is recorded, not minted: the client's
+    /// `POST /account` still succeeds, still gets the balances it asked for, and
+    /// finds the arm standing on the ledger it opened.
+    ///
+    /// Minting at the control plane instead - which an earlier draft of this
+    /// round did - answers that request `409 already open` and hands the account
+    /// default balances and no policy, so the fix for a silent no-op became a
+    /// refusal on a legitimate client path.
+    ///
+    /// HONEST ABOUT WHAT BITES: the second assertion bites on a dropped record.
+    /// The `open_account` call succeeding is a GUARD, not a proven-biting
+    /// assertion - reproducing the regression it forbids means putting a mint
+    /// back into `Run::arm`, and there is no perturbation of the shipped code
+    /// that produces it.
+    #[tokio::test]
+    async fn a_named_arm_before_a_client_opens_its_account_does_not_lock_it_out() {
+        let run = run(1_000, 400, None);
+        run.arm(
+            Some("SUB-01"),
+            VenueArm::GoDark {
+                armed_ns: 1_000,
+                span_ns: 5_000,
+            },
+        )
+        .await;
+
+        let named = mogwai_protocol::AccountId::parse("SUB-01").unwrap();
+        run.open_account(
+            &named,
+            std::collections::HashMap::from([("USD".to_owned(), Decimal::from(50_000))]),
+            mogwai_protocol::risk::AccountPolicy::default(),
+        )
+        .expect("an arm against an account is not an account");
+        let opened = run.peek_passenger(&named).expect("just opened");
+        assert!(
+            opened.dark.open_at(SimClock::identity(), 1_000),
+            "the arm posted before the client existed must be standing on the ledger it opened"
+        );
+    }
+
+    /// The same record reaches an account that arrives on a SOCKET instead, and
+    /// it reaches only that account: a named arm is not a venue-wide one.
+    #[tokio::test]
+    async fn a_named_arm_reaches_the_account_that_connects_later_and_no_other() {
+        let run = run(1_000, 400, None);
+        run.arm(
+            Some("SUB-02"),
+            VenueArm::GoDark {
+                armed_ns: 1_000,
+                span_ns: 5_000,
+            },
+        )
+        .await;
+
+        let stranger = run.passenger(&mogwai_protocol::AccountId::parse("SUB-03").unwrap());
+        assert!(
+            !stranger.dark.open_at(SimClock::identity(), 1_000),
+            "an arm naming one account must not black out another"
+        );
+        let named = run.passenger(&mogwai_protocol::AccountId::parse("SUB-02").unwrap());
+        assert!(
+            named.dark.open_at(SimClock::identity(), 1_000),
+            "an arm naming an account that had not connected must be standing when it does"
+        );
+    }
+
+    /// A clear lifts the venue RECORD and every pending named one too, or an
+    /// account connecting after it would be opened from arms the operator
+    /// already lifted. The engine queue is deliberately untouched on the seated
+    /// ledgers and on the venue record, which is `Engine::clear_armed`'s
+    /// documented split.
+    #[tokio::test]
+    async fn a_clear_stops_arming_ledgers_minted_after_it() {
+        let run = run(1_000, 400, None);
+        run.arm(
+            None,
+            VenueArm::GoDark {
+                armed_ns: 1_000,
+                span_ns: 5_000,
+            },
+        )
+        .await;
+        run.arm(None, VenueArm::DelayAcks { ms: 37 }).await;
+        run.arm(
+            Some("SUB-04"),
+            VenueArm::StallData {
+                armed_ns: 1_000,
+                span_ns: 5_000,
+            },
+        )
+        .await;
+        run.clear_venue_arms().await;
+
+        let late = run.passenger(&mogwai_protocol::AccountId::parse("LATE-002").unwrap());
+        assert!(
+            !late.dark.open_at(SimClock::identity(), 1_000),
+            "a cleared blackout must not be re-armed onto a ledger minted after the clear"
+        );
+        assert_eq!(
+            late.delay_ms.load(Ordering::Relaxed),
+            0,
+            "a cleared ack delay must not be re-armed either"
+        );
+        let named = run.passenger(&mogwai_protocol::AccountId::parse("SUB-04").unwrap());
+        assert!(
+            !named.stall.open_at(SimClock::identity(), 1_000),
+            "a clear stops everything, including an arm waiting for an account to arrive"
+        );
+    }
+
+    /// A venue-wide arm of each storage class, with the engine queue filled to
+    /// its cap so a replay onto a freshly minted ledger is observable through
+    /// the shed report. Shared by the two mint-site tests so neither can be
+    /// checking a different set of arms than the other.
+    async fn fill_venue_record(run: &Run) {
+        run.arm(
+            None,
+            VenueArm::GoDark {
+                armed_ns: 1_000,
+                span_ns: 5_000,
+            },
+        )
+        .await;
+        run.arm(None, VenueArm::DelayAcks { ms: 37 }).await;
+        for _ in 0..mogwai_engine::MAX_ARMED_DIVERGENCES {
+            let shed = run
+                .arm(
+                    None,
+                    VenueArm::Engine(mogwai_protocol::control::Divergence::DuplicateNextFill),
+                )
+                .await;
+            assert!(shed.is_none(), "the record fills before it sheds");
+        }
     }
 
     /// An absent session keeps the pre-session contract exactly: silence is not
