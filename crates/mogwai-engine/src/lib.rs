@@ -929,6 +929,13 @@ impl Engine {
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if moved || originated_orders > 0 {
             events.retain(|event| !matches!(event, ServerMessage::AccountState(_)));
+            // VENUE MAINTENANCE, so this consults no `DropNextAccountUpdate`
+            // and calls `push_account_snapshot` not at all - one of the three
+            // sites that helper's doc names. A re-mark is not a client command
+            // and originates its own liquidations, so spending an arm the
+            // client aimed at its own next fill would burn it on the venue's
+            // act. `apply_margin_breaches` is entered with
+            // `apply_divergences` false throughout for the same reason.
             events.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
         MarkOutcome {
@@ -1550,6 +1557,8 @@ impl Engine {
         }
         let mut events = Vec::new();
         if paid {
+            // VENUE MAINTENANCE, the funding exchange: reports unconditionally
+            // and consults no arm, on the same ruling as `on_mark` above.
             events.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
         MarkOutcome {
@@ -1596,6 +1605,8 @@ impl Engine {
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if settled || originated_orders > 0 {
             events.retain(|event| !matches!(event, ServerMessage::AccountState(_)));
+            // VENUE MAINTENANCE, settlement: reports unconditionally and
+            // consults no arm, on the same ruling as `on_mark` above.
             events.push(ServerMessage::AccountState(self.snapshot(ts)));
         }
         MarkOutcome {
@@ -7261,11 +7272,14 @@ mod tests {
     }
 
     /// THE GROUP'S CLOSING SNAPSHOT OBEYS `DropNextAccountUpdate`, because it
-    /// goes through `push_account_snapshot` like every site that is not one of
-    /// the two marked exemptions. It used to be pushed unconditionally, which
-    /// made the group one of three paths where a client could arm the
-    /// divergence and still be told the truth about its balances; the other two
-    /// were `expire_orders` and `on_modify`, closed alongside it.
+    /// goes through `push_account_snapshot`, whose doc names exactly which
+    /// sites do not. It used to be pushed unconditionally, which made the group
+    /// one of three paths where a client could arm the divergence and still be
+    /// told the truth about its balances. `expire_orders` was the second and
+    /// was closed alongside it. The third, `on_modify`, was RULED THE OTHER WAY
+    /// rather than closed: `modify_does_not_consume_armed_drop` pins the arm
+    /// surviving an amend so it lands on the next fill, so that site is a
+    /// marked exemption and not an outstanding gap.
     ///
     /// TWO ARMS, because the closing pass runs after pass two: the filling
     /// member spends the first on its own snapshot, and the second is the one
@@ -7707,6 +7721,83 @@ mod tests {
                 .any(|order| order.submit.client_order_id == "EXIT"
                     && matches!(order.resting, Resting::Limit { .. })),
             "nothing to wait for, so the child rests live"
+        );
+    }
+
+    /// A RELEASED `MarketToLimit` CHILD RESTS; IT DOES NOT TAKE THE MARKET.
+    ///
+    /// The standalone submit path takes the market for this type, and
+    /// `docs/oms-types.md` states the carve-out this test pins: `release_child`
+    /// rests every non-conditional child at its stated price, because the
+    /// linkage pass that releases it holds no `MarketReading` to price against.
+    /// The child here is MARKETABLE at release - a sell limited at 50 against a
+    /// market of 99 - so "rested" and "took the market" are distinguishable
+    /// outcomes rather than the same silence. Give the release a reading and
+    /// this test fails on the fill it would produce, which is the point: that
+    /// would be a change to what an order-list child means, not a bug fix.
+    #[test]
+    fn a_released_market_to_limit_child_rests_at_its_stated_price() {
+        let mut e = linked_engine();
+        // The CHILD IS SENT FIRST so it is held when its parent fills: pass two
+        // submits members in order, and a child of an already-filled parent is
+        // live at once and never sees `release_child` at all.
+        let mut exit = limit_order("EXIT", 1);
+        exit.order_type = OrderType::MarketToLimit;
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(50));
+        let exit = linked(
+            exit,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+        let entry = linked(
+            limit_order("ENTRY", 1),
+            link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
+        );
+
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![exit, entry],
+            },
+            1,
+            Some(reading(0)),
+        );
+
+        assert!(
+            out.iter().any(|event| matches!(
+                event,
+                ServerMessage::OrderFilled(fill) if fill.client_order_id == "ENTRY"
+            )),
+            "the parent filled on arrival, so the release actually ran: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|event| matches!(
+                event,
+                ServerMessage::OrderFilled(fill) if fill.client_order_id == "EXIT"
+            )),
+            "and the released child took nothing, marketable though it is: {out:?}"
+        );
+
+        let child = e
+            .open
+            .iter()
+            .find(|open| open.submit.client_order_id == "EXIT")
+            .expect("the released child is still open");
+        assert!(
+            matches!(
+                child.resting,
+                Resting::Limit { fill_trigger_px } if fill_trigger_px == Decimal::from(50)
+            ),
+            "it rests as an ordinary limit at its stated price: {:?}",
+            child.resting
+        );
+        assert_eq!(
+            child.leaves_qty,
+            Decimal::from(1),
+            "with its whole quantity still to work"
         );
     }
 

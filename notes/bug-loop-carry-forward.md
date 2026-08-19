@@ -4316,18 +4316,96 @@ document whose review found a hole the fix opened one layer up:
   candidates were enumerated and cleared - the price-less-market stamp and
   refusal in `http.rs` are safe because `validate_submit` requires a price on a
   `MarketToLimit`, and the adapter's `wire_order_type` is an exhaustive match.
+  THE ENUMERATION MISSED ONE, found by the close pass: `Engine::release_child`
+  decides how a released order-list child rests and NAMES NO ORDER TYPE AT ALL -
+  it branches on `is_conditional()` and on `submit.price` - so no search for
+  `OrderType::` could reach it. A released `MarketToLimit` child therefore rests
+  as a plain limit and never takes the market. Ruled NOT a defect (a released
+  child rests, which is the same argument `validate_order_link` refuses a
+  `Market` child on), stated as a carve-out in `docs/oms-types.md` and pinned by
+  `a_released_market_to_limit_child_rests_at_its_stated_price`. THE SHARPER
+  RULE: "re-read every site that enumerates the type's family" is not enough,
+  because the site that decides a type's behaviour may not mention the type.
+  Ask instead WHICH FUNCTIONS DECIDE THIS BEHAVIOUR, and reach them through the
+  behaviour rather than through the enum's name.
 - THE COMMENT AT THE GROUP SNAPSHOT CLAIMED A UNIVERSAL ITS NEIGHBOUR VIOLATED,
   which is the arc's signature defect wearing durable prose. `expire_orders` and
   `on_modify` both still pushed unconditionally, and both MOVE A HOLD - an
   expiry frees one, an amend refreshes one - so an operator could arm
   `DropNextAccountUpdate`, watch a GTD expire or amend an order, and be handed
-  the fresh balances anyway with the arm still loaded. Closed by installing the
-  helper rather than by narrowing the comment, per the build-don't-defer rule.
-  `an_expiry_and_an_amend_both_obey_drop_next_account_update` pins both, each
-  with its unarmed twin so the assertion cannot pass on a vanished snapshot.
+  the fresh balances anyway with the arm still loaded. `expire_orders` was
+  closed by installing the helper, per the build-don't-defer rule, and
+  `an_expiry_obeys_drop_next_account_update` pins it with an unarmed twin so the
+  assertion cannot pass on a vanished snapshot. `on_modify` was NOT closed: it
+  was ruled the other way, because `modify_does_not_consume_armed_drop` already
+  pinned the arm SURVIVING an amend, and it is a MARKED EXEMPTION rather than an
+  outstanding gap. This paragraph claimed a test that was never written and a
+  fix that was deliberately not made; corrected by the close pass.
 - AN ID-ONLY GROUP ASSERTION IS ONE GATE FROM CHANGING SUBJECT AGAIN.
   `one_bad_member_rejects_a_whole_group_and_accepts_nothing` had been repaired
   this round for exactly that failure and left asserting `["GOOD", "BAD"]`; it
   now asserts both REASON STRINGS, which also pins the blame-forwarding shape
   (`order group rejected whole: BAD was refused because ...` on the innocent
   member, the bare reason on the blamed one).
+
+## The engine document, close pass: what the three commits left
+
+Eighth close pass, eighth defect found in an unreviewed second half. Nothing
+found was a live venue misbehaviour - the P and L, margin and admission changes
+all hold up - and everything found was PROSE OR REACH: a claim about the code
+that the code did not honour, or a helper whose stated set was wider than its
+call sites.
+
+- THE `on_submit_group` DOC BLOCK WAS DETACHED FROM ITS FUNCTION. Round 3
+  inserted `push_account_snapshot` and its doc BETWEEN `on_submit_group`'s
+  fifty-line doc comment and `on_submit_group` itself, so the two blocks fused:
+  the group's entire atomicity contract - two passes, the closing linkage, why
+  `Ouo` must not be applied twice - was rendered as documentation of the
+  snapshot helper, and the function it describes was left undocumented. Nothing
+  detects this; rustdoc renders it happily and the gate cannot see it. WHEN
+  INSERTING A FUNCTION ABOVE ANOTHER, CHECK WHAT THE DOC BLOCK ABOVE THE
+  INSERTION POINT BELONGS TO. Restored by moving the helper above the group's
+  doc.
+- `push_account_snapshot`'s DOC CLAIMED A UNIVERSAL ITS OWN CRATE VIOLATED SIX
+  TIMES - the exact defect round 3 installed it to close, reproduced in the fix.
+  "Every batch that ends in an `AccountState` goes through it" and "there are
+  three [exempt sites], all marked" were both false: `on_submit_from`'s fill
+  snapshot and `on_cancel`'s each spell the rule themselves with an extra
+  carve-out, and `on_mark`, `settle` and the funding exchange in `lib.rs` push
+  unconditionally and consult no arm. The three venue-maintenance sites are
+  RIGHT to - that is the 2026-08-19 ruling that venue-originated work does not
+  spend client arms - but they were unmarked, which is how the next reader
+  concludes the helper covers them. All five now say what they are, and the
+  helper's doc names them.
+- THE HELPER COULD NOT EXPRESS THAT RULING AT ALL. It took no
+  `apply_divergences`, so two of its five call sites - both inside
+  `on_submit_from`, which `close_at_mark` enters with the flag FALSE for a
+  venue-originated flatten - would have consumed a client arm on the venue's own
+  act, and the reduce-only cap-zero cancel is reachable that way if a position
+  goes flat between the breach walk and the submit. Latent rather than live
+  today, so there is no test and deliberately none: the flag is now threaded and
+  the reachability argument is stated at the site instead.
+- THE ROUND-3 `OrderType::` ENUMERATION MISSED `release_child`, recorded in that
+  round's section above with the sharper rule it cost.
+- TWO STALE CLAIMS CORRECTED, both from unreviewed halves: this document said
+  `an_expiry_and_an_amend_both_obey_drop_next_account_update` pins a fix to
+  `on_modify` that was deliberately not made and a test that was never written,
+  and `the_groups_closing_snapshot_can_be_dropped`'s doc said "the two marked
+  exemptions" when there are three and that `on_modify` was "closed alongside
+  it" when it was ruled the other way. A REPORT THAT CORRECTS ITSELF MID-ROUND
+  LEAVES THE SUPERSEDED SENTENCE BEHIND unless someone re-reads the whole
+  paragraph after the reversal.
+- ONE FILING IN `notes/bugs-server.md` WAS FACTUALLY WRONG and is rewritten. It
+  claimed a `MarketToLimit` order-list child "TAKES THE MARKET on release"; it
+  does not, and the filing's coherence argument rested on that. A filing is the
+  only channel to a later round, so a wrong one is worse than none.
+
+WHAT THE CLOSE PASS CHECKED AND FOUND SOUND: the
+`position_unrealized_checked` / `position_unrealized` split (four readers, no
+reader takes the wrong one, and the zero-price-on-an-inverse case answers zero
+rather than saturating); `worst_case_leaves`, both consumers and its
+pass-invariance argument; the three marked snapshot exemptions, each real and
+each citing the test or the reason that makes it one; the `MarketToLimit`
+owner-question closure, which the 2026-08-16 completeness ruling in
+`reference/architecture.md` does support; and `docs/order-lists.md`, whose
+round-1 regression is genuinely reverted.

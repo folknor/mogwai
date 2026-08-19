@@ -49,6 +49,58 @@ impl Engine {
             .then(|| "hedging reduce-only order requires a position_id".to_string())
     }
 
+    /// THE ONE HOME OF THE CLOSING-SNAPSHOT RULE for the ORDER-ENTRY paths.
+    ///
+    /// The rule has two halves and both are load-bearing. A batch that MOVED
+    /// THE LEDGER owes a snapshot, and that snapshot is exactly what
+    /// `DropNextAccountUpdate` exists to hide - so an armed drop takes it and
+    /// the client is left to notice. A batch that moved NOTHING (a bare
+    /// acceptance, a held child taking no reservation) still reports the
+    /// account, because there is nothing to hide and spending the arm on it
+    /// would burn a divergence the operator armed against a real fill.
+    ///
+    /// `apply_divergences` carries the same meaning it does everywhere else in
+    /// this file: FALSE for a VENUE-ORIGINATED batch - a margin or risk breach
+    /// closing a position at the mark - which reports the account but must
+    /// never spend an arm the client aimed at its own next fill. Passing it is
+    /// what makes that structural rather than incidental; see `on_cancel`,
+    /// which states the same rule for the cancel path.
+    ///
+    /// WHAT THIS DOES NOT COVER, stated exactly, because a comment claiming a
+    /// wider set than it has is this file's signature defect. Three
+    /// order-entry sites are exempt and each says so in place - the
+    /// resting-limit acceptance, the held-child acceptance and `on_modify`.
+    /// `on_submit_from`'s fill snapshot and `on_cancel`'s spell the rule
+    /// themselves because each carries an extra carve-out the helper has no
+    /// argument for. And the VENUE-MAINTENANCE snapshots in `lib.rs` - `on_mark`,
+    /// `settle` and the funding exchange - do not come from an order-entry
+    /// command at all: they report unconditionally and consult no arm, which is
+    /// the same ruling `apply_divergences` encodes here.
+    ///
+    /// A caller that must ALSO stay silent on a batch that moved nothing - the
+    /// clock-driven sweep, which runs on every tick - tests `account_changed`
+    /// itself before calling and gets the arm half from here. An EMPTY batch is
+    /// no batch and reports nothing.
+    fn push_account_snapshot(
+        &mut self,
+        out: &mut Vec<ServerMessage>,
+        ts: u64,
+        apply_divergences: bool,
+    ) {
+        if out.is_empty() {
+            return;
+        }
+        if apply_divergences
+            && account_changed(out)
+            && self
+                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                .is_some()
+        {
+            return;
+        }
+        out.push(ServerMessage::AccountState(self.snapshot(ts)));
+    }
+
     /// Submit a LINKED GROUP: every member admitted, or none of them.
     ///
     /// TWO PASSES, and the split is the whole mechanism.
@@ -105,42 +157,6 @@ impl Engine {
     /// a validator re-spelled here would read as the rule's home while
     /// implementing a fraction of it, which is the defect this file's structural
     /// note names.
-    /// THE ONE HOME OF THE CLOSING-SNAPSHOT RULE, and every batch that ends in
-    /// an `AccountState` goes through it.
-    ///
-    /// The rule has two halves and both are load-bearing. A batch that MOVED
-    /// THE LEDGER owes a snapshot, and that snapshot is exactly what
-    /// `DropNextAccountUpdate` exists to hide - so an armed drop takes it and
-    /// the client is left to notice. A batch that moved NOTHING (a bare
-    /// acceptance, a held child taking no reservation) still reports the
-    /// account, because there is nothing to hide and spending the arm on it
-    /// would burn a divergence the operator armed against a real fill.
-    ///
-    /// Spelled once because it was hand-rolled at five sites and two of them
-    /// pushed unconditionally - the group's closing pass and this - which made
-    /// them the paths where an operator could arm the arm and the client be
-    /// told the truth anyway. A site that genuinely must not consult the arm
-    /// says so in place and calls neither half; there are three, all marked -
-    /// the resting-limit acceptance, the held-child acceptance and `on_modify`.
-    ///
-    /// A caller that must ALSO stay silent on a batch that moved nothing - the
-    /// clock-driven sweep, which runs on every tick - tests `account_changed`
-    /// itself before calling and gets the arm half from here. An EMPTY batch is
-    /// no batch and reports nothing.
-    fn push_account_snapshot(&mut self, out: &mut Vec<ServerMessage>, ts: u64) {
-        if out.is_empty() {
-            return;
-        }
-        if account_changed(out)
-            && self
-                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
-                .is_some()
-        {
-            return;
-        }
-        out.push(ServerMessage::AccountState(self.snapshot(ts)));
-    }
-
     pub(crate) fn on_submit_group(
         &mut self,
         orders: &[SubmitOrder],
@@ -247,7 +263,7 @@ impl Engine {
             // snapshot for a ledger move somebody else already reported and
             // already paid an arm for.
             let mut closing = closing;
-            self.push_account_snapshot(&mut closing, ts);
+            self.push_account_snapshot(&mut closing, ts, true);
             out.extend(closing);
         }
         out
@@ -620,7 +636,7 @@ impl Engine {
             // A trigger that booked a fill or freed a reservation owes its
             // snapshot under the same `DropNextAccountUpdate` rule as any other
             // fill; a bare acceptance moves no balance and leaves the arm alone.
-            self.push_account_snapshot(&mut out, ts);
+            self.push_account_snapshot(&mut out, ts, apply_divergences);
             return out;
         }
 
@@ -788,7 +804,13 @@ impl Engine {
                 ts_event: ts,
             });
             out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
-            self.push_account_snapshot(&mut out, ts);
+            // REACHABLE FROM A VENUE-ORIGINATED CLOSE: `close_at_mark` submits a
+            // reduce-only market order, and a position that went flat between
+            // the breach walk and this submit caps it at zero. Hence
+            // `apply_divergences` rather than `true` - the venue's own flatten
+            // must not spend the client's arm here any more than it does at the
+            // fill snapshot below.
+            self.push_account_snapshot(&mut out, ts, apply_divergences);
             return out;
         }
 
@@ -902,6 +924,11 @@ impl Engine {
             out.extend(self.close_unrested(&record, WireOrderStatus::Filled, ts));
         }
 
+        // SPELLS THE RULE ITSELF rather than calling `push_account_snapshot`,
+        // and its doc names this site: the helper has no argument for the
+        // `last_qty > 0` carve-out below, which is a statement about what the
+        // arm was aimed at rather than about whether the batch moved anything.
+        //
         // Untargeted: applies to this submit's account-state snapshot. Scanned
         // for the same head-of-line-blocking reason as the duplicate divergence.
         // Gated on an actual execution: a zero `last_qty` (a partial floored
@@ -945,9 +972,6 @@ impl Engine {
         self.apply_scans_on_clock(results, ts, mogwai_protocol::SimClock::identity())
     }
 
-    /// As `apply_scans`, on the clock of the boat whose sweep produced these
-    /// results. The sweeper walks one boat at a time and every `ts` here was
-    /// sampled on that boat, so the fee surcharge is judged on it.
     /// Cancel every resting order whose time-in-force has run out.
     ///
     /// TIME-DRIVEN and nothing to do with triggers, which is why it is its own
@@ -1021,8 +1045,11 @@ impl Engine {
             // `DropNextAccountUpdate` half, which this site used to skip. It
             // was the last unconditional push outside the two marked
             // exemptions: an operator could arm the arm, watch a GTD order
-            // expire, and be handed the fresh balances anyway.
-            self.push_account_snapshot(&mut out, ts);
+            // expire, and be handed the fresh balances anyway. TRUE, though the
+            // clock rather than a client drives it: the arm is armed against an
+            // order LEAVING THE BOOK, which is exactly what an expiry is, and
+            // `an_expiry_obeys_drop_next_account_update` pins that.
+            self.push_account_snapshot(&mut out, ts, true);
         }
         out
     }
@@ -1140,6 +1167,9 @@ impl Engine {
         }
     }
 
+    /// As `apply_scans`, on the clock of the boat whose sweep produced these
+    /// results. The sweeper walks one boat at a time and every `ts` here was
+    /// sampled on that boat, so the fee surcharge is judged on it.
     pub fn apply_scans_on_clock(
         &mut self,
         results: &[ScanResult],
@@ -1331,7 +1361,10 @@ impl Engine {
         // which is what `swept_fill_max_bytes` sizes against. What the helper
         // owns here is the `DropNextAccountUpdate` half.
         if account_changed(&out) {
-            self.push_account_snapshot(&mut out, ts);
+            // TRUE for the same reason the expiry pass passes it: a swept fill
+            // or a funds-check eviction is an order executing or leaving the
+            // book, which is precisely what the arm names.
+            self.push_account_snapshot(&mut out, ts, true);
         }
         if cfg!(debug_assertions) {
             self.reconcile_order_locked();
@@ -2680,6 +2713,12 @@ impl Engine {
                 ts_event: ts,
             }];
             out.extend(reaped);
+            // SPELLS THE RULE ITSELF rather than calling
+            // `push_account_snapshot`, and its doc names this site: a cancel
+            // always moves the ledger, so the helper's `account_changed` half
+            // would be dead weight, and the `apply_divergences` half is stated
+            // here in the negative form this path was fixed into.
+            //
             // A cancel takes the order OFF the book and gives its hold back, so
             // the snapshot it owes is exactly the account movement
             // `DropNextAccountUpdate` exists to hide - suppressing it leaves the

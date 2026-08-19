@@ -93,6 +93,17 @@ of 100 filled at 200 - so no remainder arose on the clean path at all, and where
 an armed `PartialFillNext` manufactured one, the kept remainder rested inert,
 offered to no sweep, unable to fill or expire.
 
+ONE CARVE-OUT, AND IT IS A REAL DIFFERENCE: a `MarketToLimit` submitted as an
+ORDER-LIST CHILD never takes the market. A held child is released by its
+parent's fill, and a release RESTS the child at its stated price - the same
+thing it does for every non-conditional type, because the release happens inside
+the linkage pass with no market reading of its own to price against. So a
+market-to-limit exit leg is, in practice, a limit exit leg. That is stated here
+rather than corrected because the alternative - handing the release a reading so
+a released child can execute on arrival - is a change to what an order-list
+child MEANS, and `validate_order_link` refuses a `Market` child on exactly the
+argument that a released child rests.
+
 ORDER LISTS are served, so a genuine bracket needs no workaround. See
 [Order lists](order-lists.md) for the rules and what each one does.
 

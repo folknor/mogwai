@@ -1,5 +1,24 @@
 # Bug hunt: mogwai-engine
 
+CLOSED AND EXHAUSTED. Nothing in this document is open. It is kept for the
+withdrawal in section 11, the refusal inside section 10, and the structural note,
+all of which a later round would otherwise re-derive. The residuals live in
+`notes/todo.md` and `notes/bugs-server.md`.
+
+THE CLOSE PASS OF 2026-08-19 found no live venue misbehaviour and four prose
+defects, three of them in `push_account_snapshot` - the helper round 3 installed
+to close exactly this defect family - whose doc claimed a set six sites wider
+than its call sites, whose signature could not express the venue-originated
+ruling, and whose insertion detached `on_submit_group`'s doc block from
+`on_submit_group`. The fourth is a carve-out neither round found: a
+`MarketToLimit` submitted as an ORDER-LIST CHILD never takes the market, because
+`Engine::release_child` rests every released non-conditional child at its stated
+price and names no order type at all - so the round-3 enumeration could not have
+reached it by searching for one. Ruled not a defect, stated in
+`docs/oms-types.md`, pinned by
+`a_released_market_to_limit_child_rests_at_its_stated_price`, and the open owner
+question filed in `notes/bugs-server.md`.
+
 Reconnaissance report, 2026-08-18. One Opus hunter, read-only, scope
 `crates/mogwai-engine`: order state machines, the matching loop, fills and
 partial fills, order groups and their linkage, account and position state, and

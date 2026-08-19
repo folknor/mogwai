@@ -231,15 +231,28 @@ implies.
   while widening the guard to cover `MarketToLimit`; the widening did not create
   the gap, it doubled the number of types standing on it.
 
-- AN `OrderType::Market` ORDER-LIST CHILD IS REFUSED and a `MarketToLimit` one
-  is not, which is now worth a second look. `validate_order_link` refuses a
-  Market child on the argument that "a released child rests, and a market order
-  has nothing to rest on". As of 2026-08-19 a `MarketToLimit` TAKES THE MARKET
-  on release, so a bracket exit stated that way executes the instant its parent
-  fills rather than resting - which is coherent (its remainder does rest, so the
-  stated argument does not reach it) but is not what the rule's prose leads a
-  reader to expect. Noted rather than filed as a defect: no behaviour here is
-  wrong, the rule's stated ground is just narrower than the rule.
+- A `MarketToLimit` ORDER-LIST CHILD IS A LIMIT CHILD, which is not what
+  `docs/oms-types.md` describes the type as doing. CORRECTED 2026-08-19 BY THE
+  CLOSE PASS; the filing as first written claimed the opposite and was wrong.
+  What is actually true: `Engine::release_child` rests every released
+  non-conditional child at `submit.price` as `Resting::Limit`, so a
+  `MarketToLimit` child NEVER takes the market - the release runs inside
+  `apply_linkage_after_fill`, which holds no `MarketReading` to price against.
+  The standalone submit path took the market as of 2026-08-19; the release path
+  was not enumerated with it, which is the one site the round-3
+  `OrderType::` audit could not have found by grep, since `release_child` names
+  no order type at all.
+  NOT A DEFECT AS IT STANDS, and the reason is the rule the original filing
+  reached for from the wrong end: `validate_order_link` refuses a `Market`
+  child precisely because "a released child rests", so resting a released
+  market-to-limit is the CONSISTENT behaviour and executing it on release would
+  be the thing that contradicts the linkage contract. The carve-out is now
+  stated in `docs/oms-types.md`.
+  WHAT IS OWED, AND TO WHOM: an owner call on whether a release should carry a
+  market reading at all - which would make a released `MarketToLimit` execute on
+  arrival and would reopen whether a `Market` child can be admitted too. Until
+  that is asked, the venue serves the type one way standalone and another way as
+  a child, and says so in the durable doc rather than in a comment.
 
 ## 9. LEAD, not a finding: a completion announcement that reached one socket and not another
 
