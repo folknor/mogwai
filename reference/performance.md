@@ -8,6 +8,60 @@ Numbers measured through `brokkr mogwai` carry their result UUID, so any claim
 here can be re-derived - `brokkr results <uuid>` and `brokkr sidecar <uuid>`.
 Numbers from the criterion harnesses do not, and are pinned by commit instead.
 
+## The adapter socket suites' wall, 2026-08-19
+
+`brokkr test -p mogwai-adapter "" --debug`, the serial sweep of the four
+socket-backed test binaries, on host `bygg`: **39.71 s -> 12.14 s**, no test
+removed and two added. For four rounds roughly 37 s of that was recorded as
+UNEXPLAINED and was the crate's largest single cost; this is where it went.
+
+COUNTS, because two figures below are ratios and a stale denominator makes them
+unreadable. The four binaries held 58 tests when the work started and hold 60
+now: `adapter_smoke::both_legs_disclose_one_process_session_on_the_upgrade` and
+`data_client_transport::an_undecodable_clock_is_retried_then_falls_back_without
+_refusing` were added, in that order. The distribution quoted next was taken
+between those two additions, so its denominator is 59.
+
+THE INSTRUMENT CAME FIRST, because nobody had a per-test distribution and every
+proposal was therefore a guess. libtest's `--report-time` is nightly-only, so
+`scripts/adapter_test_walls.py` runs the already-built test binaries directly,
+one test per process, and times each. The shape it showed was not a few
+outliers but a FLOOR: 55 of those 59 sat in a 419-892 ms band with a hard
+~420 ms bottom, while the only two that never call `connect()` came in at 15 ms
+and 23 ms.
+
+A floor that flat is a fixed cost inside `connect()`, and it was one. The test
+stub answered `GET /clock` with the catch-all `[]`, which the client cannot
+decode, so every connecting test walked `fetch_clock_or_identity`'s full ladder
+- three attempts with a 200 ms wall sleep between them - before falling back to
+the identity clock. 57 of the 59 connect, at ~400 ms each: about 24 s.
+
+The fix is in the harness, not the client. The stub now serves a real identity
+envelope (`common::IDENTITY_CLOCK_JSON`, speed 1, zero floor), which is
+behaviourally identical downstream - `ensure_on_tape` receives `Some(0)`
+instead of `None` and no start can precede zero - and is a more honest fixture,
+since the real venue answers that route. 39.71 -> 15.93 s. The retry ladder
+kept its coverage deliberately, moving from 57 accidental traversals asserting
+nothing to one test in `data_client_transport`,
+`an_undecodable_clock_is_retried_then_falls_back_without_refusing`, which arms
+the new `fail_clock` switch and counts the attempts.
+
+With the floor gone the distribution became legible and named a real outlier:
+`havoc::a_venue_serving_another_run_is_refused_terminally` at 5.0 s, which is
+`wait_connected`'s five-second readiness bound spent in full because readiness
+never arrives on a terminal refusal. That is the standing shape - A BOUND ON A
+FUTURE THAT CANNOT SUCCEED IS ON THE PASSING PATH, NOT THE FAILING ONE - and
+the same repair applied there as to `conn_reconnect_respects_max_attempts` a
+round earlier: bound the connect at 500 ms, then poll the observable. 15.93 ->
+11.83 s.
+
+The final distribution over all 60, one test per process, totals 11.38 s and has
+a long flat tail: only four exceed half a second, and each is deliberate - the
+close-and-reconnect replay pin at 1.42 s, the reconnect-attempt ladder at
+1.31 s, the unsupported-init table at 0.78 s, and the identity refusal at
+0.76 s. The retry-ladder test is the one remaining ~420 ms entry, which is the
+cost the other 57 used to pay each.
+
 ## Session-segment cut and compose, 2026-08-18
 
 The session-segment sampler's two offline surfaces, measured on host `bygg`

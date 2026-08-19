@@ -105,6 +105,15 @@ impl Default for MogwaiDataClientConfig {
 }
 
 /// Serde default for both configs' `session`: this process's identity.
+///
+/// PINNED END TO END by
+/// `adapter_smoke::both_legs_disclose_one_process_session_on_the_upgrade`,
+/// which reads the two upgrade request lines off the stub and asserts they
+/// carry one wire-legal session minted from this pid. Until it existed, making
+/// this return `None` left every socket test in the crate green - the only
+/// failure was the unit test below, which reads the struct field and never the
+/// wire, so a client that built the right config and dialled the wrong URL was
+/// undetectable.
 fn default_session() -> Option<String> {
     Some(process_session_id().to_owned())
 }

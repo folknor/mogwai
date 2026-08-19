@@ -11,6 +11,10 @@ cannot fail, fixtures that cannot represent their shape, and anything else weird
 
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 
+THIS DOCUMENT IS CLOSED. Five rounds, no open findings left - every section
+below records what was fixed or, in one case, a refusal with its measurement.
+It is kept until the arc's close pass reads it.
+
 The hunter reports running nothing, and verified its two load-bearing claims
 against source: `replace_data_event_sender` is a `thread_local` in
 `research/nautilus_trader/crates/common/src/live/runner.rs`, and the 100 ms
@@ -56,106 +60,139 @@ they are sound. Do not consolidate these onto a shared sender.
 
 ## Process-global state
 
-`process_session_id()`'s `OnceLock` is genuinely process-wide, and every exec
-client built through `MogwaiExecClientConfig::default()` (i.e. all of
-`adapter_smoke` and `reconciliation`) presents the identical session string. This
-is harmless today only because every test binds its own stub, so no two clients
-ever meet on one venue. Two consequences:
+CLOSED IN ROUND 5, and the coverage hole it named was real and is closed.
+`adapter_smoke::both_legs_disclose_one_process_session_on_the_upgrade` builds
+one process's exec leg and data leg against one stub, reads the two `/ws`
+request lines off `ws_requests`, and asserts a session is PRESENT on both,
+EQUAL across them, wire-legal by `mogwai_protocol::validate_session_id`, and
+minted from this pid. Bite-checked by making `default_session` return `None`:
+it fails naming the bare request line, at 0.94 s. Both consequences the report
+drew - that a two-distinct-clients test must state `session:` explicitly, and
+that a "two legs, no eviction" test asserts a constant unless it reads the wire
+- are now written on `tests/common`'s module doc rather than living here.
 
-- A SESSION-EVICTION TEST CANNOT BE WRITTEN THE OBVIOUS WAY in these binaries.
-  Any test that wants two DISTINCT clients on one venue must set `session:`
-  explicitly (as `havoc` does with `session: None`), and any test wanting "same
-  process, two legs, no eviction" is testing a constant.
-- THERE IS NO TEST AT ALL FOR THE `session=` QUERY PARAMETER.
-  `StubState::ws_requests` records the full request line specifically so
-  disclosure is assertable, and exactly one test uses it - for `account=`.
-  Nothing asserts `session=` is present, well-formed, or shared between a
-  process's data and exec legs, which is the ENTIRE stated reason the `OnceLock`
-  exists ("without a shared identity the second dial would evict the first and
-  the host would disconnect itself before it ever traded"). Delete
-  `default_session` and no adapter test goes red. That is the largest coverage
-  hole the hunter found.
-
-`replace_data_event_sender` / `replace_exec_event_sender` are thread-locals
-(`DATA_EVENT_SENDER.with(...)` in nautilus `common/src/live/runner.rs`), and each
-`#[tokio::test]` gets its own libtest thread, so these are safe under
-`--test-threads=8`. Worth stating because the module doc calls them "global" and
-the naming invites the opposite conclusion. No global loggers, capture buffers,
-env vars, or fixed ports anywhere in scope - all listeners are `127.0.0.1:0`.
+The thread-local claim was verified and is TRUE: `DATA_EVENT_SENDER` and
+`EXEC_EVENT_SENDER` are `thread_local!` in the pinned nautilus release's
+`common/src/live/runner.rs`. The doc comments calling them "global" are
+nautilus's own and `research/` is read-only, so the correction is stated on
+this workspace's harness instead, next to the negative-assertion windows whose
+soundness depends on it.
 
 ## Binary-level timing
 
-Cargo runs the four binaries sequentially, so each binary's wall time is its own
-longest test. Distribution is lopsided:
-
-- `havoc` (17 tests) holds essentially all the slow ones: two 600 ms sleeps, a
-  300 ms sleep, a 400 ms dark window, two 2 s `wait_for_at_least` calls, and the
-  ~2 s trigger-latency test. Floor about 2 s, total about 6-8 s serial content.
-  ROUNDS 1-3 HAVE INVALIDATED THIS BULLET'S FIGURES, and round 5 owns correcting
-  it rather than trusting it: `havoc` holds 19 tests, not 17; the 100 ms pre-push
-  sleep the section's last paragraph costs out is GONE, replaced by
-  `common::PushGate`; and the trigger-latency test measures 0.94 s, not the
-  1.5-2 s written here. The dead-socket test round 1 added can spend up to 3 s in
-  `wait_for_at_least`, so the "floor about 2 s" is the more misleading of the two
-  numbers left. Re-measure before quoting any of it.
-- `reconciliation` (14 tests) is all fast request/response - floor about 300 ms.
-- `adapter_smoke` (10) and `data_client_transport` (12) are fast except the two
-  `MAX_HISTORY_LIMIT` paging tests, which build large tapes and serialize them
-  through the stub twice.
-
-Nothing is near the 20 s watchdog. But if the 100 ms harness sleep is removed,
-roughly 40 tests get 100 ms faster each - the single largest cheap win available
-here.
-
-ROUND 2 MEASURED IT AND THE ESTIMATE HELD, but it is a tenth of the wall, not
-the wall: `brokkr test -p mogwai-adapter "" --debug` went 42.46 s to 37.47 s per
-sweep, and 37.61 s after the round's own review fixes. About 4 s of that is the
-harness sleep (it ran on every `/ws` upgrade, including the exec legs that seed
-no tape, which is why the count is ~40 sockets rather than the ~13 tests that
-seed frames) and about 1 s is `conn_reconnect_respects_max_attempts` no longer
-spending a 2 s connect bound on its passing path.
-
-THE REMAINING ~37 s IS UNEXPLAINED, is not the sum of these tests' asserted
-waits, and is now the largest single cost in the crate - larger than everything
-this document's timing sections propose to save put together. NOBODY HAS
-MEASURED WHERE IT GOES. That is the next timing pass's first job, before any
-further structural-win claim is made about this crate: get a per-test
-distribution first, then decide whether there is anything worth fixing.
-Round 2 deliberately did not chase it.
+CLOSED IN ROUND 5 BY MEASUREMENT, and the section's every figure was stale, so
+it is replaced rather than corrected. THE ~37 s WAS NOT A DISTRIBUTION OF SLOW
+TESTS AT ALL - it was a ~420 ms FLOOR under every test that calls `connect()`,
+paid because the stub answered `GET /clock` with an undecodable `[]` and the
+client retried three times with 200 ms wall sleeps before falling back. The
+serial sweep is 12.1 s now, from 39.71 s, with no test removed and two added.
+The instrument that found it (`scripts/adapter_test_walls.py`), the per-test
+shape, and the second repair the clean distribution then exposed are recorded
+durably in `reference/performance.md` under the 2026-08-19 entry, because a
+measured number belongs there rather than in a transient note.
 
 ## Assertions that cannot fail
 
-FOUND IN ROUND 2 WHILE FIXING THE SAME SHAPE ELSEWHERE, not by the original
-hunt, and left for a later round rather than swept in under a review fix.
+CLOSED IN ROUND 5. The class was swept across all four binaries and the crate's
+`#[cfg(test)]` modules. THE INSTANCE THE REPORT NAMED IS REFUSED ON EVIDENCE
+and two others were found and fixed:
 
-- `havoc::a_venue_serving_another_run_is_refused_terminally` asserts
-  `client.is_disconnected()` after a connect that was refused. That flag is
-  `!connected`, it starts FALSE, and `lifecycle` stores `false` on every failed
-  dial - so it is true from the first instant of the test and the assertion
-  passes whatever the client does. The same expression was removed twice from
-  `conn_reconnect_respects_max_attempts` in round 2 for exactly this reason.
-  The test is NOT vacuous overall: its `handshakes <= 2` bound is real, and it
-  is the assertion carrying the property. Either delete the dead line or
-  replace it with something the client actually writes on the refusal path.
-- SWEEP FOR THE WHOLE CLASS while you are there: every `is_disconnected()` in
-  these binaries is meaningful only after a connect that SUCCEEDED, and even
-  then only as a window rather than a snapshot (see `dialing_blind...`).
+- REFUSED: `havoc::a_venue_serving_another_run_is_refused_terminally`'s
+  `is_disconnected()`. Round 2's reasoning does not transfer to this fixture.
+  The flag is vacuous only where the stub REFUSES THE UPGRADE, because nothing
+  can then set `connected` true; this stub serves a perfectly good websocket and
+  the refusal happens after the dial succeeds, with `connected.store(true)` the
+  very next statement on the non-refusing path. Bite-checked as a text edit -
+  `IdentityOutcome::Mismatch` returning `Ok(())` fails exactly this line, and
+  the `handshakes <= 2` bound does not move, so it is the ONLY assertion
+  carrying the property. Deleting it would have unpinned the whole refusal. The
+  reasoning is now written beside the assertion. The cold review then found a
+  narrow vacuous-pass WINDOW in it - the `health_hits` gate moves when the stub
+  SERVES the probe, before the client has classified the response and reached
+  `connected.store(true)` - so it is held as a 250 ms window rather than
+  snapshotted once. Two further couplings the same review named are now written
+  down beside it: the 500 ms connect bound only has headroom BECAUSE the stub's
+  clock default changed in the same commit, and cancelling `connect()`
+  mid-flight skips its own `abort_tasks`/`retire_connected_flag` cleanup, which
+  is safe here only because the identity mismatch is TERMINAL.
+- FIXED: `reconciliation::mass_status_reports_all_three_sets_over_the_single_ws
+  _transport` asserted `ws_hits >= 1`. `fixture()` connects and `expect`s it,
+  and a connect that returns has completed an upgrade the stub counted, so the
+  value is at least one before the test's first line. Deleted; the two query
+  counters beside it are the real wire evidence.
+- FIXED: `convert::tests::a_future_def_builds_a_futures_contract` asserted
+  `!contract.expiration_ns.to_rfc3339().is_empty()`, which no value can
+  falsify - a zeroed expiration renders as 1970 and passed. Replaced by the
+  property it was reaching for: a mogwai future must not expire inside a run.
+  Bite-checked by substituting `ts_init` for the sentinel.
+
+- FIXED, AND FOUND BY THE ROUND'S OWN COLD REVIEW: the deliberate ladder test
+  this round ADDED was itself half-vacuous, the eleventh instance of the arc's
+  signature defect and introduced by the round whose subject was that defect.
+  Its claim was that an UNKNOWN floor admits a window a known floor would
+  refuse; it cannot discriminate, because the fallback yields `None`, the
+  success path against the same stub yields `Some(0)`, and `ensure_on_tape`
+  only bails on `start < data_origin` with `start` a `u64`. Confirmed by
+  measurement, not argument: with `ensure_on_tape`'s comparison text-edited to
+  `false`, the ladder test still PASSED. Only `clock_hits == 3` was live. The
+  test is renamed
+  `an_undecodable_clock_is_retried_then_falls_back_without_refusing` and now
+  asserts only the ladder and the non-refusal.
+- FIXED, EXPOSED BY THE SAME ANALYSIS: the pre-existing
+  `off_tape_window_still_answers_the_request` was vacuous in the same way. It
+  publishes a real nonzero floor and asserts the response is empty, but it left
+  the stub's tape EMPTY, so a venue holding no rows answers empty too and the
+  assertion passed with the guard disabled. It now stocks a row at the floor
+  and asserts `trades_hits == 0`, which is what "refused at the CLIENT
+  boundary" means. Bite-checked: the `false` edit above now fails it by name.
+  A second test proposed for the contrast was written, bite-checked, and then
+  DELETED as a duplicate of this one - strengthening the existing test was the
+  smaller change and closed a live vacuity rather than adding a parallel one.
+
+The sweep's other candidates were checked and stand: the `!is_disconnected()`
+assertions in `an_unanswerable_identity_probe_does_not_refuse` and
+`divergence_go_dark_within_the_idle_timeout_is_ridden_out` require the flag to
+have been SET, `dialing_blind...` already holds it as a window, every
+`wait_for_at_least` pair returns the observed count so the bound bites, and
+`clock.rs`'s `is_empty()` is a real negative assertion behind a cancelled timer.
 
 ## Smaller notes
 
-- `data_client_transport::trade_history_pages_without_duplicates_at_the_seam`
-  asserts `trades_hits == 2` INSIDE the response loop while the `/trades` handler
-  increments that counter from a different task; it is ordered correctly (the
-  response can only exist after both fetches) but the coupling is implicit.
-- `request_whole_tape` builds a NEW stub per call while taking
-  `&Arc<StubState>` - so `trades_hits`/`trades_starts` accumulate across any
-  second call on the same state. Only used once per test today; a landmine if
-  anyone calls it twice.
-- `next_exec_event`'s panic message ("execution event arrives") names neither the
-  test's expectation nor the elapsed time, so a timeout in any of the ~20 call
-  sites reads identically.
-- `adapter_smoke::a_submitted_position_id_reaches_the_wire` reads
-  `ws_client_messages` after draining two events rather than draining to a
-  deadline like its sibling `an_order_list_reaches_the_wire_as_linked_legs` does.
-  It happens to be safe (the events imply the submit crossed), but the two tests
-  use different disciplines for the same question.
+ALL CLOSED IN ROUND 5.
+
+- `trade_history_pages_without_duplicates_at_the_seam` reads `trades_hits`
+  after the response loop now, with the ordering argument written down: the
+  count is settled because the response cannot exist until both fetches were
+  served. The assertion was sound; what it lacked was any statement of why, so
+  it read as a cross-task counter poked at an arbitrary moment.
+- `request_whole_tape` resets `trades_hits` and `trades_starts` at entry, so the
+  counters mean "SINCE ENTRY" - not "this run", which the reset cannot buy: each
+  call binds a new stub over the SAME `Arc<StubState>` and never shuts the
+  previous accept loop down, so a client still alive from an earlier call could
+  contribute. None does today. The doc says which of the two it is.
+- `next_exec_event` takes a `what: &str` and every one of its call sites names
+  what it was waiting for. It also separates a closed sink from a timeout and
+  reports the timeout duration. The old message named neither the expectation
+  nor the wait and cost round 4 real time to attribute.
+- `a_submitted_position_id_reaches_the_wire` drains to a deadline, matching its
+  sibling `an_order_list_reaches_the_wire_as_linked_legs`. It was safe by an
+  inference about the stub's reply rather than by observing the thing asserted
+  on, and the two tests answered one question two ways.
+- `an_account_labelled_differently_is_still_served` was closed in round 1. The
+  design it rests on - the venue's account id is a LABEL and the client keeps
+  its own - is now stated durably in `reference/architecture.md`, because a cold
+  reviewer proposed the exact inverse assertion and only a measurement stopped
+  it. The paragraph's scope was tightened after review: the venue CAN seat more
+  than one ledger (`seat(&account_id, ..)` is keyed by account plus session), so
+  the "nothing to be misrouted onto it" argument is a statement about ONE
+  CONNECTION, and it now says so.
+
+Also landed here, off this round's cold review and outside the adapter: the
+`ETXTBSY` filed against `launch::tests::the_ready_bound_returns_on_time_against
+_a_silent_venue` was misdiagnosed. `silent_venue()` has ONE caller and closes
+its write handle before the exec, so there is no second writer in-process; the
+race is CROSS-PROCESS, between the gate's dev and instrumented sweeps running
+the same test at once. The filed fix - the test's own name in the filename -
+would have changed nothing, since both processes compute the same name. The
+path is PID-qualified now and unlinked after the launch, and the todo entry is
+retired rather than corrected.

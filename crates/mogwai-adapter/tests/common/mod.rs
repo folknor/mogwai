@@ -17,6 +17,39 @@
 //! substring, so a wire-format change (a field rename, an envelope change) makes
 //! the stub stop recognising the client's `Subscribe` / `SubmitOrder` and the
 //! test fails loudly instead of passing against a broken protocol.
+//!
+//! # What is and is not shared between tests in one binary
+//!
+//! `replace_data_event_sender` / `replace_exec_event_sender` ARE NOT GLOBAL,
+//! whatever their nautilus doc comments say. Both are `thread_local!` in
+//! `nautilus_common::live::runner` (`DATA_EVENT_SENDER.with(...)`), libtest runs
+//! each test on its own thread, and every test in these binaries is
+//! `flavor = "current_thread"` so the client's tasks run on that same thread.
+//! Each test therefore owns its sink outright, which is what makes the several
+//! negative assertions here (`assert_no_exec_event`, the bounded tail drains)
+//! sound: a 250 ms window on a SHARED channel would be leaky, and these are not
+//! shared. Do not consolidate them onto one sender. Nothing else in scope is
+//! process-wide either - no global logger, no capture buffer, no environment
+//! variable, and every listener is `127.0.0.1:0`.
+//!
+//! THE ONE GENUINELY PROCESS-WIDE THING IS THE SESSION ID.
+//! `mogwai_adapter::config`'s `process_session_id` is a `OnceLock`, by design -
+//! one worker process is one client, so its data and execution legs present one
+//! identity and cannot evict each other off their shared ledger. The
+//! consequence for THESE binaries is that every client built through a
+//! `Mogwai*ClientConfig::default()` presents the SAME session string, which is
+//! harmless only because each test binds its own stub and no two clients ever
+//! meet on one venue. Two things follow, and both bite silently:
+//!
+//! - A TEST WANTING TWO DISTINCT CLIENTS ON ONE VENUE MUST SET `session:`
+//!   EXPLICITLY (`havoc.rs` uses `session: None` throughout). A session-eviction
+//!   test written the obvious way, with two defaulted configs, is asserting
+//!   against a constant.
+//! - A test wanting "same process, two legs, no eviction" is likewise testing a
+//!   constant unless it asserts on what CROSSED THE WIRE. That is what
+//!   `adapter_smoke::both_legs_disclose_one_process_session_on_the_upgrade`
+//!   does, off `ws_requests`, and it is the only thing in the crate that fails
+//!   when the default is removed.
 
 // A shared test-support module: every item is `pub` so the three test binaries
 // can use it, but nothing is reachable outside the crate, so both lints fire
@@ -64,6 +97,19 @@ pub const INSTRUMENTS_JSON: &str = r#"[{"symbol":"BTCUSDT","class":{"class":"spo
 
 /// Stable non-zero instant stamped on venue-truth query envelopes.
 pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
+
+/// The default `GET /clock` envelope: an identity simulated clock at speed 1,
+/// with the tape floor at zero.
+///
+/// IDENTITY IS THE POINT. `sim_epoch_ns == wall_anchor_ns == 0` with
+/// `speed == 1.0` maps simulated onto wall exactly, which is what the adapter
+/// falls back to when it cannot read a clock at all - so serving this changes
+/// no scaling, no `ts_init`, no havoc sleep and no backoff anywhere. What it
+/// changes is that the client SUCCEEDS at reading it, which is the whole
+/// saving. `data_origin_ns` of zero is a KNOWN floor rather than an unknown
+/// one, and no request start can precede it, so the off-tape guard admits
+/// exactly what it admitted before.
+pub const IDENTITY_CLOCK_JSON: &str = r#"{"sim":{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0},"server_now_ns":0,"data_origin_ns":0,"warmup_ns":0}"#;
 
 /// Test scenario state shared between the stub and the test body. A test mutates
 /// the relevant fields before connecting, then reads the counters/recorded
@@ -149,12 +195,38 @@ pub struct StubState {
     /// the history fetch. The request generators must still emit a (empty)
     /// response rather than leaving the nautilus request unresolved.
     pub fail_trades: AtomicBool,
-    /// JSON body of `GET /clock`. Unset falls through to the catch-all `[]`,
-    /// which the client cannot decode and so treats as an identity clock with
-    /// an UNKNOWN tape floor (`data_origin_ns` 0) - fine for most tests, but it
-    /// disables the adapter's off-tape window guard, so any test exercising
-    /// that guard must publish a real envelope here.
+    /// JSON body of `GET /clock`. Unset serves [`IDENTITY_CLOCK_JSON`], a real
+    /// decodable envelope at speed 1 with a zero tape floor, which is what a
+    /// venue that has just booted looks like. A test exercising the off-tape
+    /// window guard publishes an envelope with a real `data_origin_ns` here;
+    /// a test exercising the UNDECODABLE path sets `fail_clock`.
+    ///
+    /// THE DEFAULT USED TO BE THE CATCH-ALL `[]`, and it was the single largest
+    /// cost in this crate's test suite: the client cannot decode it, and
+    /// `fetch_clock_or_identity` retries three times with a 200 ms wall sleep
+    /// between attempts before falling back, INLINE IN `connect()`. That is
+    /// ~400 ms on every connecting test, and all but two tests in these
+    /// binaries connect. Measured per test with
+    /// `scripts/adapter_test_walls.py`: they sat in a flat 419-892 ms band with
+    /// a ~420 ms floor, while the two that never connect came in at 15 ms and
+    /// 23 ms. The counts and the whole accounting are in
+    /// `reference/performance.md` under 2026-08-19. Serving a decodable clock is behaviourally identical
+    /// downstream - `ensure_on_tape` is given `Some(0)` instead of `None`, and
+    /// no start can precede zero - and it is not a weaker fixture but a more
+    /// honest one: the real venue answers this route.
     pub clock_body: Mutex<Option<String>>,
+    /// When true, `GET /clock` answers the undecodable catch-all `[]`,
+    /// modelling a venue whose clock cannot be read at all. This is the only
+    /// route to `fetch_clock_or_identity`'s retry-then-identity-fallback
+    /// branch, which every test in these binaries used to traverse by accident
+    /// and none of them asserted anything about. Costs ~400 ms of retry
+    /// ladder, so arm it only in a test whose property IS that branch.
+    pub fail_clock: AtomicBool,
+    /// Number of `GET /clock` requests served. The RETRY LADDER is the only
+    /// thing that distinguishes a fallback from a refusal from the outside, so
+    /// a test on `fail_clock` counts the attempts rather than inferring them
+    /// from how long the connect took.
+    pub clock_hits: AtomicUsize,
     /// When true, `GET /account` returns an empty account snapshot. Defaults to
     /// false so older-server compatibility remains the default stub behavior.
     pub serve_account: AtomicBool,
@@ -446,10 +518,16 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
         )
         .await;
     } else if path.starts_with("/clock") {
+        state.clock_hits.fetch_add(1, Ordering::Relaxed);
+        if state.fail_clock.load(Ordering::Relaxed) {
+            // The old DEFAULT, now opt-in: a body the client cannot decode.
+            respond_json(stream, "200 OK", "[]").await;
+            return;
+        }
         let body = state.clock_body.lock().expect("clock body mutex").clone();
         match body {
             Some(body) => respond_json(stream, "200 OK", &body).await,
-            None => respond_json(stream, "200 OK", "[]").await,
+            None => respond_json(stream, "200 OK", IDENTITY_CLOCK_JSON).await,
         }
     } else if path.starts_with("/instruments") {
         // The real venue REGISTERS a symbol when a socket binds it, so its
@@ -1018,7 +1096,13 @@ pub async fn connected_exec_client(
 
     let account_id = client.account_id();
     let drain_account = async {
-        match next_exec_event(sink_rx, Duration::from_secs(2)).await {
+        match next_exec_event(
+            sink_rx,
+            Duration::from_secs(2),
+            "the initial AccountState connect() seeds from GET /account",
+        )
+        .await
+        {
             ExecutionEvent::Account(account) => {
                 assert_eq!(account.account_id, account_id);
                 cache
@@ -1251,15 +1335,38 @@ pub fn venue_stop_order_row(
     }
 }
 
-/// Awaits the next execution event or fails after `timeout`.
+/// Awaits the next execution event or fails after `timeout`, naming what the
+/// caller was waiting for.
+///
+/// `what` IS NOT DECORATION AND IS NOT OPTIONAL. This helper is called from
+/// roughly thirty sites across three binaries, and its old message -
+/// `execution event arrives: Elapsed(())`, reported at this file - named
+/// neither the expectation nor the wait, so every one of those thirty timeouts
+/// read identically and pointed at the harness rather than at the property. It
+/// was hit live during a round-4 bite-check and cost real time to attribute.
+/// libtest's panic header names the TEST (the thread is named for it); what
+/// only the call site knows is which event in the sequence failed to arrive,
+/// which is what this argument carries.
+///
+/// The two failures are also separated. A closed sink means the client's event
+/// task died or the sender was replaced out from under this receiver, which is
+/// a different defect from a client that simply never emitted - and the old
+/// `expect("sink open")` reported it as an unwrap on a `None`.
 pub async fn next_exec_event(
     rx: &mut UnboundedReceiver<ExecutionEvent>,
     timeout: Duration,
+    what: &str,
 ) -> ExecutionEvent {
-    tokio::time::timeout(timeout, rx.recv())
-        .await
-        .expect("execution event arrives")
-        .expect("sink open")
+    match tokio::time::timeout(timeout, rx.recv()).await {
+        Ok(Some(event)) => event,
+        Ok(None) => panic!(
+            "the execution sink closed while waiting for {what}; the client's event \
+             task is gone, so nothing more can ever arrive"
+        ),
+        Err(_) => {
+            panic!("no execution event reached the sink within {timeout:?}, waiting for {what}")
+        }
+    }
 }
 
 /// Awaits the next data event or fails after `timeout`.

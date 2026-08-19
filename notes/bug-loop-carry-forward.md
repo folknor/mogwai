@@ -7,7 +7,8 @@ this forward. Not a history: when an entry stops binding future work, delete it.
 Arc in progress: the eleven `notes/bugs-*.md` reports, worked one document at a
 time in this order. `bugs-tests-lifecycle` CLOSED on 2026-08-19 after five
 rounds plus a close pass over the whole commit arc, with no open findings;
-`bugs-tests-adapter` is next. The order is
+`bugs-tests-adapter` CLOSED the same way after five rounds, awaiting its close
+pass; `bugs-tests-tape` is next. The order is
 `bugs-tests-lifecycle`, `bugs-tests-adapter`,
 `bugs-tests-tape`, `bugs-tests-engine-protocol`, `bugs-tests-lab-cli`, then
 `bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
@@ -684,6 +685,99 @@ what this measurement resolves.
   message bullet in the report's "Smaller notes". It was observed here, not
   fixed here.
 
+## The adapter document, round 5: what carries to `bugs-tests-tape`
+
+The adapter-specific mechanics (`PushGate`, the two frame anchors,
+`close_after_trades`, `serve_exec_message`, `fail_clock`) die with that
+document. What generalises:
+
+- MEASURE THE DISTRIBUTION BEFORE PROPOSING A STRUCTURAL WIN. Four rounds
+  carried "~37 s unexplained, the crate's largest cost" and every proposal
+  against it was a guess. One instrument -
+  `scripts/adapter_test_walls.py`, which runs already-built libtest binaries one
+  test per process and times each - answered it in a single sweep's wall, and
+  the answer was not a slow test anywhere. IT WAS A FLOOR: 55 of the 59 then in
+  those binaries sat in a
+  419-892 ms band with a hard ~420 ms bottom, and the only two that never
+  `connect()` at 15 ms and 23 ms. A FLAT FLOOR IS A FIXED COST IN A SHARED
+  SETUP PATH, and it is invisible in every aggregate. The script is generic over
+  libtest binaries, so the tape document can point it at those.
+  - The cause was a HARNESS FIXTURE MODELLING A BROKEN VENUE BY DEFAULT: the
+    stub answered `GET /clock` with an undecodable `[]`, and the client's
+    three-attempt, 200 ms-apart retry ladder ran inline in `connect()` on all 57
+    connecting tests. Serving a real envelope is both faster and a MORE HONEST
+    fixture - the real venue answers that route. 39.71 s -> 15.93 s. ASK WHAT
+    THE DEFAULT FIXTURE CLAIMS THE WORLD LOOKS LIKE; a default that models a
+    fault makes every test pay the fault's recovery path.
+  - AND THE DELETION'S HOLE ONE LAYER UP WAS REAL: 57 accidental traversals of
+    the fallback branch asserted nothing about it, but they were its only
+    coverage. Removing the accident owes the branch ONE deliberate test. Here
+    that is a `fail_clock` switch plus a test counting the attempts - which
+    also pins the ladder itself, which nothing had.
+  - WITH THE FLOOR GONE THE DISTRIBUTION NAMED A REAL OUTLIER, which it could
+    not before: one test at 5.0 s, spending `wait_connected`'s whole readiness
+    bound because readiness cannot arrive on a terminal refusal. Same shape as
+    round 2's `conn_reconnect_respects_max_attempts` - A BOUND ON A FUTURE THAT
+    CANNOT SUCCEED IS ON THE PASSING PATH - repaired the same way, bound the
+    connect and poll the observable afterwards. 15.93 s -> 11.83 s.
+- A VACUITY FINDING IS ABOUT A FIXTURE, NOT ABOUT AN EXPRESSION. Round 2 filed
+  `is_disconnected()` as a dead assertion class and named a second instance;
+  measured, that instance is the ONLY assertion in its test that catches the
+  defect. The flag is vacuous where the stub refuses the upgrade, because
+  nothing can set it; where the stub serves a good socket and the client refuses
+  LATER, the same expression discriminates. Bite-check the named instance rather
+  than sweeping by grep - deleting it would have unpinned the whole venue
+  identity refusal.
+  - The sweep did find two genuine ones elsewhere, both of the form "an
+    assertion about a value the setup already guarantees": a counter asserted
+    `>= 1` after a connect that must have moved it, and
+    `assert!(!x.to_rfc3339().is_empty())`, which no timestamp can falsify. THE
+    SHAPE TO GREP FOR IS A PREDICATE WHOSE FALSE BRANCH IS UNREACHABLE FOR THE
+    TYPE, not a particular function name.
+- A SHARED WAIT HELPER OWES ITS CALLER'S EXPECTATION IN ITS PANIC. One helper
+  called from ~30 sites reported `execution event arrives: Elapsed(())` at its
+  own file, so every one of those timeouts read identically; it cost round 4
+  real time. libtest names the TEST for free (the thread carries the name), so
+  what the helper has to be given is WHAT was awaited. Also separate a closed
+  channel from a timeout, and print the duration.
+- A DURABLE STATEMENT IS OWED WHERE A DESIGN IS COUNTER-INTUITIVE AND ONLY
+  COMMENTS CARRY IT. The venue's account id is a LABEL the client does not
+  adopt; a cold reviewer proposed the exact inverse assertion and only a
+  measurement stopped it. It lived in two function doc comments and now lives in
+  `reference/architecture.md`. The test to apply: could a competent reviewer
+  reading only the durable docs derive the opposite? Then it is not documented.
+  - AND SCOPE THE CLAIM TO WHAT IS ACTUALLY TRUE. The paragraph rested on "one
+    venue is one run is one ledger", which reads as "only one ledger can exist"
+    - and the venue in fact seats several, keyed by account plus session. The
+    argument survives only at CONNECTION scope, and a durable paragraph written
+    to stop a reviewer deriving the inverse has to be exactly right or it hands
+    them the inverse premise instead.
+- A ROUND WHOSE SUBJECT IS A DEFECT CLASS WILL COMMIT AN INSTANCE OF IT. The
+  vacuity sweep's own new test was half-vacuous: it claimed an unknown floor
+  admits what a known floor refuses, on a fixture where the only floor either
+  path yields is ZERO, and `start < origin` over a `u64` makes zero and
+  "unknown" observationally identical. It passed with the guard text-edited to
+  `false`. So did the pre-existing test on the other side, which asserted an
+  empty response over an EMPTY tape - an empty answer being exactly what a
+  venue with no rows returns. TWO RULES CARRY:
+  - A CONTRAST TEST MUST BE ABLE TO PRODUCE THE CONTRAST. Ask what values the
+    fixture can actually put on both sides of the comparison; where one side is
+    a type's floor, there is no other side.
+  - BITE-CHECK BY BREAKING THE PRODUCTION GUARD AND RUNNING THE WHOLE
+    NEIGHBOURHOOD, not only the test just written. Both defects here surfaced
+    from one `&& false` edit, and the second was four rounds old.
+- A COUNTER RESET AT ENTRY BUYS "SINCE ENTRY", NOT "THIS RUN", wherever the
+  shared state outlives the reset. Say which one the doc means; the gap between
+  them is where the next wrong verdict comes from.
+- A FIXED FILESYSTEM PATH IN A TEST IS A CROSS-PROCESS RESOURCE, because the
+  gate runs several sweeps of the same package at once. A write-then-exec on
+  one intermittently fails `ETXTBSY`, and the obvious fix - the test's own name
+  in the filename - changes NOTHING, since both processes compute it. Only a
+  pid or a tempdir closes it. Note also that a single crashed test aborts the
+  sweep and makes brokkr report a whole package's tests as ORPHANED, which is
+  indistinguishable in the output from the known tool bug: check for a crash
+  before blaming the tool.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -781,7 +875,12 @@ what this measurement resolves.
   the invocation. Baseline after the adapter document's round 4: 1185 workspace
   + 442 instrumented, in 1m05s, with 63 ignored, 17 skips and 0 orphaned pairs,
   1690 coverage pairs - two tests up, the segmented-head pin and the replay pin.
-  Serial adapter sweep 39.71 s. Before that: 1183 + 442
+  After round 5 and its review fixes: 1187 + 442, in 1m01s, 63 ignored, 1692
+  coverage pairs, 0 orphaned - two tests up, the session-disclosure pin and the
+  undecodable-clock pin. SERIAL ADAPTER SWEEP 12.14 s, from 39.71 s; the four
+  socket binaries hold 60 tests totalling 11.38 s one-per-process. See the
+  round-5 section above and `reference/performance.md`.
+  Serial adapter sweep at the end of round 4: 39.71 s. Before that: 1183 + 442
   instrumented, in 1m06s, with 63 ignored, 17 skips and 0 orphaned pairs. It was
   1181 at the end of round 5 and 1179 / 65 / 19 at the end of round 4: the
   round-5 difference is the two completion gates it un-parked, which now RUN

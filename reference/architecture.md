@@ -84,6 +84,33 @@ That exists for the ephemeral single-client venue, where making the one client
 name an id would be ceremony; it is not a venue-wide account every connection
 shares.
 
+THE ACCOUNT ID ON A SNAPSHOT IS A LABEL, AND A CLIENT KEEPS ITS OWN. A venue
+may seat several ledgers - `/ws?account=` names one, and the seat is keyed by
+that account plus the session - but ONE CONNECTION SEES EXACTLY ONE OF THEM.
+The account a connection carries is the only account on that socket, so nothing
+can be misrouted onto it, and the id the venue writes on an `AccountState`
+therefore identifies nothing a client has to resolve. The
+adapter reads it exactly once, at connect, where `note_account_label` logs the
+divergence if the venue's name for the ledger differs from the configured one -
+and then stamps the CONFIGURED id onto every snapshot it publishes
+(`handle_account_state`). Both halves of this used to be an equality check, and
+both were per-account-slot invariants that outlived the slots: the connect-time
+one killed the client outright, and one release of the venue reported a bare
+`MOGWAI`, which is a legal `mogwai_protocol::AccountId` and an unconstructable
+nautilus one, so no configured value could satisfy it and every run died on
+connect. The push-path one silently DROPPED a differently-labelled snapshot, so
+a client took every fill while its balances quietly stopped moving.
+
+This is written here because the design is counter-intuitive from the outside
+and has been re-derived backwards twice under review: the natural-looking
+assertion - that a published snapshot carries the id that arrived on the wire -
+is the exact inverse of the contract, and pinning it would restore the drop.
+The assertion that belongs on this path is the configured id, and it bites;
+`adapter_smoke::an_account_labelled_differently_is_still_served` is where it
+lives. The scope is the connection, and that is where the argument would break:
+if a socket ever carried several ledgers, the id becomes a key and this whole
+paragraph is what has to change first.
+
 An account may carry a RISK POLICY, which the venue ENFORCES rather than
 reports. This is a risk-policy layer and not a funded-account feature: a live
 venue has the same machinery, where an operator sets a daily loss limit that

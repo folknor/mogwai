@@ -244,9 +244,18 @@ async fn mass_status_reports_all_three_sets_over_the_single_ws_transport() {
         .expect("mass status generates")
         .expect("mass status is Some, not the trait default");
     assert_mass_status(&mass);
+    // Both sets came off the WIRE rather than out of a client-side cache: a
+    // mass status assembled from local state would satisfy `assert_mass_status`
+    // and leave these at zero.
     assert!(fixture.state.order_queries.load(Ordering::Relaxed) >= 1);
     assert!(fixture.state.fill_queries.load(Ordering::Relaxed) >= 1);
-    assert!(fixture.state.ws_hits.load(Ordering::Relaxed) >= 1);
+    // `ws_hits >= 1` USED TO SIT HERE AND COULD NOT FAIL. `fixture()` connects
+    // the exec client and `expect`s it, and a connect that returns has by
+    // definition completed a `/ws` upgrade the stub counted - so the value is
+    // at least one before this test's first line runs, whatever the mass-status
+    // path does. It is deleted rather than repaired: the two counters above are
+    // the wire evidence, and each of them is written by the transport this one
+    // was standing in for.
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -420,7 +429,13 @@ async fn query_order_emits_an_order_status_report() {
             None,
         ))
         .expect("query order");
-    match next_exec_event(&mut fixture.sink_rx, Duration::from_secs(2)).await {
+    match next_exec_event(
+        &mut fixture.sink_rx,
+        Duration::from_secs(2),
+        "the order status report query_order(O-1) emits",
+    )
+    .await
+    {
         ExecutionEvent::Report(ExecutionReport::Order(report)) => {
             assert_eq!(report.client_order_id, Some(ClientOrderId::from("O-1")));
             assert_eq!(report.venue_order_id, VenueOrderId::from("V-1"));

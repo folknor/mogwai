@@ -73,8 +73,9 @@ fn bar_type() -> nautilus_model::data::BarType {
 fn data_client(base_url: String) -> MogwaiDataClient {
     let config = MogwaiDataClientConfig {
         // Stated rather than defaulted so the label these tests assert on is
-        // written down here. It is a nautilus-side label with no venue meaning:
-        // the venue has one ledger and carries no account identity on the wire.
+        // written down here. It is BOTH a nautilus-side label and the ledger
+        // named on `/ws?account=` - the two are deliberately one field, and the
+        // upgrade has carried the account since the shared-venue landing.
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         ..MogwaiDataClientConfig::default()
@@ -400,21 +401,132 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
         .expect("request trades");
 
     let timeout = Duration::from_secs(10);
-    loop {
+    let delivered = loop {
         if let DataEvent::Response(DataResponse::Trades(resp)) =
             next_data_event(&mut sink_rx, timeout).await
         {
-            assert_eq!(resp.data.len(), mogwai_protocol::MAX_HISTORY_LIMIT + 1);
-            for pair in resp.data.windows(2) {
-                assert!(pair[0].ts_event < pair[1].ts_event);
-            }
-            assert_eq!(
-                state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
-                2
-            );
-            break;
+            break resp.data.clone();
         }
+    };
+    assert_eq!(delivered.len(), mogwai_protocol::MAX_HISTORY_LIMIT + 1);
+    for pair in delivered.windows(2) {
+        assert!(pair[0].ts_event < pair[1].ts_event);
     }
+    // READ AFTER THE LOOP, NOT INSIDE IT, and the move is about making the
+    // ordering argument visible rather than about fixing a race. `trades_hits`
+    // is incremented by the stub's `/trades` handler on another task, and this
+    // assertion is sound only because the response cannot exist until both
+    // fetches have been served - so the count is settled by the time the
+    // response is in hand. Asserting it from inside the loop stated that
+    // dependency nowhere and read as a cross-task counter poked at an arbitrary
+    // moment, which is the shape that IS a race everywhere else in these files.
+    assert_eq!(
+        state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "the seam is crossed in exactly two pages: one full page and its remainder"
+    );
+}
+
+/// A venue whose `/clock` CANNOT BE DECODED is RETRIED and then served anyway:
+/// the fallback is a fallback, never a refusal.
+///
+/// THIS BRANCH HAD NO DELIBERATE COVERAGE AND ENORMOUS ACCIDENTAL COVERAGE.
+/// The stub's default `/clock` body used to be the catch-all `[]`, so all 57
+/// connecting tests in these four binaries traversed
+/// `fetch_clock_or_identity`'s retry-then-fall-back path - three attempts, two
+/// 200 ms wall sleeps, INLINE IN `connect()` - and not one of them asserted
+/// anything about it. That was ~400 ms per test and ~24 s of a ~40 s serial
+/// sweep, the crate's largest single cost. The default now serves a real
+/// envelope; this test is what keeps the fallback covered, once, on purpose,
+/// and it is the only place `fail_clock` should be armed.
+///
+/// WHAT IS ASSERTED IS THE LADDER AND THE OUTCOME, because those are the two
+/// things visible from outside. `clock_hits` pins that the client RETRIED
+/// rather than committing to the identity axis on the first failure - the whole
+/// reason the retry exists is that the fallback silently puts every `ts_init`,
+/// havoc sleep, quota interval and backoff on the wrong time axis for the life
+/// of the connection, so giving up immediately on a transient blip is the
+/// defect. The connect then SUCCEEDING is the other half: an unreadable clock
+/// is a fallback, never a refusal, or a venue whose clock route blipped once
+/// would be unattachable.
+///
+/// THE UNKNOWN FLOOR IS NOT PINNED HERE, AND CANNOT BE PINNED FROM ONE TEST.
+/// The fallback sets `data_origin_ns = None`; the success path against a stub
+/// serving `IDENTITY_CLOCK_JSON` sets `Some(0)`; and `ensure_on_tape` only
+/// bails when `start < data_origin`, where `start` is a `u64`. Nothing can
+/// precede zero, so `Some(0)` and `None` are OBSERVATIONALLY IDENTICAL and a
+/// window assertion on this fixture passes whatever `floor_known` is. So this
+/// test asserts only what it CAN discriminate - the ladder and the non-refusal.
+/// The floor contrast needs a NONZERO known floor to have a false branch at
+/// all, and that is `off_tape_window_still_answers_the_request`'s job.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn an_undecodable_clock_is_retried_then_falls_back_without_refusing() {
+    use nautilus_common::messages::data::RequestTrades;
+
+    let state = Arc::new(StubState::default());
+    state
+        .fail_clock
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    // A tape whose rows sit far above zero, matching the sibling's fixture so
+    // the two differ in exactly one input: whether the clock decodes.
+    *state.trades_tape.lock().expect("trades tape mutex") =
+        Some(vec![tape_trade(2_000_000_000_000_000_000, 10_000)]);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+
+    let mut client = data_client(base_url);
+    client.start().expect("start grabs the sink");
+    // The connect completes DESPITE the unreadable clock: the fallback is the
+    // point, and a client that refused here would be unable to attach to any
+    // venue whose clock route blipped.
+    client
+        .connect()
+        .await
+        .expect("an unreadable clock is a fallback, not a refusal");
+
+    // The connect is over, so the ladder is settled and this needs no poll.
+    assert_eq!(
+        state.clock_hits.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "an unreadable clock is retried before the identity fallback commits \
+         the connection to the wrong time axis"
+    );
+
+    client
+        .request_trades(RequestTrades::new(
+            instrument_id(),
+            Some(chrono::DateTime::from_timestamp_nanos(1)),
+            None,
+            None,
+            Some(ClientId::from("MOGWAI-DATA")),
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        ))
+        .expect("the request is accepted");
+
+    let timeout = Duration::from_secs(5);
+    let delivered = loop {
+        if let DataEvent::Response(DataResponse::Trades(resp)) =
+            next_data_event(&mut sink_rx, timeout).await
+        {
+            break resp.data.clone();
+        }
+    };
+    // The connection is USABLE after the fallback - it reaches the wire and
+    // serves rows. This is the "not a refusal" half restated at the request
+    // level, not a claim about the floor.
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0].ts_event,
+        UnixNanos::from(2_000_000_000_000_000_000)
+    );
+    assert!(
+        state.trades_hits.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+        "the request must have reached /trades, not been answered empty at the boundary"
+    );
 }
 
 fn tape_trade(ts_event: u64, price_cents: i64) -> mogwai_protocol::TradeTick {
@@ -429,12 +541,35 @@ fn tape_trade(ts_event: u64, price_cents: i64) -> mogwai_protocol::TradeTick {
 
 /// Drives one `request_trades` against a cursor-honouring tape and returns the
 /// delivered rows.
+///
+/// THE COUNTERS MEAN "SINCE THIS CALL BEGAN", and that is the strongest thing
+/// the reset can buy. This binds a NEW stub on a NEW port while taking a
+/// `&Arc<StubState>` that a caller may already have used, so `trades_hits` and
+/// `trades_starts` would otherwise accumulate across calls and a second call's
+/// caller would assert a paging count that includes the first call's fetches.
+/// Every caller happens to call it once today; that is a property of the call
+/// sites, not of this helper, and it is exactly the kind of latency that turns
+/// into a wrong verdict the first time someone adds a second call.
+///
+/// IT IS NOT ISOLATION. The previous call's stub keeps its accept loop running
+/// on the SAME `Arc<StubState>` - nothing shuts it down - so a client still
+/// alive from an earlier call could in principle bump these counters after the
+/// reset. No caller holds one today. If one ever does, the reset stops being
+/// enough and the stubs need shutting down, not the counters rescoping.
 async fn request_whole_tape(
     state: &Arc<StubState>,
     tape: Vec<mogwai_protocol::TradeTick>,
 ) -> Vec<nautilus_model::data::TradeTick> {
     use nautilus_common::messages::data::RequestTrades;
 
+    state
+        .trades_hits
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    state
+        .trades_starts
+        .lock()
+        .expect("trades starts mutex")
+        .clear();
     *state.trades_tape.lock().expect("trades tape mutex") = Some(tape);
     let base_url = bound_stub(Arc::clone(state)).await;
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
@@ -793,6 +928,17 @@ async fn failed_history_fetch_still_answers_the_request() {
 /// `warmup_ns` rather than the former `backfill_horizon_ns`: the rename is a
 /// WIRE change, so this text and `clock_snapshot_round_trips` in
 /// `mogwai-protocol` move together or one of them fails.
+///
+/// THE TAPE IS STOCKED AND `/trades` IS COUNTED, and both are load-bearing. An
+/// empty response is what a venue holding NO ROWS returns too, so on the stub's
+/// default empty tape `resp.data.is_empty()` passed whether or not the guard
+/// fired - vacuous in exactly the way this crate spent a round sweeping for.
+/// A row at the floor makes the emptiness a consequence, and `trades_hits == 0`
+/// says the refusal happened at the CLIENT boundary rather than at the venue.
+/// This is also the only place a KNOWN floor is discriminated from an unknown
+/// one: `an_undecodable_clock_is_retried_then_falls_back_without_refusing`
+/// cannot do it, because the only floor its fixture yields is zero and no
+/// `u64` start precedes zero.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn off_tape_window_still_answers_the_request() {
@@ -807,6 +953,9 @@ async fn off_tape_window_still_answers_the_request() {
         r#"{{"sim":{{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0}},"server_now_ns":{},"data_origin_ns":{ORIGIN},"warmup_ns":86400000000000}}"#,
         ORIGIN + 86_400_000_000_000
     ));
+    // Rows the venue WOULD serve if it were asked. See the note above: without
+    // them an empty response proves nothing.
+    *state.trades_tape.lock().expect("trades tape mutex") = Some(vec![tape_trade(ORIGIN, 10_000)]);
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
@@ -836,10 +985,18 @@ async fn off_tape_window_still_answers_the_request() {
         if let DataEvent::Response(DataResponse::Trades(resp)) =
             next_data_event(&mut sink_rx, timeout).await
         {
-            assert!(resp.data.is_empty(), "an off-tape window answers empty");
+            assert!(
+                resp.data.is_empty(),
+                "an off-tape window answers empty, though the tape holds a row at the floor"
+            );
             break;
         }
     }
+    assert_eq!(
+        state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the refusal is at the CLIENT boundary: /trades must never have been asked"
+    );
 
     client
         .request_bars(RequestBars::new(

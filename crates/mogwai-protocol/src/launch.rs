@@ -1118,12 +1118,24 @@ mod tests {
     /// prepends and exit, which is a boot failure rather than the silence under
     /// test - and because a committed fixture would carry an executable bit that
     /// has to survive a checkout.
+    ///
+    /// THE PATH IS PID-QUALIFIED, AND THAT IS A CROSS-PROCESS FIX, NOT A
+    /// CROSS-THREAD ONE. This helper has exactly one caller and the write closes
+    /// its handle before `set_permissions` and the exec, so nothing inside one
+    /// test binary races here. What DOES race is two test BINARIES: the full
+    /// gate runs several sweeps, and the dev and instrumented ones both build
+    /// and run this crate's unit tests, so two processes run this same test at
+    /// once, one writing the script while the other execs it - and Linux answers
+    /// the exec with `ETXTBSY`. It was observed once, intermittently, green on
+    /// rerun with no tree change. Embedding the test's NAME would have fixed
+    /// nothing, since both processes compute the same name; only something
+    /// per-process does.
     fn silent_venue() -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target")
-            .join("mogwai-silent-venue.sh");
+            .join(format!("mogwai-silent-venue-{}.sh", std::process::id()));
         std::fs::create_dir_all(path.parent().expect("target dir")).expect("create target dir");
         std::fs::write(&path, "#!/bin/sh\nexec sleep 60\n").expect("write the silent venue");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -1140,15 +1152,19 @@ mod tests {
     /// then never returned.
     #[test]
     fn the_ready_bound_returns_on_time_against_a_silent_venue() {
+        let script = silent_venue();
         let started = std::time::Instant::now();
         let error = launch(LaunchSpec {
-            binary: Some(silent_venue().into_os_string()),
+            binary: Some(script.clone().into_os_string()),
             ready_timeout: Some(Duration::from_millis(400)),
             stderr: StderrSink::Discard,
             ..LaunchSpec::default()
         })
         .expect_err("a venue that never speaks must time out");
         let elapsed = started.elapsed();
+        // The name is per-process, so nothing collects it between runs; unlink
+        // it here rather than accumulating one script per test-binary pid.
+        drop(std::fs::remove_file(&script));
 
         assert!(matches!(error, LaunchError::Timeout { .. }), "{error:?}");
         assert!(

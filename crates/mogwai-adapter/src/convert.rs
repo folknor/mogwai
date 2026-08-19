@@ -591,7 +591,22 @@ mod tests {
         assert_eq!(contract.multiplier.to_string(), "2.5");
         assert_eq!(contract.lot_size.to_string(), "1");
         assert_eq!(contract.size_increment.to_string(), "1");
-        assert!(!contract.expiration_ns.to_rfc3339().is_empty());
+        // THE VENUE MODELS NO EXPIRY, so the contract has to be dated past any
+        // run: a future whose expiration lands inside the run is expired at
+        // birth, and nautilus refuses orders on an expired contract. The
+        // assertion here used to be that `to_rfc3339()` is NON-EMPTY, which no
+        // value can falsify - a zeroed expiration renders as 1970 and passed.
+        // Bounded rather than compared to the `i64::MAX` sentinel literal, so
+        // the sentinel can move without a false failure while a collapse to a
+        // run-scale instant still fails. `activation_ns` is the other half:
+        // a contract that has not activated yet is refused the same way.
+        const YEAR_2200_NS: u64 = 7_258_118_400_000_000_000;
+        assert!(
+            contract.expiration_ns.as_u64() > YEAR_2200_NS,
+            "a mogwai future must not expire inside a run; got {}",
+            contract.expiration_ns
+        );
+        assert_eq!(contract.activation_ns, UnixNanos::from(0));
     }
 
     #[test]

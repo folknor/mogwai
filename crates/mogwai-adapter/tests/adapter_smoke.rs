@@ -21,13 +21,13 @@ use common::{
     StubState, bound_stub, cached_order, cached_stop_limit, cached_stop_market,
     cached_trailing_stop, connected_exec_client, instrument_id, next_exec_event, submit_command,
 };
-use mogwai_adapter::MOGWAI_VENUE;
+use mogwai_adapter::{MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig};
 use nautilus_common::{
     cache::Cache,
-    clients::ExecutionClient,
-    live::runner::replace_exec_event_sender,
+    clients::{DataClient, ExecutionClient},
+    live::runner::{replace_data_event_sender, replace_exec_event_sender},
     messages::{
-        ExecutionEvent,
+        DataEvent, ExecutionEvent,
         execution::{ModifyOrder, SubmitOrder},
     },
 };
@@ -76,6 +76,123 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
     assert!(client.is_connected());
 }
 
+/// THE TWO LEGS OF ONE HOST DISCLOSE ONE SESSION, and it is this process's.
+///
+/// This is the property `process_session_id`'s whole design rests on, and until
+/// this test it had no end-to-end coverage at all: `MogwaiDataClientConfig` and
+/// `MogwaiExecClientConfig` both default `session` to it, `ws_url` appends it,
+/// and `StubState::ws_requests` records the request line precisely so a
+/// disclosure is assertable - but every socket assertion in these four binaries
+/// read that list for `account=` and nothing read it for `session=`. Making
+/// `default_session` return `None` left every one of them green.
+///
+/// What breaks without it is not this test's stub, which seats everyone: the
+/// VENUE seats one client per ledger and evicts a second, so a nautilus host -
+/// which holds two sockets on one account by construction - would disconnect
+/// its own data leg the instant its execution leg dialled. That failure is
+/// invisible from either client's own side, which is why the assertion has to
+/// be on what crossed the wire.
+///
+/// THREE THINGS, and each is separately losable. The parameter is PRESENT on
+/// both upgrades; the two values are EQUAL, which is the anti-eviction property
+/// itself; and the value is wire-legal by the server's own rule, because the
+/// URL is built by concatenation and a session needing percent-encoding would
+/// fail as an unreadable 400 from inside the reconnect loop.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn both_legs_disclose_one_process_session_on_the_upgrade() {
+    let state = Arc::new(StubState::default());
+    state.serve_account.store(true, Ordering::Relaxed);
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    // The exec leg, built exactly as every other test in this binary builds one,
+    // so what is asserted here is the DEFAULT a host gets rather than a fixture.
+    let (exec_tx, mut exec_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(exec_tx);
+    let _exec = connected_exec_client(
+        base_url.clone(),
+        Rc::new(RefCell::new(Cache::default())),
+        &mut exec_rx,
+    )
+    .await;
+
+    // ...and the data leg of the same host, on the same ledger. `session` is
+    // left at its default on purpose: stating it would test the fixture.
+    let (data_tx, _data_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(data_tx);
+    let mut data = MogwaiDataClient::new(
+        ClientId::from("MOGWAI-DATA"),
+        MogwaiDataClientConfig {
+            account_id: AccountId::from("MOGWAI-001"),
+            base_url,
+            ..MogwaiDataClientConfig::default()
+        },
+    )
+    .expect("data client builds");
+    data.start().expect("start grabs the data-event sink");
+    data.connect().await.expect("the data leg connects");
+
+    // POLLED, NOT READ ON THE NEXT LINE: `ws_requests` is written by the stub's
+    // per-connection handler tasks, so an empty or short list means "not
+    // recorded yet" exactly as readily as "never sent". The two seconds are a
+    // failure deadline, not a wait this test spends on its passing path.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let requests = loop {
+        let seen = state.ws_requests.lock().expect("ws request mutex").clone();
+        if seen.len() >= 2 || Instant::now() >= deadline {
+            break seen;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        requests.len() >= 2,
+        "both legs must have upgraded, or there is no pair to compare: {requests:?}"
+    );
+
+    let sessions: Vec<String> = requests
+        .iter()
+        .map(|line| {
+            session_query_value(line)
+                .unwrap_or_else(|| panic!("every upgrade must disclose a session: {line}"))
+        })
+        .collect();
+    let first = &sessions[0];
+    assert!(
+        sessions.iter().all(|session| session == first),
+        "the two legs of one process are ONE client of one ledger; differing \
+         sessions make the venue evict one with the other: {sessions:?}"
+    );
+    // Wire-legal by the SERVER's rule, not by a local charset guess, so the two
+    // ends cannot drift on what a URL may carry.
+    mogwai_protocol::validate_session_id(first).unwrap_or_else(|reason| {
+        panic!("the minted session {first:?} is not wire-legal: {reason}")
+    });
+    // ...and it is THIS PROCESS's, which is what makes a restarted worker get a
+    // fresh identity and reclaim its ledger from the sockets of the dead one. A
+    // constant compiled into the adapter would satisfy everything above.
+    let expected_prefix = format!("mogwai-{pid}-", pid = std::process::id());
+    assert!(
+        first.starts_with(&expected_prefix),
+        "the session must be minted from this process's identity ({expected_prefix}...), got {first:?}"
+    );
+}
+
+/// Reads `session=` out of a recorded `/ws` request line. Deliberately exact on
+/// the key rather than a substring search for the word: a future query
+/// parameter merely CONTAINING it must not stand in for the disclosure.
+fn session_query_value(request_line: &str) -> Option<String> {
+    request_line
+        .split_whitespace()
+        .nth(1)?
+        .split_once('?')?
+        .1
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == "session")
+        .map(|(_, value)| value.to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_submitted_position_id_reaches_the_wire() {
@@ -107,13 +224,37 @@ async fn a_submitted_position_id_reaches_the_wire() {
             None,
         ))
         .unwrap();
-    let _ = next_exec_event(&mut sink_rx, Duration::from_secs(2)).await;
-    let _ = next_exec_event(&mut sink_rx, Duration::from_secs(2)).await;
-    let sent = state.ws_client_messages.lock().unwrap();
-    let submit = sent
-        .iter()
-        .find(|message| message.contains("SubmitOrder"))
-        .unwrap_or_else(|| panic!("no SubmitOrder in {sent:?}"));
+    // DRAINED TO A DEADLINE, the same discipline as
+    // `an_order_list_reaches_the_wire_as_linked_legs`, which asks the same
+    // question of the same list. This used to drain two execution events and
+    // then read `ws_client_messages` once, which was SAFE - the accept can only
+    // exist because the submit crossed - but safe by an inference about the
+    // stub's reply rather than by observing the thing asserted on, and the two
+    // tests then answered "did this field reach the wire" two different ways.
+    // The inference also breaks silently for any future fixture that acks
+    // without echoing, at which point the read races the writer task.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let submit = loop {
+        let found = state
+            .ws_client_messages
+            .lock()
+            .expect("ws client messages mutex")
+            .iter()
+            .find(|message| message.contains("SubmitOrder"))
+            .cloned();
+        if let Some(submit) = found {
+            break submit;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the client never put a SubmitOrder on the wire: {:?}",
+            state
+                .ws_client_messages
+                .lock()
+                .expect("ws client messages mutex")
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert!(submit.contains(r#""position_id":"BTCUSDT-7""#), "{submit}");
 }
 
@@ -167,11 +308,11 @@ async fn adapter_submit_drives_live_exec_events() {
 
     let timeout = Duration::from_secs(2);
     assert!(matches!(
-        next_exec_event(&mut sink_rx, timeout).await,
+        next_exec_event(&mut sink_rx, timeout, "the local OrderSubmitted").await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
     ));
 
-    match next_exec_event(&mut sink_rx, timeout).await {
+    match next_exec_event(&mut sink_rx, timeout, "the venue's OrderAccepted").await {
         ExecutionEvent::Order(OrderEventAny::Accepted(accepted)) => {
             assert_eq!(accepted.client_order_id, order.client_order_id());
             assert_eq!(accepted.venue_order_id, VenueOrderId::from("V-1"));
@@ -182,7 +323,7 @@ async fn adapter_submit_drives_live_exec_events() {
     // The fill must map onto the right order, venue id, instrument, qty, price -
     // a mis-mapped fill (wrong order, wrong scale, dropped venue id) would still
     // be a `Filled` variant but is caught here.
-    match next_exec_event(&mut sink_rx, timeout).await {
+    match next_exec_event(&mut sink_rx, timeout, "the venue's OrderFilled").await {
         ExecutionEvent::Order(OrderEventAny::Filled(fill)) => {
             assert_eq!(fill.client_order_id, order.client_order_id());
             assert_eq!(fill.venue_order_id, VenueOrderId::from("V-1"));
@@ -194,7 +335,7 @@ async fn adapter_submit_drives_live_exec_events() {
         other => panic!("expected an OrderFilled, got {other:?}"),
     }
 
-    match next_exec_event(&mut sink_rx, timeout).await {
+    match next_exec_event(&mut sink_rx, timeout, "the pushed AccountState").await {
         ExecutionEvent::Account(account) => {
             let usdt = account
                 .balances
@@ -358,17 +499,17 @@ async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
 
     let timeout = Duration::from_secs(2);
     assert!(matches!(
-        next_exec_event(&mut sink_rx, timeout).await,
+        next_exec_event(&mut sink_rx, timeout, "the stop-market's OrderSubmitted").await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
     ));
-    match next_exec_event(&mut sink_rx, timeout).await {
+    match next_exec_event(&mut sink_rx, timeout, "the stop-market's OrderAccepted").await {
         ExecutionEvent::Order(OrderEventAny::Accepted(accepted)) => {
             assert_eq!(accepted.client_order_id, order.client_order_id());
             assert_eq!(accepted.venue_order_id, VenueOrderId::from("V-9"));
         }
         other => panic!("expected an OrderAccepted, got {other:?}"),
     }
-    match next_exec_event(&mut sink_rx, timeout).await {
+    match next_exec_event(&mut sink_rx, timeout, "the stop-market's OrderTriggered").await {
         ExecutionEvent::Order(OrderEventAny::Triggered(triggered)) => {
             assert_eq!(triggered.client_order_id, order.client_order_id());
             assert_eq!(triggered.venue_order_id, Some(VenueOrderId::from("V-9")));
@@ -376,7 +517,7 @@ async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
         }
         other => panic!("expected an OrderTriggered between accept and fill, got {other:?}"),
     }
-    match next_exec_event(&mut sink_rx, timeout).await {
+    match next_exec_event(&mut sink_rx, timeout, "the fill the trigger produced").await {
         ExecutionEvent::Order(OrderEventAny::Filled(fill)) => {
             assert_eq!(fill.client_order_id, order.client_order_id());
             assert_eq!(fill.instrument_id.venue, *MOGWAI_VENUE);
@@ -681,15 +822,15 @@ async fn a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered() {
 
     let timeout = Duration::from_secs(2);
     assert!(matches!(
-        next_exec_event(&mut sink_rx, timeout).await,
+        next_exec_event(&mut sink_rx, timeout, "the stop-limit's OrderSubmitted").await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
     ));
     assert!(matches!(
-        next_exec_event(&mut sink_rx, timeout).await,
+        next_exec_event(&mut sink_rx, timeout, "the stop-limit's OrderAccepted").await,
         ExecutionEvent::Order(OrderEventAny::Accepted(_))
     ));
     assert!(matches!(
-        next_exec_event(&mut sink_rx, timeout).await,
+        next_exec_event(&mut sink_rx, timeout, "the stop-limit's OrderTriggered").await,
         ExecutionEvent::Order(OrderEventAny::Triggered(_))
     ));
     assert_eq!(
@@ -715,7 +856,13 @@ async fn a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered() {
         ))
         .expect("amend dispatches");
 
-    match next_exec_event(&mut sink_rx, timeout).await {
+    match next_exec_event(
+        &mut sink_rx,
+        timeout,
+        "the amend ack (OrderUpdated) for the triggered stop-limit",
+    )
+    .await
+    {
         ExecutionEvent::Order(OrderEventAny::Updated(updated)) => {
             assert_eq!(
                 updated.trigger_price,

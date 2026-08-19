@@ -665,16 +665,86 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs the data-event sink");
-    // Refused, so the client never reports connected and `connect` gives up
-    // waiting. The DISTINCT signal is the named `venue identity mismatch` error
-    // line the loop logs before returning; at this API the outcome is simply
-    // that the client never comes up, which is the correct end state either way.
-    drop(client.connect().await);
+    // Refused, so the client never reports connected and `connect` spends its
+    // whole readiness bound waiting for something that cannot arrive. The
+    // DISTINCT signal is the named `venue identity mismatch` error line the loop
+    // logs before returning; at this API the outcome is simply that the client
+    // never comes up, which is the correct end state either way.
+    //
+    // BOUNDED, BECAUSE `wait_connected`'s FIVE SECONDS ARE ON THIS TEST'S
+    // PASSING PATH, NOT ITS FAILING ONE. Readiness never arrives here, so the
+    // internal deadline WAS the runtime and this one test was 5.0 s of a 15.6 s
+    // serial sweep - the same shape `conn_reconnect_respects_max_attempts` was
+    // repaired for. Everything the refusal needs is loopback and complete in
+    // single-digit milliseconds: one dial, one `/health` probe, one classify.
+    //
+    // THE BOUND IS COUPLED TO THE STUB'S `/clock` DEFAULT, AND THAT COUPLING IS
+    // INVISIBLE FROM HERE, so it is written down. `connect()` does the clock
+    // fetch, then seeds instruments, then spawns the pump, and only THEN spawns
+    // the reader that issues the `/health` probe the poll below waits on. When
+    // the stub's default clock body was the undecodable catch-all, that prefix
+    // alone was ~400 ms of retry ladder and this bound had ~100 ms of margin;
+    // the default now serves a decodable envelope, which is the ONLY reason the
+    // headroom is two orders of magnitude. ARMING `fail_clock` IN THIS FIXTURE,
+    // OR LENGTHENING THE LADDER, PUTS THE PREFIX BACK OVER THE BOUND - and this
+    // test would then fail on `health_hits` never reaching one, reporting a
+    // refusal defect that is not there. Raise the bound with the ladder, or
+    // derive it from `CLOCK_FETCH_MAX_ATTEMPTS`.
+    //
+    // CANCELLING `connect()` MID-FLIGHT SKIPS ITS OWN CLEANUP - `abort_tasks`
+    // and `retire_connected_flag` never run, so the pump, the reader and the
+    // `delivery_ready` sender are dropped rather than retired. That is the
+    // guard-scope shape AGENTS.md flags, and TERMINALITY IS WHAT MAKES IT SAFE
+    // HERE: a venue-identity mismatch is terminal, so the lifecycle loop returns
+    // and nothing restarts to race the assertions below. On any fixture whose
+    // failure is retryable this cancellation would leave a live reconnect loop
+    // running under the assertions.
+    drop(tokio::time::timeout(Duration::from_millis(500), client.connect()).await);
 
+    // The probe was ASKED, polled rather than assumed: with the connect bounded
+    // above, "not refused yet" and "never probed" are otherwise the same
+    // silence, and an assertion on the flag alone would then be reading a
+    // client that had not got round to deciding.
+    let probes = wait_for_at_least(&state.health_hits, 1, Duration::from_secs(2)).await;
     assert!(
-        client.is_disconnected(),
-        "a client bound to run 7 must not stay connected to run 4242"
+        probes >= 1,
+        "the client must have probed /health to judge the run at all; saw {probes}"
     );
+
+    // THIS `is_disconnected()` IS LIVE, and it is the ONLY assertion here that
+    // catches the defect - which is the opposite of what it looks like, so it is
+    // written down rather than left to be re-derived. The flag is `!connected`,
+    // it starts false, and `lifecycle` stores false on every failed dial, so on
+    // a fixture that REFUSES THE UPGRADE it reads "disconnected" from t=0 and
+    // any assertion on it is vacuous - that is why it was removed twice from
+    // `conn_reconnect_respects_max_attempts`, and a test-hunt report proposed
+    // removing it here on the same reasoning. It does not transfer. This stub
+    // serves a perfectly good websocket; the refusal happens AFTER the dial
+    // succeeds, in `verify_run_identity`, and the very next statement on the
+    // non-refusing path is `connected.store(true)`. So a client that stops
+    // refusing reports connected here, and the flag discriminates.
+    //
+    // Bite-checked as a text edit: making `IdentityOutcome::Mismatch` return
+    // `Ok(())` fails THIS assertion by its own message. The `handshakes` bound
+    // below does not move - one dial either way - so deleting this would have
+    // left the whole refusal unpinned.
+    //
+    // HELD AS A WINDOW, NOT SNAPSHOTTED, because the gate above is `health_hits`
+    // and the stub increments that when it SERVES `/health` - before the client
+    // has received the response, classified it and reached the store. A single
+    // read the instant the counter moves therefore has a real if narrow window
+    // in which a NON-refusing client is still false, which would pass this
+    // vacuously on the very bite-check that is supposed to catch it. Watching
+    // for a quarter second closes the window: a client that stops refusing
+    // stores true within microseconds of the classify.
+    let watch_until = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < watch_until {
+        assert!(
+            client.is_disconnected(),
+            "a client bound to run 7 must not stay connected to run 4242"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     // The refusal is terminal, so the loop stops dialing rather than walking the
     // reconnect ladder against an address it has already judged.
     let handshakes = state.ws_handshakes.load(Ordering::Relaxed);
@@ -1031,14 +1101,14 @@ async fn divergence_partial_fill_reports_partial_qty() {
 
     let timeout = Duration::from_secs(3);
     assert!(matches!(
-        next_exec_event(&mut rx, timeout).await,
+        next_exec_event(&mut rx, timeout, "the local OrderSubmitted").await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
     ));
     assert!(matches!(
-        next_exec_event(&mut rx, timeout).await,
+        next_exec_event(&mut rx, timeout, "the venue's OrderAccepted").await,
         ExecutionEvent::Order(OrderEventAny::Accepted(_))
     ));
-    match next_exec_event(&mut rx, timeout).await {
+    match next_exec_event(&mut rx, timeout, "the PARTIAL OrderFilled").await {
         ExecutionEvent::Order(OrderEventAny::Filled(fill)) => {
             assert_eq!(
                 fill.last_qty,
@@ -1076,18 +1146,18 @@ async fn divergence_duplicate_fill_forwards_both_wire_events() {
 
     let timeout = Duration::from_secs(3);
     assert!(matches!(
-        next_exec_event(&mut rx, timeout).await,
+        next_exec_event(&mut rx, timeout, "the local OrderSubmitted").await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
     ));
     assert!(matches!(
-        next_exec_event(&mut rx, timeout).await,
+        next_exec_event(&mut rx, timeout, "the venue's OrderAccepted").await,
         ExecutionEvent::Order(OrderEventAny::Accepted(_))
     ));
-    let first = match next_exec_event(&mut rx, timeout).await {
+    let first = match next_exec_event(&mut rx, timeout, "the FIRST of the duplicated fills").await {
         ExecutionEvent::Order(OrderEventAny::Filled(fill)) => fill,
         other => panic!("expected first OrderFilled, got {other:?}"),
     };
-    let second = match next_exec_event(&mut rx, timeout).await {
+    let second = match next_exec_event(&mut rx, timeout, "the DUPLICATE fill behind it").await {
         ExecutionEvent::Order(OrderEventAny::Filled(fill)) => fill,
         other => panic!("expected the duplicate OrderFilled to be forwarded, got {other:?}"),
     };
@@ -1123,15 +1193,20 @@ async fn divergence_dropped_account_update_leaves_fill_without_snapshot() {
 
     let timeout = Duration::from_secs(3);
     assert!(matches!(
-        next_exec_event(&mut rx, timeout).await,
+        next_exec_event(&mut rx, timeout, "the local OrderSubmitted").await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
     ));
     assert!(matches!(
-        next_exec_event(&mut rx, timeout).await,
+        next_exec_event(&mut rx, timeout, "the venue's OrderAccepted").await,
         ExecutionEvent::Order(OrderEventAny::Accepted(_))
     ));
     assert!(matches!(
-        next_exec_event(&mut rx, timeout).await,
+        next_exec_event(
+            &mut rx,
+            timeout,
+            "the fill whose account update was dropped"
+        )
+        .await,
         ExecutionEvent::Order(OrderEventAny::Filled(_))
     ));
     // No account snapshot follows the dropped update.
@@ -1370,19 +1445,25 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
     // Submitted is emitted locally by the client, never over the wire, so it
     // pays no inbound latency.
     assert!(matches!(
-        next_exec_event(&mut rx, Duration::from_secs(6)).await,
+        next_exec_event(&mut rx, Duration::from_secs(6), "the local OrderSubmitted").await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
     ));
     assert!(matches!(
-        next_exec_event(&mut rx, Duration::from_secs(6)).await,
+        next_exec_event(&mut rx, Duration::from_secs(6), "the held OrderAccepted").await,
         ExecutionEvent::Order(OrderEventAny::Accepted(_))
     ));
-    match next_exec_event(&mut rx, Duration::from_secs(6)).await {
+    match next_exec_event(&mut rx, Duration::from_secs(6), "the held OrderTriggered").await {
         ExecutionEvent::Order(OrderEventAny::Triggered(_)) => {}
         other => panic!("expected the held OrderTriggered, got {other:?}"),
     }
     let triggered = Instant::now();
-    match next_exec_event(&mut rx, Duration::from_secs(6)).await {
+    match next_exec_event(
+        &mut rx,
+        Duration::from_secs(6),
+        "the held fill behind the trigger",
+    )
+    .await
+    {
         ExecutionEvent::Order(OrderEventAny::Filled(_)) => {}
         other => panic!("expected the held fill behind the trigger, got {other:?}"),
     }

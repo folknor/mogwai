@@ -247,8 +247,14 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   2026-08-16 for a coverage-audit reason that was never a property of this
   workspace - a brokkr bug reporting every `mogwai-data` test as orphaned under
   the `instrumented` sweep - and a brokkr build dated 2026-08-17 fixed it. If it
-  ever goes red that way again, suspect the tool before the tree, and run the
-  socket suites by name meanwhile:
+  ever goes red that way again, suspect the tool before the tree - BUT CHECK
+  FOR A CRASHED TEST FIRST, because the two readings are indistinguishable in
+  the output. A single test aborting the parallel sweep produces the same
+  wall of orphaned `mogwai-data` tests, and a real regression can hide behind
+  either reading; 2026-08-19 saw exactly that, from an `ETXTBSY` on a test that
+  wrote and then exec'd a FIXED path while the gate's second sweep ran the same
+  test in another process. A path is per-process or it is a shared resource.
+  Meanwhile run the socket suites by name:
   `brokkr test -p mogwai-adapter "" --debug` and
   `brokkr test -p mogwai-cli socket --debug`.
 - COMMIT OR STASH BEFORE READING A `brokkr test -p mogwai-cli ""` RESULT. That
