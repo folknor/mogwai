@@ -157,7 +157,36 @@ async fn next_trade(rx: &mut UnboundedReceiver<DataEvent>) -> nautilus_model::da
 /// to the sink - it neither passes the `HavocFilter` nor rides the WS stream -
 /// so "the havoc/stub suppressed everything" tests must tolerate it while
 /// still failing on any trade, bar, or quote that leaks through.
-async fn assert_only_instrument_prologue(rx: &mut UnboundedReceiver<DataEvent>, window: Duration) {
+///
+/// THE WINDOW DOES NOT OPEN UNTIL THE STUB HAS SPOKEN, and that is the
+/// difference between "the client suppressed the tape" and "the tape was never
+/// sent". A window timed from the caller's own line races the stub's push task;
+/// expiring before the first frame reached the wire is a PASS that observed
+/// nothing, which is this arc's signature defect wearing a negative
+/// assertion's costume. `ws_first_frame_at` is stamped strictly before the
+/// first send, so waiting for it makes the silence afterwards evidence. The
+/// wait is bounded and FAILS rather than falling through, because a stub that
+/// never pushed is the case the window cannot judge.
+async fn assert_only_instrument_prologue(
+    state: &StubState,
+    rx: &mut UnboundedReceiver<DataEvent>,
+    window: Duration,
+) {
+    let sent_by = Instant::now() + Duration::from_secs(2);
+    while state
+        .ws_first_frame_at
+        .lock()
+        .expect("ws first frame instant mutex")
+        .is_none()
+    {
+        common::assert_push_gate_opened();
+        assert!(
+            Instant::now() < sent_by,
+            "the stub never put a frame on the wire, so a silent sink says nothing \
+             about what the client suppressed"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let deadline = Instant::now() + window;
     loop {
         // See `wait_for_at_least`: an absence observed because the tape was
@@ -484,11 +513,12 @@ async fn havoc_drop_prob_one_drops_all() {
         ..ClientHavoc::default()
     });
 
-    let mut rx = subscribed_data_client(state, Some(havoc)).await;
+    let mut rx = subscribed_data_client(Arc::clone(&state), Some(havoc)).await;
 
     // Panics if any of the five dropped trades reaches the sink; only the
-    // connect-time instrument prologue may arrive.
-    assert_only_instrument_prologue(&mut rx, Duration::from_millis(400)).await;
+    // connect-time instrument prologue may arrive. The helper establishes that
+    // the stub SENT before it starts scoring the silence.
+    assert_only_instrument_prologue(&state, &mut rx, Duration::from_millis(400)).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

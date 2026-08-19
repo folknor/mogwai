@@ -11,9 +11,12 @@ cannot fail, fixtures that cannot represent their shape, and anything else weird
 
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 
-THIS DOCUMENT IS CLOSED. Five rounds, no open findings left - every section
-below records what was fixed or, in one case, a refusal with its measurement.
-It is kept until the arc's close pass reads it.
+THIS DOCUMENT IS CLOSED AND ITS CLOSE PASS HAS RUN (2026-08-19). Five rounds
+plus a review of the whole commit arc `c8098da..`, no open findings left - every
+section below records what was fixed or, in one case, a refusal with its
+measurement. The close pass's own three findings and the arc verdict are in
+`notes/bug-loop-carry-forward.md`; do not run a second close pass over this
+document.
 
 The hunter reports running nothing, and verified its two load-bearing claims
 against source: `replace_data_event_sender` is a `thread_local` in

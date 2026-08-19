@@ -48,8 +48,14 @@
 //! - A test wanting "same process, two legs, no eviction" is likewise testing a
 //!   constant unless it asserts on what CROSSED THE WIRE. That is what
 //!   `adapter_smoke::both_legs_disclose_one_process_session_on_the_upgrade`
-//!   does, off `ws_requests`, and it is the only thing in the crate that fails
-//!   when the default is removed.
+//!   does, off `ws_requests`, and it is the only SOCKET test in the crate that
+//!   fails when the default is removed. Re-measured by the close pass, because
+//!   the stronger phrasing that stood here ("the only thing in the crate") is
+//!   false and misleadingly so: `config`'s own
+//!   `both_legs_default_to_the_same_process_session` fails too, and it is a UNIT
+//!   test, so cargo stops after the lib target and the four socket binaries
+//!   never run at all. Anyone repeating that bite-check has to name this test
+//!   directly, or the sweep reports a failure that says nothing about the wire.
 
 // A shared test-support module: every item is `pub` so the three test binaries
 // can use it, but nothing is reachable outside the crate, so both lints fire

@@ -7,8 +7,8 @@ this forward. Not a history: when an entry stops binding future work, delete it.
 Arc in progress: the eleven `notes/bugs-*.md` reports, worked one document at a
 time in this order. `bugs-tests-lifecycle` CLOSED on 2026-08-19 after five
 rounds plus a close pass over the whole commit arc, with no open findings;
-`bugs-tests-adapter` CLOSED the same way after five rounds, awaiting its close
-pass; `bugs-tests-tape` is next. The order is
+`bugs-tests-adapter` CLOSED the same way on 2026-08-19, five rounds plus its own
+close pass; `bugs-tests-tape` is next. The order is
 `bugs-tests-lifecycle`, `bugs-tests-adapter`,
 `bugs-tests-tape`, `bugs-tests-engine-protocol`, `bugs-tests-lab-cli`, then
 `bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
@@ -273,13 +273,14 @@ trusts yet.
     never at the return of `connect()`. Measuring from connect charges the
     client for everything the harness does between the upgrade and the push, and
     the harness does a lot there - `havoc_latency_delays_inbound_event` passed
-    with `HavocLatency` ZEROED, satisfied entirely by stub time. Deliberately
-    independent of the 100 ms pre-push sleep, so whatever a later round does to
-    that sleep cannot revive the defect. It is also where a "nothing leaked
-    early" window should END: `assert_only_instrument_prologue` with a fixed
-    duration starts its window at the return of `connect()` and races the
-    harness's own delays, so a slow enough connect fails the test for nothing.
-    Poll until the stamp appears instead - it is set strictly before the send.
+    with `HavocLatency` ZEROED, satisfied entirely by stub time. It is also
+    where a "nothing leaked early" window should END, and the two blackout
+    tests do exactly that: poll until the stamp appears rather than picking a
+    fixed duration off the return of `connect()`, which races the harness's own
+    delays. The stamp is set strictly before the send, so observing it set is a
+    sound place to stop looking.
+    (`assert_only_instrument_prologue`'s own fixed window is a different case
+    and is fine: its callers drop the whole tape, so no stamp is coming.)
   - `fail_health` makes `GET /health` answer 500, which is the ONLY way to
     represent `IdentityOutcome::Unreachable` end to end - the stub could
     previously model only a venue that answers, so the unanswerable branch had
@@ -323,14 +324,6 @@ trusts yet.
   the idle window and no socket is ever declared dead. The general form: after
   writing a divergence fixture, delete the divergence and confirm the test goes
   red. Nothing else detects this.
-- `notes/bugs-tests-adapter.md`'s "Binary-level timing" section says `havoc` has
-  17 tests. It has 19 after this round - ONE ADDED, none deleted; the deletion
-  was in `reconciliation`, which went 15 to 14. It also says `havoc`'s floor is
-  about 2 s, and the new dead-socket test can spend up to 3 s in
-  `wait_for_at_least` before it gives up, so that floor is now the more
-  misleading of the two numbers. The section is descriptive prose owned by round
-  5; the counts were left as written rather than silently edited under a later
-  round's feet.
 - THE VENUE'S ACCOUNT ID IS A LABEL AND THE CLIENT KEEPS ITS OWN. A round-1 cold
   review argued `an_account_labelled_differently_is_still_served` should assert
   the emitted `account_id` equals the WIRE's `SANDBOX-042`, on the reasoning that
@@ -392,9 +385,9 @@ trusts yet.
     while only ~13 tests seed frames. Measured before and after:
     `brokkr test -p mogwai-adapter "" --debug` 42.46 s -> 37.47 s per sweep,
     37.61 s once the round's review fixes landed.
-    THE OTHER 37 s IS UNACCOUNTED FOR by anything either round has read, and is
-    the thing to measure before another structural-win claim is made about this
-    crate. A per-test distribution first; nobody has one.
+    THE REMAINING ~37 s IS SOLVED - see the round-5 section below. It was a
+    ~420 ms floor under every connecting test, not a distribution of slow ones.
+    Do not re-open it as an open question; the sweep is 12 s.
   - IT MOVED THE GO-DARK TEST'S GROUND AND THE GROUND GOT FIRMER. Round 1 chose
     `idle_timeout_ms = 250` to STRADDLE the 100 ms pre-push delay; with the gate
     the pre-push interval is not a wall duration at all, so the seeded trade
@@ -533,24 +526,15 @@ what this measurement resolves.
   against the 30 ms baseline from 13x to 6.7x. The buckets ARE the signal; this
   round spent wall to widen signals, and spending it back here for the largest
   one would be incoherent.
-- `notes/bugs-tests-adapter.md`'s "Binary-level timing" section is now WRONG in
-  four places and carries an in-place warning saying so, because round 5 owns it
-  and rounds 2 and 3 would otherwise be editing under its feet. Stale: the test
-  count (19, not 17), the 100 ms pre-push sleep it costs out (gone since round 2,
-  replaced by `PushGate`), the trigger test's 1.5-2 s (measured 0.94 s), and the
-  2 s floor (the round-1 dead-socket test can spend 3 s). Round 5 re-measures
-  rather than editing the numbers in place.
-- A LEAD ON THE UNEXPLAINED ~37 s, not chased: the account-snapshot wait above
-  puts at least one full inbound-latency window inside EVERY exec client's
-  connect - the 30 ms baseline at minimum, the armed exec delay where one is
-  armed - and `adapter_smoke`, `reconciliation` and much of `havoc` build one per
-  test. Nobody has a per-test distribution yet; libtest's `--report-time` is
-  nightly-only, so getting one needs another route - a `Drop` timer on a
-  per-test guard, or wrapping each `#[tokio::test]` body, or simply running the
-  binaries under `--test-threads=1` and reading the tool's own per-test walls,
-  which `brokkr test -p mogwai-adapter <NAME>` already prints one test at a time.
-- THE ROUND'S OWN COLD REVIEW FOUND NO DEFECT IN ITS CODE, the first time in
-  twelve rounds, and independently re-derived all four mechanisms against
+- A LEAD ON THE UNEXPLAINED ~37 s, FILED HERE AND THEN OVERTAKEN: the
+  account-snapshot wait puts at least one full inbound-latency window inside
+  EVERY exec client's connect - the 30 ms baseline at minimum. Real, and NOT the
+  answer; round 5 measured the distribution and the cost was elsewhere. Kept
+  only because the lead is still true of the exec leg and a later latency test
+  on it has to budget for the window; the accounting question it was raised
+  against is closed.
+- THE ROUND'S OWN COLD REVIEW FOUND NO DEFECT IN ITS CODE, the first time in the
+  arc, and independently re-derived all four mechanisms against
   production source. It found three WORDING defects instead, all in the second
   half nobody else reads, and all of the same family the round had just closed -
   a comment that says something the code does not do:
@@ -778,6 +762,51 @@ document. What generalises:
   indistinguishable in the output from the known tool bug: check for a crash
   before blaming the tool.
 
+## The adapter document, close pass: what the five commits left
+
+The arc is SOUND - the gate is green, the serial sweep reproduces at 11.96 s,
+and the headline coverage claim was re-measured rather than taken on trust
+(removing `default_session`'s default fails
+`both_legs_disclose_one_process_session_on_the_upgrade` on its own message).
+Three findings, all prose or fixture, none in production behaviour.
+
+- THE TWELFTH COSTUME WAS A NEGATIVE ASSERTION.
+  `havoc::assert_only_instrument_prologue` scored a 400 ms silence starting at
+  the caller's own line, so a run where the stub had not yet pushed would have
+  passed having observed nothing - "the client suppressed the tape" and "the
+  tape was never sent" being the same silence. It now waits for
+  `ws_first_frame_at` first and FAILS if no frame ever went out. Bite-checked by
+  emptying the seeded tape: the old form passes, the new one fails by name.
+  THE RULE, and it is the general one for this family: A NEGATIVE ASSERTION
+  OWES A POSITIVE PRECONDITION. Round 1 wrote this exact advice about this exact
+  helper and it was never applied; the entry above now describes the code.
+- THE PREMISE THE ROUND-5 CORRECTION RETIRED SURVIVED IN TWO SOURCE COMMENTS.
+  "One venue is one run is one ledger" is false - a venue seats several ledgers,
+  keyed by account plus session - and round 5 rewrote
+  `reference/architecture.md` to rest on CONNECTION scope instead. But
+  `client/exec.rs`'s `handle_account_state` and
+  `adapter_smoke::an_account_labelled_differently_is_still_served` still carried
+  the retired premise, in the two places a reader arrives at when checking the
+  architecture paragraph. A durable paragraph written to stop a reviewer
+  deriving the inverse is worth nothing if the code it describes hands them the
+  inverse premise; both now state the connection-scope argument and point at
+  the doc. FIXING A DURABLE DOC IS HALF THE JOB - grep the claim.
+- `common/mod.rs` CLAIMED THE SESSION PIN IS "THE ONLY THING IN THE CRATE THAT
+  FAILS" when the default is removed. It is the only SOCKET test that does;
+  `config`'s own unit test fails too, and being a unit test it aborts cargo
+  before the four socket binaries run at all, so the naive bite-check reports a
+  failure that says nothing about the wire. Corrected in place, with the
+  invocation that actually works.
+
+LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
+
+- `crates/mogwai-server/src/config.rs`'s `account_id` doc still opens "One venue
+  is one run is one ledger", the same retired premise, about the SERVER side.
+  Out of every arc's scope so far. It is a one-line correction whenever
+  something touches that file.
+- `target/tmp` still accumulates `*d-*.log`, `bad-*.toml` and `stale-*.pid`.
+  Recorded on the lifecycle document, still outside every arc.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -872,20 +901,23 @@ document. What generalises:
   touching the harness; it is the invocation AGENTS.md prescribes and the only
   one that exercises `--test-threads=1`.
 - `brokkr check` is blind to the socket-backed suites; `brokkr check --gate` is
-  the invocation. Baseline after the adapter document's round 4: 1185 workspace
-  + 442 instrumented, in 1m05s, with 63 ignored, 17 skips and 0 orphaned pairs,
-  1690 coverage pairs - two tests up, the segmented-head pin and the replay pin.
-  After round 5 and its review fixes: 1187 + 442, in 1m01s, 63 ignored, 1692
-  coverage pairs, 0 orphaned - two tests up, the session-disclosure pin and the
-  undecodable-clock pin. SERIAL ADAPTER SWEEP 12.14 s, from 39.71 s; the four
-  socket binaries hold 60 tests totalling 11.38 s one-per-process. See the
-  round-5 section above and `reference/performance.md`.
-  Serial adapter sweep at the end of round 4: 39.71 s. Before that: 1183 + 442
-  instrumented, in 1m06s, with 63 ignored, 17 skips and 0 orphaned pairs. It was
-  1181 at the end of round 5 and 1179 / 65 / 19 at the end of round 4: the
-  round-5 difference is the two completion gates it un-parked, which now RUN
-  rather than being skipped, and the close pass's is its two new harness pins.
-  Serial socket suite green in 6.5s.
+  the invocation. THE WORKSPACE TEST COUNT ONLY GOES UP, so the series below is
+  the arc's ledger - but it spans TWO documents, and an entry that says just
+  "round 4" is unreadable. Every entry names its document.
+  - lifecycle r4: 1179 + 442, 65 ignored, 19 skips.
+  - lifecycle r5: 1181 - two completion gates un-parked, so they RUN rather
+    than being skipped (hence 63 ignored, 17 skips from here on).
+  - lifecycle close pass: 1183 + 442, in 1m06s, 0 orphaned - two harness pins.
+  - adapter r4: 1185 + 442, in 1m05s, 1690 coverage pairs, 0 orphaned - the
+    segmented-head pin and the replay pin. Serial adapter sweep 39.71 s.
+  - adapter r5: 1187 + 442, in 1m01s, 1692 coverage pairs, 0 orphaned - the
+    session-disclosure pin and the undecodable-clock pin. SERIAL ADAPTER SWEEP
+    12.14 s, from 39.71 s; the four socket binaries hold 60 tests totalling
+    11.38 s one-per-process. See the round-5 section above and
+    `reference/performance.md`.
+  - adapter close pass: unchanged at 1187 + 442, 1692 pairs, 0 orphaned, 58.3 s;
+    serial adapter sweep re-measured at 11.96 s. Prose fixes only, no new test.
+  The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is
   what that list is for. `test_threads` STAYS AT 8 even so: the cliff at 16 was

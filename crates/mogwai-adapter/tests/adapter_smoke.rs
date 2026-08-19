@@ -354,9 +354,13 @@ async fn adapter_submit_drives_live_exec_events() {
 /// Both halves of that used to fail. The connect path asserted equality and
 /// killed the client; the pushed path dropped every mismatched snapshot, so a
 /// client would take its fills while its balances quietly stopped moving. Both
-/// were per-account-slot invariants that outlived the slots: one venue is one
-/// run is one ledger, so the account this connection carries is the only one
-/// there is and a label cannot mean it belongs elsewhere.
+/// were per-account-slot invariants that outlived the slots, and THE SCOPE THAT
+/// SURVIVES IS THE CONNECTION rather than the venue: a venue does seat several
+/// ledgers, keyed by account plus session, but a socket names exactly one on its
+/// `/ws?account=` upgrade, so the account this connection carries is the only
+/// one it can ever see and a label cannot mean it belongs elsewhere. The full
+/// argument, and what would have to change first, is in
+/// `reference/architecture.md`.
 ///
 /// The label here is deliberately nothing like the configured `MOGWAI-001`.
 #[tokio::test(flavor = "current_thread")]

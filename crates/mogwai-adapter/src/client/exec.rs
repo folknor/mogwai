@@ -2817,13 +2817,17 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
     // client that named the account differently produced a client whose balances
     // silently stopped updating while every fill still arrived.
     //
-    // The drop guarded against adopting a MISROUTED snapshot back when a venue
-    // served many accounts and could route one to the wrong session. This venue
-    // serves one run with one ledger, so the only account there is, is the one
-    // this connection carries - there is nothing to be misrouted from, and a
-    // dropped snapshot can only lose state that was correct. The configured id
-    // is stamped on below, as it always was; `note_account_label` says once at
-    // connect if the two names differ.
+    // The drop guarded against adopting a MISROUTED snapshot back when the
+    // account was an addressable SLOT a venue could route one to the wrong one
+    // of. THE SCOPE THAT SURVIVES IS THE CONNECTION, not the venue: a venue does
+    // seat several ledgers, keyed by account plus session, but a socket names
+    // exactly one on its `/ws?account=` upgrade and only that one's state comes
+    // back down it. So there is nothing to be misrouted from HERE, and a dropped
+    // snapshot can only lose state that was correct. The configured id is
+    // stamped on below, as it always was; `note_account_label` says once at
+    // connect if the two names differ. `reference/architecture.md` carries the
+    // argument in full, including what would have to change first if a socket
+    // ever carried several ledgers.
     let ts_event = UnixNanos::from(state.ts_event);
     let balances = state
         .balances
