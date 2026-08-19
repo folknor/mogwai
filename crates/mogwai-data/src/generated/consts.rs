@@ -197,7 +197,8 @@ pub(super) const CHILD_CAP: u32 = 4_096;
 /// and does not participate in calibration. Not "never hit" - the standardized
 /// t(4) still has infinite kurtosis, so the running maximum grows with the
 /// horizon. The honest statement is NO OBSERVED PARTICIPATION over the 16M
-/// calibration sample. See `standardized_candidate_rail_sizing`.
+/// calibration sample. See `shipped_garch_rails_sit_above_the_clean_tail`,
+/// which is the measurement and runs on every lane.
 pub(super) const GARCH_SIGMA_CAP: f64 = 1e-3;
 /// Bounds the clean feedback return. Same sizing run: the largest clean
 /// |return| observed over 16M updates was 3.33e-3, so this sits just above it

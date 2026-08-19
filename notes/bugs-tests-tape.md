@@ -66,18 +66,10 @@ sweep; the focused `brokkr test -p mogwai-data "" --debug` went
 one measured loss are in `reference/performance.md`. What is left open from
 this cluster, for whoever takes it:
 
-- TWO MORE SKIP ENTRIES REST ON THE SAME FALSE COST CLAIM.
-  `standardized_candidate_rail_sizing` measures 0.37 s and
-  `realized_return_envelope_under_regime_scaling` 0.20 s, one test per process
-  in dev. Only `synthetic_spread_decomposition_at_protocol_seven` at 6.46 s is
-  even loosely a cost exclusion, and none of the three is near the watchdog.
-  The heading that claimed every entry under it "outlives the 20-second
-  per-test hang watchdog by design" is GONE - it is a per-entry statement with
-  numbers now - but the entries themselves were left
-  named with their measured costs rather than moved, because what those tests
-  should be is entangled with finding 6 - `standardized_candidate_rail_sizing`
-  is the test finding 6 says carries the real claim, and it is one of the two
-  that never runs.
+- CLOSED IN ROUND 4, with finding 6. Both entries are out of `skip` and both
+  tests are un-ignored. `synthetic_spread_decomposition_at_protocol_seven` at
+  6.46 s is the only entry left that the cost heading describes even loosely,
+  and it is untouched.
 
 ## 4. Ignore reasons are free text, so no scan can classify them
 
@@ -104,52 +96,37 @@ derivation or a re-blessing, the five bite-checks, and the two things the
 bite-checks found that nobody had proposed are in
 `notes/bug-loop-carry-forward.md`. Nothing is left open from this cluster.
 
-## 6. `garch_second_moment_instrumentation` reports on a process that has not shipped for two repairs
+## 6. `garch_second_moment_instrumentation` reported a retired process - closed in round 4
 
-`tests.rs:4671` and the block comment above it at 4488. The comment states
-`a1 * E[z^2] + b1 = 0.12 * 2 + 0.875 = 1.115`. The shipped constants are
-`GARCH_ARCH = 0.02`, `GARCH_GARCH = 0.979`. The test hardcodes
-`vol_scalar = 1e-6`; the shipped `VOL_SCALAR` is `1.2e-5`. And it labels the RAW
-t(4) arm "AS SHIPPED" and the standardized arm "COUNTERFACTUAL" - but the shipped
-generator standardizes (`trace_consumes_no_draws_and_leaves_the_tape_byte_identical`
-asserts `innovation_raw / innovation_std == STUDENT_T_UNIT_SCALE`), so the labels
-are exactly inverted relative to today's code.
+Reproduced in full, including both printed numbers, and closed by REPOINTING
+rather than deleting: the shipped arm now runs at `VOL_SCALAR` with the
+standardized innovation, the second arm runs the same shipped `a1` and `b1`
+with the standardization switched off and is labelled as exactly that - it
+cannot reconstruct the pre-standardization era, because `GarchVol::new` reads
+the shipped `a1` and `b1` and offers no override - and the shipped arm carries
+three assertions a constant change can break. The entangled skip entries went
+with it
+- `standardized_candidate_rail_sizing` is un-ignored, renamed
+`shipped_garch_rails_sit_above_the_clean_tail`, pointed at the shipped
+constants and running, and so is
+`realized_return_envelope_under_regime_scaling`. THE COLD REVIEW OF THAT FIX
+PASS FOUND THREE MORE OF THE SAME DISEASE IN THE REPOINTED INSTRUMENT - a
+stated 10 percent window that was really under 1 percent, a "retired process"
+label on a parameter triple that never shipped, and two rail assertions that
+could not fail - and all three are closed. The bite-checks, the numbers, the
+seed ensemble behind the widened window and the one assertion deliberately left
+ungated are in `notes/bug-loop-carry-forward.md`. Nothing is left open from this
+cluster.
 
-Its printed output, captured by the hunter, says
-`sqrt(E[sigma2]) / vol_scalar 968.71x` and `cap occupancy 17.19%` under a banner
-reading "AS SHIPPED". Neither number describes anything the venue produces. The
-two assertions (`raw.effective_persistence() > 1.0` at 1.019, `standardized < 1.0`
-at 0.9991) are arithmetic identities over two constants and a distribution mean -
-no change to the generator, the tape, or the rails can make them red.
+## 7. `tape_version_prose` panicked on a byte-index slice - closed in round 4
 
-This is a stale report presented as a finding, and it is dangerous precisely
-because it is legible and quotable. Either re-point it at `VOL_SCALAR` and swap
-the labels, or delete it - `standardized_candidate_rail_sizing` (which does use
-1.2e-5 and does check the shipped rails against the measured tail) is the test
-that carries the real claim, and it is `#[ignore]`d and skipped, i.e. never run.
-
-## 7. `tape_version_prose` can panic on a byte-index slice
-
-`crates/mogwai-data/tests/tape_version_prose.rs`, `claims()`:
-
-```rust
-let end = (at + pattern.len() + digits.len() + 40).min(rest.len());
-let start = at.saturating_sub(40);
-found.push((value, rest[start..end].to_string()));
-```
-
-Those are byte offsets into a `String` that may contain multi-byte UTF-8. Any
-non-ASCII character within 40 bytes either side of a
-`` `TAPE_PROTOCOL_VERSION` is N `` claim panics the gate with "byte index is not
-a char boundary" - and the panic looks nothing like a stale-prose failure. The
-repo's no-gremlins rule makes this unlikely rather than impossible (a name, a
-currency symbol, a pasted quote in `notes/` all suffice; `notes/` is deliberately
-in scope). Use `char_indices` or `rest.get(start..end)` with a fallback.
-
-Two smaller notes on the same file: `markdown_files` follows symlinks via
-`path.is_dir()`, so a symlinked directory cycle recurses forever; and it
-`panic!`s on any `read_dir` error, so one unreadable directory anywhere in the
-tree fails a test about prose.
+The `claims()` half reproduced exactly and is fixed, with a pin that builds its
+multi-byte character rather than committing one. Of the two smaller notes, the
+symlink one is REAL BUT NOT AS DESCRIBED - a cycle does not recurse forever,
+Linux bounds it at 40 levels - and is fixed and pinned; the `read_dir` panic is
+REFUSED as fail-closed behaviour a gate certifying complete coverage should
+have. The measurements are in `notes/bug-loop-carry-forward.md`. Nothing is
+left open from this cluster.
 
 ## 8. Smaller things
 

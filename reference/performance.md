@@ -117,6 +117,44 @@ and the runner config's own record has the same walk at 7.622 s serial against
 7.768 s at eight threads, so the 20 s per-test kill sits 2.6x away rather than
 the 1.6x-inflation estimate's 1.7x.
 
+## The two GARCH instruments the skip list was hiding, 2026-08-19
+
+The same shape as the dwell entry above, found by finishing the audit that one
+started. `standardized_candidate_rail_sizing` and
+`realized_return_envelope_under_regime_scaling` were `#[ignore]`d and in the
+gate profile's `skip` list under the heading claiming every entry there outlives
+the 20-second per-test hang watchdog. Measured one test per process in dev on
+host `bygg`: **0.43 s** and **0.20 s**, three sweeps agreeing to within 0.15 s.
+
+A review pass argued that 0.43 s reads like a RELEASE number and that dev would
+land at 8 to 30 s, straddling the watchdog. IT DOES NOT. Re-measured with
+`--debug`, which is the profile the argument was about, the rail sizing runs
+**0.45 s to 0.56 s** across the three sweeps, and the whole `garch` filter -
+both instruments plus the second-moment harness - runs **0.63 s to 0.77 s**.
+Record the spread rather than a single figure: this crate's gate wall is noisy
+and a lone number invites exactly that objection.
+
+WHAT THE WRONG CLAIM COST, and it is the dwell lesson verbatim: those two are
+the ONLY measurements behind `GARCH_SIGMA_CAP`, `FEEDBACK_RETURN_CEILING` and
+`REALIZED_RETURN_CEILING`. The numbers `consts.rs` cites in prose - a sigma
+reaching 57.2x its unconditional scale, a largest clean return of 3.33e-3, an
+unclipped return RMS of 1.2393e-5 over 16M updates, a clean realized maximum of
+0.82 percent at `vol_mult` 1 - all come from tests nothing had run since they
+were written. Both are un-ignored, out of `skip`, and read
+`GARCH_ARCH`/`GARCH_GARCH`/`VOL_SCALAR` rather than a frozen candidate triple
+that happened to equal them. Every figure above re-measured unchanged on the
+round's tree.
+
+THE GATE, `brokkr check --gate`, on the round's tree: **49.0 s** on the fix
+pass and **52.4 s** after the review repairs, which changed no test count.
+Against the 41.4 s / 50.4 s pair recorded above this is inside the noise that
+entry warns about; the counts are the readable part. 1195 + 440 = 1692 pairs,
+1635 run, 57 ignored, 0 orphaned, 14 skips. The deltas from 1191 + 436 / 1688 /
+1627 / 61 / 16 decompose exactly: two new `mogwai-data` tests in
+`tests/tape_version_prose.rs` are +2 in each sweep and +4 pairs, and the two
+un-ignored instruments are +2 run in each sweep, -4 ignored and -2 skips while
+adding no pair, having already been pairs.
+
 ## The adapter socket suites' wall, 2026-08-19
 
 `brokkr test -p mogwai-adapter "" --debug`, the serial sweep of the four

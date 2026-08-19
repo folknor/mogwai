@@ -978,14 +978,9 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
   of this round's cut - which assumed one all-features sweep and therefore an
   unrunnable, silently-passing test - did not survive contact with the runner.
   The focused runner also applies NO `skip` list; only the gate profile does.
-- TWO SKIP ENTRIES STILL REST ON THE SAME FALSE COST CLAIM and were left in
-  place with their measured numbers: `standardized_candidate_rail_sizing`
-  0.37 s and `realized_return_envelope_under_regime_scaling` 0.20 s, under a
-  heading in `brokkr.toml` saying every entry below it outlives the watchdog.
-  Only `synthetic_spread_decomposition_at_protocol_seven` at 6.46 s is even
-  loosely described. They are entangled with the report's finding 6 - the test
-  it says carries the real claim is one of the two that never runs - so
-  whoever takes finding 6 takes these.
+- TWO SKIP ENTRIES WERE LEFT UNRESOLVED HERE AND ROUND 4 CLOSED THEM with
+  finding 6; see that section. `synthetic_spread_decomposition_at_protocol_seven`
+  at 6.46 s is the only entry the cost heading still describes even loosely.
 - REFUSED: cutting `SESSION_DRAW`. 15M parent events is ~30 simulated days and
   the seven `dow_weight` assertions need whole weeks to separate a weekend from
   a weekday, so halving it passes on less evidence rather than failing sooner.
@@ -1176,6 +1171,173 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
   order 1e-8 ns. The comment argued the direction of `ceil`, which is not
   sufficient, and now argues the magnitude.
 
+## The tape document, round 4: the GARCH report and the prose gate
+
+- `garch_second_moment_instrumentation` WAS REPOINTED, NOT DELETED, and the
+  reasoning is the round's main ruling. Its two arms were labelled RAW =
+  "AS SHIPPED" and standardized = "COUNTERFACTUAL", exactly inverted, at a
+  `vol_scalar` of 1e-6 against a shipped `VOL_SCALAR` of 1.2e-5 - so its
+  headline numbers, `sqrt(E[sigma2]) / vol_scalar 968.71x` and
+  `cap occupancy 17.19%`, described the pre-standardization process under a
+  banner saying otherwise. All of it reproduced verbatim. The question "what
+  was it the only implementation of" answered itself: `consts.rs` CITES it as
+  the ground for `GARCH_ARCH` and `GARCH_GARCH`, so deleting it would have left
+  a durable comment pointing at nothing.
+  - THE SHIPPED ARM NOW CARRIES THREE ASSERTIONS A CONSTANT CHANGE CAN BREAK,
+    which is what the old pair could not. Stationarity
+    (`GARCH_ARCH * E[z^2] + GARCH_GARCH < 1`, measured 0.9991), RAIL
+    NON-PARTICIPATION (`at_cap` and `feedback_clamped` both exactly zero in a
+    million clean updates), and `sqrt(E[sigma2]) / VOL_SCALAR` within a factor
+    of two of one (measured 0.9571). Bite-checked as text edits in `consts.rs`:
+    `GARCH_GARCH` 0.979 -> 0.99 fails stationarity by name at 1.0101, and
+    `VOL_SCALAR` 1.2e-5 -> 1.2e-4 fails the rail assertion at 4 feedback clamps
+    with stationarity still green - so the two are independent rather than one
+    check wearing two hats. The third is bitten in `dynamics.rs` instead, and
+    why is the next entry.
+  - THE 10 PERCENT WINDOW THE FIX PASS SHIPPED WAS UNDER 1 PERCENT, and the
+    cold review caught it. `a0 = VOL_SCALAR^2 * (1 - a1 - b1)` over a stationary
+    variance `a0 / (1 - a1 * E[z^2] - b1)` puts a 0.001 denominator under a
+    derivative of `-a1` = -0.02: A TWENTYFOLD AMPLIFICATION of `E[z^2]` into the
+    ratio, so the window admitted `E[z^2]` in about [0.9905, 1.0083] while the
+    sibling unit-variance assertion two lines above admitted [0.75, 1.25], 25x
+    wider. Worse, `E[z^2]` is a mean of a squared standardized t(4), INFINITE
+    VARIANCE at df 4, so no CLT error bar exists to justify any tight number.
+  - THE OBVIOUS REPAIR - assert against the stationary variance computed FROM
+    the measured `E[z^2]`, dividing the amplification out - WAS TRIED AND IS
+    WORSE, which is why it was measured before being written down. Over harness
+    seeds 42, 7 and 1: raw ratio 0.9571 / 0.9904 / 0.9530, corrected ratio
+    0.9319 / 1.0085 / 0.9455. The correction WIDENS the spread from 3.7 points
+    to 7.7, because it feeds `E[z^2]`'s own noise through the same 20x gain into
+    the target. And driving `GARCH_GARCH` to 0.9799 - still stationary, still
+    green everywhere else - takes the raw ratio to 0.685 and the corrected one
+    to 0.474, BOTH DOWNWARD, opposite to what stationary theory predicts,
+    because near the pole a million updates stop sampling the stationary mean.
+    Either form at 10 percent is a red gate for a change that broke nothing.
+  - SO THE WINDOW IS HALF TO DOUBLE AND ITS CATCH SET IS MEASURED, not tasted.
+    The ratio is near an IDENTITY across the stationary interior by
+    construction, so no band gates `a1` and `b1` here at all. What it does catch:
+    a broken `a0` derivation - `a0 * 9` in `GarchVol::new` gives 2.87x and fails,
+    which is the claim `VOL_SCALAR^2` is the unconditional variance, asserted
+    nowhere else - and loss of unit variance, which misses by 80x on the
+    unstandardized arm and missed by 968x pre-repair. Both ratios are still
+    PRINTED, which is the part the tight assertion was pretending to do.
+  - THE SECOND ARM'S LABEL WAS ALSO FALSE AND IS NOW TRUE. The fix pass drove
+    it at the pre-standardization era's `vol_scalar` of 1e-6 and captioned it
+    "the pre-standardization process", justified as "a counterfactual is only
+    informative at the parameters it actually ran with". But `run_garch_harness`
+    builds `GarchVol::new`, which reads the SHIPPED `GARCH_ARCH` and
+    `GARCH_GARCH` and takes no override - the era ran 0.12 and 0.875 - so that
+    arm was TWO of today's three parameters with one historical one: a triple
+    that never shipped in any era, printed under a historical banner. The same
+    defect the round was closing, one layer down, and the justification argued
+    for something the code did not do. Both arms now run at `VOL_SCALAR` and the
+    second is captioned "TODAY's parameters WITHOUT the standardization", which
+    is what its assertions actually claim; `vol_scalar` reached only the printed
+    report, since both are scale-free. Reconstructing the era needs an `a1`/`b1`
+    override hook and nothing here asks a question that would justify one.
+  - THAT ARM'S PERSISTENCE ASSERTION IS DELIBERATELY KEPT AND ITS MEANING IS
+    WRITTEN ON IT. It reads TODAY's `a1` and `b1` against an unstandardized
+    innovation, so what it says is "the standardization is what buys
+    stationarity, not slack in the parameters" - true at 1.0191, and a future
+    re-solve turning it red has made the standardization optional rather than
+    regressed. That is a deliberate re-read, not a goalpost to move.
+  - AND THE HARNESS MAKES ITS OWN STANDARDIZATION DECISION, so DE-STANDARDIZING
+    PRODUCTION LEAVES EVERY ASSERTION HERE GREEN. Stated on the block comment
+    rather than papered over: that property belongs to
+    `trace_consumes_no_draws_and_leaves_the_tape_byte_identical`, which asserts
+    `innovation_raw / innovation_std == STUDENT_T_UNIT_SCALE` against the
+    shipped walk. This file owns the CONSEQUENCES - stationarity, rail
+    occupancy, whether `VOL_SCALAR` means what it says.
+- THE TWO SKIP ENTRIES ROUND 2 LEFT ARE RESOLVED, the same way the dwell pair
+  was. `standardized_candidate_rail_sizing` measures 0.43 s and
+  `realized_return_envelope_under_regime_scaling` 0.20 s against a heading
+  claiming both outlive the 20 s watchdog; both are un-ignored, out of `skip`
+  and running on every lane. THE COST OF THE WRONG CLAIM WAS THE DWELL COST
+  AGAIN: those two are the only measurements behind `GARCH_SIGMA_CAP`,
+  `FEEDBACK_RETURN_CEILING` and `REALIZED_RETURN_CEILING`, so every number
+  `consts.rs` quotes in prose - 57.2x, 3.33e-3, RMS 1.2393e-5, 0.82 percent -
+  came from a test nothing ran. All re-measured unchanged.
+  - BOTH NOW READ THE SHIPPED CONSTANTS. Each had a frozen
+    `(0.02, 0.979, 1.2e-5)` "stage-1 winner" written into it, and the envelope
+    one also had the design-era "proposed" rails `1e-3` and `4e-3` as local
+    literals. Those were what the sweep chose BETWEEN; left in place after the
+    choice landed, a re-solve would have gone on measuring the old process,
+    green, while `consts.rs` cited it. The rail test is renamed
+    `shipped_garch_rails_sit_above_the_clean_tail` for the same reason - the
+    word "candidate" was load-bearing and had stopped being true.
+  - THE ENVELOPE TEST NEEDED A CLAIM OF ITS OWN, because pointing it at the
+    shipped rails made its two assertions duplicates of the rail test's at half
+    the horizon. It now asserts what only it can see: `REALIZED_RETURN_CEILING`
+    is INERT IN CLEAN OPERATION - `base_max * session_peak` at `vol_mult` 1 is
+    8.1771e-3 against a ceiling of 5e-2, which is `consts.rs`'s "0.82 percent
+    against 5.13 percent" asserted rather than printed. Bite-checked by editing
+    the ceiling to 4e-3, re-verified after this round's edits.
+  - FOUR RAIL ASSERTIONS ACROSS THE TWO TESTS COULD NOT FAIL, and the round's
+    own bite-check evidence was misattributed to them. The cold review named
+    the sigma pair; MEASUREMENT FOUND THE FEEDBACK PAIR IS THE SAME. Lowering
+    `GARCH_SIGMA_CAP` to 5e-4 and, separately, `FEEDBACK_RETURN_CEILING` to
+    1e-3 fails BOTH tests on `measure_uncapped_tail`'s in-loop
+    `!hit_variance_cap() && !hit_feedback_clamp()` guard, never on the named
+    assertion after the loop - the guard aborts the run at the first offending
+    update, so no later comparison against a maximum is ever reached. The sigma
+    ones were dead twice over: `step` writes `sigma2 = candidate.min(cap)`, so
+    a maximum over the capped value cannot exceed the cap even with the guard
+    removed. All four are DELETED. The claim is stated once, on the guard,
+    whose message now says what a failure means, and the guard is the stronger
+    form anyway - every step rather than a top-k maximum.
+  - AND `measure_uncapped_tail` NOW COLLECTS `sigma2_candidate`, the pre-cap
+    value, which is what its own name says it measures. It was collecting the
+    capped `sigma2`. The guard makes the two equal today, so every printed
+    figure - 57.2x, 3.3252e-3, RMS 1.2393e-5 - is unchanged; the point is that
+    they would silently stop being equal exactly when the measurement mattered.
+- `tape_version_prose`'s `claims()` PANICKED ON A BYTE-INDEX SLICE and now
+  snaps only the QUOTED window to char boundaries. WHAT IS MATCHED IS
+  UNTOUCHED, and that was the constraint: the gate's whole design is two exact
+  phrasings, everything else read as a HISTORICAL record, so a repair that
+  widened matching would rewrite frozen specs.
+  - PINNED BY A SYNTHETIC HAYSTACK, not by a file in the tree: the repository
+    forbids the character in its own prose, so the hazard is unrepresentable as
+    a fixture and the pin BUILDS the character from its scalar value. Placement
+    is exact - it straddles the window edge on each side - because a multi-byte
+    character merely NEAR a claim is harmless and a test that puts one in the
+    neighbourhood passes for free. Bite-checked one edge at a time: reverting
+    `start` alone fails on the leading character, reverting `end` alone fails on
+    the trailing one.
+  - THE SYMLINK NOTE IS REAL BUT NOT AS REPORTED, AND MEASUREMENT IS WHAT SAID
+    SO. "A symlinked directory cycle recurses forever" is false on Linux: the
+    kernel caps symlink resolution per pathname at 40, `is_dir` returns false
+    there and the walk terminates on its own. What it actually cost, planted as
+    `notes/x -> ..` and measured, was a 40-FOLD WALK - 0.27 s to 1.02 s - with
+    every markdown file collected up to forty times, plus a reachable `read_dir`
+    failure on the ELOOP boundary that would fail a prose gate with a symlink
+    error. Fixed with `entry.file_type()` and pinned by
+    `a_symlink_cycle_is_not_descended_into`, which builds the cycle in a
+    pid-named `CARGO_TARGET_TMPDIR` directory rather than in the tree the suite
+    is judged against. IT ASSERTS THE COUNT, NOT TERMINATION: the defect
+    terminates too, and reports the same two files eighty times. Bite-checked
+    by restoring `path.is_dir()`.
+  - REFUSED: making the walk tolerate a `read_dir` error. The report reads the
+    panic as "one unreadable directory fails a test about prose", and it does -
+    correctly. This gate's claim is that it read every markdown file in the
+    repository; skipping a directory it could not open keeps the green light
+    while dropping the claim, which is the fail-open scanner the arc has
+    refused twice already. The panic message now says that is what it is. A
+  follow-up note - that a panic in `markdown_files` leaks the scratch tree,
+  because `remove_dir_all` runs after the walk - is ACCEPTED AS STATED rather
+  than fixed: the directory is inert, lives under `CARGO_TARGET_TMPDIR` rather
+  than in the tree the suite judges, and `catch_unwind` around the walk is more
+  machinery than a build-tree directory is worth. The cost is written beside
+  the prologue that would collect it.
+- REFUTED, BY MEASUREMENT: that the 0.43 s un-ignore cost rests on a
+  release-profile number and would be 8 to 30 s in dev, straddling the
+  watchdog. Re-measured with `--debug` it is 0.45 s to 0.56 s across the three
+  sweeps. The lesson kept is the smaller one: record the SPREAD, not a single
+  figure, on a crate whose gate wall is known to be noisy.
+- NO `TAPE_PROTOCOL_VERSION` BUMP WAS OWED, checked rather than assumed:
+  `git diff` on `consts.rs` is two lines of doc comment naming the renamed test,
+  and every `tests.rs` edit is inside `mod tests`, which `generated/mod.rs`
+  declares `#[cfg(test)]`. No constant, no fingerprint, no artifact moved.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -1323,6 +1485,14 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
     across the fix pass and its review sweep. UNCHANGED from tape r2 on purpose
     - the round rewrote five vector executors inside one existing test and
     added none.
+  - tape r4: 1195 + 440, 1692 pairs, 1635 run, 57 ignored, 0 orphaned, 14
+    skips, 49.0 s. FOUR MOVING PARTS AND THEY SEPARATE CLEANLY: two new
+    `mogwai-data` tests in `tests/tape_version_prose.rs` are +2 in EACH sweep
+    (that crate is in both) and +4 pairs; the two un-ignored GARCH instruments
+    are +2 run in each sweep, -4 ignored and -2 skips while adding NO pair,
+    because an ignored test was already a pair. The wall is inside the noise
+    the r2 entry warns about; read the counts. The review-repair pass re-ran it
+    at 52.4 s with every count identical.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

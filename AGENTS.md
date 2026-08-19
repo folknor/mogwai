@@ -233,7 +233,12 @@ Test and process rules the loop paid for, nine non-biting tests among them:
 - BITE-CHECK EVERY NEW REGRESSION TEST: revert the production fix as a TEXT
   EDIT, observe the named failure, restore it as a text edit. Never restore
   with `git checkout -- <path>` - the tree routinely carries other uncommitted
-  work in the same file, and that command destroyed it twice.
+  work in the same file, and that command destroyed it twice. READ WHICH
+  ASSERTION FIRED, not merely that the test went red: four rail assertions
+  survived a bite-check in the tape round because an EARLIER guard inside the
+  measurement loop failed first, and a red test with the right name reads as
+  proof for whichever assertion the author had in mind. A perturbation that
+  proves nothing looks exactly like a test that cannot fail.
 - THE PROFILE SPLIT BITES: `brokkr check` runs tests in dev, `brokkr test`
   in release. A test pinning `debug_assertions` behaviour must be gated
   `#[cfg(debug_assertions)]` or the release sweep fails it; a test whose bite

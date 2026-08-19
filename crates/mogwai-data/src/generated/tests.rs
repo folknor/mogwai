@@ -17,8 +17,9 @@ use crate::{TickEvent, TickSource};
 
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::{
-    FEEDBACK_RETURN_CEILING, GARCH_SIGMA_CAP, MAX_SESSION_GAP_NS, NS_PER_HOUR,
-    REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE, TRADE_BOUNCE_HALF_WIDTH_TICKS,
+    FEEDBACK_RETURN_CEILING, GARCH_ARCH, GARCH_GARCH, GARCH_SIGMA_CAP, MAX_SESSION_GAP_NS,
+    NS_PER_HOUR, REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
+    TRADE_BOUNCE_HALF_WIDTH_TICKS, VOL_SCALAR,
 };
 use super::numeric::decimal_from_f64;
 use super::session::{utc_hour, utc_hour_dow};
@@ -2919,9 +2920,18 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
     // The rails are no longer openable - `step` reads the shipped constants and
     // takes no multiplier, which is the decoupling. That is fine and in fact
     // stronger: the SHIPPED rails were sized to sit above this process's clean
-    // tail, so the assertion inside the loop that neither was reached is now a
-    // direct check of that sizing claim rather than an artifact of a harness
-    // fence. If a future change lets either rail bind here, this fails loudly.
+    // tail, so THE ASSERTION INSIDE THE LOOP IS THE SIZING CLAIM, checked on
+    // every step rather than on a top-k maximum. Callers must not restate it
+    // afterwards as `sigma_tail.max() < GARCH_SIGMA_CAP`: `step` writes
+    // `sigma2 = candidate.min(cap)`, so a maximum taken over the CAPPED value
+    // can never exceed the cap and such an assertion is dead by construction.
+    // Both callers say so where the temptation is.
+    //
+    // The sigma tail is therefore collected from `sigma2_candidate`, the value
+    // BEFORE the cap, which is what "uncapped tail" in this function's name
+    // means. The in-loop guard makes the two equal today; collecting the
+    // capped one would silently start under-reporting the tail the moment it
+    // stopped being equal.
     let unit = STUDENT_T_UNIT_SCALE;
     let mut sigma_tail = TopK::new(65_536);
     let mut return_tail = TopK::new(65_536);
@@ -2943,9 +2953,11 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
             let step = vol.step(z);
             assert!(
                 !step.hit_variance_cap() && !step.hit_feedback_clamp(),
-                "the sizing run must be unrailed; the fence was reached"
+                "the sizing run must be unrailed: a shipped rail bound the clean \
+                 process, so it does not sit above the clean tail and this \
+                 measurement is no longer of the unrailed process"
             );
-            sigma_tail.push(step.sigma2.sqrt());
+            sigma_tail.push(step.sigma2_candidate.sqrt());
             return_tail.push(step.unclipped_return.abs());
             sumsq += step.unclipped_return * step.unclipped_return;
             total += 1;
@@ -2955,27 +2967,26 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
     (sigma_tail, return_tail, rms, total)
 }
 
-// MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-// the workspace runner config, and has to be: the gate sets `include_ignored`
-// deliberately - that is how the socket-backed suites get covered - so
-// `#[ignore]` does not keep this out of it. Every instrument of this shape MUST
-// be added to that list as well. Nothing detects the omission; the symptom is
-// the full gate dying on the 20-second per-test hang watchdog, blaming a test
-// that was never meant to run there.
+// THIS IS THE REPOSITORY'S RAIL-SIZING CLAIM AND IT RUNS. It was `#[ignore]`d
+// and in the gate profile's `skip` list under a cost heading asserting that
+// every entry there outlives the 20-second per-test hang watchdog. Measured on
+// 2026-08-18, one test per process in dev, it takes 0.43 s - so the durable
+// numbers in `consts.rs` (a sigma reaching 57.2x its unconditional scale, a
+// largest clean return of 3.33e-3, an RMS of 1.2393e-5, all over 16M updates)
+// rested on a test nothing had run since it was written. Neither the
+// `#[ignore]` nor the skip entry survives that measurement.
 //
-// Run it deliberately by name, raising the watchdog for that one run:
-//   test -p mogwai-data standardized_candidate_rail_sizing --timeout 280
-// `--timeout` applies to the focused runner only, takes 1 to 280 seconds, and
-// is refused when the name matches more than one test. 280 is a hard cap. See
-// AGENTS.md for the runner these arguments belong to.
+// It is also pointed at the SHIPPED constants rather than at a written-down
+// "stage-1 winner" triple that happened to equal them. A candidate frozen in a
+// test is a second opinion about the generator: re-solve `GARCH_ARCH`,
+// `GARCH_GARCH` or `VOL_SCALAR` and this would have gone on measuring the old
+// process, green, while `consts.rs` still cited it.
 #[test]
-#[ignore = "long multi-seed tail measurement; run deliberately with an extended timeout"]
-fn standardized_candidate_rail_sizing() {
-    // The stage-1 winner.
+fn shipped_garch_rails_sit_above_the_clean_tail() {
     let candidate = GarchOverride {
-        a1: 0.02,
-        b1: 0.979,
-        vol_scalar: 1.2e-5,
+        a1: GARCH_ARCH,
+        b1: GARCH_GARCH,
+        vol_scalar: VOL_SCALAR,
     };
     const SEEDS: u64 = 8;
     const HORIZON: u64 = 2_000_000;
@@ -2985,7 +2996,7 @@ fn standardized_candidate_rail_sizing() {
 
     println!();
     println!(
-        "standardized candidate a1 {:.2} b1 {:.3} vol_scalar {:.2e}",
+        "shipped standardized process a1 {:.2} b1 {:.3} vol_scalar {:.2e}",
         candidate.a1, candidate.b1, candidate.vol_scalar
     );
     println!("{SEEDS} seeds x {HORIZON} updates = {total} unrailed latent updates");
@@ -3049,16 +3060,21 @@ fn standardized_candidate_rail_sizing() {
     // "Above the measured tail" is not "never hit". Standardized t(4) still has
     // infinite kurtosis, so the running maximum grows with the horizon; the
     // honest claim is NO OBSERVED PARTICIPATION over this 16M sample.
-    assert!(
-        sigma_tail.max() < GARCH_SIGMA_CAP,
-        "the sigma rail must sit above the clean tail: max {} vs rail {GARCH_SIGMA_CAP}",
-        sigma_tail.max()
-    );
-    assert!(
-        return_tail.max() < FEEDBACK_RETURN_CEILING,
-        "the feedback rail must sit above the clean tail: max {} vs rail {FEEDBACK_RETURN_CEILING}",
-        return_tail.max()
-    );
+    //
+    // BOTH HALVES OF THAT INVARIANT ARE ENFORCED IN THE LOOP, NOT HERE, and
+    // the pair of top-k restatements that used to stand at this point is gone
+    // because neither could fail. `measure_uncapped_tail` asserts
+    // `!hit_variance_cap() && !hit_feedback_clamp()` on EVERY step, so a rail
+    // sized below the clean tail aborts the run at the first offending update
+    // and no later comparison against a maximum is ever reached. The sigma one
+    // was dead twice over: `step` writes `sigma2 = candidate.min(cap)`, so a
+    // maximum taken over the capped value cannot exceed the cap even with the
+    // guard removed. Two assertions that read as the headline claim and could
+    // not report it is exactly the defect this round is named for, so the
+    // claim is stated once, on the guard, where it bites per-step rather than
+    // per-maximum.
+    //
+    // What survives here are the claims the guard does NOT make.
     assert!(
         sigma_tail.max() / candidate.vol_scalar > 1.0,
         "sigma excursions should exceed the unconditional scale"
@@ -3086,34 +3102,26 @@ fn standardized_candidate_rail_sizing() {
 // multiplying the clean rail by 100 is not a derivation.
 // ---------------------------------------------------------------------------
 
-// MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-// the workspace runner config, and has to be: the gate sets `include_ignored`
-// deliberately - that is how the socket-backed suites get covered - so
-// `#[ignore]` does not keep this out of it. Every instrument of this shape MUST
-// be added to that list as well. Nothing detects the omission; the symptom is
-// the full gate dying on the 20-second per-test hang watchdog, blaming a test
-// that was never meant to run there.
-//
-// Run it deliberately by name, raising the watchdog for that one run:
-//   test -p mogwai-data realized_return_envelope_under_regime_scaling --timeout 280
-// `--timeout` applies to the focused runner only, takes 1 to 280 seconds, and
-// is refused when the name matches more than one test. 280 is a hard cap. See
-// AGENTS.md for the runner these arguments belong to.
+// SAME TREATMENT, SAME GROUNDS as the rail sizing above: `#[ignore]`d and
+// skipped under a watchdog claim, measured at 0.20 s. It runs, and it reads the
+// shipped constants rather than the design-era candidate and the design-era
+// "proposed" rails - those literals were what the sweep was choosing BETWEEN,
+// and leaving them written down here after the choice landed turned the
+// instrument into a record of a decision instead of a check on it.
 #[test]
-#[ignore = "regime envelope sweep; run deliberately with an extended timeout"]
 fn realized_return_envelope_under_regime_scaling() {
     let candidate = GarchOverride {
-        a1: 0.02,
-        b1: 0.979,
-        vol_scalar: 1.2e-5,
+        a1: GARCH_ARCH,
+        b1: GARCH_GARCH,
+        vol_scalar: VOL_SCALAR,
     };
     const SEEDS: u64 = 8;
     const HORIZON: u64 = 1_000_000;
-    // Proposed clean rails. Both sit above the observed clean tail, so they do
-    // not participate in ordinary calibration - which is what lets the base
-    // distribution below be treated as the unrailed one.
-    const CLEAN_SIGMA_RAIL: f64 = 1e-3;
-    const CLEAN_FEEDBACK_RAIL: f64 = 4e-3;
+    // The clean rails, as shipped. Both sit above the observed clean tail, so
+    // they do not participate in ordinary calibration - which is what lets the
+    // base distribution below be treated as the unrailed one.
+    const CLEAN_SIGMA_RAIL: f64 = GARCH_SIGMA_CAP;
+    const CLEAN_FEEDBACK_RAIL: f64 = FEEDBACK_RETURN_CEILING;
     // Peak of the committed session vol curve; the realized path multiplies by
     // this as well as by the regime, and ignoring it would under-size the
     // ceiling by a factor of nearly 2.5.
@@ -3130,7 +3138,7 @@ fn realized_return_envelope_under_regime_scaling() {
     println!();
     println!("clean base process over {total} updates: RMS {rms:.4e}, max |return| {base_max:.4e}");
     println!(
-        "proposed clean rails: sigma {CLEAN_SIGMA_RAIL:.1e} (max seen {:.4e}), feedback {CLEAN_FEEDBACK_RAIL:.1e} (max seen {base_max:.4e})",
+        "shipped clean rails: sigma {CLEAN_SIGMA_RAIL:.1e} (max seen {:.4e}), feedback {CLEAN_FEEDBACK_RAIL:.1e} (max seen {base_max:.4e})",
         sigma_tail.max()
     );
     println!("session vol peak {session_peak:.3}");
@@ -3197,13 +3205,26 @@ fn realized_return_envelope_under_regime_scaling() {
         100.0 * (REALIZED_RETURN_CEILING.exp() - 1.0)
     );
 
+    // The two rail restatements that stood here are gone for the reason given
+    // at the end of `shipped_garch_rails_sit_above_the_clean_tail`: both clean
+    // rails are enforced per-step by `measure_uncapped_tail`'s own guard, which
+    // aborts before any maximum is compared, and the sigma one could not fail
+    // even without it. `CLEAN_SIGMA_RAIL` and `CLEAN_FEEDBACK_RAIL` stay named
+    // above because the printed table is written in terms of them.
+    //
+    // THE CLAIM THIS INSTRUMENT OWNS, and the only one the rail sizing above
+    // does not already carry: `REALIZED_RETURN_CEILING` is a PRODUCT POLICY
+    // that must be INERT in clean operation. `consts.rs` states it as "the
+    // unbounded realized maximum at `vol_mult` 1 is 0.82 percent" against a
+    // ceiling permitting 5.13 percent. `vol_mult` 1 at the session vol peak is
+    // the worst clean case, so the ceiling shaping nothing there is exactly
+    // that sentence, asserted.
+    let clean_worst_case = base_max * session_peak;
     assert!(
-        base_max < CLEAN_FEEDBACK_RAIL,
-        "the clean feedback rail must sit above the clean tail it is not meant to shape"
-    );
-    assert!(
-        sigma_tail.max() < CLEAN_SIGMA_RAIL,
-        "the clean sigma rail must sit above the clean tail"
+        clean_worst_case < REALIZED_RETURN_CEILING,
+        "the realized ceiling must not shape clean operation: worst clean \
+         realized return {clean_worst_case} against ceiling \
+         {REALIZED_RETURN_CEILING}"
     );
 }
 
@@ -4618,22 +4639,49 @@ fn pearson<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
 //
 // The recursion is a textbook GARCH(1,1), and `GarchVol::new` sets
 // `a0 = vol_scalar^2 * (1 - a1 - b1)` so `vol_scalar^2` is the unconditional
-// variance. That derivation assumes a UNIT-VARIANCE innovation. The innovation
-// is a raw Student-t(df) whose variance is `df / (df - 2)` = 2 at the committed
-// `STUDENT_T_DF`, so the true second-moment condition is
+// variance. That derivation assumes a UNIT-VARIANCE innovation, and the
+// second-moment condition it needs is `a1 * E[z^2] + b1 < 1`.
 //
-//     a1 * E[z^2] + b1  =  0.12 * 2 + 0.875  =  1.115  >  1
+// AS SHIPPED that condition holds. `next_latent_mid` divides the raw
+// Student-t(df) by `STUDENT_T_UNIT_SCALE` before the innovation reaches the
+// recursion, so `E[z^2] = 1` and the condition is `a1 + b1` = 0.999. The first
+// arm below is that process. Its label used to say "COUNTERFACTUAL" while the
+// raw arm said "AS SHIPPED", exactly inverted, for two repairs after the
+// standardization landed - which is the shape this file keeps finding
+// elsewhere: a legible, quotable report describing a world that stopped
+// existing.
 //
-// which has no finite stationary variance. The implemented process stays
-// bounded only because `sigma2` is capped and the feedback return is clamped,
-// which makes it a materially different process from the one its own
-// initialization and comments describe.
+// THE SECOND ARM IS THE SAME SHIPPED PARAMETERS WITH THE STANDARDIZATION
+// SWITCHED OFF, and it is kept because it is why the standardization is
+// load-bearing rather than cosmetic. Unstandardized, the innovation is a raw
+// Student-t(4) of variance `df / (df - 2)` = 2, so the condition reads
+// `a1 * 2 + b1` = 1.019 at today's `a1` and `b1` - no finite stationary
+// variance, bounded only because `sigma2` is capped and the feedback return
+// clamped.
 //
-// This harness measures what the recursion actually does, driving the SHIPPED
+// IT IS NOT A RECONSTRUCTION OF THE PRE-STANDARDIZATION ERA and must not be
+// labelled as one. That era ran `a1` 0.12 and `b1` 0.875, giving 1.115, at a
+// `vol_scalar` of 1e-6; `run_garch_harness` builds `GarchVol::new`, which reads
+// the SHIPPED `GARCH_ARCH` and `GARCH_GARCH` and offers no override, so no arm
+// reachable from here can be that process. An earlier repair drove this arm at
+// the era's 1e-6 and captioned it accordingly, which printed a triple that
+// never shipped in any era under a historical banner - the same defect, one
+// layer down. Reconstructing the era needs an `a1`/`b1` override hook, and
+// nothing here asks a question that would justify adding one.
+//
+// This harness measures what the recursion does, driving the SHIPPED
 // `GarchVol::step` and `draw_student_t` rather than re-deriving them. Prices,
 // bounce, sweeps and the session envelope are bypassed on purpose: reading this
 // off emitted prices does not work, because the almost-sure two-tick bounce is
 // larger than the latent return it would have to reveal.
+//
+// WHAT IT DOES NOT COVER, so nobody reads it as covering it: the harness makes
+// its own standardization decision, so DE-STANDARDIZING PRODUCTION would leave
+// every assertion here green. That property belongs to
+// `trace_consumes_no_draws_and_leaves_the_tape_byte_identical`, which asserts
+// `innovation_raw / innovation_std == STUDENT_T_UNIT_SCALE` against the shipped
+// walk. What this file owns is the CONSEQUENCE of the choice - stationarity,
+// rail occupancy and whether `VOL_SCALAR` means what it says.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -4681,8 +4729,14 @@ impl GarchReport {
 }
 
 /// Drive the shipped recursion for `total` updates after `burn_in`. When
-/// `standardize` is set the innovation is divided by `sqrt(df / (df - 2))`.
-/// That arm is a TEST-ONLY counterfactual; nothing shipped does it.
+/// `standardize` is set the innovation is divided by `STUDENT_T_UNIT_SCALE`,
+/// which is what `next_latent_mid` does; clearing it drives the SAME shipped
+/// `a1` and `b1` with an unstandardized innovation. `a1` and `b1` are NOT
+/// overridable here - `GarchVol::new` reads them from `consts.rs` - so the
+/// cleared arm is today's parameters without the standardization, never a
+/// reconstruction of the pre-standardization era. The divisor is the shipped
+/// constant rather than a local `sqrt(df / (df - 2))` so a change to either is
+/// felt here.
 fn run_garch_harness(vol_scalar: f64, burn_in: u64, total: u64, standardize: bool) -> GarchReport {
     use rand::SeedableRng;
     use rand_distr::{ChiSquared, Normal};
@@ -4691,7 +4745,7 @@ fn run_garch_harness(vol_scalar: f64, burn_in: u64, total: u64, standardize: boo
     let mut rng = rand_chacha::ChaCha12Rng::seed_from_u64(42);
     let normal = Normal::new(0.0, 1.0).expect("valid normal");
     let chi_squared = ChiSquared::new(super::consts::STUDENT_T_DF).expect("valid chi-squared");
-    let unit = (super::consts::STUDENT_T_DF / (super::consts::STUDENT_T_DF - 2.0)).sqrt();
+    let unit = super::consts::STUDENT_T_UNIT_SCALE;
 
     let mut report = GarchReport::default();
     let mut scales: Vec<f64> = Vec::with_capacity(total as usize);
@@ -4742,7 +4796,7 @@ fn run_garch_harness(vol_scalar: f64, burn_in: u64, total: u64, standardize: boo
 }
 
 fn print_garch_report(label: &str, vol_scalar: f64, report: &GarchReport) {
-    let unit = (super::consts::STUDENT_T_DF / (super::consts::STUDENT_T_DF - 2.0)).sqrt();
+    let unit = STUDENT_T_UNIT_SCALE;
     println!("--- {label}");
     println!("  updates                        {}", report.updates);
     println!("  empirical E[z^2]               {:.4}", report.mean_z2);
@@ -4792,43 +4846,168 @@ fn print_garch_report(label: &str, vol_scalar: f64, report: &GarchReport) {
     );
 }
 
-/// Reports the recursion's realized second-moment behaviour and pins the
-/// finding, so a future GARCH repair has to re-bless this deliberately rather
-/// than quietly changing what the generator's volatility means.
+/// Reports the recursion's realized second-moment behaviour and gates the
+/// shipped triple `(GARCH_ARCH, GARCH_GARCH, VOL_SCALAR)` on it, so a future
+/// GARCH repair has to re-bless this deliberately rather than quietly changing
+/// what the generator's volatility means.
+///
+/// The UNSTANDARDIZED arm carries no gate on the venue. It is here for the
+/// contrast in the printed report and for the one claim that is still live
+/// about it, which is stated on its own assertion below.
 #[test]
 fn garch_second_moment_instrumentation() {
     const BURN_IN: u64 = 100_000;
     const UPDATES: u64 = 1_000_000;
-    let vol_scalar = 1e-6;
 
-    let raw = run_garch_harness(vol_scalar, BURN_IN, UPDATES, false);
-    let standardized = run_garch_harness(vol_scalar, BURN_IN, UPDATES, true);
-    print_garch_report("raw Student-t(4), AS SHIPPED", vol_scalar, &raw);
+    // BOTH ARMS RUN AT `VOL_SCALAR`; see the block comment above for why the
+    // second one cannot be captioned as the pre-standardization era. Its two
+    // assertions are scale-free, so the `vol_scalar` it is driven at reaches
+    // only the printed report - which is exactly why an inaccurate one here was
+    // worth removing rather than tolerating.
+    let shipped = run_garch_harness(VOL_SCALAR, BURN_IN, UPDATES, true);
+    let unstandardized = run_garch_harness(VOL_SCALAR, BURN_IN, UPDATES, false);
+    print_garch_report("standardized t(4), AS SHIPPED", VOL_SCALAR, &shipped);
     print_garch_report(
-        "standardized t(4)/sqrt(2), COUNTERFACTUAL",
-        vol_scalar,
-        &standardized,
+        "raw t(4), TODAY's parameters WITHOUT the standardization",
+        VOL_SCALAR,
+        &unstandardized,
     );
 
     assert!(
-        (raw.mean_z2 - 2.0).abs() < 0.5,
-        "raw innovation variance should sit near the t(4) value 2, got {}",
-        raw.mean_z2
+        (shipped.mean_z2 - 1.0).abs() < 0.25,
+        "the shipped innovation must reach the recursion with unit variance, got {}",
+        shipped.mean_z2
     );
     assert!(
-        raw.effective_persistence() > 1.0,
-        "raw recursion should be non-stationary in second moment, got {}",
-        raw.effective_persistence()
+        shipped.effective_persistence() < 1.0,
+        "the shipped recursion must be stationary in second moment: \
+         GARCH_ARCH {GARCH_ARCH} * E[z^2] + GARCH_GARCH {GARCH_GARCH} = {}",
+        shipped.effective_persistence()
+    );
+    // THE RAILS ARE NOT PART OF THE PROCESS AT THESE PARAMETERS, and that is
+    // the claim most easily lost by a re-solve: a non-stationary recursion is
+    // bounded BY its rails rather than by its own dynamics, which is what the
+    // unstandardized arm below shows at 17.19 percent cap occupancy and 1.46
+    // percent feedback clamping, at these same shipped `a1` and `b1`.
+    // Occupancy is asserted at zero rather than "small", because at the
+    // shipped scale the cap sits 83x above the unconditional scale and nothing
+    // in a clean million updates comes near it. The wider-horizon version of
+    // this claim, with the measured tail behind it, is
+    // `shipped_garch_rails_sit_above_the_clean_tail`.
+    assert_eq!(
+        (shipped.at_cap, shipped.feedback_clamped),
+        (0, 0),
+        "no shipped update may be shaped by a rail: {} at the variance cap and \
+         {} feedback clamps in {} clean updates",
+        shipped.at_cap,
+        shipped.feedback_clamped,
+        shipped.updates
+    );
+    // `VOL_SCALAR` MEANS WHAT IT SAYS - AND THE CHECK HAS TO BE WRITTEN AROUND
+    // A 20x AMPLIFICATION, which is the whole reason this is three lines rather
+    // than one.
+    //
+    // `GarchVol::new` intends `E[sigma2] = VOL_SCALAR^2`, setting
+    // `a0 = VOL_SCALAR^2 * (1 - a1 - b1)`. The stationary variance of the
+    // recursion is `a0 / (1 - a1 * E[z^2] - b1)`, so the intent is only
+    // realized when `E[z^2]` is exactly 1. At the shipped `a1 + b1` of 0.999
+    // the denominator is 0.001 and its derivative in `E[z^2]` is `-a1` = -0.02,
+    // A TWENTYFOLD AMPLIFICATION: `E[z^2]` of 0.99 gives a ratio of 0.913, and
+    // 1.01 gives 1.118. So a naive `sqrt(E[sigma2]) / VOL_SCALAR` within 10
+    // percent is NOT a 10 percent band on anything - it is a band of under
+    // plus or minus 1 percent on `E[z^2]`, TIGHTER THAN THE UNIT-VARIANCE
+    // ASSERTION ABOVE BY 25x, and it would reject values that assertion
+    // deliberately accepts. It cannot be defended statistically either: `z` is
+    // a standardized t(4), `z^2` has INFINITE VARIANCE at df 4, so the sample
+    // mean has no CLT error bar, and the persistence-0.999 recursion relaxes
+    // over ~1000 steps, leaving of order 1000 effective blocks in a million.
+    // A `rand_distr` bump or a burn-in change could flip that red with nothing
+    // about the generator having moved. A previous draft of this repair asserted
+    // exactly that, commented as a 10 percent window; the measured 0.957 sat
+    // 43 percent of the way to its lower failure edge.
+    //
+    // DIVIDING THE AMPLIFICATION OUT MAKES IT WORSE, WHICH WAS WORTH MEASURING
+    // BEFORE WRITING A NUMBER DOWN. Comparing the realized `sqrt(E[sigma2])`
+    // against the stationary sd implied by the MEASURED `E[z^2]` - the
+    // amplification-corrected form, which is the obvious repair - was tried
+    // over three harness seeds, 42, 7 and 1:
+    //
+    //     seed   E[z^2]   raw ratio   corrected ratio
+    //       42   1.0026      0.9571            0.9319
+    //        7   0.9982      0.9904            1.0085
+    //        1   1.0008      0.9530            0.9455
+    //
+    // The correction WIDENS the spread, 3.7 points to 7.7, because it feeds
+    // `E[z^2]`'s own sampling noise through the same 20x amplification into the
+    // target it is comparing against. The residual is not the amplification: it
+    // is that `E[sigma2]` is a mean over a persistence-0.999 recursion, whose
+    // relaxation time is of order 1000 steps, so a million updates carry of
+    // order a THOUSAND effective observations of a heavy-tailed quantity. On
+    // that evidence 0.9319 would have sat 68 percent of the way to the 10
+    // percent edge - a gate one unlucky seed from red.
+    //
+    // SO THE WINDOW IS WIDE - half to double - AND WHAT IT CATCHES WAS
+    // ESTABLISHED BY BITING IT rather than by taste. The ratio is close to an
+    // IDENTITY across the whole stationary interior, because `a0` is DEFINED
+    // from `a1` and `b1` to make it one: moving `b1` within that interior
+    // barely moves it, so no band of any width gates `a1` and `b1` here, and
+    // pretending otherwise was half of what the 10 percent version was doing.
+    // What it does catch, measured:
+    //
+    //   - a broken `a0` derivation. Multiplying `GarchVol::new`'s `a0` by 9
+    //     gives 2.87x and fails. That is the actual claim - `VOL_SCALAR^2` is
+    //     the unconditional variance - and it is the one nothing else here
+    //     asserts.
+    //   - loss of unit variance in the innovation. The unstandardized arm below
+    //     misses by 80x at these very parameters, and the pre-repair process
+    //     missed by 968x. Two orders of magnitude of margin.
+    //
+    // And the failure mode the tight version would have added, also measured:
+    // driving `b1` to 0.9799, still stationary and still green everywhere else,
+    // takes the ratio to 0.685 and the amplification-corrected form to 0.474,
+    // BOTH DOWNWARD, opposite to the direction stationary theory predicts,
+    // because near the pole a million updates no longer sample the stationary
+    // mean at all. A 10 percent window on either form is a red gate for a
+    // parameter move that broke nothing.
+    //
+    // Both ratios are PRINTED so a drift within the band is still visible to a
+    // reader, which is the part a tight assertion was pretending to do.
+    let stationary_var = VOL_SCALAR.powi(2) * (1.0 - GARCH_ARCH - GARCH_GARCH)
+        / (1.0 - GARCH_ARCH * shipped.mean_z2 - GARCH_GARCH);
+    let realized_ratio = shipped.mean_sigma2.sqrt() / VOL_SCALAR;
+    println!(
+        "sqrt(E[sigma2]) / VOL_SCALAR {realized_ratio:.4}x; against the stationary \
+         sd at the measured E[z^2] {:.4}x",
+        shipped.mean_sigma2.sqrt() / stationary_var.sqrt()
     );
     assert!(
-        (standardized.mean_z2 - 1.0).abs() < 0.25,
-        "standardized innovation should have unit variance, got {}",
-        standardized.mean_z2
+        stationary_var.is_finite() && stationary_var > 0.0,
+        "the measured E[z^2] {} puts the recursion past its stationarity pole",
+        shipped.mean_z2
     );
     assert!(
-        standardized.effective_persistence() < 1.0,
-        "standardized recursion should be stationary, got {}",
-        standardized.effective_persistence()
+        (0.5..2.0).contains(&realized_ratio),
+        "sqrt(E[sigma2]) must track VOL_SCALAR to within a factor of two - see \
+         the comment above for why the band is this wide and what it is sized \
+         to catch - got {realized_ratio}x"
+    );
+
+    assert!(
+        (unstandardized.mean_z2 - 2.0).abs() < 0.5,
+        "an unstandardized t(4) innovation has variance df/(df-2) = 2, got {}",
+        unstandardized.mean_z2
+    );
+    // THE ONE LIVE CLAIM THIS ARM CARRIES: at TODAY's a1 and b1 the
+    // unstandardized condition is still above one, so the standardization is
+    // what buys stationarity rather than slack in the parameters. If a future
+    // re-solve turns this red it has not regressed - it has made the
+    // standardization optional, which is a deliberate re-read of both arms.
+    assert!(
+        unstandardized.effective_persistence() > 1.0,
+        "without the standardization today's parameters would still be \
+         non-stationary; got {} - see the comment above this assertion before \
+         changing it",
+        unstandardized.effective_persistence()
     );
 }
 
