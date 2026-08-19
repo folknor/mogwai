@@ -370,10 +370,10 @@ impl GeneratorScalars {
         // `TickRuleAggressor` per-symbol state and any symbol-keyed consumer on
         // the same empty string and cross-contaminating instruments. Reject it.
         if self.symbol.is_empty() {
-            return Err(ScalarError { field: "symbol" });
+            return Err(ScalarError::field("symbol"));
         }
         if self.arrival.is_some_and(|arrival| !arrival.is_valid()) {
-            return Err(ScalarError { field: "arrival" });
+            return Err(ScalarError::field("arrival"));
         }
         for (field, provenance) in [
             ("quoted_width", self.quoted_width.provenance()),
@@ -387,13 +387,11 @@ impl GeneratorScalars {
                 provenance,
                 super::quote::CalibrationProvenance::Fitted { corpus } if corpus.trim().is_empty()
             ) {
-                return Err(ScalarError { field });
+                return Err(ScalarError::field(field));
             }
         }
         if self.modal_tick <= Decimal::ZERO {
-            return Err(ScalarError {
-                field: "modal_tick",
-            });
+            return Err(ScalarError::field("modal_tick"));
         }
         // `modal_tick` must be representable at `price_decimals`. `next_price`
         // snaps every quote with `round_dp(price_decimals)`; a tick carrying
@@ -408,39 +406,25 @@ impl GeneratorScalars {
         // whole-number grid (YM/MYM are the motivating examples); values above
         // 28 claim precision the numeric representation cannot provide.
         if self.price_decimals > 28 || self.modal_tick.normalize().scale() > self.price_decimals {
-            return Err(ScalarError {
-                field: "modal_tick",
-            });
+            return Err(ScalarError::field("modal_tick"));
         }
         if !strictly_positive_finite(self.mean_event_duration_s) {
-            return Err(ScalarError {
-                field: "mean_event_duration_s",
-            });
+            return Err(ScalarError::field("mean_event_duration_s"));
         }
         if !strictly_positive_finite(self.children_mean) {
-            return Err(ScalarError {
-                field: "children_mean",
-            });
+            return Err(ScalarError::field("children_mean"));
         }
         if !self.children_single_frac.is_finite() {
-            return Err(ScalarError {
-                field: "children_single_frac",
-            });
+            return Err(ScalarError::field("children_single_frac"));
         }
         if !strictly_positive_finite(self.levels_mean) {
-            return Err(ScalarError {
-                field: "levels_mean",
-            });
+            return Err(ScalarError::field("levels_mean"));
         }
         if self.children_mean <= 1.0 {
-            return Err(ScalarError {
-                field: "children_mean",
-            });
+            return Err(ScalarError::field("children_mean"));
         }
         if !(0.0..1.0).contains(&self.children_single_frac) {
-            return Err(ScalarError {
-                field: "children_single_frac",
-            });
+            return Err(ScalarError::field("children_single_frac"));
         }
         // Floor-branch feasibility (the generator successor spec, 3.1). An
         // instrument whose base quiet-state mean sits at or below one child
@@ -463,28 +447,23 @@ impl GeneratorScalars {
             let active_single =
                 (self.children_single_frac - quiet_share * quiet_single) / (1.0 - quiet_share);
             if active_mean <= 1.0 || !(1.0 / active_mean..=1.0).contains(&active_single) {
-                return Err(ScalarError {
-                    field: "children_single_frac (floor-branch active solve infeasible)",
-                });
+                return Err(ScalarError::detailed(
+                    "children_single_frac",
+                    "floor-branch active solve infeasible",
+                ));
             }
         }
         if !(1.0..=self.children_mean).contains(&self.levels_mean) {
-            return Err(ScalarError {
-                field: "levels_mean",
-            });
+            return Err(ScalarError::field("levels_mean"));
         }
         if !self.size_round_frac.is_finite() || !(0.0..=1.0).contains(&self.size_round_frac) {
-            return Err(ScalarError {
-                field: "size_round_frac",
-            });
+            return Err(ScalarError::field("size_round_frac"));
         }
         // The successor spec 3.2 bound: wide enough for any plausible tail,
         // tight enough that a unit mix-up (a variance where a sigma belongs)
         // cannot slip through as configuration.
         if !self.size_log_sigma.is_finite() || !(0.1..=3.0).contains(&self.size_log_sigma) {
-            return Err(ScalarError {
-                field: "size_log_sigma",
-            });
+            return Err(ScalarError::field("size_log_sigma"));
         }
         // `start_price` seeds `vol.mid`, which `next_latent_mid` clamps to
         // [modal_tick, MID_CEILING] on the very first tick. A start_price above
@@ -494,24 +473,16 @@ impl GeneratorScalars {
         // strictly-positive check, since modal_tick is already validated > 0).
         if self.start_price < self.modal_tick || self.start_price > Decimal::from(1_000_000_000_i64)
         {
-            return Err(ScalarError {
-                field: "start_price",
-            });
+            return Err(ScalarError::field("start_price"));
         }
         if self.latent_size_median <= Decimal::ZERO {
-            return Err(ScalarError {
-                field: "latent_size_median",
-            });
+            return Err(ScalarError::field("latent_size_median"));
         }
         if self.latent_size_median.round_dp(SIZE_DECIMALS) <= Decimal::ZERO {
-            return Err(ScalarError {
-                field: "latent_size_median",
-            });
+            return Err(ScalarError::field("latent_size_median"));
         }
         if !strictly_positive_finite(self.vol_scalar) {
-            return Err(ScalarError {
-                field: "vol_scalar",
-            });
+            return Err(ScalarError::field("vol_scalar"));
         }
         // Deliberately no upper coupling to `quoted_width`: the displayed BBO
         // is only the top level, and an aggressive parent may print beyond the
@@ -521,9 +492,7 @@ impl GeneratorScalars {
         if !self.trade_displacement_ticks.ticks().is_finite()
             || self.trade_displacement_ticks.ticks() < 0.0
         {
-            return Err(ScalarError {
-                field: "trade_displacement_ticks",
-            });
+            return Err(ScalarError::field("trade_displacement_ticks"));
         }
         // `vol_scalar` is the unconditional sigma, and `GarchVol` initializes
         // `sigma2` to its square. At or above the state rail the process is born
@@ -538,9 +507,7 @@ impl GeneratorScalars {
         // headroom is diagnosed instead, and shipped presets are held to zero
         // diagnostics.
         if self.vol_scalar >= GARCH_SIGMA_CAP {
-            return Err(ScalarError {
-                field: "vol_scalar",
-            });
+            return Err(ScalarError::field("vol_scalar"));
         }
         Ok(())
     }
@@ -572,9 +539,7 @@ impl GeneratorScalars {
             || decimal_to_f64(self.latent_size_median)
                 < decimal_to_f64(min_size) * LATENT_SIZE_MIN_RATIO
         {
-            return Err(ScalarError {
-                field: "latent_size_median",
-            });
+            return Err(ScalarError::field("latent_size_median"));
         }
         Ok(())
     }
@@ -734,7 +699,44 @@ pub struct TickTraversal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalarError {
+    /// The BARE name of the offending scalar, and nothing else. Consumers
+    /// render it as a config path (`mogwai-server`'s config loader prints
+    /// `generator.{field}`) and may match on it, so a sentence here would be
+    /// both unmatchable and unrenderable. Where one field has several distinct
+    /// ways to fail, the discriminating prose goes in [`Self::detail`].
     pub field: &'static str,
+    /// Which of a field's several checks refused, when knowing that changes
+    /// what an operator does. `None` when the field name is the whole story.
+    pub detail: Option<&'static str>,
+}
+
+impl ScalarError {
+    /// A refusal whose field name is the whole story.
+    #[must_use]
+    pub const fn field(field: &'static str) -> Self {
+        Self {
+            field,
+            detail: None,
+        }
+    }
+
+    /// A refusal that names which of a field's checks refused.
+    #[must_use]
+    pub const fn detailed(field: &'static str, detail: &'static str) -> Self {
+        Self {
+            field,
+            detail: Some(detail),
+        }
+    }
+}
+
+impl std::fmt::Display for ScalarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.detail {
+            Some(detail) => write!(f, "{} ({detail})", self.field),
+            None => f.write_str(self.field),
+        }
+    }
 }
 
 /// Why a [`super::GeneratedSource`] construction can fail: the scalar config

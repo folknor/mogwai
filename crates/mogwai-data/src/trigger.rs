@@ -19,7 +19,8 @@ pub const VOL_WINDOW_NS: u64 = 300_000_000_000;
 /// comfortably above any sweep interval the config validator permits is what
 /// makes the band a claim about the span an order actually waits out.
 pub const FILL_HORIZON_NS: u64 = 60_000_000_000;
-/// Returns below which a reading is REFUSED rather than reported. Refusing is
+/// The COUNT of returns below which a reading is REFUSED rather than reported -
+/// a sample-size floor, not a threshold on the return values. Refusing is
 /// the conservative answer: a zero band is the most permissive fill regime the
 /// venue has, so answering "no evidence" with it would be backwards.
 pub const MIN_VOL_SAMPLES: usize = 8;
@@ -84,6 +85,18 @@ pub fn scan_triggers(
     budget: usize,
 ) -> Walk {
     let Some(earliest) = scans.iter().map(|scan| scan.from_ns).min() else {
+        // THE ONE PLACE IN EITHER WALK WHERE `reached_ns` IS ASSERTED RATHER
+        // THAN PROVED, and it is sound only because of what a frontier MEANS
+        // here. It is not a claim that the tape up to `to_ns` was read; it is a
+        // claim that nothing between the caller's old frontier and `to_ns` can
+        // still be owed a hit. With no scans there is no predicate to owe one
+        // to, and this branch reads no tick, so it consumes no frontier either -
+        // `drained: 0` is the proof of that, and every other exit below earns
+        // its `reached_ns` from an event with a later timestamp. If a caller
+        // ever derives something from `reached_ns` OTHER than "no scan was
+        // missed" - a data-completeness claim, a checkpoint, a cache key - this
+        // branch stops being true and must start returning the caller's own
+        // `from`.
         return Walk {
             hits: Vec::new(),
             reached_ns: to_ns,
@@ -104,9 +117,11 @@ pub fn scan_triggers(
     let mut fill_sell_min: Option<Decimal> = None;
     let mut touch_buy_min: Option<Decimal> = None;
     let mut touch_sell_max: Option<Decimal> = None;
-    // The TOUCHED family opens in the opposite direction to the stop family and
-    // the same one as a limit: a touched BUY hits at or below its trigger, so
-    // its bound is the largest such trigger, and symmetrically for a sell. Kept
+    // `TriggerToward` - the TOUCHED-order family, not to be confused with
+    // `TriggerTouch`, which is the STOP family despite the name. It opens in the
+    // opposite direction to the stop family and the same one as a limit: a
+    // touched BUY hits at or below its trigger, so its bound is the largest such
+    // trigger, and symmetrically for a sell. Kept
     // as its own pair rather than folded into the `fill_*` slots, because the
     // strictness differs - `<=` against `<` - and sharing a bound would make the
     // prune drop a print that lands exactly on a touched trigger.

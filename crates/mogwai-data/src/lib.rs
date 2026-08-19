@@ -115,7 +115,17 @@ pub use trigger::{
 /// a seam, so a first segment's `open_gap_ret` cannot displace `start_price`,
 /// and the clock refuses rather than saturating at `u64::MAX`. Composed tapes
 /// move; nothing the fitted generator produces does.
-pub const TAPE_PROTOCOL_VERSION: u32 = 21;
+///
+/// 22 stops an armed `FlowSurge` from exciting the self-exciting arrival
+/// kernel. The kernel scores realized parent counts against a baseline
+/// expectation, and that expectation was computed without `rate_mult` while the
+/// counts were drawn with it, so the operator's own multiplier read as market
+/// excitement and compounded: measured on the unfixed code, an 8x surge left
+/// the mean latent at 123. The expectation now carries `rate_mult`, so a surge
+/// is the output envelope it is declared to be. NO CLEAN TAPE MOVES - under
+/// neutral modifiers the new factor is exactly 1.0 - but a tape served while a
+/// `FlowSurge` was armed does, and the rule is unconditional.
+pub const TAPE_PROTOCOL_VERSION: u32 = 22;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.
@@ -482,7 +492,9 @@ impl TickSource for MemorySource {
 /// - FAULT LATCHING: a child fault is absorbed once and made terminal
 ///   ([`Self::latch_fault`] clears every head), so a faulted merge yields
 ///   `None` forever instead of silently continuing on the surviving sources
-///   and presenting a hole as a legitimate end of stream.
+///   and presenting a hole as a legitimate end of stream. The latch is the ONLY
+///   mechanism that ends a merge: [`Self::starting_at`] positions every child
+///   even when an earlier one faults, so no child is ever left at its origin.
 /// - THE INCLUSIVE ONE-TICK SEEK BUFFER: [`Self::starting_at`] seeks each child
 ///   and RETAINS the first tick at or after `start_ts` as that child's head, so
 ///   a tick landing exactly on the seek instant is emitted rather than
@@ -508,6 +520,17 @@ impl MergeSource {
             heads,
             fault: None,
         };
+        // EVERY child is positioned, faulted or not, and the latch happens
+        // AFTER the whole pass. The loop used to `break` on the first fault,
+        // leaving the tail of `sources` un-seeked while `latch_fault` cleared
+        // the heads - two mechanisms doing one job, and only the second of them
+        // load-bearing. It was harmless exactly as long as a latched fault stays
+        // terminal; the moment anything makes one recoverable, a merge would
+        // resume on children still parked at their origin rather than at
+        // `start_ts`, and silently emit ticks from before the requested start.
+        // Positioning everything costs one pass over a handful of sources at
+        // construction and cannot leave that state behind.
+        let mut first_fault = None;
         for i in 0..s.sources.len() {
             s.heads[i] = match start_ts {
                 Some(ts) => s.sources[i].seek_to(ts),
@@ -515,10 +538,13 @@ impl MergeSource {
             };
             if s.heads[i].is_none()
                 && let Some(fault) = s.sources[i].fault()
+                && first_fault.is_none()
             {
-                s.latch_fault(fault);
-                break;
+                first_fault = Some(fault);
             }
+        }
+        if let Some(fault) = first_fault {
+            s.latch_fault(fault);
         }
         s
     }
@@ -655,6 +681,54 @@ mod tests {
             }))
         );
         assert!(merged.next_tick().is_none());
+    }
+
+    /// Refuses to produce a head at all, and records where it was positioned.
+    struct RecordsItsSeek {
+        seeked_to: std::rc::Rc<std::cell::Cell<Option<u64>>>,
+    }
+
+    impl TickSource for RecordsItsSeek {
+        fn next_tick(&mut self) -> Option<TickEvent> {
+            None
+        }
+
+        fn seek_to(&mut self, start_ts: u64) -> Option<TickEvent> {
+            self.seeked_to.set(Some(start_ts));
+            None
+        }
+    }
+
+    /// The state a fault leaves behind, asserted on the CHILD rather than on
+    /// the merge's output - a merge whose heads were cleared reports `None`
+    /// either way, so an output-only test cannot tell a positioned child from
+    /// an un-seeked one. That is the shape this arc keeps finding: a thing that
+    /// reads as covered and is not.
+    #[test]
+    fn a_faulting_child_does_not_leave_its_siblings_un_seeked() {
+        let seeked_to = std::rc::Rc::new(std::cell::Cell::new(None));
+        let faulting = FaultAfterFirst {
+            first: None,
+            faulted: false,
+        };
+        let watcher = RecordsItsSeek {
+            seeked_to: std::rc::Rc::clone(&seeked_to),
+        };
+        let merged =
+            MergeSource::starting_at(vec![Box::new(faulting), Box::new(watcher)], Some(25));
+
+        assert_eq!(
+            merged.fault(),
+            Some(TickFault::Arrival(ArrivalRefusal::NoOpenExposure {
+                from_ns: 42,
+            })),
+            "the first child's fault must still be the latched one"
+        );
+        assert_eq!(
+            seeked_to.get(),
+            Some(25),
+            "a sibling behind a faulting child was never positioned"
+        );
     }
 
     #[test]

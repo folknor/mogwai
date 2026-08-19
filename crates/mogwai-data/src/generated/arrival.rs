@@ -674,7 +674,15 @@ impl ArrivalKernel {
         let mut cursor = from_ns;
         let limit = from_ns.saturating_add(MAX_SESSION_GAP_NS);
         while cursor < limit {
-            self.advance_state_to(state, env.cell_index(cursor), env, base_mean_s, rng, cursor)?;
+            self.advance_state_to(
+                state,
+                env.cell_index(cursor),
+                env,
+                base_mean_s,
+                modifiers.rate_mult,
+                rng,
+                cursor,
+            )?;
             let x = self.latent_x(state);
             if !x.is_finite() {
                 return Err(ArrivalRefusal::NonFiniteState { clock_ns: cursor });
@@ -721,6 +729,7 @@ impl ArrivalKernel {
                 env.cell_index(parent_ts_ns),
                 env,
                 base_mean_s,
+                modifiers.rate_mult,
                 rng,
                 parent_ts_ns,
             )?;
@@ -769,12 +778,39 @@ impl ArrivalKernel {
         }
     }
 
+    /// Walks the latent state forward to `target`, one grid cell at a time.
+    ///
+    /// `rate_mult` is the RuntimeModifiers multiplier in force over the span
+    /// being walked, and it exists for exactly one family. The self-exciting
+    /// kernel's feedback is a RATIO - the parents actually drawn in a cell over
+    /// the parents the baseline expected there - so both halves of that ratio
+    /// have to be measured against the same intensity. `next_parent` draws with
+    /// `rate_at * x * rate_mult / base_mean_s`, so the expectation it is scored
+    /// against carries `rate_mult` too. Every other family's transition is
+    /// independent of the realized count and ignores it.
+    ///
+    /// WHY THAT IS THE RULE AND NOT A CHOICE: without it an armed `FlowSurge`
+    /// inflates `observed / expected` by the whole multiplier, the kernel reads
+    /// the operator's own injection as market excitement, and `a` climbs toward
+    /// `rate_mult` - so the venue serves MORE than the multiplier asked for
+    /// during the surge and keeps serving a `tau_s`-decayed tail of it after the
+    /// surge has cleared, which no divergence declares and nothing bounds below
+    /// `ARRIVAL_X_CEILING`. That is the state-versus-envelope split
+    /// `generated/consts.rs` states for the GARCH rails: a divergence is an
+    /// OUTPUT envelope and must not raise the process's own state.
+    ///
+    /// The pairing is exact per CALL rather than per cell: one `next_parent`
+    /// call holds one set of modifiers and walks exactly the cells its own span
+    /// crossed, so the only inexactness is a surge that arms or clears strictly
+    /// inside a single span - at most the one cell containing the boundary.
+    #[allow(clippy::too_many_arguments)]
     fn advance_state_to(
         &self,
         state: &mut ArrivalState,
         target: u64,
         env: &ArrivalEnv,
         base_mean_s: f64,
+        rate_mult: f64,
         rng: &mut ChaCha12Rng,
         clock_ns: u64,
     ) -> Result<(), ArrivalRefusal> {
@@ -808,7 +844,7 @@ impl ArrivalKernel {
                 while *cell_index < target {
                     let start = env.cell_start(*cell_index);
                     let end = start.saturating_add(step_ns);
-                    let expected = env.baseline_integral(start, end, base_mean_s);
+                    let expected = env.baseline_integral(start, end, base_mean_s) * rate_mult;
                     *a = params.transition(*a, expected, *cell_count, step_s);
                     if !a.is_finite() {
                         return Err(ArrivalRefusal::NonFiniteState { clock_ns });
@@ -963,6 +999,7 @@ mod tests {
                     cell,
                     &environment,
                     1.0,
+                    1.0,
                     &mut rng,
                     cell * CADENCE_STEP_NS,
                 )
@@ -1003,6 +1040,7 @@ mod tests {
                     cell,
                     &environment,
                     1.0,
+                    1.0,
                     &mut rng,
                     cell * CADENCE_STEP_NS,
                 )
@@ -1040,6 +1078,7 @@ mod tests {
                     &mut state,
                     cell,
                     &environment,
+                    1.0,
                     1.0,
                     &mut rng,
                     cell * CADENCE_STEP_NS,
@@ -1163,6 +1202,79 @@ mod tests {
                 "30-day X mean at cell {cell_index}"
             );
         }
+    }
+
+    /// Mean latent level over a self-exciting walk driven at a fixed
+    /// `rate_mult`. Reported rather than asserted inline so the neutral and
+    /// surged arms are computed by ONE expression - a hand-built pair would let
+    /// the two arms drift into measuring different things and still pass.
+    fn self_exciting_mean_latent(rate_mult: f64, draws: usize) -> f64 {
+        let kernel = ArrivalKernel::SelfExciting(SelfExcitingParams {
+            phi: 0.9,
+            tau_s: 60.0,
+        });
+        let environment = env(None);
+        let modifiers = RuntimeModifiers {
+            rate_mult,
+            ..RuntimeModifiers::NEUTRAL
+        };
+        let shape = SweepShape::new(1.2, 0.9, 1.1);
+        let mut rng = ChaCha12Rng::seed_from_u64(0x5E1F_0001);
+        let mut state = ArrivalState::new(&kernel, 0, &mut rng);
+        let mut from = 0;
+        let mut sum = 0.0;
+        for _ in 0..draws {
+            let draw = kernel
+                .next_parent(
+                    &mut state,
+                    from,
+                    1.0,
+                    &shape,
+                    &environment,
+                    modifiers,
+                    &mut rng,
+                )
+                .expect("open exposure on a flat profile");
+            sum += draw.latent_x;
+            from = draw.next_from_ns;
+        }
+        sum / draws as f64
+    }
+
+    /// A `FlowSurge` is an OUTPUT ENVELOPE, and the self-exciting kernel must
+    /// not read the operator's own multiplier back in as market excitement.
+    ///
+    /// The stake is not tidiness. `x = (1 - phi) + phi * a`, so a kernel that
+    /// scores its realized counts against an UNSCALED baseline drives `a`
+    /// toward `rate_mult` itself - the venue then serves the multiplier times
+    /// the excitement the multiplier caused, and keeps serving a `tau_s`-decayed
+    /// tail of it after the divergence has cleared.
+    ///
+    /// AND IT COMPOUNDS, which is why the number below is not eight. Measured
+    /// on the unfixed code by this exact test: an 8x surge left the mean latent
+    /// at 123, because the excitement raises `x`, a raised `x` draws more
+    /// parents into the next cell, and those inflate the ratio again. The bite
+    /// is a 15x overshoot of what the operator asked for at 8x, and the
+    /// protocol's `rate_mult` ceiling is 1000.
+    #[test]
+    fn an_armed_flow_surge_does_not_excite_the_self_exciting_latent() {
+        const DRAWS: usize = 20_000;
+        let neutral = self_exciting_mean_latent(1.0, DRAWS);
+        let surged = self_exciting_mean_latent(8.0, DRAWS);
+
+        // Both arms sit at the kernel's stationary latent mean of 1. The
+        // tolerance is on the RATIO rather than on either arm alone: the claim
+        // is that the multiplier does not move the latent, and an absolute bound
+        // on each arm separately would pass a pair that drifted together.
+        assert!(
+            (neutral - 1.0).abs() < 0.05,
+            "the neutral arm must sit at the stationary mean, got {neutral}"
+        );
+        assert!(
+            (surged / neutral - 1.0).abs() < 0.05,
+            "an 8x surge moved the latent from {neutral} to {surged} - the \
+             divergence is exciting the process instead of scaling its output"
+        );
     }
 
     #[test]

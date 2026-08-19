@@ -417,7 +417,7 @@ impl GeneratedSource {
         for size in [scalars.top_sizes.bid, scalars.top_sizes.ask] {
             if size < size_grid.min_size || (size_grid.integral && size.fract() != Decimal::ZERO) {
                 return Err(GeneratedSourceError::Scalar(
-                    super::fingerprint::ScalarError { field: "top_sizes" },
+                    super::fingerprint::ScalarError::field("top_sizes"),
                 ));
             }
         }

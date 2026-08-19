@@ -8,6 +8,60 @@ Numbers measured through `brokkr mogwai` carry their result UUID, so any claim
 here can be re-derived - `brokkr results <uuid>` and `brokkr sidecar <uuid>`.
 Numbers from the criterion harnesses do not, and are pinned by commit instead.
 
+## The arrival kernel's cost cliff, 2026-08-19
+
+Priced to answer one question - whether an `ArrivalKernel::next_parent`
+jump-ahead rewrite is worth the owner's chart gate - and recorded here because
+the answer turns on the numbers rather than on the mechanism. THE ANSWER IS NO.
+The measured record, the reachability analysis and the recommendation follow.
+
+NOT A BENCHED ROW, so it carries no UUID. A throwaway integration probe over
+`CadenceWalk::next` - the shipped kernel draw with nothing attached - at
+fingerprint-median BTCUSDT scalars, a flat session profile and
+`mean_event_duration_s` 0.171, on the owner's host. Dev and release agreed to
+within noise on every row, which is the reading: the traversal is bound by its
+per-cell RNG draw, not by anything the optimizer reaches.
+
+| case | per parent draw |
+|---|---|
+| healthy walk, all four families, `thin` 1 | 45 to 50 ns |
+| `LiquidityDrought` at its `thin_factor` ceiling of 1000 | about 3 us |
+| `LogOuCox` `sigma_y` 8, `thin` 1000 - succeeds, so it repeats | 3.6 ms mean, 115 ms peak |
+| the full 31.6M-cell traversal to `MAX_SESSION_GAP_NS` | 460 to 660 ms, then a terminal refusal |
+| the one draw spanning a 49-hour weekend, 176,400 cells | 650 us to 1.19 ms |
+| three weeks of calendar walking, 7.4M parent draws | about 500 ms total |
+
+The weekend crossing is the row worth remembering, because it was the half of
+the report expected to matter most: 176,400 one-second cells of latent evolution,
+paid once a week under the river mutex, for about a millisecond. Real mechanism,
+rounding-error magnitude.
+
+The 31.6M cliff is real and reachable, but only from a config no preset ships -
+no shipped preset declares an arrival family at all, so `ArrivalConfig::kernel`
+is never called on any default serving path, and the reachable population is
+operator `generator.arrival` overrides plus the lab's own screen. It also
+TERMINATES rather than recurring: the traversal that reaches
+`MAX_SESSION_GAP_NS` refuses with `NoOpenExposure`, the fault latches, and the
+source is done. `AGENTS.md`'s "a multi-hour computation is presumptively a
+defect" does not apply to two-thirds of a second that cannot repeat.
+
+`LiquidityDrought` is not the cause; capped at `thin_factor` 1000 it buys 3
+microseconds. What reaches the cliff is two knobs with no upper bound -
+`LogOuCox`'s `sigma_y`, whose `x = exp(y - sigma^2 / 2)` latent is unbounded
+BELOW, and `GeneratorScalars::mean_event_duration_s` - and both are validator
+gaps rather than kernel defects.
+
+THE RECOMMENDATION IS TO BOUND THOSE TWO KNOBS AND LEAVE THE KERNEL ALONE. The
+per-cell RNG draw inside `advance_state_to` IS the tape: skipping it, batching
+it, or substituting the closed-form n-step transition changes how many values
+come off the `ChaCha12Rng` and therefore every later draw, so no byte-preserving
+O(1) jump-ahead exists and any rewrite spends the chart gate. Upper bounds cost
+nothing by comparison - they are ADMISSION changes that move no byte of any tape
+a bounded config produces - but refusing a config that works today is a product
+decision, so they are filed rather than landed. The number to beat if the
+rewrite is ever revisited is 45 ns per parent on a healthy walk. The kernel is
+not slow; it is unbounded at one end of a parameter range nothing validates.
+
 ## The `mogwai-data` test binary's wall, 2026-08-19
 
 TWO DIFFERENT LANES ARE MEASURED HERE AND THEY DO NOT PAIR. Read the command

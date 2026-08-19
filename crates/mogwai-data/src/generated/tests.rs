@@ -655,19 +655,14 @@ fn scalars_reject_coverage_holes() {
     // every symbol-keyed consumer.
     let mut no_symbol = good.clone();
     no_symbol.symbol = String::new();
-    assert_eq!(no_symbol.validate(), Err(ScalarError { field: "symbol" }));
+    assert_eq!(no_symbol.validate(), Err(ScalarError::field("symbol")));
 
     // (a) modal_tick 1e-7 is in range and price_decimals 1 is in range, but
     // together round_dp(1) silently coarsens the grid to 0.1.
     let mut fine_tick = good.clone();
     fine_tick.modal_tick = Decimal::new(1, 7);
     fine_tick.price_decimals = 1;
-    assert_eq!(
-        fine_tick.validate(),
-        Err(ScalarError {
-            field: "modal_tick"
-        })
-    );
+    assert_eq!(fine_tick.validate(), Err(ScalarError::field("modal_tick")));
 
     // (b) start_price outside the [modal_tick, MID_CEILING] clamp band: a
     // value above the ceiling instantly collapses the mid, one below a tick
@@ -676,40 +671,23 @@ fn scalars_reject_coverage_holes() {
     high_start.start_price = Decimal::from(5_000_000_000_i64);
     assert_eq!(
         high_start.validate(),
-        Err(ScalarError {
-            field: "start_price"
-        })
+        Err(ScalarError::field("start_price"))
     );
     let mut low_start = good.clone();
     low_start.start_price = good.modal_tick / Decimal::from(2);
-    assert_eq!(
-        low_start.validate(),
-        Err(ScalarError {
-            field: "start_price"
-        })
-    );
+    assert_eq!(low_start.validate(), Err(ScalarError::field("start_price")));
 
     // (c) vol_scalar above the sigma cap is silently pinned at the cap on
     // the first tick and does nothing in the base regime.
     let mut hot_vol = good.clone();
     hot_vol.vol_scalar = GARCH_SIGMA_CAP * 10.0;
-    assert_eq!(
-        hot_vol.validate(),
-        Err(ScalarError {
-            field: "vol_scalar"
-        })
-    );
+    assert_eq!(hot_vol.validate(), Err(ScalarError::field("vol_scalar")));
 
     // Equality used to pass even though GARCH then initialized on its cap and
     // clipped every upward shock. The mechanism now reserves headroom.
     let mut capped_vol = good.clone();
     capped_vol.vol_scalar = GARCH_SIGMA_CAP;
-    assert_eq!(
-        capped_vol.validate(),
-        Err(ScalarError {
-            field: "vol_scalar"
-        })
-    );
+    assert_eq!(capped_vol.validate(), Err(ScalarError::field("vol_scalar")));
 
     // A truthful coarse grid is not rejected merely because its tick return
     // exceeds the module-level clamp. That ratio predicts sticky latent-mid
@@ -749,9 +727,9 @@ fn try_new_accepts_valid_input_and_surfaces_bad_input() {
     bad_scalars.mean_event_duration_s = f64::NAN;
     assert_eq!(
         GeneratedSource::try_new(bad_scalars, 42, 0, &fp, None).err(),
-        Some(GeneratedSourceError::Scalar(ScalarError {
-            field: "mean_event_duration_s"
-        }))
+        Some(GeneratedSourceError::Scalar(ScalarError::field(
+            "mean_event_duration_s"
+        )))
     );
 
     // A bad session profile on the explicit-session path is surfaced too: an
@@ -1852,9 +1830,7 @@ fn size_grid_separates_unit_mismatch_from_thin_truthful_sizes() {
     scalars.latent_size_median = Decimal::new(1337, 6);
     assert_eq!(
         scalars.validate_size_grid(Decimal::ONE),
-        Err(ScalarError {
-            field: "latent_size_median"
-        })
+        Err(ScalarError::field("latent_size_median"))
     );
 
     scalars.latent_size_median = Decimal::new(5, 1);
@@ -5440,9 +5416,185 @@ fn an_infeasible_active_solve_refuses_by_name() {
     let err = scalars
         .validate()
         .expect_err("infeasible solve must refuse");
-    assert!(
-        err.field.contains("floor-branch"),
-        "the refusal should name the floor-branch solve, got {}",
-        err.field
+    // `field` stays a BARE config-field name a consumer can match on, and the
+    // discriminating prose lives in `detail`. Both halves are asserted: the
+    // refusal is useless to an operator without the detail, and unmatchable if
+    // the detail ever leaks back into the field.
+    assert_eq!(
+        err,
+        ScalarError::detailed(
+            "children_single_frac",
+            "floor-branch active solve infeasible"
+        )
     );
+    assert_eq!(
+        err.to_string(),
+        "children_single_frac (floor-branch active solve infeasible)"
+    );
+}
+
+/// Nothing else in the tree checks that a refusal's `field` is renderable as a
+/// config path, and `children_single_frac (floor-branch ...)` shipped for as
+/// long as it did because of that. Every refusal `validate`,
+/// `validate_size_grid` and `try_new` can produce is walked here.
+///
+/// EACH CASE ASSERTS ITS OWN REFUSAL, BY NAME. An earlier draft guarded the
+/// walk with a `refusals.len() >= 12` floor, which is the defect this arc keeps
+/// finding: three mutations could quietly stop refusing, or start refusing on a
+/// DIFFERENT field, and the floor still held. A named expectation per case
+/// fails on both.
+#[test]
+fn every_scalar_refusal_names_a_bare_config_field() {
+    fn bare(err: &ScalarError) -> bool {
+        !err.field.is_empty()
+            && err
+                .field
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }
+
+    let fp = Fingerprint::from_repo_json();
+    let good = GeneratorScalars::xbtusd_anchor(&fp);
+    let empty_corpus = super::quote::CalibrationProvenance::Fitted {
+        corpus: "   ".to_string(),
+    };
+
+    // (mutation, the field the refusal must name). Ordered as `validate` tests
+    // them, so a reordered check that shadows a later branch shows up as the
+    // wrong name rather than as a still-passing count.
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, Box<dyn Fn(&mut GeneratorScalars)>)> = vec![
+        (
+            "symbol",
+            Box::new(|s: &mut GeneratorScalars| s.symbol = String::new()),
+        ),
+        (
+            "arrival",
+            Box::new(|s: &mut GeneratorScalars| {
+                s.arrival = Some(ArrivalConfig::LogOuCox {
+                    sigma_y: -1.0,
+                    tau_s: 60.0,
+                });
+            }),
+        ),
+        // The three provenance slots: a `Fitted` calibration whose corpus is
+        // blank is a fit that names no data, and each slot must refuse under
+        // its OWN name rather than under whichever the loop happens to reach.
+        ("quoted_width", {
+            let p = empty_corpus.clone();
+            Box::new(move |s: &mut GeneratorScalars| {
+                s.quoted_width = QuotedWidth::new(std::num::NonZeroU32::new(2).unwrap(), p.clone());
+            })
+        }),
+        ("top_sizes", {
+            let p = empty_corpus.clone();
+            Box::new(move |s: &mut GeneratorScalars| s.top_sizes.provenance = p.clone())
+        }),
+        ("trade_displacement_ticks", {
+            let p = empty_corpus.clone();
+            Box::new(move |s: &mut GeneratorScalars| {
+                s.trade_displacement_ticks = TradeDisplacement::new(0.5, p.clone());
+            })
+        }),
+        (
+            "modal_tick",
+            Box::new(|s: &mut GeneratorScalars| s.modal_tick = Decimal::ZERO),
+        ),
+        (
+            "modal_tick",
+            Box::new(|s: &mut GeneratorScalars| {
+                s.modal_tick = Decimal::new(1, 7);
+                s.price_decimals = 1;
+            }),
+        ),
+        (
+            "mean_event_duration_s",
+            Box::new(|s: &mut GeneratorScalars| s.mean_event_duration_s = f64::NAN),
+        ),
+        (
+            "children_mean",
+            Box::new(|s: &mut GeneratorScalars| s.children_mean = 0.0),
+        ),
+        (
+            "children_single_frac",
+            Box::new(|s: &mut GeneratorScalars| s.children_single_frac = 1.5),
+        ),
+        // The one detailed refusal: the floor-branch solve. It must still name
+        // a bare field, with the prose in `detail`.
+        (
+            "children_single_frac",
+            Box::new(|s: &mut GeneratorScalars| {
+                s.children_mean = 1.05;
+                s.children_single_frac = 0.10;
+                s.levels_mean = 1.02;
+            }),
+        ),
+        (
+            "levels_mean",
+            Box::new(|s: &mut GeneratorScalars| s.levels_mean = 0.5),
+        ),
+        (
+            "size_round_frac",
+            Box::new(|s: &mut GeneratorScalars| s.size_round_frac = 2.0),
+        ),
+        (
+            "size_log_sigma",
+            Box::new(|s: &mut GeneratorScalars| s.size_log_sigma = 9.0),
+        ),
+        (
+            "start_price",
+            Box::new(|s: &mut GeneratorScalars| s.start_price = Decimal::from(5_000_000_000_i64)),
+        ),
+        (
+            "latent_size_median",
+            Box::new(|s: &mut GeneratorScalars| s.latent_size_median = Decimal::ZERO),
+        ),
+        (
+            "vol_scalar",
+            Box::new(|s: &mut GeneratorScalars| s.vol_scalar = GARCH_SIGMA_CAP),
+        ),
+        (
+            "trade_displacement_ticks",
+            Box::new(|s: &mut GeneratorScalars| {
+                s.trade_displacement_ticks = TradeDisplacement::uncalibrated(-1.0);
+            }),
+        ),
+    ];
+
+    for (index, (expected, mutate)) in cases.iter().enumerate() {
+        let mut scalars = good.clone();
+        mutate(&mut scalars);
+        let err = scalars
+            .validate()
+            .expect_err(&format!("case {index} ({expected}) stopped refusing"));
+        assert_eq!(
+            err.field, *expected,
+            "case {index} refused under the wrong field: {err:?}"
+        );
+        assert!(
+            bare(&err),
+            "case {index} field is not a bare identifier: {err:?}"
+        );
+    }
+
+    // `validate_size_grid` is a separate entry point with a refusal of its own:
+    // a latent center far under the smallest tradable quantity.
+    let err = good
+        .validate_size_grid(Decimal::ONE)
+        .expect_err("a sub-grid latent median must refuse");
+    assert_eq!(err.field, "latent_size_median");
+    assert!(bare(&err), "{err:?}");
+
+    // And `try_new` produces one refusal neither validator can: the top-of-book
+    // sizes against the instrument's own grid. It is operator-visible, so it is
+    // held to the same bare-field rule.
+    let mut off_grid = good.clone();
+    off_grid.top_sizes.bid = Decimal::ZERO;
+    let Some(GeneratedSourceError::Scalar(err)) =
+        GeneratedSource::try_new(off_grid, 42, 0, &fp, None).err()
+    else {
+        panic!("a sub-min top-of-book size must refuse as a scalar error");
+    };
+    assert_eq!(err.field, "top_sizes");
+    assert!(bare(&err), "{err:?}");
 }

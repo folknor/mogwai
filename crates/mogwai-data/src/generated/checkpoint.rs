@@ -210,8 +210,8 @@ impl CheckpointIndex {
     /// resumes up to the new, larger `k` ticks before the target), it never
     /// changes which ticks are emitted. The origin (index 0) is always retained
     /// as the pre-first-tick fallback. The residual drain stays bounded by the
-    /// coarsened `k` grows only logarithmically in session length (a doubling
-    /// costs `MAX_CHECKPOINTS * k` more ticks).
+    /// coarsened `k`, which grows only logarithmically in session length (each
+    /// doubling costs `MAX_CHECKPOINTS * k` more ticks).
     ///
     /// PINNED snapshots are exempt from the every-other rule, because dropping
     /// one is NOT correctness-preserving: a control boundary is the only
@@ -232,8 +232,15 @@ impl CheckpointIndex {
         if self.checkpoints.len() < before {
             self.k = self.k.saturating_mul(2);
         }
-        while self.checkpoints.len() > MAX_CHECKPOINTS {
-            self.checkpoints.remove(1);
+        // ONE shift, not one per dropped snapshot. `remove(1)` in a loop moves
+        // the whole tail down for every element it drops, which is the only
+        // unbounded-shift loop in this file; a drain of the same range removes
+        // exactly the same snapshots - the oldest after the origin - in a single
+        // pass. Immaterial at 4096, and left as a loop it would be the thing
+        // that stops being immaterial if the ceiling ever moves.
+        let excess = self.checkpoints.len().saturating_sub(MAX_CHECKPOINTS);
+        if excess > 0 {
+            self.checkpoints.drain(1..=excess);
         }
     }
 

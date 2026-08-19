@@ -12,11 +12,14 @@ The hunter read the whole crate (`lib.rs`, `segment.rs`, `trigger.rs`, `bars.rs`
 and all of `generated/`) plus the call sites in `mogwai-server` and `mogwai-lab`
 the findings depend on. No edits made.
 
-FINDINGS 1 THROUGH 5 ARE CLOSED and their text removed; the surviving sections
-keep their ORIGINAL numbers, so this document starts at 6 by design. Later rounds'
-briefs and `notes/bug-loop-carry-forward.md` cite these findings by number, and
-renumbering would silently break those citations. What they were, and the
-corrections the fix passes made to them:
+EVERY FINDING IN THIS DOCUMENT IS NOW CLOSED. 1 through 5 had their text removed
+by their fix passes, 6 was answered with a measurement rather than a fix - its
+section is the evidence, and it carries one FILED item - and 7's seven bullets
+were worked in round 3. The sections keep their ORIGINAL numbers, so this
+document starts at 6 by design: later briefs and
+`notes/bug-loop-carry-forward.md` cite these findings by number, and renumbering
+would silently break those citations. What 1 through 5 were, and the corrections
+the fix passes made to them:
 
 - 1 was `GeneratedSource::seek_to` spinning forever on a refused arrival draw,
   and 2 its root cause - `advance_parent` was infallible, so a refusal returned
@@ -51,67 +54,155 @@ corrections the fix passes made to them:
   `SegmentSource::clock_exhausted` names the one terminal condition it has.
   The `seek_to` / `fault` sub-item of 4 is NOT closed; see `notes/todo.md`.
 
-## 6. `ArrivalKernel::next_parent` has a cost cliff of roughly 31.6M iterations per draw
+## 6. `ArrivalKernel::next_parent`'s cost cliff, MEASURED
 
-`limit = from_ns + MAX_SESSION_GAP_NS` (366 days), and while the market is open
-`next_segment_end` returns the next ONE-SECOND cell. So the budget-traversal
-loop can run up to 31.6 million iterations for a single parent draw, each
-calling `advance_state_to` (which itself walks cell by cell consuming RNG - for
-`ShotNoise`, a `Poisson` sample plus per-jump draws each cell) and
-`next_segment_end`. It is reached whenever `intensity` stays small relative to
-the exponential budget: a thin session profile, a large `thin_factor` from
-`LiquidityDrought`, or a latent `x` that has decayed.
+The round-3 fix pass was asked to price the hunter's estimate rather than act on
+it, because a jump-ahead rewrite moves RNG consumption and therefore trips the
+owner's standing chart gate. THE DECISION THIS MEASUREMENT NAMES: whether to
+spend that gate on an arrival-kernel rewrite. The answer from the numbers below
+is NO, not yet, and the cheap fix is somewhere else entirely.
 
-Weekend crossings are the tamer version of the same thing: `intensity == 0.0`
-jumps the cursor to the calendar boundary in one step, but the NEXT loop
-iteration calls `advance_state_to` with the post-weekend cell index, which then
-walks roughly 172,800 one-second cells consuming RNG for each. That is arguably
-correct (the latent must evolve in wall time) but it is a per-weekend RNG burn
-that nothing bounds or documents, and it is paid synchronously under the river
-mutex on the serving path.
+Measured 2026-08-19 on the owner's host with a throwaway probe over
+`CadenceWalk::next` - the shipped `ArrivalKernel::next_parent` with nothing
+attached - at fingerprint-median scalars, a flat session profile and
+`mean_event_duration_s` 0.171. Debug and release agreed to within noise on every
+row, which is itself informative: the loop is bound by its per-cell RNG draw, not
+by anything the optimizer touches.
 
-`AGENTS.md` says "a multi-hour computation is presumptively a defect to optimize
-before it is run". The OU, MMPP and shot-noise transitions over a fixed step are
-all closed-form over `n` steps (`decay^n`, a single Gaussian with the aggregated
-variance, a thinned Poisson) - a jump-ahead would collapse both cases to O(1) at
-the cost of a re-bless. The hunter would take that trade.
+### The mechanism is real and the arithmetic is right
 
-## 7. Smaller and lower-confidence
+`limit = from_ns + MAX_SESSION_GAP_NS` is 366 days, `next_segment_end` returns
+the next one-second cell while the venue is open, so the budget traversal can run
+31.6 million iterations for one parent draw. The hunter's count is correct.
 
-- `MergeSource::starting_at` breaks on the first faulting child, leaving later
-  sources never seeked. Harmless today because `latch_fault` clears all heads,
-  but the loop's `break` and the fill-with-`None` are two mechanisms doing one
-  job; if anyone ever makes a fault recoverable, the un-seeked tail is a
-  landmine.
-- `scan_triggers`' empty-scan branch returns `reached_ns: to_ns, drained: 0` -
-  it claims a fully drained horizon without reading a tick. Correct given no
-  scans consume the frontier, but it is the only place in either walk where
-  `reached_ns` is asserted rather than proved, and the two walks otherwise go to
-  great lengths about exactly this. Worth a comment at minimum.
-- The `TriggerToward` prune comment is wrong about itself. Lines around the
-  `toward_buy_max` and `toward_sell_min` declarations say "The TOUCHED family
-  opens in the opposite direction to the stop family" while describing the
-  `TriggerToward` slots. The hunter checked all six (kind, side) bounds against
-  `trades_through`, `touches_trigger` and `touches_toward` - THE CODE IS EXACTLY
-  RIGHT, and the pre-filter is sound (`keeps_max` matches each predicate's open
-  direction, and the `<=` vs `<` strictness split is genuinely why `toward_*`
-  cannot share the `fill_*` slots). Only the prose mislabels the family.
-- `MIN_VOL_SAMPLES`' doc comment is garbled: "Returns below which a reading is
-  REFUSED rather than reported" - it is a minimum COUNT, not a return threshold.
-- `ScalarError { field: "children_single_frac (floor-branch active solve infeasible)" }`
-  stuffs a sentence into a `&'static str` field that every other variant uses as
-  a bare field name. Any consumer switching on `field` will not match it.
-- The self-exciting feedback ignores `RuntimeModifiers::rate_mult`.
-  `advance_state_to` computes `expected` from `env.baseline_integral(..)`, which
-  has no surge term, while the observed `cell_count` counts parents drawn WITH
-  the surge applied. An armed `FlowSurge` therefore inflates `observed /
-  expected` and the kernel amplifies itself on top of the operator's multiplier.
-  That may well be intended (a surge is real flow, and real flow excites), but
-  nothing says so, and it is the kind of thing the divergence-is-an-output-
-  envelope principle in `consts.rs` argues against everywhere else.
-- `CheckpointIndex::coarsen`'s `while len > MAX { remove(1) }` is O(n) per
-  removal under pin pressure. Immaterial at 4096, noted only because it is the
-  one unbounded-shift loop in the file.
+### What it COSTS is 0.66 seconds, not hours
+
+| case | per draw |
+|---|---|
+| healthy walk, any family, thin 1 | 45 to 50 ns |
+| `LiquidityDrought` at its `thin_factor` CEILING of 1000 | about 3 us |
+| `LogOuCox` `sigma_y` 8 with thin 1000 | 3.6 ms mean, 115 ms peak, NO refusal |
+| full 31.6M-cell traversal | 460 to 660 ms, then `NoOpenExposure` |
+
+`AGENTS.md`'s "a multi-hour computation is presumptively a defect" does not
+apply. The cliff is two-thirds of a second, and it is TERMINAL - the traversal
+that reaches the limit refuses, the fault latches, and the source is done. It
+cannot recur.
+
+### What is reachable, and from what
+
+- NO SHIPPED PRESET DECLARES AN ARRIVAL FAMILY. MNQ, MES and BTCUSDT carry no
+  `[generator.arrival]` table, `GeneratorScalars::arrival` is therefore `None`,
+  `ArrivalConfig::kernel` is never called, and the integrated path this finding
+  is about is not on the serving path of any default run. `mogwai-server`'s
+  config loader has a dedicated branch admitting `generator.arrival` as an
+  operator OVERRIDE precisely because the seam is absent from every preset. The
+  reachable population is operator configs and the lab's own screen.
+- `LiquidityDrought` IS NOT THE CAUSE. Its validator caps `thin_factor` at 1000,
+  and at that cap a draw costs about 3 microseconds. The hunter listed it as a
+  trigger; it is not one.
+- THE TWO UNBOUNDED KNOBS ARE THE CAUSE, and both are validator gaps rather than
+  kernel defects:
+  - `ArrivalConfig::LogOuCox`'s `sigma_y` is checked only for finiteness and
+    non-negativity. `x = exp(y - sigma^2 / 2)`, so the latent is unbounded BELOW
+    and the exposure per cell collapses. `sigma_y` 8 costs 115 ms per draw and
+    keeps succeeding; `sigma_y` 12 hits the full traversal and refuses. Every
+    other family's latent has a floor - MMPP by construction, `SelfExciting` at
+    `1 - phi` with `phi <= 0.98`, `ShotNoise` at `1 - m` with `m <= 0.8` - and
+    every other family's parameters carry two-sided ranges. `sigma_y` is the odd
+    one out.
+  - `GeneratorScalars::mean_event_duration_s` is checked only as
+    strictly-positive-finite. At 1e4 one draw costs 10 ms; at 1e6 it hits the
+    full traversal and refuses.
+
+### The weekend crossing is real and costs about one millisecond
+
+Measured on an MNQ-shaped calendar (one weekly window, minutes 1020 to 8160, so
+a 49-hour weekend closure = 176,400 one-second cells): the single draw that
+spans it costs 650 us to 1.19 ms depending on family, and three weeks of
+walking (7.4 to 7.5 MILLION parent draws) costs about 500 ms in total. The
+hunter's
+mechanism is right and its magnitude is a rounding error. It is paid once a
+week under the river mutex and is not worth a line of code.
+
+### Is there a fix that bounds the cost without moving a byte? Not for the cliff
+
+Stated plainly, because a "no" is the useful answer here. The per-cell RNG draw
+inside `advance_state_to` IS the tape: skipping it, batching it, or replacing it
+with the closed-form `n`-step transition all change how many values come off the
+`ChaCha12Rng` and therefore change every later draw. There is no byte-preserving
+O(1) jump-ahead. The one genuinely free win inside the loop is
+`baseline_integral`, which the `SelfExciting` arm recomputes per cell and which
+consumes no randomness - hoisting it is a constant-factor improvement on one
+family and does not change the shape.
+
+### Recommendation
+
+DO NOT spend the chart gate on the jump-ahead. Close the two validator gaps
+instead, which is the fix that costs nothing:
+
+- give `LogOuCox`'s `sigma_y` an upper bound, in the two-sided style every other
+  family's parameters already use;
+- give `mean_event_duration_s` an upper bound in `GeneratorScalars::validate`.
+
+Both are ADMISSION changes. They move no byte of any tape a bounded config
+produces - they only refuse, at boot, configs that today produce a 115 ms draw or
+a half-second terminal traversal. Filed as an open item rather than landed by
+this pass, because refusing a config that currently works is a product decision
+and this round's remit was to measure.
+
+If the rewrite is ever revisited, the number to beat is 45 ns per parent on a
+healthy walk. The kernel is not slow; it is unbounded at one end of a parameter
+range nothing validates.
+
+## 7. Smaller and lower-confidence - CLOSED
+
+All seven bullets were worked in round 3. Six were fixed and one refused; the
+resolved text is removed rather than annotated, per the loop's convention. Three
+things a later round should know:
+
+- THE `RuntimeModifiers::rate_mult` BULLET WAS THE SERIOUS ONE AND THE SECTION
+  HEADING UNDERSOLD IT. The hunter offered it as "may well be intended". It was
+  not: measured on the unfixed code, an armed `FlowSurge` at `rate_mult` 8 left
+  the self-exciting kernel's mean latent at 123, because the excitement raises
+  `x`, a raised `x` draws more parents into the next cell, and those inflate the
+  ratio again. Fifteen times what the operator asked for, plus a `tau_s`-decayed
+  tail after the divergence cleared, all below `ARRIVAL_X_CEILING` and so refused
+  by nothing. `advance_state_to` now takes the multiplier and scales the baseline
+  expectation with it. `TAPE_PROTOCOL_VERSION` took 22 for this; no CLEAN tape
+  moves, because the new factor is exactly 1.0 under neutral modifiers.
+- THE `TriggerToward` BULLET IS REFUSED. The hunter checked the code and found it
+  exactly right, which is correct, but the comment is right too. "The TOUCHED
+  family" names `ScanKind::TriggerToward` - the touched-ORDER family - and every
+  clause after it describes `TriggerToward` accurately. The confusion is that
+  `TriggerTouch` is the STOP family despite its name, so "TOUCHED" and "Touch"
+  read as the same word. Nothing was wrong; the comment now names the variant
+  explicitly so the next reader does not spend the same hour.
+- `ScalarError` NOW CARRIES `field` AND `detail`. `field` is a BARE config
+  identifier a consumer can match on and `mogwai-server` renders as
+  `generator.{field}`; `detail` carries the discriminating prose where one field
+  has several ways to fail. Constructed through `ScalarError::field` and
+  `ScalarError::detailed`, never as a literal.
+  `every_scalar_refusal_names_a_bare_config_field` walks every refusal
+  `validate`, `validate_size_grid` and `try_new` can produce - the last of those
+  being `top_sizes`, an operator-visible refusal outside either validator's
+  reach - and asserts EACH case's field BY NAME. The fix pass first guarded it
+  with a `refusals.len() >= 12` floor, which is this arc's signature defect in
+  the round's own new test: three mutations could stop refusing, or refuse under
+  a different field, and the floor still held. Nothing checked any of this
+  before, which is why the floor-branch sentence shipped in a `&'static str`
+  field for as long as it did. `mogwai-server` renders the detail AFTER the
+  verb rather than inline, so the parenthetical cannot be read as part of the
+  config path an operator is about to go edit.
+
+The other four: `MergeSource::starting_at` now positions every child before it
+latches a fault, pinned by
+`a_faulting_child_does_not_leave_its_siblings_un_seeked`, which asserts on the
+CHILD because a merge whose heads were cleared reports `None` either way;
+`scan_triggers`' empty-scan branch carries a comment stating exactly what its
+asserted `reached_ns` does and does not claim, and what would make it false;
+`MIN_VOL_SAMPLES` says it is a sample COUNT; and `CheckpointIndex::coarsen`
+drains its excess in one pass instead of `remove(1)` in a loop.
 
 ## What the hunter checked and found sound
 
@@ -130,6 +221,7 @@ could not construct one, because `RegimeState::new` drops an already-elapsed arm
 and every later frontier advance either consumes the arm or leaves it strictly
 ahead. `SweepShape`'s `single_frac >= 1.0` division-by-zero is correctly
 special-cased in `begin_event` and unreachable from `next_count_scaled`.
-`TAPE_PROTOCOL_VERSION` is 21, `AGENTS.md` says next takes 22, and no markdown
-carries a stale live-identity claim. `bars.rs` is correct and its out-of-order
+At the time of the hunt the live tape identity was 21; round 3 spent 22 on the
+FlowSurge repair in finding 7, so `TAPE_PROTOCOL_VERSION` is 22 and
+`TAPE_PROTOCOL_VERSION` next takes 23. `bars.rs` is correct and its out-of-order
 contract is deliberate and tested.

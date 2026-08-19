@@ -3829,9 +3829,10 @@ FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
   message: the added expressions only READ `self.fault`, so on any non-refusing
   draw the RNG sequence, clock, burst and emitted values are untouched, and the
   refusal path produced no valid tape to move. Round 2 then took the next
-  identity for the composer's price rails, so `TAPE_PROTOCOL_VERSION` next
-  takes 22. A later data round touching the generator will almost certainly owe
-  one; this round genuinely did not.
+  identity for the composer's price rails, leaving 22 as the next unspent
+  identity at the close of that round; round 3 spent it on the FlowSurge
+  self-excitation repair. A later data round touching the generator will
+  almost certainly owe one; this round genuinely did not.
 - THE 454-ORPHANED-`mogwai-data` WALL HAS A LIKELIER CAUSE THAN THE BROKKR BUG.
   `run_complete_is_stamped_on_the_receiving_sockets_clock` is intermittent and
   real - it failed once more this round at `completion.rs:510` on a tree confined
@@ -3962,3 +3963,72 @@ lead. Both abort the parallel sweep and both therefore produce the wall of
 orphaned `mogwai-data` pairs that reads as a brokkr coverage bug - THERE ARE
 NOW TWO KNOWN PRODUCERS OF THAT WALL, and the tell is the orphan count equalling
 the missing sweep's pass count.
+
+## `notes/bugs-data.md` round 3, and the document is EXHAUSTED
+
+Finding 7's seven bullets plus finding 6. Six of the seven fixed, one refused,
+and finding 6 answered with a measurement instead of a fix. The document has no
+open findings left; the arc's close pass is next.
+
+FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
+
+- `TAPE_PROTOCOL_VERSION` TOOK 22 for the `FlowSurge` self-excitation repair.
+  `advance_state_to` scored realized parent counts against a baseline
+  expectation computed WITHOUT `rate_mult` while `next_parent` drew those counts
+  WITH it, so the self-exciting kernel read the operator's own multiplier as
+  market excitement and compounded it: an 8x surge measured at a mean latent of
+  123, a 15x overshoot, with a `tau_s`-decayed tail after the surge cleared and
+  nothing bounding it below `ARRIVAL_X_CEILING`. NO CLEAN TAPE MOVES - the new
+  factor is exactly 1.0 under neutral modifiers - and the conformance vectors
+  did not need re-blessing either, because the driver parameterizes
+  `SelfExciting` at `phi = 0`. The bump was owed anyway; the rule is
+  unconditional.
+- ONLY THE `SelfExciting` ARM READS A REALIZED COUNT. The other three arrival
+  transitions are independent of it and correctly ignore `rate_mult`. One
+  residual is disclosed in the doc comment: a surge arming or clearing strictly
+  inside one `next_parent` span mis-scales that one cell.
+- THE ARRIVAL KERNEL'S COST CLIFF IS PRICED AND THE ANSWER IS "DO NOT REWRITE
+  IT". The measured table now lives in `reference/performance.md` under "The
+  arrival kernel's cost cliff" - the durable home, because `notes/bugs-data.md`
+  dies with this arc and a durable document may never cite `notes/`. Headlines:
+  45 ns on a healthy walk, 3 us at `LiquidityDrought`'s `thin_factor` ceiling,
+  650 us to 1.19 ms for the once-a-week weekend crossing, and 460 to 660 ms for
+  the full 31.6M-cell traversal, which then REFUSES and cannot recur. There is
+  no byte-preserving O(1) jump-ahead, so any rewrite spends the owner's chart
+  gate for no measured benefit.
+- THE REAL EXPOSURE IS TWO UNBOUNDED VALIDATOR KNOBS, filed in `notes/todo.md`
+  rather than landed: `LogOuCox`'s `sigma_y` and
+  `GeneratorScalars::mean_event_duration_s`. Refusing a config that works today
+  is a product call for the owner. Note `sigma_y` 8 costs 3.6 ms per draw MEAN,
+  peaking at 115 ms - the filed item quoted the peak as the mean until the cold
+  review caught it, and a filed decision arguing from a 30x-overstated number is
+  exactly the thing that gets re-litigated later.
+- NO SHIPPED PRESET DECLARES AN ARRIVAL FAMILY AT ALL. MNQ, MES and BTCUSDT
+  carry no `[generator.arrival]` table, so `ArrivalConfig::kernel` is never
+  called on a default serving path and the whole arrival-config surface is
+  reachable only from an operator override and the lab's own screen. Worth
+  knowing before pricing any arrival finding as urgent.
+
+WHAT THE ROUND-3 CLOSE PASS FOUND, and it is the EIGHTH close pass out of eight
+to find its defect in a NEW TEST rather than in production code:
+
+- `every_scalar_refusal_names_a_bare_config_field` GUARDED FIFTEEN MUTATIONS
+  WITH `refusals.len() >= 12`. Instance 30 of the signature defect, in the
+  round's own new test, and in the very test written to close a
+  nothing-checks-this gap. Three mutations could stop refusing entirely, or
+  refuse under a DIFFERENT field, with the floor still green. Each case now
+  carries the field name it must refuse under, and the walk also covers the
+  three `Fitted`-with-blank-corpus provenance slots and `try_new`'s `top_sizes`
+  refusal, which neither validator produces. Bitten by putting the floor-branch
+  sentence back into `field`: case 10 fires by name.
+- THE COUNT-IN-PROSE DEFECT BIT A FOURTH TIME, and this time the ORCHESTRATOR
+  was the source: the round was briefed as "finding 7's eight bullets", the fix
+  pass wrote that count into the document, and the enumeration then also said
+  "the other five" while listing four. Section 7 had SEVEN bullets, enumerated
+  at the source in git rather than re-guessed. AN ASSERTED COUNT IN PROSE IS
+  NEVER CHECKED BY ANYTHING - count at the source or state no number.
+- `reference/performance.md` CITED `notes/bugs-data.md` for its verdict and its
+  recommendation. A durable document may not cite a transient one, and this
+  arc's documents are all scheduled for deletion; the substance was MOVED into
+  `performance.md` rather than pointed at. Check this on every close pass that
+  lands a durable measurement.

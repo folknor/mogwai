@@ -1164,12 +1164,12 @@ mod tests {
             "/../../analysis/stage-a-batch-manifest.json"
         ));
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
-        // Re-blessed at tape protocol 21, which the manifest hashes over: the
+        // Re-blessed at tape protocol 22, which the manifest hashes over: the
         // constant is an input to the plan identity, so a bump moves this by
         // construction and the artifact and this literal move together.
         assert_eq!(
             manifest.plan_sha256,
-            "700c9a7f7f0badee08ad820a1168991e26c14781f70e4a9a1efca72fbe8ccd23"
+            "d27e4b7b0f7289c4752b10463df3c2f2699aaff0d6917b1c81f39729a82b8ad0"
         );
         assert_eq!(
             manifest.plan_sha256,

@@ -1317,6 +1317,15 @@ fn validate_symbol_keys(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Renders a scalar refusal's optional detail as a trailing clause, or nothing
+/// when the field name is the whole story. Kept out of the config-path position
+/// so an operator reading `generator.<field>` sees only what they must edit.
+fn detail_suffix(err: &mogwai_data::ScalarError) -> String {
+    err.detail
+        .map(|detail| format!(": {detail}"))
+        .unwrap_or_default()
+}
+
 /// One validated [`source::InstrumentProfile`] from a deserialized
 /// `[instrument]` table. Factored out of `build_instrument_profiles` so the
 /// offline `gen` command can build the SAME profile from an embedded preset
@@ -1365,10 +1374,17 @@ fn profile_from_configured(
         }
     }
     scalars.validate().map_err(|err| {
+        // The bare `field` is the config PATH and must stay in the path
+        // position; the optional detail says which of that field's checks
+        // refused and is appended after the verb. Rendering the whole `Display`
+        // inline produced `generator.children_single_frac (floor-branch active
+        // solve infeasible) failed validation`, where the parenthetical reads
+        // as part of the path an operator is about to go edit.
         anyhow::anyhow!(
-            "instrument {} generator.{} failed validation",
+            "instrument {} generator.{} failed validation{}",
             def.symbol,
-            err.field
+            err.field,
+            detail_suffix(&err)
         )
     })?;
     let size_grid = mogwai_data::SizeGrid::from_def(&def);
@@ -1376,9 +1392,10 @@ fn profile_from_configured(
         .validate_size_grid(size_grid.min_size)
         .map_err(|err| {
             anyhow::anyhow!(
-                "instrument {} generator.{} failed size-grid validation",
+                "instrument {} generator.{} failed size-grid validation{}",
                 def.symbol,
-                err.field
+                err.field,
+                detail_suffix(&err)
             )
         })?;
     for diagnostic in scalars.empirical_diagnostics(fp, size_grid.multiplier) {

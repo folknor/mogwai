@@ -217,6 +217,29 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- TWO ARRIVAL KNOBS HAVE NO UPPER BOUND, and both let an operator config buy a
+  half-second parent draw. `ArrivalConfig::LogOuCox`'s `sigma_y` is validated
+  only as finite and non-negative, and `x = exp(y - sigma^2 / 2)` is unbounded
+  BELOW, so a thin latent stretches the budget traversal in
+  `ArrivalKernel::next_parent` over its 366-day limit one second at a time.
+  MEASURED 2026-08-19: `sigma_y` 8 at `thin` 1000 costs 3.6 ms per draw on
+  average, peaking at 115 ms, and KEEPS SUCCEEDING - so unlike the cliff it
+  recurs draw after draw rather than terminating. `sigma_y` 12 walks the full
+  31.6M cells in 460 to 660 ms and
+  then refuses `NoOpenExposure`. `GeneratorScalars::mean_event_duration_s` has
+  the same gap - validated strictly-positive-finite only - and reaches the same
+  traversal at 1e6. Every other arrival family's parameters carry two-sided
+  ranges and every other family's latent has a floor; these two are the odd ones
+  out. The fix is an ADMISSION bound in `ArrivalConfig::is_valid` and
+  `GeneratorScalars::validate`, which moves no byte of any tape a bounded config
+  produces and needs no chart gate. NOT LANDED because refusing a config that
+  today works is a product decision. Note the blast radius is small: no shipped
+  preset declares an arrival family at all, so this is reachable only from an
+  operator `generator.arrival` override and from the lab's screen. Filed
+  2026-08-19 by the `bugs-data` round-3 fix pass; the measured table and the
+  recommendation are `reference/performance.md`, "The arrival kernel's cost
+  cliff".
+
 - `SegmentSource` OVERRIDES NEITHER `seek_to` NOR `fault`, so an effectively
   infinite source inherits the O(distance) default walk `mogwai-data`'s own
   `TickSource` doc warns about - the same shape `GeneratedSource` needed
