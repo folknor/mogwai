@@ -8,6 +8,115 @@ Numbers measured through `brokkr mogwai` carry their result UUID, so any claim
 here can be re-derived - `brokkr results <uuid>` and `brokkr sidecar <uuid>`.
 Numbers from the criterion harnesses do not, and are pinned by commit instead.
 
+## The `mogwai-data` test binary's wall, 2026-08-19
+
+TWO DIFFERENT LANES ARE MEASURED HERE AND THEY DO NOT PAIR. Read the command
+attached to each number; an earlier draft of this entry attributed both sweep
+walls to one invocation that cannot produce them, and the correction is the
+reason the split is spelled out.
+
+THE FOCUSED RUNNER, `brokkr test -p mogwai-data "" --debug` on host `bygg`.
+It runs the crate's suite once per sweep and there are THREE sweeps -
+`workspace`, `instrumented` and `timing` - not two, and it does NOT apply the
+gate profile's `skip` list, which is why both dwell twins ran in the baseline.
+Serial, one run each side, re-measured on the round's own tree:
+
+| sweep | before | after |
+|---|---|---|
+| `workspace` (dev) | 44.62 s | 37.97 s |
+| `instrumented` (dev, `hotpath-alloc`) | 44.61 s | 9.96 s |
+| `timing` (release) | 44.43 s | 38.22 s |
+| total | **133.66 s** | **86.15 s** |
+
+The three deltas decompose exactly. `workspace` and `timing` each lose only the
+deleted twin, about 6.5 s. `instrumented` loses the twin AND the five walks
+that are now absent from that build shape, 6.5 + 28.4 s. `timing` does not
+enable `hotpath`, so the `cfg` leaves it alone by construction.
+
+THE GATE, `brokkr check --gate`, full and unscoped: **58.3 s -> 41.4 s and
+50.4 s**, two runs on the same host after the change. Both are quoted because
+one is not a number: the gate runs eight threads against a loaded desktop and
+its wall is the noisiest figure in this file, so treat it as "faster, by
+something between 8 and 17 seconds" and re-derive it before quoting it. The
+coverage counts are NOT noisy and are the ones to check: 1191 + 436 = 1688
+pairs, 1627 run, 61 ignored, 0 orphaned, 16 skips. The gate runs
+`workspace` and `instrumented` only, and it DOES apply `skip`, so its
+arithmetic is not the table's. IN THE GATE'S `workspace` SWEEP THE TWO DWELL
+CHANGES CANCEL - the twin's deletion is about -6.5 s and un-skipping
+`dwell_is_bounded_across_run_seeds` is about +6.5 s - and all five `cfg`'d
+walks still run there. THE ENTIRE GATE SAVING COMES FROM THE `instrumented`
+SWEEP. The dwell change bought coverage, not wall clock, on the default lane;
+only the focused runner sees it as time.
+
+THE DISTRIBUTION CAME FIRST, through the same instrument the adapter round
+built - `scripts/adapter_test_walls.py`, which is generic over libtest
+binaries. It showed the OPPOSITE shape to the adapter's: not a floor but seven
+genuine walks carrying 93% of the wall, with a tail of 168 tests at a
+millisecond apiece.
+
+| test | dev wall, one per process |
+|---|---|
+| `session_modulation_reproduces_curves` | 7.51 s |
+| `dwell_is_bounded_across_run_seeds` | 6.54 s |
+| `run_seeded_tape_dwell_is_bounded` | 6.53 s |
+| `synthetic_spread_decomposition_at_protocol_seven` | 6.46 s |
+| `realism` | 6.35 s |
+| `session_edge_spike_lifts_realized_clamp` | 5.28 s |
+| `session_edge_spike_localizes` | 2.72 s |
+| the other 168 | 3.29 s combined |
+
+TWO CUTS, and neither weakened a gate.
+
+THE BINARY RAN TWICE FOR NOTHING. The `instrumented` sweep builds this crate
+with `hotpath-alloc` so that a feature nothing compiles cannot rot; that is a
+COMPILE-time property, and `crates/mogwai-data/src` carries no `hotpath`
+annotation at all - the crate's only one is in `examples/arrival_walk_bench.rs`.
+So the second sweep re-executed every million-tick walk to learn nothing: the
+same test measures 7.65 s in the default shape and 7.67 s in the instrumented
+one. The five walks over ~2 s now carry `#[cfg(not(feature = "hotpath"))]`, so
+they are absent from that build shape rather than filtered out of the run -
+which matters, because the gate certifies complete coverage and a filtered test
+is an ORPHANED pair while a test that does not exist in a shape is no pair at
+all. The audit agrees: 1688 pairs, 0 orphaned. Instrumented 44.61 -> 9.96 s,
+and that sweep is where all of the gate's saving lives.
+
+THE ONLY MULTI-SEED DWELL GATE WAS THE ONE NOBODY RAN. It was `#[ignore]`d and
+in the runner's skip list on the claim that it "outlives the 20-second per-test
+hang watchdog by design"; measured, it is 6.54 s, and its eight arms are
+`DRAW / 8` apiece - the same two million parent events in total as `realism`.
+Meanwhile a single-seed twin at the full draw ran on every lane for 6.53 s. The
+twin is deleted, seed 42 (the default run seed, so the shipped realization)
+moved into the loop, and the eight-arm version now runs everywhere. The arms
+are 0, 1, 2, 3, 4, 5, 6 and 42: seed 7 is displaced by 42 rather than joined by
+it, because eight arms at `DRAW / 8` is what keeps the total at two million
+parent events. Eight realizations for the wall clock of one - and on the gate's
+default sweep that is exactly what it cost, nothing, since the deletion and the
+un-skipping cancel there.
+
+WHAT THE SHORTER PER-SEED DRAW COSTS, measured against each bound rather than
+argued: `mean_gap_s` 0.1743-0.1785 short against 0.17426 full, declared
+0.17104 with a 10% window, so the short arms sit further from the declared mean
+and the band did not soften; `gap_p999_s` 2.92-3.03 short against 3.18 full,
+bound 10.65, so a tail defect must reach 3.55x rather than 3.35x - a 6% loss on
+one of four assertions, bought with seven extra seeds; `empty_hour_frac` and
+`max_empty_hour_run_h` are exactly 0 at both draws, being one-sided guards
+against silence that a 0.17 s mean gap never approaches. The silence guard was
+bite-checked at the short draw by injecting a 30,000x `LiquidityDrought`:
+`empty_hour_frac` fails at 0.765 against 0.0105. State that guard honestly: at
+~11 complete hour buckets its resolution is 1/11 = 0.09 against a 0.0105 bound,
+so it is a BINARY "no empty hour at all" and not a measurement of a fraction.
+That was already true at the full draw, where ~96 buckets give 0.0104 against
+the same 0.0105, so the short draw gives up nothing here - but the two-sided
+reading the assertion's form suggests was never available.
+
+REFUSED: cutting `SESSION_DRAW`. Its 15M parent events are about 30 simulated
+days and the seven `dow_weight` assertions need whole weeks to separate a
+weekend from a weekday, so halving it does not fail sooner, it passes on less
+evidence. The reported watchdog risk did not reproduce either: 7.51 s serial,
+and the runner config's own record has the same walk at 7.622 s serial against
+7.768 s at eight threads, so the 20 s per-test kill sits 2.6x away rather than
+the 1.6x-inflation estimate's 1.7x.
+
 ## The adapter socket suites' wall, 2026-08-19
 
 `brokkr test -p mogwai-adapter "" --debug`, the serial sweep of the four

@@ -126,16 +126,36 @@ include_ignored = true
 # `include_ignored` pulls in two unrelated families, and only one of them is
 # what this gate is for. The socket-backed tests are `#[ignore]`d for an
 # ENVIRONMENT reason - they bind loopback listeners - and are fast, so the gate
-# runs them. The six below are `#[ignore]`d for a COST reason: they are
-# measurement instruments that walk millions of ticks, and every one of them
-# outlives the 20-second per-test hang watchdog by design. Under
-# `include_ignored` they do not report slow, they get killed and fail the gate,
-# which is how `brokkr check --gate` came to be unrunnable in this workspace.
+# runs them. The other family is the `#[ignore]`d instruments, and the honest
+# statement of why they are skipped is NOT one sentence - it used to be
+# "every one of them outlives the 20-second per-test hang watchdog by design",
+# and the 2026-08-18 tape round measured that claim and found it false for most
+# of them. It is kept per entry now, beside the entry, with a number:
+#
+#   - `vol_probe` and the `parity12a_`, `parity3b_`, envelope, exposure-pin and
+#     screen-oracle entries really are minutes-long walks. The watchdog claim is
+#     theirs, and under `include_ignored` they do not report slow, they get
+#     killed and fail the gate - which is how `brokkr check --gate` came to be
+#     unrunnable in this workspace.
+#   - `standardized_candidate_rail_sizing` (0.37 s),
+#     `realized_return_envelope_under_regime_scaling` (0.20 s) and
+#     `synthetic_spread_decomposition_at_protocol_seven` (6.46 s), one test per
+#     process in dev, are nowhere near the watchdog. They are skipped on
+#     inertia, not on cost; see the note beside them.
+#   - `read_market_latency_stays_within_submit_budget` is not a cost exclusion
+#     at all - it is a release-profile wall-clock contract this debug lane
+#     cannot validly evaluate. Its own note says so.
+#   - `arrival_control_refuses_a_tree_that_changed_during_the_run` is an
+#     ENVIRONMENT exclusion: it needs, and deliberately dirties, the tree.
+#
+# A SKIP ENTRY STATES A COST AND NOTHING CHECKS IT. That is the standing hole
+# this heading used to paper over; the per-entry numbers above are the only
+# defence, and they decay.
 #
 # Skipping them costs no coverage: the audit accepts a non-run pair that is
 # `#[ignore]`d at the source, and each stays runnable by name, which is the
-# documented way to use an instrument anyway -
-# `brokkr test -p mogwai-server vol_probe` and its five siblings.
+# documented way to use an instrument anyway - e.g.
+# `brokkr test -p mogwai-server vol_probe`.
 #
 # THE INVARIANT every pattern below must satisfy: it may match ONLY tests that
 # are `#[ignore]`d at the source. That is what makes skipping them free - the
@@ -211,7 +231,25 @@ skip = [
     # in practice for being unjudgeable on a loaded host, it was a gate no lane
     # evaluated. It is now the `tape_lateness` measurable target instead.
     "read_market_latency_stays_within_submit_budget",
-    "dwell_is_bounded_across_run_seeds",
+    # `dwell_is_bounded_across_run_seeds` USED TO SIT HERE and no longer does.
+    # It was excluded under the COST heading above - "walks millions of ticks",
+    # "outlives the 20-second per-test hang watchdog by design" - and that claim
+    # was measured false: its eight arms are `DRAW / 8` apiece, the same two
+    # million parent events in total as `realism`, and it runs in 6.54 s. The
+    # consequence of the wrong claim was that the repository's ONLY multi-seed
+    # dwell gate was the one test nothing ever ran, while a single-seed twin at
+    # the full draw ran on every lane for the same wall clock. The twin is gone,
+    # seed 42 moved into the loop, and the gate runs the eight-arm version.
+    #
+    # The two entries below are the same shape and are NOT resolved here. Both
+    # are excluded under the same COST heading and neither is anywhere near the
+    # watchdog: `standardized_candidate_rail_sizing` measures 0.37 s and
+    # `realized_return_envelope_under_regime_scaling` 0.20 s, one test per
+    # process in dev. `synthetic_spread_decomposition_at_protocol_seven` at
+    # 6.46 s is the only remaining entry the heading describes even loosely.
+    # Deciding what those three should be is entangled with the standing
+    # findings on the GARCH instrumentation test that reports on them, so they
+    # are left named here with their measured cost rather than moved on a guess.
     "standardized_candidate_rail_sizing",
     "realized_return_envelope_under_regime_scaling",
     "synthetic_spread_decomposition_at_protocol_seven",

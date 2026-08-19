@@ -26,50 +26,58 @@ the filesystem at runtime, and one of them was a serious defect (finding 1,
 closed in round 1: no test in the tree writes a committed fixture any more, and
 nothing may again).
 
-Measured in dev, serial:
+## 2. `session_modulation_reproduces_curves` - closed in round 2
 
-| test | wall |
-|---|---|
-| `session_modulation_reproduces_curves` (`#[ignore]`d, NOT skipped) | 7.71 s |
-| `run_seeded_tape_dwell_is_bounded` | 6.69 s |
-| `dwell_is_bounded_across_run_seeds` (`#[ignore]`d AND skipped) | 6.71 s |
-| `realism` | 6.47 s |
+Closed by giving the bare `#[ignore]` a COST reason that also states what the
+attribute buys - exclusion from the FAST lane, not from the gate, which sets
+`include_ignored`.
 
-## 2. `session_modulation_reproduces_curves` - the slowest test in the workspace, `#[ignore]`d for nothing, and closest to the watchdog
+BOTH OF THE FINDING'S PROPOSED CUTS WERE REFUSED, with measurement.
 
-`tests.rs:2155`, a bare `#[ignore]` with NO REASON STRING, not in the `skip`
-list. It walks `SESSION_DRAW = 15_000_000` parent events and takes 7.71 s in dev
-- it is the 7.6 s test named in the brief. So:
+- Cutting `SESSION_DRAW`: 15M parent events is about 30 simulated days, and the
+  seven `dow_weight` assertions need whole weeks to separate a weekend from a
+  weekday. Halving it does not fail sooner, it passes on less evidence. The
+  harness already discards every child, so the remaining cost is the arrival
+  draw itself.
+- Un-ignoring it: 7.5 s onto every plain `brokkr check` for no gate value, the
+  gate already running it.
 
-- The `#[ignore]` buys nothing: the gate runs it anyway.
-- It is the binary's floor. `mogwai-data`'s lib test binary is run twice
-  (workspace plus `instrumented`), so this test alone is about 15 s of gate wall.
-- It has the least headroom of anything in scope: 7.7 s serial against a 20 s
-  watchdog, and it is compute-bound, which is precisely the class the sibling
-  project saw inflate 1.7 s to 2.7 s (about 1.6x) at 8 threads. 7.7 x 1.6 is
-  about 12 s. One slower host or one more parallel compute-bound sibling and this
-  is the test that kills the gate.
+THE WATCHDOG RISK DID NOT REPRODUCE. 7.51 s serial, and `brokkr.toml`'s own
+record has the same walk at 7.622 s serial against 7.768 s at eight threads -
+this walk barely notices the parallel lane and sits 2.6x from the 20 s kill.
+The finding's 1.6x inflation figure was borrowed from a sibling project.
 
-Either drop the `#[ignore]` (it is a real gate and should be honest about it) or
-cut `SESSION_DRAW`. Note the harness already throws away every child
-(`src.burst.remaining = 0`) to afford the span; the remaining cost is the arrival
-draw itself.
+## 3. `dwell_is_bounded_across_run_seeds` - closed in round 2
 
-## 3. `dwell_is_bounded_across_run_seeds` is skipped on a cost claim that is false
+The finding was right and the fix is the one it proposed:
+`run_seeded_tape_dwell_is_bounded` is deleted, this test is un-ignored and out
+of `skip`, and it runs the arms 0, 1, 2, 3, 4, 5, 6 and 42 - seed 42 kept
+because it is the default run seed and therefore the shipped realization, seed
+7 displaced so the arm count stays eight and the total stays two million parent
+events. The per-bound discrimination arithmetic is in
+`reference/performance.md` and beside the test.
 
-`brokkr.toml` skips it, and both the source comment and the config imply it
-"outlives the 20-second per-test hang watchdog by design". It runs in 6.71 s -
-cheaper than `session_modulation`, which is not skipped. Its `#[ignore]` reason
-says "walks eight two-million-tick run realizations", but it calls
-`assert_run_seed_dwell_is_bounded_with_draw(run_seed, DRAW / 8)` - eight 250k
-walks, the same 2M total as `realism`.
+## What round 2 changed, and what is left
 
-Consequence: the only multi-seed dwell gate the repo has is never run, while
-`run_seeded_tape_dwell_is_bounded` (`tests.rs:2012`) runs the seed-42 arm at full
-`DRAW` for the same 6.7 s. The right move is to delete
-`run_seeded_tape_dwell_is_bounded`, un-ignore `dwell_is_bounded_across_run_seeds`,
-remove it from `skip`, and get eight seeds of coverage for the same wall clock.
-This directly addresses "a single seed passing is not evidence the band holds".
+The full gate went 58.3 s to 41.4 s and 50.4 s on two post-change runs - a
+noisy figure, and all of whatever it saved comes from the `instrumented`
+sweep; the focused `brokkr test -p mogwai-data "" --debug` went
+133.66 s to 86.15 s over its three sweeps. The numbers, the lane split and the
+one measured loss are in `reference/performance.md`. What is left open from
+this cluster, for whoever takes it:
+
+- TWO MORE SKIP ENTRIES REST ON THE SAME FALSE COST CLAIM.
+  `standardized_candidate_rail_sizing` measures 0.37 s and
+  `realized_return_envelope_under_regime_scaling` 0.20 s, one test per process
+  in dev. Only `synthetic_spread_decomposition_at_protocol_seven` at 6.46 s is
+  even loosely a cost exclusion, and none of the three is near the watchdog.
+  The heading that claimed every entry under it "outlives the 20-second
+  per-test hang watchdog by design" is GONE - it is a per-entry statement with
+  numbers now - but the entries themselves were left
+  named with their measured costs rather than moved, because what those tests
+  should be is entangled with finding 6 - `standardized_candidate_rail_sizing`
+  is the test finding 6 says carries the real claim, and it is one of the two
+  that never runs.
 
 ## 4. Ignore reasons are free text, so no scan can classify them
 
@@ -81,14 +89,12 @@ carry-forward; it is not repeated here.
 
 What is left open, for a later round if it wants it: an ignore REASON is free
 text, so nothing can tell a COST ignore from an ENVIRONMENT one, and that
-classification is what any stronger rule in this area would need. Exactly one
-`#[ignore]` in the tree carries no reason at all -
-`session_modulation_reproduces_curves`, which is finding 2's test and finding
-2's call to make.
+classification is what any stronger rule in this area would need. There is no
+longer a reasonless `#[ignore]` anywhere in the tree: round 2 gave
+`session_modulation_reproduces_curves` a COST reason that also states what the
+attribute buys, which is exclusion from the FAST lane rather than from the gate.
 
-`dwell_is_bounded_across_run_seeds`'s skip entry (the "skipped on a false cost"
-half) was left alone: finding 3 owns that test, and moving its entry before that
-decision is made would just have to move back.
+`dwell_is_bounded_across_run_seeds`'s skip entry is gone and the test runs.
 
 ## 5. Conformance "vectors" V4-V8 are green by construction
 
@@ -209,14 +215,24 @@ tree fails a test about prose.
   2.326 plus or minus 0.05 instead. That is the reasoning the V4-V8 vectors above
   are missing.
 
-## Structural recommendation
+## Structural recommendation - closed in round 2
 
-The `mogwai-data` lib test binary carries roughly 20 s of dev-profile compute in
-four tests (`session_modulation` 7.7, `run_seeded_tape_dwell` 6.7, `realism` 6.5,
-plus `arrival_families_match_their_stationary_derivations` at 3 x 30 simulated
-days), and the whole binary runs TWICE because of the `instrumented` sweep. That
-sweep exists to prove the `hotpath` annotations still compile - it does not need
-to re-execute million-tick statistical gates to do that. Gating the four heavy
-walks behind a `cfg(not(feature = "hotpath"))`, or giving the `instrumented`
-sweep a filter, halves the gate's compute bill and buys back the watchdog
-headroom that finding 2 is spending.
+The premise held and the fix landed: the five walks over ~2 s carry
+`#[cfg(not(feature = "hotpath"))]` and the instrumented sweep of this crate went
+44.61 s to 9.96 s, which is where ALL of the gate's saving comes from. Three
+corrections to how it was stated, for the record.
+
+- The heavy set is SEVEN tests, not four, and the report's fourth
+  (`arrival_families_match_their_stationary_derivations`) is 472 ms - not in it
+  at all. The two it missed are `session_edge_spike_lifts_realized_clamp`
+  (5.28 s) and `session_edge_spike_localizes` (2.72 s).
+- The `cfg` and the filter are NOT interchangeable alternatives. The gate
+  certifies complete coverage, so a filtered-out test is an orphaned pair and an
+  error, while a test absent from a build shape is no pair at all. There is also
+  no per-sweep filter to reach for: `skip` lives on the profile and would apply
+  to both sweeps.
+- The justification is stronger than "the annotations only need to compile":
+  `crates/mogwai-data/src` carries no `hotpath` annotation at ALL, so the two
+  build shapes of this crate's lib differ in the dependency graph and in one
+  example target and in nothing a test can observe. Measured, the same test runs
+  7.65 s in one shape and 7.67 s in the other.

@@ -1,6 +1,16 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
+// Compiling out the five heavy walks (see the note below) strands the helpers
+// only they reach - `measure`, `measure_session_curves`,
+// `windowed_latent_returns` and the two result structs. They stay COMPILED in
+// that shape, which is exactly what keeps the instrumented sweep a real build
+// check of this file rather than a hole in it; they are simply unreachable, so
+// the lint is silenced THERE AND ONLY THERE. The default shape still reports
+// dead code in this file, so a helper whose last real caller is deleted is
+// still caught - which is the decay a blanket allow would otherwise hide.
+#![cfg_attr(feature = "hotpath", allow(dead_code))]
+
 use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 
 use crate::{TickEvent, TickSource};
@@ -16,6 +26,42 @@ use super::source::{integral_lot, repeat_is_compatible};
 use super::*;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
+
+// THE HEAVY-WALK CFG NOTE. Five tests in this file carry
+// `#[cfg(not(feature = "hotpath"))]` and point back here; this is the one place
+// the reasoning lives.
+//
+// This crate's lib test binary is built and run TWICE by the full gate: once in
+// the default shape, and once with `hotpath-alloc` on, so that a feature nothing
+// compiles cannot rot unnoticed. That second sweep exists to prove the
+// annotations, the optional dependency and the harness examples still BUILD - a
+// compile-time property, satisfied by compiling.
+//
+// Re-EXECUTING a multi-second statistical walk in it proves nothing further,
+// because `crates/mogwai-data/src` carries no `hotpath` annotation at all: the
+// only `cfg(feature = "hotpath")` in this crate is in
+// `examples/arrival_walk_bench.rs`. The two shapes differ in the dependency
+// graph and in that example, not in one byte of behaviour these tests can
+// observe - measured, `session_modulation_reproduces_curves` runs 7.65 s in the
+// default shape and 7.67 s in the instrumented one.
+//
+// So the gate paid about 28 s of dev-profile compute per run for a re-run that
+// cannot say anything the first run did not. The five walks opt out of the
+// instrumented shape; the other ~170 tests in this binary still run in both,
+// which is what keeps the second sweep a real sweep rather than a build check.
+// Opting OUT is the mechanism rather than a runner-side filter, deliberately:
+// the gate certifies complete coverage, so a filtered-out test is an ORPHANED
+// pair and an error, while a test that does not exist in a build shape is no
+// pair at all.
+//
+// The line is drawn at ROUGHLY TWO SECONDS, measured one test per process in
+// dev by `scripts/adapter_test_walls.py`, which is generic over libtest
+// binaries. Below that the doubling is not worth a `cfg` a reader has to come
+// here to understand.
+//
+// If this crate ever does grow an annotation in `src`, this stays sound: an
+// annotation wraps a call in a timer, it does not move a value, and the
+// remaining tests still compile and run it in both shapes.
 
 fn next_trade(source: &mut GeneratedSource) -> mogwai_protocol::TradeTick {
     loop {
@@ -1073,7 +1119,9 @@ fn liquidity_drought_imitates_dying_symbol() {
     );
 }
 
+// A 1M-tick walk: see the heavy-walk cfg note at the top of this file.
 #[test]
+#[cfg(not(feature = "hotpath"))]
 fn session_edge_spike_localizes() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
@@ -1103,7 +1151,10 @@ fn session_edge_spike_localizes() {
 // binds). Post-fix the realized clamp is lifted in-window by
 // (1.0 + extra_vol_mult), so a near-ceiling extra_vol_mult both breaks the
 // old MAX_ABS_RETURN ceiling and scales the in-window RMS with the knob.
+//
+// Two 1M-tick walks: see the heavy-walk cfg note at the top of this file.
 #[test]
+#[cfg(not(feature = "hotpath"))]
 fn session_edge_spike_lifts_realized_clamp() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
@@ -1762,7 +1813,9 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
     assert_eq!(head, PRE_GRID_HEAD, "the spot grid moved the spot draws");
 }
 
+// A 2M-parent-event walk: see the heavy-walk cfg note at the top of this file.
 #[test]
+#[cfg(not(feature = "hotpath"))]
 fn realism() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
@@ -2008,28 +2061,73 @@ fn arrival_children_mults_preserve_the_declared_mean() {
     );
 }
 
-#[test]
-fn run_seeded_tape_dwell_is_bounded() {
-    assert_run_seed_dwell_is_bounded(42);
-}
-
-// MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
-// the workspace runner config, and has to be: the gate sets `include_ignored`
-// deliberately - that is how the socket-backed suites get covered - so
-// `#[ignore]` does not keep this out of it. Every instrument of this shape MUST
-// be added to that list as well. Nothing detects the omission; the symptom is
-// the full gate dying on the 20-second per-test hang watchdog, blaming a test
-// that was never meant to run there.
+// THE ONLY DWELL GATE, and it is a MULTI-SEED one. It replaced a pair: this
+// test, which was `#[ignore]`d AND in the runner's `skip` list on the claim
+// that it "outlives the 20-second per-test hang watchdog by design", and
+// `run_seeded_tape_dwell_is_bounded`, which walked seed 42 alone at the full
+// `DRAW` and ran on every lane. The claim was FALSE - the eight arms are
+// `DRAW / 8` apiece, the same 2M parent events in total as `realism`, measured
+// at 6.54 s - so the repo's only evidence that the dwell band holds across
+// seeds was the one test nothing ever ran, while the one that did run could
+// only ever say "seed 42 passes".
 //
-// Run it deliberately by name, raising the watchdog for that one run:
-//   test -p mogwai-data dwell_is_bounded_across_run_seeds --timeout 280
-// `--timeout` applies to the focused runner only, takes 1 to 280 seconds, and
-// is refused when the name matches more than one test. 280 is a hard cap. See
-// AGENTS.md for the runner these arguments belong to.
+// SEED 42 IS IN THE LOOP, not dropped with the test that carried it: it is the
+// default run seed (`RunSeeds::from_run_seed(42)`), i.e. the tape a bare
+// `mogwai serve` actually produces, so a sweep of the first eight integers that
+// excluded it would have traded the shipped realization for eight unshipped
+// ones. THE ARMS ARE SPELLED OUT BELOW AND THERE ARE EIGHT OF THEM:
+// 0, 1, 2, 3, 4, 5, 6 and 42. SEED 7, which the pre-round sweep of the first
+// eight integers covered, IS DELIBERATELY DROPPED - the arm count is what
+// multiplies `DRAW / 8` back to the two million parent events the wall-clock
+// argument above rests on, so 42 displaces 7 rather than joining it. The list
+// is written out rather than expressed as a range plus a chain because every
+// prose statement of the old form was read as nine arms.
+//
+// WHAT THE SHORTER PER-SEED DRAW COSTS, measured rather than argued, seed by
+// seed against each bound:
+//   - `mean_gap_s`, the only two-sided band: 0.1743-0.1785 across the eight
+//     `DRAW / 8` arms against a declared 0.17104 and a +/-10% window, versus
+//     0.17426 on the old full-draw seed-42 arm. The short arms sit FURTHER from
+//     the declared mean, so the band's bite did not soften.
+//   - `gap_p999_s`: 2.92-3.03 short, 3.18 full, bound 10.65. A defect must
+//     stretch the tail 3.55x rather than 3.35x to be caught - the one place the
+//     shorter draw is measurably weaker, 6%, bought with seven extra
+//     realizations.
+//   - `empty_hour_frac` and `max_empty_hour_run_h` came out at exactly 0 on
+//     every arm at both draws. That is not vacuity: they are one-sided bounds
+//     against SILENCE, and a tape at a 0.17 s mean gap has no empty hour to
+//     find. Bite-checked at the short draw by injecting a 30,000x
+//     `LiquidityDrought` into this helper - `empty_hour_frac` fails at 0.765
+//     against its 0.0105 bound.
+//     ONE ASSERTION IS GENUINELY WEAKER AT THE SHORT DRAW and it is
+//     `max_empty_hour_run_h`. Its bound is the anchor plus 2 h, i.e. 7 h, and a
+//     `DRAW / 8` arm spans only ~12 h (250k events at 0.174 s), so it can fire
+//     only on a tape that is dead for eight of its eleven complete hour
+//     buckets, where the full draw spans ~4 days and would catch an eight-hour
+//     blackout anywhere in it. It costs the TEST nothing, because
+//     `empty_hour_frac` is asserted first and dominates it at both draws: one
+//     empty hour in eleven is 0.09, already eight times the bound, so every
+//     blackout `max_empty_hour_run_h` would have named is caught one line
+//     earlier by name. WHAT IS LOST IS THE TWO-SIDEDNESS OF THE STATEMENT, not
+//     the coverage: at ~11 complete hour buckets the RESOLUTION of
+//     `empty_hour_frac` is 1/11 = 0.09 against a 0.0105 bound, so the assertion
+//     has degenerated to "no empty hour at all". It was already effectively
+//     that at the full draw - ~96 buckets is a resolution of 0.0104 against
+//     0.0105 - so nothing is given up here, but read it as the binary guard it
+//     is rather than as a measurement of a fraction.
+//
+// An eight-arm 2M-parent-event walk: see the heavy-walk cfg note at the top of
+// this file. Run it alone with the workspace runner AGENTS.md names:
+//   test -p mogwai-data dwell_is_bounded_across_run_seeds --debug
+// That takes about 6.5 s per sweep and needs no `--timeout` raise - the old
+// hint here asked for `--timeout 280` on a walk that never needed it. The
+// runner runs EVERY sweep of the profile, and for this crate it reports
+// SKIP with a reason for the `instrumented` sweep, which is the `cfg` above
+// doing its job rather than a silent zero-match pass.
 #[test]
-#[ignore = "walks eight two-million-tick run realizations"]
+#[cfg(not(feature = "hotpath"))]
 fn dwell_is_bounded_across_run_seeds() {
-    for run_seed in 0..8 {
+    for run_seed in [0, 1, 2, 3, 4, 5, 6, 42] {
         assert_run_seed_dwell_is_bounded_with_draw(run_seed, DRAW / 8);
     }
 }
@@ -2099,10 +2197,7 @@ fn a_river_never_prints_two_trades_at_one_instant() {
     );
 }
 
-fn assert_run_seed_dwell_is_bounded(run_seed: u64) {
-    assert_run_seed_dwell_is_bounded_with_draw(run_seed, DRAW);
-}
-
+#[cfg(not(feature = "hotpath"))]
 fn assert_run_seed_dwell_is_bounded_with_draw(run_seed: u64, draw: usize) {
     let fp = Fingerprint::from_repo_json();
     let def = mogwai_protocol::default_instruments()
@@ -2151,8 +2246,33 @@ fn assert_dwell_is_bounded(measured: &Measured, scalars: &GeneratorScalars, fp: 
 // NOTE: the persistent arrival state can carry a long quiet gap across a UTC
 // day boundary. Hour shares remain tightly sampled, while the seven-point day
 // curve is therefore checked for shape rather than exact occupancy.
+//
+// THE `#[ignore]` CARRIES A REASON NOW, and the reason is COST. It was the one
+// bare `#[ignore]` in the workspace, which made it unclassifiable: nothing can
+// tell a cost ignore from an environment one or a parked one, and this file's
+// neighbours are all three.
+//
+// What the attribute buys is exclusion from the FAST lane, which does not set
+// `include_ignored`; the full gate does set it, so this is a real gate there
+// and runs on every one. It is deliberately NOT in the runner's `skip` list.
+//
+// CUTTING `SESSION_DRAW` WAS CONSIDERED AND REFUSED. At the committed 0.171 s
+// mean event gap, 15M parent events is about 30 simulated days, and the seven
+// `dow_weight` assertions below need several whole weeks to separate a weekend
+// from a weekday; halving the draw halves the span to two weeks, which does not
+// fail sooner, it passes on less evidence. The harness already throws every
+// child away (`src.burst.remaining = 0`), so what is left is the arrival draw
+// itself at about 500 ns per event in dev - there is no fat to take.
+//
+// THE WATCHDOG HEADROOM IS 2.6x, MEASURED, not the ~1.6x a static estimate
+// suggested: 7.51 s one test per process in dev, and the runner config records
+// the same walk at 7.622 s serial against 7.768 s at eight threads, i.e. this
+// walk barely notices the parallel lane. The 20 s per-test kill is not close.
+//
+// A 15M-parent-event walk: see the heavy-walk cfg note at the top of this file.
 #[test]
-#[ignore]
+#[cfg(not(feature = "hotpath"))]
+#[ignore = "walks 15M parent events, about 30 simulated days, in 7.5 s; kept out of the fast lane, run by the full gate"]
 fn session_modulation_reproduces_curves() {
     assert_eq!(utc_hour_dow(0), (0, 4));
     assert_eq!(utc_hour_dow(1_700_000_000_000_000_000), (22, 2));
@@ -2230,9 +2350,17 @@ fn session_modulation_reproduces_curves() {
 #[derive(Default)]
 struct Measured {
     mean_gap_s: f64,
-    #[expect(
-        dead_code,
-        reason = "Sample maxima are recorded for diagnostic context but intentionally never gated."
+    // The `expect` is conditional because under `hotpath` the whole struct is
+    // unreachable (its two callers are the compiled-out heavy walks), so rustc
+    // reports the STRUCT and this field-level expectation goes unfulfilled -
+    // which is itself an error. It still bites in the default shape, which is
+    // the shape that gets to say a field has no reader.
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            dead_code,
+            reason = "Sample maxima are recorded for diagnostic context but intentionally never gated."
+        )
     )]
     max_gap_s: f64,
     gap_p999_s: f64,

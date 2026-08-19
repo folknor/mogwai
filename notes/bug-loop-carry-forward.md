@@ -906,6 +906,102 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
     the pin would stop biting - the location is the mechanism. Untracked at the
     root is the requirement; RAII cleanup is the fix.
 
+## The tape document, round 2: the gate's compute bill
+
+- `crates/mogwai-data/src` CARRIES NO `hotpath` ANNOTATION. The crate's only
+  `cfg(feature = "hotpath")` is in `examples/arrival_walk_bench.rs`, so the
+  `instrumented` sweep's build shape differs from the default one in the
+  dependency graph and that example and in NOTHING a test in this crate can
+  observe - the same walk measures 7.65 s in one shape and 7.67 s in the other.
+  That is why five tests now carry `#[cfg(not(feature = "hotpath"))]` and why
+  that costs the sweep nothing: the sweep exists to prove a feature nothing
+  compiles cannot rot, which is a COMPILE property, satisfied by compiling.
+  `mogwai-lab` is NOT in the same position - it has two annotations in `src` -
+  so do not carry this cut across to it without re-deriving it there.
+  - THE MECHANISM IS OPTING OUT OF THE BUILD SHAPE, NOT FILTERING THE RUN, and
+    the two are not interchangeable. The gate `certifies = "complete"`, so a
+    filtered test is an ORPHANED pair and an error; a test that does not exist
+    in a shape is no pair at all. Verified: 1688 pairs, 0 orphaned. There is
+    also no per-sweep filter available - `skip` lives on the profile and hits
+    both sweeps.
+  - IT STRANDS THE HELPERS THE GATED TESTS ALONE REACH, which is the hole one
+    layer up: `measure`, `measure_session_curves`, `windowed_latent_returns`
+    and their result structs become unreachable in that shape. The file carries
+    `#![cfg_attr(feature = "hotpath", allow(dead_code))]` for it - scoped to
+    that shape ONLY, so the default shape still reports a helper whose last
+    caller was deleted. A blanket allow would have hidden exactly that decay.
+    A field-level `#[expect(dead_code)]` inside a struct that becomes dead
+    ALSO breaks: rustc reports the struct, the field expectation goes
+    unfulfilled, and that is an error. `Measured::max_gap_s` is
+    `#[cfg_attr(not(feature = "hotpath"), expect(...))]` for that reason.
+  - THE LINE IS ROUGHLY TWO SECONDS, measured one test per process by
+    `scripts/adapter_test_walls.py`, which is generic over libtest binaries and
+    was the adapter round's instrument. `mogwai-data`'s shape is the OPPOSITE of
+    the adapter's: not a floor but seven real walks carrying 93% of the wall
+    over a tail of 168 tests at a millisecond each.
+- THE DWELL PAIR IS ONE TEST NOW. `run_seeded_tape_dwell_is_bounded` is
+  DELETED and `dwell_is_bounded_across_run_seeds` is un-ignored, out of `skip`,
+  and runs the EIGHT ARMS 0, 1, 2, 3, 4, 5, 6 AND 42 at `DRAW / 8`. Seed 42 is
+  in the loop deliberately - it is the default run seed, so a sweep of the
+  first eight integers would have traded the shipped realization for eight
+  unshipped ones - and SEED 7 IS DISPLACED RATHER THAN JOINED, because eight
+  arms is what multiplies `DRAW / 8` back to the two million parent events the
+  wall-clock argument rests on. The list is written out in the source for that
+  reason: every range-plus-chain phrasing of it was read as nine arms. The skip
+  entry's stated
+  ground ("outlives the 20-second watchdog by design") was false at 6.54 s, and
+  its cost was that the repo's ONLY multi-seed dwell evidence was the test
+  nothing ran.
+  - THE FOUR DWELL BOUNDS, MEASURED, so the next reader does not re-derive them:
+    `mean_gap_s` 0.1743-0.1785 short vs 0.17426 full against declared 0.17104
+    and a 10% window; `gap_p999_s` 2.92-3.03 short vs 3.18 full against a bound
+    of 10.65; `empty_hour_frac` and `max_empty_hour_run_h` EXACTLY ZERO at both
+    draws. The last two are not vacuous - they are one-sided guards against
+    silence, bite-checked at the short draw with a 30,000x `LiquidityDrought`
+    (`empty_hour_frac` fails at 0.765 against 0.0105). But
+    `max_empty_hour_run_h` IS genuinely weaker short: its bound is 7 h and a
+    `DRAW / 8` arm spans only ~12 h, so it can fire only on a near-total
+    blackout. It costs the test nothing because `empty_hour_frac` is asserted
+    first and dominates it at both draws, and that reasoning is written beside
+    the test. THE UNSTATED COROLLARY, now stated: at ~11 complete hour buckets
+    the RESOLUTION of `empty_hour_frac` is 1/11 = 0.09 against a 0.0105 bound,
+    so that assertion is a BINARY "no empty hour at all" and not a two-sided
+    measurement of a fraction. It was already binary at the full draw (~96
+    buckets, 0.0104 against 0.0105), so the short draw gives up nothing - but
+    do not read the assertion's form as more than it is.
+- `brokkr test -p <crate> <NAME>` RUNS EVERY SWEEP OF THE RESOLVED PROFILE, not
+  one. For `mogwai-data` that is `workspace`, `instrumented` and `timing`, and
+  it reports each separately - a sweep whose filter matches nothing prints
+  `SKIP ... - no tests matched (likely feature-gated out of this sweep)` rather
+  than a green PASS. That is what makes a `#[cfg(not(feature = "hotpath"))]`
+  test still runnable by name with no false green, and it is why a cold review
+  of this round's cut - which assumed one all-features sweep and therefore an
+  unrunnable, silently-passing test - did not survive contact with the runner.
+  The focused runner also applies NO `skip` list; only the gate profile does.
+- TWO SKIP ENTRIES STILL REST ON THE SAME FALSE COST CLAIM and were left in
+  place with their measured numbers: `standardized_candidate_rail_sizing`
+  0.37 s and `realized_return_envelope_under_regime_scaling` 0.20 s, under a
+  heading in `brokkr.toml` saying every entry below it outlives the watchdog.
+  Only `synthetic_spread_decomposition_at_protocol_seven` at 6.46 s is even
+  loosely described. They are entangled with the report's finding 6 - the test
+  it says carries the real claim is one of the two that never runs - so
+  whoever takes finding 6 takes these.
+- REFUSED: cutting `SESSION_DRAW`. 15M parent events is ~30 simulated days and
+  the seven `dow_weight` assertions need whole weeks to separate a weekend from
+  a weekday, so halving it passes on less evidence rather than failing sooner.
+  The watchdog risk did not reproduce: 7.51 s serial, and `brokkr.toml`'s own
+  record has the same walk at 7.622 s serial against 7.768 s at eight threads,
+  so this walk BARELY NOTICES THE PARALLEL LANE and sits 2.6x from the 20 s
+  kill. The report's 1.6x-inflation estimate was borrowed from a sibling
+  project and does not describe this one.
+- WHERE THE GATE'S SAVING ACTUALLY IS, because the first draft of this section
+  got it wrong: entirely in the `instrumented` sweep. In the gate's `workspace`
+  sweep the deletion and the un-skipping cancel and all five `cfg`'d walks
+  still run, so the dwell change bought COVERAGE there and no wall clock. The
+  full gate went 58.3 s to 41.4 s and 50.4 s on two post-change runs; the wall
+  is noisy at eight threads on a loaded host and the coverage counts are not,
+  so audit with the counts.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -1014,6 +1110,8 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
     12.14 s, from 39.71 s; the four socket binaries hold 60 tests totalling
     11.38 s one-per-process. See the round-5 section above and
     `reference/performance.md`.
+  - adapter close pass: unchanged at 1187 + 442, 1692 pairs, 0 orphaned, 58.3 s;
+    serial adapter sweep re-measured at 11.96 s. Prose fixes only, no new test.
   - tape r1: 1187 + 441, 1691 pairs, 0 orphaned, 59.1 s. THE COUNT WENT DOWN
     AND THAT IS CORRECT: an ignored `mogwai-data` test was removed from the
     suite entirely and one `mogwai-cli` test added, so the "only goes up" rule
@@ -1029,12 +1127,35 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
     `mogwai-cli` parser fixtures for the fixture-write scan, workspace sweep
     only, so +4 in the first bucket and +4 pairs, exactly as the rule above
     predicts.
-  - adapter close pass: unchanged at 1187 + 442, 1692 pairs, 0 orphaned, 58.3 s;
-    serial adapter sweep re-measured at 11.96 s. Prose fixes only, no new test.
+  - tape r2: 1191 + 436, 1688 pairs, 1627 run, 61 ignored, 0 orphaned, 16
+    skips; 41.4 s and 50.4 s on two runs. THE BASELINE
+    IS THE LINE DIRECTLY ABOVE, tape r1 fix pass at 1191 + 441 and 1695 pairs -
+    stated because a cold reviewer took the baseline from the adapter close
+    pass, which used to be appended at the END of this list while belonging
+    chronologically before tape r1, and got an arithmetic mismatch out of it.
+    The list is in order now; keep it that way.
+    THE SECOND BUCKET DROPPED BY 5, 441 to 436, AND THAT IS THE POINT: five
+    heavy walks are now absent from the instrumented BUILD SHAPE, so they are
+    no pair rather than an orphaned one. The dwell changes move NEITHER bucket:
+    `run_seeded_tape_dwell_is_bounded` deleted is -1 in each, and
+    `dwell_is_bounded_across_run_seeds` un-skipped so it RUNS is +1 in each.
+    Pairs: -2 for the deletion (a `mogwai-data` test, so both shapes), -5 for
+    the cfg (absent from one shape), 1695 - 7 = 1688.
+    Serial `brokkr test -p mogwai-data "" --debug` runs THREE sweeps, not two,
+    and applies no `skip`: 44.62 + 44.61 + 44.43 = 133.66 s -> 37.97 + 9.96 +
+    38.22 = 86.15 s. The GATE's saving is a different number and comes entirely
+    from the instrumented sweep; see `reference/performance.md`.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is
-  what that list is for. `test_threads` STAYS AT 8 even so: the cliff at 16 was
+  what that list is for - but the COST half was never audited against a
+  measurement until the tape round did it, and one entry was flatly wrong while
+  two more are off by an order of magnitude. See the tape round-2 section. A
+  skip entry states a cost; nothing checks it - so the universal claim that
+  headed that list ("every one of them outlives the 20-second watchdog by
+  design") is GONE, replaced by a per-entry statement carrying the measured
+  number and, where the exclusion is not about cost at all, saying so.
+  `test_threads` STAYS AT 8 even so: the cliff at 16 was
   attributed to one of the un-parked tests, and the whole suite now passes at 16
   and at 32, twice each - but one removed cause is not evidence the cliff had
   only one, which is that todo item's own standard for this class of defect.
