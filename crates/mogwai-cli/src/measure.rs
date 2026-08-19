@@ -317,26 +317,8 @@ pub fn run_measure_with(
 
     // -- Input-side population gates.
     for g in &generated_seeds {
-        let dates: Vec<Option<&str>> = g
-            .per_session
-            .iter()
-            .map(|r| r.get("session_date").and_then(Value::as_str))
-            .collect();
-        if dates.iter().any(Option::is_none) {
-            bail!("seed {} carries non-string session dates", g.seed);
-        }
-        let mut sorted: Vec<&str> = dates.iter().map(|d| d.unwrap_or_default()).collect();
-        let mut unique = sorted.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        sorted.sort_unstable();
-        if sorted != unique || dates.len() != 23 {
-            bail!(
-                "seed {} carries {} sessions, not 23 sorted unique",
-                g.seed,
-                dates.len()
-            );
-        }
+        session_dates_are_23_sorted_unique(&g.per_session)
+            .with_context(|| format!("seed {}", g.seed))?;
     }
     let mut distinct_calendars: std::collections::BTreeSet<Vec<Option<&str>>> =
         std::collections::BTreeSet::new();
@@ -433,6 +415,49 @@ pub fn run_measure_with(
             sessions: generated_seeds.iter().map(|g| g.per_session.len()).sum(),
         },
     })
+}
+
+/// The input-side population gate on one seed's generated `per_session` array:
+/// 23 sessions, every `session_date` a string, all distinct, IN ASCENDING
+/// ORDER.
+///
+/// THE ORDER HALF WAS DECORATION UNTIL 2026-08-20. The gate sorted its own copy
+/// of the dates before comparing it against the sorted-deduped copy, so the
+/// comparison could only ever detect a DUPLICATE - two sorted vectors of the
+/// same multiset are equal by construction - while the refusal it raised said
+/// "not 23 sorted unique". A shuffled calendar passed it. The dates are
+/// compared in the order they arrive now, which is the only comparison that
+/// states what the message claims, and the count, duplicate and order refusals
+/// are three distinct messages so a failure says which one fired. Extracted
+/// from `run_measure_with` so the
+/// claim is testable at all: it sat mid-way through a multi-minute walk driver
+/// with no reachable seam.
+fn session_dates_are_23_sorted_unique(per_session: &[Value]) -> anyhow::Result<()> {
+    let dates: Vec<Option<&str>> = per_session
+        .iter()
+        .map(|r| r.get("session_date").and_then(Value::as_str))
+        .collect();
+    if dates.iter().any(Option::is_none) {
+        bail!("carries non-string session dates");
+    }
+    let as_read: Vec<&str> = dates.iter().map(|d| d.unwrap_or_default()).collect();
+    if as_read.len() != 23 {
+        bail!("carries {} session dates, not 23", as_read.len());
+    }
+    // THE THREE REFUSALS ARE SEPARATE MESSAGES ON PURPOSE. A shared one reads
+    // as a contradiction on the ordering path - an out-of-order calendar of 23
+    // distinct dates would report "carries 23 sessions, not 23 sorted unique" -
+    // and, worse, it leaves a test unable to name which half it selected.
+    let mut ascending = as_read.clone();
+    ascending.sort_unstable();
+    ascending.dedup();
+    if ascending.len() != as_read.len() {
+        bail!("carries duplicate session dates: {as_read:?}");
+    }
+    if as_read != ascending {
+        bail!("carries session dates out of ascending order: {as_read:?}");
+    }
+    Ok(())
 }
 
 /// `run_measure12a_observed`: the observed half - per-session sufficient
@@ -658,6 +683,68 @@ pub(crate) fn run_final_walk_with_count_windows(
 
 #[cfg(test)]
 mod tests {
+    use super::session_dates_are_23_sorted_unique;
+
+    fn sessions(dates: &[&str]) -> Vec<serde_json::Value> {
+        dates
+            .iter()
+            .map(|d| serde_json::json!({ "session_date": d }))
+            .collect()
+    }
+
+    fn calendar() -> Vec<String> {
+        (1..=23).map(|d| format!("2026-01-{d:02}")).collect()
+    }
+
+    /// The gate's refusal says "23 sorted unique" and all three words must be
+    /// load-bearing. The ORDER one was not: the gate sorted its own copy first,
+    /// so a shuffled calendar of 23 distinct dates passed - and a sorted
+    /// comparison against a sorted-deduped copy can, by construction, only
+    /// report duplicates.
+    #[test]
+    fn the_population_gate_refuses_a_calendar_that_is_out_of_order() {
+        let calendar = calendar();
+        let refs: Vec<&str> = calendar.iter().map(String::as_str).collect();
+        session_dates_are_23_sorted_unique(&sessions(&refs))
+            .expect("an ascending calendar of 23 distinct dates passes");
+
+        // Each arm is selected BY ITS OWN MESSAGE. A substring two refusals
+        // share cannot tell which half fired, and this arc has already been
+        // burned by a bite-check that asserted on exactly that.
+        let mut shuffled = refs.clone();
+        shuffled.swap(3, 17);
+        let err = session_dates_are_23_sorted_unique(&sessions(&shuffled))
+            .expect_err("a calendar out of ascending order must be refused");
+        assert!(
+            err.to_string().contains("out of ascending order"),
+            "the ordering refusal is its own message: {err}"
+        );
+
+        // The three halves that already bit, kept beside it so a later
+        // tightening cannot trade one for another.
+        let mut duplicated = refs.clone();
+        duplicated[22] = duplicated[21];
+        let err = session_dates_are_23_sorted_unique(&sessions(&duplicated))
+            .expect_err("a duplicated session date must be refused");
+        assert!(
+            err.to_string().contains("duplicate session dates"),
+            "the duplicate refusal is its own message: {err}"
+        );
+        let err = session_dates_are_23_sorted_unique(&sessions(&refs[..22]))
+            .expect_err("22 sessions must be refused");
+        assert!(
+            err.to_string().contains("carries 22 session dates, not 23"),
+            "the count refusal is its own message: {err}"
+        );
+        let missing = vec![serde_json::json!({ "session_date": 7 })];
+        let err = session_dates_are_23_sorted_unique(&missing)
+            .expect_err("a non-string session date must be refused");
+        assert!(
+            err.to_string().contains("non-string session dates"),
+            "the type refusal is its own message: {err}"
+        );
+    }
+
     /// Regression for the 2c-ii golden-gate finding: `run_measure12a_observed`
     /// once passed whole PER-SESSION records (carrying sibling non-object
     /// fields like `segments` and `permutations`, both arrays) straight into

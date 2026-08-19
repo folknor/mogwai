@@ -9,8 +9,10 @@ Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 Confidence labels are the hunter's own.
 
 The hunter reports editing nothing, and verified its claims against the tape
-constant (`crates/mogwai-data/src/lib.rs:109` = 20), the committed artifacts'
-recorded versions (11 and 14), and cargo's test CWD semantics.
+constant, the committed artifacts' recorded versions (11 and 14), and cargo's
+test CWD semantics. Its transcription of the constant said 20; the tree it read
+carried 22, which is also the number finding 1 argues from, so the slip was in
+the preamble alone.
 
 ## 1. `arrival-control` gate B1 can never pass: hardcoded tape version is three bumps stale (high confidence, real bug) - FIXED 2026-08-18
 
@@ -209,43 +211,132 @@ blindness above:
   `preflight` and both `synth` outputs carry the identical convention, so it is
   a crate-wide question rather than a defect in `fit`. Filed in `notes/todo.md`.
 
-## 6. `--type trace` under-counts children of the last parent when the window ends at `end` (medium confidence)
+## 6-7. RESOLVED 2026-08-20 (fix pass, round 2)
 
-`gen.rs:378-407` (`write_trace`). The loop breaks on `ts >= end` for either
-event kind, then emits `pending`. A parent whose `parent_ts < until <= end` can
-own child trades whose timestamps land at or past `end`; those trades break the
-loop before `record.child_count += 1` runs, and the record is emitted anyway
-with a truncated `child_count`. Since the constraint is only `until <= end`, the
-common case `until == end` puts the last in-window parent exactly on this
-boundary. The quote-side path handles this correctly (a quote at `>= until`
-emits the previous parent THEN breaks), so the asymmetry looks unintentional
-rather than a documented truncation. The hunter has not confirmed a real parent
-straddles the boundary in practice - it depends on child spacing - hence medium
-confidence, but the code admits it.
+Finding 6 was REAL and is fixed. Finding 7 named four tests: TWO WERE ALREADY
+FIXED IN THE TREE THE HUNTER READ and are refused, two were real and are fixed.
+What each turned out to be, with the measurement, so a later round does not
+redo it:
 
-## 7. Non-biting and brittle tests
+- FINDING 6 REPRODUCED, and the reproduction is the interesting part. The code
+  admits it exactly as reported - `write_trace`'s loop broke on `ts >= end` for
+  a TRADE as readily as for a quote, and `--trace-until == start + length` is
+  legal, so the last in-window parent's brood was cut at the walk's stopping
+  instant and the short record emitted anyway. BUT IT IS INVISIBLE TO ANY
+  ROUND-NUMBER WINDOW: a brood spans microseconds while the parents are seconds
+  apart, so a `--trace-until` on a whole second falls between broods. 599
+  round-second closes were probed against a walk an hour longer and not one
+  differed. The regression test therefore DERIVES its window close from the
+  tape - it walks the source for the first parent past the origin owning a child
+  strictly after it, counts that parent's whole brood as an independent oracle,
+  and closes the window one nanosecond past the parent.
+  `the_last_parents_child_count_does_not_depend_on_where_the_walk_stops` in
+  `gen.rs`. Bite-checked by restoring the trade-side break: red on `the last
+  in-window parent's brood was truncated at the window close`,
+  `left: Some(1), right: Some(4)` - the named assertion, and the same 1-versus-4
+  the differential form had shown before the oracle replaced it.
+  THE PERTURBATION WAS NOT A PURE REVERSION, and the round-2 cold review was
+  right to say so. The fix DELETED the `end` parameter, so restoring the defect
+  restores a parameter: the signature moves, and the test's own `write_trace`
+  call site and the production call in `run_into` had to be edited alongside it.
+  Every edit was a text edit and nothing was restored with `git checkout`, but
+  this is not the single-hunk reversion `AGENTS.md` describes, and the record
+  says so rather than describing a cleaner check than was run. The general
+  point: a fix that changes a SIGNATURE cannot be bite-checked by a local
+  reversion, and the honest move is to name the extra edits, not to prefer a
+  weaker fix for the sake of a tidier check.
+  THE FIX REMOVES `end` FROM `write_trace` ENTIRELY. Since the validator already
+  enforces `until <= end`, the quote-side `>= until` break is the only stopping
+  point the record shape admits: a brood belongs to its parent, so the walk must
+  run to the NEXT PARENT and no further. `end` still bounds the WINDOW at the
+  call site, which is where it belongs.
+  NO TAPE VERSION BUMP IS OWED. `write_trace` is a consumer - it draws nothing,
+  perturbs nothing, and `trace_consumes_no_draws_and_leaves_the_tape_byte_identical`
+  in `mogwai-data` pins that. What changed is how many ticks the trace reader
+  consumes before it stops, which moves a REPORTED count and not a generated
+  byte. `TAPE_PROTOCOL_VERSION` is 22.
+- FINDING 7, `presets_cli.rs`: REFUSED, STALE. `every_listed_preset_is_fetchable_by_name`
+  already asserts `output.status.success()` AND non-emptiness of the listing,
+  with a comment naming the exact vacuity the hunter describes. Landed in
+  `8a782fa` on 2026-08-18, in the tree the hunter read.
+- FINDING 7, `completion.rs`: REFUSED, STALE. The healthy venue takes
+  `StderrSink::Discard` and its comment records the shadowed `Arc<Mutex<Vec<_>>>`
+  as a defect already removed - "a buffer filling for no reader". There is one
+  `diagnostics` pair in the file and it is read.
+- FINDING 7, THE STRICT DRAIN SHAPE: HALF STALE, HALF REAL.
+  `unconfigured_symbol.rs` was already converted to the ending-recording form,
+  and its comment quotes `while let Ok(Some(Ok(Message::Text(_))))` as the shape
+  it replaced. `serving.rs`'s `a_ws_upgrade_for_a_configured_non_boot_symbol_is_served`
+  was the LAST INSTANCE workspace-wide and is converted to match. NOT
+  BITE-CHECKED, AND IT CANNOT BE: the venue emits no Ping, Pong or Binary frame,
+  so no production edit makes the old shape produce the wrong answer - which is
+  precisely why it survived. The change is brittleness removal, and what it buys
+  is that the panic now names the ending (`the venue CLOSED the socket`,
+  `the socket failed`, `the deadline expired`) instead of reporting all of them
+  as "produced no named market frame". The audit was widened rather than taken
+  on faith: `Ok(Some(Ok(Message::` appears eleven times in `crates/`, and every
+  other instance is a `match` arm with a live catch-all beside it.
+- FINDING 7, THE POPULATION GATE: REAL AND FIXED, AND IT WAS WORSE THAN
+  REPORTED. The hunter said the gate "says nothing about the actual ordering".
+  It cannot say anything about it: it sorted `sorted` and compared it against
+  the sorted-deduped `unique`, and TWO SORTED VECTORS OF THE SAME MULTISET ARE
+  EQUAL BY CONSTRUCTION, so the comparison had exactly one reachable failure
+  mode - a duplicate - while raising a refusal that reads "not 23 sorted
+  unique". The dates are compared in arrival order now. The gate was EXTRACTED
+  to `session_dates_are_23_sorted_unique` to be testable at all: it sat mid-way
+  through a multi-minute walk driver behind a Brick G cache, with no reachable
+  seam, which is why it had no test in the first place.
+  `the_population_gate_refuses_a_calendar_that_is_out_of_order` in `measure.rs`
+  covers all four refusals. Bite-checked as a text edit restoring the
+  sort-before-compare: red on `a calendar out of ascending order must be
+  refused`, the ordering assertion by name, with the duplicate, count and
+  non-string arms untouched - so the perturbation selected the half that was
+  decoration and left the halves that already bit alone.
+  FILED, because the consumer is unreachable from here: no sweep in this
+  workspace populates the walk cache, so the first real `measure` run is the
+  first execution of the tightened comparison. `notes/todo.md`.
 
-- `tests/presets_cli.rs:47` `every_listed_preset_is_fetchable_by_name` never
-  asserts the listing command succeeded. If `presets` exits nonzero with empty
-  stdout, the `for name in listing.lines()` body never executes and the test
-  passes green. Its sibling three lines up does assert status; this one dropped
-  it.
-- `tests/completion.rs:105-122`: the first `diagnostics` and
-  `diagnostics_for_sink` pair is constructed, wired into the first launch's
-  `StderrSink::Lines`, and then immediately shadowed by a second pair. The first
-  venue's captured stderr is unreachable dead state. Harmless, but it reads as
-  if the healthy-venue diagnostics were being checked, and they are not.
-- `tests/serving.rs:121-127` and `tests/unconfigured_symbol.rs:61-63` use
-  `while let Ok(Some(Ok(Message::Text(frame))))`. Any non-Text frame - a Ping, a
-  Close - terminates the loop and falls straight into
-  `panic!("... produced no frames")`, reporting a false failure. Today the
-  server sends no pings so it does not bite; the sibling loops at
-  `serving.rs:105` and `completion.rs:47` use the safe shape (bind `message`,
-  match Text, `_ => {}`). The strict shape should not survive.
-- `measure.rs:322-334`: the population gate's comment says "23 sorted unique",
-  but it sorts a copy before comparing, so it verifies uniqueness and count and
-  says nothing about the actual ordering of `per_session`. If sorted order is
-  load-bearing downstream, the gate does not check it.
+Also filed: `--type trace` still has no end-to-end coverage through the shipped
+binary - the argv, the window validation and the legality of `until == end` are
+unstated by any test.
+
+### Cold review of the round-2 fix pass, closed 2026-08-20
+
+No blockers. The review confirmed the `write_trace` fix (one caller, `end`
+still validated at that call site, `analysis/out/` untracked so no committed
+artifact needed re-blessing), the `measure.rs` fix and its diagnostic chain, and
+that the `serving.rs` drain conversion is honestly labelled as unbitten
+brittleness removal. Four minor findings, all closed:
+
+- THE BITE-CHECK RECORD OVERSTATED ITS OWN PURITY. Corrected in place above: the
+  perturbation was sound but it moved a signature and touched two call sites,
+  which the record now says.
+- `assert!(children > 1)` WAS STRICTER THAN THE PRECONDITION IT STATED. The
+  oracle's `straddles` flag already guarantees a child past the parent, and a
+  brood of exactly one such child exhibits the truncation as 0 versus 1 - a
+  perfectly good witness the assertion would have thrown away as unusable. It is
+  `> 0` now, restating the precondition rather than narrowing it, with the
+  reasoning in place. This matters because the fingerprint is a committed
+  artifact this arc has already re-blessed twice.
+- THE TEST CITED A DOC COMMENT THAT DID NOT SAY WHAT IT CLAIMED. The test's doc
+  asserted `write_trace` "says" `child_count` is the parent's WHOLE brood; the
+  production doc said only "its child count". The DOC was tightened, not the
+  citation - it is the durable statement the fix's correctness rests on, so it
+  now states the contract and states why the next parent is the only legal
+  stopping point.
+- THE REFUSAL MESSAGE WAS AMBIGUOUS NOW THAT ALL THREE HALVES ARE REACHABLE. An
+  out-of-order calendar of 23 distinct dates reported "carries 23 sessions, not
+  23 sorted unique", which reads as a contradiction. Count, duplicate and order
+  are three separate refusals now (`carries N session dates, not 23`, `carries
+  duplicate session dates`, `carries session dates out of ascending order`), and
+  `the_population_gate_refuses_a_calendar_that_is_out_of_order` ASSERTS EACH ARM
+  BY ITS OWN MESSAGE rather than by a substring two of them share - which is the
+  hazard this arc's instance 32 was.
+
+Re-bitten after the split, as a text edit: deleting the `as_read != ascending`
+refusal alone fails the test on `a calendar out of ascending order must be
+refused`, with the duplicate, count and type arms still green - so the ordering
+half is selected by the perturbation and by the message both.
 
 ## 8. Structural: the shipped venue binary carries roughly 13,000 lines of retired-protocol evidence tooling
 

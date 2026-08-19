@@ -5028,3 +5028,78 @@ only of what it found.
   orphaned. +3 on the workspace sweep over the pre-fix tree, which is exactly
   the three tests added - two parser fixtures pinning both halves of the
   widening, and the cache typo refusal.
+
+## The cli document, round 2: the defect no round-number window can see
+
+Findings 6 and 7. Two of the four items in finding 7 were ALREADY FIXED in the
+tree the hunter read - stale findings from a report written against a moving
+tree, the same shape round 1 hit - so checking before fixing paid for itself
+twice in one round.
+
+- A DEFECT WHOSE WITNESS IS A MEASURE-ZERO SET LOOKS EXACTLY LIKE NO DEFECT.
+  `gen --type trace` truncated the last parent's `child_count` when the trace
+  window closed at the walk's end, and the first regression test written for it
+  PASSED - as did 599 more window closes taken on whole seconds. The reason is
+  structural rather than lucky: a brood spans microseconds, the parents are
+  seconds apart, so a window close picked on any round unit falls BETWEEN
+  broods with probability essentially one. THE FIX WAS TO DERIVE THE WITNESS
+  FROM THE TAPE - walk the source for a parent that actually owns a child past
+  where the window would close, and use that parent's instant. CARRY THE SHAPE:
+  when a reported defect will not reproduce, ask whether the test's INPUT is
+  drawn from the region the defect lives in before concluding the report was
+  wrong. A round number is not a neutral choice; it is a choice correlated with
+  every other round number in the system.
+- AND THE ORACLE BEAT THE DIFFERENTIAL. The first form compared a short walk
+  against a long one, which is only a statement that the answer is stable, not
+  that it is right. The landed form counts the parent's whole brood
+  independently and asserts the emitted count equals it - which also caught an
+  off-by-one in the oracle itself (the first child shares the parent's
+  timestamp, so a "strictly after" trigger misses it) that the differential
+  form would have carried silently.
+- A COMPARISON CAN HAVE ONE REACHABLE FAILURE MODE AND A MESSAGE NAMING THREE.
+  `measure`'s population gate refused with "not 23 sorted unique" while sorting
+  its own copy before comparing it against the sorted-deduped copy - and two
+  sorted vectors of one multiset are equal by construction, so only the
+  duplicate half could ever fire. This is the arc's signature defect in its
+  purest arithmetic form: nothing reads as more gated than a comparison. The
+  tell is a normalization applied to BOTH sides of an equality that exists to
+  detect that very normalization.
+- A GATE WITH NO SEAM HAS NO TEST, AND THAT IS THE FIRST FINDING ABOUT IT. Both
+  real defects this round sat in code with zero coverage: `write_trace` had no
+  test of any kind, and the population gate sat mid-way through a multi-minute
+  walk driver behind a cache no sweep populates. Extracting the gate to a named
+  function was most of the fix. Where a pass finds an unreachable check, the
+  extraction is the deliverable even if the check turns out to be right.
+- A BRITTLENESS FIX THAT CANNOT BE BITE-CHECKED SAYS SO. The last strict
+  `while let Ok(Some(Ok(Message::Text(..))))` drain in the workspace
+  (`serving.rs`) was converted to the ending-recording form. No production edit
+  makes it bite, because the venue emits no control frames - so it is recorded
+  as brittleness removal, with the audit widened instead of taken on faith
+  (eleven `Ok(Some(Ok(Message::` sites in `crates/`, every other one a `match`
+  arm with a live catch-all). Do not dress an unbitten change as a bitten one.
+- `write_trace` NO LONGER TAKES `end`. The walk's only legal stopping point is
+  the NEXT PARENT at or past `--trace-until`, because a brood belongs to its
+  parent; `end` bounds the WINDOW at the call site and nothing else. A future
+  change that reintroduces a child-timestamp stop reintroduces the truncation.
+- THIS DOCUMENT WAS WRITTEN AGAINST A MOVING TREE AND ITS CONFIDENCE LABELS
+  SHOULD BE DISCOUNTED ACCORDINGLY. Three of its findings across two rounds
+  were STALE - already fixed by commits in the tree the hunter read: finding 2's
+  artifact half by `4a1e18e`, and both `every_listed_preset_is_fetchable_by_name`
+  and the `completion.rs` shadowed diagnostics by `8a782fa`. A reconnaissance
+  pass reading a tree that other passes are landing into cannot distinguish "not
+  fixed" from "fixed since I read it", so VERIFY BEFORE FIXING is not diligence
+  here, it is the only way to read the report at all.
+- A FIX THAT CHANGES A SIGNATURE CANNOT BE BITE-CHECKED BY A LOCAL REVERSION,
+  and the record must say which extra edits the perturbation needed. Removing
+  `end` from `write_trace` meant restoring the defect also restored a parameter,
+  dragging in the test's call site and the production call. The check is still
+  sound; describing it as a pure text-edit reversion was not. The rule this adds
+  to the arc's bite-check discipline: NAME THE EXTRA EDITS, and never prefer a
+  weaker fix for the sake of a tidier check.
+- ONE REFUSAL COVERING THREE CONDITIONS CANNOT BE ASSERTED ON. Once the
+  population gate's ordering half actually bit, its shared "not 23 sorted
+  unique" message read as a contradiction on that path AND left the test unable
+  to say which half it had selected - the same hazard as instance 32, where a
+  bite-check asserted on a substring two messages shared. Split refusals are not
+  cosmetic: a multi-condition guard owes one message per condition, or the test
+  proving one of them proves nothing in particular.

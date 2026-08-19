@@ -146,15 +146,39 @@ async fn a_ws_upgrade_for_a_configured_non_boot_symbol_is_served() {
         .await
         .expect("configured non-boot river places a boat");
     assert_eq!(response.status(), 101);
+    // Drain to a DEADLINE and RECORD HOW THE STREAM ENDED. The shape this
+    // replaces - `while let Ok(Some(Ok(Message::Text(frame))))` - exits the
+    // loop on a Ping, a Pong, a Binary or a Close as readily as on the
+    // deadline, and every one of those then arrived at the panic below as
+    // "produced no named market frame". That is a WRONG ANSWER rather than a
+    // timeout: a venue that closed this socket would be reported as a venue
+    // that served an unnamed river. The venue sends no control frames today,
+    // so nothing makes it bite yet - which is exactly why it survived, and is
+    // no reason to leave the last instance of the shape standing.
     let deadline = common::deadline(Duration::from_secs(10));
-    while let Ok(Some(Ok(Message::Text(frame)))) =
-        tokio::time::timeout_at(deadline, socket.next()).await
-    {
-        if frame.contains("MNQ") {
-            return;
+    let mut named = false;
+    let ending = loop {
+        match tokio::time::timeout_at(deadline, socket.next()).await {
+            Err(_) => break "the deadline expired with no named market frame".to_string(),
+            Ok(None) => break "the venue ended the stream".to_string(),
+            Ok(Some(Err(err))) => break format!("the socket failed: {err}"),
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                break format!("the venue CLOSED the socket: {frame:?}");
+            }
+            Ok(Some(Ok(Message::Text(frame)))) => {
+                if frame.contains("MNQ") {
+                    named = true;
+                    break String::new();
+                }
+            }
+            // A Ping, a Pong or a Binary frame is not the end of anything.
+            Ok(Some(Ok(_))) => {}
         }
-    }
-    panic!("configured non-boot river produced no named market frame");
+    };
+    assert!(
+        named,
+        "configured non-boot river produced no named market frame: {ending}"
+    );
 }
 
 /// A boated river answers history only as far as ITS BOAT has published, never

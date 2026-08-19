@@ -193,7 +193,10 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
         }
         let mut source = build_source(args, &profile, args.start)?;
         source.enable_vol_trace();
-        return write_trace(&mut source, from, until, end, sink);
+        // `end` bounds the WINDOW (checked just above), not the walk: the walk
+        // stops at the first parent at or past `until`, so the last in-window
+        // parent's brood is counted whole even when `until == end`.
+        return write_trace(&mut source, from, until, sink);
     }
 
     if matches!(args.kind, GenType::Summary | GenType::Measure12a) {
@@ -334,13 +337,19 @@ fn self_peak_rss_bytes() -> u64 {
 /// One JSON line per parent whose event instant falls inside
 /// `[from, until)`: the parent timestamp, its child count, and the
 /// volatility intermediates the source observed on the REAL step path.
+///
+/// `child_count` IS THE PARENT'S WHOLE BROOD - every trade between that parent
+/// and the NEXT parent, regardless of where those children fall relative to
+/// `until`. That is the contract the record shape admits, and it is why the
+/// walk's only stopping point is the next parent: a count truncated at some
+/// other instant would be a different quantity emitted under the same name.
+///
 /// The walk itself runs identically with the trace enabled - pinned by
 /// `trace_consumes_no_draws_and_leaves_the_tape_byte_identical`.
 fn write_trace(
     source: &mut mogwai_data::GeneratedSource,
     from: u64,
     until: u64,
-    end: u64,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
     #[derive(serde::Serialize)]
@@ -363,16 +372,18 @@ fn write_trace(
         Ok(())
     };
     while let Some(event) = source.next_tick() {
-        let ts = event.ts_event();
-        if ts >= end {
-            break;
-        }
         match event {
             TickEvent::Quote(q) => {
                 emit(pending.take(), out)?;
                 if q.ts_event >= until {
                     // Every later parent sits past the window; the walk can
                     // stop - the tape up to here is already fully realized.
+                    // THE NEXT PARENT IS THE ONLY LEGAL STOPPING POINT: a
+                    // brood's children carry `child_stride_ns` spacing, so
+                    // stopping on a CHILD's timestamp (this loop used to break
+                    // on `ts >= start + length`, which `--trace-until` is
+                    // allowed to equal) truncates the last parent's
+                    // `child_count` and emits the short record anyway.
                     break;
                 }
                 pending = source.take_vol_trace().map(|vol| TraceRecord {
@@ -760,6 +771,105 @@ mod tests {
             aggressor: AggressorSide::NoAggressor,
             ts_event: ts,
         }
+    }
+
+    /// A trace record's `child_count` is the parent's WHOLE brood - the
+    /// trades between it and the next parent - and the doc comment on
+    /// `write_trace` says so. The walk's own span (`--length`) must therefore
+    /// not be able to move it. The window is legal at `trace_until == end`
+    /// (the validation admits `until <= end`), which puts the last in-window
+    /// parent's children on the far side of the walk's stopping instant.
+    ///
+    /// The window close is DERIVED from the tape rather than guessed: a brood
+    /// spans microseconds and the parents are seconds apart, so a `until`
+    /// picked on a round second lands between broods with overwhelming
+    /// probability and the defect is invisible. 599 round-second closes were
+    /// probed while writing this and not one of them crossed a brood.
+    #[test]
+    fn the_last_parents_child_count_does_not_depend_on_where_the_walk_stops() {
+        fn source() -> mogwai_data::GeneratedSource {
+            let args = GenArgs {
+                kind: GenType::Trace,
+                length: "1d".to_string(),
+                interval: None,
+                symbol: "BTCUSDT".to_string(),
+                seed: None,
+                start: 0,
+                start_price: None,
+                config: None,
+                warmup: None,
+                trace_from: None,
+                trace_until: None,
+                regime: None,
+                havoc: None,
+                out: None,
+            };
+            let profile = resolve_profile_for(&args).expect("cli profile");
+            let mut source = build_source(&args, &profile, args.start).expect("cli source");
+            source.enable_vol_trace();
+            source
+        }
+
+        fn trace(until: u64) -> Vec<String> {
+            let mut buf = Vec::new();
+            write_trace(&mut source(), 0, until, &mut buf).expect("trace");
+            lines_of(&buf)
+        }
+
+        // Walk the tape independently for the ORACLE: a parent past the origin
+        // that owns a child strictly after it, and its WHOLE brood - every
+        // trade up to the next parent. The window then closes one nanosecond
+        // past that parent, so the parent is inside `[from, until)` and every
+        // child but the first sits at or beyond the close.
+        let mut walk = source();
+        // (parent ts, children seen so far, any child strictly after the parent)
+        let mut brood: Option<(u64, u32, bool)> = None;
+        loop {
+            let event = walk.next_tick().expect("the generator never exhausts");
+            match event {
+                TickEvent::Quote(q) => {
+                    if let Some((_, _, straddles)) = brood
+                        && straddles
+                    {
+                        break;
+                    }
+                    brood = Some((q.ts_event, 0, false));
+                }
+                TickEvent::Trade(t) => {
+                    if let Some((p, count, straddles)) = &mut brood {
+                        *count += 1;
+                        if *p > 0 && t.ts_event > *p {
+                            *straddles = true;
+                        }
+                    }
+                }
+            }
+        }
+        let (parent_ts, children, _) = brood.expect("a brood was under construction");
+        // `straddles` already guarantees one child strictly past the parent,
+        // so this restates the precondition rather than narrowing it: a brood
+        // of exactly one such child exhibits the truncation as 0 versus 1 and
+        // is a perfectly good witness. Asserting `> 1` here would abort the
+        // test as unusable the first time the fingerprint moved.
+        assert!(
+            children > 0,
+            "the chosen parent must own a child past the window close, \
+             or the truncation this test names cannot occur"
+        );
+
+        let emitted = trace(parent_ts + 1);
+        let last = emitted.last().expect("the trace window emitted no parents");
+        let record: serde_json::Value = serde_json::from_str(last).expect("trace record json");
+        assert_eq!(
+            record["parent_ts"].as_u64(),
+            Some(parent_ts),
+            "the last record is not the parent whose brood straddles the close"
+        );
+        assert_eq!(
+            record["child_count"].as_u64(),
+            Some(u64::from(children)),
+            "the last in-window parent's brood was truncated at the window close"
+        );
     }
 
     fn iv(n: u64) -> NonZeroU64 {

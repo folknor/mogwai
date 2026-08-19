@@ -2124,6 +2124,37 @@ group by any other route has no API for it, and none is owed until one is wanted
   carry positive return variance and come nowhere near the degenerate case, so
   nothing currently depends on this being fixed.
 
+- `mogwai gen --type trace` HAS NO END-TO-END CLI COVERAGE. Filed 2026-08-20 by
+  the `bugs-cli.md` round-2 fix pass, which found the mode's only real defect -
+  the last parent's `child_count` truncated at the window close - with the mode
+  carrying zero tests of any kind. It now has one, at the `write_trace` seam
+  inside `gen.rs`; nothing exercises the argv (`--trace-from`/`--trace-until`
+  parsing, the four-part window validation, the `--interval`/`--warmup`
+  rejections) through the shipped binary the way `presets_cli.rs` does for
+  `presets`. The window validation in particular admits `until == end`, which is
+  the case the defect lived in, and no test states that it is legal.
+
+- THE MEASURE POPULATION GATE NOW REFUSES AN UNSORTED CALENDAR, and no live
+  `measure` run has been made against the tightened form. WATCH THE NEXT ONE.
+  Filed 2026-08-20 by the same pass. Context for a reader who did not see that
+  round: `session_dates_are_23_sorted_unique` in
+  `crates/mogwai-cli/src/measure.rs` guards each generated seed's `per_session`
+  array. Its refusal always claimed "23 sorted unique", but it sorted its own
+  copy of the dates before comparing it against the sorted-deduped copy, so it
+  could only ever detect a duplicate; a shuffled calendar passed. It compares
+  the dates in ARRIVAL ORDER now, and the count, duplicate and order refusals
+  are three distinct messages.
+  Every producing path is a forward calendar walk, so ascending is the expected
+  shape and the tightening should be inert. The reason it is filed rather than
+  simply landed: the gate sits mid-way through a multi-minute walk driver behind
+  a Brick G cache that NO TEST SWEEP IN THIS WORKSPACE POPULATES, so the unit
+  test on the extracted function is the only execution it has had, and the first
+  real `mogwai measure` run is the first time the tightened comparison sees real
+  data. If it then refuses with "carries session dates out of ascending order"
+  on a calendar that is genuinely fine, THE FINDING IS THAT `per_session` IS NOT
+  EMITTED IN DATE ORDER and the gate's message was the half that was wrong - not
+  a reason to loosen the check back to a self-comparison.
+
 
 ## Consumer context: every MOGWAI item in broadarrow's todo
 
