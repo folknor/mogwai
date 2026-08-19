@@ -18,14 +18,30 @@
 //! under-reserving voids the bound outright while over-reserving only costs a
 //! connection some budget.
 //!
-//! THE UPWARD ROUNDING HAS A CEILING, AND IT IS ENFORCED. Over-reservation is
-//! not free - every constant here is multiplied by a row or member count and
-//! charged before the engine is allowed to mutate - so this module's tests
-//! bracket every bound from BOTH sides against the maximal fixture that
-//! defines it: `bound >= actual` and `bound < 2 * actual`, through the
-//! `brackets` helper, which carries the measured slack table. Round generously
-//! WITHIN that factor; a derivation that doubles its own struct is a test
-//! failure rather than a conservative choice.
+//! THE UPWARD ROUNDING HAS A CEILING ON THE PER-STRUCT BOUNDS, AND IT IS
+//! ENFORCED. Over-reservation is not free - a row constant is multiplied by a
+//! row count the server does not control and charged before the engine is
+//! allowed to mutate - so this module's tests bracket each of those from BOTH
+//! sides against the maximal fixture that DEFINES it: `bound >= actual` and
+//! `bound < 2 * actual`, through the `brackets` helper, which carries the
+//! measured slack table. Round generously WITHIN that factor; a derivation
+//! that doubles its own struct is a test failure rather than a conservative
+//! choice.
+//!
+//! THE CEILING STOPS AT THE COMPOSITIONS, DELIBERATELY. It covers the five row
+//! constants, `SNAPSHOT_ENVELOPE_MAX_BYTES`, `ORDER_EVENT_MAX_BYTES` (against
+//! its dominating `OrderRejected` arm) and `account_state_max_bytes`, each of
+//! which has one maximal struct to be measured against. `LINKAGE_MAX_BYTES`,
+//! `BOUNDARY_REFUSAL_BYTES`, `swept_fill_max_bytes` and
+//! `swept_batch_max_bytes` have none: they bound the widest output a command
+//! CLASS can produce, so any sample feeds one command to one book and the
+//! ratio is a property of the sample. Measured over the engine's reservation
+//! matrix it runs 2.2x to 249x, which is why
+//! `worst_case_reservation_covers_actual_output` in `mogwai-engine` is
+//! one-sided by ruling rather than by omission. `worst_case_output_bytes` is
+//! bracketed on its two QUERY arms only, where the reply really does have one
+//! maximal shape. A NEW COMPOSED BOUND INHERITS THAT REFUSAL; a new
+//! per-struct constant owes a `brackets` call.
 
 use crate::{
     ClientMessage, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
@@ -384,13 +400,18 @@ mod tests {
         }
     }
 
-    /// EVERY BOUND IN THIS MODULE IS ASSERTED FROM BOTH SIDES, against the
-    /// maximal fixture that DEFINES it: it must dominate the fixture, and it
-    /// must not exceed twice it. A one-sided `actual <= bound` is satisfied by
-    /// a derivation that over-reserves by any factor at all, and
-    /// over-reservation is not free - every one of these constants is
+    /// EVERY PER-STRUCT BOUND IN THIS MODULE IS ASSERTED FROM BOTH SIDES,
+    /// against the maximal fixture that DEFINES it: it must dominate the
+    /// fixture, and it must not exceed twice it. A one-sided `actual <= bound`
+    /// is satisfied by a derivation that over-reserves by any factor at all,
+    /// and over-reservation is not free - each of these constants is
     /// multiplied by a row count or a member count and charged against a
     /// connection's byte budget before the engine is allowed to mutate.
+    ///
+    /// THE COMPOSED BOUNDS ARE OUT OF SCOPE HERE AND THE MODULE HEADER SAYS
+    /// WHY. `LINKAGE_MAX_BYTES`, `BOUNDARY_REFUSAL_BYTES` and the two `swept_*`
+    /// helpers have no single maximal struct to be measured against, so no
+    /// call below passes one to this helper - which is a ruling, not a gap.
     ///
     /// THE CEILING IS `2 * actual` AND THE FACTOR IS NOT PICKED FROM THE AIR.
     /// It is the ceiling `admission_frames_fit_their_ceiling` already uses on

@@ -9,9 +9,10 @@ time in this order. `bugs-tests-lifecycle` CLOSED on 2026-08-19 after five
 rounds plus a close pass over the whole commit arc, with no open findings;
 `bugs-tests-adapter` CLOSED the same way on 2026-08-19, five rounds plus its own
 close pass; `bugs-tests-tape` CLOSED on 2026-08-19 after its five rounds and
-close pass; `bugs-tests-engine-protocol` finished its five rounds on 2026-08-19,
-empty of open findings apart from two recorded refusals, and goes to its close
-pass next, after which `bugs-tests-lab-cli` starts. The order is
+close pass; `bugs-tests-engine-protocol` CLOSED on 2026-08-19 the same way,
+five rounds plus a close pass over the whole commit arc, with no open findings
+apart from two recorded refusals and one carried residual.
+`bugs-tests-lab-cli` starts next. The order is
 `bugs-tests-lifecycle`, `bugs-tests-adapter`,
 `bugs-tests-tape`, `bugs-tests-engine-protocol`, `bugs-tests-lab-cli`, then
 `bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
@@ -1904,6 +1905,78 @@ refusal texts, the sizing constants. What generalises:
   drift a reader will assume it covers - the caller choosing the wrong variant -
   is somewhere else entirely. Write the narrow claim on the assertion, or move
   the broad one to a test that exercises the caller.
+
+## The engine/protocol document, close pass: what the five commits left
+
+The arc is SOUND. The gate is green at 1220 + 440, 1717 pairs, 1660 run, 57
+ignored, 0 orphaned. Every one of the six production changes was re-derived
+against the code rather than read off the commit messages, and all six are
+either behaviour-preserving or intentionally not: `shipped_policy`'s membership
+gate is preserving (the list has five names and the match five arms, one for
+one); `is_execution` / `is_admission` as exhaustive matches classify today's
+variants exactly as the `matches!` did; both catch-all deletions are preserving
+because the arms above already intercepted every other variant; `validate()`'s
+`trim()` and `account_state_max_bytes` dropping the escape factor are the two
+deliberate behaviour changes, each with its premise pinned by a test; and
+`launch`'s poll counter and parameterised interval are additive, with the
+counter written on every build and read only under `cfg(test)`.
+
+TWO BITE-CHECK CLAIMS WERE RE-RUN RATHER THAN TRUSTED, both the load-bearing
+ones, and both hold exactly as recorded. Restoring `if asked_to_stop { break; }`
+ahead of the `try_wait` fails `a_venue_that_ended_during_shutdown_still_records
+_its_exit` on the EXIT-RECORD assertion (`None` against
+`Some(VenueExit { success: true, code: Some(0) })`) in dev and in the timing
+sweep alike, with the poll assertion green - which is the whole point of making
+the arm an observable. Deleting the zero-hold `filter` in
+`order_reservation_entry` fails
+`a_zero_initial_margin_policy_cannot_drift_the_reservation_cache` in BOTH
+profiles, naming `{"USD": 0}`, so the round-5 claim that the strengthened
+assertion needs no `cfg(debug_assertions)` gate is measured, not argued.
+
+THE ONE FINDING IS PROSE, IN THE SECOND HALF NOBODY COLD-REVIEWS, AND IT IS THE
+FOURTH DOCUMENT RUNNING THAT THIS IS WHERE THE FIND IS.
+
+- `sizing.rs`'s MODULE HEADER CLAIMED A GATE OVER MORE THAN THE GATE COVERS.
+  Round 5's cold review correctly made the header state the new `2 * actual`
+  ceiling; the sentence it wrote says "this module's tests bracket EVERY BOUND
+  from both sides against the maximal fixture that defines it", and the
+  `brackets` doc comment opened with "EVERY BOUND IN THIS MODULE IS ASSERTED
+  FROM BOTH SIDES". Neither is true, and the untrue part is precisely what the
+  same round REFUSED: `LINKAGE_MAX_BYTES`, `BOUNDARY_REFUSAL_BYTES`,
+  `swept_fill_max_bytes` and `swept_batch_max_bytes` have no single maximal
+  struct to be measured against and get no `brackets` call, and
+  `worst_case_output_bytes` gets one on its two QUERY arms only. So a reader
+  adding a composed bound would believe a ceiling was watching it. Both
+  statements now scope to the per-struct bounds, enumerate what is covered, and
+  carry the refusal's reason (2.2x to 249x over the engine's reservation matrix)
+  where the next implementer will hit it. THE GENERAL SHAPE IS THE ARC'S
+  SIGNATURE ONE MOVED UP A LEVEL: not a test that cannot fail, but a
+  DESCRIPTION of a gate that is wider than the gate - and it was produced by the
+  fix for a finding about a header that described the OLD policy. Correcting a
+  durable sentence is the moment to check its new scope, because the sentence
+  that replaces an under-claim naturally over-claims.
+
+RESIDUALS CARRIED, all three left standing on their stated grounds:
+
+- REFUSED, and it stands: `read_ready`'s `NoRecord` 50 ms pause. `NoRecord` is
+  EOF on the stdout pipe, which a LIVE venue can produce, so "drain to EOF" is
+  an unbounded wait on a child that is still running. Pinned by
+  `a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure`.
+- REFUSED, and it stands: a per-case slack ceiling in
+  `worst_case_reservation_covers_actual_output`. The header correction above is
+  now where that refusal is written down for a reader who never opens the notes.
+- CARRIED: `" USD "` - a currency with SURROUNDING whitespace - is accepted by
+  both validators and matches no balance. The stronger rule (refuse any code
+  differing from its trimmed form) belongs on `AccountPolicy::validate` and
+  `validate_divergence` at once, and was deliberately not smuggled in under a
+  finding about blanks. It is a candidate for whichever document next touches
+  either validator.
+- UNPINNED BY RULING, not by omission: that the OWNING THREAD writes the
+  teardown slot on a real failed kill. Provoking one means reaping the child out
+  from under the owner, which leaves `Child::kill` signalling a pid the kernel
+  may have recycled. The ORDERING around that slot is pinned
+  (`the_teardown_detail_is_read_after_the_owner_joins`), and the healthy
+  direction is pinned too.
 
 ## Facts a later round would otherwise re-derive wrong
 

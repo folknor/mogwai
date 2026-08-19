@@ -585,3 +585,37 @@ sentence the change made false, not only the code.
 C, A1-A8, B1-B5 and D are all done. The document is empty of open findings; what
 remains in it is the two recorded refusals - `read_ready`'s `NoRecord` pause in
 section C, and the per-case ceiling in section D's round-5 entry above.
+
+## Close pass, 2026-08-19
+
+CLOSED. The five commits `a3a796d..0e2c32d` were reviewed as one arc against a
+green unscoped gate (1220 + 440, 1717 pairs, 1660 run, 57 ignored, 0 orphaned).
+
+All six production changes were re-derived rather than read off the commit
+messages: the `shipped_policy` membership gate, both catch-all deletions and the
+two exhaustive `EventKind` predicates are behaviour-preserving; `validate()`'s
+`trim()` and `account_state_max_bytes` dropping the escape factor are the two
+deliberate behaviour changes and each has its premise pinned by a test
+(`AccountId::parse` is the only constructor, `Deserialize` routes through it,
+and the 0..=0x7f sweep is the whole accepted domain); `launch`'s poll counter
+and parameterised interval are additive.
+
+Two bite-checks were re-run as text edits rather than trusted, and both hold
+exactly as recorded - the launcher's unconditional reap (fails on the exit
+record, poll assertion green, dev and timing sweeps alike) and the zero-hold
+reservation filter (fails in both profiles naming `{"USD": 0}`).
+
+ONE FINDING, and it is prose in the unreviewed second half, as on the three
+documents before this one. `sizing.rs`'s module header and the `brackets` doc
+comment both said EVERY bound in the module is bracketed from both sides. The
+composed bounds - `LINKAGE_MAX_BYTES`, `BOUNDARY_REFUSAL_BYTES`,
+`swept_fill_max_bytes`, `swept_batch_max_bytes` - are not, deliberately, and
+`worst_case_output_bytes` is bracketed on its two query arms only. That is the
+same refusal section D records, so the header was describing a gate wider than
+the gate. Both statements now scope to the per-struct bounds, enumerate what is
+covered, and carry the refusal's reason where an implementer will hit it.
+
+The third residual, carried rather than closed: `" USD "` with surrounding
+whitespace is accepted by both validators and matches no balance. Round 2
+declined to smuggle the stronger rule in under a finding about blanks, and this
+pass agrees - it belongs on both validators at once.
