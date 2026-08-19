@@ -15,7 +15,10 @@ The endpoint therefore has to be learned rather than assumed. On boot the venue
 writes ONE line of JSON to STDOUT - the version 8 `ReadyRecord`, carrying
 `version`, `addr`, `pid`, `run_seed`, `data_origin_ns`, `run_start_ns`,
 `run_duration_ns`, `warmup_ns`, `reset_account_on_reconnect`, `account_ttl_ms`
-and `version_string` - and that is the only thing it ever writes there. The last
+and `version_string` - and in practice that is the only thing it ever writes
+there, though the shipped launcher does not require it: it drains stdout for the
+whole run and discards everything past the record, so a stray write is ignored
+rather than taking `EPIPE` mid-run. The last
 two are the account-persistence policy: whether a returning client gets its own
 ledger back, and how long an unattended one survives before the venue collects
 it. It reports no symbol. Logs go to stderr, so
@@ -107,8 +110,16 @@ gates drive the venue through it, so it cannot drift from the binary it launches
 The prose remains because a launcher in another language still has to implement
 it.
 
-Three details of that guard are worth stating, because a caller writes code
-against each and cannot see any of them from the signature. `shutdown()` reports
+Four details of that guard are worth stating, because a caller writes code
+against each and cannot see any of them from the signature. Dropping it BLOCKS -
+it signals the owning thread, which kills and reaps the child, and joins it - but
+the cost is a signal round trip, measured at a few hundred microseconds against a
+healthy venue, NOT the 200 ms interval at which the owner polls for a venue that
+ended on its own. Those are different clocks: the shutdown channel disconnects
+when the guard drops and the owner wakes on that at once, so no teardown ever
+waits out a poll window. Sub-millisecond is short enough to drop on an async
+worker; what no launcher can bound is a venue that refuses `SIGKILL`, and a
+caller for whom that matters drops the guard off its reactor. `shutdown()` reports
 a venue that would NOT die - a failed signal or a failed reap comes back as
 `LaunchError::Teardown`, so the "shut it down and report a failure to do so"
 check callers write is real, and a caller that ignores it may launch a

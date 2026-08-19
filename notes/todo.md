@@ -217,6 +217,28 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- NOTHING ROUTES A NEW WALL-CLOCK BUDGET INTO THE `timing` SWEEP, and the
+  workspace has already paid for this shape once. `brokkr.toml` states the
+  standing policy for a latency assertion - `#[ignore]` at the source, an entry
+  in the gate's `skip`, and a name in the `timing` sweep's `only`, because "a
+  latency assertion in a dev lane does not produce a weaker result: it produces a
+  meaningless one" - and `tape_lateness_under_acceleration` was deleted for
+  violating it. The enforcement that exists,
+  `every_release_only_filter_is_skipped_by_the_gate`, runs the check in ONE
+  DIRECTION: every test the `only` filter catches must be gate-skipped. The
+  converse - every test carrying a wall-clock budget appears in some `only`
+  filter - is not checkable from the outside, because "carries a budget" is not a
+  syntactic property, and a plain `#[test]` asserting 50 ms in the parallel dev
+  lane is therefore admitted silently. Filed 2026-08-19 by the `bugs-protocol`
+  round-3 fix pass, whose cold review caught exactly that test on the way in;
+  that instance was closed by INFLATING THE INTERVAL under test rather than by
+  routing it, which is the better answer whenever the quantity is a parameter and
+  no answer at all when it is not. Same family as the standing item on durable
+  prose asserting a live fact: caught by habit or not at all. An owner-level
+  question if anyone wants it mechanised - a source scan for `Duration::from_`
+  inside an `assert!` would be the crude form, and would have to justify its
+  false-positive rate against a repository full of legitimate loose bounds.
+
 - `MarketToLimit` IS UNIMPLEMENTED IN BOTH HALVES OF ITS NAME: it takes no
   market, and its remainder rests inert. ONE DEFECT WITH TWO SYMPTOMS - do not
   fix either alone, because the first is why the second is unreachable today.

@@ -7,8 +7,11 @@ Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 Confidence labels are the hunter's own.
 
 Round 1 (2026-08-19) closed G and J and round 2 closed H and I; those sections
-are deleted rather than annotated, per the discrepancies-doc rule. What they
-cost and what binds later work is in `notes/bug-loop-carry-forward.md`.
+are deleted rather than annotated, per the discrepancies-doc rule. Round 3
+closed E and F and REFUSED C with measurement; those three keep their sections
+because two of them changed the launcher's public surface and the third is a
+refusal, which stays with its reasoning. What they cost and what binds later
+work is in `notes/bug-loop-carry-forward.md`.
 
 The hunter read the whole crate (`launch.rs`, `messages.rs`, `control.rs`,
 `havoc.rs`, `sizing.rs`, `ready.rs`, `clock.rs`, `decimal.rs`, `lib.rs`) plus
@@ -90,22 +93,49 @@ what is deliberately NOT reported: a child already reaped by the loop above make
 kill and wait fail harmlessly, so the record is only kept when nothing was
 reaped.
 
-## C. Launcher: `Drop` blocks a runtime worker, in a module whose premise is async hosts
+## C. Launcher: `Drop` blocks a runtime worker - REFUSED with measurement, 2026-08-19
 
-The module doc's first load-bearing property is about async applications ("in an
-async application, spawning from a pool task is both the natural thing to write
-and the wrong thing to write"). But `LaunchedVenue::drop` calls `terminate()`
-calls `owner.join()`, and the owner can be sitting in
-`recv_timeout(OWNER_POLL)` - so dropping the handle blocks the calling thread
-for up to 200 ms plus the child's `wait()`. Dropped on a tokio worker (which is
-where a nautilus host will drop it), that stalls the reactor. Nothing in the
-docs warns about it, and unlike the spawn hazard it cannot be fixed by the
-caller without knowing the internals.
+The finding's mechanism is FALSE and the recommended structural rewrite would
+have been paid for nothing. `LaunchedVenue::drop` does not wait out
+`OWNER_POLL`: `terminate` drops the shutdown SENDER, which DISCONNECTS the
+channel, and `Receiver::recv_timeout` returns `Err(Disconnected)` at once rather
+than at the end of the interval. Shutdown latency is ALREADY a wakeup. The poll
+interval bounds only how late the owner notices a venue that ended ON ITS OWN,
+which is not on any teardown path.
 
-The clean fix is structural: have the owner park on a channel with no timeout
-and learn about a natural child exit via SIGCHLD or a dedicated waiter, so
-shutdown latency is a wakeup rather than a poll interval. Given pre-1.0, the
-hunter would do that rather than shrink `OWNER_POLL` and call it addressed.
+MEASURED, against a scripted venue held past two completed poll windows so the
+owner was provably parked mid-interval: 314 us and 258 us for the whole drop -
+signal, kill, reap, join - against an `OWNER_POLL` of 200 ms. Three orders of
+magnitude below the claim.
+
+The reachability half was checked too, and it does not rescue the finding.
+`mogwai-adapter` NEVER HOLDS A `LaunchedVenue` - it re-exports `launch` and
+nothing more, so no client of the venue drops one. The real consumer is
+broadarrow's `ba-worker`, which does hold one across an async run on a
+`current_thread` runtime and calls `shutdown()` from `async fn run` at the end.
+So a drop on a reactor thread is genuinely reachable; it just costs sub-
+millisecond, at teardown, after the node has stopped.
+
+What was owed and is now paid: the property was undocumented and INVISIBLE. An
+owner loop rewritten as `sleep(owner_poll); try_recv()` reads as an equivalent
+refactor and passes every other test in the module.
+`tearing_down_a_healthy_venue_is_a_wakeup_not_a_poll_interval` pins it, and its
+SHAPE was the round's cold-review find. The first cut ran at the production
+`OWNER_POLL` of 200 ms and asserted teardown under a quarter of it - a 50 ms
+wall-clock budget in the parallel dev lane, which is exactly what
+`tape_lateness_under_acceleration` was deleted for (50 ms asserted, 311 ms
+measured in RELEASE under a load average of 1.46), and `brokkr.toml`'s policy
+for that class is `#[ignore]` plus the `timing` sweep. Neither routing was
+taken: the test WIDENS THE SIGNAL instead, running the owner at a ten-second
+interval so the two outcomes are sub-millisecond and ten seconds, with the bound
+at two - four orders of magnitude above the honest cost, a fifth of the defect,
+and the same loose-upper-bound class as the module's existing 5 s and 10 s
+assertions. It also asserts `completed_polls() == 0`, which is the clock-free
+half: no window expired, so the reap was the shutdown arm's. Bite-checked by
+rewriting the owner loop as `sleep(owner_poll); try_recv()`: fails at 9.951 s and
+9.950 s across both sweeps. `LaunchedVenue`'s doc and `docs/cli.md`
+now state the real cost, the two clocks, and the one thing no launcher can bound
+(a venue that refuses `SIGKILL`).
 
 ## D. Launcher: the readiness wall-clock guarantee is conditional on no descendant holding stdout - FIXED 2026-08-18
 
@@ -144,27 +174,74 @@ does not help against a wrapper's grandchild that has left the process group.
 `docs/cli.md` now states the supported shape (name the binary, or a wrapper that
 `exec`s it) and what it costs when a caller does not.
 
-## E. Launcher: the venue is now forbidden from ever writing to stdout again, and nothing says so
+## E. Launcher: the venue is forbidden from writing to stdout - FIXED 2026-08-19
 
-After the readiness line is read, the reader thread's `stdout` handle is
-dropped, closing the read end. Any subsequent stdout write from the venue gets
-EPIPE (Rust ignores SIGPIPE). The module doc states the venue "writes exactly
-one line of JSON to stdout, and that is the only thing it ever writes there" as
-a description of current behaviour - but it is in fact now a HARD REQUIREMENT
-IMPOSED BY THE LAUNCHER, and the venue side has no test pinning it. A future
-`println!` in the serve path becomes an EPIPE-on-write failure mid-run with a
-cause nobody will find. Worth either keeping the pipe drained-and-discarded for
-the run, or stating the prohibition on the venue side where a violator would
-read it.
+The mechanism was real and is now MEASURED rather than argued. FIXED by
+DRAINING, which was the choice between the finding's two options, and the reason
+is that one of them removes the requirement and the other only documents it.
 
-## F. Launcher: `LaunchError::Spawn` for an internal thread failure renders as user-hostile nonsense
+Stating the prohibition on the venue side buys a test that fires when someone
+adds a `println!` to the serve path - but the rule it would enforce exists only
+because the launcher chose to close a pipe, it constrains a whole crate forever
+in service of one library's convenience, and it is enforceable only over code
+inside this workspace. A venue is a process; a launcher that cannot survive it
+writing to its own stdout is the defective party. So the readiness reader now
+`io::copy`s stdout into `io::sink()` after sending the record, to EOF, which
+arrives when the venue dies. Cost: one thread per venue for the run, exactly the
+shape and lifetime the stderr drain already has. The module doc's "the only
+thing it ever writes there" is a DESCRIPTION again.
 
-Two sites construct `Spawn { binary: OsString::from("<owning thread>") }` and
-`"<readiness reader thread>"`. `Display` then produces: "could not spawn the
-venue binary \<owning thread\>: ... If the binary is elsewhere, point the
-launcher at it - whatever your launcher calls that setting, it ends up as
-LaunchSpec::binary". The operator is told to reconfigure a binary path in
-response to EAGAIN on thread creation. This deserves its own variant.
+The reader is consequently never joined on ANY path. It was already unjoined on
+the timeout arm (finding D), so the `reader_is_released` flag and its branch are
+gone; `read_ready` takes `&mut impl Read` so the handle survives the call.
+
+`a_venue_that_writes_to_stdout_after_readiness_is_not_broken` pins it, and the
+bite-check is the finding's own mechanism executing: with the drain replaced by
+`drop(stdout)` the `/bin/sh` fixture - which does NOT ignore `SIGPIPE` - dies of
+the signal, and the test fails on `VenueExit { success: false, code: None }`
+against the `Some(0)` the script asked for, both sweeps. That is direct
+observation of the EPIPE-mid-run failure the finding described.
+
+## F. Launcher: `LaunchError::Spawn` for an internal thread failure - FIXED 2026-08-19
+
+FIXED with the variant the finding asked for. `LaunchError::Thread { what:
+&'static str, source }`, where `what` is the thread's ROLE - "owns the venue for
+the run", "reads the venue's readiness line" - and cannot be mistaken for a
+path. `Display` places the limit locally ("a limit of THIS process - threads,
+memory or an RLIMIT - and not a problem with the venue binary or its
+configuration") and `source()` reports the io error.
+
+THE MESSAGE USED TO END "nothing was spawned", AND THAT WAS FALSE AT ONE OF THE
+TWO SITES - cold review caught it. It holds for the owning thread, which is
+created before any `Command::spawn`; the readiness reader is created INSIDE
+`own_venue` with a venue process already running, so the sentence told the
+operator no venue had started when one had, in a change whose whole point is
+that the message must not send them after the wrong remedy. It now says "no
+venue is left running: one already started for this launch has been killed and
+reaped", which is true at both - the reader site falls through to the same
+unconditional kill-and-reap every other failure path in `own_venue` reaches, and
+the owning-thread site never spawned one.
+
+NOTHING BROKE, AND THE NEXT VARIANT CANNOT. Adding a variant is a public API
+change, so the readers were checked: `mogwai-cli`'s `lifecycle.rs` matches only
+`NoRecord` and `Timeout`, neither exhaustively; broadarrow's `ba-worker` and
+`run-prep` render the error through `Display` and never match a variant. That
+grep is manual, unrepeatable and blind to any consumer not vendored here, so
+`LaunchError` is `#[non_exhaustive]` now - the one-line durable fix, free while
+the crate is pre-1.0, which the first pass had left on the table.
+
+`a_failed_launcher_thread_does_not_blame_the_binary` pins THE RENDERING, and the
+first pass recorded a bite-check that cannot have run: it claimed restoring the
+`Spawn { binary: "<owning thread>" }` CONSTRUCTION failed the test, but the test
+builds `LaunchError::Thread` literally and never calls `launch`, so a call-site
+revert leaves it green. The honest statement, and the check that was actually
+run: reverting the `Display` ARM to the old `Spawn` wording fails it on "a
+thread failure must not send the operator after a binary path", both sweeps.
+WHAT NO TEST HOLDS is the coupling - that the two thread-creation sites raise
+this variant - because reaching either branch means driving the process to its
+thread limit. That is held STRUCTURALLY instead, and this round made it so:
+`spawn_launcher_thread` is now the module's only thread-creation call and the
+only constructor of `LaunchError::Thread`.
 
 ## K. `sizing.rs`: two bounds have derivations but no run derivation
 

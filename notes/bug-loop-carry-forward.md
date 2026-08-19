@@ -3378,6 +3378,108 @@ there.
     a quantity, no shared fixture, and both sides green because neither is
     checked. This is a note about the CONVENTION, not a request to fix the file.
 
+## The protocol document, round 3: the launcher residuals (C, E, F)
+
+Ledger: round 3 ends at 1244 + 451, 1752 pairs, 1695 run, 57 ignored, 0
+orphaned. Round 2 ended at 1241 + 451 / 1749 / 1692, so the delta is exactly the
+three tests this round added and nothing was reclassified.
+
+- A `recv_timeout` PARKED ON A CHANNEL IS NOT A POLL, and the whole of finding C
+  rested on reading it as one. Dropping the sender DISCONNECTS the channel and
+  `recv_timeout` returns at once; the interval bounds only the arm that runs when
+  NOBODY signalled. `LaunchedVenue::drop` was measured at 314 us and 258 us
+  against an `OWNER_POLL` of 200 ms, with the owner provably parked mid-interval
+  (two completed poll windows first). The finding wanted the loop replaced with a
+  `SIGCHLD` waiter to buy exactly that. NINETEENTH OVERTURNED ARGUMENT OF THE
+  ARC, and the cheapest one yet: one test, four minutes.
+  - The residual was real though, and it was INVISIBILITY rather than latency.
+    `sleep(owner_poll); try_recv()` is an equivalent-looking refactor that passes
+    every other test in the module and costs a full interval on every caller's
+    drop. `tearing_down_a_healthy_venue_is_a_wakeup_not_a_poll_interval` pins it.
+    GENERAL SHAPE: when measurement refuses a finding, the property that made it
+    refusable is usually undocumented and untested, and THAT is what the round
+    owes.
+  - AND THE TEST THAT PINS IT WAS FIRST WRITTEN AS A LATENCY BUDGET IN THE
+    PARALLEL DEV LANE - production `OWNER_POLL` of 200 ms, teardown asserted
+    under a quarter of it. THAT IS THE SHAPE THIS WORKSPACE ALREADY DELETED ONCE
+    (`tape_lateness_under_acceleration`: 50 ms asserted, 311 ms measured in
+    RELEASE at load average 1.46), and `brokkr.toml` carries a standing routing
+    for the class - `#[ignore]` at the source, an entry in the gate's `skip`, and
+    a name in the `timing` sweep's `only`. NOTHING ENFORCES THAT ROUTING:
+    `every_release_only_filter_is_skipped_by_the_gate` checks that the `only`
+    filter's tests are gate-skipped, never that a test carrying a budget has a
+    filter. So the two ways out are ROUTE IT or STOP IT BEING A BUDGET, and the
+    second is better whenever the interval under test is a parameter: the owner
+    runs at ten seconds here, the honest teardown is sub-millisecond, and the
+    bound is two seconds - the loose-upper-bound class the module's other
+    wall-clock assertions are already in (10 s against a 60 s child, 5 s against
+    a 300 s bound), not a budget any host has to be fast enough to meet.
+    Bite-checked with the `sleep(owner_poll); try_recv()` rewrite: 9.951 s and
+    9.950 s against the two-second bound, both sweeps. CARRY THE TEST: before
+    writing a wall-clock assertion, ask whether the thing being measured against
+    is a constant you can inflate. If it is, inflate it and the assertion stops
+    being about the host.
+- `mogwai-adapter` NEVER HOLDS A `LaunchedVenue`. It re-exports
+  `mogwai_protocol::launch` and nothing else - no client, factory or config in
+  that crate constructs or drops one. Any future finding phrased as "the nautilus
+  host will drop it on a tokio worker" has to go through broadarrow's
+  `ba-worker`, which is where the only async consumer actually lives: it holds
+  the venue at worker scope across `async fn run` on a `current_thread` runtime
+  and calls `shutdown()` at the end. Check `research/broadarrow` for the consumer
+  shape rather than assuming the adapter is it.
+- THE LAUNCHER NO LONGER IMPOSES A RULE ON THE VENUE'S STDOUT. The readiness
+  reader `io::copy`s into `io::sink()` after sending the record and runs to EOF,
+  so a stray `println!` in the serve path is discarded instead of taking `EPIPE`
+  mid-run. Chosen over the alternative - a venue-side test forbidding stdout
+  writes - because a venue is a process and a launcher that cannot survive one
+  writing to its own stdout is the defective party; the prohibition would also
+  have been enforceable only over code inside this workspace. Consequences that
+  bind: `read_ready` takes `&mut impl Read`, the reader thread is NEVER JOINED on
+  any path (the timeout arm already was not, per finding D, so the
+  `reader_is_released` flag is gone), and the thread's lifetime is now the
+  child's.
+  - THE BITE-CHECK IS ALSO THE ONLY DIRECT OBSERVATION OF THE BUG. `/bin/sh` does
+    not ignore `SIGPIPE`, so with the drain replaced by `drop(stdout)` the
+    fixture dies of the signal and records
+    `VenueExit { success: false, code: None }` where it asked for `Some(0)`.
+    A shell fixture is the cheap way to make an ignored-signal failure visible,
+    because Rust's own `SIGPIPE` handling would have hidden it.
+- `LaunchError::Thread { what: &'static str, source }` exists now, and no site may
+  put a role name in `Spawn`'s `binary` field again. Adding the variant broke
+  NOTHING: no exhaustive `match` on `LaunchError` exists in this tree or in
+  `research/` - `mogwai-cli`'s `lifecycle.rs` matches `NoRecord` and `Timeout`
+  non-exhaustively, and broadarrow only renders `Display`.
+  - AND THAT GREP IS NOT OWED AGAIN. `LaunchError` is `#[non_exhaustive]` as of
+    this round, which was the one-line durable fix the first pass discharged by
+    hand instead. GENERAL FORM, and it is worth reaching for on sight in this
+    pre-1.0 workspace: when the safety of a change rests on a manual survey of
+    consumers, half of whom are not in this repository, prefer the attribute that
+    makes the survey unnecessary over the survey.
+  - THE VARIANT'S MESSAGE IS THE ROUND'S SECOND LESSON ABOUT ITS OWN FIX: it
+    ended "nothing was spawned", which is FALSE at the readiness-reader site,
+    where a venue process is already running. A change whose entire justification
+    is that an operator must not be sent after the wrong remedy shipped a
+    sentence telling them no venue had started. Cold review caught it. When a fix
+    is about the truth of a message, check the message at EVERY site that raises
+    it, not at the one that motivated it.
+  - THE COUPLING IS STRUCTURAL, NOT TESTED, and the distinction was mis-recorded
+    once (see the ledger-honesty entry below). `spawn_launcher_thread` is the
+    module's only thread-creation call and the only constructor of the variant;
+    `a_failed_launcher_thread_does_not_blame_the_binary` pins the RENDERING only,
+    because reaching the real branch means driving the process to its thread
+    limit.
+- LEDGER HONESTY BIT ON THIS ROUND'S OWN RECORD. The first pass wrote a
+  bite-check it could not have run - "restoring the `Spawn { binary: "<owning
+  thread>" }` construction: it fails naming the old rendering" - for a test that
+  constructs the error literally and never calls `launch`, so a call-site revert
+  leaves it green; only deleting the variant moves it, and that is a compile
+  error, not a failure. The test's own doc comment was honest about this and the
+  two notes were not. THE RULE THE ARC ALREADY HAD, restated because it was
+  broken by a pass that knew it: a bite-check claim names the EDIT that was made
+  and the failure that was OBSERVED, and if the edit was never run the claim is
+  not written. A test that constructs its subject cannot be bite-checked through
+  the production call sites - say what it pins and say what stays unpinned.
+
 ## Loop conventions for this arc
 
 - Every stage runs as a foreground Opus subagent, including the fix pass and the
