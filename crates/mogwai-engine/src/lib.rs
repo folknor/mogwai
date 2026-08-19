@@ -5927,11 +5927,23 @@ mod tests {
             "unsettled cash cannot be spent: {early:?}"
         );
 
+        // THE INSTANT ITSELF, not a step either side of it. The sale printed at
+        // ts 2, so the credit settles at `2 * DAY + 2`; probing `2 * DAY` and
+        // `2 * DAY + 3` steps over the boundary and cannot see a `>` / `<=`
+        // flip in `release_settled_cash`.
+        const SETTLES_AT: u64 = 2 * DAY + 2;
         assert!(
-            !e.release_settled_cash(2 * DAY),
-            "nothing settles before the instant"
+            !e.release_settled_cash(SETTLES_AT - 1),
+            "one nanosecond before the instant nothing has settled"
         );
-        assert!(e.release_settled_cash(2 * DAY + 3), "and settles at it");
+        assert!(
+            e.release_settled_cash(SETTLES_AT),
+            "and the instant itself settles it"
+        );
+        assert!(
+            !e.release_settled_cash(SETTLES_AT + 1),
+            "a credit settles once: the second pass moves nothing"
+        );
         assert_eq!(
             balance(&e.snapshot(5), "USD").free,
             Decimal::from(10_000),
@@ -7119,6 +7131,70 @@ mod tests {
             *e.account.balances.get("USDT").expect("funded") > before,
             "a negative rate pays the long rather than charging it"
         );
+    }
+
+    /// THE SHORT SIDE, which is the half the sign convention is easy to get
+    /// wrong on and which no test held: both funding tests above hold a LONG
+    /// and vary the direction through the RATE alone, so `apply_funding` taking
+    /// `qty.abs()` would make a short pay funding too - the transfer inverted -
+    /// with nothing red.
+    ///
+    /// Funding is a TRANSFER, so the short's flow is the long's mirror at the
+    /// same marks: the long above pays exactly 60 at a positive rate, and this
+    /// short receives exactly 60.
+    #[test]
+    fn a_short_perpetual_receives_the_funding_a_long_pays() {
+        // (rate, mark, what the short's balance must do). ROW ONE IS THE EXACT
+        // MIRROR of the long test above - same rate, same mark, same size - so
+        // the 60 the long pays is the 60 this short receives. ROW TWO MIRRORS
+        // NOTHING: no long test runs a negative rate at mark 50,000 with the
+        // amount asserted, so it is a value pin on the negative-rate short
+        // (10 contracts at 50,000 at one basis point, paid rather than
+        // received), not a cross-check against a long.
+        for (rate, mark, expected) in [
+            (Decimal::new(1, 4), 60_000, Decimal::from(60)),
+            (-Decimal::new(1, 4), 50_000, Decimal::from(-50)),
+        ] {
+            let mut e = Engine::build(EngineConfig {
+                account_id: test_account_id(),
+                instruments: vec![perpetual(rate)],
+                balances: HashMap::from([("USDT".to_string(), Decimal::from(100_000))]),
+                fill_seed: 0,
+            });
+            e.set_margin_policy(
+                "BTCUSDT.P".into(),
+                MarginPolicy {
+                    initial_per_contract: Decimal::ZERO,
+                    maintenance_per_contract: Decimal::ZERO,
+                    breach_action: BreachAction::Refuse,
+                    basis: MarginBasis::PerContract,
+                },
+            );
+            let out = e.process(
+                ClientMessage::SubmitOrder(order_with(
+                    "S1",
+                    Side::Sell,
+                    "BTCUSDT.P",
+                    10,
+                    Some(Decimal::from(50_000)),
+                )),
+                1,
+            );
+            assert!(
+                out.iter()
+                    .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                "the short must actually be on the book, or this funds nothing: {out:?}"
+            );
+            e.mark(&[("BTCUSDT.P".into(), Decimal::from(mark))], 2);
+            let before = *e.account.balances.get("USDT").expect("funded");
+            e.apply_funding(EIGHT_HOURS_NS - 1, EIGHT_HOURS_NS + 1, 3);
+            let after = *e.account.balances.get("USDT").expect("funded");
+            assert_eq!(
+                after - before,
+                expected,
+                "a short at rate {rate} marked at {mark} takes the other side of the long's flow"
+            );
+        }
     }
 
     /// A span crossing no instant funds nothing, and a span crossing two funds

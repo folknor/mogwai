@@ -11,7 +11,9 @@
 //! bounds: key names and punctuation counted, each numeric at its widest
 //! decimal form, each string at `JSON_ESCAPE_FACTOR` times its cap (a byte
 //! serde must escape as `\uXXXX` costs six output bytes, so an ASCII-only
-//! measurement would be 6x too small). The fixed addends are scaffolding and
+//! measurement would be 6x too small). The one string charged at its RAW cap
+//! is the account id, and only because its TYPE forbids an escapable byte -
+//! see `account_state_max_bytes`. The fixed addends are scaffolding and
 //! numerics only; they are rounded generously upward, because over-reserving
 //! costs a connection some budget while under-reserving voids the bound.
 use crate::{
@@ -83,9 +85,12 @@ pub const MARGIN_ROW_MAX_BYTES: usize = 192 + ESC * (MAX_SYMBOL_LEN + MAX_CURREN
 /// 430, rounded to 512 on top of the charged strings.
 pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 512 + ESC * (3 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN);
 
-/// One fill row inside a `FillSnapshot`: an `OrderFilled` plus its trade id, so
-/// three client-id-shaped strings (client, venue, trade), one symbol, four
-/// decimals, a u64 and two enum spellings, rounded to 320.
+/// One fill row inside a `FillSnapshot`, which is an `OrderFilled` verbatim:
+/// FOUR client-id-shaped strings (client, venue, trade and the optional
+/// `position_id`), one symbol, one commission currency, four decimals, a u64
+/// and two enum spellings, rounded to 384. The four id-shaped strings, the
+/// symbol and the currency are charged separately below; the addend is
+/// scaffolding and numerics only.
 pub const FILL_ROW_MAX_BYTES: usize =
     384 + ESC * (4 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
 
@@ -113,9 +118,25 @@ pub const BOUNDARY_REFUSAL_BYTES: usize = ORDER_EVENT_MAX_BYTES;
 
 /// Upper bound on one serialized `AccountState`: the envelope plus every
 /// balance and position row the book currently carries.
+///
+/// THE ACCOUNT ID IS THE ONE STRING HERE CHARGED AT ITS RAW CAP rather than at
+/// `JSON_ESCAPE_FACTOR` times it, and it is the only string in this module that
+/// may be. `AccountId` is a newtype whose sole constructor is
+/// `AccountId::parse` - `Deserialize` routes through it too - and that alphabet
+/// is ASCII alphanumerics plus `.`, `_`, `:` and `-`, not one of which
+/// `serde_json` escapes. So the type cannot carry a byte that costs more than
+/// one on the wire, and a 6x factor here is not a bound, it is 320 bytes of
+/// dead weight charged against every reservation that names an account - which
+/// a group of nine members pays ten times over.
+/// `the_account_id_alphabet_carries_nothing_json_escapes` is what holds the
+/// premise: widen the alphabet and this term owes its factor back.
+///
+/// Every OTHER string bounded in this module is a bare `String` or `Arc<str>`
+/// whose contents are capped in length and not in alphabet, so it keeps the
+/// factor.
 #[must_use]
 pub fn account_state_max_bytes(shape: &BookShape) -> usize {
-    144 + ESC * MAX_ACCOUNT_ID_LEN
+    144 + MAX_ACCOUNT_ID_LEN
         + shape.balances * BALANCE_ROW_MAX_BYTES
         + shape.positions * POSITION_ROW_MAX_BYTES
         + shape.margins * MARGIN_ROW_MAX_BYTES
@@ -245,28 +266,327 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccountId, AccountState};
+    use crate::{
+        AccountId, AccountState, Balance, ClientMessage, FillSnapshot, LiquiditySide, OrderFilled,
+        OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, PostedMargin, ServerMessage,
+        Side, TimeInForce, WireOrderStatus,
+    };
+    use rust_decimal::Decimal;
 
-    #[test]
-    fn account_state_bound_covers_a_max_length_account_id() {
-        let shape = BookShape {
+    /// U+0001 fills every string these tests build, because `serde_json`
+    /// escapes it to a six-byte escape sequence, which is exactly what
+    /// `JSON_ESCAPE_FACTOR` charges for. No validator lets a real id carry it;
+    /// the bound must hold for what the TYPE can carry, and every string
+    /// bounded here except the account id is a plain `String` or `Arc<str>`
+    /// capped in length and not in alphabet.
+    fn worst(len: usize) -> String {
+        char::from(1).to_string().repeat(len)
+    }
+
+    /// `Decimal::MIN` is the widest serialized numeric: 29 digits and a sign.
+    /// Every decimal in these fixtures is at it, for the same reason every
+    /// string is at its cap.
+    fn maximal_balance() -> Balance {
+        Balance {
+            currency: worst(MAX_CURRENCY_LEN),
+            total: Decimal::MIN,
+            free: Decimal::MIN,
+            locked: Decimal::MIN,
+        }
+    }
+
+    fn maximal_position() -> Position {
+        Position {
+            symbol: worst(MAX_SYMBOL_LEN).into(),
+            position_id: Some(worst(MAX_CLIENT_ID_LEN)),
+            quantity: Decimal::MIN,
+            avg_px: Decimal::MIN,
+            mark_px: Decimal::MIN,
+            unrealized_pnl: Decimal::MIN,
+        }
+    }
+
+    fn maximal_margin() -> PostedMargin {
+        PostedMargin {
+            symbol: worst(MAX_SYMBOL_LEN).into(),
+            currency: worst(MAX_CURRENCY_LEN),
+            initial: Decimal::MIN,
+            maintenance: Decimal::MIN,
+        }
+    }
+
+    /// Every optional field PRESENT and every enum at its longest spelling -
+    /// `TrailingStopMarket` (18), `PartiallyFilled` (15), `Gtd` - because a row
+    /// bound that holds only for the short spellings is not a bound.
+    fn maximal_status_row() -> OrderStatusInfo {
+        OrderStatusInfo {
+            client_order_id: worst(MAX_CLIENT_ID_LEN),
+            venue_order_id: worst(MAX_CLIENT_ID_LEN),
+            symbol: worst(MAX_SYMBOL_LEN).into(),
+            position_id: Some(worst(MAX_CLIENT_ID_LEN)),
+            side: Side::Sell,
+            order_type: OrderType::TrailingStopMarket,
+            time_in_force: TimeInForce::Gtd,
+            status: WireOrderStatus::PartiallyFilled,
+            quantity: Decimal::MIN,
+            filled_qty: Decimal::MIN,
+            price: Some(Decimal::MIN),
+            trigger_price: Some(Decimal::MIN),
+            ts_triggered: Some(u64::MAX),
+            reduce_only: true,
+            post_only: true,
+            ts_accepted: u64::MAX,
+            ts_last: u64::MAX,
+        }
+    }
+
+    fn maximal_fill() -> OrderFilled {
+        OrderFilled {
+            client_order_id: worst(MAX_CLIENT_ID_LEN),
+            venue_order_id: worst(MAX_CLIENT_ID_LEN),
+            trade_id: worst(MAX_CLIENT_ID_LEN),
+            symbol: worst(MAX_SYMBOL_LEN).into(),
+            position_id: Some(worst(MAX_CLIENT_ID_LEN)),
+            side: Side::Sell,
+            last_qty: Decimal::MIN,
+            last_px: Decimal::MIN,
+            leaves_qty: Decimal::MIN,
+            commission: Decimal::MIN,
+            commission_currency: worst(MAX_CURRENCY_LEN),
+            liquidity_side: LiquiditySide::Maker,
+            ts_event: u64::MAX,
+        }
+    }
+
+    fn empty_shape() -> BookShape {
+        BookShape {
             balances: 0,
             positions: 0,
             margins: 0,
             open_orders: 0,
             closed_orders: 0,
             recorded_fills: 0,
-        };
-        let state = AccountState {
-            account_id: AccountId::parse(&"Z".repeat(MAX_ACCOUNT_ID_LEN)).unwrap(),
+        }
+    }
+
+    /// The row half of the module's claim, RUN rather than argued, on the model
+    /// of `order_event_bound_covers_both_maximal_lifecycle_frames`. Each of
+    /// these five constants is multiplied by a row count the server has no
+    /// control over, so a derivation that drifted from its struct
+    /// under-reserves by that count - and until this test existed, halving any
+    /// of them left both crates green.
+    ///
+    /// Each row is measured ALONE, which is what these constants bound; the
+    /// array commas and the envelope are the aggregate tests below.
+    #[test]
+    fn every_row_bound_covers_its_maximal_row() {
+        let rows: [(&str, usize, Vec<u8>); 5] = [
+            (
+                "balance",
+                BALANCE_ROW_MAX_BYTES,
+                serde_json::to_vec(&maximal_balance()).unwrap(),
+            ),
+            (
+                "position",
+                POSITION_ROW_MAX_BYTES,
+                serde_json::to_vec(&maximal_position()).unwrap(),
+            ),
+            (
+                "margin",
+                MARGIN_ROW_MAX_BYTES,
+                serde_json::to_vec(&maximal_margin()).unwrap(),
+            ),
+            (
+                "order status",
+                ORDER_STATUS_ROW_MAX_BYTES,
+                serde_json::to_vec(&maximal_status_row()).unwrap(),
+            ),
+            (
+                "fill",
+                FILL_ROW_MAX_BYTES,
+                serde_json::to_vec(&maximal_fill()).unwrap(),
+            ),
+        ];
+        for (label, bound, bytes) in rows {
+            assert!(
+                bound >= bytes.len(),
+                "{label} row bound {bound} must dominate {} wire bytes",
+                bytes.len()
+            );
+        }
+    }
+
+    /// The envelope either snapshot wraps its rows in, measured with NO rows so
+    /// nothing else can pay for it. Both kinds, because the wire tag differs
+    /// and it is inside the constant.
+    #[test]
+    fn the_snapshot_envelope_bound_covers_an_empty_reply_of_either_kind() {
+        let orders = ServerMessage::OrderStatusSnapshot(OrderStatusSnapshot {
+            request_id: worst(MAX_CLIENT_ID_LEN),
+            orders: Vec::new(),
+            ts_event: u64::MAX,
+        });
+        let fills = ServerMessage::FillSnapshot(FillSnapshot {
+            request_id: worst(MAX_CLIENT_ID_LEN),
+            fills: Vec::new(),
+            ts_event: u64::MAX,
+        });
+        for (label, frame) in [("order status", &orders), ("fill", &fills)] {
+            let bytes = serde_json::to_vec(frame).unwrap().len();
+            assert!(
+                SNAPSHOT_ENVELOPE_MAX_BYTES >= bytes,
+                "{label} envelope bound {SNAPSHOT_ENVELOPE_MAX_BYTES} must dominate {bytes} \
+                 wire bytes"
+            );
+        }
+    }
+
+    /// `account_state_max_bytes` end to end: the envelope alone at a maximal
+    /// account id, and then the whole thing at seven rows of every kind, which
+    /// is what catches the array commas the per-row bounds above do not charge
+    /// for.
+    ///
+    /// BOTH FIXTURES ARE MEASURED AS `ServerMessage::AccountState`, never as a
+    /// bare `AccountState`. `ServerMessage` is `#[serde(tag = "type")]`, so the
+    /// frame the server reserves for carries about 21 further bytes of tag that
+    /// a bare struct does not - and this term's fixed addend is tight enough
+    /// now that under-measuring by 21 would hide a halving of it.
+    #[test]
+    fn account_state_bound_covers_an_empty_and_a_maximal_snapshot() {
+        let account_id = AccountId::parse(&"Z".repeat(MAX_ACCOUNT_ID_LEN)).unwrap();
+        let empty = ServerMessage::AccountState(AccountState {
+            account_id: account_id.clone(),
             balances: Vec::new(),
             positions: Vec::new(),
             margins: Vec::new(),
             ts_event: u64::MAX,
-        };
+        });
+        let bytes = serde_json::to_vec(&empty).unwrap().len();
+        let bound = account_state_max_bytes(&empty_shape());
         assert!(
-            account_state_max_bytes(&shape) >= serde_json::to_vec(&state).unwrap().len(),
-            "account snapshot bound must dominate its wire bytes"
+            bound >= bytes,
+            "empty account snapshot bound {bound} must dominate {bytes} wire bytes"
+        );
+
+        const ROWS: usize = 7;
+        let full = ServerMessage::AccountState(AccountState {
+            account_id,
+            balances: vec![maximal_balance(); ROWS],
+            positions: vec![maximal_position(); ROWS],
+            margins: vec![maximal_margin(); ROWS],
+            ts_event: u64::MAX,
+        });
+        let shape = BookShape {
+            balances: ROWS,
+            positions: ROWS,
+            margins: ROWS,
+            ..empty_shape()
+        };
+        let bytes = serde_json::to_vec(&full).unwrap().len();
+        let bound = account_state_max_bytes(&shape);
+        assert!(
+            bound >= bytes,
+            "maximal account snapshot bound {bound} must dominate {bytes} wire bytes"
+        );
+    }
+
+    /// The two query replies against the bound the server actually reserves
+    /// with - envelope plus rows, at the row counts the `BookShape` states.
+    /// This is the composition `every_row_bound_covers_its_maximal_row` and the
+    /// envelope test each hold one half of.
+    #[test]
+    fn query_reply_bounds_cover_their_maximal_snapshots() {
+        const ROWS: usize = 7;
+        let shape = BookShape {
+            open_orders: 5,
+            closed_orders: 2,
+            recorded_fills: ROWS,
+            ..empty_shape()
+        };
+
+        let query_orders = ClientMessage::QueryOrders {
+            request_id: worst(MAX_CLIENT_ID_LEN),
+            client_order_id: None,
+            open_only: false,
+        };
+        let reply = ServerMessage::OrderStatusSnapshot(OrderStatusSnapshot {
+            request_id: worst(MAX_CLIENT_ID_LEN),
+            orders: vec![maximal_status_row(); ROWS],
+            ts_event: u64::MAX,
+        });
+        let bytes = serde_json::to_vec(&reply).unwrap().len();
+        let bound = worst_case_output_bytes(&query_orders, &shape);
+        assert!(
+            bound >= bytes,
+            "order status reply bound {bound} must dominate {bytes} wire bytes"
+        );
+
+        let query_fills = ClientMessage::QueryFills {
+            request_id: worst(MAX_CLIENT_ID_LEN),
+            client_order_id: None,
+        };
+        let reply = ServerMessage::FillSnapshot(FillSnapshot {
+            request_id: worst(MAX_CLIENT_ID_LEN),
+            fills: vec![maximal_fill(); ROWS],
+            ts_event: u64::MAX,
+        });
+        let bytes = serde_json::to_vec(&reply).unwrap().len();
+        let bound = worst_case_output_bytes(&query_fills, &shape);
+        assert!(
+            bound >= bytes,
+            "fill reply bound {bound} must dominate {bytes} wire bytes"
+        );
+    }
+
+    /// THE PREMISE UNDER `account_state_max_bytes` CHARGING THE ACCOUNT ID AT
+    /// ITS RAW CAP: no character `AccountId::parse` accepts costs more than one
+    /// byte on the wire.
+    ///
+    /// The `0..=0x7f` sweep is EXHAUSTIVE, and it is the whole accepted domain
+    /// because `parse` requires `is_ascii_alphanumeric` or one of four ASCII
+    /// punctuation marks, so nothing above U+007F can be accepted at all.
+    /// Widen that alphabet by one escapable byte and this fires - which is the
+    /// signal that the dropped `JSON_ESCAPE_FACTOR` is owed back.
+    ///
+    /// THE TWO HALVES ARE NOT THE SAME STRENGTH, and saying so is the point of
+    /// this paragraph. The ASCII half is a proof by enumeration. The
+    /// "nothing above U+007F" half is a SAMPLE of six characters, which cannot
+    /// prove the claim - the proof is the `parse` predicate itself, read. The
+    /// sample exists so a widening that made the ASCII sweep stop being the
+    /// whole domain fails something rather than nothing.
+    #[test]
+    fn the_account_id_alphabet_carries_nothing_json_escapes() {
+        let mut accepted = 0usize;
+        for byte in 0u8..=0x7f {
+            let ch = char::from(byte);
+            let Ok(id) = AccountId::parse(&ch.to_string()) else {
+                continue;
+            };
+            accepted += 1;
+            let bytes = serde_json::to_vec(&id).unwrap().len();
+            assert_eq!(
+                bytes, 3,
+                "{ch:?} is accepted into an AccountId but costs {bytes} wire bytes, not 3 - \
+                 the raw-cap charge in account_state_max_bytes owes its escape factor back"
+            );
+        }
+        for ch in [
+            '\u{80}',
+            '\u{a0}',
+            '\u{e9}',
+            '\u{2028}',
+            '\u{ff21}',
+            '\u{1f600}',
+        ] {
+            assert!(
+                AccountId::parse(&ch.to_string()).is_err(),
+                "{ch:?} must be refused, or the ASCII sweep above is not the whole domain"
+            );
+        }
+        assert_eq!(
+            accepted,
+            26 + 26 + 10 + 4,
+            "the accepted alphabet is ASCII alphanumerics plus '.', '_', ':' and '-'"
         );
     }
 

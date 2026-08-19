@@ -1774,6 +1774,58 @@ COLD REVIEW OF THE ROUND FOUND FOUR, all real, all fixed in the same commit:
   so now. `SimClock::identity()` already is the `0, 0, 1.0` literal the test
   hand-built.
 
+## The engine/protocol document, round 4: the wire-size constants
+
+- `sizing.rs`'s TEST MODULE NOW CARRIES A MAXIMAL-FIXTURE KIT - `worst(len)`
+  (U+0001 fill), `maximal_balance`, `maximal_position`, `maximal_margin`,
+  `maximal_status_row`, `maximal_fill`, `empty_shape` - and nothing there may
+  hand-build a row again. The kit's rule is every string at its cap, every
+  `Decimal` at `Decimal::MIN`, every OPTIONAL FIELD PRESENT and every enum at
+  its longest spelling; a fixture that drops one of those measures a narrower
+  struct than the constant bounds, which is the exact defect the round closed.
+- THE ACCOUNT ID IS CHARGED AT ITS RAW CAP AND THAT IS A RULING, not an
+  oversight to re-tighten. `AccountId` is the only validated-alphabet string in
+  the wire types, its sole constructor is `AccountId::parse`, and its alphabet
+  (ASCII alphanumerics plus `.`, `_`, `:` and `-`) contains nothing
+  `serde_json` escapes, so `JSON_ESCAPE_FACTOR` there bought 320 bytes of dead
+  reservation per account snapshot rather than any safety.
+  `the_account_id_alphabet_carries_nothing_json_escapes` is the premise's pin
+  and its failure message says the factor is owed back. Anyone widening that
+  alphabet - or adding a second validated-alphabet type and reaching for the
+  same shortcut - owes that test a look first. NO OTHER STRING IN THE MODULE
+  QUALIFIES: symbols are `Arc<str>`, ids and currencies are `String`, all
+  capped in LENGTH and not in alphabet.
+- THE SIZING DERIVATIONS ARE TIGHT, WHICH SETTLES HALF OF SECTION D BEFORE
+  ROUND 5 OPENS IT. Measured worst cases against their bounds: balance
+  288/234, position 832/785, margin 480/405, order status 1856/1830, fill
+  2208/2184, snapshot envelope 512/474, account-state envelope 208/164. So the
+  "over-reserves by 1000x also passes" worry has no instance in these
+  constants; if round 5 adds a slack ceiling, `2 * analytic` is comfortable
+  everywhere and anything tighter than about 1.25x would fail on the loose
+  account-state envelope alone.
+- A WIRE-SIZE FIXTURE MEASURES THE TAGGED FRAME, NEVER THE BARE STRUCT.
+  `ServerMessage` is `#[serde(tag = "type")]`, so a snapshot struct serialized
+  on its own is about 21 bytes short of what the server reserves for -
+  `"type":"AccountState",`. The round's first account-state fixture measured
+  the bare struct and reported 142 where the frame is 164. The general shape,
+  and it is NEW FOR THIS ARC: THE ROUND'S OWN PRODUCTION IMPROVEMENT MADE AN
+  EXISTING MEASUREMENT ERROR MATTER. Dropping the dead escape factor on the
+  account id was right and it also removed the slack that had been hiding a
+  22-byte under-measurement in the test guarding the same term. When a change
+  TIGHTENS a bound, re-derive what the tests around it measure - a fixture that
+  was merely imprecise under generous slack becomes the thing that can no
+  longer bite.
+- `rust_decimal` SERIALIZES A `Decimal` AS A JSON STRING, not a number, and
+  DESERIALIZES from either. Both facts bit during the round: the string form is
+  why the row measurements run two bytes over a naive digit count, and the
+  lenient parse is why an equity fixture written with `"multiplier":1` decodes
+  fine.
+- A `rename_all` PERTURBATION IS NOT A BITE-CHECK FOR A SINGLE-WORD WIRE TAG.
+  Flipping `InstrumentClass`'s `snake_case` to `camelCase` left every tag
+  (`spot`, `future`, `equity`, `perpetual`, `inverse`) byte-identical and the
+  round-trip test correctly stayed green. The perturbation that bites is an
+  explicit `#[serde(rename = "...")]` on one variant.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -1963,6 +2015,15 @@ COLD REVIEW OF THE ROUND FOUND FOUR, all real, all fixed in the same commit:
     per round as they land; a missing entry makes the next one's arithmetic
     unreadable, which is exactly what the tape r2 entry above warns about, and
     it cost r3 a reconciliation it could not do from inside the round.
+  - engine/protocol r4: 1216 + 440, 1713 pairs, 1656 run, 57 ignored, 0
+    orphaned, 14 skips, 55.0 s and 54.7 s across two runs. +7 IN THE WORKSPACE
+    SWEEP AND NOTHING IN THE INSTRUMENTED ONE, all of it new: four
+    `mogwai-protocol` tests in `sizing.rs`, two in `instruments.rs` and one
+    `mogwai-engine` funding test. Both crates are workspace-sweep only, which
+    is why the second bucket holds. One existing test was RENAMED
+    (`account_state_bound_covers_a_max_length_account_id` to
+    `..._covers_an_empty_and_a_maximal_snapshot`) and two rewritten in place,
+    and none of that moves a count.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

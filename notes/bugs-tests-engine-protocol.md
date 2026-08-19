@@ -35,51 +35,7 @@ A1 through A8 are CLOSED - see "Round 2" and "Round 3" below.
 
 ## B. Fixtures that exclude the bug by construction
 
-**B1. `sizing.rs :: account_state_bound_covers_a_max_length_account_id` uses
-`BookShape { balances: 0, positions: 0, margins: 0, .. }` and an `AccountState`
-with three empty `Vec`s.** It exercises exactly the
-`144 + ESC * MAX_ACCOUNT_ID_LEN` envelope term and NONE of the row terms.
-`BALANCE_ROW_MAX_BYTES`, `POSITION_ROW_MAX_BYTES`, `MARGIN_ROW_MAX_BYTES`,
-`ORDER_STATUS_ROW_MAX_BYTES`, `FILL_ROW_MAX_BYTES` and
-`SNAPSHOT_ENVELOPE_MAX_BYTES` have NO MAXIMAL-ROW TEST AT ALL - halve any of them
-and only the engine's sampled `worst_case_reservation_covers_actual_output` might
-catch it, and only if the matrix happens to reach that row shape. The module's
-own doc says "every constant below carries a field-by-field derivation," and
-`order_event_bound_covers_both_maximal_lifecycle_frames` is the model to copy: it
-constructs both maximal frames with U+0001 fill. Do the same for each of the six
-row constants.
-
-**B2. Same test, second problem: the id is `"Z".repeat(MAX_ACCOUNT_ID_LEN)`,
-which JSON does not escape.** The `JSON_ESCAPE_FACTOR` term is therefore never
-load-bearing in the assertion. Its sibling three tests down does this correctly
-with `char::from(1)` and says so in the doc comment. (It is arguably harmless
-because `AccountId::parse` restricts the alphabet - but then the `ESC *` in
-`account_state_max_bytes` is 6x dead weight on every reservation, which is worth
-knowing either way.)
-
-**B3. `instruments.rs` - every `InstrumentClass::Equity` accessor is tested only
-at its default.** `an_equity_credits_no_currency_balance` is the sole equity test
-in the module, and it builds `lot_size: ONE, borrowable: None, settlement_ns: 0`
-and then never calls `lot_size()`, `borrowable()` or `settlement_ns()`. Implement
-all three as `Decimal::ONE` / `None` / `0` ignoring the field and every protocol
-test passes. (The engine's `Shares` fixture DOES parameterize these correctly and
-covers the behaviour - so this is a coverage-attribution issue rather than a live
-hole, but the accessors themselves are unpinned.) Relatedly,
-`instrument_def_round_trips` covers only `spot` and `future`; the `equity`,
-`perpetual` and `inverse` wire tags and the `one_share` serde default are
-unpinned byte-wise.
-
-**B4. `engine :: sale_proceeds_are_held_unsettled_until_their_instant` steps over
-its own boundary.** Sale at `ts=2`, settlement `2*DAY`, so the instant is
-`2*DAY + 2`. The test probes `2*DAY` (false) and `2*DAY + 3` (true) and never the
-instant itself. A `>` / `>=` flip in `release_settled_cash` is invisible.
-
-**B5. No perpetual-short funding test.**
-`a_long_perpetual_pays_funding_on_its_marked_notional` and
-`a_negative_funding_rate_pays_the_long` both hold a LONG; the sign is varied only
-via the rate. If `apply_funding` took `qty.abs()`, a short would also pay funding
-- direction inverted, no test red. The short side is the half where the sign
-convention is actually easy to get wrong.
+B1 through B5 are CLOSED - see "Round 4" below.
 
 ## C. `launch.rs` - closed, with one refusal
 
@@ -147,10 +103,16 @@ FAILED launch and nothing on any other path.
   are all exercised only indirectly through engine tests, or not at all.
   `MAX_SESSION_LEN` / `validate_session_id` the hunter could find no test for on
   either side.
-- **Doc/constant drift in `sizing.rs`:** `FILL_ROW_MAX_BYTES` doc says "rounded
-  to 320", the constant is `384`. `POSITION_ROW_MAX_BYTES` doc says "four
-  decimals" while listing six fields. These are the derivations the module doc
-  says are the proof, so drift in them is drift in the argument.
+- **Doc/constant drift in `sizing.rs`** - CLOSED IN ROUND 4, out of turn,
+  because that round's stated purpose was making the derivations match their
+  structs and leaving one knowingly stale contradicts it. `FILL_ROW_MAX_BYTES`
+  said "rounded to 320" against a `384` constant and "three client-id-shaped
+  strings" against a term charging four; the derivation now names the four
+  (client, venue, trade, `position_id`), the commission currency, and 384.
+  `POSITION_ROW_MAX_BYTES` NEEDED NO FIX and the report was wrong about it:
+  its six fields are four `Decimal`s plus two strings, so "four decimals" is
+  the correct count of the decimals and the strings are charged separately on
+  the same line.
 - `engine :: submit_rejects_semantically_invalid_inputs` is the counter-example
   to the recorded `min_price = 10.0` incident and is worth copying elsewhere: it
   pins exact reason strings AND asserts balances, positions and the open book are
@@ -347,7 +309,148 @@ five) is corrected. The other three were the vacuous zero-band control, an
   which is correct - the value pin is not redundant, it just cannot be the
   cross-check its old name claimed.
 
+## Round 4: B1-B5, the wire-size constants and two one-sided fixtures
+
+All five reproduced. Nothing was refused, and B2's parenthetical - the half the
+brief called the interesting part - resolved in favour of DELETING the factor
+rather than testing an unreachable case.
+
+COLD REVIEW OF THE ROUND INDEPENDENTLY VERIFIED THE PRODUCTION CHANGE and found
+four things, all fixed in the same commit. The one that mattered is first,
+because it is a shape this arc had not seen: THE ROUND'S OWN PRODUCTION
+IMPROVEMENT MADE AN EXISTING MEASUREMENT ERROR MATTER.
+
+- THE ACCOUNT-STATE FIXTURES MEASURED A BARE `AccountState` while the
+  reservation covers the TAGGED `ServerMessage::AccountState` frame - about 21
+  bytes of `"type"` the struct alone does not carry. Not a live bug, and it had
+  been harmless while the term carried 351 bytes of fixed slack; dropping the
+  dead escape factor cut that to 31, at which point a fixture under-measuring by
+  22 is most of what a bite-check has left to work with. Both fixtures wrap in
+  `ServerMessage` now, and the halving of the `144` addend fails at the TAGGED
+  size, 136 against 164. The two sibling tests added in the same change already
+  wrapped correctly, so this was an inconsistency inside one commit.
+- THE EQUITY-ACCESSOR CONTROL LOOP HELD ONLY `Spot` AND `Future` under a doc
+  comment claiming "every other class". `Perpetual` and `Inverse` are in the
+  loop now, so the comment is true and all four non-equity classes are pinned at
+  the documented constants.
+- THE ALPHABET TEST'S TWO HALVES ARE NOT THE SAME STRENGTH and the test now says
+  so: the `0..=0x7f` sweep is a proof by enumeration, the "nothing above U+007F"
+  half is a SAMPLE of six characters whose real proof is the `parse` predicate
+  read. The sample is there so a widening that made the sweep stop being the
+  whole domain fails something.
+- The short-funding test's second row is a VALUE PIN, not a mirror: no long test
+  runs a negative rate at mark 50,000 with the amount asserted, so the "same
+  rule read from the other side" comment read stronger than it was. Row one is
+  the exact mirror; the comment now distinguishes them.
+
+Two further findings were REFUSED as out of scope: both concerned
+`analysis/asia_jump_probe.py`, which is untracked scratch work unrelated to this
+document and stays untracked.
+
+- B1 IS CLOSED WITH FOUR TESTS IN `sizing.rs`, and every one of the six
+  constants was bite-checked by HALVING its fixed addend, as the report
+  proposed. `every_row_bound_covers_its_maximal_row` builds a maximal row for
+  each of the five row constants - every string at its cap filled with U+0001,
+  every `Decimal` at `Decimal::MIN`, every optional field PRESENT and every
+  enum at its longest spelling (`TrailingStopMarket`, `PartiallyFilled`) -
+  and each halving failed on its own labelled entry:
+  balance 192 against 234 wire bytes, position 704 against 785, margin 384
+  against 405, order status 1600 against 1830, fill 2016 against 2184.
+  `the_snapshot_envelope_bound_covers_an_empty_reply_of_either_kind` measures
+  the envelope with NO rows, so nothing else can pay for it: halved, 448
+  against 474.
+  - THE PER-ROW ASSERTIONS ARE NOT THE WHOLE CLAIM, because a row bound charges
+    nothing for the comma between rows. Two aggregate tests hold the
+    composition the server actually reserves against:
+    `account_state_bound_covers_an_empty_and_a_maximal_snapshot` (empty, then
+    seven rows of all three kinds) and
+    `query_reply_bounds_cover_their_maximal_snapshots` (both query replies at
+    seven rows through `worst_case_output_bytes`). The two order-status and
+    fill halvings fail BOTH the row test and the reply test, which is the
+    evidence the aggregate is not just restating the per-row one.
+  - THE MEASURED SLACK, which section D's over-reservation item will want:
+    balance 288/234, position 832/785, margin 480/405, order status 1856/1830,
+    fill 2208/2184, envelope 512/474. Every row constant is inside 20 percent
+    of its worst case and two are inside 2 percent, so the derivations are
+    TIGHT, not 1000x loose - the over-reservation D worries about is not in
+    these constants. The account-state envelope is the loose one, at 208
+    against 164.
+  - THE 164 IS A CORRECTION THE COLD REVIEW FORCED, and it is worth stating
+    because a later round setting a slack ceiling would inherit the error. The
+    round's first fixture measured a BARE `AccountState`, 142 bytes. What the
+    server reserves for is `ServerMessage::AccountState`, and `ServerMessage`
+    is tagged, so the real frame is 164 - the fixture under-measured the term
+    it guards by 22 bytes. That mattered only because the round itself removed
+    320 bytes of dead account-id slack from the same term: the two sibling
+    tests added in the same change already wrapped in `ServerMessage`, so the
+    inconsistency was inside one commit. Both fixtures wrap now, and the
+    re-bite-check at the tagged size fails 136 against 164.
+  - NO SEVENTH UNEXERCISED BOUND WAS FOUND. Sweeping every `*_BYTES` in the
+    crate: `ORDER_EVENT_MAX_BYTES` already had its maximal test,
+    `BOUNDARY_REFUSAL_BYTES` and `LINKAGE_MAX_BYTES` are defined in terms of it,
+    `ADMISSION_FRAME_MAX_BYTES` has its own two-sided test in `messages.rs`, and
+    `MAX_CLIENT_MESSAGE_BYTES` is an inbound cap rather than a derivation.
+    `swept_batch_max_bytes` is the one FUNCTION with no test naming it; it is
+    `swept_fill_max_bytes` with a fifth frame charged per venue-originated
+    order, so it dominates a sampled bound by construction. Left alone
+    deliberately.
+- B2 IS SETTLED AGAINST THE FACTOR: `account_state_max_bytes` now charges the
+  account id at `MAX_ACCOUNT_ID_LEN`, not at `ESC * MAX_ACCOUNT_ID_LEN`. The
+  parenthetical was right - `AccountId` is a newtype whose ONLY constructor is
+  `AccountId::parse` (verified by grep: no other `AccountId(` exists in the
+  workspace, and `Deserialize` routes through `parse`), and its alphabet is
+  ASCII alphanumerics plus `.`, `_`, `:` and `-`, none of which `serde_json`
+  escapes. So the 6x was not a bound at all, it was 320 bytes of dead weight on
+  every reservation naming an account - which a nine-member group pays ten
+  times over, since it charges `members + 1` snapshots.
+  - WHAT REPLACES THE TEST-FOR-AN-UNREACHABLE-CASE is a test for the PREMISE.
+    `the_account_id_alphabet_carries_nothing_json_escapes` sweeps the whole
+    accepted domain - all of `0..=0x7f`, exhaustive because `parse` requires
+    `is_ascii_alphanumeric` or one of four ASCII marks so nothing above U+007F
+    can be accepted - asserts every accepted character serializes to exactly
+    three bytes, and pins the accepted count at 66. Bite-checked by adding
+    `'\u{1}'` to `parse`'s allowed set: fails naming the character, its 8 wire
+    bytes, and the fact that the raw-cap charge owes its factor back. The
+    non-ASCII half is pinned by a short refusal list so the ASCII sweep cannot
+    silently stop being the whole domain.
+  - The claim is stated where it is spent, on `account_state_max_bytes` and in
+    the module doc, both of which previously said every string is charged the
+    factor.
+- B3 GOT ALL THREE HALVES. `the_equity_accessors_report_the_terms_the_class
+  _states` states `lot_size: 100`, `borrowable: Some(500)` and a T+2
+  `settlement_ns`, and each accessor was bite-checked separately by making it
+  ignore its field. `Some(0)` IS ITS OWN CASE and earned its place: a
+  `borrowable.filter(|b| !b.is_zero())` passes the `Some(500)` assertion and
+  fails only on the hard-to-borrow one, which is exactly the collapse that
+  would turn "no locate available" into "no borrow market modelled". The
+  non-equity control (spot and future answering the three constants) is
+  bite-checked too, per the standing rule that a control is a test: with
+  `lot_size`'s fallback moved to `ZERO` it fails naming the class.
+  - The wire half: `instrument_def_round_trips` covers all five classes now,
+    bite-checked by renaming the `equity` tag to `shares`. The `one_share`
+    serde default has its own test,
+    `an_equity_omitting_its_optional_terms_takes_the_documented_defaults`,
+    which decodes an equity stating only currency and multiplier; bite-checked
+    by returning `Decimal::ZERO` from `one_share`, which is the failure that
+    would make every quantity a whole number of nothing.
+- B4 REPRODUCED AND THE OLD PROBES REALLY WERE BLIND. Under a `>` to `>=` flip
+  in `release_settled_cash` the credit settles at `2 * DAY + 2`, so the old
+  test's `2 * DAY` still retains and its `2 * DAY + 3` still releases - both
+  assertions pass over the flipped comparison. The test now names the instant
+  as a `const` and probes `SETTLES_AT - 1` (false), `SETTLES_AT` (true) and
+  `SETTLES_AT + 1` (false, because a credit settles once and the second pass
+  must move nothing). Bite-checked: the flip fails on "and the instant itself
+  settles it".
+- B5 REPRODUCED EXACTLY AS THE REPORT PREDICTED, `qty.abs()` and all.
+  `a_short_perpetual_receives_the_funding_a_long_pays` mirrors the long test at
+  the same marks - a short of 10 marked at 60,000 at one basis point RECEIVES
+  exactly the 60 the long pays - and carries the negative-rate short as a
+  second row, where it pays 50. It asserts the short actually filled before it
+  reads the balance, so "no position" cannot masquerade as "no funding".
+  Bite-checked by taking `position.qty.abs()` in `apply_funding`: the new test
+  fails with `-60` against `60` and BOTH long tests stay green, which is the
+  measurement behind the report's claim.
+
 ## The hunter's own ordering
 
-C and A1-A8 are done. Next is B1 (six unpinned wire-size constants that a
-reservation system depends on).
+C, A1-A8 and B1-B5 are done. What remains is section D.

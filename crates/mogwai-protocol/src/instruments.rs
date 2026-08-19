@@ -456,15 +456,91 @@ mod tests {
             size_increment: Decimal::ONE,
         };
 
+        let equity = InstrumentDef {
+            symbol: "AAPL".into(),
+            class: InstrumentClass::Equity {
+                currency: "USD".into(),
+                multiplier: Decimal::ONE,
+                lot_size: Decimal::from(100),
+                borrowable: Some(Decimal::from(500)),
+                settlement_ns: 2 * 24 * 3_600 * 1_000_000_000,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::ONE,
+        };
+
+        let perpetual = InstrumentDef {
+            symbol: "BTCUSDT.P".into(),
+            class: InstrumentClass::Perpetual {
+                underlying: "BTC".into(),
+                settlement_currency: "USDT".into(),
+                multiplier: Decimal::ONE,
+                asset_class: WireAssetClass::Cryptocurrency,
+                funding_interval_ns: 8 * 3_600 * 1_000_000_000,
+                funding_rate: Decimal::new(1, 4),
+                index_symbol: Some("BTCUSDT".into()),
+                funding_clamp: Decimal::new(5, 3),
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::ONE,
+        };
+
+        let inverse = InstrumentDef {
+            symbol: "BTCUSD-INV".into(),
+            class: InstrumentClass::Inverse {
+                underlying: "BTC".into(),
+                settlement_currency: "BTC".into(),
+                quote_currency: "USD".into(),
+                multiplier: Decimal::from(100),
+                asset_class: WireAssetClass::Cryptocurrency,
+            },
+            price_precision: 1,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 1),
+            size_increment: Decimal::ONE,
+        };
+
         for (def, tag) in [
             (spot, "\"class\":\"spot\""),
             (future, "\"class\":\"future\""),
+            (equity, "\"class\":\"equity\""),
+            (perpetual, "\"class\":\"perpetual\""),
+            (inverse, "\"class\":\"inverse\""),
         ] {
             let json = serde_json::to_string(&def).unwrap();
             assert!(json.contains(tag), "wire tag must be exact: {json}");
             let decoded: InstrumentDef = serde_json::from_str(&json).unwrap();
             assert_eq!(decoded, def);
         }
+    }
+
+    /// `lot_size` is the ONE equity field with a non-zero serde default, so a
+    /// config omitting it must decode to one share rather than to zero - which
+    /// would make every quantity a whole number of nothing. Its neighbours
+    /// `borrowable` and `settlement_ns` default to absent and zero, and those
+    /// two defaults are load-bearing in the other direction: they are what says
+    /// "this venue models no borrow market and settles instantly".
+    #[test]
+    fn an_equity_omitting_its_optional_terms_takes_the_documented_defaults() {
+        let json = r#"{"class":"equity","currency":"USD","multiplier":1}"#;
+        let decoded: InstrumentClass = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            decoded,
+            InstrumentClass::Equity {
+                currency: "USD".into(),
+                multiplier: Decimal::ONE,
+                lot_size: Decimal::ONE,
+                borrowable: None,
+                settlement_ns: 0,
+            }
+        );
+        assert_eq!(decoded.lot_size(), Decimal::ONE, "odd lots are accepted");
+        assert_eq!(decoded.borrowable(), None);
+        assert_eq!(decoded.settlement_ns(), 0);
     }
 
     #[test]
@@ -595,6 +671,78 @@ mod tests {
             !equity.is_future(),
             "a cash equity posts no per-contract collateral"
         );
+    }
+
+    /// The three equity-only accessors READ THEIR FIELD, and nothing else in
+    /// this crate said so: the fixture above states all three at their
+    /// defaults, so an implementation returning `Decimal::ONE` / `None` / `0`
+    /// and ignoring the class entirely passed every protocol test. The engine's
+    /// `Shares` fixture does parameterize them, but that is coverage of the
+    /// BEHAVIOUR in another crate, not of the accessor.
+    ///
+    /// The non-equity direction is the other half: every other class answers
+    /// the same three questions with the documented constants, which is what
+    /// lets the ledger ask them without matching on the class first.
+    #[test]
+    fn the_equity_accessors_report_the_terms_the_class_states() {
+        let equity = InstrumentClass::Equity {
+            currency: "USD".into(),
+            multiplier: Decimal::ONE,
+            lot_size: Decimal::from(100),
+            borrowable: Some(Decimal::from(500)),
+            settlement_ns: 2 * 24 * 3_600 * 1_000_000_000,
+        };
+        assert_eq!(equity.lot_size(), Decimal::from(100), "a round-lot name");
+        assert_eq!(
+            equity.borrowable(),
+            Some(Decimal::from(500)),
+            "a stated borrow, which is not the same fact as no borrow market"
+        );
+        assert_eq!(equity.settlement_ns(), 2 * 24 * 3_600 * 1_000_000_000);
+
+        // `Some(0)` is hard-to-borrow and must not collapse to `None`.
+        let hard = InstrumentClass::Equity {
+            currency: "USD".into(),
+            multiplier: Decimal::ONE,
+            lot_size: Decimal::ONE,
+            borrowable: Some(Decimal::ZERO),
+            settlement_ns: 0,
+        };
+        assert_eq!(hard.borrowable(), Some(Decimal::ZERO));
+
+        for other in [
+            InstrumentClass::Spot {
+                base: "BTC".into(),
+                quote: "USDT".into(),
+            },
+            InstrumentClass::Future {
+                underlying: "NQ".into(),
+                settlement_currency: "USD".into(),
+                multiplier: Decimal::from(2),
+                asset_class: WireAssetClass::Index,
+            },
+            InstrumentClass::Perpetual {
+                underlying: "BTC".into(),
+                settlement_currency: "USDT".into(),
+                multiplier: Decimal::ONE,
+                asset_class: WireAssetClass::Cryptocurrency,
+                funding_interval_ns: 8 * 3_600 * 1_000_000_000,
+                funding_rate: Decimal::new(1, 4),
+                index_symbol: None,
+                funding_clamp: Decimal::ZERO,
+            },
+            InstrumentClass::Inverse {
+                underlying: "BTC".into(),
+                settlement_currency: "BTC".into(),
+                quote_currency: "USD".into(),
+                multiplier: Decimal::from(100),
+                asset_class: WireAssetClass::Cryptocurrency,
+            },
+        ] {
+            assert_eq!(other.lot_size(), Decimal::ONE, "{other:?}");
+            assert_eq!(other.borrowable(), None, "{other:?}");
+            assert_eq!(other.settlement_ns(), 0, "{other:?}");
+        }
     }
 
     #[test]
