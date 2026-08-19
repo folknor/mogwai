@@ -85,10 +85,17 @@ impl TreeOracle for GitTreeOracle {
 /// self-dependency to reach it.
 ///
 /// The gate is belt AND braces: `--all-features` would switch this on in a
-/// release build too, so the two artifact writers in `mogwai-cli` also refuse
+/// release build too, so every artifact writer in `mogwai-cli` also refuses
 /// outright when [`tree_readings_are_production`] is false. Neither guard
 /// alone is enough - the cfg can be defeated by a feature flag, and the
 /// runtime check is only as good as the call sites that remember it.
+///
+/// THE SET IS SIX, NOT TWO, and this comment said two for a while because the
+/// refusal was inlined in the two writers the seam's own tests exercised -
+/// leaving `fit`, `measure`, `minute_range_envelope` and
+/// `arrival_envelope_diagnostic` writing tree-attested bindings with the
+/// braces off. They now share `mogwai_cli::attestation`, whose roster test
+/// holds the set against the sources rather than against a memory.
 #[cfg(any(test, feature = "test-seam"))]
 mod seam {
     use super::{GitTreeOracle, LabResult, TreeOracle, TreeQuery, TreeReading};

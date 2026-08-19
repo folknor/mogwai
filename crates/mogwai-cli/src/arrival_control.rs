@@ -503,12 +503,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
     // only one; it exists because the cfg can be switched back on by an
     // `--all-features` build, and one install would otherwise forge both ends
     // at once.
-    if !mogwai_lab::ledger::tree_readings_are_production() {
-        bail!(
-            "a scripted tree reader is installed; an artifact binding may only be attested by git \
-             itself"
-        );
-    }
+    crate::attestation::refuse_scripted_tree_attestation()?;
     let (head, clean) = fresh_tree_state().map_err(|e| anyhow!("{e}"))?;
     if !clean || head != commit {
         bail!("the tree changed during the arrival-control run; the artifact is unbound");

@@ -16,10 +16,16 @@ apart from two recorded refusals and one carried residual.
 findings apart from THREE FULL REFUSALS - B2, D1 and D4 - AND ONE PARTIAL, D2,
 refused as a fixture candidate and closed by anchoring its inputs instead.
 Counted rather than estimated: three summaries of that document had stated the
-number three different ways. ITS CLOSE PASS IS THE LAST OF THE TEST DOCUMENTS. `bugs-protocol` starts next and is THE FIRST PRODUCTION-CODE
-REPORT OF THE ARC - the five test-hunt documents are done, so from here the
-findings are about shipped behaviour rather than about the gates that watch it,
-and "the test cannot fail" stops being the default diagnosis. The order is
+number three different ways. ITS CLOSE PASS RAN ON 2026-08-19 AND WAS THE LAST
+OF THE TEST DOCUMENTS' - one finding, a runtime guard installed at two of six
+call sites; see that section. `bugs-protocol` starts next and is THE FIRST
+PRODUCTION-CODE REPORT OF THE ARC - the five test-hunt documents are done, so
+from here the findings are about shipped behaviour rather than about the gates
+that watch it, and "the test cannot fail" stops being the default diagnosis.
+WHAT STILL BINDS FROM THE TEST ARC is everything about the tests a production
+fix WRITES: a fix whose regression test cannot fail has closed nothing, so the
+vacuity rules, the bite-check discipline and the shared-fixture rule all carry
+forward unchanged and apply to the new tests rather than to the reports. The order is
 `bugs-tests-lifecycle`, `bugs-tests-adapter`,
 `bugs-tests-tape`, `bugs-tests-engine-protocol`, `bugs-tests-lab-cli`, then
 `bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
@@ -2107,8 +2113,9 @@ RESIDUALS CARRIED, all three left standing on their stated grounds:
       absent from the built `target/release/mogwai`.
     - A RUNTIME REFUSAL. `tree_readings_are_production()` exists in BOTH
       configurations - a thread-local probe with the seam, a constant `true`
-      without - and both artifact writers bail on it immediately before their
-      `fresh_tree_state` re-attestation. This is what survives an
+      without - and every artifact writer bails on it immediately before its
+      write. IT WAS TWO WRITERS OF SIX until the close pass; see that section.
+      This is what survives an
       `--all-features` release build, which the cfg alone does not. In a
       production build the branch folds away entirely, which is why its message
       is also absent from the binary.
@@ -2695,6 +2702,63 @@ documents inherit:
   that miscounts its own instances is the durable-prose-asserting-a-live-fact
   shape aimed at itself.
 
+## The lab/cli document, close pass: what the five commits left
+
+ONE FINDING, and it is the arc's signature defect for the twenty-fifth time -
+A THING THAT READS AS GATED AND IS NOT - in the unreviewed half of the round-2
+commit, which is where the previous four close passes found theirs.
+
+- THE RUNTIME BRACE COVERED TWO WRITERS OF SIX. Round 2's cold review found the
+  tree-state seam spoofable and the fix-and-commit half closed it with a cargo
+  feature plus a runtime refusal - inlined in `arrival_control` and
+  `arrival_screen`, the two writers that round's tests exercised, with the
+  seam's own module comment then stating the set as "the two artifact writers
+  in `mogwai-cli`" as though that were the whole roster. It is not:
+  `measure`, `fit`, `minute_range_envelope` and `arrival_envelope_diagnostic`
+  all write a tree-attested binding, all four had the braces off, and three of
+  them have dirty-tree tests that install a double in the same commit. Under
+  the `--all-features` build the runtime guard exists FOR, one install would
+  have forged their bindings unchallenged.
+  - CLOSED BY A SHARED CALL PLUS A ROSTER TEST, not by four more inline copies.
+    `mogwai_cli::attestation::refuse_scripted_tree_attestation` is the one
+    guard now; `tree_writers_all_refuse_a_scripted_attestation` reads this
+    crate's own sources, finds every file that SERIALIZES `harness_tree_commit`
+    or `clean_tree`, and fails naming any that does not call it. Bite-checked
+    by deleting the call from `measure.rs`: the test names `measure.rs`.
+  - AND THE ROSTER TEST STATES ITS OWN BLIND SPOT. `fit` binds an artifact
+    whose JSON is serialized in `mogwai_lab::fit::driver`, so the roster cannot
+    see it; the guard is there by judgment and the docstring says which writer
+    the file scan misses and why. A source-scanning roster is worth having and
+    is not a proof.
+  - THE GENERAL RULE, which is the guard-scope family with the guard in the
+    right place and the wrong NUMBER of them: WHEN A FIX INSTALLS A CHECK AT A
+    CALL SITE, COUNT THE CALL SITES BEFORE WRITING DOWN HOW MANY THERE ARE. The
+    comment claiming "the two" is what made the gap read as covered, exactly as
+    a green test does.
+
+LATERAL, OBSERVED AND NOT FIXED, AND IT IS A LEAD FOR `bugs-server` RATHER THAN
+FOR A TEST DOCUMENT: `run_complete_is_stamped_on_the_receiving_sockets_clock`
+failed ONE of the close pass's two full `brokkr check --gate` runs, on
+`.expect("second boat receives completion")`, and passed the other. That is not
+the family `watch_a_bounded_run` closes: the helper DISCARDS a run whose socket
+saw no content frame or whose drain ended on the deadline, so reaching the
+`expect` at all means the second socket was a live session, drained to a clean
+end, and never received the announcement. The remaining explanations are about
+the VENUE - a boat whose completion frame is not written to every attached
+socket before teardown closes them - not about the test's premises, which is
+why it belongs to a production round. Reproduce it before believing it: one in
+two here, and `bugs-tests-lifecycle` is closed, so nothing else is watching.
+
+Everything else held. The AGENTS.md edits were verified against the tree (the
+shared-fixture count really is three and `segment_library_conformance.json`
+really is path-loaded by both sides; `subcontract`'s two encodings really are
+read by different consumers); `gen.rs` really does reach the session math
+through `mogwai_lab::summary`, so the deleted sweep really was `f(x) == f(x)`;
+the architecture note's protocol-9 tape-hash claim is enforced by a now-unignored
+test rather than dated; the sampler `Drop`, the `cache_root` purity split, the
+`resolve_fifo` split and the two named error messages are behaviour-preserving
+or intentionally not, and each says which.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -3029,7 +3093,7 @@ documents inherit:
   a drop guard, and it composes with a test whose property needs the child alone
   signalled: kill the child explicitly, let the guard take the group afterwards.
 - `analysis/asia_jump_probe.py` is untracked, unrelated to this arc, and
-  predates it. It is not to be swept into a commit. Seventeen cold reviewers
+  predates it. It is not to be swept into a commit. Nineteen cold reviewers
   have now analysed it unprompted; the standing answer is that it is out of
   scope and stays untracked.
   - ONE THING FROM THAT NOISE IS WORTH KEEPING, because it is the shared-fixture
@@ -3054,13 +3118,17 @@ documents inherit:
   a hole one layer up from what it was closing. Round 6 found two there: the wall
   budget's own reset moving an anchor forward, and a durable performance number
   recorded from a draft of the instrument that the same commit then fixed. BOTH
-  WERE IN THE UNREVIEWED HALF. Budget a close pass per arc, and point it there
-  first. THREE DOCUMENTS, THREE CONFIRMATIONS: the tape close pass's findings
-  are all in that half too, and all of them are PROSE - a false equation, a
-  self-contradicting section, a subcommand description - which is what the
-  unreviewed half of a round about tests produces once the tests themselves
-  are being written carefully. Point the close pass at the durable prose the
-  round touched, not only at its code.
+  WERE IN THE UNREVIEWED HALF. Budget a close pass per document, and point it
+  there first. FIVE DOCUMENTS, FIVE CONFIRMATIONS, with no exception yet. Three
+  of them were all PROSE - a false equation, a self-contradicting section, a
+  subcommand description - which is what the unreviewed half of a round about
+  tests produces once the tests themselves are being written carefully. The
+  lab/cli one was not: it was a runtime guard installed at two of the six call
+  sites that owed it, under a comment stating the set as two. So point the
+  close pass at the durable prose the round touched AND at the call sites of
+  whatever the round's last fix installed - a fix written after the last cold
+  review is the least-examined code in the arc, and it is the code closing a
+  finding, which is where the stakes are highest.
 - Any ADJUDICATOR launched in this arc reads `notes/todo.md` and `brokkr.toml`
   in addition to its fork framing and the usual contracts. Owner instruction.
   `brokkr.toml` carries the gate profile's parallelism and skip list, which

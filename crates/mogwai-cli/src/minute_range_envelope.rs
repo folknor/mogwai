@@ -76,6 +76,10 @@ pub fn run(args: MinuteRangeEnvelopeArgs) -> anyhow::Result<Value> {
     if envelope["p99_lower"].is_null() || envelope["p99"].is_null() {
         bail!("observed pass did not produce a two-sided minute-range envelope");
     }
+    // `clean_tree: true` below is asserted, not measured - the claim rests
+    // entirely on the `require_clean_tree` at the top of this function, so a
+    // scripted reader would write it unchallenged.
+    crate::attestation::refuse_scripted_tree_attestation()?;
     let artifact = json!({
         "binding": {
             "harness_tree_commit": commit,

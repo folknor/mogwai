@@ -411,6 +411,11 @@ pub fn run_measure_with(
         );
     }
 
+    // The same second guard the other tree-attested writers carry: the
+    // binding below claims git attested this run, and one installed double
+    // would otherwise forge both the opening `require_clean_tree` and this
+    // re-attestation.
+    crate::attestation::refuse_scripted_tree_attestation()?;
     let (head, clean) = fresh_tree_state().map_err(|e| anyhow!("{e}"))?;
     if !clean || head != harness_commit {
         bail!("the tree changed during the measure12a run; the artifact is unbound");

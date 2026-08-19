@@ -218,6 +218,10 @@ pub fn run(args: ArrivalEnvelopeDiagnosticArgs) -> anyhow::Result<Value> {
         .iter()
         .filter(|cell| cell["counterfactual_verdict"] == "passed")
         .count();
+    // This binding records the reading rather than demanding a clean one, but
+    // it is still a provenance claim about the commit that produced the
+    // cells, and a scripted reader could name any commit at all.
+    crate::attestation::refuse_scripted_tree_attestation()?;
     let (head, clean) = fresh_tree_state().map_err(|error| anyhow!(error.to_string()))?;
     let mut hashes = Map::new();
     hashes.insert(

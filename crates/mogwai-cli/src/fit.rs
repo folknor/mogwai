@@ -70,6 +70,12 @@ pub fn run(args: &FitArgs) -> anyhow::Result<()> {
     }
     let cfg = resolve(args, &harness_commit, &harness_commit);
     let artifact = run_fit(&cfg).map_err(|e| anyhow!("the fit refused: {e}"))?;
+    // The fit driver serialized `binding.harness_tree_commit` out of the
+    // commit resolved above, so this artifact is tree-attested exactly as the
+    // others are - and the roster test in `attestation` cannot see it, because
+    // the serialization is in `mogwai-lab`. Refuse a scripted attestation
+    // before the bytes reach disk.
+    crate::attestation::refuse_scripted_tree_attestation()?;
     let bytes = serde_json::to_vec_pretty(&artifact)?;
     std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
 

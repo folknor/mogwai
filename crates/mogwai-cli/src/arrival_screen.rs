@@ -462,12 +462,7 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     // See the twin in `arrival_control::run_with`: the binding below is a
     // provenance claim, and a scripted tree reader could otherwise forge both
     // the step-1 commit and this re-attestation from one install.
-    if !mogwai_lab::ledger::tree_readings_are_production() {
-        bail!(
-            "a scripted tree reader is installed; an artifact binding may only be attested by git \
-             itself"
-        );
-    }
+    crate::attestation::refuse_scripted_tree_attestation()?;
     let (head, clean) = fresh_tree_state().map_err(|e| anyhow!(e.to_string()))?;
     if !clean || head != commit {
         bail!("the artifact is unbound");
