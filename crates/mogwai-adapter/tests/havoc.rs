@@ -55,7 +55,7 @@ async fn subscribed_data_client(
     state: Arc<StubState>,
     havoc: Option<HavocSpec>,
 ) -> UnboundedReceiver<DataEvent> {
-    let base_url = bound_stub(state).await;
+    let base_url = bound_stub(Arc::clone(&state)).await;
     let (sink_tx, sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
 
@@ -72,6 +72,10 @@ async fn subscribed_data_client(
     client.start().expect("start grabs sink");
     client.connect().await.expect("connect opens transports");
     subscribe(&mut client);
+    // THE SUBSCRIPTION IS RECORDED, so the tape may flow. Released here rather
+    // than waited out by the stub, because the subscription never crosses the
+    // wire and nothing on the venue side can see it (`common::PushGate`).
+    state.push_gate.open();
     sink_rx
 }
 
@@ -109,6 +113,7 @@ fn conn_havoc(conn: ConnHavoc) -> HavocSpec {
 /// trades, in which case the socket is application-silent.
 async fn connect_data_client(
     base_url: String,
+    state: &StubState,
     havoc: Option<HavocSpec>,
 ) -> (MogwaiDataClient, UnboundedReceiver<DataEvent>) {
     let (sink_tx, sink_rx) = unbounded_channel::<DataEvent>();
@@ -129,6 +134,9 @@ async fn connect_data_client(
     client.start().expect("start grabs sink");
     client.connect().await.expect("connect opens transports");
     subscribe(&mut client);
+    // See `subscribed_data_client`: the local subscription is now recorded, so
+    // the stub's tape push is released.
+    state.push_gate.open();
     (client, sink_rx)
 }
 
@@ -150,6 +158,9 @@ async fn next_trade(rx: &mut UnboundedReceiver<DataEvent>) -> nautilus_model::da
 async fn assert_only_instrument_prologue(rx: &mut UnboundedReceiver<DataEvent>, window: Duration) {
     let deadline = Instant::now() + window;
     loop {
+        // See `wait_for_at_least`: an absence observed because the tape was
+        // never released is not evidence that anything was suppressed.
+        common::assert_push_gate_opened();
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return;
@@ -168,9 +179,32 @@ async fn assert_only_instrument_prologue(rx: &mut UnboundedReceiver<DataEvent>, 
 async fn wait_for_at_least(count: &AtomicUsize, target: usize, timeout: Duration) -> usize {
     let deadline = Instant::now() + timeout;
     loop {
+        // THE GATE SPEAKS FIRST, on every poll helper in this file: a leg that
+        // gave up waiting for `push_gate` sent no tape, and a counter that then
+        // fails to move - or an absence that then passes - is that omission's
+        // symptom rather than a finding about the client. Free unless a stall
+        // was actually recorded on this thread.
+        common::assert_push_gate_opened();
         let value = count.load(Ordering::Relaxed);
         if value >= target || Instant::now() >= deadline {
             return value;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Waits up to `timeout` for the stub to have recorded at least one `/ws`
+/// upgrade, returning the request lines it holds at that point (empty if the
+/// deadline passed without one). The stub records from its own handler task, so
+/// a caller that reads the list directly is asking a question the answer to has
+/// not necessarily been written yet.
+async fn wait_for_ws_request(state: &StubState, timeout: Duration) -> Vec<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        common::assert_push_gate_opened();
+        let requests = state.ws_requests.lock().expect("ws request mutex").clone();
+        if !requests.is_empty() || Instant::now() >= deadline {
+            return requests;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -638,18 +672,41 @@ async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs the data-event sink");
     client.connect().await.expect("connect is spawned");
-    tokio::time::sleep(Duration::from_millis(600)).await;
 
-    // A FULL SESSION, not a dial that failed fast.
-    assert!(
-        !client.is_disconnected(),
-        "dialing blind establishes a session against a stranger"
-    );
-    let requests = state.ws_requests.lock().expect("ws request mutex").clone();
+    // THE UPGRADE RECORD IS WRITTEN BY THE STUB'S HANDLER TASK, so it is polled
+    // for rather than read on the next line: silence from a background recorder
+    // means "nothing recorded YET", and a fixed sleep only guesses how long yet
+    // lasts. On the passing path the poll returns on its first look, because
+    // `serve_ws` pushes the request line before it writes the upgrade bytes and
+    // `connect` cannot have returned connected before that; the two seconds are
+    // a failure deadline for the paths where it did not happen.
+    let requests = wait_for_ws_request(&state, Duration::from_secs(2)).await;
     assert!(
         !requests.is_empty(),
         "the stranger completed at least one upgrade"
     );
+    // A FULL SESSION, not an upgrade that completes and then dies. THIS IS A
+    // WINDOW, NOT A SNAPSHOT, and that is what the deleted `sleep(600ms)` was
+    // buying: `ws_requests` is pushed at the TOP of `serve_ws`, before the
+    // upgrade bytes are even written, and `connect` returns as soon as the
+    // client reports connected - so a stranger that completes the handshake and
+    // immediately drops the socket satisfies both of the checks above. The
+    // session has to be observed SURVIVING, which is the stub's own
+    // `active_ws` (decremented by the handler's drop guard) plus the client not
+    // having fallen back into its reconnect loop.
+    let held = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < held {
+        assert_eq!(
+            state.active_ws.load(Ordering::Relaxed),
+            1,
+            "the stranger's socket must stay up, not close behind the upgrade"
+        );
+        assert!(
+            !client.is_disconnected(),
+            "dialing blind establishes a session against a stranger"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     // The disclosure half, pinned as the POSITIVE it now is: the upgrade names
     // this run's ledger, so a blind dial opens that account on a stranger's
     // venue. Asserted on the CONFIGURED id rather than on the substring
@@ -705,11 +762,16 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
     // reports connected, and its message would name the socket, not the check.
     drop(client.connect().await);
 
-    tokio::time::sleep(Duration::from_millis(600)).await;
     // The probe was ASKED before anything is concluded from the client not
     // having refused: a client that skipped the check entirely would satisfy
     // the assertion below for free, which is the vacuity this test carried.
-    let probes = state.health_hits.load(Ordering::Relaxed);
+    //
+    // POLLED, NOT SLEPT FOR. `health_hits` is written by the stub's handler
+    // task, so an empty count means "not recorded yet" as readily as "never
+    // asked"; the two-second wait is the failure deadline, not the success
+    // path, and a client that really skips the probe now fails in two seconds
+    // rather than being waited out for a fixed six hundred milliseconds.
+    let probes = wait_for_at_least(&state.health_hits, 1, Duration::from_secs(2)).await;
     assert!(
         probes >= 1,
         "the client must have probed /health at all; saw {probes} requests"
@@ -724,11 +786,18 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn conn_reconnect_respects_max_attempts() {
     // The stub refuses the WebSocket upgrade on every dial. With a three-attempt
-    // cap the client must dial at least three times (one initial plus two
-    // retries) and then give up disconnected - and never dial a fifth. The exact
-    // contract is "disconnected after the cap"; pin the count with a robust
-    // lower+upper bound rather than a brittle exact-count under scheduler delay,
-    // and assert `is_disconnected`.
+    // cap the client must dial exactly three times - one initial plus two
+    // retries - and then stop.
+    //
+    // "STOPPED" IS ASSERTED AS THE ABSENCE OF A FOURTH DIAL, and deliberately
+    // not as `is_disconnected()`. That flag is `!connected`, it starts FALSE,
+    // and `lifecycle` stores `false` on every failed dial - so it reads
+    // "disconnected" from the first instant of the test, long before the cap is
+    // reached, and any assertion built on it passes whatever the client does.
+    // Two earlier shapes of this test asserted it anyway, the second inside a
+    // poll loop whose condition was therefore false on entry, making the loop
+    // body and its named message unreachable in every run. The only observable
+    // that distinguishes "gave up" from "still trying" is the dial counter.
     let state = Arc::new(StubState::default());
     state.refuse_ws.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
@@ -755,20 +824,47 @@ async fn conn_reconnect_respects_max_attempts() {
     client.start().expect("start grabs the data-event sink");
     // The dials all fail, so the loop exhausts the cap and the connect helper's
     // readiness wait never succeeds; bound the await rather than block on it.
-    drop(tokio::time::timeout(Duration::from_secs(2), client.connect()).await);
+    // THE BOUND IS A FAILURE DEADLINE, NOT A BUDGET THIS TEST SPENDS - it used
+    // to be two seconds, and since readiness never arrives the test paid every
+    // one of them on the passing path. The ladder here is three loopback dials
+    // and two 30 ms backoffs, so a client that is going to give up has given up
+    // an order of magnitude inside this.
+    drop(tokio::time::timeout(Duration::from_secs(1), client.connect()).await);
 
-    // Give any erroneous extra dial time to land before pinning the count.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let handshakes = state.ws_handshakes.load(Ordering::Relaxed);
+    // THE LOWER BOUND IS POLLED, NOT INHERITED FROM THE TIMEOUT ABOVE. The
+    // ladder in front of the third dial is a `/clock` fetch with its own retry
+    // sleeps, an instrument seed, three loopback dials and two 30 ms backoffs;
+    // if that overruns the connect bound then the negative window below opens
+    // early and fails on `saw 1` or `saw 2` - a wall-clock flake wearing the
+    // costume of the defect. Waiting for the count makes the bound a failure
+    // deadline on both sides.
+    let dials = wait_for_at_least(&state.ws_handshakes, 3, Duration::from_secs(2)).await;
     assert!(
-        (3..=4).contains(&handshakes),
-        "a three-attempt cap must dial three times (initial plus two retries), \
-         tolerating one racing extra at most; saw {handshakes}"
+        dials >= 3,
+        "a three-attempt cap dials three times: initial plus two retries; saw {dials}"
     );
-    assert!(
-        client.is_disconnected(),
-        "client must end disconnected once attempts are exhausted"
-    );
+    // THE WINDOW IS A NEGATIVE ASSERTION and stays: the property is that no
+    // FOURTH dial ever lands, and the only way to observe an event that must
+    // not happen is to watch for a while. What changed is the count it holds.
+    //
+    // The old `(3..=4)` tolerance made the window vacuous against the defect it
+    // was written for - a fourth dial arriving at 310 ms passed, and one
+    // arriving at 10 ms passed too, so the wait bought nothing. Three is exact
+    // rather than tolerant because the ladder is: `exhausted(0)` is false, the
+    // dial fails, `backoff_or_exhausted` bumps to 1 and 2 and returns true at
+    // 3, and every dial is counted by the stub BEFORE it drops the socket the
+    // client is waiting on. There is no scheduling order in which a fourth is
+    // legal, so tolerating one only hid it.
+    let window = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < window {
+        let handshakes = state.ws_handshakes.load(Ordering::Relaxed);
+        assert_eq!(
+            handshakes, 3,
+            "a three-attempt cap dials exactly three times (initial plus two \
+             retries) and never again; saw {handshakes}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -782,6 +878,7 @@ async fn conn_heartbeat_pings_when_enabled() {
     let base_url = bound_stub(Arc::clone(&state)).await;
     let (_client, _rx) = connect_data_client(
         base_url,
+        &state,
         Some(conn_havoc(ConnHavoc {
             heartbeat_interval_ms: 50,
             ..ConnHavoc::default()
@@ -812,7 +909,7 @@ async fn conn_handles_inbound_server_ping() {
         .expect("ws trades mutex")
         .push(trade_json(10, "100.00"));
     let base_url = bound_stub(Arc::clone(&state)).await;
-    let (_client, _rx) = connect_data_client(base_url, None).await;
+    let (_client, _rx) = connect_data_client(base_url, &state, None).await;
 
     let pongs = wait_for_at_least(&state.ws_pongs, 1, Duration::from_secs(2)).await;
     assert!(
@@ -834,7 +931,7 @@ async fn conn_clean_default_is_single_connection() {
         .expect("ws trades mutex")
         .push(trade_json(10, "100.00"));
     let base_url = bound_stub(Arc::clone(&state)).await;
-    let (_client, mut rx) = connect_data_client(base_url, None).await;
+    let (_client, mut rx) = connect_data_client(base_url, &state, None).await;
 
     let trade = next_trade(&mut rx).await;
     assert_eq!(trade.ts_event, UnixNanos::from(10));
@@ -1014,6 +1111,7 @@ async fn divergence_go_dark_within_the_idle_timeout_is_ridden_out() {
     // the two budgets happened not to overlap.
     let (client, mut rx) = connect_data_client(
         base_url,
+        &state,
         Some(conn_havoc(ConnHavoc {
             idle_timeout_ms: 1_500,
             ..ConnHavoc::default()
@@ -1083,9 +1181,13 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
     // `dark_ms` says, so deleting the blackout would not have moved the verdict
     // and the test would have pinned "a permanently dead venue is re-dialled" -
     // the trivial case the blackout was supposed to exclude. With a trade
-    // seeded, the venue WOULD have spoken at ~100 ms and only the blackout
-    // keeps it quiet past the idle timeout, so the assertions below separate
-    // the two.
+    // seeded, the venue WOULD have spoken as soon as the push gate opened -
+    // which is the instant the subscription is recorded, well inside the idle
+    // window - and only the blackout keeps it quiet past the idle timeout, so
+    // the assertions below separate the two. The straddle used to be stated
+    // against the harness's fixed 100 ms pre-push sleep; with the gate the
+    // pre-push interval is no longer a wall duration at all, which makes the
+    // separation wider rather than narrower.
     let state = Arc::new(StubState::default());
     state.dark_ms.store(600, Ordering::Relaxed);
     state
@@ -1097,10 +1199,12 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
 
     let (_client, mut rx) = connect_data_client(
         base_url,
+        &state,
         Some(conn_havoc(ConnHavoc {
-            // Longer than the harness's 100 ms pre-push delay and shorter than
-            // that plus the blackout: without the blackout the seeded trade
-            // lands INSIDE the idle window and no socket is ever declared dead.
+            // Shorter than the blackout, and long enough that the push the gate
+            // releases lands inside it: without the blackout the seeded trade
+            // arrives INSIDE the idle window and no socket is ever declared
+            // dead.
             idle_timeout_ms: 250,
             // A flat, short backoff: the property is that a second dial happens
             // at all, and the default one-second ladder would only make the

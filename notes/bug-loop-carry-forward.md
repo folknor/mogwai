@@ -352,6 +352,109 @@ trusts yet.
   round 1. If the bite ever needs widening, widen the ARMED delay, which moves
   the signal, rather than the assertion, which moves the goalposts.
 
+## The adapter document, round 2: the harness push gate
+
+- `tests/common/PushGate` REPLACED THE 100 ms PRE-PUSH SLEEP IN `serve_ws`, and
+  ROUNDS 3 AND 4 BOTH STAND ON IT. A data client's subscription is satisfied
+  ENTIRELY LOCALLY - `subscribe_trades` sends no wire frame - so the stub cannot
+  observe it and no condition on the venue side exists; the TEST has to say when
+  the push may happen. `state.push_gate.open()` is that statement, and the leg
+  waits for it only when `ws_trades` is non-empty, so a leg with nothing to push
+  never waits at all. It LATCHES, because a reconnecting client re-enters
+  `serve_ws` and a one-shot permit would strand the second socket.
+  - A STALLED GATE IS REPORTED BY THE TEST, NOT BY THE STUB, and the first cut
+    had this backwards. `PushGate::wait` asserted on timeout - inside the
+    per-connection `tokio::spawn` in `run_stub` whose `JoinHandle` is dropped, so
+    the runtime CAPTURED the panic and the test never failed on it; worse, the
+    unwind dropped the socket, the client read a dead venue and re-dialled into a
+    fresh leg that waited and panicked again, so a forgotten `open()` was a
+    reconnect storm ending in a downstream timeout. Now `wait` returns a bool, a
+    timeout sets a thread-local (every test in these binaries is
+    `flavor = "current_thread"`, so the stub's tasks run on the test's own
+    thread), the leg pushes nothing and stays up, and `common::assert_push_gate
+    _opened()` panics naming the gate. It is called from `next_data_event` and
+    from every poll helper in `havoc.rs`, which is what makes the gate the FIRST
+    thing to speak. NOTHING DETECTS A WAIT SITE THAT FORGOT THE CALL: a `Drop`
+    backstop on `StubState` was built to be that detector and MEASURED NOT TO
+    WORK - tokio catches panics in task destructors too, and the bite-check
+    printed the panic under a test libtest still reported as passing. It was
+    deleted rather than kept as a verdict nobody delivers.
+  - `PUSH_GATE_DEADLINE` IS THEREFORE ONE-SIDED, and 1 s is generous rather than
+    squeezed. The legitimate wait is one `connect()` return plus a synchronous
+    subscribe - single-digit ms - and the upper side is only how long a FAILING
+    run spends before it records the stall. It does NOT have to beat any test's
+    own deadline; the earlier note here claiming it did was written against the
+    swallowed-panic design and was false in both directions - that design always
+    named the data event.
+  - THE COST OF THE OLD SLEEP WAS ~4 s OF THE BINARY'S 42 s, not the wall. It
+    fired on every `/ws` upgrade including the exec legs, so ~40 sockets paid it
+    while only ~13 tests seed frames. Measured before and after:
+    `brokkr test -p mogwai-adapter "" --debug` 42.46 s -> 37.47 s per sweep,
+    37.61 s once the round's review fixes landed.
+    THE OTHER 37 s IS UNACCOUNTED FOR by anything either round has read, and is
+    the thing to measure before another structural-win claim is made about this
+    crate. A per-test distribution first; nobody has one.
+  - IT MOVED THE GO-DARK TEST'S GROUND AND THE GROUND GOT FIRMER. Round 1 chose
+    `idle_timeout_ms = 250` to STRADDLE the 100 ms pre-push delay; with the gate
+    the pre-push interval is not a wall duration at all, so the seeded trade
+    would land essentially at the subscribe and the separation is wider, not
+    narrower. Round 1's bite-check was re-run after the change and still fails
+    correctly: deleting the `dark_ms` line fails
+    `divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket` on its
+    own named assertion ("the blackout, not a served-then-idle socket, must be
+    what cost the re-dial").
+- ONE RESIDUAL THE FIX COULD NOT CLOSE, recorded rather than papered over.
+  `a_host_subscribing_quotes_after_connect_receives_the_book_immediately` now
+  establishes the WIRE half of its ordering (the quote is on the wire before the
+  subscribe, polled on `ws_first_frame_at`), which the old `sleep(50ms)` never
+  did - that sleep was racing the harness's own 100 ms and was ALWAYS too short.
+  What no test can establish is the CLIENT half: whether the reader had filed the
+  quote in the pre-subscription cache before the subscribe. The client exposes no
+  observable for it, and a quote delivered LIVE to a subscription that beat it
+  satisfies the same assertion. Closing this needs a client-side observable, not
+  another wait.
+- `is_disconnected()` IS `!connected`, IT STARTS FALSE, AND `lifecycle` STORES
+  FALSE ON EVERY FAILED DIAL. So on any refuse-the-upgrade fixture it reads
+  "disconnected" from the first instant of the test and no assertion built on it
+  can fail. `conn_reconnect_respects_max_attempts` asserted it twice, the second
+  time inside a `while !client.is_disconnected()` poll whose condition was
+  therefore false on entry - loop body and named message unreachable in every
+  run, a verdict the change ADVERTISED and never observed. The only observable
+  separating "gave up" from "still trying" on that path is the dial counter.
+  Where the flag IS meaningful is after a SUCCESSFUL connect, as in
+  `dialing_blind...`, and even there it needs a window rather than a snapshot.
+- `conn_reconnect_respects_max_attempts`'s `(3..=4)` TOLERANCE IS GONE and the
+  300 ms negative window stays. ITS LOWER BOUND IS POLLED, not inherited from
+  the connect timeout: the exact-3 window opens only after
+  `wait_for_at_least(&ws_handshakes, 3, 2s)` returns, because the ladder in
+  front of the third dial - a `/clock` fetch with retry sleeps, an instrument
+  seed, three loopback dials, two 30 ms backoffs - can outlast the 1 s connect
+  bound on a loaded box, and the window would then fire on `saw 1` and read as
+  the defect. Bite-checked both sides: cap 2 fails "saw 2", cap 4 fails "saw 4".
+  The tolerance made the window vacuous against the
+  defect it was written for: a fourth dial passed whether it arrived at 10 ms or
+  310 ms, so the wait bought nothing. Three is EXACT because the ladder admits no
+  other count - `exhausted(0)` is false, the dial fails, `backoff_or_exhausted`
+  bumps to 1 and 2 and returns true at 3, and the stub counts each dial before it
+  drops the socket the client is waiting on. Measured 20/20 at exactly 3.
+  - AND ITS 2 s CONNECT BOUND WAS A BUDGET IT ALWAYS SPENT. Readiness never
+    arrives on this path, so the timeout WAS the runtime; it is 1 s now with the
+    count polled for afterwards, and the test went 2.44 s to 1.44 s. THE SHAPE
+    GENERALISES to any test that bounds a future which cannot succeed: that bound
+    is on the passing path, not the failing one.
+- A CONDITION POLL IS NOT AUTOMATICALLY AN IMPROVEMENT ON A SLEEP, and
+  `dialing_blind_establishes_a_full_session_with_a_stranger` shows both ways it
+  is not. `ws_requests` is pushed at the TOP of `serve_ws`, before the upgrade
+  bytes are written, and `connect` returns only once the client reports
+  connected - so polling for the upgrade record returns on its first look and
+  establishes nothing the previous line had not. And the deleted `sleep(600ms)`
+  WAS load-bearing: it made `!is_disconnected()` a claim about a session that
+  had survived, and asserting it at t~0 let a stranger that upgrades and
+  immediately drops the socket pass. The replacement is a 200 ms window over
+  `active_ws == 1` and the client's connected state, which is the condition the
+  sleep was standing in for. GENERAL FORM: when replacing a fixed wait, ask what
+  the DURATION was buying, not only what the wait was waiting for.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform

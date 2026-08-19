@@ -29,10 +29,14 @@
 
 mod common;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use common::{
-    StubState, bound_stub, instrument_id, next_data_event, next_non_instrument_data_event,
+    StubState, assert_push_gate_opened, bound_stub, instrument_id, next_data_event,
+    next_non_instrument_data_event,
 };
 use mogwai_adapter::{MogwaiDataClient, MogwaiDataClientConfig};
 use nautilus_common::{
@@ -113,6 +117,10 @@ async fn subscribe_and_request_drive_data_events() {
             None,
         ))
         .expect("subscribe trades");
+    // The subscription is recorded, so the stub's tape push is released. The
+    // harness used to sleep 100 ms before pushing and hope this line had run;
+    // see `common::PushGate`.
+    state.push_gate.open();
 
     // The stub pushes a trade unbidden; it must reach the sink with every field
     // round-tripped (a wrong scaling, flipped aggressor or dropped ts would
@@ -206,7 +214,40 @@ async fn a_host_subscribing_quotes_after_connect_receives_the_book_immediately()
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
     client.connect().await.expect("connect opens the socket");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // THE QUOTE MUST BE ON THE WIRE BEFORE THE SUBSCRIBE, which is the whole
+    // property: a host that subscribes late still gets the book, because the
+    // client caches the pre-subscription BBO. This used to be a `sleep(50ms)`
+    // that was racing the harness's own 100 ms pre-push delay and therefore
+    // ALWAYS too short - the test passed only because the cache does not care
+    // when the quote lands, so the ordering it claims to set up was never
+    // established. Now the push is released explicitly and waited for: the stub
+    // stamps `ws_first_frame_at` strictly before the send, so observing it set
+    // establishes the wire half of the ordering.
+    //
+    // WHAT IT STILL CANNOT ESTABLISH is the client half - whether the reader had
+    // filed the quote in the pre-subscription cache before the call below. The
+    // client exposes no observable for that, and a quote delivered LIVE to a
+    // subscription that beat it satisfies the same assertion. That gap predates
+    // this change and the sleep did not close it either; it is recorded rather
+    // than papered over.
+    state.push_gate.open();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while state
+        .ws_first_frame_at
+        .lock()
+        .expect("ws first frame instant mutex")
+        .is_none()
+    {
+        // The gate is checked before this wait reports its own timeout: a leg
+        // that gave up waiting for it stamps no first-frame instant either.
+        assert_push_gate_opened();
+        assert!(
+            Instant::now() < deadline,
+            "the stub never put the cached quote on the wire"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     client
         .subscribe_quotes(SubscribeQuotes::new(
@@ -262,6 +303,10 @@ async fn an_unrepresentable_quote_is_dropped_not_panicked() {
             None,
         ))
         .expect("subscribe quotes before connect");
+    // Subscribed BEFORE connect, so there is no ordering to arrange - the gate
+    // is opened here only because the leg has frames to push and would
+    // otherwise wait for a release that never comes.
+    state.push_gate.open();
     client
         .connect()
         .await
@@ -598,11 +643,11 @@ async fn a_subscribe_for_an_instrument_absent_from_the_seeded_set_is_accepted() 
 /// below never arrives.
 ///
 /// The readiness barrier around it is not separately observable here: the stub
-/// pushes its trade at upgrade, but the pump is a task on this same
-/// current-thread runtime and does not run until the test awaits, by which
-/// point connect has returned either way. What the barrier buys is the case the
-/// pump DOES get scheduled mid-connect; it is cheap, and the ordering it
-/// enforces is the one this test's delivery depends on.
+/// holds its trade until this test opens the push gate, which is after connect
+/// and after the subscribe, and the pump is a task on this same current-thread
+/// runtime that does not run until the test awaits anyway. What the barrier
+/// buys is the case the pump DOES get scheduled mid-connect; it is cheap, and
+/// the ordering it enforces is the one this test's delivery depends on.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn a_frame_for_an_unconfigured_symbol_survives_the_post_bind_reseed() {
@@ -645,6 +690,8 @@ async fn a_frame_for_an_unconfigured_symbol_survives_the_post_bind_reseed() {
             None,
         ))
         .expect("an unconfigured label subscribes");
+    // The subscription is recorded; release the tape (`common::PushGate`).
+    state.push_gate.open();
 
     match next_non_instrument_data_event(&mut sink_rx, Duration::from_secs(5)).await {
         DataEvent::Data(Data::Trade(trade)) => {

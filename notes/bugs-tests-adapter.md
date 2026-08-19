@@ -14,38 +14,15 @@ Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 The hunter reports running nothing, and verified its two load-bearing claims
 against source: `replace_data_event_sender` is a `thread_local` in
 `research/nautilus_trader/crates/common/src/live/runner.rs`, and the 100 ms
-pre-push sleep is unconditional in `serve_ws` before `ws_trades` is drained.
+pre-push sleep was unconditional in `serve_ws` before `ws_trades` was drained.
+That sleep is gone as of round 2; `common::PushGate` stands where it was.
 
 ## Fixed durations on the success path (the parked-completion-test family)
 
-- `common::serve_ws` line ~484: `sleep(100ms)` with the comment "give the client
-  a scheduling turn ... to record its local Nautilus subscription before the
-  first tape frame arrives." THIS IS THE FAMILY'S CANONICAL SHAPE, sitting in the
-  shared harness and therefore under every data test in three binaries. It is a
-  bet that connect plus subscribe finishes in 100 ms of wall time; under
-  `--test-threads=8` on a loaded box that bet can lose, and when it loses the
-  failure is "expected a trade data event, got Instrument" or a timeout - a wrong
-  answer, not a clean timeout. It also adds a flat 100 ms to every socket test.
-  The fix is a condition, not a longer sleep: have the stub wait for the client
-  to signal readiness, or (better) accept that the tests must tolerate frames
-  arriving before the subscription by having the client buffer, or drive the push
-  explicitly from the test after subscribe (e.g. a `tokio::sync::Notify` in
-  `StubState` the test fires).
-- `havoc::dialing_blind_establishes_a_full_session_with_a_stranger`:
-  `sleep(600ms)` then `assert!(!client.is_disconnected())`. Should poll for
-  `ws_requests` non-empty / connected, with 600 ms as the failure deadline.
-- `havoc::an_unanswerable_identity_probe_does_not_refuse`: same 600 ms sleep,
-  same fix.
-- `havoc::conn_reconnect_respects_max_attempts`: `sleep(300ms)` "to give any
-  erroneous extra dial time to land". Justified as a NEGATIVE window, but note
-  the `(3..=4)` tolerance already admits the timing is loose; a 4th dial arriving
-  at 310 ms passes.
-- `data_client_transport::a_host_subscribing_quotes_after_connect_receives_the_book_immediately`:
-  `sleep(50ms)` after connect before subscribing, to let the cached quote land.
-  That 50 ms is racing the stub's own 100 ms sleep - it is *always* too short,
-  and the test only passes because the client caches the quote whenever it
-  arrives. Harmless today, meaningless as written; drop it or make it a
-  condition.
+CLOSED IN ROUND 2. All five bullets fixed; see `notes/bug-loop-carry-forward.md`
+for the machinery (`common::PushGate`) later rounds must not break, and for the
+one residual the fix could not close (the client half of the cached-quote
+ordering is not observable from a test).
 
 ## Wall-clock upper bounds that will bite under parallelism
 
@@ -164,6 +141,40 @@ longest test. Distribution is lopsided:
 Nothing is near the 20 s watchdog. But if the 100 ms harness sleep is removed,
 roughly 40 tests get 100 ms faster each - the single largest cheap win available
 here.
+
+ROUND 2 MEASURED IT AND THE ESTIMATE HELD, but it is a tenth of the wall, not
+the wall: `brokkr test -p mogwai-adapter "" --debug` went 42.46 s to 37.47 s per
+sweep, and 37.61 s after the round's own review fixes. About 4 s of that is the
+harness sleep (it ran on every `/ws` upgrade, including the exec legs that seed
+no tape, which is why the count is ~40 sockets rather than the ~13 tests that
+seed frames) and about 1 s is `conn_reconnect_respects_max_attempts` no longer
+spending a 2 s connect bound on its passing path.
+
+THE REMAINING ~37 s IS UNEXPLAINED, is not the sum of these tests' asserted
+waits, and is now the largest single cost in the crate - larger than everything
+this document's timing sections propose to save put together. NOBODY HAS
+MEASURED WHERE IT GOES. That is the next timing pass's first job, before any
+further structural-win claim is made about this crate: get a per-test
+distribution first, then decide whether there is anything worth fixing.
+Round 2 deliberately did not chase it.
+
+## Assertions that cannot fail
+
+FOUND IN ROUND 2 WHILE FIXING THE SAME SHAPE ELSEWHERE, not by the original
+hunt, and left for a later round rather than swept in under a review fix.
+
+- `havoc::a_venue_serving_another_run_is_refused_terminally` asserts
+  `client.is_disconnected()` after a connect that was refused. That flag is
+  `!connected`, it starts FALSE, and `lifecycle` stores `false` on every failed
+  dial - so it is true from the first instant of the test and the assertion
+  passes whatever the client does. The same expression was removed twice from
+  `conn_reconnect_respects_max_attempts` in round 2 for exactly this reason.
+  The test is NOT vacuous overall: its `handshakes <= 2` bound is real, and it
+  is the assertion carrying the property. Either delete the dead line or
+  replace it with something the client actually writes on the refusal path.
+- SWEEP FOR THE WHOLE CLASS while you are there: every `is_disconnected()` in
+  these binaries is meaningful only after a connect that SUCCEEDED, and even
+  then only as a window rather than a snapshot (see `dialing_blind...`).
 
 ## Smaller notes
 

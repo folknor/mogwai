@@ -200,6 +200,132 @@ pub struct StubState {
     pub close_after_trades: AtomicBool,
     /// Internal: set once the close-after-trades leg has served its one batch.
     served_once: AtomicBool,
+    /// Gate on the WS leg's FIRST application push. See [`PushGate`].
+    pub push_gate: PushGate,
+}
+
+/// The condition the WS leg's tape push waits on, replacing a fixed sleep.
+///
+/// THE PROBLEM IT SOLVES. A data client's subscription is satisfied ENTIRELY
+/// LOCALLY - `subscribe_trades` sends no wire frame - so a tape frame that
+/// reaches the client before the local subscription is recorded is legitimately
+/// discarded, and the test then fails with "expected a trade data event, got
+/// Instrument" or a timeout. A WRONG ANSWER, not a clean one. The harness used
+/// to buy the client a head start with an unconditional `sleep(100ms)` before
+/// the push: a bet that connect-plus-subscribe fits in 100 ms of wall time,
+/// which a loaded box loses, and a flat 100 ms added to every socket test that
+/// seeds a frame.
+///
+/// The stub CANNOT observe the subscription - nothing about it crosses the
+/// wire - so the test has to say when it is ready. That is what this is: the
+/// test calls [`PushGate::open`] after subscribing (or, where the property is
+/// about a PRE-subscription frame, before), and the leg pushes then and not
+/// before.
+///
+/// IT LATCHES. A reconnecting client re-enters `serve_ws`, and a one-shot
+/// permit would strand the second socket forever; once open, every later socket
+/// pushes immediately.
+///
+/// ONLY THE PUSH WAITS. A leg with an empty `ws_trades` has nothing to gate, so
+/// it never waits at all - which is where most of the removed wall time comes
+/// from, since the exec and reconciliation binaries seed no tape.
+pub struct PushGate {
+    open: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for PushGate {
+    fn default() -> Self {
+        Self {
+            open: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+/// How long the WS leg waits for a test to open the gate before giving up.
+///
+/// ONE BOUND, NOT TWO. Below, the legitimate wait is one `connect()` return
+/// plus a synchronous `subscribe_*` - single-digit milliseconds - so a second
+/// is two orders of magnitude of headroom and cannot be lost to host load.
+/// Above, this is only how long a FAILING run spends before it records the
+/// stall; it does not have to beat any downstream deadline, because the stall
+/// is reported by [`assert_push_gate_opened`] wherever a test waits, and by
+/// `StubState`'s `Drop` otherwise. An earlier draft made this constant race
+/// `next_trade`'s two seconds, on the theory that the gate had to complain
+/// first to be the named failure; that theory rested on a panic inside a
+/// detached `tokio::spawn`, which the runtime swallows.
+const PUSH_GATE_DEADLINE: Duration = Duration::from_secs(1);
+
+thread_local! {
+    /// Set when a WS leg gave up waiting for [`PushGate::open`]. THREAD-LOCAL
+    /// RATHER THAN GLOBAL BECAUSE EVERY TEST IN THESE BINARIES IS
+    /// `flavor = "current_thread"`: the stub's tasks are spawned onto the
+    /// runtime the test itself blocks on, so they run on the test's own thread
+    /// and a flag set there is readable by the test and by nothing else. The
+    /// authoritative failure is `StubState`'s `Drop`, which reads the same flag
+    /// on the same thread during runtime shutdown; the explicit checks exist
+    /// only so the gate is named BEFORE a downstream timeout gets to speak.
+    static PUSH_GATE_STALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Panics naming the gate if any WS leg on this thread gave up waiting for it.
+///
+/// CALL THIS WHEREVER A TEST WAITS FOR SOMETHING THE GATED PUSH PRODUCES,
+/// before that wait reports its own timeout. Without it the symptom is a
+/// missing data event, which is exactly the wrong answer the gate was built to
+/// replace.
+///
+/// NOTHING DETECTS A WAIT SITE THAT FORGOT THIS, and a `Drop` backstop on
+/// `StubState` was built to be that detector and then MEASURED NOT TO WORK: the
+/// state is released when the runtime drops the handler task holding it, tokio
+/// catches panics in task destructors, and the bite-check printed the panic
+/// under a test libtest still reported as passing. That is the same
+/// swallowed-panic defect this whole change is closing, so it was removed
+/// rather than kept as a verdict nobody delivers. The call sites are the
+/// mechanism; a new one that waits on a tape frame owes itself this line.
+pub fn assert_push_gate_opened() {
+    assert!(
+        !PUSH_GATE_STALLED.with(std::cell::Cell::get),
+        "the stub had tape frames to push and no test opened `push_gate` \
+         within {PUSH_GATE_DEADLINE:?}, so nothing was ever sent; a test that \
+         seeds `ws_trades` must call `state.push_gate.open()` once its \
+         subscription is recorded"
+    );
+}
+
+impl PushGate {
+    /// Releases the tape push, now and for every later socket.
+    pub fn open(&self) {
+        self.open.send_replace(true);
+    }
+
+    /// Waits for [`PushGate::open`], returning whether it opened.
+    ///
+    /// A TIMEOUT RECORDS AND RETURNS rather than panicking. It used to assert
+    /// here, which cannot fail the test: this runs inside the per-connection
+    /// `tokio::spawn` in `run_stub` whose `JoinHandle` is dropped, so the
+    /// runtime captures the panic, prints it and moves on - and the unwind
+    /// dropped the socket, which the client read as a dead venue and re-dialled
+    /// into a fresh leg that waited and panicked again. A forgotten `open` was
+    /// therefore a reconnect storm ending in a downstream timeout, which is the
+    /// wrong answer this whole mechanism exists to remove.
+    pub async fn wait(&self) -> bool {
+        let mut rx = self.open.subscribe();
+        let wait = async {
+            // `borrow_and_update` marks the value seen BEFORE awaiting the next
+            // change, so an `open` racing this loop is observed rather than
+            // slept through.
+            while !*rx.borrow_and_update() {
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        };
+        if tokio::time::timeout(PUSH_GATE_DEADLINE, wait).await.is_ok() {
+            return true;
+        }
+        PUSH_GATE_STALLED.with(|stalled| stalled.set(true));
+        false
+    }
 }
 
 /// Binds an ephemeral loopback listener, spawns the stub against it, and returns
@@ -503,15 +629,22 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     .await;
 
     use futures_util::{SinkExt, StreamExt};
-    // The venue streams the one run-wide tape without a subscribe frame. Give
-    // the client a scheduling turn after the handshake to record its local
-    // Nautilus subscription before the first tape frame arrives.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The venue streams the one run-wide tape without a subscribe frame, so the
+    // test - not a fixed sleep - says when the push may happen. See `PushGate`.
+    // A leg with nothing to push never waits.
+    let mut frames = state.ws_trades.lock().expect("ws trades mutex").clone();
+    if !frames.is_empty() && !state.push_gate.wait().await {
+        // The gate never opened. Push NOTHING - pushing anyway would restore
+        // the raciness the gate replaced - but keep the socket alive and fall
+        // through to the read loop, so the client is not driven into a
+        // reconnect storm on top of the omission. The stall is recorded; see
+        // `assert_push_gate_opened`.
+        frames.clear();
+    }
     let dark = state.dark_ms.load(Ordering::Relaxed);
     if dark > 0 {
         tokio::time::sleep(Duration::from_millis(dark as u64)).await;
     }
-    let frames = state.ws_trades.lock().expect("ws trades mutex").clone();
     for trade in frames {
         // Stamped BEFORE the send, and only for the first frame of the first
         // socket: this is the instant a latency measurement is honest from.
@@ -1015,10 +1148,14 @@ pub async fn next_data_event(
     rx: &mut UnboundedReceiver<DataEvent>,
     timeout: Duration,
 ) -> DataEvent {
-    tokio::time::timeout(timeout, rx.recv())
-        .await
-        .expect("data event arrives")
-        .expect("sink open")
+    let Ok(event) = tokio::time::timeout(timeout, rx.recv()).await else {
+        // THE GATE SPEAKS FIRST. A leg that gave up waiting for `push_gate`
+        // sent nothing, and the missing data event is that omission's symptom,
+        // not a finding about the client.
+        assert_push_gate_opened();
+        panic!("data event arrives within {timeout:?}");
+    };
+    event.expect("sink open")
 }
 
 /// Like [`next_data_event`], but discards leading `DataEvent::Instrument`
