@@ -4752,9 +4752,12 @@ generation, so no `TAPE_PROTOCOL_VERSION` bump is owed.
   "drains live connections for up to the shutdown grace" - which is the seventh
   instance of that reverse finding.
 - THE FIX IS `Run::session_guard` / `Run::sessions_drained`, a watch whose
-  RECEIVERS ARE THE LIVE SESSIONS. `handle_socket` takes one first and drops it
-  last, so the guard's lifetime is the session's rather than the hyper
-  connection's; a PLANNED completion waits for the set to empty inside the
+  RECEIVERS ARE THE LIVE SESSIONS. It is taken in `ws_upgrade` before the 101
+  and dropped with the `SocketSession` after the writer flush, so the guard's
+  lifetime strictly contains the session's and the hyper connection's - the fix
+  pass took it at the top of `handle_socket`, which was still one window short
+  and is what the fix-and-commit bullet below moved; a PLANNED completion waits
+  for the set to empty inside the
   existing `SHUTDOWN_GRACE`. A SIGNAL DELIBERATELY DOES NOT WAIT - nothing tells
   a session to end on that path, so waiting would idle out the grace on any
   venue with a socket attached and turn a clean stop into a bailed one. That
@@ -4886,6 +4889,66 @@ evidence.
   a field added to either that does render one makes a preview and a real ledger
   differ and nothing detects it.
 - Flake hunt re-run after the guard move: 0 failures in 80 rounds, 16 threads
-  under 64 busy processes, matching the fix pass's post-fix baseline.
+  under 64 busy processes. NOT COMPARABLE TO THE FIX PASS'S BASELINE, which the
+  close pass caught: lead 9's numbers - 5 in 78 before, 0 in 80 after - were
+  taken at 32 THREADS, and at 32 the close pass found the family still losing
+  for a different reason (see its section).
 - Gate green: 1297 plus 466, 1820 pairs, 1763 run, 57 ignored, 0 orphaned, plus
   both socket suites by name.
+
+## The server document, close pass: what the three commits left
+
+Two defects, both in the unreviewed half of a round's own fix - the arc's
+signature, ninth document running. Lead 10 was not attacked; what was attacked
+instead is the family it lives in, and that produced the second defect.
+
+- THE ACCOUNT AN ADMITTED SOCKET IS RECLAIMING WAS STILL TTL-COLLECTABLE.
+  Round 1 gave the venue `Passenger::admitted` and made `freeze_if_unattended` a
+  TWO-PART predicate - no lane AND no admission - but `collect_expired_accounts`
+  was left asking the freeze stamp alone. A returning socket is counted on before
+  the 101 and does not clear the freeze until its handler reaches `resume`, a
+  101, a task spawn and an instrument registration later, so the collector could
+  discard the ledger inside that window and the client that came back for its
+  book was silently minted a fresh one. THE SHAPE TO CARRY: when a fix splits a
+  predicate into two halves, every OTHER reader of the old half is a call site of
+  the fix. Closed by asking both halves in both places;
+  `an_admitted_socket_spares_the_account_it_is_reclaiming` bites.
+- THE DECLARED-DURATION FAMILY WAS STILL LOSING, and the round-3 loop fix did not
+  close it - it closed the run-clock half and left the observable the tests
+  actually read on a different clock. 2 failures in 40 rounds of the `completion`
+  binary at 32 threads under 64 busy processes, both short: 1_998_342_796 ns of a
+  declared 2 s, and 29_981_996_200 ns of a declared 30 s. MECHANISM: the deadline
+  is judged on the venue clock, while `ws.rs` deliberately re-derives every
+  `RunComplete` on the RECEIVING SOCKET'S BOAT clock, which is anchored at that
+  boat's placement - so the announcement trails the run clock by the placement gap
+  times `speed`, permanently. `elapsed_ns >= declared` was a cross-clock identity
+  nothing establishes, and the round-3 prose claiming the loop "makes serving the
+  whole declared duration a property of this code" was true only of the clock the
+  test does not read.
+  Closed three ways: the run-clock property is now `serve.rs`'s `deadline_wait`
+  with a deterministic host-free test over the truncating conversion,
+  bite-checked against the old wake-once shape; the socket-side assertions bound
+  the skew through `completion.rs`'s `boat_skew_floor`, a hundredth of the
+  declared duration against a defect that is wrong by the whole warmup; and
+  `reference/clock.md` states the skew as consumer-visible. The residual - no
+  consumer can tell a late-placed boat from a short run, because the frame carries
+  no boat epoch - is in `notes/todo.md`.
+- THE GENERAL LESSON, and the one worth carrying past this arc: A FIX THAT MAKES A
+  PROPERTY TRUE ON ONE CLOCK DOES NOT MAKE IT TRUE ON THE OBSERVABLE. Ask which
+  clock the assertion reads before calling a timing fix done.
+- Two stale durable claims corrected: `http.rs`'s `arm_target` still said a
+  control request naming an unconnected account "resolves to the EMPTY set",
+  which stopped being true when round 2's record landed, and this document's own
+  round-3 section said the session guard is taken in `handle_socket`, which the
+  fix-and-commit pass moved to `ws_upgrade` four bullets later.
+- LEAD 10 NOT ATTACKED DIRECTLY and left open with round 3's evidence, plus 30
+  more clean rounds of the `lifecycle` binary at 32 THREADS under 64 busy
+  processes - a thread count round 3 did not try. The judgement: the ambiguity
+  repair means the next occurrence arrives as one verdict, and a second
+  unreproduced intermittent was worth less than hunting the family at the thread
+  count the lead-9 record was actually taken at, which is what found the
+  declared-duration defect above.
+- Numbers: gate green at 1299 plus 466, 1822 pairs, 1765 run, 57 ignored, 0
+  orphaned, plus both socket suites by name. Completion hunt after the fix: 0
+  failures in 60 rounds at 32 threads under 64 busy processes, against 2 in 40
+  before.

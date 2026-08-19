@@ -65,6 +65,24 @@ struct WatchedRun {
 /// attempt is started only if one of the same size still fits.
 const ATTACH_RETRY_BUDGET: Duration = Duration::from_secs(8);
 
+/// The least elapsed sim time a SOCKET may report for a run that declared
+/// `declared_ns`, which is not `declared_ns`.
+///
+/// A boat's clock is anchored at ITS OWN PLACEMENT while the deadline is judged
+/// on the run clock, and `ws.rs` re-derives every `RunComplete` on the receiving
+/// socket's boat - so an announcement trails the declared duration by the
+/// placement gap times `speed`, always, and by more when the host is crowded.
+/// One percent is the allowance for that skew and nothing else: it is three
+/// orders of magnitude tighter than the defect these tests exist for, a deadline
+/// measured from boot rather than from `run_start_ns`, which is wrong by the
+/// whole warmup. Measured shortfalls under a 32-thread hunt were 1.7 ms of 2 s
+/// and 18 ms of 30 s, both about a tenth of this. `reference/clock.md` carries
+/// the durable statement; do not widen this to keep a red run green, because
+/// past this the skew is no longer a placement gap.
+fn boat_skew_floor(declared_ns: u64) -> u64 {
+    declared_ns - declared_ns / 100
+}
+
 /// Launches a `--duration`-bounded venue, opens the named sockets and drains
 /// every one of them to completion - relaunching until each socket was a LIVE
 /// SESSION on the run it is reporting about.
@@ -326,6 +344,20 @@ async fn drain_to_completion(socket: &mut WsSocket, timeout: Duration) -> Watche
 
 /// The declared duration is a contract: the venue serves exactly that much sim
 /// time, says so, and exits 0 on its own without anybody signalling it.
+///
+/// THE CONTRACT IS ON THE RUN CLOCK AND THIS OBSERVABLE IS ON A BOAT'S, which
+/// is why the bound below is `boat_skew_floor` rather than the declared
+/// duration itself. The deadline task stops once the RUN clock is past the
+/// deadline (`serve.rs`'s `deadline_wait`, which has its own deterministic
+/// test), while `ws.rs` re-derives every announcement on the receiving socket's
+/// BOAT clock - anchored at that boat's placement, so it trails the run clock
+/// by the placement gap times `speed`, permanently. Asserting equality here was
+/// asserting a cross-clock identity nothing establishes: measured under a
+/// crowded 32-thread hunt it lost 2 rounds in 40, short by 1.7 ms of a declared
+/// 2 s and by 18 ms of a declared 30 s. `reference/clock.md` states the skew;
+/// what this test still catches is the defect it was written for, a deadline
+/// measured from the wrong epoch, which is wrong by the whole warmup rather
+/// than by a placement gap.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline() {
@@ -347,8 +379,9 @@ async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadlin
         )
     });
     assert!(
-        elapsed_ns >= 2_000_000_000,
-        "the run served {elapsed_ns} ns of a declared 2s"
+        elapsed_ns >= boat_skew_floor(2_000_000_000),
+        "the run served {elapsed_ns} ns of a declared 2s, which is short by more than a boat's \
+         placement skew"
     );
     assert!(watched.closed, "the announcement is followed by a close");
 
@@ -591,15 +624,19 @@ async fn sigterm_closes_without_announcing_run_complete() {
 /// which at speed 100 is a large multiple of the declared duration in simulated
 /// terms.
 ///
-/// SO THIS TEST HAS LESS MARGIN THAN IT USED TO, and the honest statement is
-/// that it has none: the old span-based sleep served the declared duration PLUS
-/// the boot interval, and the fixed one serves the declared duration exactly.
-/// `elapsed_ns >= 30_000_000_000` is therefore a near-equality rather than a
-/// bound with room in it. What makes it hold is the deadline task's own loop -
-/// it sleeps until `sim_ns(now) >= deadline_ns` rather than once to a
-/// truncating conversion of it - and NOT the scheduler's sleep overshoot, which
-/// is what would have to cover the gap otherwise. If this ever goes red by a
-/// few hundred nanoseconds, that loop is what regressed.
+/// SO THIS TEST HAS LESS MARGIN THAN IT USED TO, and it had none: the old
+/// span-based sleep served the declared duration PLUS the boot interval, and
+/// the fixed one serves the declared duration exactly - on the RUN clock. The
+/// announcement this reads is stamped on the receiving socket's BOAT clock,
+/// which is anchored at that boat's placement and therefore trails the run
+/// clock by the placement gap times `speed` - 180 us of gap is 18 ms of sim at
+/// speed 100 - so `elapsed_ns >= 30_000_000_000` was a cross-clock identity
+/// nothing establishes, and a 32-thread flake hunt duly took it down. It is now
+/// bounded by `boat_skew_floor`, which still fails by three orders of magnitude
+/// if the deadline epoch regresses to boot. The run-clock half - never stopping
+/// before `sim_ns(now) >= deadline_ns`, which the truncating conversion of
+/// `wall_ns` would otherwise do - is pinned deterministically and without a host
+/// by `mogwai-server`'s `the_deadline_wait_never_reports_done_before_the_sim_clock_arrives`.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
@@ -632,13 +669,14 @@ async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
     });
 
     assert!(
-        elapsed_ns >= 30_000_000_000,
+        elapsed_ns >= boat_skew_floor(30_000_000_000),
         "the run served only {elapsed_ns} ns of a declared 30s; the deadline epoch \
          is boot rather than the post-warmup start"
     );
     assert!(
-        sim_now_ns >= record.run_start_ns + 30_000_000_000,
-        "sim-now at completion is at least the declared duration past run_start_ns"
+        sim_now_ns >= record.run_start_ns + boat_skew_floor(30_000_000_000),
+        "sim-now at completion is at least the declared duration past run_start_ns, \
+         less the boat's placement skew"
     );
     assert_eq!(
         run.venue.wait_for_exit(Duration::from_secs(20)).code,

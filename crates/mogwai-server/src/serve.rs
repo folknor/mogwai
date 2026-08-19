@@ -411,17 +411,21 @@ async fn serve_async(
             // would then announce a completion carrying less elapsed sim time
             // than it declared. Nothing but the scheduler's own overshoot
             // covered that. The loop makes serving the whole declared duration
-            // a property of this code instead.
+            // a property of this code instead - ON THE RUN CLOCK, which is the
+            // only clock it can be a property of. A socket re-derives its
+            // `RunComplete` on ITS BOAT's clock, and a boat is anchored at its
+            // own placement, so the announcement one socket reads can still
+            // carry slightly less elapsed sim time than the run declared. See
+            // `reference/clock.md`; nothing here can close that, and the wait
+            // that would - holding the run open until every boat's affine clock
+            // has passed the deadline too - would let a socket connecting near
+            // the deadline extend the run by another whole duration.
+            //
+            // The step is `deadline_wait`, so the never-break-early property is
+            // testable without a host: see its tests.
             tokio::spawn(async move {
-                loop {
-                    let wall_now = now_ns();
-                    if sim.sim_ns(wall_now) >= deadline_ns {
-                        break;
-                    }
-                    let remaining = sim.wall_ns(deadline_ns).saturating_sub(wall_now);
-                    // A truncated remainder can be zero while the sim clock is
-                    // still short; yield rather than spin on a zero sleep.
-                    tokio::time::sleep(Duration::from_nanos(remaining.max(1))).await;
+                while let Some(wait) = deadline_wait(sim, deadline_ns, now_ns()) {
+                    tokio::time::sleep(wait).await;
                 }
                 let sim_now = sim.sim_ns(now_ns());
                 completing_run.complete(sim_now, sim_now.saturating_sub(completing_run.started_ns));
@@ -455,6 +459,31 @@ async fn serve_async(
         anyhow::bail!("tape source fault: {fault:?}");
     }
     Ok(())
+}
+
+/// How long the deadline task sleeps before asking again, or `None` once the
+/// RUN CLOCK is genuinely past `deadline_ns`.
+///
+/// THE ONE RULE IS THAT `None` MEANS PAST, NEVER "CLOSE ENOUGH". `wall_ns`
+/// truncates through the scaled conversion, so the wall instant it computes for
+/// a deadline can map back to a sim instant a few hundred nanoseconds SHORT of
+/// it at a high speed - and a task that woke there and stopped would announce a
+/// completion carrying less elapsed sim time than the run declared, with only
+/// the scheduler's own sleep overshoot standing between it and a false claim.
+/// The remainder is already WALL nanoseconds, so it is returned raw rather than
+/// through `wall_duration`, which would scale it a second time; a truncated
+/// remainder can be zero while the sim clock is still short, so the wait floors
+/// at a nanosecond and yields rather than spinning.
+fn deadline_wait(
+    sim: mogwai_protocol::SimClock,
+    deadline_ns: u64,
+    wall_now: u64,
+) -> Option<Duration> {
+    if sim.sim_ns(wall_now) >= deadline_ns {
+        return None;
+    }
+    let remaining = sim.wall_ns(deadline_ns).saturating_sub(wall_now);
+    Some(Duration::from_nanos(remaining.max(1)))
 }
 
 fn resolve_run_duration(override_ns: Option<Option<u64>>, configured_ns: u64) -> Option<u64> {
@@ -552,6 +581,49 @@ mod tests {
         let addr: SocketAddr = BIND_ADDR.parse().expect("BIND_ADDR is a literal addr");
         assert!(addr.ip().is_loopback(), "{addr}");
         assert_eq!(addr.port(), 0, "{addr}");
+    }
+
+    /// THE DEADLINE TASK MAY NOT STOP EARLY, and the case that would is the
+    /// wall instant its own conversion computes.
+    ///
+    /// Waking at `wall_ns(deadline)` and stopping there is the shape this
+    /// replaced: at speed 100 the scaled conversion truncates, so that instant
+    /// maps back SHORT of the deadline for most deadlines and the run would
+    /// announce less elapsed sim time than it declared. The scan asserts the
+    /// biconditional - a wait is owed exactly while the sim clock is short -
+    /// and then asserts that the truncating case was actually reached, because
+    /// a scan over deadlines that all convert exactly would prove nothing.
+    #[test]
+    fn the_deadline_wait_never_reports_done_before_the_sim_clock_arrives() {
+        let sim = mogwai_protocol::SimClock {
+            sim_epoch_ns: 300_000_000_000,
+            wall_anchor_ns: 1_000_000_000,
+            speed: 100.0,
+        };
+        let mut truncated = 0;
+        for step in 0..1_000u64 {
+            let deadline_ns = sim.sim_epoch_ns + 30_000_000_000 + step;
+            let converted = sim.wall_ns(deadline_ns);
+            let short = sim.sim_ns(converted) < deadline_ns;
+            assert_eq!(
+                deadline_wait(sim, deadline_ns, converted).is_some(),
+                short,
+                "a wait is owed exactly while the sim clock is short of {deadline_ns}"
+            );
+            if short {
+                truncated += 1;
+            }
+            // And once the sim clock IS past it, the task stops rather than
+            // sleeping the run out one nanosecond at a time.
+            assert!(
+                deadline_wait(sim, deadline_ns, converted + 1_000_000).is_none(),
+                "the wait ends once the deadline is genuinely behind us"
+            );
+        }
+        assert!(
+            truncated > 0,
+            "the conversion never truncated, so this scan proved nothing"
+        );
     }
 
     #[test]

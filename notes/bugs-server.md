@@ -8,10 +8,22 @@ foreground lifecycle and readiness line, config loading, and its tests.
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 Confidence labels are the hunter's own.
 
-EXHAUSTED AS OF ROUND 3, 2026-08-19. Every finding is fixed or recorded as
-refused, lead 9 is closed, and lead 10 is the one open item - not reproduced,
-with what was measured and what it rules out written into that section. A close
-pass follows.
+EXHAUSTED AS OF ROUND 3, 2026-08-19, AND CLOSED THE SAME DAY. Every finding is
+fixed or recorded as refused, lead 9 is closed, and lead 10 is the ONE OPEN ITEM
+- not reproduced, with what was measured and what it rules out written into that
+section. This document is kept for that item; everything else in it is history.
+
+THE CLOSE PASS FOUND TWO MORE DEFECTS, both in the unreviewed half of a round's
+own fix, and both are fixed. `collect_expired_accounts` still asked the freeze
+stamp alone after round 1 split "is anybody reading this" into a lane AND an
+admission, so a socket reclaiming a long-frozen ledger could have it collected
+out from under it between the admission and the attach. And the declared-duration
+family - the one round 3's deadline loop was meant to settle - still failed 2
+rounds in 40 at 32 threads under load, because the loop made the property true on
+the RUN clock while the announcement the tests read is re-derived on the
+receiving socket's BOAT clock and trails it by that boat's placement gap. See the
+carry-forward's close-pass section; the consumer-visible half is in
+`reference/clock.md` and its residual in `notes/todo.md`.
 
 THE COLD REVIEW OVER ROUND 3 FOUND THE ROUND'S OWN FIX REINTRODUCING ITS OWN
 FINDING, closed in the fix-and-commit pass: scoping the silent cancel's SEARCH
@@ -322,6 +334,15 @@ The helper now reports HOW LONG it actually waited and WHICH bound produced
 that, so the next occurrence arrives as one verdict. Re-read the lead against
 that output before theorising about the shutdown path; the boring reading is
 still the one to rule out first, and it is now readable rather than inferable.
+
+STILL NOT REPRODUCED BY THE CLOSE PASS EITHER, 2026-08-19, at a thread count
+round 3 did not try: 30 rounds of the built `lifecycle` binary at 32 THREADS
+under 64 busy processes, zero failures. That is the same load and the same
+harness that fired lead 9 five times in 78 and, in the same session, took the
+declared-duration family down twice in 40 - so the hunt is demonstrably capable
+of firing this class on this host, and this test did not fire. Fifty clean rounds
+across two thread counts is not a closure, but it does place lead 10 well below
+the rate of anything else this arc has caught.
 
 STILL UNRULED-OUT if the clamp turns out not to be it: a shutdown path that
 waits on something the signal does not interrupt. The two concrete candidates a

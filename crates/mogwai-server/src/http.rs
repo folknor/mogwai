@@ -52,11 +52,15 @@ pub(crate) struct DivergenceRequest {
 /// The passengers one control-plane request applies to: the named account, or
 /// every account when it names none.
 ///
-/// An account nobody has trades yet resolves to the EMPTY set rather than
-/// creating one. Arming a blackout is not a reason to bring an account into
-/// existence, and a typo that silently created `WYRD-01` would be armed on a
-/// ledger nothing ever connects to.
 /// The account a control request targets, as `Run::arm` takes it.
+///
+/// NAMING AN ACCOUNT NEVER CREATES ONE. Arming a blackout is not a reason to
+/// bring a ledger into existence - a typo would otherwise mint `WYRD-01` and
+/// arm a ledger nothing ever connects to, and would answer the real client's own
+/// `POST /account` with a `409`. The arm is RECORDED against the name instead,
+/// and the account's first mint consumes it; see `VenueArms`. A stale line here
+/// said the request "resolves to the EMPTY set", which was the finding-5
+/// behaviour and stopped being true when the record landed.
 ///
 /// `None` is not "all the ledgers that exist", it is THE VENUE: the arm is
 /// recorded on the run, so a late-connecting account gets it too.

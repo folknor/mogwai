@@ -71,7 +71,18 @@ where the question becomes whether that run was valid.
 `warmup_ns` is the uniform servable simulated interval before `run_start_ns`.
 The boot river is materialized before readiness and every other river on first
 read. `run_start_ns` is every boat's placement origin, so per-boat clocks vary
-in wall anchor and speed but never in sim epoch.
+in wall anchor and speed but never in sim epoch. THE CONSEQUENCE FOR A DECLARED
+DURATION IS WORTH STATING, because it reads as a venue defect otherwise: the
+run deadline is judged on the venue clock, while a socket's `RunComplete` is
+re-derived on ITS boat's clock, which is anchored at that boat's placement.
+A boat placed a moment after the venue clock was anchored therefore trails it
+by that gap times `speed` - at speed 100, 180 us of placement gap is 18 ms of
+simulated time - so the announcement one socket reads can carry slightly LESS
+elapsed sim time than the run declared, permanently and by design. The venue
+serves the whole declared duration on its own clock; no socket's clock is that
+clock. Holding the run open until every boat's affine clock had also passed the
+deadline would let a socket connecting near the deadline extend the run by
+another whole duration, which is why nothing does.
 `data_origin_ns` is its earliest servable instant, always `TAPE_ORIGIN_NS`.
 `/clock` reports both the clock and the current simulated time. It takes an
 optional `?symbol=`, and answers for that river's boat: a boat carries its own

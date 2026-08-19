@@ -63,8 +63,13 @@ build:
    LANDED 2026-08-15/16. A second clause - MANY PASSENGERS ON ONE RIVER, meaning
    N traders each with its own account, ledger and view of one deterministic
    tape - belongs to the SHARED-EXCHANGE mode only, is not needed by the default
-   per-run mode, and has not landed: the venue still holds one ledger for the
-   whole process and fans every fill out to every connection.
+   per-run mode. IT HAS SINCE LARGELY LANDED, and this entry said otherwise until
+   the `notes/bugs-server.md` close pass corrected it 2026-08-19: the engine and
+   the risk ledger moved onto `Passenger`, so each account has its own book, and
+   delivery is attributed - an order event reaches its owner's lanes and an
+   `AccountState` the account it names, rather than every connection. What is
+   still open under this clause is the per-account TAPE WINDOW rather than the
+   ledger.
    See "An exchange serves many accounts and many tape windows" below.
 2. REALISTIC TAPES ACROSS SESSION CLASSES. The wyrd doctrine holds session
    structure to be the one non-fractal thing bars do not normalize away, so
@@ -247,6 +252,28 @@ group by any other route has no API for it, and none is owed until one is wanted
   distinct names before any of them connects loses the first one's arm silently.
   The `202` says nothing about it. Whether the control plane should report a shed
   pending record the way it reports a shed engine divergence is open.
+
+- A SOCKET'S `RunComplete` REPORTS SLIGHTLY LESS THAN THE DECLARED DURATION, and
+  nothing on the wire lets a consumer tell that from a short run. Filed
+  2026-08-19 by the `notes/bugs-server.md` close pass, which reproduced it: 2
+  failures in 40 rounds of the `completion` binary at 32 threads under 64 busy
+  processes, short by 1.7 ms of a declared 2 s and by 18 ms of a declared 30 s.
+  The deadline is judged on the VENUE clock; `ws.rs` re-derives every
+  announcement on the receiving socket's BOAT clock, which is anchored at that
+  boat's placement, so the announcement trails by the placement gap times
+  `speed`. Both halves are deliberate - a boat-stamped frame keeps per-socket
+  monotonicity, and waiting for every boat's clock would let a socket connecting
+  near the deadline extend the run by another whole duration - so this is a
+  CONSUMER-VISIBLE property rather than a bug, now stated in
+  `reference/clock.md`. What is open is whether a consumer should be able to
+  tell: the frame carries no boat epoch, so a strategy cannot distinguish "the
+  run served its whole duration and my boat was placed late" from "the run was
+  cut short". Shipping the boat's epoch, or the venue's own elapsed alongside
+  the socket's, would close it and is a wire change nobody has asked for.
+  The tests that tripped over it now bound the skew through
+  `completion.rs`'s `boat_skew_floor`; the run-clock half they used to imply is
+  pinned by `mogwai-server`'s
+  `the_deadline_wait_never_reports_done_before_the_sim_clock_arrives`.
 
 - `ClearDivergences` STILL DOES NOT DRAIN THE ENGINE'S ARMED QUEUE, so an
   operator has no wire control that disarms a `PartialFillNext`. That is the

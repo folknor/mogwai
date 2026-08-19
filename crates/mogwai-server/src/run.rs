@@ -1304,6 +1304,11 @@ impl Run {
     /// thing that does - a frozen account is never liquidated, marked or judged
     /// on its way out, it is simply gone.
     ///
+    /// UNATTENDED IS THE SAME TWO-PART QUESTION `freeze_if_unattended` ASKS,
+    /// and it is asked here for the same reason: the freeze stamp alone is a
+    /// statement about the past, and a socket that has been ADMITTED onto a
+    /// long-frozen account has not cleared it yet.
+    ///
     /// Returns the ids collected, so the caller can say which.
     pub(crate) fn collect_expired_accounts(&self, ttl: std::time::Duration) -> Vec<String> {
         let expired: Vec<String> = self
@@ -1312,9 +1317,21 @@ impl Run {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|(_, passenger)| {
-                passenger
-                    .frozen_for()
-                    .is_some_and(|unattended| unattended >= ttl)
+                // ADMISSION IS THE SECOND HALF OF "NOBODY IS READING THIS", and
+                // asking only the freeze clock left the two predicates able to
+                // disagree. `freeze_if_unattended` refuses to freeze an account
+                // an admitted socket is still on; this asked a STALE freeze
+                // stamp, which a returning socket does not clear until its
+                // handler reaches `resume` - so a client reclaiming a
+                // long-frozen ledger could have it collected out from under it
+                // between the admission and the attach, and would silently be
+                // handed a fresh one instead of the book it came back for. The
+                // window is the whole upgrade, which is the 101, a task spawn
+                // and an instrument registration wide.
+                passenger.admissions() == 0
+                    && passenger
+                        .frozen_for()
+                        .is_some_and(|unattended| unattended >= ttl)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -2846,6 +2863,42 @@ mod tests {
                 .iter()
                 .any(|passenger| passenger.account_id.as_str() == "HELD-001"),
             "the attached account survives"
+        );
+    }
+
+    /// A SOCKET RECLAIMING A LONG-FROZEN LEDGER MUST NOT HAVE IT COLLECTED OUT
+    /// FROM UNDER IT, which the freeze stamp alone cannot express.
+    ///
+    /// A returning `/ws` upgrade is counted onto its account before the 101 and
+    /// only clears the freeze once its handler reaches `resume` - the 101, a
+    /// task spawn and an instrument registration later. Collecting on the stamp
+    /// alone therefore discarded the account inside that window, and the client
+    /// that came back for its book was silently minted a fresh one. Both
+    /// assertions are here because the second alone passes against the broken
+    /// shape: what proves the fix is the account surviving WHILE admitted.
+    #[test]
+    fn an_admitted_socket_spares_the_account_it_is_reclaiming() {
+        let run = run(1_000, 400, None);
+        let returning = mogwai_protocol::AccountId::parse("BACK-001").unwrap();
+        let passenger = run.passenger(&returning);
+        assert!(
+            passenger.is_frozen(),
+            "an account nobody has connected to is unattended, and this test is about that state"
+        );
+
+        let admission = run.admit(&passenger);
+        assert!(
+            run.collect_expired_accounts(std::time::Duration::ZERO)
+                .is_empty(),
+            "a socket is on its way in: the ledger it is reclaiming must still be there when it \
+             arrives"
+        );
+
+        drop(admission);
+        assert_eq!(
+            run.collect_expired_accounts(std::time::Duration::ZERO),
+            vec!["BACK-001".to_string()],
+            "and once nothing is on it, the TTL collects it as it always did"
         );
     }
 
