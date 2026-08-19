@@ -702,6 +702,41 @@ mod tests {
         assert_eq!(subcontract_hash(), EXPECTED_HASH);
     }
 
+    /// TWO CONSTANTS ENCODE ONE QUANTITY, so one of them must be derived from
+    /// the other or they need a gate. The final window's length is written
+    /// twice here - as the `FINAL_END_NS - FINAL_START_NS` difference and as
+    /// the `FINAL_LENGTH` seconds string - and the two are read by DIFFERENT
+    /// consumers: `measure`'s artifact writer and `count_curve`'s binding check
+    /// take the difference, while `run_final_walk` and the `fit` driver parse
+    /// the string, so the walk that produces the exposure record and the
+    /// artifact that records its window disagree about which is authoritative.
+    /// Neither can be deleted while the fit driver needs a duration STRING and
+    /// the artifact needs nanoseconds, so this is the gate. Without it, editing
+    /// `FINAL_LENGTH` alone moves the measured window and nothing says so until
+    /// a ten-minute equality pin fails as an opaque diff of two 20 KB
+    /// accumulator records.
+    ///
+    /// `hash_matches_the_python_reference` is NOT this gate, though a bare edit
+    /// to `FINAL_LENGTH` does redden it: the hash covers every sub-contract
+    /// constant against the retired Python oracle's snapshot, so the SANCTIONED
+    /// way to move one is to re-bless `EXPECTED_HASH` in the same change - and
+    /// that re-bless says nothing about whether the two encodings still agree.
+    /// A frozen-snapshot hash catches an unintended edit; only this catches an
+    /// intended edit made to one encoding of a quantity written twice.
+    #[test]
+    fn the_final_windows_two_encodings_of_its_length_agree() {
+        let seconds: i64 = FINAL_LENGTH
+            .trim_end_matches('s')
+            .parse()
+            .expect("FINAL_LENGTH is a seconds string");
+        assert_eq!(
+            FINAL_END_NS - FINAL_START_NS,
+            seconds * 1_000_000_000,
+            "FINAL_LENGTH and the FINAL_END_NS/FINAL_START_NS difference \
+             encode different window lengths"
+        );
+    }
+
     /// WHAT SURVIVES THE ORACLE, and - said plainly - what does not.
     ///
     /// Until phase 4b item 7 this file carried a test that parsed

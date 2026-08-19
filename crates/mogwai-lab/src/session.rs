@@ -5,13 +5,18 @@
 //! (the retired rewrite plan, phase 1): a port of `analysis/mnq_fit.py`'s
 //! `local_fields`/`assign_session`/`minute_fields`/`segment_origin_ns`/
 //! `segment_end_ns`/`segment_labels`, unified with the integer-only
-//! `session_segment_at` that `crates/mogwai-cli/src/gen.rs` carries
-//! independently today. `session_segment_at` here is that same pure-integer
+//! `session_segment_at` that `crates/mogwai-cli/src/gen.rs` used to carry.
+//! `session_segment_at` here is that same pure-integer
 //! algorithm (no `chrono`, no string dates in the hot path); `assign_session`
 //! wraps it to produce the (trade-date label, segment name) pairs the
-//! preflight stream pass needs. `crates/mogwai-cli` is NOT rewired onto this
-//! module yet (phase 2 migration) - a test there pins the two
-//! implementations agree over a wide timestamp sweep.
+//! preflight stream pass needs.
+//!
+//! THE ONE IMPLEMENTATION IS NOW LITERAL. `gen.rs` was rewired onto
+//! `crate::summary` by the Python-to-Rust move, and `summary`'s own copy of
+//! this branch structure - which a `mogwai-cli` test pinned against this one
+//! over a timestamp sweep, calling itself a bridge until that rewire - is a
+//! thin field mapping over `session_segment_at` below. There is no second
+//! body to keep in step, so there is no sweep either.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -292,9 +297,10 @@ pub struct SessionSegment {
     pub segment: &'static str,
 }
 
-/// Pure-integer port of `crates/mogwai-cli/src/gen.rs`'s `session_segment_at`
-/// (same algorithm, extended to also report the trade-date day number and
-/// segment name so callers here don't need a second pass). `None` inside the
+/// The pure-integer session/segment rule, and the workspace's only body of
+/// it: `crate::summary::session_segment_at` is a field mapping over this, and
+/// `gen.rs` reaches it through that. It reports the trade-date day number and
+/// segment name too, so callers here need no second pass. `None` inside the
 /// 15:15-15:30 halt or the 16:00-17:00 daily break.
 pub fn session_segment_at(ts_ns: u64, offset_minutes: i32) -> Option<SessionSegment> {
     let offset_ns = i128::from(offset_minutes) * NS_PER_MIN;

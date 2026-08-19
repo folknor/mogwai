@@ -12,7 +12,14 @@ close pass; `bugs-tests-tape` CLOSED on 2026-08-19 after its five rounds and
 close pass; `bugs-tests-engine-protocol` CLOSED on 2026-08-19 the same way,
 five rounds plus a close pass over the whole commit arc, with no open findings
 apart from two recorded refusals and one carried residual.
-`bugs-tests-lab-cli` starts next. The order is
+`bugs-tests-lab-cli` CLOSED on 2026-08-19 after five rounds, with no open
+findings apart from THREE FULL REFUSALS - B2, D1 and D4 - AND ONE PARTIAL, D2,
+refused as a fixture candidate and closed by anchoring its inputs instead.
+Counted rather than estimated: three summaries of that document had stated the
+number three different ways. ITS CLOSE PASS IS THE LAST OF THE TEST DOCUMENTS. `bugs-protocol` starts next and is THE FIRST PRODUCTION-CODE
+REPORT OF THE ARC - the five test-hunt documents are done, so from here the
+findings are about shipped behaviour rather than about the gates that watch it,
+and "the test cannot fail" stops being the default diagnosis. The order is
 `bugs-tests-lifecycle`, `bugs-tests-adapter`,
 `bugs-tests-tape`, `bugs-tests-engine-protocol`, `bugs-tests-lab-cli`, then
 `bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
@@ -2582,6 +2589,112 @@ inside four existing tests and added none.
   the walks and nothing else. Harmless here; do not use that footer to time a
   change to an assertion.
 
+## The lab/cli document, round 5: what carries to `bugs-protocol`
+
+Sections D, E and F are closed and the document has no open findings. The
+lab/cli specifics (`unit_test_scratch`, the session-segment collapse) die with
+it. What generalises, and the first four are GENERAL RULES the production
+documents inherit:
+
+- A SHARED FIXTURE IS NOT THE ONLY CLOSE FOR A TWO-COPY GATE, and reaching for
+  it reflexively builds machinery where a deletion was owed. Three shapes, and
+  they need different answers. TWO CONVENTIONS FOR ONE QUANTITY - the shape
+  `AGENTS.md` describes - takes the fixture. THE SAME ALGORITHM WRITTEN TWICE
+  takes a deletion: `mogwai-lab`'s `summary` and `session` each carried the
+  session-segment branch structure and its four minute constants, `summary`'s
+  is now a field mapping over `session`'s, and the sweep that held them equal
+  is gone as `f(x) == f(x)`. TWO PIPELINES PRODUCING A WHOLE RECORD has no
+  units-neutral statement to write down at all, so ANCHOR THE INPUTS - which
+  is where the drift lives anyway.
+- A GATE'S JUSTIFICATION CAN EXPIRE WITHOUT THE GATE NOTICING, and the tell is
+  a comment in the future tense. `session_segment_at_agrees_with_mogwai_lab`
+  called itself a bridge "until phase 2 rewires this crate onto the lab". The
+  rewire had landed, in the opposite direction to the one the comment
+  anticipated - `gen.rs` was absorbed into `mogwai_lab::summary`, so the test
+  had silently stopped comparing two crates and become a two-copy gate inside
+  one. NOTHING DETECTS THIS: the test stays green either way, and its own
+  comment is what makes it look accounted for. When a durable comment names a
+  future event, check whether the event happened.
+- WHEN A REPORT'S TABLE AND ITS PROSE DISAGREE, THE TABLE IS USUALLY RIGHT.
+  Two of the four section-D candidates were miscategorised in the prose while
+  the table row beside them described the correct shape - a test recomputing
+  from a DIFFERENT FIELD of a committed artifact graded as "two production
+  copies", and an optimization-preserves-output gate graded as a convention
+  drift. Re-derive the shape from the code before accepting a grade.
+- THE RECOMMENDED FIX CAN BE THE SECOND INSTANCE OF THE DEFECT. The report
+  told this round to make `cadence.rs` follow `storage.rs`'s
+  `CARGO_TARGET_TMPDIR` shape. `CARGO_TARGET_TMPDIR` IS SET FOR
+  INTEGRATION-TEST TARGETS ONLY, so in a LIB UNIT test that lookup always
+  fails and the `env::temp_dir()` fallback beside it is the branch that always
+  runs - `storage.rs` was writing outside the tree too, under a comment saying
+  it was not. `CARGO_MANIFEST_DIR` is the reading that works in both, which
+  `characterize/tests.rs` already knew. Verify a recommended exemplar before
+  copying it.
+- `mogwai-lab`'s LIB UNIT TESTS NOW HAVE ONE SCRATCH SHAPE and none of them may
+  hand-roll another: `storage::unit_test_scratch(name)` returns the existing
+  `ScratchDir` guard rooted at `target/lab-unit-scratch/<name>`, inside the
+  tree, removed on drop INCLUDING the panic path, keyed on pid plus a
+  nanosecond stamp. It replaced FIVE hand-rolled scratch call sites - four in
+  `storage.rs`, one in `cadence.rs` - and five `remove_dir_all` calls that ran
+  only on the success path. What it does NOT remove is the empty
+  `target/lab-unit-scratch/<name>/scratch/` spine above the unique leaf; that
+  is a fixed set of empty directories, not an accumulation, and the doc
+  comment states it because "removed on drop" reads as more than it is.
+  `mogwai-cli`'s test binaries keep `common::scratch`, which
+  is `CARGO_TARGET_TMPDIR`-based and correct there because they are
+  integration targets - the two are deliberately separate and the reason is the
+  bullet above.
+- VERIFYING PRAISE MEANS PERTURBING, and this round's five held - the first
+  clean praise audit of the arc after four documents found false or vacuous
+  claims in praised tests. Two of the five still gained a line, and both gaps
+  are of standing families rather than of those tests: three `assert!(x
+  .is_err())` calls that could not say WHICH check fired (measurement showed
+  three different refusals, so the ambiguity was real), and an
+  agreement-only assertion that two zeros or two NaNs satisfy. A GREEN,
+  WELL-WRITTEN, GENUINELY GOOD TEST STILL OWES ITS ERROR ASSERTION A NAME AND
+  ITS AGREEMENT ASSERTION A VALUE.
+- A PREMISE INSIDE AN `#[ignore]`d GATE IS AN UNRUN PREMISE. The exposure pin
+  costs ten minutes, and the only cross-check between its two sides' INPUTS
+  lived inside it - so a check lane never ran the cheap half, and a window
+  mismatch would have surfaced ten minutes later as a diff of two 20 KB
+  accumulator records blaming the exposure contract. Split out as
+  `the_committed_binding_carries_the_window_run_final_walk_measures`, which is
+  the round-4 lesson (`the_fidelity_predicate_bites_where_one_sample_never
+  _moves`) applied a second time: WHEN A HEAVY GATE HAS A CHEAP PREMISE, THE
+  PREMISE IS ITS OWN UNIGNORED TEST. Bite-checked by moving `SUMMARY_WARMUP`
+  to `"4d"`.
+- AND THAT PREMISE TEST SHIPPED THE VERY DEFECT ITS SECTION WAS HUNTING, caught
+  by the round's cold review. CARRY THE RULE, because it is about CONSTANTS
+  rather than about implementations and is therefore easier to miss: TWO
+  CONSTANTS ENCODING ONE QUANTITY ARE A TWO-COPY GATE WITH NO GATE.
+  `subcontract` carries the final window's length twice - `FINAL_END_NS -
+  FINAL_START_NS` in nanoseconds and `FINAL_LENGTH` as a seconds string - read
+  by different consumers, and nothing compared them. `run_final_walk` parses
+  the STRING; the new premise test asserted against the DIFFERENCE; so the one
+  edit the test's own docstring named would have moved the measured window with
+  the test green. Two halves close it, and the second is owed regardless of the
+  first: make the test read the encoding its subject reads, AND assert the
+  identity between the encodings. Bite-checked together at `"2674801s"`.
+  - A FROZEN-SNAPSHOT HASH OVER A CONSTANT SET IS NOT THAT IDENTITY, and
+    believing otherwise is how the gap reads as covered.
+    `hash_matches_the_python_reference` does redden on a bare edit, since
+    `FINAL_LENGTH` is in the hashed tree - but the SANCTIONED way to move a
+    sub-contract constant re-blesses the hash in the same change, and the
+    re-blessed hash says nothing about whether the two encodings still agree. A
+    snapshot hash catches an UNINTENDED edit; only the identity catches an
+    INTENDED edit to one encoding.
+- THE GATE COUNT MOVED BY EXACTLY ONE, and the arithmetic is worth stating
+  because r4's was a flat ledger and this one is not: one `mogwai-cli` test
+  deleted (the tautological sweep) and one added (the premise) CANCEL, and the
+  `mogwai-lab` identity gate is the net +1.
+- LATERAL, AND FIXED IN PASSING: `AGENTS.md` said the shared-fixture
+  convention had "two instances so far". There are three -
+  `segment_library_conformance.json` is loaded by `mogwai-data`'s `segment.rs`
+  and `mogwai-lab`'s `segments.rs` - and it is read by PATH rather than
+  `include_str!`d, which the sentence also asserted universally. A convention
+  that miscounts its own instances is the durable-prose-asserting-a-live-fact
+  shape aimed at itself.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -2819,6 +2932,20 @@ inside four existing tests and added none.
     subject is `#[ignore]`d tests otherwise leaves this ledger flat by
     construction; the evidence for the rest is in the eleven named release runs
     recorded in its section above, not here.
+  - lab/cli r5: 1231 + 451, 1739 pairs, 1682 run, 57 ignored, 0 orphaned, 14
+    skips, 59.0 s. Plus one in EACH sweep against r4's 1230 + 450, and plus TWO
+    pairs, which is the one added `mogwai-lab` test counted in both shapes -
+    the arithmetic that tells a lab test from a cli one at a glance. The
+    `mogwai-cli` half is a
+    CANCELLATION - the tautological `session_segment_at_agrees_with_mogwai_lab`
+    deleted, `the_committed_binding_carries_the_window_run_final_walk_measures`
+    added, both workspace-sweep only - and the net movement is the one
+    `mogwai-lab` test the cold review's finding bought,
+    `the_final_windows_two_encodings_of_its_length_agree`, which runs in the
+    instrumented sweep too. Everything else the round changed was a rewrite in
+    place: three refusal assertions in `stage_a_batch.rs`, one value assertion
+    in `exact.rs`, the five scratch call sites, and the `summary`/`session`
+    collapse.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

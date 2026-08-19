@@ -290,19 +290,39 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   the two conventions drift the gate silently compares different quantities and
   still passes - the failure is invisible because both halves are green. A
   fixture built on one side cannot catch this: it pins that implementation
-  against ITSELF. The convention, two instances so far, is a versioned
+  against ITSELF. The convention, three instances so far, is a versioned
   language-neutral JSON fixture under `analysis/` carrying a `_doc`, `units`
   and `rules` block and stating the contract in a form neither side's units
-  privilege, `include_str!`d by both: `spread_conformance.json` for the
-  stratified Roll estimator, `dwell_conformance.json` for the empty-hour dwell
-  statistics. Keep the implementations separate - collapsing them usually means
-  a dependency in the wrong direction - and keep the fixture shared. A rule one
-  side genuinely owns (the lab dwell's era clamp) stays a local test beside it,
-  because a shared fixture that cannot express it must not imply it was
-  checked.
+  privilege, read by both sides: `spread_conformance.json` for the
+  stratified Roll estimator and `dwell_conformance.json` for the empty-hour
+  dwell statistics, both `include_str!`d, and
+  `segment_library_conformance.json` for the segment library, which both
+  `mogwai-data`'s `segment.rs` and `mogwai-lab`'s `segments.rs` load by path
+  at test time. Keep the implementations separate - collapsing them usually
+  means a dependency in the wrong direction - and keep the fixture shared. A
+  rule one side genuinely owns (the lab dwell's era clamp) stays a local test
+  beside it, because a shared fixture that cannot express it must not imply it
+  was checked.
   NOTHING DETECTS A MISSING FIXTURE. The next cross-implementation gate is
   caught by this habit or not at all, which is the same shape as the open item
   on durable prose asserting a live fact.
+  AND THE FIXTURE IS NOT ALWAYS THE ANSWER. A two-copy gate whose copies are
+  the SAME algorithm rather than two conventions for one quantity is closed by
+  deleting a copy, not by anchoring both - `mogwai-lab`'s `summary` and
+  `session` session-segment math was one such, collapsed in the lab/cli
+  test-hunt. And where the two sides produce a whole accumulator record rather
+  than a statistic, no units-neutral statement of it exists; anchor the
+  INPUTS instead, which is usually where the drift is.
+- TWO CONSTANTS ENCODING ONE QUANTITY ARE THE SAME DEFECT WITHOUT THE GATE,
+  and they are easier to miss because neither looks like an implementation.
+  `mogwai-lab`'s `subcontract` carries the final measurement window's length
+  twice - as a nanosecond difference and as a seconds string - read by
+  different consumers, so editing one moved the window the exposure walk
+  measures while every gate stayed green. Where neither encoding can be
+  derived from the other, assert the identity between them, and make a test
+  that claims to catch a constant's drift read THE ENCODING ITS SUBJECT READS.
+  A frozen-snapshot hash over all the constants is not this gate: the
+  sanctioned way to move one re-blesses the hash in the same change.
 - A test on a `/ws` socket may never assert on THE NEXT frame: every socket
   is attached to the live tape on upgrade, so drain to a deadline.
 - A consensus review gate converges to the verifier's utility function; a

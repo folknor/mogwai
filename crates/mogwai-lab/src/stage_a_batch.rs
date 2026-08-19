@@ -1204,7 +1204,16 @@ mod tests {
             .expect("event depth-2 probability cell exists");
         cell.lattice[0] = u32::MAX;
         manifest.plan_sha256 = manifest_hash(&manifest).expect("hashes");
-        assert!(validate_manifest(&manifest).is_err());
+        // NAMED, not merely `is_err()`. The plan hash is recomputed above so
+        // the mutation is not caught for free by the identity check, which
+        // means the refusal that fires is the whole content of the test - and
+        // an unnamed `is_err()` is satisfied by any OTHER check tripping,
+        // including one broken by the re-hash itself.
+        let text = format!("{:#}", validate_manifest(&manifest).expect_err("refuses"));
+        assert!(
+            text.contains("panel cell identity is inconsistent"),
+            "the out-of-range lattice must fail the cell identity check: {text}"
+        );
     }
 
     #[test]
@@ -1218,7 +1227,18 @@ mod tests {
         let mut changed_quick = manifest.clone();
         changed_quick.quick[0].seeds.push(999);
         changed_quick.plan_sha256 = manifest_hash(&changed_quick).expect("hashes");
-        assert!(validate_manifest(&changed_quick).is_err());
+        // Both refusals are NAMED for the reason given in
+        // `malformed_lattice_refuses_instead_of_indexing_out_of_bounds`: the
+        // hash is re-blessed first, so which check fires IS the property.
+        let quick_text = format!(
+            "{:#}",
+            validate_manifest(&changed_quick).expect_err("refuses")
+        );
+        assert!(
+            quick_text.contains("quick tasks are not an unchanged subset of the full panel"),
+            "a quick task diverging from its full-panel twin must fail the subset check: \
+             {quick_text}"
+        );
 
         let mut changed_selection = manifest.clone();
         let stratum = changed_selection
@@ -1261,6 +1281,14 @@ mod tests {
             .expect("selection slot exists");
         *slot = replacement;
         changed_selection.plan_sha256 = manifest_hash(&changed_selection).expect("hashes");
-        assert!(validate_manifest(&changed_selection).is_err());
+        let selection_text = format!(
+            "{:#}",
+            validate_manifest(&changed_selection).expect_err("refuses")
+        );
+        assert!(
+            selection_text.contains("probability sample is not the derived lowest-hash selection"),
+            "swapping the drawn probability cell must fail the selection re-derivation: \
+             {selection_text}"
+        );
     }
 }

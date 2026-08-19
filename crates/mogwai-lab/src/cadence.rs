@@ -545,12 +545,14 @@ mod tests {
     /// left uncovered.
     #[test]
     fn probe_returns_structured_result_over_a_synthetic_fixture() {
-        let dir = std::env::temp_dir().join(format!(
-            "mogwai-lab-cadence-probe-test-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("fixture.zip");
+        // The project keeps all data inside the tree, and the guard is what
+        // enforces it here: this used to be a `temp_dir()` path keyed on the
+        // pid alone, which wrote outside the tree, could not survive a second
+        // cadence test being added under the same name, and leaked its
+        // directory whenever `probe` failed - the cleanup below the call runs
+        // only on the success path.
+        let scratch = crate::storage::unit_test_scratch("cadence-probe");
+        let path = scratch.path().join("fixture.zip");
         let rows = "1,100,1,100,1000000,false,true\n\
                      2,100,2,200,1000000,false,true\n\
                      3,101,1,101,2000000,true,true\n";
@@ -563,7 +565,6 @@ mod tests {
         archive.finish().unwrap();
 
         let result = probe(&path).unwrap();
-        std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result["rows"].as_i64().unwrap(), 3);
         assert_eq!(result["timestamp_and_side"]["events"].as_i64().unwrap(), 2);

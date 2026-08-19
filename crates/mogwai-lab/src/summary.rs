@@ -143,19 +143,6 @@ pub struct TopMinuteRecord {
     pub trace_until_ns: u64,
 }
 
-/// The CME equity-index session structure the protocol-11 spec fixes: local
-/// 17:00 open, 15:15-15:30 halt, 16:00 close, on the calendar's own fixed UTC
-/// offset. These minutes describe the two shipped futures calendars; a future
-/// calendar with a different in-session structure would need its own
-/// derivation, which is exactly why the constants live here beside the
-/// session math rather than pretending to generality.
-const SESSION_OPEN_LOCAL_MIN: i128 = 17 * 60;
-const SESSION_HALT_START_LOCAL_MIN: i128 = 15 * 60 + 15;
-const SESSION_HALT_END_LOCAL_MIN: i128 = 15 * 60 + 30;
-const SESSION_CLOSE_LOCAL_MIN: i128 = 16 * 60;
-const NS_PER_DAY_I: i128 = 86_400_000_000_000;
-const NS_PER_MIN_I: i128 = 60_000_000_000;
-
 /// One open segment of a trading session, all bounds in UTC nanoseconds.
 /// `session_start_ns` keys the session (the local 17:00 open instant);
 /// `segment_origin_ns` anchors the fixed-horizon boundary grid (spec 4.6).
@@ -173,44 +160,28 @@ pub struct SessionSegment {
 /// from 15:30 to 16:00 is the post-halt segment. Closed instants (halt,
 /// break) return None - the calendar keeps generated events out of them, so
 /// a None on a real event is a session-math defect, not a data case.
+///
+/// ONE IMPLEMENTATION, IN [`crate::session`]. This was a second copy of the
+/// branch structure and of the four session-minute constants, kept honest by
+/// `mogwai-cli`'s `session_segment_at_agrees_with_mogwai_lab` - a gate whose
+/// own comment called it a temporary bridge until `mogwai-cli` was rewired
+/// onto the lab. That rewire has since landed (this module IS what `gen.rs`
+/// calls), leaving a permanent two-copy gate with no external anchor: if the
+/// session definition moved, both copies moved together and the gate stayed
+/// green. The copy is gone rather than the gate strengthened, because one
+/// implementation is what a two-copy gate is trying to approximate.
+///
+/// The two structs are not the same type and that is deliberate: the
+/// [`crate::session`] one also reports the trade-date day number and the
+/// segment name, which every caller here would have to ignore. The mapping
+/// below is the whole difference.
 pub fn session_segment_at(ts: u64, offset_minutes: i16) -> Option<SessionSegment> {
-    let offset_ns = i128::from(offset_minutes) * NS_PER_MIN_I;
-    let local = i128::from(ts) + offset_ns;
-    let day = local.div_euclid(NS_PER_DAY_I);
-    let minute_of_day = local.rem_euclid(NS_PER_DAY_I) / NS_PER_MIN_I;
-    let to_utc = |local_ns: i128| -> u64 { u64::try_from(local_ns - offset_ns).unwrap_or(0) };
-    let open_of = |d: i128| d * NS_PER_DAY_I + SESSION_OPEN_LOCAL_MIN * NS_PER_MIN_I;
-    let close_of = |d: i128| d * NS_PER_DAY_I + SESSION_CLOSE_LOCAL_MIN * NS_PER_MIN_I;
-    if minute_of_day >= SESSION_OPEN_LOCAL_MIN {
-        Some(SessionSegment {
-            session_start_ns: to_utc(open_of(day)),
-            session_end_ns: to_utc(close_of(day + 1)),
-            segment_origin_ns: to_utc(open_of(day)),
-            segment_end_ns: to_utc(
-                (day + 1) * NS_PER_DAY_I + SESSION_HALT_START_LOCAL_MIN * NS_PER_MIN_I,
-            ),
-        })
-    } else if minute_of_day < SESSION_HALT_START_LOCAL_MIN {
-        Some(SessionSegment {
-            session_start_ns: to_utc(open_of(day - 1)),
-            session_end_ns: to_utc(close_of(day)),
-            segment_origin_ns: to_utc(open_of(day - 1)),
-            segment_end_ns: to_utc(
-                day * NS_PER_DAY_I + SESSION_HALT_START_LOCAL_MIN * NS_PER_MIN_I,
-            ),
-        })
-    } else if (SESSION_HALT_END_LOCAL_MIN..SESSION_CLOSE_LOCAL_MIN).contains(&minute_of_day) {
-        Some(SessionSegment {
-            session_start_ns: to_utc(open_of(day - 1)),
-            session_end_ns: to_utc(close_of(day)),
-            segment_origin_ns: to_utc(
-                day * NS_PER_DAY_I + SESSION_HALT_END_LOCAL_MIN * NS_PER_MIN_I,
-            ),
-            segment_end_ns: to_utc(close_of(day)),
-        })
-    } else {
-        None
-    }
+    crate::session::session_segment_at(ts, i32::from(offset_minutes)).map(|seg| SessionSegment {
+        session_start_ns: seg.session_start_ns,
+        session_end_ns: seg.session_end_ns,
+        segment_origin_ns: seg.segment_origin_ns,
+        segment_end_ns: seg.segment_end_ns,
+    })
 }
 
 pub fn utc_hour_of(ts: u64) -> usize {

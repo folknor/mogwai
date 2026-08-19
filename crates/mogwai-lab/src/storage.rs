@@ -363,6 +363,39 @@ impl ScratchDir {
     }
 }
 
+/// The scratch root for this CRATE'S LIB UNIT TESTS, and the only shape they
+/// may use: a `ScratchDir` under the workspace `target/`, whose UNIQUE LEAF is
+/// removed on drop. Everything written by the test goes in that leaf, so the
+/// drop removes all of it; what survives is the empty
+/// `target/lab-unit-scratch/<name>/scratch/` spine, which is a fixed set of
+/// empty directories rather than an accumulation. Stated exactly because the
+/// obvious reading - "the scratch is removed on drop" - would have a reader
+/// expect `target/lab-unit-scratch` to disappear, and it does not.
+///
+/// `CARGO_TARGET_TMPDIR` is NOT the answer here, and reaching for it is how
+/// both hand-rolled scratch shapes in this crate - `cadence.rs`'s probe
+/// fixture and this module's own four-call-site `scratch_test_root` - ended up
+/// writing to the system temp directory, against the project convention that
+/// all data lives in the tree.
+/// Cargo defines it for INTEGRATION test targets only, so in a lib unit test
+/// `env::var` always fails and any `env::temp_dir()` fallback beside it is
+/// the branch that always runs - silently, since the fallback reads as the
+/// exceptional case. `CARGO_MANIFEST_DIR` is defined for every compilation,
+/// which is why the path is derived from it instead.
+///
+/// The unique leaf carries the pid and a nanosecond stamp (`ScratchDir::new`),
+/// so a second test under the same `name` is unrepresentable rather than
+/// merely unlikely. HOLD THE GUARD for the test's lifetime: it is what
+/// removes the directory, including on the panic path, which a trailing
+/// `remove_dir_all` at the end of a test body never does.
+#[cfg(test)]
+pub(crate) fn unit_test_scratch(name: &str) -> ScratchDir {
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/lab-unit-scratch")
+        .join(name);
+    ScratchDir::new(&base).expect("creating a unit-test scratch directory")
+}
+
 impl Drop for ScratchDir {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.path).ok();
@@ -372,24 +405,6 @@ impl Drop for ScratchDir {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn scratch_test_root(name: &str) -> PathBuf {
-        // Cargo sets this for every test binary invocation, pointing at
-        // `target/tmp` - keeps test scratch data inside the project tree
-        // rather than `/tmp` (project convention).
-        let base = match std::env::var("CARGO_TARGET_TMPDIR") {
-            Ok(v) => PathBuf::from(v),
-            Err(_) => std::env::temp_dir(),
-        };
-        base.join(format!(
-            "mogwai-lab-storage-test-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ))
-    }
 
     /// All four limbs, in every ordering that matters, against readings
     /// supplied as data - so the three below `--cache-dir` are covered
@@ -546,7 +561,8 @@ mod tests {
 
     #[test]
     fn write_prunes_stale_provenance_and_read_round_trips() {
-        let root = scratch_test_root("prune");
+        let scratch = unit_test_scratch("prune");
+        let root = scratch.path().to_path_buf();
         let inputs_old = ProvenanceInputs {
             crate_version: "0.1.0",
             tape_protocol_version: 11,
@@ -575,13 +591,12 @@ mod tests {
         let stats = cache_stats(&root).unwrap();
         assert_eq!(stats.provenance_dirs, 1);
         assert_eq!(stats.files, 1);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn prepared_cache_writes_publish_complete_entries_concurrently() {
-        let root = scratch_test_root("parallel-writes");
+        let scratch = unit_test_scratch("parallel-writes");
+        let root = scratch.path().to_path_buf();
         let token = ProvenanceToken::compute(&ProvenanceInputs {
             crate_version: "0.1.0",
             tape_protocol_version: 12,
@@ -614,12 +629,12 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(staged.is_empty(), "staged cache files remain: {staged:?}");
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn cache_clean_all_removes_every_provenance_dir() {
-        let root = scratch_test_root("clean-all");
+        let scratch = unit_test_scratch("clean-all");
+        let root = scratch.path().to_path_buf();
         let token = ProvenanceToken::compute(&ProvenanceInputs {
             crate_version: "0.1.0",
             tape_protocol_version: 11,
@@ -633,12 +648,12 @@ mod tests {
         let removed = cache_clean_all(&root).unwrap();
         assert_eq!(removed, 1);
         assert_eq!(cache_stats(&root).unwrap().provenance_dirs, 0);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn scratch_dir_is_removed_on_drop() {
-        let root = scratch_test_root("scratch");
+        let outer = unit_test_scratch("scratch");
+        let root = outer.path().to_path_buf();
         let path = {
             let scratch = ScratchDir::new(&root).unwrap();
             let p = scratch.path().to_path_buf();
@@ -646,6 +661,5 @@ mod tests {
             p
         };
         assert!(!path.exists());
-        std::fs::remove_dir_all(&root).ok();
     }
 }

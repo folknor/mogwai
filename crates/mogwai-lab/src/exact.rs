@@ -619,6 +619,15 @@ mod tests {
         let shifted = population_variance(&[1.0, 3.0, 5.0]);
         let centred = population_variance(&[-1.0, 1.0, 3.0]);
         assert_eq!(shifted.to_bits(), centred.to_bits());
+        // AND THE VALUE, because agreement alone is the one shape in this
+        // module that a broken implementation can satisfy for free: both sides
+        // returning zero, or both NaN, agree perfectly. 8/3 exactly, which the
+        // nearest double renders as 0x4005555555555555.
+        assert_eq!(
+            shifted.to_bits(),
+            (8.0_f64 / 3.0).to_bits(),
+            "the shared value must be the variance, not merely a shared answer"
+        );
     }
 
     #[test]

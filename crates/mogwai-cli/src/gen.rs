@@ -2568,37 +2568,4 @@ mod tests {
         let crypto_got = serde_json::to_value(&crypto_acc).expect("crypto summary");
         assert_eq!(crypto_got["session_cells"], serde_json::json!([]));
     }
-
-    /// Phase 1 (the retired rewrite plan) unifies the session/segment
-    /// math in `mogwai-lab`, but does NOT rewire this crate onto it yet
-    /// (phase 2). This test pins that the two implementations agree so the
-    /// eventual rewire is behavior-preserving by construction: any
-    /// divergence introduced before phase 2 fails here immediately instead
-    /// of surfacing as a silent generator drift later.
-    #[test]
-    fn session_segment_at_agrees_with_mogwai_lab() {
-        let offset: i16 = -300;
-        // A dense sweep across several days at 1-minute resolution covers
-        // every branch (evening-overnight, morning-overnight, the halt gap,
-        // post_halt, and the daily break) many times over.
-        let start_day_ns: u64 = 20_635 * 86_400 * 1_000_000_000; // 2026-07-01
-        for minute in 0..(3 * 24 * 60) {
-            let ts = start_day_ns + minute * 60_000_000_000;
-            let got = session_segment_at(ts, offset);
-            let want = mogwai_lab::session::session_segment_at(ts, i32::from(offset));
-            match (got, want) {
-                (None, None) => {}
-                (Some(g), Some(w)) => {
-                    assert_eq!(g.session_start_ns, w.session_start_ns, "ts={ts}");
-                    assert_eq!(g.session_end_ns, w.session_end_ns, "ts={ts}");
-                    assert_eq!(g.segment_origin_ns, w.segment_origin_ns, "ts={ts}");
-                    assert_eq!(g.segment_end_ns, w.segment_end_ns, "ts={ts}");
-                }
-                (g, w) => panic!(
-                    "disagreement at ts={ts}: gen.rs={g:?} mogwai-lab present={}",
-                    w.is_some()
-                ),
-            }
-        }
-    }
 }
