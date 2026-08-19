@@ -31,37 +31,7 @@ tuition here.
 
 ## A. Tests that cannot fail for the reason they name
 
-A1 through A4 are CLOSED - see "Round 2" below.
-
-**A5. `engine :: arm_drops_temporal_variants_without_blocking_engine_divergences`
-covers 4 of 8 dropped variants.** It arms
-`DelayAcks`/`GoDark`/`StallData`/`ClearDivergences`. The production match in
-`divergence.rs` also drops `CommandLatency`, `FlowSurge`, `FeeSurcharge` and
-`CancelOpenOrderSilently` - and the comment beside them says listing them
-explicitly "is what stops a future enum variant from falling through into engine
-behaviour by accident." Exactly the claim a test must hold. Move any of those
-four into the `other` arm and they become permanent dead queue entries with no
-test failing. The test also INFERS dropping from `out.len() == 4` rather than
-asserting `e.armed.is_empty()` - assert the queue directly and loop over all
-eight.
-
-**A6. `engine :: a_market_buy_slips_up_and_a_market_sell_slips_down` asserts
-`>=` / `<=`.** Delete slippage entirely (always fill at `last_px`) and it passes.
-Its sibling `a_nonzero_band_displaces_a_trigger_adversely_from_its_stated_price`
-gets this right - it runs a 64-order fixture, filters to a nonzero draw, and
-asserts strict inequality - but that test exercises `draw_trigger`, not the
-market-fill slip path. Rewrite A6 on the same pattern.
-
-**A7. `protocol/lib.rs :: default_request_timeout_secs_is_thirty`** asserts a
-constant equals its own literal. It is a change-detector with no external
-referent - there is no second definition of 30 anywhere for it to pin against.
-Delete it or make it pin the adapter's use.
-
-**A8. `instruments.rs :: default_instruments_matches_engine_btcusdt_seed`** - the
-name promises agreement with the engine's seed, but `mogwai-protocol` cannot
-depend on `mogwai-engine`, so the test is a pure self-pin of the same function
-three lines above it. Either rename it to what it does, or move the real
-cross-check into the engine, where both sides exist.
+A1 through A8 are CLOSED - see "Round 2" and "Round 3" below.
 
 ## B. Fixtures that exclude the bug by construction
 
@@ -274,8 +244,110 @@ LATERAL, fixed in passing: `messages.rs :: ServerMessage::category`'s doc glosse
 execution, and that exemption is exactly what the paragraph three lines up is
 about.
 
+## Round 3: A5-A8, the arm classification and three false referents
+
+All four reproduced. Nothing was refused, and one finding's recommended remedy
+was overtaken by a stronger one.
+
+COLD REVIEW OF THE ROUND FOUND FOUR, all real, all fixed in the same commit;
+the details are in `notes/bug-loop-carry-forward.md`. The one that changes what
+this section claims is first: A5's remedy secured the ENGINE's classification
+and left the VENUE'S ROUTER unguarded. `mogwai-server`'s `arm_divergence` still
+ended in a catch-all whose only guard was a `debug_assert!` - compiled out of
+the release profile the socket suites run in - so a variant newly classified
+server-owned in `divergence.rs` would still have compiled there and been
+forwarded to `engine.arm()`, which now DROPS it: the control would have gone
+silently dead. That router enumerates the five engine-armed variants now, and
+its stale prose (it named four server-owned variants three lines above an
+assert listing eight, and concluded "four engine-side variants" where there are
+five) is corrected. The other three were the vacuous zero-band control, an
+`assert_eq!(out.len(), 4)` moved after the indexing it licenses, and a
+`field_reassign_with_default` in the new adapter test.
+
+- A5 IS CARRIED BY THE COMPILER, which the report did not propose and round 2's
+  A3 predicted. The production comment claims listing the server-owned variants
+  "stops a future enum variant from falling through into engine behaviour by
+  accident" - a claim about variants that do not exist yet, so no test can hold
+  it. `arm`'s match had an `other =>` catch-all, so nothing held it at all: a
+  new server-owned variant fell straight into the queue as a dead entry. The
+  five engine-side variants are now enumerated too
+  (`queued @ (PartialFillNext | RejectNextSubmit | RejectNextCancel |
+  DuplicateNextFill | DropNextAccountUpdate)`), so the match is exhaustive on
+  both arms and the crate does not build until a new variant is classified.
+  Measured by adding a `BiteCheck` variant: E0004 at `divergence.rs` AND at the
+  new test's expectation match, both sweeps.
+  - The test half is `arm_classifies_every_divergence_variant`, which loops all
+    thirteen variants, reads THE QUEUE (`e.armed`) rather than an event count,
+    and derives its expectation from a second exhaustive match - deliberately
+    not from `!is_server_owned`, because one shared list would let a new variant
+    be classified once and read twice. Bite-checked by moving `CommandLatency`
+    into the queued arm: fails naming that variant and the dead-entry
+    consequence. `CommandLatency`, `FlowSurge`, `FeeSurcharge` and
+    `CancelOpenOrderSilently` - the four the old test never touched - are all
+    exercised now.
+  - WHAT STILL CANNOT BE HELD, and it is stated on the fixture: the case list is
+    hand-built and nothing checks it stays complete. A variant added to the enum
+    and forgotten there is still classified deliberately on both sides (neither
+    match compiles until it is); what it loses is the end-to-end exercise. Same
+    shape as round 2's `SHIPPED_POLICIES` ruling - state the rule the code can
+    enforce.
+  - The original test KEPT its name and its second half, which is the "without
+    blocking engine divergences" claim the new one does not make. It asserts the
+    queue directly now - after five arms, `DuplicateNextFill` alone and at the
+    FRONT - so a dropped variant that instead queued a dead entry ahead of it is
+    visible rather than inferred from `out.len() == 4`.
+- A6 REPRODUCED EXACTLY. `>=` / `<=` survives deleting slippage: with
+  `draw_market_price` returning `last_px` on both sides the old assertions pass.
+  Rewritten on the trigger-band test's pattern, but END TO END through
+  `process_with_market` rather than on the draw, because `draw_market_price` is
+  private to `orders.rs`: 64 orders per side, a fresh `banded(42)` engine each
+  (so no order pays for another's balance), every order that slips must slip the
+  adverse way, and at least one per side must slip. THE ZERO BAND IS THE
+  CONTROL and is what makes "nothing slipped" distinguishable from "the engine
+  ignores the band": every order is submitted at `band_ticks = 0` first and must
+  fill at the last print exactly. THE CONTROL'S LAST PRINT IS 99 AGAINST A
+  STATED PRICE OF 100, which the cold review had to correct - at 100 against 100
+  it could not tell the band from the stated price it is documented to ignore,
+  so it was itself the vacuous test it exists to prevent. Bite-checked twice as
+  text edits in
+  `draw_market_price` - no slip at all fails "some Buy in the fixture must slip",
+  inverted sides fail the buy direction.
+- A7 HAD NO REFERENT AND THE TEST IS DELETED. Verified rather than assumed: the
+  constant is defined once, every adapter site
+  (`clock.rs`, `client/shared.rs`, `data.rs`, `exec.rs`) reads it by name, and
+  the literal 30 appears nowhere else in the workspace, so the assertion could
+  only restate the definition. THE CLAIM THAT DOES HAVE A REFERENT is the
+  SUBSTITUTION the constant exists for - `ConnHavoc.request_timeout_secs == 0`
+  keeps the shipped default - and it had NO coverage anywhere: deleting the
+  `if configured == 0` branch left the whole workspace green.
+  `an_unset_request_timeout_takes_the_shipped_default` in
+  `mogwai-adapter/src/client/shared.rs` now pins all three directions (no spec,
+  an explicit zero, a stated 7) at speed 1.0 so neither the scaling nor the
+  `MIN_WALL_REQUEST_TIMEOUT_SECS` floor is in the way. Bite-checked by deleting
+  the substitution: the unconfigured client's timeout collapses to the 1-second
+  wall floor and the test fails 1 against 30. A test in `mogwai-protocol` could
+  not have reached this; the crate the constant lives in was the wrong place to
+  look for its second side.
+- A8 GOT BOTH HALVES. The protocol test is renamed
+  `default_instruments_ships_one_btcusdt_spot_definition`, which is what it does
+  - a value pin on the shipped wire defaults, legitimate on its own - and its
+  doc comment now says why this crate cannot make the cross-check and where the
+  one that can lives. THE REAL GATE IS IN THE ENGINE:
+  `the_default_seed_puts_the_engine_on_a_btcusdt_cent_and_satoshi_grid` reads
+  the increments back out of `Engine::new`'s ORDER VALIDATION - an on-grid order
+  accepted, a tenth of the price increment refused with "price violates price
+  increment", a tenth of the size increment refused with "quantity violates size
+  increment". Bite-checked with one text edit per increment in
+  `default_instruments`: each fails on its own named case. It does NOT use
+  `reject_reason`, whose panic on an accepted order names the helper's shape
+  instead of the grid - the refusal is destructured locally with a message
+  naming the increment.
+- LATERAL, fixed in passing: none found. The one thing worth knowing is that the
+  A8 perturbations fail the protocol value pin AND the engine gate together,
+  which is correct - the value pin is not redundant, it just cannot be the
+  cross-check its old name claimed.
+
 ## The hunter's own ordering
 
-C and A1-A4 are done. Then A5 (a production comment asserting a property no test
-holds), then B1 (six unpinned wire-size constants that a reservation system
-depends on).
+C and A1-A8 are done. Next is B1 (six unpinned wire-size constants that a
+reservation system depends on).

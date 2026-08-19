@@ -32,8 +32,17 @@ impl Engine {
             // `FlowSurge` is named here for the same reason and one more: it is
             // the first arm that reaches into GENERATOR state (a sim-time window
             // on the tape source), so it has no engine-side trigger at all.
-            // Listing it explicitly is what stops a future enum variant from
-            // falling through into engine behaviour by accident.
+            //
+            // BOTH SIDES OF THIS MATCH ARE ENUMERATED, and that is the whole
+            // mechanism behind the paragraph above: with no `_` arm the crate
+            // does not BUILD until a new `Divergence` variant is deliberately
+            // classified as server-owned or engine-armed. A catch-all would let
+            // a new server-owned variant fall through into the queue as a dead
+            // entry that nothing consumes, and no test can hold a claim about
+            // variants that do not exist yet.
+            // `arm_classifies_every_divergence_variant` in `lib.rs` states which
+            // side today's variants land on, which is the half the compiler
+            // cannot carry.
             Divergence::DelayAcks { .. }
             | Divergence::CommandLatency { .. }
             | Divergence::GoDark { .. }
@@ -42,7 +51,11 @@ impl Engine {
             | Divergence::FeeSurcharge { .. }
             | Divergence::ClearDivergences
             | Divergence::CancelOpenOrderSilently { .. } => None,
-            other => {
+            queued @ (Divergence::PartialFillNext { .. }
+            | Divergence::RejectNextSubmit { .. }
+            | Divergence::RejectNextCancel { .. }
+            | Divergence::DuplicateNextFill
+            | Divergence::DropNextAccountUpdate) => {
                 // Bound the queue so control-plane arms cannot accumulate
                 // without limit. At the cap, shed the OLDEST entry: a
                 // never-triggered targeted `PartialFillNext` sits at the front
@@ -60,7 +73,7 @@ impl Engine {
                 } else {
                     None
                 };
-                self.armed.push_back(other);
+                self.armed.push_back(queued);
                 shed
             }
         }

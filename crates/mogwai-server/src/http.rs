@@ -1159,29 +1159,31 @@ pub(crate) async fn arm_divergence(
                 passenger.engine.lock().await.clear_fee_surcharge();
             }
         }
-        // Server-ownership contract (pins B.4 / E.11): `DelayAcks`, `GoDark`,
-        // `StallData`, and `ClearDivergences` are server-owned controls with no
+        // Server-ownership contract (pins B.4 / E.11): the EIGHT variants the
+        // arms above intercept - `DelayAcks`, `CommandLatency`, `GoDark`,
+        // `StallData`, `FlowSurge`, `FeeSurcharge`, `ClearDivergences` and
+        // `CancelOpenOrderSilently` - are server-owned controls with no
         // synchronous engine-side trigger. The server owns them and must NEVER
-        // forward them to `engine.arm()`.
-        // The arms above intercept them before this catch-all, so `engine_div`
-        // can only be one of the four engine-side variants. The assert makes a
-        // future refactor that forwards a whole `HavocSpec.server` vec straight
-        // to `engine.arm()` fail loudly rather than silently losing these knobs.
-        engine_div => {
-            debug_assert!(
-                !matches!(
-                    engine_div,
-                    Divergence::DelayAcks { .. }
-                        | Divergence::CommandLatency { .. }
-                        | Divergence::GoDark { .. }
-                        | Divergence::StallData { .. }
-                        | Divergence::FlowSurge { .. }
-                        | Divergence::FeeSurcharge { .. }
-                        | Divergence::ClearDivergences
-                        | Divergence::CancelOpenOrderSilently { .. }
-                ),
-                "server-owned divergences must not be forwarded to engine.arm()",
-            );
+        // forward them to `engine.arm()`, which would drop them on the floor.
+        //
+        // THIS ARM IS ENUMERATED RATHER THAN A CATCH-ALL, and that is the whole
+        // guard: this is the ROUTING site, so a misclassification here loses a
+        // user-visible control silently. A catch-all guarded by a
+        // `debug_assert!` cannot carry that, because the release profile the
+        // socket suites run in compiles the assert out entirely. With every
+        // variant named, a new `Divergence` fails to BUILD here until someone
+        // routes it, in both profiles and on every toolchain.
+        //
+        // The five names below are the same engine-armed set `Engine::arm`
+        // enumerates in `mogwai-engine/src/divergence.rs`; that match is
+        // exhaustive too, so a variant classified server-owned there and
+        // forwarded here would fail this crate's build rather than being
+        // queued as a dead entry.
+        engine_div @ (Divergence::PartialFillNext { .. }
+        | Divergence::RejectNextSubmit { .. }
+        | Divergence::RejectNextCancel { .. }
+        | Divergence::DuplicateNextFill
+        | Divergence::DropNextAccountUpdate) => {
             // Relay an eviction in the ack body. The queue is bounded
             // (`MAX_ARMED_DIVERGENCES`), and at the cap `arm` sheds the OLDEST
             // entry - so a bare `202` with an empty body would tell an armer

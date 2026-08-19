@@ -653,6 +653,45 @@ mod tests {
 
     use super::*;
 
+    /// `ConnHavoc.request_timeout_secs == 0` is documented as "keeps 30s", and
+    /// this is the only thing that holds it. `DEFAULT_REQUEST_TIMEOUT_SECS` used
+    /// to be pinned in `mogwai-protocol` by an assertion against its own
+    /// literal, which has no second referent: the constant is defined once and
+    /// every adapter site reads it, so that assertion could only restate the
+    /// definition. The claim with a referent is the SUBSTITUTION here - that an
+    /// unconfigured client gets the shipped default rather than a zero-second
+    /// timeout that fails every request instantly. The clamp is deliberately
+    /// out of the way (speed 1.0, so no scaling and no `MIN_WALL` floor).
+    #[test]
+    fn an_unset_request_timeout_takes_the_shipped_default() {
+        let unscaled = SimClock::identity();
+        assert_eq!(
+            request_timeout_secs(&None, unscaled),
+            mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS
+        );
+        // `ConnHavoc::default()` already carries `request_timeout_secs: 0`, so
+        // this case states no timeout of its own: what it varies is the SPEC
+        // being present at all, taking `conn_havoc`'s `Some` branch rather than
+        // the `None` one above, and it must land on the same default.
+        assert_eq!(
+            request_timeout_secs(&Some(HavocSpec::default()), unscaled),
+            mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS,
+            "an unset timeout inside a spec is the same 'no opinion' as no spec"
+        );
+        let stated = HavocSpec {
+            conn: ConnHavoc {
+                request_timeout_secs: 7,
+                ..ConnHavoc::default()
+            },
+            ..HavocSpec::default()
+        };
+        assert_eq!(
+            request_timeout_secs(&Some(stated), unscaled),
+            7,
+            "a stated timeout is not overwritten by the default"
+        );
+    }
+
     #[test]
     fn an_unknown_floor_skips_the_guard_but_a_zero_floor_enforces_it() {
         ensure_on_tape(Some(UnixNanos::from(5)), None).expect("unknown floor skips guard");

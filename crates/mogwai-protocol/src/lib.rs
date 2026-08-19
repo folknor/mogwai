@@ -88,11 +88,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_request_timeout_secs_is_thirty() {
-        assert_eq!(DEFAULT_REQUEST_TIMEOUT_SECS, 30);
-    }
-
-    #[test]
     fn trades_through_is_strict_on_both_sides() {
         let limit = Decimal::from(100);
         assert!(trades_through(Side::Buy, limit, Decimal::from(99)));

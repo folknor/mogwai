@@ -658,8 +658,15 @@ mod tests {
         );
     }
 
+    /// A value pin on the shipped default set, and nothing more: this crate
+    /// cannot depend on `mogwai-engine`, so it has no way to compare against
+    /// what the engine does with these terms. The name used to promise exactly
+    /// that comparison; the cross-check that really has two sides lives in the
+    /// engine, as `the_default_seed_puts_the_engine_on_a_btcusdt_cent_and
+    /// _satoshi_grid`, where the increments are read back out of the engine's
+    /// own order validation.
     #[test]
-    fn default_instruments_matches_engine_btcusdt_seed() {
+    fn default_instruments_ships_one_btcusdt_spot_definition() {
         let defs = default_instruments();
         assert_eq!(defs.len(), 1);
         assert_eq!(

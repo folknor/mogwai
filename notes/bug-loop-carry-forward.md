@@ -1695,6 +1695,85 @@ this pass was in production behaviour.
   1439-accepted / 1440-refused with the exact message; bite-checked by flipping
   `>=` to `>`, which fails on the 1440 case by name.
 
+## The engine/protocol document, round 3: the arm classification, and referents
+
+- `Engine::arm`'S MATCH IS EXHAUSTIVE ON BOTH ARMS, and the `queued @ (...)`
+  binding is load-bearing rather than stylistic. This is the SECOND instance in
+  two rounds of round 2's rule (a comment claiming something about future
+  variants is a compiler obligation); the difference worth noting is that A3's
+  `matches!` at least classified today's variants, while a `_`/`other`
+  catch-all classifies nothing at all - a new server-owned variant fell through
+  into the armed queue as an entry `take_armed` can never consume. WHEN A
+  FINDING SAYS "A TEST MUST HOLD THIS", CHECK WHETHER THE MATCH HAS A CATCH-ALL
+  FIRST; deleting the catch-all is cheaper than any test and strictly stronger.
+- A LOOP OVER AN ENUM'S VARIANTS OWES A SECOND, INDEPENDENT CLASSIFICATION.
+  `arm_classifies_every_divergence_variant`'s expectation is its own exhaustive
+  match, not a call to the production predicate and not `!is_server_owned` over
+  one shared list: a single list lets a new variant be classified once and read
+  twice, which is the accident the production match is guarding. What NOTHING
+  can hold, and it is stated on the fixture rather than left implied, is that
+  the hand-built case list stays complete - a forgotten variant is still
+  classified deliberately on both sides, it just goes unexercised.
+- A CONSTANT WITH NO SECOND DEFINITION HAS NO REFERENT IN ITS OWN CRATE, AND ITS
+  REFERENT IS USUALLY THE SUBSTITUTION IT SERVES. `DEFAULT_REQUEST_TIMEOUT_SECS`
+  was pinned against its own literal in `mogwai-protocol`; the claim with two
+  sides is the adapter's `request_timeout_secs`, where `0` means "keep the
+  shipped default", and that branch had NO coverage in the workspace - deleting
+  it left everything green, with every unconfigured client silently dropping to
+  the 1-second `MIN_WALL_REQUEST_TIMEOUT_SECS` floor. Pinned now in
+  `mogwai-adapter/src/client/shared.rs`. GENERAL FORM for the remaining
+  documents: when a finding says "delete this, it pins nothing", ask what the
+  constant is FOR and look for that in the crate that consumes it - the answer
+  was one crate away and was a real hole, not a tidy-up.
+- A CROSS-CHECK LIVES WHERE BOTH SIDES EXIST, AND THE VALUE PIN IS NOT
+  REDUNDANT. `default_instruments()`'s terms are now read back out of
+  `Engine::new`'s order validation
+  (`the_default_seed_puts_the_engine_on_a_btcusdt_cent_and_satoshi_grid`), while
+  the protocol-side test keeps its literals under an honest name. Both fire on a
+  changed increment, which is right: one says the wire defaults moved, the other
+  says the venue's behaviour moved with them.
+  - AND A SHARED `expect`-STYLE HELPER CAN COST A FINDING ITS ATTRIBUTION. The
+    first cut read the refusals through `reject_reason`, whose panic on an
+    ACCEPTED order is "expected one order reject" - a message about the helper's
+    shape, with the bite-check's actual defect invisible. Destructured locally
+    with a message naming the increment instead. Same family as the adapter
+    document's shared-wait-helper rule: a helper called from many sites reports
+    its own expectation, never the caller's.
+
+COLD REVIEW OF THE ROUND FOUND FOUR, all real, all fixed in the same commit:
+
+- THE ROUND'S OWN RULE WAS NOT APPLIED AT THE SITE THAT MATTERED MOST. Deleting
+  `Engine::arm`'s catch-all secured the ENGINE's classification and nothing
+  else: `mogwai-server`'s `arm_divergence` - the ROUTING site, where a
+  misclassification loses a user-visible control rather than parking a dead
+  queue entry - still ended in `engine_div => ...` guarded by a
+  `debug_assert!`, and that assert is COMPILED OUT of the release profile the
+  socket suites run in. It was also the THIRD hand-maintained copy of the
+  server-owned list, kept in sync by nothing. The router now enumerates the
+  five engine-armed variants, so a new variant fails this crate's build in both
+  profiles. GENERAL FORM: when a round deletes a catch-all, grep the whole
+  workspace for the OTHER matches over the same enum before calling it closed -
+  the classification is only as strong as its weakest routing site, and a
+  `debug_assert!` is not a routing guard.
+- A CONTROL ADDED TO PREVENT A VACUOUS TEST WAS ITSELF VACUOUS, the arc's
+  seventeenth instance and the most ironic. The zero-band control submitted at
+  a stated price of 100 against `last_px: 100` and asserted the fill was 100 -
+  but `draw_market_price` IGNORES the stated price, which is the property the
+  control exists to distinguish, so an engine returning the stated price and
+  never reading the band passed every zero-band assertion. Fixed by one number:
+  the control's last print is 99 against the stated 100. A CONTROL MUST VARY
+  THE INPUT THE MECHANISM UNDER TEST READS; where two inputs are equal in the
+  fixture, the control cannot tell which one the code used.
+- A LENGTH ASSERT BELONGS BEFORE THE INDEXING IT LICENSES. Moving
+  `assert_eq!(out.len(), 4)` after `out[1]`/`out[2]` turned a short event list
+  from a named count mismatch into a bare index panic.
+- `field_reassign_with_default` (`let mut x = T::default(); x.f = v;`) appears
+  nowhere else in this workspace; use struct-update syntax. The instance also
+  hid a no-op - `ConnHavoc::default()` already sets `request_timeout_secs: 0`,
+  so that case varies the SPEC's presence, not the field, and the comment says
+  so now. `SimClock::identity()` already is the `0, 0, 1.0` literal the test
+  hand-built.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -1871,6 +1950,19 @@ this pass was in production behaviour.
     coverage bug `AGENTS.md` warns about and is NOT it: the tell is that the
     orphan count equals the missing sweep's pass count. Read the first
     `[error]` line, not the flood under it. A plain re-run was green.
+  - engine/protocol r3: 1209 + 440, 1706 pairs, 1649 run, 57 ignored, 0
+    orphaned, 14 skips, 55.0 s. THE ROUND'S OWN CONTRIBUTION IS +2 IN THE
+    WORKSPACE SWEEP AND NOTHING IN THE INSTRUMENTED ONE: two new `mogwai-engine`
+    tests and one new `mogwai-adapter` test, less the deleted `mogwai-protocol`
+    timeout pin; `mogwai-engine`, `mogwai-adapter` and `mogwai-protocol` are all
+    workspace-sweep only, which is why the second bucket does not move. Three
+    further tests were rewritten in place and moved no count. THE CHAIN,
+    reconstructed by the orchestrator because rounds 1 and 2 landed as `a3a796d`
+    and `db5931b` without an entry here: r1 ended at 1201 + 440 / 1698 pairs,
+    r2 at 1207 + 440 / 1704, r3 at 1209 + 440 / 1706. Record the gate counts
+    per round as they land; a missing entry makes the next one's arithmetic
+    unreadable, which is exactly what the tape r2 entry above warns about, and
+    it cost r3 a reconciliation it could not do from inside the round.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

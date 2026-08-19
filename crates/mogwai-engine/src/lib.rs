@@ -4701,6 +4701,110 @@ mod tests {
         assert!(e.armed.is_empty());
     }
 
+    /// One well-formed value of every `Divergence` variant.
+    ///
+    /// Hand-built, and the compiler cannot check that it stays complete - which
+    /// is exactly why `Engine::arm` and the expectation below are written as
+    /// EXHAUSTIVE matches rather than leaning on this list. A variant added to
+    /// the enum and forgotten here is still classified deliberately on both
+    /// sides (neither match compiles until it is); what it loses is only the
+    /// end-to-end exercise of that classification.
+    fn every_divergence_variant() -> Vec<Divergence> {
+        vec![
+            Divergence::PartialFillNext {
+                client_order_id: "O1".into(),
+                fraction: Decimal::from_f64(0.5).unwrap(),
+            },
+            Divergence::RejectNextSubmit {
+                reason: "no".into(),
+            },
+            Divergence::RejectNextCancel {
+                reason: "no".into(),
+            },
+            Divergence::DuplicateNextFill,
+            Divergence::DropNextAccountUpdate,
+            Divergence::DelayAcks { ms: 100 },
+            Divergence::CommandLatency {
+                submit_act_ms: 1,
+                modify_act_ms: 1,
+                cancel_act_ms: 1,
+                submit_ack_ms: 1,
+                modify_ack_ms: 1,
+                cancel_ack_ms: 1,
+            },
+            Divergence::GoDark { ms: 100 },
+            Divergence::StallData { ms: 100 },
+            Divergence::FlowSurge {
+                rate_mult: 2.0,
+                children_mult: 2.0,
+                duration_ms: 100,
+            },
+            Divergence::FeeSurcharge {
+                mult: Decimal::from(2),
+                window_ms: 100,
+            },
+            Divergence::ClearDivergences,
+            Divergence::CancelOpenOrderSilently {
+                client_order_id: "O1".into(),
+            },
+        ]
+    }
+
+    /// The classification `Engine::arm` performs, per variant, read off the
+    /// QUEUE rather than inferred from an event count.
+    ///
+    /// The production comment beside that match claims listing the server-owned
+    /// variants explicitly "stops a future enum variant from falling through
+    /// into engine behaviour by accident" - a claim about variants that do not
+    /// exist yet, which only the compiler can hold, and it does: both arms of
+    /// that match are enumerated, so a new variant breaks the build there and
+    /// in the expectation below. What THIS test adds is the half the compiler
+    /// cannot see - that today's eight server-owned variants really do leave the
+    /// queue empty (a dead entry nothing consumes, forever) and today's five
+    /// engine-side ones really are stored.
+    #[test]
+    fn arm_classifies_every_divergence_variant() {
+        for divergence in every_divergence_variant() {
+            // Exhaustive on purpose. Deliberately NOT `!is_server_owned`: a
+            // single list would let a new variant be classified once and read
+            // twice, which is the accident the production match is guarding.
+            let queued = match divergence {
+                Divergence::PartialFillNext { .. }
+                | Divergence::RejectNextSubmit { .. }
+                | Divergence::RejectNextCancel { .. }
+                | Divergence::DuplicateNextFill
+                | Divergence::DropNextAccountUpdate => true,
+                Divergence::DelayAcks { .. }
+                | Divergence::CommandLatency { .. }
+                | Divergence::GoDark { .. }
+                | Divergence::StallData { .. }
+                | Divergence::FlowSurge { .. }
+                | Divergence::FeeSurcharge { .. }
+                | Divergence::ClearDivergences
+                | Divergence::CancelOpenOrderSilently { .. } => false,
+            };
+
+            let mut e = Engine::new();
+            assert!(
+                e.arm(divergence.clone()).is_none(),
+                "an arm into an empty queue displaces nothing: {divergence:?}"
+            );
+            if queued {
+                assert_eq!(
+                    e.armed.iter().collect::<Vec<_>>(),
+                    vec![&divergence],
+                    "an engine-side divergence is stored for its trigger: {divergence:?}"
+                );
+            } else {
+                assert!(
+                    e.armed.is_empty(),
+                    "a server-owned divergence has no engine trigger, so queueing it \
+                     leaves a dead entry `take_armed` can never consume: {divergence:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn arm_drops_temporal_variants_without_blocking_engine_divergences() {
         let mut e = Engine::new();
@@ -4710,8 +4814,18 @@ mod tests {
         e.arm(Divergence::ClearDivergences);
         e.arm(Divergence::DuplicateNextFill);
 
+        // The QUEUE is the observable, not the event count: five arms, and the
+        // one engine-side arm is alone in it and at the FRONT, so the four
+        // drops neither queued a dead entry nor sat in front of it.
+        assert_eq!(
+            e.armed.iter().collect::<Vec<_>>(),
+            vec![&Divergence::DuplicateNextFill]
+        );
+
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
 
+        // Length FIRST: a regression emitting fewer events would otherwise
+        // panic on an index rather than naming the count it produced.
         assert_eq!(out.len(), 4);
         assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
         assert!(matches!(out[2], ServerMessage::OrderFilled(_)));
@@ -8728,6 +8842,71 @@ mod tests {
         };
         assert!(price(&buy) >= reading.last_px);
         assert!(price(&sell) <= reading.last_px);
+
+        // `>=` / `<=` alone is satisfied by no slippage at all, so the claim is
+        // asked of a fixture, the same way the trigger band's test does it: the
+        // draw is uniform on `0 ..= band_ticks` and one order may legitimately
+        // draw zero, but SOME order in the fixture must slip, and every order
+        // that slips must slip the adverse way. A zero band is the control -
+        // it pins that the LAST PRINT is where a fill lands when nothing
+        // displaces it, so a fixture reporting no slip is distinguishable from
+        // one whose engine ignores the band entirely.
+        //
+        // The control's last print is 99 against a stated price of 100, and
+        // that split is what makes it a control at all: `draw_market_price`
+        // IGNORES the stated price, which is the property under test, so a
+        // control reading 100 against a stated 100 would still pass for an
+        // engine that returned the stated price and never looked at the band.
+        const CONTROL_LAST_PX: i64 = 99;
+        let filled = |last_px: i64, band_ticks: u32, side: Side, i: usize| {
+            let mut e = banded(42);
+            let out = e.process_with_market(
+                ClientMessage::SubmitOrder(order_with(
+                    &format!("slip-{side:?}-{i}"),
+                    side,
+                    "BTCUSDT",
+                    1,
+                    Some(Decimal::from(100)),
+                )),
+                1,
+                Some(MarketReading {
+                    last_px: Decimal::from(last_px),
+                    ts_ns: 0,
+                    band_ticks,
+                }),
+            );
+            price(&out)
+        };
+        for side in [Side::Buy, Side::Sell] {
+            let mut slipped = 0;
+            for i in 0..64 {
+                assert_eq!(
+                    filled(CONTROL_LAST_PX, 0, side, i),
+                    Decimal::from(CONTROL_LAST_PX),
+                    "a zero band fills a market {side:?} at the last print exactly, \
+                     not at the stated price"
+                );
+                let banded = filled(100, reading.band_ticks, side, i);
+                if banded == reading.last_px {
+                    continue;
+                }
+                slipped += 1;
+                match side {
+                    Side::Buy => assert!(
+                        banded > reading.last_px,
+                        "a market buy pays UP from the last print: {banded}"
+                    ),
+                    Side::Sell => assert!(
+                        banded < reading.last_px,
+                        "a market sell is paid DOWN from the last print: {banded}"
+                    ),
+                }
+            }
+            assert!(
+                slipped > 0,
+                "some {side:?} in the fixture must slip, or the band moves nothing"
+            );
+        }
     }
 
     #[test]
@@ -9051,6 +9230,83 @@ mod tests {
             "the cancel that frees the hold is where the arm lands"
         );
         assert!(e.armed.is_empty());
+    }
+
+    /// The default seed's grid, read off the ENGINE rather than off the
+    /// function that produced it.
+    ///
+    /// `mogwai-protocol` cannot depend on `mogwai-engine`, so a test over there
+    /// named for the engine's seed can only compare `default_instruments()`
+    /// against a copy of its own literals; this is where both sides exist. The
+    /// referent is the engine's own validation, which reads `price_increment`
+    /// and `size_increment` out of the seeded definition - so widening either
+    /// increment in `default_instruments` moves what `Engine::new` ACCEPTS, and
+    /// that is what is pinned here.
+    #[test]
+    fn the_default_seed_puts_the_engine_on_a_btcusdt_cent_and_satoshi_grid() {
+        let seed = default_instruments();
+        assert_eq!(seed.len(), 1, "the default set is BTCUSDT alone");
+        assert_eq!(seed[0].symbol.as_ref(), "BTCUSDT");
+
+        let cent = Decimal::new(1, 2);
+        let satoshi = Decimal::new(1, 8);
+        let submit = |id: &str, quantity: Decimal, price: Decimal| {
+            let mut e = Engine::new();
+            e.process(
+                ClientMessage::SubmitOrder(order_decimal(
+                    id,
+                    Side::Buy,
+                    "BTCUSDT",
+                    quantity,
+                    Some(price),
+                )),
+                1,
+            )
+        };
+
+        // ON the grid: accepted, so the refusals below are about the increment
+        // and not about some other rule the fixture tripped.
+        for (id, quantity, price) in [
+            ("on-grid", satoshi, Decimal::from(100)),
+            ("on-grid-px", Decimal::ONE, Decimal::from(100) + cent),
+        ] {
+            assert!(
+                matches!(
+                    submit(id, quantity, price)[0],
+                    ServerMessage::OrderAccepted { .. }
+                ),
+                "{id} sits on the seeded grid"
+            );
+        }
+
+        // A TENTH of each increment: refused, by the exact rule that reads it.
+        // The refusal is read from the event rather than through
+        // `reject_reason`, whose panic on an ACCEPTED order would name the
+        // helper's shape instead of the grid this test is about.
+        let refusal = |out: &[ServerMessage], what: &str| match out {
+            [ServerMessage::OrderRejected { reason, .. }] => reason.clone(),
+            other => panic!("the seeded {what} increment must refuse a tenth of itself: {other:?}"),
+        };
+        assert_eq!(
+            refusal(
+                &submit(
+                    "sub-cent",
+                    Decimal::ONE,
+                    Decimal::from(100) + Decimal::new(1, 3)
+                ),
+                "price"
+            ),
+            "price violates price increment",
+            "the seeded price increment is a cent"
+        );
+        assert_eq!(
+            refusal(
+                &submit("sub-satoshi", Decimal::new(1, 9), Decimal::from(100)),
+                "size"
+            ),
+            "quantity violates size increment",
+            "the seeded size increment is a satoshi"
+        );
     }
 
     #[test]
