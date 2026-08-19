@@ -50,7 +50,10 @@ impl SweepShape {
     /// in the 2026-08 hunt and MEASURED NO IMPROVEMENT - the caller rescales the
     /// mean per sweep, so the cache would miss on nearly every call. Do not
     /// re-propose it without a measurement naming the decision it changes.
-    pub(super) fn new(children_mean: f64, single_frac: f64, levels_mean: f64) -> Self {
+    /// `pub` rather than `pub(super)` because the amendment-only transcript
+    /// regenerator is an example target outside the crate - see
+    /// `examples/regenerate_arrival_transcript.rs` for why it may not be a test.
+    pub fn new(children_mean: f64, single_frac: f64, levels_mean: f64) -> Self {
         let children_mean = children_mean.max(1.0 + f64::EPSILON);
         let (q, m) = if single_frac < 1.0 / children_mean {
             (0.0, children_mean)

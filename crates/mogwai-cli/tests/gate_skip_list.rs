@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The gate profile's skip list, held against the tests it actually matches.
+//! The gate profile's skip list, held against the tests it actually matches -
+//! and, on the same scan, the one thing a running test may never do to the tree.
 //!
 //! `brokkr.toml`'s gate profile turns on `include_ignored`, which pulls in two
 //! unrelated families: the socket-backed tests, which the gate WANTS, and a
@@ -421,6 +422,21 @@ fn count(line: &str, ch: char) -> usize {
 /// unterminated block comment or string is a file this parser cannot read, so it
 /// panics rather than returning a truncated view of it.
 fn strip_comments(path: &Path, text: &str) -> String {
+    strip(path, text, true)
+}
+
+/// The same stripper, KEEPING literal contents.
+///
+/// The name-reconstructing scan wants literals blanked, because every counter it
+/// runs reads punctuation. The fixture-write scan below wants the opposite: the
+/// path it looks for lives INSIDE a string, and blanking it would make that
+/// check pass for free - a scanner that cannot see the thing it forbids. Comments
+/// are stripped either way, so prose discussing a fixture path cannot trip it.
+fn strip_comments_keeping_literals(path: &Path, text: &str) -> String {
+    strip(path, text, false)
+}
+
+fn strip(path: &Path, text: &str, blank_literals: bool) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut at = 0usize;
@@ -462,7 +478,7 @@ fn strip_comments(path: &Path, text: &str) -> String {
             continue;
         }
         if let Some(end) = raw_string_end(bytes, at) {
-            blank(&mut out, text, at, end);
+            emit_literal(&mut out, text, at, end, blank_literals);
             at = end;
             continue;
         }
@@ -473,7 +489,7 @@ fn strip_comments(path: &Path, text: &str) -> String {
                     path.display()
                 )
             });
-            blank(&mut out, text, at, end);
+            emit_literal(&mut out, text, at, end, blank_literals);
             at = end;
             continue;
         }
@@ -484,7 +500,7 @@ fn strip_comments(path: &Path, text: &str) -> String {
                     path.display()
                 )
             });
-            blank(&mut out, text, at, end);
+            emit_literal(&mut out, text, at, end, blank_literals);
             at = end;
             continue;
         }
@@ -507,6 +523,15 @@ fn strip_comments(path: &Path, text: &str) -> String {
 fn blank(out: &mut String, text: &str, from: usize, to: usize) {
     for ch in text[from..to].chars() {
         out.push(if ch == '\n' { '\n' } else { ' ' });
+    }
+}
+
+/// A literal's span, blanked or kept verbatim.
+fn emit_literal(out: &mut String, text: &str, from: usize, to: usize, blank_it: bool) {
+    if blank_it {
+        blank(out, text, from, to);
+    } else {
+        out.push_str(&text[from..to]);
     }
 }
 
@@ -811,11 +836,237 @@ fn every_release_only_filter_is_skipped_by_the_gate() {
     }
 }
 
+/// THE COMPANION INVARIANT, and the one that is genuinely SILENT: no code the
+/// test binaries compile may write a committed fixture.
+///
+/// WHY THIS IS THE CHECK AND "EVERY IGNORED TEST OWES A SKIP ENTRY" IS NOT. The
+/// gate sets `include_ignored` ON PURPOSE, so an `#[ignore]`d test with no skip
+/// entry RUNS - and for most of them that is the intent, not an omission. The
+/// socket-backed adapter binaries are the whole reason the flag is on; the two
+/// `/trades` sizing instruments in `mogwai-server`'s `http` module are ignored,
+/// unskipped and finish in milliseconds. A check demanding an entry for every
+/// ignored test would refuse both families and would have to grow an exception
+/// list, which is the shape this arc keeps paying for. And where a missing entry
+/// IS a defect - a walk past the 20-second watchdog, a corpus no clone carries -
+/// the gate says so LOUDLY, red, naming the test. That direction needs no
+/// scanner.
+///
+/// What the gate cannot see is a test that runs, passes, and REWRITES A
+/// COMMITTED PIN on its way through, because the tree it rewrites is the tree
+/// the next run reads. That is not hypothetical: it was
+/// `regenerate_arrival_transcripts_amendment_only`, an `#[ignore]`d test in
+/// `mogwai-data` that wrote `tests/fixtures/arrival-transcript-shot_noise.json`,
+/// the file `arrival_transcripts_replay_bit_exact` pins through `include_str!`.
+/// A kernel change would have failed the pin and rewritten the fixture in the
+/// SAME run; the re-run would have read the new fixture and reported green. It
+/// ran on every full gate for as long as it existed and cost nothing only
+/// because its output happened not to have moved yet. It is an example target
+/// now - compiled by every lane, run by none.
+///
+/// THE LINE IS `tests/fixtures/`, and it is drawn by what the directory MEANS
+/// rather than around any one file. A fixture is a committed input: the suite
+/// reads it and a deliberate tool produces it. A GOLDEN (`tests/golden/`) is a
+/// different contract - `mogwai-server`'s `fill_distribution_matches_the_golden`
+/// writes one, but only when the file is ABSENT, and it panics after writing so
+/// the run can never be green on a fresh bless. That shape is safe and stays
+/// legal here. If a golden ever grows an unguarded writer, the rule it needs is
+/// its own, not a widening of this one.
+///
+/// THE SCANNER IS EXEMPT FROM ITSELF, and structurally so rather than by
+/// convenience: a scanner has to name every construct it forbids and has to
+/// name the directory it protects, so its own source matches its own rule by
+/// construction, and so does the fixture block that proves it bites. The
+/// exemption is one file, matched by name, and it is the reason the pure
+/// `fixture_write_offenders` below is tested on synthetic samples in
+/// `mod parser` instead of resting on what the tree happens to contain.
+#[test]
+fn no_test_binary_writes_a_committed_fixture() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    let files = source_files(&root);
+    // A SCAN THAT READS NOTHING FORBIDS NOTHING, and it reports green while
+    // doing it. Same floor the name scan carries, for the same reason.
+    assert!(
+        files.len() > 100,
+        "this scan found only {} source files under crates/, which is too few for this workspace - \
+         it is reading the wrong tree, and a scan that sees nothing accepts every writer there is",
+        files.len()
+    );
+    let this_file = Path::new(file!())
+        .file_name()
+        .expect("this file has a name")
+        .to_owned();
+    for (path, _) in files {
+        if path.file_name() == Some(this_file.as_os_str()) {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).expect("a scanned source file reads");
+        // Comments stripped so the paragraph above - which necessarily names the
+        // path - cannot trip a check that is about CODE; literals KEPT, because
+        // the path being looked for only ever appears inside one.
+        let code = strip_comments_keeping_literals(&path, &raw);
+        let shown = path.strip_prefix(&root).unwrap_or(&path).display();
+        offenders.extend(fixture_write_offenders(&format!("{shown}"), &code));
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "code compiled into a test binary writes a committed fixture:\n{}\n\nA fixture is a \
+         committed INPUT - the suite reads it, a deliberate tool produces it. A writer living in \
+         the suite re-blesses the pin it is supposed to be held against, and it does so on the \
+         very run where the pin failed, which is the one run that must not rewrite anything. \
+         `#[ignore]` does not keep it out: the gate profile sets `include_ignored` deliberately. \
+         Move the generator to an example target or a CLI subcommand, the way \
+         `mogwai-data/examples/regenerate_arrival_transcript.rs` was moved.",
+        offenders.join("\n")
+    );
+}
+
+/// Every construct in `code` that could put bytes on disk with a fixture path
+/// in the same scope, reported as one line each.
+///
+/// SCOPE IS THE ENCLOSING FUNCTION, not a byte window. The first cut of this
+/// check searched a fixed 1200 bytes BEFORE the construct, which was wrong in
+/// both directions at once: a path built after the write (or through a helper
+/// whose definition sits further up) was invisible, and an `include_str!` block
+/// a few hundred bytes above an unrelated `File::create` was a false positive
+/// pointing at the wrong line. A function body is the unit the defect actually
+/// lives in, so that is the unit searched, and there is no tunable left.
+///
+/// A path declared OUTSIDE every function - the idiomatic
+/// `const FIXTURE: &str = ...` at module top - puts the file itself in scope,
+/// because such a constant is reachable from every function in it.
+///
+/// WHAT THIS DOES NOT CATCH, stated rather than implied. The list below is
+/// literal constructs; a `write!`/`writeln!` into a handle some helper opened
+/// is not among them, because those two macros are overwhelmingly used to
+/// format into a `String` and a rule flagging them would be an exception list
+/// on day one. The list DOES cover the tokio spellings for free -
+/// `tokio::fs::write(` contains `fs::write(`, `tokio::fs::File::create(`
+/// contains `File::create(` - and it covers `Command::new(`, because a test
+/// spawning the shipped binary with a fixture path on its argv is the one
+/// non-`fs` way this workspace could write one.
+fn fixture_write_offenders(shown: &str, code: &str) -> Vec<String> {
+    const WRITES: [&str; 9] = [
+        "fs::write(",
+        "File::create(",
+        "File::options(",
+        "OpenOptions",
+        "fs::copy(",
+        "fs::rename(",
+        "fs::remove_file(",
+        "fs::remove_dir_all(",
+        "Command::new(",
+    ];
+    const FIXTURES: &str = "tests/fixtures";
+
+    let spans = fn_body_spans(code);
+    // A fixture path that sits in no function body at all is in scope for the
+    // whole file.
+    let module_level = code
+        .match_indices(FIXTURES)
+        .any(|(at, _)| !spans.iter().any(|&(from, to)| from <= at && at < to));
+
+    let mut offenders = Vec::new();
+    for construct in WRITES {
+        for (at, _) in code.match_indices(construct) {
+            let in_scope = module_level
+                || spans
+                    .iter()
+                    .filter(|&&(from, to)| from <= at && at < to)
+                    .any(|&(from, to)| code[from..to].contains(FIXTURES));
+            if in_scope {
+                // `lines()` yields one FEWER than the construct's line whenever
+                // the slice ends on the newline before it; counting the
+                // newlines is unconditionally right.
+                let line = code[..at].matches('\n').count() + 1;
+                let where_ = if module_level {
+                    "a module-level fixture path in scope"
+                } else {
+                    "a fixture path in the same function"
+                };
+                offenders.push(format!(
+                    "  {shown}:{line} reaches {construct} with {where_}"
+                ));
+            }
+        }
+    }
+    offenders.sort();
+    offenders
+}
+
+/// The byte span of every `fn` body in comment-stripped, literal-KEEPING code.
+///
+/// Literals are kept, so the brace walk has to skip them itself or a lone `{`
+/// inside a string unbalances it. Spans nest, and a closure body following an
+/// `fn` POINTER type is recorded as if it were a function - both are harmless
+/// here, because every enclosing span is consulted and a spurious inner span is
+/// a subset of the real one.
+fn fn_body_spans(code: &str) -> Vec<(usize, usize)> {
+    let bytes = code.as_bytes();
+    let mut spans = Vec::new();
+    let mut open: Vec<(usize, bool)> = Vec::new();
+    let mut pending_fn = false;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        if let Some(end) = raw_string_end(bytes, at) {
+            at = end;
+            continue;
+        }
+        if bytes[at] == b'"' {
+            match quoted_end(bytes, at, b'"') {
+                Some(end) => at = end,
+                None => break,
+            }
+            continue;
+        }
+        if bytes[at] == b'\'' && is_char_literal(bytes, at) {
+            match quoted_end(bytes, at, b'\'') {
+                Some(end) => at = end,
+                None => break,
+            }
+            continue;
+        }
+        match bytes[at] {
+            b'{' => {
+                open.push((at, pending_fn));
+                pending_fn = false;
+            }
+            b'}' => {
+                if let Some((from, was_fn)) = open.pop()
+                    && was_fn
+                {
+                    spans.push((from, at + 1));
+                }
+            }
+            b';' => pending_fn = false,
+            b'f' if bytes[at..].starts_with(b"fn")
+                && !at.checked_sub(1).is_some_and(|before| {
+                    bytes[before].is_ascii_alphanumeric() || bytes[before] == b'_'
+                })
+                && !bytes
+                    .get(at + 2)
+                    .is_some_and(|next| next.is_ascii_alphanumeric() || *next == b'_') =>
+            {
+                pending_fn = true;
+                at += 2;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    spans
+}
+
 /// THE PARSER'S OWN GATES. Everything above rests on the scan seeing the tree
 /// as libtest does, and the two ways it silently stopped doing that are pinned
 /// here as fixtures rather than left to be rediscovered on the tree.
 mod parser {
-    use super::{Scan, TestFn, scan_file, strip_comments};
+    use super::{
+        Scan, TestFn, fixture_write_offenders, scan_file, strip_comments,
+        strip_comments_keeping_literals,
+    };
     use std::{collections::BTreeMap, path::Path};
 
     fn scan(text: &str) -> Scan {
@@ -917,6 +1168,95 @@ mod parser {
             names(&scan),
             vec!["inner::first".to_string(), "second".to_string()]
         );
+    }
+
+    fn offenders(text: &str) -> Vec<String> {
+        let path = Path::new("fixture.rs");
+        fixture_write_offenders("fixture.rs", &strip_comments_keeping_literals(path, text))
+    }
+
+    /// THE TWIN'S REASON FOR EXISTING, pinned so nobody collapses it back.
+    ///
+    /// `strip_comments` and `strip_comments_keeping_literals` differ by one
+    /// bool, and merging them is the obvious simplification. It would also be
+    /// silent: the fixture-write scan looks for a path that only ever appears
+    /// INSIDE a string, so a blanking stripper makes that scan pass
+    /// unconditionally forever, and the source-file floor stays green because it
+    /// counts files rather than matches. This is the whole guard, in two lines.
+    #[test]
+    fn the_literal_keeping_stripper_keeps_literals_and_still_drops_comments() {
+        let path = Path::new("fixture.rs");
+        let kept = strip_comments_keeping_literals(path, "let x = \"tests/fixtures/a.json\";\n");
+        assert!(
+            kept.contains("tests/fixtures"),
+            "a stripper that blanks literals blinds the fixture-write scan completely: {kept:?}"
+        );
+        let blanked = strip_comments(path, "let x = \"tests/fixtures/a.json\";\n");
+        assert!(
+            !blanked.contains("tests/fixtures"),
+            "the name scan still wants literals gone: {blanked:?}"
+        );
+        let commented = strip_comments_keeping_literals(path, "// tests/fixtures/a.json\n");
+        assert!(
+            !commented.contains("tests/fixtures"),
+            "prose about a fixture path must never trip a check about code: {commented:?}"
+        );
+    }
+
+    /// THE SCAN BITES. Until this existed the only evidence was a manual text
+    /// edit recorded in a note, which is evidence that expires.
+    #[test]
+    fn a_formatted_fixture_path_reaching_a_write_is_flagged() {
+        let found = offenders(concat!(
+            "mod inner {\n",
+            "    #[test]\n",
+            "    fn regenerate() {\n",
+            "        let path = format!(\"{root}/crates/x/tests/fixtures/a.json\");\n",
+            "        std::fs::write(&path, bytes).expect(\"written\");\n",
+            "    }\n",
+            "}\n",
+        ));
+        assert_eq!(
+            found.len(),
+            1,
+            "the shape the rule was written for must be flagged exactly once: {found:?}"
+        );
+        assert!(found[0].contains("fixture.rs:5"), "{found:?}");
+    }
+
+    /// THE DIRECTION THE BYTE-WINDOW FIRST CUT COULD NOT SEE: a path declared
+    /// once at module top, which is how anyone would actually write this.
+    #[test]
+    fn a_module_level_fixture_constant_puts_the_whole_file_in_scope() {
+        let found = offenders(concat!(
+            "const FIXTURE: &str = \"tests/fixtures/a.json\";\n",
+            "fn writer() {\n",
+            "fs::write(FIXTURE, b\"x\").unwrap();\n",
+            "}\n",
+        ));
+        assert_eq!(found.len(), 1, "{found:?}");
+        // Column zero: `lines()` would have reported 2 here.
+        assert!(found[0].contains("fixture.rs:3"), "{found:?}");
+    }
+
+    /// AND THE FALSE POSITIVE THE WINDOW PRODUCED: a test that READS fixtures
+    /// through `include_str!` sits a few hundred bytes above any number of
+    /// unrelated scratch writes. Scope is the function, so they do not meet.
+    #[test]
+    fn a_fixture_read_does_not_convict_the_next_function() {
+        let found = offenders(concat!(
+            "mod inner {\n",
+            "    #[test]\n",
+            "    fn reads() {\n",
+            "        const V: &str = include_str!(\"../tests/fixtures/a.json\");\n",
+            "    }\n",
+            "    #[test]\n",
+            "    fn stages_a_scratch_file() {\n",
+            "        let f = std::fs::File::create(\"target/scratch.json\").unwrap();\n",
+            "    }\n",
+            "}\n",
+        ));
+        assert!(found.is_empty(), "{found:?}");
     }
 }
 

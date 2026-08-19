@@ -21,8 +21,10 @@ afterwards.
 Everything in this scope is pure computation - no sockets, no threads, no sleeps,
 no ports, no shared temp paths. THERE IS NOT A SINGLE FIXED-DURATION WAIT OR
 WALL-CLOCK BUDGET ASSERTION ANYWHERE IN `mogwai-data`, so the whole "waits on a
-duration instead of a condition" family is absent here. Only two tests touch the
-filesystem at runtime, and one of them is a serious defect.
+duration instead of a condition" family is absent here. Only two tests touched
+the filesystem at runtime, and one of them was a serious defect (finding 1,
+closed in round 1: no test in the tree writes a committed fixture any more, and
+nothing may again).
 
 Measured in dev, serial:
 
@@ -32,41 +34,6 @@ Measured in dev, serial:
 | `run_seeded_tape_dwell_is_bounded` | 6.69 s |
 | `dwell_is_bounded_across_run_seeds` (`#[ignore]`d AND skipped) | 6.71 s |
 | `realism` | 6.47 s |
-
-## 1. `regenerate_arrival_transcripts_amendment_only` runs in the gate and silently re-blesses a committed pin
-
-`crates/mogwai-data/src/generated/arrival.rs:1792`. It is `#[ignore]`d for an
-ENVIRONMENT/POLICY reason ("sanctioned only by a signed amendment"), and it is
-NOT in the `skip` list in `brokkr.toml`. The gate sets `include_ignored`, so it
-runs on every `brokkr check --gate`. It does:
-
-```rust
-let path = format!("{}/tests/fixtures/arrival-transcript-{file_stem}.json", env!("CARGO_MANIFEST_DIR"));
-std::fs::write(&path, ...)
-```
-
-The hunter ran it and diffed: the fixture is byte-identical today, so the tree
-stays clean and nobody has noticed. The failure mode is exactly the one the pin
-exists to prevent:
-
-- A kernel change lands. Run 1: `arrival_transcripts_replay_bit_exact` fails
-  (correct) - AND IN THE SAME RUN the regenerate test overwrites
-  `arrival-transcript-shot_noise.json` with the new output.
-- Run 2 recompiles, `include_str!` picks up the rewritten fixture, and the pin is
-  green. One re-run converts a real regression into a blessing.
-
-The whole doc comment ("running this outside an amendment defeats the pin's whole
-purpose; that is why it is `#[ignore]`d") is built on the assumption that
-`#[ignore]` keeps it out of the suite. It does not, in this workspace, by design.
-Contrast `mogwai-server/src/fill_golden.rs`, which gets this right: it writes
-only when the file is ABSENT, and panics after writing so the run can never be
-green on a fresh bless.
-
-Fix: this should not be a `#[test]` at all. Make it an example target or a CLI
-subcommand (`mogwai gen --type arrival-transcript`). A regeneration tool living
-in the test binary is a landmine that the gate's own `include_ignored` steps on.
-Minimum stopgap is adding the name to `skip`, but that leaves a file-writing test
-one config edit away from arming again.
 
 ## 2. `session_modulation_reproduces_curves` - the slowest test in the workspace, `#[ignore]`d for nothing, and closest to the watchdog
 
@@ -104,24 +71,24 @@ Consequence: the only multi-seed dwell gate the repo has is never run, while
 remove it from `skip`, and get eight seeds of coverage for the same wall clock.
 This directly addresses "a single seed passing is not evidence the band holds".
 
-## 4. The `skip`-list invariant needs the OTHER direction checked too
+## 4. Ignore reasons are free text, so no scan can classify them
 
-`brokkr.toml` states the invariant as "every pattern must match ONLY `#[ignore]`d
-tests" and warns that nothing detects a missing entry. Both halves are currently
-violated in the same file:
+The rest of this finding closed in round 1: the proposed "every ignored test owes
+a skip entry" rule was refused with evidence and the one genuinely silent
+sub-case was enforced instead. The reasoning lives on
+`gate_skip_list::no_test_binary_writes_a_committed_fixture` and in the
+carry-forward; it is not repeated here.
 
-- IGNORED BUT ABSENT FROM `skip`: `session_modulation_reproduces_curves`,
-  `regenerate_arrival_transcripts_amendment_only` (mogwai-data);
-  `worst_case_history_page_bytes`, `history_admission_overhead`
-  (mogwai-server/src/http.rs - another hunter's crate, same class).
-- SKIPPED ON A FALSE COST: `dwell_is_bounded_across_run_seeds`.
+What is left open, for a later round if it wants it: an ignore REASON is free
+text, so nothing can tell a COST ignore from an ENVIRONMENT one, and that
+classification is what any stronger rule in this area would need. Exactly one
+`#[ignore]` in the tree carries no reason at all -
+`session_modulation_reproduces_curves`, which is finding 2's test and finding
+2's call to make.
 
-This is enumerable and should be enforced mechanically rather than by comment. A
-test in `mogwai-data` (or a brokkr check) can parse every `#[ignore]` in the tree,
-parse the `skip` list, and assert the two agree - one side listing a non-ignored
-test, the other holding an ignored test with no entry. The config comment already
-predicts the failure ("nothing detects the omission"); three live instances say
-the prediction came true.
+`dwell_is_bounded_across_run_seeds`'s skip entry (the "skipped on a false cost"
+half) was left alone: finding 3 owns that test, and moving its entry before that
+decision is made would just have to move back.
 
 ## 5. Conformance "vectors" V4-V8 are green by construction
 

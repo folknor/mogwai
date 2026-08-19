@@ -656,8 +656,25 @@ mod tests {
         require_clean_tree()
             .expect("this pin needs a clean tree: commit or stash before running it");
         // Untracked at the repository root, so `git status --porcelain` reports
-        // it and no .gitignore rule can hide it.
+        // it and no .gitignore rule can hide it. `target/` cannot serve here:
+        // it is ignored, so a probe planted there would not dirty the tree and
+        // the pin would stop biting.
+        //
+        // WHICH MAKES THE CLEANUP LOAD-BEARING, and a straight-line
+        // `remove_file` after the call is not it: a panic inside `run_with` or
+        // inside the planting closure unwinds past it and LEAVES the probe in
+        // the tree. This same test is the one documented as refusing a dirty
+        // tree by design, so a leaked probe poisons every later run of the
+        // suite - the failure would present as an unrelated refusal. The guard
+        // removes it on the unwind path too.
+        struct Sweep(PathBuf);
+        impl Drop for Sweep {
+            fn drop(&mut self) {
+                drop(std::fs::remove_file(&self.0));
+            }
+        }
         let probe = root.join("arrival-control-midrun-probe.txt");
+        let sweep = Sweep(probe.clone());
         let out = root.join("target/arrival-control-midrun.json");
         drop(std::fs::remove_file(&out));
         let planted = probe.clone();
@@ -685,7 +702,7 @@ mod tests {
                 })),
             },
         );
-        drop(std::fs::remove_file(&probe));
+        drop(sweep);
         let err = result.expect_err("a tree that moved mid-run must unbind the artifact");
         assert!(
             err.to_string().contains("the artifact is unbound"),

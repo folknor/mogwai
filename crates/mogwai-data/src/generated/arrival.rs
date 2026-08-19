@@ -837,7 +837,7 @@ mod tests {
     use rand::SeedableRng;
     use rand_distr::Poisson;
     use serde::Deserialize;
-    use serde_json::{Value, json};
+    use serde_json::Value;
 
     use super::super::{Fingerprint, GeneratedSource, GeneratorScalars};
     use super::*;
@@ -1777,85 +1777,17 @@ mod tests {
         }
     }
 
-    /// AMENDMENT-ONLY generation of the shot-noise layer-2 transcript fixture.
-    ///
-    /// The transcripts are committed regression pins and are NEVER regenerated
-    /// to match a later change - except under a signed section 17 amendment
-    /// that explicitly authorizes a one-time replacement, which must be cited
-    /// in the commit that carries the new fixtures. Last sanctioned use: the
-    /// 2026-08-10 screen-recalibration and family-extension amendment
-    /// (`ARRIVAL_KERNEL_VERSION` 3). Running this outside an amendment defeats
-    /// the pin's whole purpose; that is why it is `#[ignore]`d and named the
-    /// way it is.
-    #[test]
-    #[ignore = "regenerates committed regression pins; sanctioned only by a signed amendment"]
-    fn regenerate_arrival_transcripts_amendment_only() {
-        let fp = Fingerprint::from_repo_json();
-        let families: [(&str, &str, Value); 1] = [(
-            "shot_noise",
-            "shot_noise",
-            json!({"m": 0.5, "k": 1.0, "tau_s": 46.4158883361278}),
-        )];
-        for (file_stem, family, params) in families {
-            let seed = 201_u64;
-            let origin_ns = 0_u64;
-            let kernel = transcript_kernel(family, &params);
-            let mut cadence_rng = ChaCha12Rng::seed_from_u64(mogwai_protocol::seeds::splitmix64(
-                seed ^ 0x6D6F6777_61693132,
-            ));
-            let mut state = ArrivalState::new(&kernel, origin_ns, &mut cadence_rng);
-            let environment = ArrivalEnv::for_profile(&fp.session_profile, None, 1.0, origin_ns);
-            let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
-            scalars.arrival = Some(transcript_config(family, &params));
-            let shape = SweepShape::new(
-                scalars.children_mean,
-                scalars.children_single_frac,
-                scalars.levels_mean,
-            );
-            let base_mean_s = scalars.mean_event_duration_s;
-            let mut from_ns = origin_ns;
-            let mut records = Vec::with_capacity(10_000);
-            for _ in 0..10_000 {
-                let draw = kernel
-                    .next_parent(
-                        &mut state,
-                        from_ns,
-                        base_mean_s,
-                        &shape,
-                        &environment,
-                        RuntimeModifiers::NEUTRAL,
-                        &mut cadence_rng,
-                    )
-                    .expect("open test exposure");
-                from_ns = draw.next_from_ns;
-                records.push(json!({
-                    "child_count": draw.child_count,
-                    "latent_x_bits": draw.latent_x.to_bits(),
-                    "parent_ts_ns": draw.parent_ts_ns,
-                }));
-            }
-            let transcript = json!({
-                "correctness_claim": "none",
-                "exposure": "fixed fully-open fingerprint session profile used by the kernel/GeneratedSource parity harness",
-                "family": family,
-                "kind": "regression-transcript",
-                "origin_ns": origin_ns,
-                "parameter_point": "frozen coarse-grid point nearest the family domain centre",
-                "params": params,
-                "records": records,
-                "seed": seed,
-            });
-            let path = format!(
-                "{}/tests/fixtures/arrival-transcript-{file_stem}.json",
-                env!("CARGO_MANIFEST_DIR")
-            );
-            std::fs::write(
-                &path,
-                serde_json::to_string_pretty(&transcript).expect("serializable transcript") + "\n",
-            )
-            .expect("fixture written");
-        }
-    }
+    // THE AMENDMENT-ONLY TRANSCRIPT REGENERATOR IS NOT HERE, AND MUST NEVER
+    // COME BACK. It was `regenerate_arrival_transcripts_amendment_only`, an
+    // `#[ignore]`d test in this module that wrote
+    // `tests/fixtures/arrival-transcript-shot_noise.json` - the pin
+    // `arrival_transcripts_replay_bit_exact` above reads through `include_str!`.
+    // The gate profile sets `include_ignored` deliberately, so `#[ignore]` did
+    // not keep it out of the suite: a kernel change would have failed the pin
+    // and rewritten the fixture in the SAME run, and the next run would have
+    // read the rewritten fixture and reported green. It lives in
+    // `examples/regenerate_arrival_transcript.rs` now, which every lane COMPILES
+    // and none RUNS, and it refuses to write without a cited amendment.
 
     #[test]
     fn parent_draw_skips_a_full_weekend_closure() {

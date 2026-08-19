@@ -43,5 +43,12 @@ name = "fill_walk_bench"
 name = "arrival_walk_bench"
 required-features = ["hotpath"]
 
+# The amendment-only regenerator for the committed arrival transcript pins.
+# It is an example rather than an `#[ignore]`d test BECAUSE the gate profile
+# sets `include_ignored`, so an ignored test that writes a fixture is run by
+# every full gate - see the file's own header.
+[[example]]
+name = "regenerate_arrival_transcript"
+
 [lints]
 workspace = true

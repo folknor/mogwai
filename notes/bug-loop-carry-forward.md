@@ -807,6 +807,105 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
 - `target/tmp` still accumulates `*d-*.log`, `bad-*.toml` and `stale-*.pid`.
   Recorded on the lifecycle document, still outside every arc.
 
+## The tape document, round 1: the gate runs ignored tests, and one of them wrote
+
+- `crates/mogwai-data/examples/regenerate_arrival_transcript.rs` IS THE
+  AMENDMENT-ONLY TRANSCRIPT REGENERATOR, and it may not go back into a test
+  binary. It was `regenerate_arrival_transcripts_amendment_only`, an
+  `#[ignore]`d test whose own doc comment justified itself on `#[ignore]`
+  keeping it out of the suite. IT DID NOT: the gate profile sets
+  `include_ignored` deliberately, so the regenerator ran on every
+  `brokkr check --gate` and rewrote
+  `tests/fixtures/arrival-transcript-shot_noise.json` - the file
+  `arrival_transcripts_replay_bit_exact` pins through `include_str!`. Today's
+  output has not moved, which is the only reason nobody saw it. An example
+  target is COMPILED by every lane and RUN by none, which is the property
+  `#[ignore]` was mistakenly thought to give.
+  - THE PORT WAS VERIFIED BYTE-FOR-BYTE before anything else: running the
+    example with the kernel untouched leaves the fixture git-clean. The three
+    bits that had to move for it to live outside the crate are
+    `SweepShape::new` going `pub(super)` to `pub`, the shot-noise params
+    becoming a `const`, and the cadence tag being spelled out; nothing else.
+  - IT REFUSES WITHOUT `--amendment "<citation>"` and exits 2. A regeneration
+    tool that runs on a bare invocation is one shell-history recall from doing
+    the damage by accident.
+  - BITE-CHECKED AS THE SCENARIO ITSELF, both halves. With
+    `-rng.random::<f64>().ln()` text-edited to `* 1.000_001` in `next_parent`,
+    `brokkr test -p mogwai-data arrival_transcripts_replay_bit_exact --debug`
+    (which passes `--include-ignored`, i.e. the gate's own shape) FAILS on
+    `wall_mmpp/stage-a timestamp 0` and the fixture stays clean; running the
+    example under the same perturbation rewrites the transcript's 10,000
+    records, which is what used to happen inside that failing run. THE RECORD
+    COUNT IS 10,000, not the 17,861 first written here - that number was the
+    diff's LINE count, and `RECORDS` in the example and
+    `transcript.records.len()` in the pin both say 10,000.
+- `gate_skip_list::no_test_binary_writes_a_committed_fixture` IS THE ENFORCER,
+  and it is deliberately NOT the rule the report asked for. "Every ignored test
+  owes a skip entry" is FALSE and was refused with measurement: the four
+  socket-backed adapter binaries and `mogwai-server`'s two `/trades` sizing
+  instruments are all ignored, unskipped, and are exactly what `include_ignored`
+  is for. And the cases where a missing entry IS a defect - a walk past the
+  watchdog, a corpus no clone carries - make the gate go RED naming the test, so
+  that direction is self-detecting. THE ONLY SILENT CASE IS A TEST THAT MUTATES
+  THE TREE IT IS BEING JUDGED AGAINST, and that is what the check forbids: a
+  write construct under `crates/*/src` or `crates/*/tests` reached with a
+  `tests/fixtures` path in scope. Bite-checked by planting the old writer back
+  in `arrival.rs`; it fails naming file and line.
+  - `tests/golden/` IS OUT OF SCOPE ON PURPOSE, not by exception.
+    `mogwai-server`'s `fill_distribution_matches_the_golden` writes its golden
+    only when the file is ABSENT and panics after writing, so a fresh bless can
+    never be green. That shape is safe; a fixture regenerator that overwrites
+    unconditionally is not. If a golden ever grows an unguarded writer it owes
+    its own rule rather than a widening of this one.
+  - `strip_comments` IN THAT FILE NOW HAS A LITERAL-KEEPING TWIN, and the two
+    callers want opposite things: the name scan needs literals BLANKED (every
+    counter it runs reads punctuation), the fixture scan needs them KEPT (the
+    path it forbids only ever appears inside a string, so blanking would make
+    the check pass for free). Comments are stripped either way, which is what
+    lets the file's own prose name the path it forbids. THE TWIN IS THE
+    THIRTEENTH GUARD-THAT-CAN-STOP-GUARDING IN THIS ARC: the two functions
+    differ by one bool, collapsing them is an obvious simplification, and doing
+    it makes the fixture scan pass unconditionally forever while the
+    source-file floor stays green because it counts FILES rather than matches.
+    `parser::the_literal_keeping_stripper_keeps_literals_and_still_drops_comments`
+    is the pin, and it fails within milliseconds when the twin is collapsed.
+  - SCOPE IS THE ENCLOSING FUNCTION, NOT A BYTE WINDOW. The first cut searched
+    1200 bytes BEFORE the construct, which was wrong in both directions at
+    once: a module-level `const FIXTURE: &str = ...` - the idiomatic way anyone
+    would actually write this - was invisible, and `arrival.rs`'s dozen
+    `include_str!` fixture READS would have convicted any unrelated
+    `File::create` landing a few hundred bytes later, naming the wrong line.
+    The window is gone; `fn_body_spans` walks braces (skipping literals, which
+    are kept in this view) and a construct is judged against every enclosing
+    span. There is no tunable left to be wrong.
+  - THE SCANNER IS EXEMPT FROM ITSELF, by one file-name match, and
+    structurally: a scanner has to name every construct it forbids and the
+    directory it protects, so its own source and its own fixture block match
+    its own rule by construction. That is why the scan lives in a pure
+    `fixture_write_offenders(shown, code)` pinned on synthetic samples in
+    `mod parser` - three of them, one positive, one module-level, one negative
+    - rather than resting on what the tree happens to contain.
+  - THE CONSTRUCT LIST covers the tokio spellings for free, which a cold review
+    read as a miss: `tokio::fs::write(` CONTAINS `fs::write(` and
+    `tokio::fs::File::create(` contains `File::create(`, and the match is a
+    substring search. `File::options(`, the remove pair and `Command::new(`
+    were added; `write!`/`writeln!` deliberately were not, because they are
+    overwhelmingly used to format into a `String` and flagging them would be an
+    exception list on day one. The doc comment used to claim a generic
+    `std::fs::` fallback that was never implemented - deleted, not widened.
+- THE SAME FAMILY, REACHED LATERALLY:
+  `arrival_control_refuses_a_tree_that_changed_during_the_run` plants
+  `arrival-control-midrun-probe.txt` at the REPOSITORY ROOT and used to remove
+  it on the straight-line path only, so a panic inside `run_with` or inside the
+  planting closure unwound past the cleanup and left the probe in the tree.
+  That test is the one AGENTS.md documents as refusing a dirty tree by design,
+  so a leaked probe poisons every later run of the suite and presents as an
+  unrelated refusal. It now removes through a `Drop` guard.
+  - THE PROBE MAY NOT MOVE TO `target/`, which the review proposed. `target/`
+    is gitignored, so a probe planted there would not dirty the tree at all and
+    the pin would stop biting - the location is the mechanism. Untracked at the
+    root is the requirement; RAII cleanup is the fix.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -915,6 +1014,21 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
     12.14 s, from 39.71 s; the four socket binaries hold 60 tests totalling
     11.38 s one-per-process. See the round-5 section above and
     `reference/performance.md`.
+  - tape r1: 1187 + 441, 1691 pairs, 0 orphaned, 59.1 s. THE COUNT WENT DOWN
+    AND THAT IS CORRECT: an ignored `mogwai-data` test was removed from the
+    suite entirely and one `mogwai-cli` test added, so the "only goes up" rule
+    above holds for TESTS THAT STAYED TESTS, not for one that became an example
+    target. THE TWO BUCKETS ARE THE TWO SWEEPS, workspace and instrumented, and
+    that is the whole explanation for the net -1 landing entirely in the second
+    one: `mogwai-data` is in BOTH sweeps, `mogwai-cli` is in the workspace
+    sweep only. So the removal cost 1 from each bucket and the addition gave 1
+    back to the first alone - 1187 stays 1187, 442 becomes 441, and the pair
+    count goes 1692 - 2 + 1 = 1691. A cold review read the buckets as
+    per-package and called the arithmetic inconsistent; they are per-sweep.
+  - tape r1 fix pass: 1191 + 441, 1695 pairs, 0 orphaned, 58.2 s. Four
+    `mogwai-cli` parser fixtures for the fixture-write scan, workspace sweep
+    only, so +4 in the first bucket and +4 pairs, exactly as the rule above
+    predicts.
   - adapter close pass: unchanged at 1187 + 442, 1692 pairs, 0 orphaned, 58.3 s;
     serial adapter sweep re-measured at 11.96 s. Prose fixes only, no new test.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
