@@ -296,6 +296,50 @@ group by any other route has no API for it, and none is owed until one is wanted
   under a symbol no client can trade or fetch over HTTP. Whichever way it goes,
   the two validators should stop being able to disagree silently.
 
+- THE LAUNCHER KILLS ONE PROCESS, NOT A PROCESS GROUP, so a venue with any
+  descendant leaks a reader thread on the readiness-timeout path. Filed
+  2026-08-19 by the `bugs-protocol` round-5 fix pass, carrying forward what
+  finding D of that report left explicitly open.
+
+  `launch`'s timeout arm issues `child.kill()` and then does NOT join the
+  readiness reader, which is what makes the readiness bound unconditional. The
+  kill closes stdout only while the CHILD holds the write end: a `binary`
+  naming a wrapper script that starts the venue without `exec`, or a venue that
+  ever grows a helper subprocess, leaves a grandchild holding an inherited copy,
+  so `read_until` never returns and that thread is stranded for the life of the
+  process. One leaked thread per timed-out launch is the deliberate trade -
+  reporting the timeout beats hanging inside it - but it is a trade, not a fix.
+
+  The robust form is putting the child in its own process group and `killpg`ing
+  it, which also collects a helper the venue itself spawned. It does NOT help
+  against a wrapper's grandchild that has left the group, so it narrows the hole
+  rather than closing it, and it is a real change to the launcher's process
+  model rather than a line. Nothing in this tree forks today - `mogwai serve`
+  spawns nothing - so this is latent, and `docs/cli.md` states the supported
+  shape (name the binary, or a wrapper that `exec`s it) and what it costs when a
+  caller does not.
+
+- FOUR REFUSAL MESSAGES SPELL THE DIVERGENCE CEILING AS A LITERAL. Filed
+  2026-08-19 by the `bugs-protocol` round-5 fix-and-commit pass, which found it
+  while spot-checking that report's cleared items and did not fix it - the
+  `bugs-*` arc has no remaining document scoped to `mogwai-protocol`, so it has
+  nowhere else to land.
+
+  `havoc::validate_divergence` writes "3600000" into the text of four refusals
+  (the `DelayAcks`/`GoDark`/`StallData` arm, `CommandLatency`, `FlowSurge` and
+  `FeeSurcharge`) while `control::MAX_DIVERGENCE_MS` is the constant the check
+  itself compares against. The constant IS 3_600_000 today, so nothing is wrong
+  and there is no bug to close - the point is that changing the constant leaves
+  four operator-facing messages naming the old ceiling, and NOTHING DETECTS IT:
+  a live fact asserted inside a string literal is invisible to the prose gate
+  and to the compiler alike. Cheap fix whenever anyone next edits those arms -
+  interpolate the constant - and the same shape as the `bugs-tests-lab-cli`
+  item about a refusal text hardcoding its cap.
+
+  COUNT THEM AT THE PRODUCTION SITES. The first filing said five, from a raw
+  match over the file: the module's tests carry the same four strings as
+  expected values, so grep reports eight.
+
 - NOTHING ON THE WIRE SAYS WHETHER A SUBMIT TOOK A MARKET READING, which forces
   one integration test to read the venue's LOG instead. Filed 2026-08-18 by the
   lifecycle-test fix pass.

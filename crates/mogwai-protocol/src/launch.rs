@@ -588,7 +588,7 @@ fn launch_with_poll(spec: LaunchSpec, owner_poll: Duration) -> Result<LaunchedVe
     // Waits WITHOUT a deadline of its own, deliberately. The readiness bound is
     // enforced inside the owner, because the owner holds the `Child` and can
     // therefore end the wait; a deadline here could only stop waiting, and then
-    // had to join a thread still blocked in `read_line` on a child that may
+    // had to join a thread still blocked in `read_ready` on a child that may
     // never write. That inverted the whole point of the bound - a wedged venue
     // made `launch` hang forever, AFTER reporting a timeout. The owner always
     // sends exactly one result, so a disconnect here means it panicked.
@@ -782,7 +782,8 @@ fn own_venue(
     });
 
     // The readiness read happens on ITS OWN thread so this one keeps a deadline.
-    // `read_line` on a child that holds stdout open and never writes cannot be
+    // `read_ready`'s `read_until` on a child that holds stdout open and never
+    // writes cannot be
     // interrupted from outside, so the bound has to belong to whoever can end
     // the wait - and that is this thread, which owns the `Child`. On expiry it
     // kills the venue, which closes stdout and releases the reader.
@@ -844,7 +845,8 @@ fn own_venue(
             // it may be stranded: killing the child closes stdout only while the
             // CHILD holds the write end, and a `binary` naming a wrapper script
             // that launches the venue without `exec` leaves the grandchild
-            // holding an inherited copy, so `read_line` never returns and a join
+            // holding an inherited copy, so the reader's `read_until` never
+            // returns and a join
             // blocked the launcher forever immediately after it had decided to
             // report a timeout. The bound has to hold against a child that
             // misbehaves, or it is not a bound. A stranded reader is one leaked

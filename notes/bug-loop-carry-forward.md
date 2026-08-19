@@ -18,10 +18,12 @@ refused as a fixture candidate and closed by anchoring its inputs instead.
 Counted rather than estimated: three summaries of that document had stated the
 number three different ways. ITS CLOSE PASS RAN ON 2026-08-19 AND WAS THE LAST
 OF THE TEST DOCUMENTS' - one finding, a runtime guard installed at two of six
-call sites; see that section. `bugs-protocol` starts next and is THE FIRST
-PRODUCTION-CODE REPORT OF THE ARC - the five test-hunt documents are done, so
-from here the findings are about shipped behaviour rather than about the gates
-that watch it, and "the test cannot fail" stops being the default diagnosis.
+call sites; see that section. `bugs-protocol`, THE FIRST PRODUCTION-CODE REPORT OF THE ARC, CLOSED on
+2026-08-19 after five rounds, with no open findings apart from three recorded
+refusals - C, L and M - and five deferrals filed in `notes/todo.md`. `bugs-data`
+starts next. From here the findings are about shipped behaviour rather than
+about the gates that watch it, and "the test cannot fail" stops being the
+default diagnosis.
 WHAT STILL BINDS FROM THE TEST ARC is everything about the tests a production
 fix WRITES: a fix whose regression test cannot fail has closed nothing, so the
 vacuity rules, the bite-check discipline and the shared-fixture rule all carry
@@ -3572,6 +3574,84 @@ added.
 - NO `TAPE_PROTOCOL_VERSION` BUMP WAS OWED. Nothing in the tape-generation path
   was touched and no artifact moved; the new file is an example target and the
   production change is a wire-boundary validator.
+
+## The protocol document, round 5: what carries to `bugs-data`
+
+Ledger: 1245 + 451, 1753 pairs, 1696 run, 57 ignored, 0 orphaned - unchanged
+from round 4, because the round added no test COUNT. It did widen one:
+`admission_frames_fit_their_ceiling` went from serializing one subject variant
+to serializing all seven.
+
+`bugs-protocol` CLOSED on 2026-08-19 with no open findings - five fixes (A, B,
+D, E, F), three recorded refusals (C, L, M) and K closed across two documents.
+`bugs-data` is next. The protocol-specific mechanics (the launcher's owner loop,
+the wire-size constants, the decimal annotations) die with that document. What
+generalises:
+
+- A FINDING CLOSED BY ANOTHER DOCUMENT IS VERIFIED HALF BY HALF, NOT AS A UNIT.
+  K had three halves; the other document's two rounds closed two of them and
+  never saw the third, because that half named a constant in `messages.rs` while
+  those rounds were scoped to `sizing.rs`. THE SCOPE THAT CLOSED A FINDING IS
+  NOT THE SCOPE THE FINDING WAS WRITTEN IN, and a multi-part finding routed to a
+  narrower document loses exactly the parts that fell outside it. Read each half
+  against the code before writing "closed elsewhere".
+- RE-CHECK A REFUSAL WHOSE GROUND YOUR OWN DOCUMENT LATER MOVED. M was refused
+  on "`NoRecord` is stdout EOF, and a venue can reach that branch alive"; round
+  3 of the same document then changed what the stdout reader does on that
+  branch. It happened to strengthen the refusal - the reader now parks in
+  `io::copy` to EOF instead of finishing, so the branch carries TWO live threads
+  rather than one - but that is a fact that had to be established rather than
+  assumed. A refusal is a claim about the code, and it expires like any other.
+- TWO PIPES, TWO THREADS, AND A SMELL THAT NAMES THE WRONG ONE. The `NoRecord`
+  sleep gives the STDERR drain a moment to fill the ring; every reading of it as
+  "join the reader, the child is dead" conflates it with the STDOUT thread. When
+  a finding proposes replacing a wait with a join, name the thread the wait is
+  actually waiting on before judging the wait.
+- "THE TEST ALREADY COMPUTES IT" IS A CLAIM ABOUT THE TEST, AND IT WAS HALF
+  FALSE. `ADMISSION_FRAME_MAX_BYTES`'s comment carried a `MAX_SYMBOL_LEN` term
+  the frame does not have, and the fix pass closed it as a doc edit on the
+  ground that `admission_frames_fit_their_ceiling` computes the analytic itself.
+  The ANALYTIC half of that is true. The EMPIRICAL half was not: the test
+  serialized only the `Submit` subject variant, so it never measured the widest
+  one, while the comment it was cited to hold up promised the derivation was run
+  rather than trusted. THE ARC'S SIGNATURE DEFECT, CLOSING THE ARC - a comment
+  promising a test runs its claim, where the test runs a narrower one. Before
+  writing "the test already holds this", read WHICH CASE the test builds, not
+  what it asserts.
+  - The repair is the general one for a bound over a sum type: enumerate EVERY
+    variant at its maximum, bound each, and take the max for the comparison. It
+    measured `Query` at 3604 as the real widest against `Submit`'s 3594 and
+    `Frame`'s 3188, so the old fixture pinned neither end, and it bites - a
+    widened `QueryKind` spelling fails at 4103 over the 4096 ceiling only after
+    the four id-only variants have passed.
+  - AND A DOC COMMENT STILL HAS NO BITE-CHECK. What it has instead is an
+    obligation to be literally true: the first cut said one capped id is the
+    whole subject contribution "whichever variant it is", which is false for
+    `Query`, and the constant it silently leaned on -
+    `ADMISSION_ENVELOPE_BYTES` - scoped itself to scaffolding that does not
+    include a serialized enum value. A bound can be SAFE and its stated
+    derivation still WRONG; correcting one is not correcting the other.
+- A COMMENT NAMING A FUNCTION IS A CLAIM THAT DECAYS SILENTLY. Three comments
+  in `launch.rs` said the readiness thread blocks in `read_line`; it calls
+  `read_ready`, which uses `read_until`, and has for some time. Nothing checks a
+  function name in prose, exactly as nothing checks a count. Fixed here; the
+  ONE remaining `read_line` in that file is a HISTORICAL record of the code the
+  wall-clock bound replaced and is correct as written.
+- COUNT AT THE SITES, NOT BY GREPPING THE FILE. The bullet below was filed as
+  "five refusal messages" and there are four: a Rust module carries its tests in
+  the same file, so every refusal string appears TWICE, once in production and
+  once as a test expectation. A count asserted in prose that no gate checks is
+  the very defect this bullet records, committed while recording it - the third
+  miscount of the arc.
+- LATERAL, RECORDED NOT FIXED: `havoc::validate_divergence` spells the
+  divergence ceiling as the literal "3600000" in FOUR refusal messages while
+  `control::MAX_DIVERGENCE_MS` is the constant - counted at the production
+  sites, not by grepping the file, because the same four strings appear again as
+  the test's expected values and a raw match reports eight. Correct today. Same
+  family as
+  the lab/cli round-5 item about a refusal text hardcoding its cap - a live fact
+  asserted inside a string literal, where no prose gate reaches. Worth folding
+  into whichever round next touches those messages.
 
 ## Loop conventions for this arc
 

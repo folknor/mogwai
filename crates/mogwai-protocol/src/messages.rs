@@ -262,16 +262,28 @@ pub const JSON_ESCAPE_FACTOR: usize = 6;
 /// `ProtocolError` construction site must route its reason through
 /// `truncate_reason`.
 ///
-/// The figure is the next power of two above `JSON_ESCAPE_FACTOR * (
-/// MAX_CLIENT_ID_LEN + MAX_REASON_LEN + MAX_SYMBOL_LEN) +
-/// ADMISSION_ENVELOPE_BYTES`, and `admission_frames_fit_their_ceiling` runs
-/// that derivation rather than trusting this comment.
+/// The figure is the next power of two above `JSON_ESCAPE_FACTOR *
+/// (MAX_CLIENT_ID_LEN + MAX_REASON_LEN) + ADMISSION_ENVELOPE_BYTES` - 3712,
+/// so 4096 - and `admission_frames_fit_their_ceiling` runs that derivation
+/// rather than trusting this comment. NO SYMBOL TERM: neither admission frame
+/// carries a symbol. `AdmissionSubject` names the refused command by ID, never
+/// by instrument, and every one of its id-shaped fields is truncated to
+/// `MAX_CLIENT_ID_LEN` by the hand-written `Serialize` below, so ONE CAPPED ID
+/// IS THE ONLY UNBOUNDED SUBJECT CONTRIBUTION. The variants are not otherwise
+/// identical and this bound does not need them to be: they differ in key name,
+/// in the width of the `kind` tag, and - for `Query` alone - by a serialized
+/// `QueryKind` value. Those deltas are fixed scaffolding, charged to
+/// `ADMISSION_ENVELOPE_BYTES`, which is why that constant is deliberately
+/// generous. `admission_frames_fit_their_ceiling` measures EVERY variant, so
+/// "the widest" is a measurement rather than a claim.
 pub const ADMISSION_FRAME_MAX_BYTES: usize = 4096;
 
 /// Fixed JSON scaffolding of an `AdmissionRejected`: the envelope, the key
-/// names, the subject tag and the `ts_event` digits. Generous by design - it is
-/// the constant term of an upper bound, so over-stating it can only make the
-/// bound safer.
+/// names, the subject tag, the `ts_event` digits, and any fixed-alphabet field
+/// value a subject variant adds beyond its capped id - today that is `Query`'s
+/// `QueryKind`, whose two spellings are `Orders` and `Fills`. Generous by
+/// design - it is the constant term of an upper bound, so over-stating it can
+/// only make the bound safer.
 pub const ADMISSION_ENVELOPE_BYTES: usize = 256;
 
 /// Truncate a server-generated reason to `MAX_REASON_LEN` bytes on a char
@@ -2585,15 +2597,50 @@ mod tests {
         let worst_id = "\u{7}".repeat(MAX_CLIENT_ID_LEN);
         let worst_reason = "\u{7}".repeat(MAX_REASON_LEN);
 
-        let widest = ServerMessage::AdmissionRejected {
-            subject: AdmissionSubject::Submit {
+        // EVERY subject variant, not just `Submit`. The variants differ in key
+        // name, in `kind` tag width, and `Query` carries a serialized
+        // `QueryKind` on top of its capped id - so which one is widest is a
+        // measurement, and taking the max is what makes the constant's
+        // "AdmissionRejected is the widest admission frame" claim run rather
+        // than be asserted about one arbitrarily chosen variant.
+        let subjects = [
+            AdmissionSubject::Submit {
                 client_order_id: worst_id.clone(),
             },
-            reason: worst_reason.clone(),
-            retryable: true,
-            ts_event: u64::MAX,
-        };
-        let widest_len = serde_json::to_string(&widest).expect("serialize").len();
+            AdmissionSubject::SubmitGroup {
+                order_list_id: worst_id.clone(),
+            },
+            AdmissionSubject::Cancel {
+                client_order_id: worst_id.clone(),
+            },
+            AdmissionSubject::Modify {
+                client_order_id: worst_id.clone(),
+            },
+            AdmissionSubject::Query {
+                request_id: worst_id.clone(),
+                query: QueryKind::Orders,
+            },
+            AdmissionSubject::Query {
+                request_id: worst_id.clone(),
+                query: QueryKind::Fills,
+            },
+            AdmissionSubject::Frame,
+        ];
+        let mut widest_len = 0usize;
+        for subject in subjects {
+            let frame = ServerMessage::AdmissionRejected {
+                subject,
+                reason: worst_reason.clone(),
+                retryable: true,
+                ts_event: u64::MAX,
+            };
+            let len = serde_json::to_string(&frame).expect("serialize").len();
+            assert!(
+                len <= ADMISSION_FRAME_MAX_BYTES,
+                "a maximal admission frame is {len} bytes, over the {ADMISSION_FRAME_MAX_BYTES} ceiling"
+            );
+            widest_len = widest_len.max(len);
+        }
 
         let error = ServerMessage::ProtocolError {
             reason: worst_reason,

@@ -6,12 +6,19 @@ Reconnaissance report, 2026-08-18. One Opus hunter, read-only, scope
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 Confidence labels are the hunter's own.
 
-Round 1 (2026-08-19) closed G and J and round 2 closed H and I; those sections
-are deleted rather than annotated, per the discrepancies-doc rule. Round 3
-closed E and F and REFUSED C with measurement; those three keep their sections
-because two of them changed the launcher's public surface and the third is a
-refusal, which stays with its reasoning. What they cost and what binds later
-work is in `notes/bug-loop-carry-forward.md`.
+NO OPEN FINDINGS REMAIN as of round 5 (2026-08-19). Round 1 closed G and J and
+round 2 closed H and I; those sections are deleted rather than annotated, per
+the discrepancies-doc rule. Round 3 closed E and F and REFUSED C with
+measurement, round 4 REFUSED L with measurement and closed the order-entry gap
+that refusal's audit turned up, and round 5 closed K's one surviving half and
+re-checked M's refusal against round 3's stdout change. What survives here is
+sections A, B, D, E and F (fixed, kept because they changed the launcher's
+public surface) and C, L and M (refusals, kept with their reasoning). What they
+cost and what binds later work is in `notes/bug-loop-carry-forward.md`; what
+they DEFERRED is in `notes/todo.md`, five items - the `MarketToLimit` defect,
+the config-symbol alphabet, the unrouted wall-clock budget, the launcher's
+single-process kill, and the four havoc refusals that spell their ceiling as a
+literal.
 
 The hunter read the whole crate (`launch.rs`, `messages.rs`, `control.rs`,
 `havoc.rs`, `sizing.rs`, `ready.rs`, `clock.rs`, `decimal.rs`, `lib.rs`) plus
@@ -243,28 +250,60 @@ thread limit. That is held STRUCTURALLY instead, and this round made it so:
 `spawn_launcher_thread` is now the module's only thread-creation call and the
 only constructor of `LaunchError::Thread`.
 
-## K. `sizing.rs`: two bounds have derivations but no run derivation
+## K. `sizing.rs`: two bounds have derivations but no run derivation - CLOSED ELSEWHERE, plus one half fixed here 2026-08-19
 
-`order_event_bound_covers_both_maximal_lifecycle_frames` exists specifically
-because the module doc's claim is that EVERY constant carries a field-by-field
-derivation, and both halves of `ORDER_EVENT_MAX_BYTES` had drifted from theirs.
-But `ORDER_STATUS_ROW_MAX_BYTES` and `FILL_ROW_MAX_BYTES` - the two rows that
-multiply by `open_orders + closed_orders` and `recorded_fills`, i.e. the two
-whose failure scales - have no such test. `ORDER_STATUS_ROW_MAX_BYTES` computes
-to 1856 against a maximal `OrderStatusInfo` the hunter hand-counts at roughly
-1760: it holds, with about 5 percent headroom, and the next field added to
-`OrderStatusInfo` voids it with nothing to catch it. `FILL_ROW_MAX_BYTES`'s
-comment also says "rounded to 320" while the constant is 384 - the comment was
-not updated with the value, which is the same drift the existing test was
-written to stop.
+TWO OF THE THREE HALVES WERE ALREADY CLOSED by a different document, and the
+third was not touched by it and is fixed in this round. Verified rather than
+taken on report.
 
-Construct both maximal rows the way the `OrderFilled` and `OrderRejected` test
-does. This is the cheapest possible extension of a test that already exists.
-
-Related, smaller: `ADMISSION_FRAME_MAX_BYTES`'s doc says the figure is derived
-from `JSON_ESCAPE_FACTOR * (MAX_CLIENT_ID_LEN + MAX_REASON_LEN + MAX_SYMBOL_LEN)
-+ ADMISSION_ENVELOPE_BYTES`, but `AdmissionRejected` carries no symbol and the
-test's `analytic` correctly omits it. Stale term in the prose.
+- THE RUN DERIVATIONS EXIST. `notes/bugs-tests-engine-protocol.md` round 4
+  (`88959bf`) built `every_row_bound_covers_its_maximal_row` in `sizing.rs`,
+  which measures all five row constants - balance, position, margin,
+  `ORDER_STATUS_ROW_MAX_BYTES` and `FILL_ROW_MAX_BYTES` - against maximal
+  fixtures from a shared kit (`worst(len)` at U+0001, every optional field
+  present, every `Decimal` at `Decimal::MIN`, every enum at its longest
+  spelling), each bracketed BOTH ways by `brackets`: the bound must dominate the
+  measured row AND must be under twice it, so an over-reservation fails too.
+  Its siblings cover the envelope and the two composed query replies. Each was
+  bite-checked by halving its addend.
+- THE 320/384 DRIFT IS GONE. Round 5 of that document (`0e2c32d`) fixed it, and
+  in the same pass corrected `ORDER_FILLED_MAX_BYTES`'s "widest shape" claim,
+  which had the two `ORDER_EVENT_MAX_BYTES` derivations backwards. Read now:
+  `FILL_ROW_MAX_BYTES`'s comment says "rounded to 384" and the constant is 384.
+- THE `ADMISSION_FRAME_MAX_BYTES` STALE SYMBOL TERM SURVIVED BOTH ROUNDS, which
+  is why this half was worth re-reading rather than assuming closed with the
+  others: that constant lives in `messages.rs`, not `sizing.rs`, so a round
+  scoped to the sizing module never saw it. FIXED here. The doc's derivation now
+  reads `JSON_ESCAPE_FACTOR * (MAX_CLIENT_ID_LEN + MAX_REASON_LEN) +
+  ADMISSION_ENVELOPE_BYTES`, matching `admission_frames_fit_their_ceiling`'s
+  `analytic` exactly, and it states the resulting figure (3712, hence 4096) and
+  WHY there is no symbol term: `AdmissionSubject` names a refused command by ID
+  and never by instrument, and every one of its id-shaped fields is truncated to
+  `MAX_CLIENT_ID_LEN` by the hand-written `Serialize`. Both spellings resolve to
+  4096 (3712 against 3904), so no constant moved and no behaviour changed.
+  - THE FIRST CUT OF THAT COMMENT OVERCLAIMED, and cold review caught it: it
+    said one capped id is the whole subject contribution "whichever variant it
+    is", which is literally false. `Query` serializes a `QueryKind` VALUE beside
+    its `request_id`, and the variants also differ in key name and in `kind` tag
+    width. The bound is safe because those deltas are fixed scaffolding charged
+    to `ADMISSION_ENVELOPE_BYTES` - but that constant's own doc listed only the
+    envelope, the key names, the subject tag and the `ts_event` digits, and a
+    serialized enum value is none of those. Both comments now say what is true:
+    one capped id is the only UNBOUNDED contribution, and the envelope covers
+    any fixed-alphabet field a variant adds on top of it.
+  - AND THE TEST DID NOT RUN THE CLAIM THE COMMENT PROMISED IT RAN. Its
+    empirical half serialized ONLY the `Submit` variant, so it never measured
+    the widest subject, while the comment said the derivation was run rather
+    than trusted - the arc's signature defect, one last time. It now serializes
+    all seven maximal subjects (`Submit`, `SubmitGroup`, `Cancel`, `Modify`,
+    both `Query` spellings, `Frame`), bounds EACH against the ceiling and takes
+    the max for the comparison against `ProtocolError`. MEASURED: `Query` really
+    is the widest at 3604 bytes against `Submit`'s 3594, `Frame` the narrowest
+    at 3188, so the old test was pinning neither end. Bite-checked by widening
+    `QueryKind::Orders`'s serialized spelling with a `serde(rename)` as a text
+    edit: the loop fails at 4103 bytes over the 4096 ceiling AFTER the four
+    id-only variants have passed - which is exactly the shape the Submit-only
+    test would have stayed green through. Restored as a text edit.
 
 ## L. `Symbol = Arc<str>` buys nothing on decode - REFUSED with measurement, 2026-08-19
 
@@ -379,7 +418,7 @@ argument. It is deliberately NOT registered as a `brokkr mogwai` target - it
 settles one decision rather than opening a series - and `brokkr.toml` says so
 beside the other deliberate non-registration.
 
-## M. Smell: the 50 ms sleep in the `NoRecord` path
+## M. Smell: the 50 ms sleep in the `NoRecord` path - REFUSED elsewhere, re-checked against round 3's stdout change 2026-08-19
 
 REFUSED, with measurement, by `notes/bugs-tests-engine-protocol.md` round 1
 (`a3a796d`). The finding's premise - "the child is dead by then" - is FALSE:
@@ -389,6 +428,26 @@ block rather than being deterministic.
 `a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure` pins it.
 Do not reopen. Kept here rather than deleted because the smell reads as live to
 anyone who has not seen that measurement.
+
+RE-CHECKED AGAINST ROUND 3'S CHANGE, which replaced the reader's `drop(stdout)`
+with an `io::copy` into `io::sink()` to EOF (finding E). It does not touch M's
+analysis, and it STRENGTHENS the refusal:
+
+- THE SLEEP IS ABOUT THE STDERR RING, NOT THE STDOUT READER. It runs after
+  `booted` is decided and gives the STDERR drain thread a moment to deliver the
+  explanation before `snapshot(stderr_ring)` copies it into the error. Round 3
+  changed only what the STDOUT thread does after it has sent its record. The two
+  threads and the two pipes are disjoint.
+- THE STDERR DRAIN IS THE THREAD A "BOUNDED JOIN" WOULD HAVE JOINED, and it ends
+  at EOF on the STDERR pipe, which arrives when the venue dies - so it is exactly
+  as unbounded as before against a live venue.
+- AND THE STDOUT READER IS NOW UNJOINABLE TOO ON THE SAME BRANCH. In the
+  `NoRecord`-while-alive case (`exec 1>&-` and a grandchild alike) the reader has
+  sent its `NoRecord`, entered the drain, and is blocked in `io::copy` until the
+  child dies. Before round 3 that thread was finishing; now it is parked for the
+  run. So the one branch the finding thought was quiescent has TWO live threads
+  on it rather than one, and the sleep remains the only bounded way to give the
+  ring a chance.
 
 Original report follows.
 
@@ -405,6 +464,51 @@ to `Drop`, not to this pre-report path - here the join could be bounded and the
 outcome ignored.
 
 ## Nothing wrong found in
+
+SPOT-CHECKED IN ROUND 5 RATHER THAN ACCEPTED, because this arc has found five
+praised or cleared items carrying a false or vacuous claim, and because round 1
+rewrote `decimal.rs` substantially AFTER the hunter cleared it. All four
+re-checked items hold, one with a note:
+
+- `ready.rs` - the claim about `parse_ready` is exact. It parses the line into a
+  `serde_json::Value` and reads `version` off THAT, refusing a mismatch before
+  any other field is trusted, with the reason stated in place: deserializing
+  first would report a newer venue's retyped field as `Malformed` rather than as
+  a version ahead. `ReadyRecord::VERSION` is 8 and the byte-form pin spells
+  `"version":8` as a literal, so a bump fails the pin and forces a look, which
+  is the wanted direction.
+- `clock.rs` - `sim_ns`, `wall_ns` and `wall_span` each guard a non-finite or
+  non-positive `speed` and each saturates in the direction its doc states, the
+  `f64` precision ceiling is disclosed on the type, and the tests cover
+  identity, nanosecond precision at an epoch-scale anchor, the 1 ns wall floor,
+  inversion, both saturation directions and the `/clock` byte form.
+- `decimal.rs` AFTER ROUND 1'S REWRITE, which is the item whose clearance was
+  stalest. It holds. `str_option` refuses a number by delegating `visit_some`
+  to the same `rust_decimal::serde::str` deserializer the required fields use,
+  so the optional case cannot drift from the required one, and `str_map` does
+  the same through a `WireDecimal` newtype. What holds the whole rule is
+  `every_wire_decimal_refuses_a_numeric_spelling`, whose comment states the
+  35-field, ten-shape table as the exhaustiveness argument and says a new field
+  owes a row - so the round-1 residual "nothing detects a new wire `Decimal`
+  that forgets the annotation" is filed where the next editor will read it.
+- The `AdmissionSubject` truncating `Serialize` - the disclosure is honest and
+  the bound is complete. All five id-bearing variants route through `bounded`,
+  which truncates on a char boundary, and the only thing any variant adds on top
+  of its capped id is `Query`'s `Copy` two-variant enum, whose two spellings are
+  six and five bytes. So no variant's UNBOUNDED contribution exceeds one capped
+  id, which is what licenses K's corrected derivation above - stated that way
+  rather than as an equality across variants, which is the overclaim K records.
+- ONE OBSERVATION, NOT A FINDING: `validate_divergence`'s refusal messages spell
+  the ceiling as the literal "3600000" while `control::MAX_DIVERGENCE_MS` is the
+  constant, in FOUR messages - the production refusal sites; the four further
+  matches in the file are the test's expected strings. The count was written as
+  five in the first pass, which is the finding's own defect family committed
+  while recording it. The constant IS 3_600_000 today, so nothing is
+  wrong; the shape is the arc's "an assertion on a constant is not an assertion
+  on the message that states it", inside a string literal where no prose gate
+  can see it. Filed in `notes/todo.md` rather than opened here - no remaining
+  document in this arc is scoped to `mogwai-protocol`, so the carry-forward
+  alone would have lost it.
 
 `ready.rs` (schema, version guard and byte-form pin are consistent, and
 `parse_ready` correctly reads `version` off the raw JSON before trusting any
