@@ -23,7 +23,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use mogwai_data::{
-    ArrivalConfig, ArrivalRefusal, CadenceWalk, GeneratedSource, ParentSummary, SizeGrid,
+    ArrivalConfig, ArrivalRefusal, CadenceWalk, GeneratedSource, ParentSummary, SizeGrid, TickFault,
 };
 use mogwai_server::source::InstrumentProfile;
 use serde::{Deserialize, Serialize};
@@ -861,6 +861,28 @@ trait ParentSource {
     fn next(&mut self) -> Result<ParentSummary, ScreenRefusal>;
 }
 
+/// The clock is A4 evidence: a refusal without it says the walk stopped but not
+/// where, which is exactly what an owner ruling needs.
+fn screen_refusal_from_arrival(refusal: ArrivalRefusal) -> ScreenRefusal {
+    ScreenRefusal {
+        variant: match refusal {
+            ArrivalRefusal::NoOpenExposure { .. } => "no_open_exposure",
+            ArrivalRefusal::IntensityCeiling { .. } => "intensity_ceiling",
+            ArrivalRefusal::NonFiniteState { .. } => "non_finite_state",
+        }
+        .to_string(),
+        clock_ns: match refusal {
+            ArrivalRefusal::NoOpenExposure { from_ns } => from_ns,
+            ArrivalRefusal::IntensityCeiling { clock_ns, .. }
+            | ArrivalRefusal::NonFiniteState { clock_ns } => clock_ns,
+        },
+        detail: format!("{refusal:?}"),
+        family: None,
+        canonical_params: None,
+        seed: None,
+    }
+}
+
 enum ParentWalk {
     Generator(Box<GeneratedSource>),
     Kernel(Box<CadenceWalk>),
@@ -868,7 +890,14 @@ enum ParentWalk {
 impl ParentSource for ParentWalk {
     fn next(&mut self) -> Result<ParentSummary, ScreenRefusal> {
         match self {
-            Self::Generator(source) => Ok(source.advance_parent()),
+            // BOTH ARMS REPORT A REFUSAL. The generator arm used to be
+            // infallible, so a refused kernel draw reached the projection as a
+            // phantom parent - the previous timestamp with zero children - and
+            // the only thing that ended the walk was the stall guard, which
+            // names the wrong cause. `advance_parent` now returns the fault.
+            Self::Generator(source) => source.advance_parent().map_err(|fault| match fault {
+                TickFault::Arrival(refusal) => screen_refusal_from_arrival(refusal),
+            }),
             Self::Kernel(walk) => {
                 let stride = walk.child_stride_ns();
                 walk.next()
@@ -877,26 +906,7 @@ impl ParentSource for ParentWalk {
                         child_count: draw.child_count,
                         child_stride_ns: stride,
                     })
-                    .map_err(|refusal| ScreenRefusal {
-                        // The clock is A4 evidence: a refusal without it says
-                        // the walk stopped but not where, which is exactly
-                        // what an owner ruling needs.
-                        variant: match refusal {
-                            ArrivalRefusal::NoOpenExposure { .. } => "no_open_exposure",
-                            ArrivalRefusal::IntensityCeiling { .. } => "intensity_ceiling",
-                            ArrivalRefusal::NonFiniteState { .. } => "non_finite_state",
-                        }
-                        .to_string(),
-                        clock_ns: match refusal {
-                            ArrivalRefusal::NoOpenExposure { from_ns } => from_ns,
-                            ArrivalRefusal::IntensityCeiling { clock_ns, .. }
-                            | ArrivalRefusal::NonFiniteState { clock_ns } => clock_ns,
-                        },
-                        detail: format!("{refusal:?}"),
-                        family: None,
-                        canonical_params: None,
-                        seed: None,
-                    })
+                    .map_err(screen_refusal_from_arrival)
             }
         }
     }
@@ -3556,10 +3566,11 @@ mod tests {
 
     #[test]
     fn a_family_one_walk_that_stalls_aborts_instead_of_looping() {
-        // Spec 3.3 step 3's termination guard. `advance_parent` cannot report
-        // failure: a faulted source returns a stale summary forever, so the
-        // projection refuses on the first non-advancing timestamp rather than
-        // hanging for eight hours.
+        // Spec 3.3 step 3's termination guard. A refusal is now reported by
+        // both walk arms, so a stall no longer means "the kernel refused and
+        // could not say so"; the guard remains for a walk that advances neither
+        // its timestamp nor its verdict, and the projection refuses on the
+        // first non-advancing timestamp rather than hanging for eight hours.
         let day = 20_000_u64;
         let start = day * DAY_NS + OPEN_NS;
         let mut source = Scripted::stalling(vec![(start + MINUTE_NS, 1)]);

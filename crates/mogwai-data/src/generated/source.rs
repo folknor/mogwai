@@ -941,7 +941,14 @@ impl TickSource for GeneratedSource {
         loop {
             if self.pending_quote.is_none() && self.burst.remaining == 0 {
                 let mut advanced = self.clone();
-                let parent = advanced.advance_parent();
+                // A refusal ends the walk here. Adopting the faulted clone is
+                // what makes `fault()` report it; skipping the adoption would
+                // leave a caller unable to tell a refusal from exhaustion, and
+                // ignoring the refusal would spin forever on a stale summary.
+                let Ok(parent) = advanced.advance_parent() else {
+                    *self = advanced;
+                    return None;
+                };
                 let parent_end = parent.parent_ts_ns.saturating_add(
                     u64::from(parent.child_count.saturating_sub(1))
                         .saturating_mul(parent.child_stride_ns),
@@ -972,13 +979,27 @@ impl GeneratedSource {
     /// their `Decimal` representation is discarded. Starting this operation in
     /// the middle of a wire parent would make its compact run ambiguous, so the
     /// boundary is enforced rather than silently repaired.
-    #[must_use]
-    pub fn advance_parent(&mut self) -> ParentSummary {
+    ///
+    /// FALLIBLE BECAUSE THE ARRIVAL KERNEL CAN REFUSE. `begin_event` latches a
+    /// refusal into `self.fault` and leaves `burst` untouched, so a summary
+    /// built unconditionally would describe a parent that was never drawn - the
+    /// previous parent's timestamp with zero children - and every caller would
+    /// advance over work that did not happen. The refusal is returned instead;
+    /// the fault stays latched on `self`, so `fault()` also reports it.
+    pub fn advance_parent(&mut self) -> Result<ParentSummary, TickFault> {
         assert!(
             self.pending_quote.is_none() && self.burst.remaining == 0,
             "advance_parent requires a parent boundary"
         );
+        // A latched fault is terminal, exactly as it is for `next_tick`: an
+        // already-faulted source must not draw again.
+        if let Some(fault) = self.fault {
+            return Err(fault);
+        }
         self.begin_event(false);
+        if let Some(fault) = self.fault {
+            return Err(fault);
+        }
         let summary = ParentSummary {
             parent_ts_ns: self.burst.parent_ts_ns,
             child_count: self.burst.remaining,
@@ -987,7 +1008,7 @@ impl GeneratedSource {
         while self.burst.remaining > 0 {
             self.step_child();
         }
-        summary
+        Ok(summary)
     }
 
     /// Advances one integrated parent and exposes the cadence latent used for
@@ -1005,7 +1026,9 @@ impl GeneratedSource {
             self.arrival_kernel.is_some(),
             "arrival transcript requires an integrated kernel"
         );
-        let summary = self.advance_parent();
+        let summary = self
+            .advance_parent()
+            .expect("arrival transcript requires a non-refusing walk");
         let latent_x = self
             .arrival_kernel
             .expect("integrated branch has kernel")

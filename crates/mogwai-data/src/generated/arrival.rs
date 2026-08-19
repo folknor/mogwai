@@ -936,7 +936,7 @@ mod tests {
             let mut generator = GeneratedSource::new(scalars, 91, 0, &fp, None);
             for _ in 0..10_000 {
                 let left = cadence.next().expect("cadence draw");
-                let right = generator.advance_parent();
+                let right = generator.advance_parent().expect("parity draw");
                 assert_eq!(
                     (left.parent_ts_ns, left.child_count),
                     (right.parent_ts_ns, right.child_count)
@@ -1505,7 +1505,7 @@ mod tests {
         let fp = Fingerprint::from_repo_json();
         let scalars = GeneratorScalars::xbtusd_anchor(&fp);
         let mut generator = GeneratedSource::new(scalars, 91, 0, &fp, None);
-        let _summary = generator.advance_parent();
+        let _summary = generator.advance_parent().expect("stage-recording draw");
         assert!(
             !generator.draw_stages.is_empty(),
             "the generator recorded no stages: only the contract-A path pushes \

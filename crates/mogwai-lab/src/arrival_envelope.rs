@@ -668,7 +668,15 @@ pub fn simulate_candidate_month(
             .map_err(|error| {
                 LabError::refusal(format!("building fidelity generator: {error:?}"))
             })?;
-            stats_from_parent_walk(grid, || Ok(source.advance_parent()))
+            // A refused draw is the candidate refusing, not the walk stalling.
+            // Before `advance_parent` was fallible this arrived as a phantom
+            // parent at the previous timestamp and the stall guard reported it
+            // under the wrong cause.
+            stats_from_parent_walk(grid, || {
+                source.advance_parent().map_err(|fault| {
+                    LabError::refusal(format!("fidelity candidate refused: {fault:?}"))
+                })
+            })
         }
         _ => {
             let mut walk = CadenceWalk::new_with_step(

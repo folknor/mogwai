@@ -245,6 +245,16 @@ REPRODUCE BEFORE BELIEVING IT: one failure in two full gate runs on this host,
 and it has not been seen since. A round that cannot reproduce it should say so
 rather than close it.
 
+IT REPRODUCED, 2026-08-19, on the `bugs-data` round-1 gate - same test, same
+`.expect("second boat receives completion")` at `completion.rs:510`, on a tree
+whose changes were confined to `mogwai-data`, one `mogwai-cli` comment and
+markdown. It passed on the immediately following gate run of the identical tree.
+So it is INTERMITTENT AND REAL, not an artifact of one pass, and the venue-side
+reading above stands. Note what it costs when it fires: this test aborts the
+parallel sweep, which reports every `mogwai-data` test as orphaned - the exact
+ambiguity `AGENTS.md` warns reads as a brokkr coverage bug. Check for a crashed
+test first, and this is the one to expect.
+
 ## What the hunter would actually rewrite
 
 Findings 1, 2 and 3 are all the same underlying problem: THE ACCOUNT AND

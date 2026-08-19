@@ -13,7 +13,7 @@
 
 use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 
-use crate::{TickEvent, TickSource};
+use crate::{TickEvent, TickFault, TickSource};
 
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::{
@@ -86,6 +86,136 @@ fn clones_share_immutable_config_and_emitted_symbol_storage() {
     assert!(std::sync::Arc::ptr_eq(&left.symbol, &right.symbol));
 }
 
+/// An integrated source whose origin sits at `origin_ns`, for building arrival
+/// refusals. `next_parent` computes `limit = from_ns + MAX_SESSION_GAP_NS`
+/// SATURATING, so an origin at or near `u64::MAX` leaves the budget walk with
+/// no exposure to spend and it refuses `NoOpenExposure` in O(1) - the budget
+/// walk runs at most one iteration and advances no cell, which is what makes
+/// this cheap enough to be the crate's refusal fixture.
+fn refusing_source_at(origin_ns: u64) -> GeneratedSource {
+    let fp = Fingerprint::from_repo_json();
+    let mut scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    scalars.arrival = Some(ArrivalConfig::LogOuCox {
+        sigma_y: 0.6,
+        tau_s: 60.0,
+    });
+    GeneratedSource::new(scalars, 91, origin_ns, &fp, None)
+}
+
+/// The refusal fixture at the very last representable instant: `cursor < limit`
+/// is false on ENTRY, so `next_parent` refuses without executing its loop once.
+/// Use this wherever the refusal is all that matters. A consumer whose own guard
+/// compares the source clock against a forward target cannot use it - nothing is
+/// after `u64::MAX` - and wants `refusing_source_at` a little below the top
+/// instead; see the `extend_toward` test.
+fn refusing_source() -> GeneratedSource {
+    refusing_source_at(u64::MAX)
+}
+
+#[test]
+fn a_refused_parent_is_reported_rather_than_summarized_as_a_phantom() {
+    let mut source = refusing_source();
+    assert!(source.fault().is_none(), "the fixture starts clean");
+    let refusal = source
+        .advance_parent()
+        .expect_err("the kernel refuses at the end of representable time");
+    assert!(matches!(
+        refusal,
+        TickFault::Arrival(ArrivalRefusal::NoOpenExposure { .. })
+    ));
+    // The fault is LATCHED, not merely returned: a caller that only consults
+    // `fault()` must see the same verdict.
+    assert!(matches!(
+        source.fault(),
+        Some(TickFault::Arrival(ArrivalRefusal::NoOpenExposure { .. }))
+    ));
+    // And it is terminal - a second call must not draw again.
+    assert!(source.advance_parent().is_err());
+}
+
+#[test]
+fn seek_to_terminates_on_a_refusal_instead_of_spinning_on_a_stale_summary() {
+    // The refusal leaves `burst` untouched, so an infallible `advance_parent`
+    // handed back the PREVIOUS parent's timestamp with zero children - a
+    // `parent_end` of 0, below any forward target - and `seek_to` adopted the
+    // faulted clone and looped forever without ever reaching `next_tick`, the
+    // one place the fault is read. A regression therefore HANGS rather than
+    // asserting, so the seek runs on its own thread against a deadline.
+    //
+    // THE DETACHED THREAD LEAKS ON REGRESSION and that is deliberate: a spinning
+    // `seek_to` cannot be cancelled, so the choice is a busy core for the rest
+    // of a failing sweep or no test at all. It costs nothing when green - the
+    // refusing fixture makes `seek_to` return on its FIRST iteration, so the
+    // thread is finished before `recv_timeout` is even entered. Do not
+    // re-litigate this into a synchronous call; that reintroduces the hang.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut source = refusing_source();
+        let tick = source.seek_to(1_000);
+        tx.send((tick.is_none(), source.fault()))
+            .expect("the seek result is received");
+    });
+    let (ended, fault) = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("seek_to must terminate on a refusal");
+    handle.join().expect("the seek thread joins");
+    assert!(ended, "a refused walk yields no tick");
+    assert!(
+        matches!(
+            fault,
+            Some(TickFault::Arrival(ArrivalRefusal::NoOpenExposure { .. }))
+        ),
+        "the refusal must survive on the seeked source, not just end the loop"
+    );
+}
+
+#[test]
+fn extend_toward_credits_no_walk_for_a_refused_parent() {
+    // The frontier rule, at the site it was written for: `extend_toward` may
+    // only credit `walked`/`since_snapshot` and snapshot the lead over a parent
+    // the SAME expression drew successfully. An infallible `advance_parent`
+    // handed it a phantom - the empty burst's `parent_ts_ns` of 0 with zero
+    // children - whose `parent_end` of 0 is below any target, so it adopted the
+    // faulted clone, credited one tick for a parent that was never drawn, took
+    // snapshots of a faulted source, and burned the entire `max_extend` budget
+    // before reporting "unreachable" rather than "faulted".
+    //
+    // The origin sits just BELOW `u64::MAX` rather than at it: the loop guard is
+    // `self.lead.clock_ns() < target`, which no lead at the top instant can
+    // satisfy, so the fixture used by the two tests above would skip the loop
+    // entirely and pass for the wrong reason. A few nanoseconds of headroom keep
+    // the guard satisfiable while `limit = from_ns + MAX_SESSION_GAP_NS` still
+    // saturates, so the refusal is still O(1).
+    let origin = u64::MAX - 1_000;
+    let source = refusing_source_at(origin);
+    assert!(source.fault().is_none(), "the fixture starts clean");
+    assert_eq!(source.clock_ns(), origin);
+
+    let max_extend = 10_000;
+    let mut index = CheckpointIndex::new(source, 1, max_extend);
+    assert_eq!(index.checkpoint_count(), 1, "only the pinned origin");
+
+    let walked = index.extend_toward(u64::MAX);
+
+    assert_eq!(
+        walked, 0,
+        "a refused parent is no walk: crediting it is the frontier defect"
+    );
+    assert!(
+        matches!(
+            index.fault(),
+            Some(TickFault::Arrival(ArrivalRefusal::NoOpenExposure { .. }))
+        ),
+        "the faulted lead must be adopted, so the index can name the refusal \
+         instead of reporting an exhausted budget"
+    );
+    assert_eq!(
+        index.checkpoint_count(),
+        1,
+        "no snapshot may be taken of a source that drew nothing"
+    );
+}
+
 #[test]
 fn compact_parent_advancement_matches_wire_frames_and_continuation() {
     let fp = Fingerprint::from_repo_json();
@@ -94,7 +224,7 @@ fn compact_parent_advancement_matches_wire_frames_and_continuation() {
     let mut wire = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
 
     for _ in 0..512 {
-        let summary = compact.advance_parent();
+        let summary = compact.advance_parent().expect("compact parent");
         let quote = wire.next_tick().expect("parent quote");
         assert!(matches!(quote, TickEvent::Quote(_)));
         assert_eq!(quote.ts_event(), summary.parent_ts_ns);
@@ -1549,7 +1679,7 @@ fn a_reopen_gap_armed_inside_a_burst_still_fires() {
     let mut clean = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
     let mut at_ts = None;
     for _ in 0..512 {
-        let parent = clean.advance_parent();
+        let parent = clean.advance_parent().expect("clean parent");
         if parent.child_count >= 2 {
             at_ts = Some(parent.parent_ts_ns + 1);
             break;
@@ -5068,7 +5198,7 @@ fn realized_children(source: &mut GeneratedSource, parents: u64) -> (f64, f64) {
     let mut rows = 0u64;
     let mut singles = 0u64;
     for _ in 0..parents {
-        let summary = source.advance_parent();
+        let summary = source.advance_parent().expect("parent draw");
         rows += u64::from(summary.child_count);
         singles += u64::from(summary.child_count == 1);
     }

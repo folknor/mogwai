@@ -158,7 +158,15 @@ impl CheckpointIndex {
             let remaining_budget = self.max_extend - walked;
             if self.lead.at_parent_boundary() {
                 let mut advanced = self.lead.clone();
-                let parent = advanced.advance_parent();
+                // A refusal produced no parent, so nothing may be credited to
+                // `walked` or `since_snapshot` and no snapshot may be taken of
+                // it. Adopt the faulted lead so `fault()` names the refusal,
+                // then stop: the tick-at-a-time fallback below would only
+                // return `None` on the same fault.
+                let Ok(parent) = advanced.advance_parent() else {
+                    self.lead = advanced;
+                    break;
+                };
                 let parent_ticks = 1usize.saturating_add(parent.child_count as usize);
                 let parent_end = parent.parent_ts_ns.saturating_add(
                     u64::from(parent.child_count.saturating_sub(1))

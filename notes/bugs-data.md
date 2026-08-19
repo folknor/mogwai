@@ -12,77 +12,24 @@ The hunter read the whole crate (`lib.rs`, `segment.rs`, `trigger.rs`, `bars.rs`
 and all of `generated/`) plus the call sites in `mogwai-server` and `mogwai-lab`
 the findings depend on. No edits made.
 
-## 1. `GeneratedSource::seek_to` spins forever when the arrival kernel refuses (real infinite loop)
+FINDINGS 1 AND 2 ARE CLOSED and their text removed; the surviving sections keep
+their ORIGINAL numbers, so this document starts at 3 by design. Later rounds'
+briefs and `notes/bug-loop-carry-forward.md` cite these findings by number, and
+renumbering would silently break those citations. What 1 and 2 were, and the one
+correction the fix pass made to them:
 
-`crates/mogwai-data/src/generated/source.rs`, the `seek_to` override:
-
-```rust
-if self.pending_quote.is_none() && self.burst.remaining == 0 {
-    let mut advanced = self.clone();
-    let parent = advanced.advance_parent();
-    let parent_end = parent.parent_ts_ns.saturating_add(...);
-    if parent_end < start_ts { *self = advanced; continue; }
-}
-let tick = self.next_tick()?;
-```
-
-`advance_parent` calls `begin_event(false)`. On the integrated path,
-`begin_integrated_event` handles an `ArrivalRefusal` by setting `self.fault` and
-RETURNING WITHOUT TOUCHING `burst`. So `advance_parent` then builds
-`ParentSummary` from the STALE burst: `parent_ts_ns` is the previous parent's
-timestamp (or `0` on a fresh source, since `SweepBurst::empty()` has
-`parent_ts_ns: 0`), and `child_count == 0`. The `while self.burst.remaining > 0`
-loop body never runs.
-
-Consequently `parent_end` is a stale or zero timestamp, which is `< start_ts`
-for any forward seek, so the loop adopts the faulted clone and `continue`s -
-WITHOUT ever reaching `self.next_tick()`, which is the only place `self.fault`
-is checked. Every subsequent iteration repeats identically. This is an unbounded
-spin holding whatever lock the caller took, which is exactly the failure mode
-the `TickSource::seek_to` doc warns callers about and which this override exists
-to avoid.
-
-Reachability today is narrow but not zero: `mogwai-server`'s `place_cursor` and
-`history_source` both call `seek_to` on a checkpoint-positioned
-`GeneratedSource`, and both are preceded by `extend_toward`, which would itself
-have stopped short on a faulting lead and returned `None`. So the
-deterministic-walk argument mostly saves it. But nothing in `mogwai-data`
-enforces that ordering, `seek_to` is a public trait method on a public type, and
-the guard costs one line (`if self.fault.is_some() { return None; }` at the top
-of the loop, or better - see finding 2).
-
-## 2. `advance_parent` reports a parent that was never produced (frontier-family defect)
-
-The root cause of finding 1, and it bites independently.
-
-`ParentSummary` has no representation for "no parent was drawn".
-`advance_parent` is `#[must_use]` and infallible, so on a refusal it hands back
-a summary describing a phantom parent - stale timestamp, zero children. Three
-consumers act on it:
-
-- `seek_to` - infinite loop (above).
-- `CheckpointIndex::extend_toward` - adopts the faulted clone as `self.lead`,
-  credits `walked += 1` and `since_snapshot += 1` for a tick that does not
-  exist, and can take a `snapshot(false)` of a faulted source. Bounded by
-  `max_extend`, so it burns the whole budget and then reports "unreachable"
-  rather than "faulted". `CheckpointIndex::fault()` exists and is never
-  consulted on that path.
-- `mogwai-lab/src/arrival_screen.rs`, `ParentWalk::next`:
-  `Self::Generator(source) => Ok(source.advance_parent())`. The `Kernel` arm
-  maps `ArrivalRefusal` into a `ScreenRefusal` with the clock as evidence; THE
-  GENERATOR ARM STRUCTURALLY CANNOT REPORT A REFUSAL. A screen driven through
-  `GeneratedSource` over a config that hits `IntensityCeiling` or
-  `NonFiniteState` produces an endless run of phantom zero-child parents at a
-  frozen timestamp and calls it data. `arrival_envelope.rs:671` has the same
-  shape.
-
-This is the frontier family from `AGENTS.md` verbatim: a cursor advanced over
-work whose success the same expression never checked, with the "lookup that
-legitimately returns nothing" variant. The fix is structural and pre-1.0-cheap:
-`advance_parent` should return `Result<ParentSummary, TickFault>` (or `Option`),
-and the three call sites should stop guessing. The hunter would not paper over
-it with a fault check in `seek_to` alone - the lab asymmetry is the more
-damaging instance and a local guard does not touch it.
+- 1 was `GeneratedSource::seek_to` spinning forever on a refused arrival draw,
+  and 2 its root cause - `advance_parent` was infallible, so a refusal returned
+  a PHANTOM parent (the stale burst's timestamp, zero children) that three
+  consumers then advanced over. `advance_parent` now returns
+  `Result<ParentSummary, TickFault>` and every consumer reports the refusal.
+- THE REPORT OVERSTATED THE LAB HALF OF 2. It said the two `mogwai-lab`
+  consumers produced "an endless run of phantom zero-child parents". Neither
+  looped: both walk under a stall guard that refuses on a non-advancing
+  timestamp. The real damage there was MISATTRIBUTION - a refused cell reported
+  as "candidate walk stalled", aborting the whole run instead of naming the
+  refusal and its clock. The structural fix stands on that ground; the
+  infinite-loop claim was true of `seek_to` only.
 
 ## 3. `SegmentSource`'s running price has no floor, no ceiling, and a silent failure mode
 

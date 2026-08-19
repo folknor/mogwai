@@ -481,7 +481,22 @@ fn measure(
     let mut counters = Counters::new(fanout_span);
     let mut recorded = 0_usize;
     loop {
-        let parent = source.advance_parent();
+        // A refusal draws no parent. The loop's only exits are timestamp-based,
+        // so continuing past one would spin on a stale timestamp forever; the
+        // combination is named because that identity is what a wedged run needs.
+        //
+        // A PANIC IS THE ONLY LOCAL OPTION because `measure` returns `Reading`,
+        // not a `Result`, and it is the sole reporting site in this change that
+        // is not a value - the rest of the refusal plumbing is a `Result` all
+        // the way out. IF `measure` IS EVER MADE FALLIBLE, THIS IS THE SITE TO
+        // REVISIT: the fault is already a value here, so the conversion is
+        // mechanical and nothing else about this loop needs to move.
+        let parent = source.advance_parent().unwrap_or_else(|fault| {
+            panic!(
+                "tick-composition walk refused for {preset} seed {seed} {}: {fault:?}",
+                mode.label()
+            )
+        });
         if recorded == parents && parent.parent_ts_ns >= fanout_end_ns {
             break;
         }
@@ -820,7 +835,7 @@ mod tests {
         parents: usize,
     ) {
         for _ in 0..parents {
-            let summary = compact.advance_parent();
+            let summary = compact.advance_parent().expect("compact walk parent");
             let quote = wire.next_tick().expect("wire quote");
             assert!(matches!(quote, TickEvent::Quote(_)));
             assert_eq!(quote.ts_event(), summary.parent_ts_ns);
