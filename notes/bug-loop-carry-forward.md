@@ -1978,6 +1978,75 @@ RESIDUALS CARRIED, all three left standing on their stated grounds:
   (`the_teardown_detail_is_read_after_the_owner_joins`), and the healthy
   direction is pinned too.
 
+## The lab/cli document, round 1: A1, C1 and C3
+
+- `the_control_artifact_carries_no_b8_field` NOW READS THROUGH `repo_root()` and
+  PANICS on a missing artifact. It had `std::fs::read(DEFAULT_OUT)` with an
+  early-return on error, and `DEFAULT_OUT` is repo-relative while a unit test's
+  CWD is its crate, so the read failed on every run since the test was written
+  and not one of its assertions had ever executed. BITE-CHECKED IN BOTH
+  DIRECTIONS, which is what made it a proof rather than an assertion: with an
+  impossible `"B9"` added to the required-gate list the FIXED test fails "B9 is
+  missing", and the OLD relative read carrying the same impossible assertion
+  PASSES. A test that passes while asserting something false is the vacuity
+  demonstrated, not argued.
+  - WHAT THEY FOUND ON FIRST EXECUTION: nothing. The committed artifact's
+    `gates` map is exactly `B1..B7` with no `B8`, so all four claims are true.
+    The defect was entirely in the test.
+- `protocol9_tape_oracle` IS NO LONGER `#[ignore]`d, and the reason is worth
+  stating as a rule rather than as a fix: ITS ONLY STATED GROUND WAS A COST, AND
+  THE COST WAS FALSE. The string said "walks seven 6-hour streams" when the
+  matrix has been THREE rows since the ETHUSDT and SOLUSDT presets were retired,
+  and the whole test measures comfortably inside the watchdog. It was in no skip
+  list and the gate sets `include_ignored`, so the attribute bought only its
+  exclusion from `brokkr check`. Checked for a surviving ground and there is
+  none - not environment (no socket, no corpus, the fixture is committed), not
+  policy - so the attribute was DELETED rather than given a corrected sentence.
+  The alternative close, rewriting the cost string, would have kept a claim that
+  has to be re-measured forever to stay true.
+  - THE PRAISE IS DESERVED, checked rather than taken on trust. The write branch
+    is guarded by TWO independent conditions - the fixture must be ABSENT and
+    `TAPE_PROTOCOL_VERSION` must equal 9 - and the version assert precedes the
+    write, so it cannot re-bless later-protocol output. Note the write targets
+    `analysis/`, not `tests/fixtures/`, so the tape document's
+    `no_test_binary_writes_a_committed_fixture` enforcer does NOT cover it. That
+    is not a hole to close here: the enforcer's own note says an unguarded
+    writer elsewhere owes its own rule, and this writer is guarded more tightly
+    than the rule would require.
+  - AND THE TAPE-LINEAGE FACT IT ESTABLISHES IS NOW DURABLE, in
+    `reference/architecture.md` beside the version narrative, because a reader
+    who knows bumps are unconditional will assume the opposite: the fixture
+    frozen at identity 9 STILL MATCHES at the current identity, so none of 12,
+    13, 14, 15 or later moved the bytes it observes. THE SENTENCE NAMES NO
+    CURRENT VERSION NUMBER, deliberately: `tape_version_prose.rs` sees only two
+    literal phrasings, so a durable claim written any other way survives the
+    next bump uncaught, and the round's cold review caught exactly that draft.
+    SCOPED DELIBERATELY - six simulated hours,
+    BTCUSDT only, offline generation path, three arms - because the sentence
+    replacing an under-claim naturally over-claims.
+- C3 IS REFUSED, AND THE MEASUREMENT INVERTED THE FINDING.
+  `the_control_walk_pair_replays_one_tape`'s 24-hour window was filed as a
+  latent gate-breaker to be cut to an hour. It is nowhere near the watchdog in
+  any of the three sweeps. More decisively, THE DAY IS THE SHORTEST
+  WINDOW THAT MEASURES ANYTHING AT ALL: `window_start_ns` is 2026-06-30T22:00:00Z,
+  an MNQ session open, and `per_session` records are emitted per COMPLETED
+  session, so 1 h, 6 h AND 12 h each yield ZERO hours and ZERO parents while
+  24 h yields 23 hours and 1,455,942 parents. The cliff is the session boundary,
+  not a gradient - shortening this pin does not weaken it, it empties it.
+  - THE SIBLING'S ARGUMENT DOES NOT TRANSFER, which is what the finding leaned
+    on. `arrival_control_refuses_a_tree_that_changed_during_the_run` uses an hour
+    and says why in place: it pins STEP ORDERING and needs only to reach its
+    gates. This pin's content is two passes agreeing over the tape they walked,
+    which is a claim about coverage.
+  - THE ROUND ADDED THE COVERAGE ASSERTION rather than only a comment, because a
+    comment does not bite. The covered-hour count fails first and by name on any
+    shortened window; the pre-existing `parents > 0` could not have caught a cut
+    that still landed one busy hour. Bite-checked at 6 h and 12 h.
+  - THE EXPECTED COUNT IS DERIVED, not written down - `gate_hours(&profile).len()`,
+    the same call the module's other tests make - so an MNQ calendar change fails
+    at `gate_hours_excludes_the_unexposed_hour`, which owns that fact, rather
+    than here behind a message about window length. Same move as `d0318a3`.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform

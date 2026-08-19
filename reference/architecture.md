@@ -679,6 +679,33 @@ is the boatyard landing: placement, pacing and the per-boat clock moved off the
 one venue-wide replay, so what a socket receives is a function of its boat
 rather than of the run.
 
+NOT EVERY BUMP MOVES EVERY TAPE, and the record for the crypto lineage is
+specific enough to be worth stating, because a reader who knows the bumps are
+unconditional will assume the opposite. `analysis/protocol9-tape-hashes.json`
+freezes FNV-1a hashes of six simulated hours of canonical BTCUSDT trade and
+quote lines, at two seeds plus a flow-surge arm, taken when the tape identity
+was 9. `protocol9_tape_oracle` in `mogwai-cli`'s `gen` module asserts equality
+against it, and AT THE CURRENT TAPE IDENTITY IT STILL MATCHES - the assertion
+is live in the gate, so that sentence is enforced rather than dated, and it
+carries no version number of its own for a later bump to falsify. The identity
+itself is stated once above, in the phrasing
+`crates/mogwai-data/tests/tape_version_prose.rs` checks; a second statement of
+it here in any other phrasing would be exactly the durable-claim defect that
+test exists to prevent.
+So none of the intervening bumps - 12's arrival-frame calibration, 13's
+fill-band decimal normalization, 14's `ReopenGap` crossing repair, 15's
+protocol-12b mechanism landing, and onward - moved any of the bytes this oracle
+observes: the first six simulated hours of the OFFLINE generation path, at
+those three arms. It does not walk MNQ, it does not walk the server's river
+placement, and it does not run past six hours, so it is evidence about the
+crypto generator's core draw rather than a blanket identity. That is consistent
+with each bump's own scope: 13 is a fill-band key and 14 a calendar crossing,
+neither of which the crypto preset's generation reaches, and 17's per-symbol
+tape root keys the SERVER's rivers while leaving offline generation seeds
+untouched. The
+version constant is a process identity that advances whenever a change COULD
+move a tape; it is not a claim that every tape moved.
+
 Each generated parent event publishes one BBO before its first trade. The book
 has an exact positive integer-tick width and is centered, with one rounding, on
 the drifted latent mid. Every child in the parent sweep shares that book. Parent

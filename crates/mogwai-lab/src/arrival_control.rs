@@ -820,8 +820,28 @@ mod tests {
 
     /// Section 2.5's determinism claim: the two accumulator passes drive one
     /// generator over one tape, so they agree on how many parents they saw.
-    /// Run at a SHORT window - the exposure contract governs the artifact run,
-    /// not this pin.
+    /// Run at ONE DAY, which is short relative to the artifact run's month but
+    /// is NOT a round number chosen for comfort: it is the SHORTEST WINDOW THAT
+    /// MEASURES ANYTHING HERE, and shortening it does not weaken the pin, it
+    /// empties it.
+    ///
+    /// `window_start_ns` is 2026-06-30T22:00:00Z, which is an MNQ SESSION OPEN,
+    /// and the accumulator's `per_session` records are emitted per COMPLETED
+    /// session. So a window that ends mid-session yields no records at all.
+    /// Measured, at this start: 1 h, 6 h and 12 h each give ZERO hours and ZERO
+    /// parents; 24 h gives 23 hours (hour 21 is the unexposed one) and
+    /// 1,455,942 parents. The cliff is the session boundary, not a gradient.
+    ///
+    /// The sibling `arrival_control_refuses_a_tree_that_changed_during_the_run`
+    /// argues for a one-hour window, and that argument does not transfer: it
+    /// pins STEP ORDERING and needs only that the run reach its gates, whereas
+    /// this pin's content is that two passes agree over the tape they walked.
+    ///
+    /// It is not `#[ignore]`d and does not want to be: it measures comfortably
+    /// inside the per-test watchdog in every sweep. No number is pinned here on
+    /// purpose - a wall stated in a doc comment has to be re-measured forever to
+    /// stay true, which is the same ground on which this round deleted a stale
+    /// cost string from `protocol9_tape_oracle`.
     #[test]
     fn the_control_walk_pair_replays_one_tape() {
         let binding = GeneratedBinding {
@@ -836,11 +856,24 @@ mod tests {
             301,
         )
         .unwrap();
-        let acc_parents: i64 = hourly_mean_parents(&walk.ctx)
-            .values()
-            .map(|r| r.parents)
-            .sum();
-        assert!(acc_parents > 0, "the short walk produced no parents");
+        let by_hour = hourly_mean_parents(&walk.ctx);
+        // The coverage assertion, not just a nonzero total: a shortened window
+        // that still catches ONE busy hour would satisfy `parents > 0` and
+        // quietly reduce this from an agreement-over-the-tape pin to an
+        // agreement-over-one-hour pin. The expected count is DERIVED from the
+        // preset rather than written down, so a legitimate MNQ calendar change
+        // fails at `gate_hours_excludes_the_unexposed_hour`, which owns that
+        // fact, instead of failing here behind a message about window length.
+        let profile = mogwai_server::config::profile_from_preset("MNQ").unwrap();
+        let exposed = gate_hours(&profile).unwrap().len();
+        let covered = by_hour.values().filter(|r| r.parents > 0).count();
+        assert_eq!(
+            covered, exposed,
+            "the walk must cover every exposed hour; a window that does not is \
+             a different and weaker pin"
+        );
+        let acc_parents: i64 = by_hour.values().map(|r| r.parents).sum();
+        assert!(acc_parents > 0, "the walk produced no parents");
         assert_eq!(
             acc_parents,
             walk.summary["parents"].as_i64().expect("a parent count"),

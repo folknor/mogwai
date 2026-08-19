@@ -9,32 +9,11 @@ This hunt looks for defects in the TESTS, not in the code they test.
 
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 
-ONE ORCHESTRATOR NOTE ON C1, because the measurement was already in hand: the
-`--timings` run of `brokkr check --gate` on 2026-08-18 recorded
-`r#gen::tests::protocol9_tape_oracle` at 1.932 s in the workspace sweep. The
-finding's claim that it is "far past the 20-second watchdog" is not what that run
-measured. The rest of C1 - that it is `#[ignore]`d, absent from the skip list,
-therefore run by the gate, and carries a stale cost statement - is unaffected by
-this, and so is the question of whether its frozen fixture is still valid.
+ROUND 1 CLOSED A1, C1 AND C3 on 2026-08-19. Those sections are gone from this
+document; what the round decided that a later reader would otherwise re-derive
+wrong is in `notes/bug-loop-carry-forward.md`.
 
 ## A. Tests that cannot fail
-
-**A1. `the_control_artifact_carries_no_b8_field` - unconditionally vacuous.**
-`crates/mogwai-cli/src/arrival_control.rs:706`
-
-```rust
-let Ok(bytes) = std::fs::read(DEFAULT_OUT) else { return; };
-```
-
-`DEFAULT_OUT` is `"analysis/mnq-arrival-control.json"`, relative. A unit test's
-CWD is the CRATE directory, so this resolves to
-`crates/mogwai-cli/analysis/...`, which does not exist and never will. The
-artifact IS committed - at the repo root. The same test module already has a
-`repo_root()` helper (added exactly because of this hazard) and does not use it
-here. So the test has never once executed an assertion. Every one of its four
-assertions (`B8` absent, `B1..B7` present) is dead. One-line fix:
-`std::fs::read(repo_root().join(DEFAULT_OUT))` - and then it should hard-fail
-rather than early-return, since the artifact is committed.
 
 **A2. The dirty-tree family - four tests, all no-ops in exactly the state the
 gate runs in.**
@@ -195,32 +174,6 @@ counter (the `sidecar` module exists for exactly this) and not an assertion.
 
 ## C. Skip-list and `#[ignore]` reconciliation
 
-**C1. `protocol9_tape_oracle` is `#[ignore]`d for COST and is NOT in the gate's
-skip list.** `mogwai-cli/src/gen.rs:1400`,
-`#[ignore = "the tape oracle walks seven 6-hour streams; run focused"]`
-
-No pattern in `brokkr.toml`'s `skip` list matches it (`protocol9`,
-`tape_oracle` - neither appears). `[test.profiles.gate]` sets
-`include_ignored = true`, so the gate runs it, and it walks three 6-hour
-generated streams (the comment says seven; the matrix is three rows now, after
-the ETHUSDT/SOLUSDT retirement - THE STATED COST IS ITSELF STALE). The hunter
-judged that far past the 20-second watchdog; see the orchestrator note at the top
-of this document for what the timings run actually measured.
-
-Second-order concern on the same test: it asserts
-`frozen["entries"] == observed["entries"]` against a fixture frozen at
-`TAPE_PROTOCOL_VERSION` 9, while the constant is now heading for 21. If any of
-the intervening bumps (12 arrival-frame calibration, 13 fill-band decimals, 14
-`ReopenGap`, 15 the 12b mechanism, and onward) moved the BTCUSDT crypto tape,
-this test is permanently red as well as over budget. The hunter did not run it;
-one deliberate
-`brokkr test -p mogwai-cli protocol9_tape_oracle --timeout 279` would settle
-which of "over budget" and "over budget AND red" is being held.
-
-The refusal branch (writing the fixture only when `TAPE_PROTOCOL_VERSION == 9`)
-is well-designed and correctly forecloses the re-blessing hazard - that half is
-exemplary and the pattern the sibling `mogwai-data` finding was missing.
-
 **C2. Cost-reason `#[ignore]`s that are correctly listed.** For the record, these
 check out: `the_envelope_matches_the_closed_forms_where_they_are_exact` (exact
 name), the ten macro-generated
@@ -228,17 +181,6 @@ name), the ten macro-generated
 prefix, and the prefix invariant holds since every one is generated `#[ignore]`d
 by the macro), `arrival_screen_layer1_reproduces_the_committed_12a_generated_blocks`,
 and `arrival_control_refuses_a_tree_that_changed_during_the_run`.
-
-**C3. `the_control_walk_pair_replays_one_tape` runs a 24-hour generator walk and
-is NOT `#[ignore]`d.** `mogwai-lab/src/arrival_control.rs:829`
-
-`window_length_ns: 86_400_000_000_000` with two accumulator passes. This runs in
-every `brokkr check` and every gate lane, under the 20-second watchdog. The doc
-comment calls it "a SHORT window", which is true only relative to the artifact
-run's month. Worth timing; if it is near the ceiling it is a latent gate-breaker,
-and the property (two passes see the same parent count) is expressible at an hour
-just as well - its own CLI sibling makes exactly that argument for its one-hour
-window.
 
 ## D. Shared-fixture convention
 
@@ -320,20 +262,16 @@ throughout. The `protocol9_tape_oracle` re-blessing guard is the correct pattern
 
 ## The hunter's recommended order of work
 
-1. **A1** - one line, a test that has literally never run.
-2. **C1** - add `protocol9_tape_oracle` to `brokkr.toml`'s skip list with a
-   CORRECT cost statement (three streams, not seven), and run it once by name to
-   learn whether it is also red.
-3. **A2 plus A3 as one rewrite** - put the tree-state reader behind the existing
+1. **A2 plus A3 as one rewrite** - put the tree-state reader behind the existing
    `Seams` mechanism (or a shared trait on `ledger::require_clean_tree`) and make
    all four dirty-tree tests assert both verdicts deterministically. This is the
    largest real hole: four tests, all dead on the gate's own machine state, all
    "covered" on paper. Do not preserve the early-return guards.
-4. **A4, A5, A6, A8** - small, individually cheap, each currently counted as
+2. **A4, A5, A6, A8** - small, individually cheap, each currently counted as
    coverage it does not provide.
-5. **B1/B2** - the envelope tolerances. This one needs a decision rather than a
+3. **B1/B2** - the envelope tolerances. This one needs a decision rather than a
    patch: a self-scaling 5-sigma band at n=32 is a choice, and tightening it will
    make the most expensive gate in the workspace occasionally red. Worth naming
    what a failure would change before touching it.
-6. **D** - a third `analysis/*_conformance.json` for the zero-fraction and
+4. **D** - a third `analysis/*_conformance.json` for the zero-fraction and
    exposure quantities, if the two-copy gates are meant to be permanent.

@@ -1396,8 +1396,20 @@ mod tests {
     /// protocol, so it can never re-bless later-protocol output; a
     /// present fixture always asserts equality. This is the frozen
     /// oracle the successor's byte-identity tests compare against.
+    ///
+    /// IT WAS `#[ignore]`d ON A COST THAT WAS NEVER RE-MEASURED - "walks seven
+    /// 6-hour streams" - and both halves of that sentence had gone stale: the
+    /// matrix is THREE rows since the ETHUSDT and SOLUSDT presets were retired,
+    /// and the whole test measures comfortably inside the per-test watchdog in
+    /// every sweep. The gate profile ran it regardless - it sets
+    /// `include_ignored` and this test is in no skip list - so the attribute
+    /// bought only its exclusion from the fast changed-files lane, on a ground
+    /// measurement does not support. There is no environment or policy ground
+    /// either: the fixture is committed, and the walk binds no socket and needs
+    /// no corpus. Nothing survived to state, so the attribute went rather than
+    /// being given a corrected cost sentence that would need re-measuring
+    /// forever to stay true.
     #[test]
-    #[ignore = "the tape oracle walks seven 6-hour streams; run focused"]
     fn protocol9_tape_oracle() {
         const WINDOW_NS: u64 = 6 * 3_600 * 1_000_000_000;
         let fixture_path = concat!(

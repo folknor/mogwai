@@ -716,13 +716,20 @@ mod tests {
     }
 
     /// Inapplicability is ABSENCE, not a recorded pass: the control has no
-    /// cadence grid for B8 to be sensitive to. Pins the committed artifact once
-    /// the run has produced it; before then there is nothing to contradict.
+    /// cadence grid for B8 to be sensitive to. Pins the COMMITTED artifact,
+    /// which is in the tree, so a missing file is a failure rather than a
+    /// reason to skip.
+    ///
+    /// `DEFAULT_OUT` is relative to the REPOSITORY, and a unit test's working
+    /// directory is its crate - so this must go through `repo_root`. It did
+    /// not, and read `crates/mogwai-cli/analysis/...`, which does not exist:
+    /// the read failed on every run and the early return meant not one of the
+    /// assertions below ever executed.
     #[test]
     fn the_control_artifact_carries_no_b8_field() {
-        let Ok(bytes) = std::fs::read(DEFAULT_OUT) else {
-            return;
-        };
+        let path = repo_root().join(DEFAULT_OUT);
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("the committed control artifact {}: {e}", path.display()));
         let artifact: Value = serde_json::from_slice(&bytes).unwrap();
         assert!(artifact["gates"].get("B8").is_none());
         for name in ["B1", "B2", "B3", "B4", "B5", "B6", "B7"] {
