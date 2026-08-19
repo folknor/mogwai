@@ -32,6 +32,13 @@ owo-colors = "4"
 pulldown-cmark = "0.13"
 
 [dev-dependencies]
+# THE SAME DEPENDENCY AS ABOVE, WITH ONE FEATURE ADDED, and the placement is
+# the whole mechanism: the dirty-tree unit tests in `fit`, `arrival_control`,
+# `arrival_screen` and `minute_range_envelope` install a scripted tree reader,
+# and that reader must not exist in the binary this crate ships. Under
+# resolver 3 a dev-dependency's features are unified only into builds that
+# compile a test target, so `cargo build --release` leaves `test-seam` off.
+mogwai-lab = { workspace = true, features = ["test-seam"] }
 mogwai-protocol.workspace = true
 tokio.workspace = true
 futures-util.workspace = true

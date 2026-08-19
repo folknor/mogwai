@@ -54,6 +54,15 @@ tokio.workspace = true
 # frame - the walk is the other half of what a screen cell spends.
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath", "mogwai-data/hotpath"]
+
+# The tree-state seam in `ledger` - `TreeOracle`, `install_tree_oracle`,
+# `ScriptedTree`. OFF BY DEFAULT AND IT MUST STAY OFF, because installing a
+# double lets a caller fabricate the `harness_tree_commit` an artifact's
+# binding is attested with. `mogwai-cli` enables it in [dev-dependencies]
+# only; under resolver 3 that does not reach a build compiling no test target,
+# so the shipped `target/release/mogwai` has no installation point at all.
+# See the module comment in `ledger.rs` for the second, runtime guard.
+test-seam = []
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "mogwai-data/hotpath-alloc"]
 
 # The layer-2 projection instrument. `required-features` is what stops a plain

@@ -70,7 +70,6 @@ pub fn run(args: &FitArgs) -> anyhow::Result<()> {
     }
     let cfg = resolve(args, &harness_commit, &harness_commit);
     let artifact = run_fit(&cfg).map_err(|e| anyhow!("the fit refused: {e}"))?;
-
     let bytes = serde_json::to_vec_pretty(&artifact)?;
     std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
 
@@ -128,25 +127,58 @@ pub fn resolve(args: &FitArgs, harness_commit: &str, default_cache_commit: &str)
 mod tests {
     use super::*;
 
-    /// The N1 fit-side gate: `fit` is now a call site of the SHARED
-    /// `mogwai_lab::ledger::require_clean_tree`, and moving it must not change
-    /// what an operator sees. Depends on the development tree being dirty, as
-    /// its `minute_range_envelope` sibling does; on a clean tree calling `run`
-    /// would launch a real fit, so the check is skipped rather than risked.
-    #[test]
-    fn fit_refuses_a_dirty_tree() {
-        if require_clean_tree().is_ok() {
-            return;
-        }
-        let err = run(&FitArgs {
-            corpus: None,
-            ledger: None,
-            preflight: None,
+    use std::rc::Rc;
+
+    use mogwai_lab::ledger::{ScriptedTree, TreeQuery, install_tree_oracle};
+
+    fn missing_inputs(out: &str) -> FitArgs {
+        FitArgs {
+            corpus: Some("no/such/fit-corpus".into()),
+            ledger: Some("no/such/fit-ledger.json".into()),
+            preflight: Some("no/such/fit-preflight.json".into()),
             cache_dir: None,
             cache_commit: None,
-            out: Some("target/fit-dirty-tree-test.json".into()),
-        })
-        .expect_err("this development tree is deliberately dirty");
-        assert!(err.to_string().contains("working tree is dirty"));
+            out: Some(out.into()),
+        }
+    }
+
+    /// The N1 fit-side gate: `fit` is a call site of the SHARED
+    /// `mogwai_lab::ledger::require_clean_tree`, and moving it must not change
+    /// what an operator sees.
+    ///
+    /// BOTH VERDICTS ARE INJECTED, and that is the whole design. This test
+    /// used to return early on a clean tree - so on the state every gate run
+    /// is meant to happen in, it asserted nothing at all - and the reason
+    /// given was that calling `run` on a clean tree would launch a real fit.
+    /// The seam removes both problems at once: no git is consulted, the tree
+    /// state is whatever the test says, and the clean direction stops at the
+    /// corpus that is not there.
+    #[test]
+    fn fit_refuses_a_dirty_tree_before_the_corpus_and_binds_a_clean_one() {
+        let dirty = Rc::new(ScriptedTree::dirty("d1r7y"));
+        let err = {
+            let _guard = install_tree_oracle(Rc::clone(&dirty));
+            run(&missing_inputs("target/fit-dirty-tree-test.json"))
+                .expect_err("a dirty tree refuses")
+        };
+        assert!(
+            err.to_string().contains("the working tree is dirty"),
+            "{err}"
+        );
+        // The status read alone, so nothing past the gate ran: the fit never
+        // reached the corpus it would have refused on next.
+        assert_eq!(dirty.queries(), vec![TreeQuery::Status]);
+
+        let clean = Rc::new(ScriptedTree::clean("c1ean"));
+        let err = {
+            let _guard = install_tree_oracle(Rc::clone(&clean));
+            run(&missing_inputs("target/fit-clean-tree-test.json"))
+                .expect_err("the corpus is not there either")
+        };
+        assert!(
+            err.to_string().contains("the fit refused"),
+            "a clean tree must be bound and the run carried into the fit: {err}"
+        );
+        assert_eq!(clean.queries(), vec![TreeQuery::Status, TreeQuery::Head]);
     }
 }

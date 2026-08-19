@@ -126,6 +126,12 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     } else {
         Some(require_clean_tree().map_err(|e| anyhow!(e.to_string()))?)
     };
+    // NOT WRAPPED. `ScreenContext::open` also parses the JSON, builds the 12a
+    // binding, resolves the MNQ preset, computes gate hours and hashes
+    // `analysis/fingerprint.json`; a blanket "opening the 12a measurement"
+    // here would relabel every one of those as a measurement-path failure.
+    // The measurement read and parse name themselves inside `open` instead,
+    // which is what the ordering pins below key on.
     let context =
         ScreenContext::open(&measure, args.cache.as_deref()).map_err(|e| anyhow!(e.to_string()))?;
     // The probe prices the walk itself; the grid run is allowed its cache.
@@ -453,6 +459,15 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     let hours = context.gate_hours();
     let unexposed: Vec<_> = (0_i64..24).filter(|h| !hours.contains(h)).collect();
     let commit = commit.expect("full run has commit");
+    // See the twin in `arrival_control::run_with`: the binding below is a
+    // provenance claim, and a scripted tree reader could otherwise forge both
+    // the step-1 commit and this re-attestation from one install.
+    if !mogwai_lab::ledger::tree_readings_are_production() {
+        bail!(
+            "a scripted tree reader is installed; an artifact binding may only be attested by git \
+             itself"
+        );
+    }
     let (head, clean) = fresh_tree_state().map_err(|e| anyhow!(e.to_string()))?;
     if !clean || head != commit {
         bail!("the artifact is unbound");
@@ -514,6 +529,9 @@ fn refuse_committed_census_path(path: &std::path::Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::rc::Rc;
+
+    use mogwai_lab::ledger::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     use super::*;
 
@@ -533,32 +551,50 @@ mod tests {
     /// inputs happen to say. Pinned by pointing the run at a path that cannot
     /// be read: whichever refusal comes back names which check ran first.
     ///
-    /// Both tree states are asserted rather than one being skipped - the pin is
-    /// the ORDER, and the order is visible from either state.
+    /// BOTH VERDICTS ARE INJECTED. The previous version branched on the
+    /// AMBIENT tree, and its clean branch asserted only that the error did not
+    /// contain the word `clean` - which a file-not-found error satisfies
+    /// whether or not the gate ran, so the branch that runs on every gate
+    /// machine could not fail. Each direction now names the error it expects
+    /// and checks the query log that produced it.
     #[test]
     fn arrival_screen_refuses_a_dirty_tree_before_reading_inputs() {
-        let (_, clean) = fresh_tree_state().expect("a git tree");
+        let measure = "analysis/this-12a-artifact-does-not-exist.json";
         let out = "target/stage-a-dirty-tree-test.json";
         drop(std::fs::remove_file(out));
-        let error = run(args(
-            "analysis/this-12a-artifact-does-not-exist.json",
-            out,
-            false,
-        ))
-        .expect_err("an unreadable measure path cannot produce an artifact")
-        .to_string();
-        if clean {
-            assert!(
-                !error.contains("clean"),
-                "the tree is clean, so the input read is what must fail: {error}"
-            );
-        } else {
-            assert!(
-                error.contains("clean") || error.contains("dirty"),
-                "a dirty tree must be refused before the input is read: {error}"
-            );
-        }
+        let dirty = Rc::new(ScriptedTree::dirty("d1r7y"));
+        let error = {
+            let _guard = install_tree_oracle(Rc::clone(&dirty));
+            run(args(measure, out, false))
+                .expect_err("a dirty tree cannot produce an artifact")
+                .to_string()
+        };
+        assert!(
+            error.contains("the working tree is dirty"),
+            "a dirty tree must be refused before the input is read: {error}"
+        );
+        assert!(
+            !error.contains(measure),
+            "the measurement was opened before the tree was checked: {error}"
+        );
+        assert_eq!(dirty.queries(), vec![TreeQuery::Status]);
         assert!(!Path::new(out).exists());
+
+        let clean = Rc::new(ScriptedTree::clean("c1ean"));
+        let clean_out = "target/stage-a-clean-tree-test.json";
+        drop(std::fs::remove_file(clean_out));
+        let error = {
+            let _guard = install_tree_oracle(Rc::clone(&clean));
+            run(args(measure, clean_out, false))
+                .expect_err("the measurement is not there either")
+                .to_string()
+        };
+        assert!(
+            error.contains(&format!("reading the 12a measurement {measure}")),
+            "a clean tree must be bound and the run carried into the input: {error}"
+        );
+        assert_eq!(clean.queries(), vec![TreeQuery::Status, TreeQuery::Head]);
+        assert!(!Path::new(clean_out).exists());
     }
 
     #[test]
@@ -581,20 +617,45 @@ mod tests {
     /// inputs with the tree in whatever state it is in, and that it names no
     /// output file. The measured run itself is brick A0's own gate, an
     /// orchestrated `arrival-screen --cost-probe` invocation.
+    ///
+    /// "CONSULTED THE TREE" IS ASSERTED ON THE READER, not on the error text.
+    /// This test used to assert the refusal contained neither `clean` nor
+    /// `dirty`, which a file-not-found error satisfies unconditionally: a
+    /// probe that DID demand a clean tree would sail past the gate on the
+    /// clean tree every gate run happens on, fail on the missing input, and
+    /// leave the test green. The seam makes the claim observable - the tree
+    /// reader is installed and must be asked NOTHING.
+    ///
+    /// SCOPED HONESTLY: the run dies at the measurement read, so what is
+    /// pinned is that nothing BEFORE the first input consulted the tree. A
+    /// consultation added after it would leave this green. That is where the
+    /// gate is today - `run` reads the tree in its first ten lines and the
+    /// probe returns before the pre-write re-attestation - and taking the
+    /// claim further means letting the probe run, which is the six-minute
+    /// walk this test exists to avoid.
     #[test]
     fn arrival_screen_cost_probe_needs_no_clean_tree_and_writes_no_artifact() {
         let out = "target/stage-a-cost-probe-test.json";
         drop(std::fs::remove_file(out));
-        let error = run(args(
-            "analysis/this-12a-artifact-does-not-exist.json",
-            out,
-            true,
-        ))
-        .expect_err("an unreadable measure path stops the probe")
-        .to_string();
+        let tree = Rc::new(ScriptedTree::dirty("d1r7y"));
+        let error = {
+            let _guard = install_tree_oracle(Rc::clone(&tree));
+            run(args(
+                "analysis/this-12a-artifact-does-not-exist.json",
+                out,
+                true,
+            ))
+            .expect_err("an unreadable measure path stops the probe")
+            .to_string()
+        };
         assert!(
-            !error.contains("clean") && !error.contains("dirty"),
-            "the probe consulted the tree state: {error}"
+            tree.queries().is_empty(),
+            "the probe consulted the tree state: {:?}",
+            tree.queries()
+        );
+        assert!(
+            error.contains("reading the 12a measurement"),
+            "the probe must fail on its input, not on anything before it: {error}"
         );
         assert!(!Path::new(out).exists());
         // And the probe branch returns before any write even when it succeeds:
@@ -641,12 +702,23 @@ mod tests {
         );
         census_args.out = None;
         census_args.demand_census = Some(census.into());
-        let error = run(census_args)
-            .expect_err("an unreadable measure path stops the census")
-            .to_string();
+        let tree = Rc::new(ScriptedTree::dirty("d1r7y"));
+        let error = {
+            let _guard = install_tree_oracle(Rc::clone(&tree));
+            run(census_args)
+                .expect_err("an unreadable measure path stops the census")
+                .to_string()
+        };
+        // Same correction as the cost probe's: the old assertion was on the
+        // absence of two words from an error a missing file produces anyway.
         assert!(
-            !error.contains("clean") && !error.contains("dirty"),
-            "the census consulted tree cleanliness: {error}"
+            tree.queries().is_empty(),
+            "the census consulted tree cleanliness: {:?}",
+            tree.queries()
+        );
+        assert!(
+            error.contains("reading the 12a measurement"),
+            "the census must fail on its input: {error}"
         );
         assert!(!Path::new(census).exists());
         assert!(!Path::new(DEFAULT_OUT).with_extension("json.tmp").exists());

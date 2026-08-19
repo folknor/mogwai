@@ -250,6 +250,27 @@ trusts yet.
       "still under budget, go again" admits an attempt the clamp then refuses -
       replacing this helper's message with the clamp's. The check carries the
       LAST ATTEMPT'S MEASURED COST.
+    - AND A THIRD, FOUND BY THE lab/cli r2 GATE RUN RATHER THAN BY REVIEW: THE
+      ACCEPTANCE TEST DID NOT ASK HOW THE DRAIN ENDED. `run_complete_reaches
+      _every_open_socket` failed one gate run and passed the next with
+      "the first socket saw the completion announcement, after 15 content
+      frames" - a paced 2 s MNQ run prints about 89, so 15 is roughly 0.4 s of
+      it. `drain_to_completion`'s deadline is CLAMPED to the test's remaining
+      wall budget, so an attempt begun late enough is cut off mid-run and
+      returns a reading that passes the `content_frames > 0` premise and
+      carries no announcement, which the caller then reports as a venue defect.
+      The discard condition covered a lost ATTACH and not a truncated DRAIN.
+      This is the file's own standing rule - A DRAIN THAT DOES NOT RECORD HOW
+      THE STREAM ENDED IS NOT A DRAIN - in the one place it had not been
+      applied: `while let Ok(Some(Ok(m)))` folded a close, a stream end, a
+      transport error and a timeout into "the loop finished". `Watched` now
+      carries an `Ending`, a `Deadline` ending discards the run exactly like a
+      lost attach, and the give-up message prints the endings. Bite-checked by
+      capping the drain deadline at 400 ms: 19 launches, every one discarded,
+      and the failure that arrives names host load instead of the venue.
+      The sigterm caller asserts the ending is not `Deadline` BEFORE its
+      absence assertion, because a truncated drain satisfies "no announcement"
+      for free.
   - WHAT SEPARATES TWO BOATS IS THEIR WALL ANCHOR, NOT THEIR SPEED.
     `boatyard.rs` gives every boat the same `sim_epoch_ns = origin_ns` and a
     `wall_anchor_ns = now_ns()` taken AT BOAT CONSTRUCTION, so two boats built at
@@ -2047,6 +2068,171 @@ RESIDUALS CARRIED, all three left standing on their stated grounds:
     at `gate_hours_excludes_the_unexposed_hour`, which owns that fact, rather
     than here behind a message about window length. Same move as `d0318a3`.
 
+## The lab/cli document, round 2: the tree-state seam
+
+- `mogwai_lab::ledger` NOW READS THE TREE THROUGH A SEAM, and nothing may
+  hand-roll a second one. `TreeOracle` serves the two RAW git readings
+  (`TreeQuery::Status`, `TreeQuery::Head`, each a `TreeReading { success,
+  stdout }`); `GitTreeOracle` is production and is the DEFAULT whenever nothing
+  is installed; `install_tree_oracle(Rc<impl TreeOracle>)` returns a guard that
+  restores the previous oracle on drop. `require_clean_tree` AND
+  `fresh_tree_state` both go through it, so a run's step-1 gate and its
+  pre-write re-attestation are scriptable together.
+  - THE SEAM DOES NOT SHIP, AND THAT IS A NEW SHAPE FOR THIS ARC: a test seam
+    that WEAKENS A PRODUCTION INTEGRITY GUARANTEE. The first cut exported
+    `install_tree_oracle`, `TreeOracle` and `ScriptedTree` unconditionally from
+    a crate `mogwai-cli` depends on normally, so they landed in
+    `target/release/mogwai` - and one `ScriptedTree::clean("deadbeef")` install
+    forges BOTH ENDS of the fail-closed contract at once, the step-1 commit
+    that becomes `binding.harness_tree_commit` and the pre-write
+    re-attestation, with `"clean_tree": true` written beside it. Nothing wrote
+    a forged artifact only because each clean-direction test happened to die on
+    a missing input first, which is one refactor from being untrue.
+    CLOSED WITH BOTH AVAILABLE GUARDS, because neither is sufficient alone:
+    - A CARGO FEATURE. The whole seam is `#[cfg(any(test, feature =
+      "test-seam"))]`, and `mogwai-cli` enables `test-seam` ONLY in
+      `[dev-dependencies]`. Under resolver 3 a dev-dependency's features are
+      not unified into a build compiling no test target, so a release build
+      gets a `read_tree` that calls `GitTreeOracle` directly with no
+      thread-local and no installation point. `test` is in the cfg so
+      `mogwai-lab`'s own unit tests need no self-dependency. VERIFIED ON THE
+      ARTIFACT rather than argued: `ScriptedTree::dirty`'s porcelain literal is
+      absent from the built `target/release/mogwai`.
+    - A RUNTIME REFUSAL. `tree_readings_are_production()` exists in BOTH
+      configurations - a thread-local probe with the seam, a constant `true`
+      without - and both artifact writers bail on it immediately before their
+      `fresh_tree_state` re-attestation. This is what survives an
+      `--all-features` release build, which the cfg alone does not. In a
+      production build the branch folds away entirely, which is why its message
+      is also absent from the binary.
+    THE GENERAL RULE, and it is the one to carry: A TEST SEAM ON A GATE WHOSE
+    OUTPUT IS A PROVENANCE CLAIM IS AN ATTACK ON THAT CLAIM. Ask of every new
+    seam what a caller could ASSERT by installing a double, not just what a
+    test can provoke. Where the answer is "a record somebody trusts", the seam
+    is feature-gated and the writer refuses on it.
+  - THE READINGS ARE RAW ON PURPOSE. A double returning a `clean: bool` verdict
+    would move the gate's own decision into the double and leave the production
+    branch untested; serving the bytes `git status --porcelain` really prints
+    keeps the decision where it is asserted.
+  - `ScriptedTree` TAKES BOTH READINGS, and the first cut did not - it
+    hardcoded the head reading as a success, so `unreadable()` modelled a
+    failing `git status` ONLY. Two consequences, both real: `require_clean_tree`
+    has FOUR outcomes and the `rev-parse` failure was unreachable through the
+    double and untested, and `fresh_tree_state`'s `&& head.success` term could
+    be DELETED with every test still green (measured, not argued). The shape is
+    not exotic - a repository with no commits or an unborn HEAD gives a
+    succeeding, empty `git status --porcelain` over a failing `rev-parse` - and
+    it is the case where the untested branch matters most, because binding the
+    trimmed empty stdout would bind an artifact TO NOTHING rather than error.
+    `head_unreadable()` models it, and both branches now have a test that bites.
+    The same fix repaired a FALSE RED in the double's own audit: it selected the
+    scripted constructor on the status bytes alone, so in a repository with no
+    commits it compared `clean("")`'s successful bind against the real reading's
+    refusal and blamed the double. The selection is on both readings' success.
+  - `ScriptedTree` RECORDS EVERY QUERY IN ORDER
+    (`queries()`). That log is what makes the ordering claim assertable: a
+    dirty or unreadable tree costs `[Status]` alone, a clean one costs
+    `[Status, Head]`, and a command that must not consult the tree at all -
+    `arrival-screen --cost-probe` and `--demand-census` - must leave it EMPTY.
+    Asserting on the log rather than on the refusal text is the whole repair
+    for A3: `!error.contains("clean")` is satisfied by a file-not-found error
+    unconditionally, so the old assertion could not fail on the clean tree
+    every gate run happens on.
+  - THE DOUBLE IS AUDITED AGAINST THE REAL ENDPOINT by
+    `the_scripted_double_reproduces_the_real_git_readings`, which replays THIS
+    tree's actual `git` output through the seam and requires the gate to reach
+    the same verdict, then requires the matching `ScriptedTree` constructor to
+    reach it too. It is the one test in that module allowed to read the ambient
+    tree, because comparing against it is its job, and it passes in all four
+    states.
+    - IT IS ALSO THE ONLY SUBPROCESS THIS CRATE'S SWEEP SPAWNS, which is a cost
+      taken deliberately against that sweep's fast, sandbox-safe framing. `git`
+      NOT ON PATH RETURNS RATHER THAN PANICS - there is nothing to audit the
+      double against, and reporting that as a defect in this workspace would be
+      a wrong answer. Every other outcome, both commands failing outside a
+      repository included, is a state it compares in.
+    - WHERE ITS SECOND ASSERTION BITES IS NOT WHERE IT RUNS. On a clean tree
+      `clean()`'s status bytes are bit-identical to what real `git status`
+      printed, so both sides get the same input by construction and the
+      comparison is near tautological; the signal is in the other three states,
+      where the constructor INVENTS the reading. A clean gate machine therefore
+      exercises the weakest of the four. Stated in place rather than
+      rearranged, because it is a limit of comparing against whatever tree is
+      there.
+  - THE GUARD'S RESTORE IS PINNED (`an_installed_oracle_is_removed_when_its
+    _guard_drops`), because a leaked oracle would silently re-point whatever
+    runs next on that thread. Thread-local is the right scope: libtest gives
+    each test its own thread, and these commands read the tree on the thread
+    that entered `run`.
+- THE FOUR DIRTY-TREE TESTS NOW ASSERT BOTH DIRECTIONS AND NEITHER TOUCHES GIT.
+  `fit_refuses_a_dirty_tree_before_the_corpus_and_binds_a_clean_one`,
+  `minute_range_envelope_refuses_a_dirty_tree_before_reading_inputs`,
+  `arrival_control_refuses_a_dirty_tree_before_reading_inputs` and
+  `arrival_screen_refuses_a_dirty_tree_before_reading_inputs` each inject dirty
+  then clean. THE EARLY-RETURN GUARDS ARE GONE and must not come back: they
+  were added 2026-08-09 against the inverse defect (the tests asserted the
+  development tree was dirty and went red at every clean commit) and the cure
+  preserved the disease - all four self-disabled in exactly the state the gate
+  runs in.
+  - THE ORDERING IS ASSERTED POSITIVELY IN BOTH DIRECTIONS, not by the absence
+    of a word. Dirty: the refusal is the tree's AND does not name the input.
+    Clean: the refusal is the FIRST INPUT'S, named. That needed two production
+    messages to carry their path - `minute_range_envelope`'s `verify_input` and
+    `arrival_screen`'s measurement read both emitted a bare
+    "No such file or directory", indistinguishable from every other read in the
+    command. `arrival_control` needed none: its first input is the B5
+    transcript and "B5 refused" already names itself.
+    - THE NAMING GOES ON THE READ, NOT AROUND THE CALL, and the first cut got
+      this wrong in a way that RELOCATED the defect instead of fixing it: it
+      wrapped the whole of `ScreenContext::open` as "opening the 12a
+      measurement". `open` also parses the JSON, builds the 12a binding,
+      resolves the MNQ preset, computes gate hours and hashes
+      `analysis/fingerprint.json` - so a corrupt fingerprint or a broken preset
+      reported as a measurement-path failure, which is the exact class of
+      unattributed error the change existed to remove. It also weakened the
+      three tests keying on the string: a fingerprint-hash failure satisfied
+      them just as well, so they pinned "we got past the tree gate" rather than
+      "we reached the measurement". `open` now names its own `fs::read` and
+      `from_slice`, and the callers wrap nothing.
+  - `arrival_control`'s clean direction PASSES AN ABSENT `b5_log` EXPLICITLY.
+    That is what retires the guard's stated reason - "on a clean tree calling
+    `run` would launch the real six-minute artifact run" - because the run now
+    dies on the missing transcript before any walk.
+    - AND IT RUNS WITH `run_b1: false`. On production `Seams` the test's outcome
+      depends on `target/no-such-b5-for-the-ordering-pin.log` NOT EXISTING: if
+      it ever did, the run would sail past B5 into `run_b1`, which execs a
+      `mogwai gen` subprocess per symbol from inside a unit test. Low
+      probability, high blast radius, and the ordering claim is about the B5
+      read, which is upstream of B1 either way - so disarming B1 removes the
+      hazard without touching the pin. The dirty direction stays on `run` so
+      the public entry point's wiring is still pinned.
+- `ResourceSampler` GAINED A `Drop`, and the round is what made it bite.
+  `arrival_control`'s `run_with` starts the 1 Hz sample thread at its top and
+  only `stop`s it at the very end, so every `?` between them leaked the thread
+  for the life of the process - latent while those early returns were reachable
+  only from an operator run that then exits, and NOT LATENT ANY MORE, because
+  the new clean-direction assertion drives one of them IN-PROCESS inside a test
+  binary that goes on to run every other test in the crate. The guard-scope
+  family with a thread as the resource. Pinned by
+  `a_dropped_sampler_stops_its_thread_rather_than_leaking_it`, which asserts on
+  the stop flag and SAYS IN PLACE that the join is not observable from there,
+  rather than dressing the gap in a predicate that cannot fail.
+  - BITE-CHECKED IN THREE DIRECTIONS, all as text edits. Moving each gate to
+    AFTER its first input read fails all four on the dirty assertion, each
+    naming the input error it got instead. Making `require_clean_tree` never
+    bind fails all four on the clean assertion. Making `arrival-screen`
+    consult the tree unconditionally fails the cost-probe and census tests on
+    the QUERY LOG ("the probe consulted the tree state: [Status]") - the
+    assertion that replaced the vacuous one.
+- `demand_census_needs_no_clean_tree_and_writes_no_screen_artifact` GOT THE
+  SAME REPAIR though the report named only the cost probe: identical shape, one
+  line, and leaving it would have left a second instance of a closed finding.
+- `arrival_control_refuses_a_tree_that_changed_during_the_run` IS DELIBERATELY
+  NOT ON THE SEAM and must stay off it. Its mechanism is planting a real
+  untracked file at the repository root and having the run's own re-attestation
+  see it; scripting that reading would pin the test against itself. It keeps
+  its `#[ignore]`, its clean-tree precondition and its drop guard.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -2254,6 +2440,16 @@ RESIDUALS CARRIED, all three left standing on their stated grounds:
     two-sided bracket, the zero-margin cache test gained an assertion that bites
     in both profiles, the refusal matrix moved to a funded fixture, and the two
     `contains("trigger")` sites became exact strings.
+  - lab/cli r2: 1226 + 446, 1729 pairs, 1672 run, 57 ignored, 0 orphaned, 14
+    skips, 51.7 s. +6 IN EACH SWEEP, +12 PAIRS, and the arithmetic is the rule
+    above working exactly: five of the six new tests are `mogwai-lab`'s
+    `ledger::tests` and the sixth is its `sampler::tests` drop pin, and that
+    crate is in BOTH sweeps, so one test is two pairs. The six rewritten
+    `mogwai-cli` tests move no count. The baseline is
+    engine/protocol r5 at 1220 + 440 / 1717 - lab/cli r1 landed as `4a1e18e`
+    without an entry here, and the arithmetic above shows it moved no count.
+    Whoever reconciles r1's own effect on the ignored count owes it a
+    measurement rather than a reading of its commit message.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

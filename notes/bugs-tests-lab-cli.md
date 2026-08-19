@@ -9,52 +9,12 @@ This hunt looks for defects in the TESTS, not in the code they test.
 
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 
-ROUND 1 CLOSED A1, C1 AND C3 on 2026-08-19. Those sections are gone from this
-document; what the round decided that a later reader would otherwise re-derive
+ROUND 1 CLOSED A1, C1 AND C3 on 2026-08-19; ROUND 2 CLOSED A2 AND A3 the same
+day. Those sections are gone from this
+document; what the rounds decided that a later reader would otherwise re-derive
 wrong is in `notes/bug-loop-carry-forward.md`.
 
 ## A. Tests that cannot fail
-
-**A2. The dirty-tree family - four tests, all no-ops in exactly the state the
-gate runs in.**
-
-- `arrival_control.rs:527` `arrival_control_refuses_a_dirty_tree_before_reading_inputs`
-  - `if !tree_is_dirty() { return; }`
-- `fit.rs:137` `fit_refuses_a_dirty_tree` - `if require_clean_tree().is_ok() { return; }`
-- `minute_range_envelope.rs:116`
-  `minute_range_envelope_refuses_a_dirty_tree_before_reading_inputs` - same guard
-- (`arrival_screen.rs:539` is the branching variant, see A3)
-
-The guard was added deliberately (the comment records finding it red on a clean
-commit, 2026-08-09), but the cure preserved the disease: `AGENTS.md` explicitly
-instructs "COMMIT OR STASH BEFORE READING A `brokkr test -p mogwai-cli ""`
-RESULT", and every gate run is meant to happen on a clean tree. So all four
-self-disable precisely when they would count. They are green-by-construction on
-the machine state that matters and only bite on a developer's scratch tree.
-
-This is not fixable by tweaking the guard - it is a design defect. THE SEAM
-ALREADY EXISTS IN THIS VERY FILE: `arrival_control::run_with(args, Seams { read_b5,
-run_b1, window, mid_run })`. The right rewrite is to add the tree-state reader to
-`Seams` (or a shared `ledger::TreeState` trait) and have all four tests inject
-both a clean and a dirty verdict, asserting the refusal and the ordering
-deterministically in one process, with no git and no ambient state. That removes
-the ambient dependency, removes the "on a clean tree calling `run` would launch a
-real fit" hazard, and lets each test assert BOTH directions.
-`mogwai_lab::ledger::require_clean_tree` is the shared call site - inject there,
-once.
-
-**A3. `arrival_screen_cost_probe_needs_no_clean_tree_and_writes_no_artifact` -
-passes for the wrong reason on a clean tree.** `arrival_screen.rs:586`
-
-It points at a nonexistent measure path and asserts
-`!error.contains("clean") && !error.contains("dirty")`. On a clean tree, a probe
-that DID demand a clean tree would sail past the check and still fail on
-file-not-found - same error text, test still green. The property it claims to pin
-is unobservable in the state it is usually run in. Its sibling
-`arrival_screen_refuses_a_dirty_tree_before_reading_inputs` (line 539) has the
-same shape: the `clean` branch asserts `!error.contains("clean")`, which a
-file-not-found error satisfies unconditionally. Both belong in the seam rewrite
-of A2.
 
 **A4. `frozen_12a_path_is_byte_identical_through_the_parameterized_seam` - a
 tautology.** `count_curve.rs` (~line 665)
@@ -233,17 +193,23 @@ convention, and it does not consult `CARGO_TARGET_TMPDIR` the way
 but not safe against a second cadence test being added later. Should use the
 `storage.rs` helper's shape.
 
-**E2.** `arrival_control_refuses_a_tree_that_changed_during_the_run` plants an
-untracked file at the repository root and removes it after `run_with` returns. If
-`run_with` panics (not just errors), the probe leaks and the developer's tree is
-left dirty by a test whose siblings then silently change behavior (A2). A drop
-guard would make the cleanup unconditional.
+**E2. CLOSED, and it was never open.** The finding read
+`arrival_control_refuses_a_tree_that_changed_during_the_run`'s root-level probe
+file as leaking on a panic and recommended a drop guard. The drop guard is
+already there and was already in HEAD - `struct Sweep(PathBuf)` in
+`arrival_control.rs` - so the cleanup is unconditional today. The
+sibling-behaviour half is gone too: round 2 put the four dirty-tree tests behind
+an injected tree reader, so a leaked probe could no longer change what any of
+them assert even if one leaked. The test keeps its `#[ignore]`, its clean-tree
+precondition and its drop guard, and it deliberately stays OFF the seam - the
+LOCATION of the probe is its mechanism, so scripting the reading would pin it
+against itself.
 
 **E3.** No test in scope sets an env var, touches a global logger, or asserts a
 memory budget outside the injected-reading `BudgetGuard::scripted` harness -
-which is a genuinely good design and the model for A2's fix.
-`budgeted`/`BudgetGuard` shows this codebase already knows how to inject an
-ambient reading; the tree-state checks just never got the same treatment.
+which is a genuinely good design and was the model for A2's fix.
+`budgeted`/`BudgetGuard` showed this codebase already knew how to inject an
+ambient reading; the tree-state checks got the same treatment in round 2.
 
 ## F. Things the hunter read that are worth saying are good
 
@@ -262,16 +228,11 @@ throughout. The `protocol9_tape_oracle` re-blessing guard is the correct pattern
 
 ## The hunter's recommended order of work
 
-1. **A2 plus A3 as one rewrite** - put the tree-state reader behind the existing
-   `Seams` mechanism (or a shared trait on `ledger::require_clean_tree`) and make
-   all four dirty-tree tests assert both verdicts deterministically. This is the
-   largest real hole: four tests, all dead on the gate's own machine state, all
-   "covered" on paper. Do not preserve the early-return guards.
-2. **A4, A5, A6, A8** - small, individually cheap, each currently counted as
+1. **A4, A5, A6, A8** - small, individually cheap, each currently counted as
    coverage it does not provide.
-3. **B1/B2** - the envelope tolerances. This one needs a decision rather than a
+2. **B1/B2** - the envelope tolerances. This one needs a decision rather than a
    patch: a self-scaling 5-sigma band at n=32 is a choice, and tightening it will
    make the most expensive gate in the workspace occasionally red. Worth naming
    what a failure would change before touching it.
-4. **D** - a third `analysis/*_conformance.json` for the zero-fraction and
+3. **D** - a third `analysis/*_conformance.json` for the zero-fraction and
    exposure quantities, if the two-copy gates are meant to be permanent.

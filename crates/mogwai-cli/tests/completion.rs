@@ -159,7 +159,22 @@ async fn watch_a_bounded_run(
             Vec::new()
         };
 
-        if seen.len() == wanted && seen.iter().all(|watched| watched.content_frames > 0) {
+        // TWO CONDITIONS, AND THE SECOND WAS MISSING FOR A ROUND. The first is
+        // the premise: every socket was a live session, evidenced by a content
+        // frame. The second is that every drain got to WATCH THE RUN END -
+        // `drain_to_completion`'s deadline is clamped to this test's remaining
+        // wall budget, so an attempt begun late enough is cut off mid-run and
+        // returns a perfectly plausible-looking reading with no announcement in
+        // it. That reading passed the frame count, was accepted, and the caller
+        // reported the missing announcement as a venue defect - the same wrong
+        // answer this helper exists to eliminate, arriving through the helper's
+        // own acceptance test. A budget-ended drain is not evidence either way,
+        // so the run is discarded exactly like a lost attach.
+        if seen.len() == wanted
+            && seen
+                .iter()
+                .all(|watched| watched.content_frames > 0 && watched.ending != Ending::Deadline)
+        {
             return WatchedRun {
                 venue,
                 seen,
@@ -176,13 +191,17 @@ async fn watch_a_bounded_run(
         let attempt_cost = attempt_started.elapsed();
         assert!(
             std::time::Instant::now() + attempt_cost < give_up,
-            "after {} launches this test never got a LIVE SESSION onto a {duration} run - some \
-             socket was accepted and then written nothing at all, which is a run already tearing \
-             down when this test reached it. That is a statement about how loaded this host is, \
-             not about the venue, and a run this test never watched cannot be reported on either \
-             way. The last attempt cost {attempt_cost:?}, which is what a further one is budgeted \
-             at.",
-            spent.len()
+            "after {} launches this test never fully WATCHED a {duration} run - either some \
+             socket was accepted and written nothing at all, which is a run already tearing down \
+             when this test reached it, or a drain hit the clamped wall deadline before the run \
+             ended, which observes only part of it. Endings on the last attempt: {:?}. That is a \
+             statement about how loaded this host is, not about the venue, and a run this test \
+             never watched to its end cannot be reported on either way. The last attempt cost \
+             {attempt_cost:?}, which is what a further one is budgeted at.",
+            spent.len(),
+            seen.iter()
+                .map(|watched| (watched.ending, watched.content_frames))
+                .collect::<Vec<_>>()
         );
     }
 }
@@ -207,19 +226,58 @@ struct Watched {
     /// "the venue had already served 1 frames on, so this was a live session" -
     /// the exact falsehood the counter rules out.
     content_frames: usize,
+    /// HOW THE DRAIN ENDED, and it is the second half of the session premise
+    /// rather than diagnostics. A drain cut off by [`common::deadline`]'s clamp
+    /// has not observed the end of the run at all, so an absent announcement in
+    /// that reading says nothing about the venue - and the caller reports it as
+    /// the venue never announcing. See [`Ending`].
+    ending: Ending,
+}
+
+/// How a drain stopped. The distinction that matters is VENUE-ENDED versus
+/// BUDGET-ENDED: the first three are the venue speaking, the fourth is this
+/// test running out of wall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The venue sent a close frame.
+    Closed,
+    /// The stream ended without one.
+    StreamEnded,
+    /// The transport failed.
+    Failed,
+    /// The read deadline was reached with the socket still live. NOT EVIDENCE
+    /// ABOUT THE RUN.
+    Deadline,
 }
 
 /// Drains until a `RunComplete` arrives or the socket ends, reporting what was
-/// seen.
+/// seen AND how the stream ended.
+///
+/// THE ENDING IS RECORDED BECAUSE THE OLD LOOP ERASED IT. `while let
+/// Ok(Some(Ok(m)))` folds a close, a transport error, a clean stream end and a
+/// timeout into one "the loop finished", which is the arc's standing rule - a
+/// drain that does not record how the stream ended is not a drain - in the one
+/// place the rule had not been applied. It cost a real gate failure: the drain
+/// deadline is CLAMPED to the test's remaining wall budget, so on a loaded host
+/// a run whose attach retries had eaten the budget was drained for a fraction of
+/// its declared duration, and `run_complete_reaches_every_open_socket` reported
+/// "the first socket saw the completion announcement, after 15 content frames" -
+/// a property failure produced by an exhausted budget. Fifteen frames of a paced
+/// 2 s MNQ run is about 0.4 s of it.
 async fn drain_to_completion(socket: &mut WsSocket, timeout: Duration) -> Watched {
     let mut announcement = None;
-    let mut closed = false;
     let mut content_frames = 0;
     // Clamped to the test's remaining budget: a 30 s bound inside a 20 s per-test
     // watchdog cannot report anything, because the watchdog reaches it first and
     // the failure arrives as an unattributed kill.
     let deadline = common::deadline(timeout);
-    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
+    let ending = loop {
+        let message = match tokio::time::timeout_at(deadline, socket.next()).await {
+            Err(_) => break Ending::Deadline,
+            Ok(None) => break Ending::StreamEnded,
+            Ok(Some(Err(_))) => break Ending::Failed,
+            Ok(Some(Ok(message))) => message,
+        };
         match message {
             // THE SUBSTRING IS A PRE-FILTER, NOT THE ASSERTION, and it is here
             // for throughput rather than convenience. The one caller still on an
@@ -246,7 +304,6 @@ async fn drain_to_completion(socket: &mut WsSocket, timeout: Duration) -> Watche
                 }
             }
             Message::Close(frame) => {
-                closed = true;
                 if let Some(frame) = frame {
                     assert_eq!(
                         u16::from(frame.code),
@@ -254,15 +311,16 @@ async fn drain_to_completion(socket: &mut WsSocket, timeout: Duration) -> Watche
                         "a completed run closes with WS 1000, not a fault code"
                     );
                 }
-                break;
+                break Ending::Closed;
             }
             _ => {}
         }
-    }
+    };
     Watched {
         announcement,
-        closed,
+        closed: ending == Ending::Closed,
         content_frames,
+        ending,
     }
 }
 
@@ -283,8 +341,9 @@ async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadlin
     let (_, elapsed_ns) = watched.announcement.unwrap_or_else(|| {
         panic!(
             "the run announced no completion on a socket the venue had already served {} content \
-             frames on, so this was a live session and not a connect that lost a race",
-            watched.content_frames
+             frames on and whose drain ended {:?}, so this was a live session watched to the end \
+             and not a connect that lost a race",
+            watched.content_frames, watched.ending
         )
     });
     assert!(
@@ -391,14 +450,17 @@ async fn run_complete_reaches_every_open_socket() {
 
     assert!(
         left.announcement.is_some(),
-        "the first socket saw the completion announcement, after {} content frames",
-        left.content_frames
+        "the first socket saw the completion announcement, after {} content frames and a {:?} \
+         ending",
+        left.content_frames,
+        left.ending
     );
     assert!(
         right.announcement.is_some(),
         "the second socket saw it too - the fanout reaches every connection - after {} content \
-         frames",
-        right.content_frames
+         frames and a {:?} ending",
+        right.content_frames,
+        right.ending
     );
     assert!(
         left.closed && right.closed,
@@ -494,6 +556,18 @@ async fn sigterm_closes_without_announcing_run_complete() {
     .expect("signal the venue");
 
     let watched = drain_to_completion(&mut socket, Duration::from_secs(20)).await;
+    // THE ABSENCE IS ONLY EVIDENCE IF THE DRAIN RAN OUT OF VENUE RATHER THAN
+    // OUT OF BUDGET. A signalled venue ends this socket - the assertion below
+    // reads "nothing planned was announced before it died", and a drain cut off
+    // by the clamped deadline would satisfy it without the venue having died at
+    // all. Checked FIRST, so an exhausted budget names itself instead of
+    // arriving as a claim about the venue.
+    assert_ne!(
+        watched.ending,
+        Ending::Deadline,
+        "the drain hit its wall deadline with the socket still live, so the absent announcement \
+         below is this test running out of budget rather than the venue dying unannounced"
+    );
     assert!(
         watched.announcement.is_none(),
         "a signalled venue announced a planned completion it never had: {:?}",
@@ -532,8 +606,9 @@ async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
     let (sim_now_ns, elapsed_ns) = watched.announcement.unwrap_or_else(|| {
         panic!(
             "the run announced no completion on a socket the venue had already served {} content \
-             frames on, so this was a live session and not a connect that lost a race",
-            watched.content_frames
+             frames on and whose drain ended {:?}, so this was a live session watched to the end \
+             and not a connect that lost a race",
+            watched.content_frames, watched.ending
         )
     });
 

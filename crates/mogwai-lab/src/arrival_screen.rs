@@ -667,8 +667,25 @@ pub struct ProjectionContext {
 
 impl ScreenContext {
     pub fn open(measure_path: &Path, cache: Option<&Path>) -> LabResult<Self> {
-        let measure_bytes = std::fs::read(measure_path)?;
-        let measure: Value = serde_json::from_slice(&measure_bytes)?;
+        // ATTRIBUTED HERE RATHER THAN AROUND THE WHOLE CALL. A caller that
+        // wrapped `open` as "opening the 12a measurement" would put that
+        // sentence on every failure below it too - a broken MNQ preset, a
+        // missing `analysis/fingerprint.json`, an unparseable binding - which
+        // is the unattributed error the naming was meant to remove, relocated
+        // rather than fixed. These two lines are the ones that really are
+        // about the measurement path, so they are the ones that name it.
+        let measure_bytes = std::fs::read(measure_path).map_err(|e| {
+            LabError::refusal(format!(
+                "reading the 12a measurement {}: {e}",
+                measure_path.display()
+            ))
+        })?;
+        let measure: Value = serde_json::from_slice(&measure_bytes).map_err(|e| {
+            LabError::refusal(format!(
+                "parsing the 12a measurement {}: {e}",
+                measure_path.display()
+            ))
+        })?;
         let binding = GeneratedBinding::from_measure12a(&measure)?;
         let sessions = measure["observed"]["per_session"]
             .as_array()

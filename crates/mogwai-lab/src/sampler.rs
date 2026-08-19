@@ -184,6 +184,28 @@ impl ResourceSampler {
     }
 }
 
+/// THE GUARD-SCOPE RULE APPLIED TO A THREAD. `stop` is the only thing that
+/// ever set `stop` and joined, and it sits at the END of `arrival_control`'s
+/// `run_with` - so every `?` between the `start` and it left the 1 Hz sample
+/// loop running for the life of the process. That was latent while the
+/// early-return paths were only reachable from a real operator run that then
+/// exits; it is not latent any more, because the round-2 clean-direction
+/// assertion drives one of those early returns IN-PROCESS, inside a test
+/// binary that goes on to run every other test in the crate.
+///
+/// Idempotent with `stop`, which takes the handle before this runs.
+impl Drop for ResourceSampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            // A panicked sampler thread is `stop`'s verdict to deliver, not a
+            // destructor's: unwinding out of `drop` during another unwind
+            // aborts the process.
+            drop(h.join());
+        }
+    }
+}
+
 fn sample_once(
     pid: u32,
     fixed: &[PathBuf],
@@ -200,6 +222,31 @@ fn sample_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sampler dropped without `stop` - which is every `?` between the
+    /// `start` and the `stop` in `arrival_control`'s `run_with` - takes its
+    /// thread with it. Asserted on the THREAD rather than on the absence of an
+    /// error: the leak is silent by construction, and only the loop's own exit
+    /// distinguishes "cleaned up" from "still sampling forever".
+    #[test]
+    fn a_dropped_sampler_stops_its_thread_rather_than_leaking_it() {
+        let sampler = ResourceSampler::start(Vec::new(), None);
+        let stop = Arc::clone(&sampler.stop);
+        assert!(
+            sampler.handle.is_some(),
+            "the sample loop is running before the drop"
+        );
+        assert!(!stop.load(Ordering::Relaxed), "the loop starts unstopped");
+        drop(sampler);
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "the drop must ask the sample loop to finish"
+        );
+        // THE JOIN IS NOT ASSERTED, and saying so is better than a predicate
+        // that cannot fail: a `JoinHandle` consumed inside `drop` leaves this
+        // test nothing to observe it through. The flag is the half that is
+        // observable, and it is the half that was missing.
+    }
 
     #[test]
     fn samples_this_process_and_stops_cleanly() {

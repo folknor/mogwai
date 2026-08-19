@@ -45,7 +45,16 @@ pub fn run(args: MinuteRangeEnvelopeArgs) -> anyhow::Result<Value> {
     let preflight = args.preflight.unwrap_or_else(|| DEFAULT_PREFLIGHT.into());
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
 
-    let hashes = verify_input(&corpus, &ledger).map_err(|e| anyhow!(e.to_string()))?;
+    // The refusal names the ledger it was verifying against: a bare io error
+    // here reads as an unattributed "No such file or directory", which is
+    // also indistinguishable from every other read this command performs.
+    let hashes = verify_input(&corpus, &ledger).map_err(|e| {
+        anyhow!(
+            "verifying {} against {}: {e}",
+            corpus.display(),
+            ledger.display()
+        )
+    })?;
     let (preflight_json, preflight_hash) =
         require_preflight(&hashes, &preflight).map_err(|e| anyhow!(e.to_string()))?;
     let usable = preflight_json["usable_sessions"]
@@ -102,29 +111,59 @@ fn write_atomic(path: &std::path::Path, value: &Value) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Only meaningful on a DIRTY tree, and it must say so rather than assume
-    /// it. Without the guard this test asserts the development tree is dirty,
-    /// which makes the standing gate RED at every clean commit - exactly when
-    /// the gate is most likely to be run, and the state every artifact command
-    /// requires. Found 2026-08-09 by running the gate immediately after a
-    /// commit; it had passed until then only because the tree happened to be
-    /// dirty every previous time.
-    ///
-    /// The sibling in `arrival_control` carries the same guard for the same
-    /// reason. On a clean tree the refusal cannot be provoked without dirtying
-    /// the tree, which a unit test in the general lane must not do.
+    use std::rc::Rc;
+
+    use mogwai_lab::ledger::{ScriptedTree, TreeQuery, install_tree_oracle};
+
+    fn missing_inputs(out: &str) -> MinuteRangeEnvelopeArgs {
+        MinuteRangeEnvelopeArgs {
+            corpus: Some("no/such/envelope-corpus".into()),
+            ledger: Some("no/such/envelope-ledger.json".into()),
+            preflight: Some("no/such/envelope-preflight.json".into()),
+            out: Some(out.into()),
+        }
+    }
+
+    /// The tree gate runs BEFORE any input is read, and both verdicts are
+    /// injected so the claim is checked in the state the gate is actually run
+    /// in. It used to return early on a clean tree - which is every gate run -
+    /// after a 2026-08-09 fix for the inverse defect, asserting the
+    /// development tree was dirty and going red at every clean commit. The
+    /// early return cured the redness and preserved the vacuity; the seam
+    /// removes both, because the tree state is now the test's to state.
     #[test]
     fn minute_range_envelope_refuses_a_dirty_tree_before_reading_inputs() {
-        if require_clean_tree().is_ok() {
-            return;
-        }
-        let err = run(MinuteRangeEnvelopeArgs {
-            corpus: None,
-            ledger: None,
-            preflight: None,
-            out: Some("target/minute-range-envelope-test.json".into()),
-        })
-        .expect_err("this development tree is deliberately dirty");
-        assert!(err.to_string().contains("working tree is dirty"));
+        let dirty = Rc::new(ScriptedTree::dirty("d1r7y"));
+        let err = {
+            let _guard = install_tree_oracle(Rc::clone(&dirty));
+            run(missing_inputs("target/minute-range-envelope-test.json"))
+                .expect_err("a dirty tree refuses")
+        };
+        assert!(
+            err.to_string().contains("the working tree is dirty"),
+            "{err}"
+        );
+        // The refusal names the tree and NOT the ledger, and the query log
+        // says why: the run stopped on the status read, so the inputs below
+        // were never opened.
+        assert!(
+            !err.to_string().contains("no/such/envelope-ledger.json"),
+            "the inputs were reached before the tree was checked: {err}"
+        );
+        assert_eq!(dirty.queries(), vec![TreeQuery::Status]);
+
+        let clean = Rc::new(ScriptedTree::clean("c1ean"));
+        let err = {
+            let _guard = install_tree_oracle(Rc::clone(&clean));
+            run(missing_inputs(
+                "target/minute-range-envelope-clean-test.json",
+            ))
+            .expect_err("the corpus is not there either")
+        };
+        assert!(
+            err.to_string().contains("no/such/envelope-ledger.json"),
+            "a clean tree must be bound and the run carried into the inputs: {err}"
+        );
+        assert_eq!(clean.queries(), vec![TreeQuery::Status, TreeQuery::Head]);
     }
 }

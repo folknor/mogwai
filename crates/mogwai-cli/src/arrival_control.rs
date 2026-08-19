@@ -495,6 +495,20 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
         .map(|(k, _)| k.clone())
         .collect();
     let (peak_rss, _) = sampler.stop(&[], None)?;
+    // THE ARTIFACT REFUSES A SCRIPTED ATTESTATION. `binding.harness_tree_commit`
+    // and `clean_tree: true` below are a provenance claim, and both ends of it -
+    // step 1's `require_clean_tree` and this re-attestation - read through a
+    // seam that tests can install a double into. The seam is compiled out of a
+    // production build, so this is the second of two guards rather than the
+    // only one; it exists because the cfg can be switched back on by an
+    // `--all-features` build, and one install would otherwise forge both ends
+    // at once.
+    if !mogwai_lab::ledger::tree_readings_are_production() {
+        bail!(
+            "a scripted tree reader is installed; an artifact binding may only be attested by git \
+             itself"
+        );
+    }
     let (head, clean) = fresh_tree_state().map_err(|e| anyhow!("{e}"))?;
     if !clean || head != commit {
         bail!("the tree changed during the arrival-control run; the artifact is unbound");
@@ -515,33 +529,75 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
 mod tests {
     use super::*;
 
-    /// Whether this tree can be walked into `run` without the six-minute
-    /// artifact run actually starting. The refusal tests below all depend on
-    /// the development tree being dirty, exactly as the `minute_range_envelope`
-    /// sibling does; on a clean tree they would launch the real run and spend
-    /// six minutes walking to prove a property about step ordering.
-    fn tree_is_dirty() -> bool {
-        require_clean_tree().is_err()
-    }
+    use std::rc::Rc;
 
-    #[test]
-    fn arrival_control_refuses_a_dirty_tree_before_reading_inputs() {
-        if !tree_is_dirty() {
-            return;
-        }
-        let err = run(ArrivalControlArgs {
+    use mogwai_lab::ledger::{ScriptedTree, TreeQuery, install_tree_oracle};
+
+    fn missing_inputs(out: &str) -> ArrivalControlArgs {
+        ArrivalControlArgs {
             measure: Some("no/such/measure.json".into()),
             envelope: Some("no/such/envelope.json".into()),
             b1_baseline: None,
             b1_after: None,
             b1_baseline_commit: None,
-            b5_log: None,
-            out: Some("target/arrival-control-test.json".into()),
-        })
-        .expect_err("this development tree is deliberately dirty");
-        // The missing input paths above are the point: the refusal must come
-        // from the tree, before a byte of either artifact is read.
-        assert!(err.to_string().contains("working tree is dirty"));
+            // Explicit and absent: the FIRST thing `run_with` does after the
+            // tree gate is read this transcript, so it is what a clean tree
+            // must be refused by.
+            b5_log: Some("target/no-such-b5-for-the-ordering-pin.log".into()),
+            out: Some(out.into()),
+        }
+    }
+
+    /// The tree gate runs before a byte of any input is read, and BOTH
+    /// verdicts are injected so the claim holds in the state the gate is
+    /// actually run in. This test used to return early unless the developer's
+    /// working tree happened to be dirty, which is precisely the state a gate
+    /// run is not in; the reason recorded for the guard - that a clean tree
+    /// would launch the real six-minute artifact run - is gone too, because
+    /// the run now dies on the missing B5 transcript instead.
+    #[test]
+    fn arrival_control_refuses_a_dirty_tree_before_reading_inputs() {
+        let dirty = Rc::new(ScriptedTree::dirty("d1r7y"));
+        let err = {
+            let _guard = install_tree_oracle(Rc::clone(&dirty));
+            run(missing_inputs("target/arrival-control-test.json"))
+                .expect_err("a dirty tree refuses")
+        };
+        assert!(
+            err.to_string().contains("the working tree is dirty"),
+            "{err}"
+        );
+        assert!(
+            !err.to_string().contains("B5 refused"),
+            "the B5 transcript was read before the tree was checked: {err}"
+        );
+        assert_eq!(dirty.queries(), vec![TreeQuery::Status]);
+
+        // THE CLEAN DIRECTION RUNS WITH B1 DISARMED, and that is a hazard
+        // removal rather than a weakening: the pin is that the B5 read is what
+        // a bound run reaches first, and B1 is downstream of it either way.
+        // Left on production `Seams` this test's outcome would depend on
+        // `target/no-such-b5-for-the-ordering-pin.log` NOT EXISTING - and if
+        // it ever did, the run would sail past B5 into `run_b1`, which execs a
+        // `mogwai gen` subprocess per symbol from inside a unit test. Low
+        // probability, and nothing about the ordering claim needs it.
+        let clean = Rc::new(ScriptedTree::clean("c1ean"));
+        let err = {
+            let _guard = install_tree_oracle(Rc::clone(&clean));
+            run_with(
+                missing_inputs("target/arrival-control-clean-test.json"),
+                Seams {
+                    run_b1: false,
+                    ..Seams::production()
+                },
+            )
+            .expect_err("the B5 transcript is not there either")
+        };
+        assert!(
+            err.to_string().contains("B5 refused"),
+            "a clean tree must be bound and the run carried into its first input: {err}"
+        );
+        assert_eq!(clean.queries(), vec![TreeQuery::Status, TreeQuery::Head]);
     }
 
     /// The derivation B1's supporting check now rests on has to actually find
