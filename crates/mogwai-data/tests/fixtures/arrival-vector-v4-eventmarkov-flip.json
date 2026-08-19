@@ -1,7 +1,8 @@
 {
   "vector": "V4",
+  "version": 2,
   "what_it_checks": "Event-Markov pre-flip child-state read and the intervening main-stream price/book draw order.",
-  "derivation": "Section 7 contract A: the state flip is drawn after the Weibull innovation, last_quiet is recorded before that flip, price and book draws consume the main stream next, and only then does the child draw read last_quiet. Starting quiet and taking a flip therefore makes the successor active while the current child law remains quiet.",
+  "derivation": "Section 7 contract A: the state flip is drawn after the Weibull innovation, last_quiet is recorded before that flip, price and book draws consume the main stream next, and only then does the child draw read last_quiet. Starting quiet and taking a flip therefore makes the successor active while the current child law remains quiet. The main_stream_order below is the STAGE order the contract fixes, written out with the per-stage draw counts this vector's inputs declare; version 2 compares its stage sequence - consecutive repeats collapsed - against the generator's own recorded trace. The multiplicities themselves are NOT gated and cannot be: a stage's primitive-draw count belongs to the distribution it samples, and the ziggurat's rejection loop makes even that variable.",
   "params": { "quiet_share": 0.35, "switch_rate": 0.1, "rate_ratio": 150.0 },
   "inputs": [ { "initial_quiet": true, "gap_draw": "0x3fe0000000000000", "flip_draw": "0x0000000000000000", "price_draws_before_child": 2, "book_draws_before_child": 3 } ],
   "expected": [ { "child_reads_quiet": true, "next_quiet": false, "main_stream_order": ["gap", "flip", "latent_mid", "latent_mid", "side_book", "side_book", "side_book", "child"] } ]

@@ -1,8 +1,25 @@
 {
   "vector": "V8",
-  "what_it_checks": "The six-step reopen ordering: no crossing, a crossing, and a closure-crossing shift.",
-  "derivation": "Section 4.1 uses crossing from < at <= candidate. No crossing leaves candidate unchanged. A crossing shifts candidate before cell assignment and next_from. If that shift lands closed, calendar.next_open_ns supplies the resolved parent, and that snapped time is also the cell and the base for next_from.",
-  "params": { "intra_event_step_ns": 1000 },
-  "inputs": [ { "from_ns": 10, "at_ns": 20, "candidate_ns": 19, "shift_ns": 5, "child_count": 3 }, { "from_ns": 10, "at_ns": 20, "candidate_ns": 20, "shift_ns": 5, "child_count": 3 }, { "from_ns": 10, "at_ns": 20, "candidate_ns": 20, "shift_ns": 50, "child_count": 2, "next_open_ns": 100 } ],
-  "expected": [ { "parent_ts_ns": 19, "reopen_applied": false, "cell": 0, "next_from_ns": 2019 }, { "parent_ts_ns": 25, "reopen_applied": true, "cell": 0, "next_from_ns": 2025 }, { "parent_ts_ns": 100, "reopen_applied": true, "cell": 0, "next_from_ns": 1100 } ]
+  "version": 2,
+  "what_it_checks": "The reopen ordering inside next_parent: no crossing, a crossing, and a crossing whose shift lands in a closed window.",
+  "derivation": "Section 4.1 step 5 uses the crossing test from_ns < at_ts_ns <= candidate. No crossing leaves the candidate untouched. A crossing shifts the candidate, and if the shifted instant is closed the calendar's next_open_ns supplies the resolved parent. The calendar here is open through the epoch's own minute and shut for the one after it, so 70.5 s is closed and reopens at 120 s. Windows are indexed in minutes of the LOCAL week and the Unix epoch sits 5,760 minutes into that week, so clock minute 1 - the closed one - is week minute 5,761. Version 2 replaced the original ten-nanosecond arithmetic: SessionCalendar is minute-granular, so a next_open_ns of 100 ns was unreachable by any calendar and the whole vector could only be checked against a local re-implementation of the crossing rule. Each case's candidate is placed by giving next_parent a unit-intensity budget of (candidate_ns - from_ns) / 1e9 seconds, which section 4.2's time change resolves to exactly that instant; case 1 gates that placement directly, since its parent IS the unshifted candidate. Each cell below is the case's parent instant divided by the cadence step declared in params - the derivation's claim that the snapped time is also the cell, which version 2's first cut left asserting over nothing. next_from_ns carries no expected value on purpose: the child count is an RNG draw, so a pinned successor instant would be a run written down. What params does pin is the stride the identity multiplies by.",
+  "params": {
+    "base_mean_s": 1.0,
+    "latent_x": 1.0,
+    "intra_event_step_ns": 1000,
+    "cadence_step_ns": 1000000000,
+    "open_minute_of_week_from": 0,
+    "open_minute_of_week_to": 5761,
+    "reopen_minute_of_week": 5762
+  },
+  "inputs": [
+    { "case": "no crossing", "from_ns": 50000000000, "candidate_ns": 50500000000, "at_ns": 50900000000, "shift_ns": 5000000000 },
+    { "case": "crossing into an open instant", "from_ns": 50000000000, "candidate_ns": 50500000000, "at_ns": 50200000000, "shift_ns": 5000000000 },
+    { "case": "crossing into a closed window", "from_ns": 50000000000, "candidate_ns": 50500000000, "at_ns": 50200000000, "shift_ns": 20000000000 }
+  ],
+  "expected": [
+    { "parent_ts_ns": 50500000000, "reopen_applied": false, "cell": 50 },
+    { "parent_ts_ns": 55500000000, "reopen_applied": true, "cell": 55 },
+    { "parent_ts_ns": 120000000000, "reopen_applied": true, "cell": 120 }
+  ]
 }

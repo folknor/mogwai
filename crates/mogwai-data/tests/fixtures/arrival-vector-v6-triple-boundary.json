@@ -1,8 +1,29 @@
 {
   "vector": "V6",
-  "what_it_checks": "Integrated-family budget traversal across a grid boundary, UTC hour boundary and calendar closure.",
-  "derivation": "Section 4.2 consumes intensity segment by segment. With unit intensity, a budget of 3/2 consumes 1/4 before the grid boundary, 1/4 before the UTC-hour boundary, zero through the closed interval, then the remaining 1 at the next open interval. The elapsed offset is 1/4 + 1/4 + 3 + 1 = 9/2 = 4.5 seconds. Thus the closure advances time but spends no budget and the resolved parent is one second after reopen.",
-  "params": { "base_mean_s": 1.0, "latent_x": 1.0, "rate_mult": 1.0 },
-  "inputs": [ { "budget": "0x3ff8000000000000", "segments_s": ["0x3fd0000000000000", "0x3fd0000000000000", "0x4008000000000000", "0x3ff0000000000000"], "open": [true, true, false, true] } ],
-  "expected": [ { "budget_spent": ["0x3fd0000000000000", "0x3fd0000000000000", "0x0000000000000000", "0x3ff0000000000000"], "remaining_after_segments": ["0x3ff4000000000000", "0x3ff0000000000000", "0x3ff0000000000000", "0x0000000000000000"], "parent_offset_s": "0x4012000000000000" } ]
+  "version": 2,
+  "what_it_checks": "Integrated-family budget traversal across a grid boundary, UTC hour boundary and calendar closure, driven through ArrivalKernel::next_parent itself.",
+  "derivation": "Section 4.2 consumes intensity segment by segment and rate_at is EXACTLY ZERO while the venue is shut, so a closed segment advances the cursor and consumes nothing. With unit intensity a budget of 3/2 consumes 1/4 before the grid boundary, 1/4 before the UTC-hour boundary, zero across the three closed minutes, then the remaining 1 after the reopen. The elapsed offset is 1/4 + 1/4 + 180 + 1 = 181.5 seconds. Version 2 replaced the original three-SECOND closure with a three-MINUTE one because SessionCalendar windows are minute-granular, so the old figure named a closure no calendar can express and could therefore only ever be checked against test-local arithmetic. The claim - a closure advances time and spends no budget - is unchanged and the arithmetic is the same arithmetic. Calendar windows are indexed in minutes of the LOCAL week, and the Unix epoch sits 5,760 minutes into that week, so clock minutes 60 to 63 - the hour boundary this vector crosses - are week minutes 5,820 to 5,823.",
+  "params": { "base_mean_s": 1.0, "latent_x": 1.0, "unit_intensity_budget_s": 1.5 },
+  "inputs": [
+    {
+      "origin_ns": 750000000,
+      "from_ns": 3599500000000,
+      "closed_minute_of_week_from": 5820,
+      "closed_minute_of_week_to": 5823
+    }
+  ],
+  "expected": [
+    {
+      "parent_ts_ns": 3781000000000,
+      "parent_offset_ns": 181500000000,
+      "reopen_applied": false
+    }
+  ],
+  "derivation_intermediates": {
+    "_doc": "EVERY FIELD IN THIS BLOCK IS DERIVATION RECORD AND IS READ BY NOTHING. It is how the offset above was derived, kept for review and DELIBERATELY not asserted: next_parent exposes no per-segment accounting, so any test checking these would be checking test-local arithmetic against a fixture derived from the same arithmetic - the defect version 2 exists to remove. The gated claims are the params, parent_ts_ns and the expected block; everything here is prose with a JSON shape. segments_s and open moved here from inputs in the same pass, for the same reason: the segmentation is a CONSEQUENCE of origin_ns, the cadence step and the calendar minutes above, not an input the kernel can be given.",
+    "segments_s": [0.25, 0.25, 180.0, 1.0],
+    "open": [true, true, false, true],
+    "budget_spent": [0.25, 0.25, 0.0, 1.0],
+    "remaining_after_segments": [1.25, 1.0, 1.0, 0.0]
+  }
 }

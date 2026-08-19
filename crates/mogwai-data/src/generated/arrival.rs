@@ -1224,6 +1224,17 @@ mod tests {
             let vector: Value =
                 serde_json::from_str(source).expect("valid conformance vector JSON");
             assert_eq!(vector["vector"], format!("V{}", index + 1));
+            // A SCHEMA version, and only that.  It pins the shape these
+            // executors read - which fields exist, and which of them are
+            // gated rather than derivation record - so a rewrite of the
+            // layout cannot land without coming back through this test.
+            // IT DETECTS NO CONTENT EDIT: widening an expected value or
+            // retuning a param leaves `version` at 2 and this assertion
+            // green.  Nothing in the tree detects that, which is the same
+            // hole AGENTS.md records against the shared-fixture rule; the
+            // executors below are what has to be strong enough not to need
+            // one.
+            assert_eq!(vector["version"], 2, "conformance vector schema version");
             assert!(
                 vector["what_it_checks"]
                     .as_str()
@@ -1343,6 +1354,172 @@ mod tests {
         }
     }
 
+    /// A unit-intensity conformance environment: a flat session profile at
+    /// `thin = 1.0`, so `ArrivalEnv::rate_at` is exactly 1.0 whenever the venue
+    /// is open and exactly 0.0 while it is shut. That is what lets the vectors
+    /// below state their arithmetic in bare seconds of exposure.
+    fn conformance_env(
+        calendar: Option<&SessionCalendar>,
+        origin_ns: u64,
+        step_ns: u64,
+    ) -> ArrivalEnv {
+        let profile = SessionProfile {
+            intensity_hour: [1.0 / 24.0; 24],
+            vol_hour: [1.0; 24],
+            dow_weight: [1.0 / 7.0; 7],
+        };
+        ArrivalEnv::for_profile_with_step(&profile, calendar, 1.0, origin_ns, step_ns)
+    }
+
+    /// A kernel whose latent multiplier is exactly 1.0 in BOTH states: with
+    /// `rate_ratio = 1` the level denominator is `q + (1-q) = 1`, so `level`
+    /// returns 1.0 either way. The walk still takes exactly one cadence draw
+    /// per traversed grid step, which is what keeps V5's contract-B ordering
+    /// claim observable while the intensity stays the vectors' unit intensity.
+    fn unit_latent_kernel() -> ArrivalKernel {
+        ArrivalKernel::WallMmpp(WallMmppParams {
+            occupancy: 0.35,
+            rate_ratio: 1.0,
+            tau_s: 10.0,
+        })
+    }
+
+    struct KernelRun {
+        draw: ParentDraw,
+        shape: SweepShape,
+        /// The cadence stream as it stood immediately BEFORE `next_parent`
+        /// ran, so a caller can replay the draws the kernel was about to make.
+        reference: ChaCha12Rng,
+        environment: ArrivalEnv,
+        from_ns: u64,
+    }
+
+    /// Runs the real `ArrivalKernel::next_parent` with the intensity scaled so
+    /// that the kernel's OWN drawn budget realizes `unit_budget_s` seconds of
+    /// open exposure exactly.
+    ///
+    /// The scaling is what makes these vectors gates rather than change
+    /// detectors: their expected timestamps are derived from the spec's unit
+    /// intensity and a stated budget, and the budget the kernel draws is not
+    /// choosable, so the alternative would be to read the expected value off a
+    /// run. The clone that reads the budget also LEANS ON contract B's
+    /// ordering claim (section 7: the budget is the first cadence draw), which
+    /// is why a kernel that drew the child count first would fail V6, V7 and
+    /// V8 as well as V5.
+    ///
+    /// The latent-draw accounting a caller may replay off `reference` is NOT
+    /// general: `advance_state_to` takes one cadence draw per traversed grid
+    /// step, so the count is `cell_index(parent)` only when the walk starts in
+    /// cell zero AND resolves inside its first segment. V5 is the only caller
+    /// that replays, and it is driven from `from_ns = 0` on an uninterrupted
+    /// grid for exactly that reason.
+    fn drive_next_parent(
+        calendar: Option<&SessionCalendar>,
+        origin_ns: u64,
+        step_ns: u64,
+        from_ns: u64,
+        base_mean_s: f64,
+        unit_budget_s: f64,
+        pending_reopen: Option<PendingReopen>,
+    ) -> KernelRun {
+        drive_next_parent_with(
+            unit_latent_kernel(),
+            calendar,
+            origin_ns,
+            step_ns,
+            from_ns,
+            base_mean_s,
+            unit_budget_s,
+            pending_reopen,
+        )
+    }
+
+    /// `drive_next_parent` over a caller-chosen kernel. Every kernel passed
+    /// here must have a latent multiplier of EXACTLY 1.0 at the resolved
+    /// instant, or the intensity scaling no longer realizes `unit_budget_s`
+    /// seconds of exposure and the vector's expected timestamp does not hold.
+    #[allow(clippy::too_many_arguments)]
+    fn drive_next_parent_with(
+        kernel: ArrivalKernel,
+        calendar: Option<&SessionCalendar>,
+        origin_ns: u64,
+        step_ns: u64,
+        from_ns: u64,
+        base_mean_s: f64,
+        unit_budget_s: f64,
+        pending_reopen: Option<PendingReopen>,
+    ) -> KernelRun {
+        let environment = conformance_env(calendar, origin_ns, step_ns);
+        let mut rng = ChaCha12Rng::seed_from_u64(4242);
+        let mut state = ArrivalState::new(&kernel, 0, &mut rng);
+        let shape = SweepShape::new(1.2, 0.9, 1.1);
+        let reference = rng.clone();
+        let budget = -reference.clone().random::<f64>().ln();
+        let modifiers = RuntimeModifiers {
+            // `next_parent` forms `rate_at * x * rate_mult / base_mean_s`, so
+            // carrying `base_mean_s` here is what keeps the realized exposure
+            // `unit_budget_s` seconds for any declared mean.
+            rate_mult: budget / unit_budget_s * base_mean_s,
+            children_mult: 1.0,
+            pending_reopen,
+        };
+        let draw = kernel
+            .next_parent(
+                &mut state,
+                from_ns,
+                base_mean_s,
+                &shape,
+                &environment,
+                modifiers,
+                &mut rng,
+            )
+            .expect("the conformance exposure resolves a parent");
+        KernelRun {
+            draw,
+            shape,
+            reference,
+            environment,
+            from_ns,
+        }
+    }
+
+    /// The stage sequence with consecutive repeats collapsed. A vector writes
+    /// its contract-A order out with the per-stage draw counts it declares;
+    /// production records one tag per STAGE, and the multiplicities are not
+    /// gated (see the V4 fixture's derivation for why they cannot be).
+    fn collapsed_stages(order: &Value) -> Vec<String> {
+        let mut collapsed: Vec<String> = Vec::new();
+        for tag in order.as_array().expect("a stage order array") {
+            let tag = tag.as_str().expect("a stage tag").to_string();
+            if collapsed.last() != Some(&tag) {
+                collapsed.push(tag);
+            }
+        }
+        assert!(!collapsed.is_empty(), "a stage order is never empty");
+        collapsed
+    }
+
+    /// The shipped contract-A stage trace of ONE generator event, read off the
+    /// generator itself rather than restated here.
+    fn shipped_contract_a_stages() -> Vec<String> {
+        let fp = Fingerprint::from_repo_json();
+        let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+        let mut generator = GeneratedSource::new(scalars, 91, 0, &fp, None);
+        let _summary = generator.advance_parent();
+        assert!(
+            !generator.draw_stages.is_empty(),
+            "the generator recorded no stages: only the contract-A path pushes \
+             tags, so an anchor whose scalars carry an `arrival` kernel takes \
+             `begin_integrated_event` and traces nothing. Pick a contract-A \
+             anchor, or teach the integrated path its own trace."
+        );
+        generator
+            .draw_stages
+            .iter()
+            .map(|tag| (*tag).to_string())
+            .collect()
+    }
+
     fn execute_v4_event_markov_contract(vector: &Value) {
         let input = &vector["inputs"][0];
         let quiet_share = vector["params"]["quiet_share"]
@@ -1364,17 +1541,9 @@ mod tests {
         assert_eq!(clock.last_quiet, vector["expected"][0]["child_reads_quiet"]);
         assert_eq!(clock.quiet, vector["expected"][0]["next_quiet"]);
         assert_eq!(
-            vector["expected"][0]["main_stream_order"],
-            serde_json::json!([
-                "gap",
-                "flip",
-                "latent_mid",
-                "latent_mid",
-                "side_book",
-                "side_book",
-                "side_book",
-                "child"
-            ]),
+            shipped_contract_a_stages(),
+            collapsed_stages(&vector["expected"][0]["main_stream_order"]),
+            "V4 contract-A stage order",
         );
     }
 
@@ -1400,81 +1569,329 @@ mod tests {
             );
         }
         assert_eq!(
-            expected["contract_a_order"],
-            serde_json::json!(["gap", "flip", "price", "book", "child"])
+            shipped_contract_a_stages(),
+            collapsed_stages(&expected["contract_a_order"]),
+            "V5 contract-A stage order",
         );
+
+        // Contract B is checked by REPLAYING the cadence stream in the order
+        // the fixture states and comparing the child count that replay lands
+        // on against the one `next_parent` returned. The reference consumes
+        // the stages in the fixture's declared order, so a kernel that moved
+        // the child draw ahead of the budget or ahead of the latent steps
+        // lands on a different count.
+        let run = drive_next_parent(None, 0, CADENCE_STEP_NS, 0, 1.0, 1.0, None);
+        let mut reference = run.reference.clone();
+        let mut child_from_reference = None;
+        for stage in expected["contract_b_order"]
+            .as_array()
+            .expect("contract B order")
+        {
+            match stage.as_str().expect("a contract B stage") {
+                "budget" => {
+                    // ONE DRAW, CONSUMED AND NOT CHECKED, and that is the
+                    // honest state of it: `next_parent` returns no budget and
+                    // exposes no observable of one, so there is nothing on the
+                    // production side to compare against. Asserting the
+                    // fixture's `-ln(U)` against the helper's own `-ln(U)` off
+                    // the same stream offset was tried and is a tautology -
+                    // green even for a kernel that draws no budget at all.
+                    // What the position buys is real, and it is spent below:
+                    // consuming here is what leaves the reference standing
+                    // where the child draw must be, so a kernel that drew the
+                    // child count first lands on a different count.
+                    let _: f64 = reference.random();
+                }
+                "latent_steps" => {
+                    // One draw per traversed grid step (section 4.2). The step
+                    // count is the resolved parent's cell ONLY under this
+                    // vector's shape - the walk starts in cell zero and the
+                    // traversal resolves inside its first segment, so the two
+                    // `advance_state_to` calls step `cell_index(parent)` times
+                    // between them. Do not lift this expression to a vector
+                    // that starts mid-grid or crosses a segment.
+                    assert_eq!(0, run.from_ns, "V5's replay assumes a cell-zero start");
+                    for _ in 0..run.environment.cell_index(run.draw.parent_ts_ns) {
+                        let _: f64 = reference.random();
+                    }
+                }
+                "child" => {
+                    child_from_reference = Some(run.shape.next_count_scaled(1.0, &mut reference));
+                }
+                other => panic!("unknown contract B stage {other}"),
+            }
+        }
         assert_eq!(
-            expected["contract_b_order"],
-            serde_json::json!(["budget", "latent_steps", "child"])
+            run.draw.child_count,
+            child_from_reference
+                .expect("the contract B order names the child draw")
+                .max(1),
+            "V5 contract-B child-draw position",
         );
     }
 
     fn execute_v6_budget_traversal(vector: &Value) {
         let input = &vector["inputs"][0];
-        let mut remaining = hex(&input["budget"]);
-        let mut offset = 0.0;
-        for index in 0..4 {
-            let seconds = hex(&input["segments_s"][index]);
-            let open = input["open"][index].as_bool().expect("open flag");
-            let spent = if open { remaining.min(seconds) } else { 0.0 };
-            remaining -= spent;
-            offset += if spent < seconds && open {
-                spent
-            } else {
-                seconds
-            };
-            assert_bits(
-                spent,
-                &vector["expected"][0]["budget_spent"][index],
-                "V6 budget spent",
-            );
-            assert_bits(
-                remaining,
-                &vector["expected"][0]["remaining_after_segments"][index],
-                "V6 remaining budget",
-            );
-        }
-        assert_bits(
-            offset,
-            &vector["expected"][0]["parent_offset_s"],
-            "V6 parent offset",
+        let calendar = SessionCalendar {
+            utc_offset_minutes: 0,
+            open_windows: vec![
+                super::super::calendar::WeeklyWindow {
+                    start_minute: 0,
+                    end_minute: input["closed_minute_of_week_from"]
+                        .as_u64()
+                        .expect("closure start") as u32,
+                },
+                super::super::calendar::WeeklyWindow {
+                    start_minute: input["closed_minute_of_week_to"]
+                        .as_u64()
+                        .expect("closure end") as u32,
+                    end_minute: 10_079,
+                },
+            ],
+            settlement_minute_of_day: None,
+        };
+        // The vector must describe a world the venue can hold. Version 1's V6
+        // named a three-SECOND closure on a minute-granular calendar and
+        // nothing said so, because nothing built a calendar from it.
+        calendar
+            .validate()
+            .expect("V6's closure must be a representable calendar");
+        let from_ns = input["from_ns"].as_u64().expect("from");
+        let params = &vector["params"];
+        let run = drive_next_parent(
+            Some(&calendar),
+            input["origin_ns"].as_u64().expect("origin"),
+            CADENCE_STEP_NS,
+            from_ns,
+            params["base_mean_s"].as_f64().expect("base mean"),
+            params["unit_intensity_budget_s"]
+                .as_f64()
+                .expect("unit-intensity budget"),
+            None,
+        );
+        let expected = &vector["expected"][0];
+        assert_eq!(
+            run.draw.latent_x.to_bits(),
+            params["latent_x"].as_f64().expect("latent x").to_bits(),
+            "V6 the declared unit latent multiplier is what the kernel resolved",
+        );
+        // THE WINDOW IS A MAGNITUDE BOUND, not a statement about which way
+        // `ceil` rounds - the pre-ceiling value can sit either side of the
+        // ideal, because the intensity scaling is a float division. The bound:
+        // `remaining` accumulates relative error of order 1e-16 over three
+        // segment subtractions, and the final delta is 2.5e8 ns, so the
+        // absolute error is of order 1e-8 ns and `ceil` lands on the exact
+        // nanosecond or the one above it. Four is that bound with room, and
+        // it is nowhere near a tolerance on the claim: a traversal that spent
+        // budget across the closure, or failed to skip it, moves this by
+        // 0.25 or by 180 SECONDS.
+        let expected_parent = expected["parent_ts_ns"].as_u64().expect("parent");
+        assert!(
+            (expected_parent..=expected_parent + 4).contains(&run.draw.parent_ts_ns),
+            "V6 parent instant: expected {expected_parent} (+0..4 ns of ceiling), got {}",
+            run.draw.parent_ts_ns,
+        );
+        let expected_offset = expected["parent_offset_ns"].as_u64().expect("offset");
+        assert_eq!(
+            expected_parent - from_ns,
+            expected_offset,
+            "the fixture's own parent instant and offset must agree",
+        );
+        assert_eq!(
+            run.draw.reopen_applied, expected["reopen_applied"],
+            "V6 no reopen is armed, so none may be reported",
+        );
+        assert!(
+            calendar.is_open(run.draw.parent_ts_ns),
+            "V6 a resolved parent never lands in a closed window",
         );
     }
 
     fn execute_v7_degenerate_budget(vector: &Value) {
-        let uniform = hex(&vector["inputs"][0]["uniform"]);
-        let budget = -uniform.ln();
-        assert_bits(budget, &vector["expected"][0]["budget"], "V7 kernel budget");
-        let parent_ts_ns = (budget * 1e9).ceil().max(1.0) as u64;
-        assert_eq!(parent_ts_ns, vector["expected"][0]["parent_ts_ns"]);
+        let input = &vector["inputs"][0];
+        let params = &vector["params"];
+        // g = -ln(U) is the fixture's OWN derivation of the budget, and it is
+        // used here as the driver's target exposure, NOT asserted. The
+        // fixture records `derivation_intermediates.budget` for review; a
+        // version-1-style `assert_bits` on it compared this line's arithmetic
+        // against a fixture value produced by the same arithmetic, with
+        // production outside the loop. The gated claim is the timestamp.
+        let budget = -hex(&input["uniform"]).ln();
+        let base_mean_s = params["base_mean_s"].as_f64().expect("base mean");
+        let step_ns = input["cadence_step_ns"].as_u64().expect("cadence step");
+        let from_ns = input["from_ns"].as_u64().expect("from");
+        let expected_parent = vector["expected"][0]["parent_ts_ns"]
+            .as_u64()
+            .expect("parent");
+
+        // The declared baseline rate is a claim about the ENVIRONMENT the
+        // conversion runs in, and `conformance_env` is what has to satisfy it.
+        // Reading it here is what stops the field from being decoration.
+        let baseline_rate = params["baseline_rate"].as_f64().expect("baseline rate");
+        assert_eq!(
+            conformance_env(None, 0, step_ns).rate_at(from_ns).to_bits(),
+            baseline_rate.to_bits(),
+            "V7 the declared baseline rate is what the environment supplies",
+        );
+
+        // EVERY DRIVEN FAMILY, not one. The conversion under test is shared
+        // code in `next_parent`, but the vector's claim is that all of them
+        // reach it with the same resolved instant, and version 2's first cut
+        // drove `wall_mmpp` alone while the fixture still listed four. Each
+        // kernel here is parameterized to a latent multiplier of EXACTLY 1.0:
+        // `WallMmpp` at `rate_ratio = 1` has denominator `q + (1-q) = 1`;
+        // `LogOuCox` at `sigma_y = 0` keeps `y = 0`, so `exp(0 - 0) = 1`;
+        // `SelfExciting` at `phi = 0` gives `(1-0) + 0*a = 1` for any `a`.
+        // The families differ in how many cadence draws they take and in what
+        // they draw, so this is not one path run three times.
+        for family in input["driven_families"]
+            .as_array()
+            .expect("the driven families")
+        {
+            let name = family.as_str().expect("a family name");
+            let kernel = match name {
+                "wall_mmpp" => ArrivalKernel::WallMmpp(WallMmppParams {
+                    occupancy: 0.35,
+                    rate_ratio: 1.0,
+                    tau_s: 10.0,
+                }),
+                "log_ou_cox" => ArrivalKernel::LogOuCox(LogOuParams {
+                    sigma_y: 0.0,
+                    tau_s: 10.0,
+                }),
+                "self_exciting" => ArrivalKernel::SelfExciting(SelfExcitingParams {
+                    phi: 0.0,
+                    tau_s: 10.0,
+                }),
+                other => panic!("V7 names a family with no unit-latent parameterization: {other}"),
+            };
+            let run = drive_next_parent_with(
+                kernel,
+                None,
+                0,
+                step_ns,
+                from_ns,
+                base_mean_s,
+                budget,
+                None,
+            );
+            assert_eq!(
+                run.draw.latent_x.to_bits(),
+                1.0_f64.to_bits(),
+                "V7 {name} must reach the conversion at unit latent intensity",
+            );
+            // The widened grid is load-bearing and a bite-check found it: at
+            // the shipped one-second step the resolved instant lands exactly
+            // on the segment end, where `candidate.min(end)` clamps it - so a
+            // kernel that added a nanosecond to every conversion still
+            // produced this vector's timestamp. On a ten-second grid the
+            // parent is strictly interior and the conversion is the only
+            // thing that decides it.
+            assert_eq!(
+                run.draw.parent_ts_ns, expected_parent,
+                "V7 nanosecond conversion of a unit budget, {name}",
+            );
+        }
     }
 
     fn execute_v8_reopen_seam(vector: &Value) {
+        let params = &vector["params"];
+        let calendar = SessionCalendar {
+            utc_offset_minutes: 0,
+            open_windows: vec![
+                super::super::calendar::WeeklyWindow {
+                    start_minute: params["open_minute_of_week_from"]
+                        .as_u64()
+                        .expect("open from") as u32,
+                    end_minute: params["open_minute_of_week_to"].as_u64().expect("open to") as u32,
+                },
+                super::super::calendar::WeeklyWindow {
+                    start_minute: params["reopen_minute_of_week"].as_u64().expect("reopen") as u32,
+                    end_minute: 10_079,
+                },
+            ],
+            settlement_minute_of_day: None,
+        };
+        // Same reason as V6: version 1 named a `next_open_ns` of 100 ns, which
+        // no calendar can produce, and only a re-implementation ever read it.
+        calendar
+            .validate()
+            .expect("V8's closure must be a representable calendar");
+        // Read from the vector rather than taken from production: the
+        // expected cells below are this number divided into the expected
+        // parents, so the two have to be the same number or the cell claim is
+        // not the fixture's.
+        let step_ns = params["cadence_step_ns"].as_u64().expect("cadence step");
+        assert_eq!(
+            step_ns, CADENCE_STEP_NS,
+            "V8 the declared cadence step is the shipped one",
+        );
         for (input, expected) in vector["inputs"]
             .as_array()
             .expect("inputs")
             .iter()
             .zip(vector["expected"].as_array().expect("expected"))
         {
-            let from = input["from_ns"].as_u64().expect("from");
-            let at = input["at_ns"].as_u64().expect("at");
-            let candidate = input["candidate_ns"].as_u64().expect("candidate");
-            let crossed = from < at && at <= candidate;
-            let mut parent = if crossed {
-                candidate.saturating_add(input["shift_ns"].as_u64().expect("shift"))
-            } else {
-                candidate
-            };
-            if crossed && input.get("next_open_ns").is_some() {
-                parent = input["next_open_ns"].as_u64().expect("next open");
-            }
-            let count = input["child_count"].as_u64().expect("child count");
-            assert_eq!(parent, expected["parent_ts_ns"]);
-            assert_eq!(crossed, expected["reopen_applied"]);
-            assert_eq!(parent / CADENCE_STEP_NS, expected["cell"]);
+            let from_ns = input["from_ns"].as_u64().expect("from");
+            let candidate_ns = input["candidate_ns"].as_u64().expect("candidate");
+            let run = drive_next_parent(
+                Some(&calendar),
+                0,
+                step_ns,
+                from_ns,
+                params["base_mean_s"].as_f64().expect("base mean"),
+                (candidate_ns - from_ns) as f64 / 1e9,
+                Some(PendingReopen {
+                    at_ts_ns: input["at_ns"].as_u64().expect("at"),
+                    shift_ns: input["shift_ns"].as_u64().expect("shift"),
+                }),
+            );
+            let case = input["case"].as_str().expect("case name");
             assert_eq!(
-                parent.saturating_add((count - 1) * INTRA_EVENT_STEP_NS),
-                expected["next_from_ns"]
+                run.draw.latent_x.to_bits(),
+                params["latent_x"].as_f64().expect("latent x").to_bits(),
+                "V8 declared unit latent multiplier, {case}",
+            );
+            assert_eq!(
+                run.draw.parent_ts_ns,
+                expected["parent_ts_ns"].as_u64().expect("parent"),
+                "V8 parent instant, {case}",
+            );
+            assert_eq!(
+                run.draw.reopen_applied, expected["reopen_applied"],
+                "V8 reopen flag, {case}",
+            );
+            // The cell the resolved parent falls in. Version 2's first cut
+            // dropped this and left the fixture's derivation asserting - "that
+            // snapped time is also the cell and the base for next_from" - over
+            // nothing. The expected cells are the fixture's own division of
+            // its parent instants by the one-second cadence step, so this is a
+            // fixture claim checked against `ArrivalEnv::cell_index`, and it
+            // is the third case that carries the weight: a reopen snapped
+            // WITHOUT the calendar lands in a different cell.
+            assert_eq!(
+                run.environment.cell_index(run.draw.parent_ts_ns),
+                expected["cell"].as_u64().expect("cell"),
+                "V8 resolved cell, {case}",
+            );
+            // The `(count - 1)` stride identity of section 4.1's second frozen
+            // consequence. BE CLEAR ABOUT WHAT THIS IS: the child count comes
+            // out of the same `ParentDraw`, because the count is an RNG draw
+            // and pinning it in the fixture would be writing down what a run
+            // produced. So this is a RE-IMPLEMENTATION check on the identity's
+            // shape, not a fixture gate on the successor instant. What the
+            // fixture does gate is the STRIDE: `intra_event_step_ns` is read
+            // from the vector rather than from the production constant, so a
+            // change to `INTRA_EVENT_STEP_NS` alone fails here.
+            let stride_ns = params["intra_event_step_ns"].as_u64().expect("stride");
+            assert_eq!(
+                stride_ns, INTRA_EVENT_STEP_NS,
+                "V8 the declared intra-event stride is the shipped one",
+            );
+            assert_eq!(
+                run.draw.next_from_ns,
+                run.draw.parent_ts_ns + u64::from(run.draw.child_count - 1) * stride_ns,
+                "V8 successor clock, {case}",
             );
         }
     }

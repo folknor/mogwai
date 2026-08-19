@@ -1002,6 +1002,180 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
   is noisy at eight threads on a loaded host and the coverage counts are not,
   so audit with the counts.
 
+## The tape document, round 3: the conformance vectors now run production
+
+- `arrival_conformance_vectors_v1_through_v9` HAS A SCHEMA VERSION NOW, and it
+  is a SCHEMA version only. Every fixture carries `"version": 2` and the loop
+  asserts it, so a rewrite of the layout - which fields exist, which of them
+  are gated - cannot land without coming back through the test. IT DETECTS NO
+  CONTENT EDIT: widening an expected value or retuning a param leaves `version`
+  at 2 and the assertion green. The round's first cut claimed the opposite in
+  a comment and here, and cold review caught it. Nothing in the tree detects a
+  quietly widened vector, which is the same hole AGENTS.md records against the
+  shared-fixture rule; the executors are what has to be strong enough not to
+  need one.
+- `crates/mogwai-data/tests/fixtures/` HOLDS THE VECTORS AND IS NOT THE
+  `analysis/` CONVENTION, deliberately. The `analysis/` rule exists for gates
+  where TWO IMPLEMENTATIONS IN DIFFERENT LANGUAGES compare a quantity; these
+  vectors have one implementation and one language, and the failure they had
+  was the other half of the same lesson - a fixture and a test-local
+  re-implementation derived from each other with production outside the loop.
+  Do not relocate them expecting the rule to apply.
+- THE PER-VECTOR VERDICT, because a later round will otherwise re-litigate it.
+  Every expected value in V4 through V8 traces to
+  `notes/protocol-12b-arrival-composition-spec.md` - section 7's two contract
+  orderings, 4.2's segment-by-segment integral with the calendar INSIDE it,
+  4.1's crossing rule and `(count - 1)` stride identity. NONE of them was
+  read off a run, so routing production through them is a real gate and not a
+  re-bless. What was wrong was only where the comparison happened.
+- `drive_next_parent` IS THE ROUTING MECHANISM AND ITS TRICK IS LOAD-BEARING.
+  A vector states a budget; the kernel's budget is an RNG draw and cannot be
+  chosen. The helper reads the budget the kernel is ABOUT to draw from a clone
+  of the cadence stream and sets `RuntimeModifiers::rate_mult` to
+  `budget / unit_budget_s`, so the drawn budget realizes the vector's stated
+  seconds of open exposure exactly. Without it the only way to have an
+  expected timestamp is to run the kernel and write down what came out, which
+  is the change-detector failure. THE CLONE ALSO LEANS ON CONTRACT B: it is
+  only the budget because the budget is the first cadence draw, so moving the
+  child draw to the front fails V6, V7 and V8 as well as V5.
+  - `unit_latent_kernel` is `WallMmpp` at `rate_ratio = 1.0`, where the level
+    denominator is 1 and `level` returns 1.0 in BOTH states. That keeps the
+    latent multiplier at the vectors' unit intensity while the walk still takes
+    one cadence draw per traversed grid step, which is what leaves V5's
+    contract-B ordering claim observable.
+- TWO FIXTURES WERE UNREALIZABLE AND THE TEST-LOCAL ARITHMETIC IS WHY NOBODY
+  NOTICED. V6 asserted a THREE-SECOND calendar closure and V8 a
+  `next_open_ns` of 100 ns; `SessionCalendar` is MINUTE-granular, so neither
+  could be produced by any calendar the venue can hold. A vector that only ever
+  meets a re-implementation never finds out that it describes an impossible
+  world. Both were re-derived from the same spec arithmetic at realizable
+  scales - V6 three minutes and a 181.5 s offset, V8 a closure at clock minute
+  1 reopening at 120 s.
+  - AND CALENDAR WINDOWS ARE INDEXED IN MINUTES OF THE LOCAL WEEK, not from the
+    clock: `UNIX_EPOCH_LOCAL_WEEK_MINUTE` is 5,760, so clock minute 60 is week
+    minute 5,820. The first cut of both fixtures used clock minutes, and the
+    symptom was a parent resolving one second into what was supposed to be a
+    closure.
+- `GeneratedSource` CARRIES `draw_stages`, a `#[cfg(test)]` STAGE TRACE of the
+  shipped contract-A path, cleared at the top of `begin_event`. It records ONE
+  TAG PER STAGE - `gap`, `flip`, `latent_mid`, `side_book`, `child` - and NOT
+  one per RNG draw, because a stage's primitive-draw count belongs to the
+  distribution it samples and the ziggurat's rejection loop makes even that
+  variable. V4's `main_stream_order` still spells its multiplicities out; the
+  test compares the sequence with consecutive repeats COLLAPSED, and the
+  multiplicities are documented as ungated rather than left looking checked.
+- THE FIVE BITE-CHECKS, all as text edits in production and all reverted:
+  a `rate_at(cursor).max(0.5)` (the calendar not inside the intensity) moves
+  V6's parent 179 s; dropping `at_ts_ns <= candidate` from the crossing guard
+  fails V8's no-crossing case; replacing the calendar snap with the bare
+  shifted instant fails V8's closed-window case; drawing the child count before
+  the budget fails `V5 contract-B child-draw position` at 4 against 1 - it is
+  the CHILD-COUNT comparison that catches it, and the round's first draft
+  attributed the bite to an assertion labelled "the first cadence draw is the
+  budget" that could not fail at all, see below; and reordering the Weibull
+  sample after the flip in `next_duration_ns` fails V4's stage order.
+- TWO THINGS THE BITE-CHECKS FOUND THAT THE REPORT DID NOT NAME, and both are
+  the "your first design has a hole one layer up" rule again:
+  - V7 AT THE SHIPPED ONE-SECOND GRID COULD NOT SEE THE CONVERSION IT EXISTS
+    FOR. Its parent lands exactly on the segment end, where
+    `candidate.min(end)` clamps it, so a kernel adding a nanosecond to every
+    `delta_ns` still produced 1,000,000,000. The vector now runs on a
+    ten-second cadence step so the parent is strictly interior. GENERAL FORM:
+    a vector whose expected instant coincides with a clamp is measuring the
+    clamp. Ask where the value is decided before believing the assertion.
+  - `next_parent`'s `if intensity == 0.0 { cursor = end; continue; }` IS A
+    FAST PATH, NOT THE MECHANISM. Deleting it changes no behaviour, because
+    `available` is then zero, `remaining > available` holds and the loop
+    advances the cursor identically. Its real job is keeping `0.0 / 0.0` out of
+    `delta_ns` if `remaining` ever reaches exactly zero. The first V6
+    bite-check was that deletion and it PASSED - a perturbation that proves
+    nothing looks exactly like a test that cannot fail.
+- NO `TAPE_PROTOCOL_VERSION` BUMP WAS OWED and it was checked rather than
+  assumed: `git diff` on `arrival.rs` is entirely inside `mod tests`, and every
+  `source.rs` edit is `#[cfg(test)]` - a field that does not exist in release
+  and pushes that consume no RNG. The gate's counts are unchanged at 1191 + 436
+  over 1688 pairs, 0 orphaned, which is the same evidence: no test was added or
+  removed, five were rewritten.
+- THE ROUND COMMITTED AN INSTANCE OF ITS OWN SUBJECT, the fourteenth in this
+  arc and the second time a round has done it while the defect class was the
+  round's whole topic. V5's contract-B replay carried a `"budget"` arm
+  asserting `-ln(U)` from a clone of the cadence stream against `run.budget`,
+  which the helper had produced from the SAME clone at the SAME offset by the
+  SAME expression. Both sides were test-local, no production code was
+  consulted, and the arm was green for a kernel that draws no budget at all -
+  while its message said "the first cadence draw is the budget". IT IS GONE
+  AND NOTHING REPLACED IT: `next_parent` returns no budget and exposes no
+  observable of one, so there is nothing to compare against, and saying so in
+  place beats an assertion that reads as a gate. The arm still CONSUMES one
+  draw, which is what leaves the reference standing where the child draw must
+  be - that position is the whole bite, and it is spent on the child-count
+  comparison two lines down.
+- THE FAMILY THE COLD REVIEW SWEPT: A THING THAT READS AS GATED AND IS NOT.
+  Four more instances beyond the one above, all closed the same way - either
+  the field is read by an assertion that observes production, or it moves to
+  `derivation_intermediates` and says it is read by nothing.
+  - V7's `assert_bits` on the budget was fixture-against-itself, verbatim the
+    defect its own new `_doc` said version 2 existed to remove. `budget` is in
+    `derivation_intermediates` now.
+  - V6's `segments_s` / `open` were declared inputs that nothing read - the
+    segmentation is a CONSEQUENCE of the origin, the cadence step and the
+    calendar minutes, not something the kernel can be given. Both moved.
+  - Every remaining declared param is READ AND ASSERTED. `base_mean_s` reaches
+    `next_parent` (the driver carries it into `rate_mult` so the realized
+    exposure is invariant to it); `latent_x` is checked against
+    `ParentDraw::latent_x`; `baseline_rate` against `ArrivalEnv::rate_at`;
+    `intra_event_step_ns` and `cadence_step_ns` against the shipped constants.
+    Bite-checked by editing the fixture value: each edit now fails a named
+    assertion, where before it changed nothing.
+  - V8 got `cell` back, pinned in the fixture as its own parent instants
+    divided by its own declared cadence step and asserted against
+    `ArrivalEnv::cell_index` - the derivation's "that snapped time is also the
+    cell" had been left asserting over nothing. Bite-checked by shifting
+    `cell_index` one step: fails at 51 against 50.
+  - `next_from_ns` STAYS UNPINNED AND SAYS WHY. The child count is an RNG
+    draw, so a pinned successor instant would be a run written down; the
+    identity check restates production's expression and is labelled a
+    re-implementation check, not a fixture gate. What the fixture does gate is
+    the STRIDE it multiplies by. Bite-checked at `INTRA_EVENT_STEP_NS = 1_001`.
+- V7 DRIVES THREE FAMILIES NOW, and the fourth name was wrong rather than
+  missing. The fixture listed `event_markov`, `wall_mmpp`, `log_ou_cox` and
+  `self_exciting` while the executor drove `WallMmpp` alone. `event_markov`
+  IS THE CONTRACT-A PATH AND NEVER ENTERS `next_parent`, so it could not have
+  been driven by this vector under any rewrite; it is dropped from the list
+  with the reason recorded in the derivation. The other three are driven, each
+  parameterized to a latent multiplier of exactly 1.0 - `WallMmpp` at
+  `rate_ratio = 1`, `LogOuCox` at `sigma_y = 0`, `SelfExciting` at `phi = 0` -
+  which is the precondition the intensity-scaling trick needs. The families
+  differ in what and how much they draw, so this is not one path run three
+  times: bite-checked by adding 1.0 to `ArrivalState::new`'s `LogOuCox` arm,
+  which fails `V7 log_ou_cox must reach the conversion at unit latent
+  intensity` and NOTHING ELSE in the vector set - coverage no vector had.
+- BOTH FIXTURE-BUILT CALENDARS ARE `validate()`d NOW. That is the cheapest
+  possible guard against the round's own two-impossible-worlds finding: a
+  vector describing a closure no `SessionCalendar` can hold used to be
+  invisible because nothing built a calendar from it.
+- `draw_stages` IS A SOFT GATE AND THE FIELD SAYS SO. The pushes are
+  hand-placed statements ADJACENT TO the work, so what they pin is the order
+  of the PUSHES; moving a draw past its own tag is undetected. It catches a
+  reordering of the stages AS WRITTEN, which is how contract A is expressed
+  here, and that is the whole of what V4 and V5 rest on it. Do not restate it
+  as pinning the draw order. `begin_integrated_event` pushes nothing, so an
+  anchor with an `arrival` kernel traces empty rather than wrong; the reader
+  refuses on emptiness and its message now names that cause.
+- `drive_next_parent`'s LATENT-STEP REPLAY IS NOT GENERAL. `cell_index(parent)`
+  is the draw count only when the walk starts in cell zero AND resolves inside
+  its first segment. V5 is the only caller that replays and is driven from
+  `from_ns = 0` for exactly that reason; the helper's doc and the call site
+  both say so, and the call site asserts the cell-zero start rather than
+  trusting it.
+- V6's `+0..4 ns` WINDOW IS A MAGNITUDE BOUND, not a statement about which way
+  `ceil` rounds. The pre-ceiling value can sit either side of the ideal,
+  because the intensity scaling is a float division; what makes the window
+  safe is that `remaining` carries relative error of order 1e-16 over three
+  segment subtractions against a 2.5e8 ns delta, so the absolute error is of
+  order 1e-8 ns. The comment argued the direction of `ceil`, which is not
+  sufficient, and now argues the magnitude.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -1145,6 +1319,10 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
     and applies no `skip`: 44.62 + 44.61 + 44.43 = 133.66 s -> 37.97 + 9.96 +
     38.22 = 86.15 s. The GATE's saving is a different number and comes entirely
     from the instrumented sweep; see `reference/performance.md`.
+  - tape r3: 1191 + 436, 1688 pairs, 61 ignored, 0 orphaned, 51.9 s and 52.3 s
+    across the fix pass and its review sweep. UNCHANGED from tape r2 on purpose
+    - the round rewrote five vector executors inside one existing test and
+    added none.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

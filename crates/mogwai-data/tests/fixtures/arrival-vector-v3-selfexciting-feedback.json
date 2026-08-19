@@ -1,5 +1,6 @@
 {
   "vector": "V3",
+  "version": 2,
   "what_it_checks": "Causal self-exciting feedback, including a floored cell and a reopen cell.",
   "derivation": "Section 5.4 with phi = 1/2 and decay = 1/2. Start A_0 = 1. Cell 0 has E=2 and n=4, so a_0=2, A_1=(1/2)1+(1/2)2=3/2 and X_1=(1/2)+(1/2)(3/2)=5/4. Cell 1 is floored, so a_1=1, A_2=(1/2)(3/2)+(1/2)1=5/4 and X_2=9/8. The reopen cell has E=4 and n=2, so a_2=1/2, A_3=(1/2)(5/4)+(1/2)(1/2)=7/8 and X_3=15/16. Counts affect the next cell only.",
   "params": { "phi": 0.5, "tau_s": "0x3ff71547652b82fe", "expected_count_floor": "0x3f847ae147ae147b" },

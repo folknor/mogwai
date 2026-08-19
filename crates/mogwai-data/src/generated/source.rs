@@ -104,6 +104,31 @@ pub struct GeneratedSource {
     pub(super) repeat_draws: u64,
     #[cfg(test)]
     pub(super) rejected_repeat_draws: u64,
+    /// The main-stream STAGE order of the shipped (contract A) event path,
+    /// recorded as the event executes and cleared at the top of every
+    /// `begin_event`. One tag per stage, not one per RNG draw: the stochastic
+    /// contract fixes which stage runs before which, and the number of
+    /// primitive draws a stage makes is a property of the distribution it
+    /// samples (`draw_student_t` alone takes a normal and a chi-squared, and
+    /// the ziggurat's rejection loop makes even that count variable), so a
+    /// per-draw counter could not be pinned. Recording costs nothing in
+    /// release: the field does not exist there.
+    ///
+    /// IT IS A SOFT GATE AND MUST BE READ AS ONE. The pushes are hand-placed
+    /// statements ADJACENT TO the work, not instrumentation inside the draws,
+    /// so what they pin is the order of the PUSHES. A change that moves a
+    /// draw past its own tag - reordering `next_latent_mid` against
+    /// `next_side_and_book` while both tags stay put - leaves this trace
+    /// unchanged. What it does catch is a reordering of the stages as
+    /// WRITTEN, which is how the contract-A order is actually expressed here,
+    /// and that is the whole of the claim V4 and V5 rest on it.
+    ///
+    /// ONLY `begin_event` FEEDS IT. `begin_integrated_event` pushes nothing,
+    /// so a generator whose scalars carry an `arrival` kernel traces an empty
+    /// sequence rather than a wrong one; the reader in `arrival.rs` refuses on
+    /// emptiness and says so.
+    #[cfg(test)]
+    pub(super) draw_stages: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,6 +543,8 @@ impl GeneratedSource {
             repeat_draws: 0,
             #[cfg(test)]
             rejected_repeat_draws: 0,
+            #[cfg(test)]
+            draw_stages: Vec::new(),
         })
     }
 
@@ -584,6 +611,8 @@ impl GeneratedSource {
         if let Some(quiet) = self.arrival_override {
             self.arrival.quiet = quiet;
         }
+        #[cfg(test)]
+        self.draw_stages.push("gap");
         let raw_eps = self.duration_dist.sample(&mut self.rng);
         let state_mean = if self.arrival.quiet {
             self.arrival.quiet_mean_s
@@ -596,6 +625,8 @@ impl GeneratedSource {
         } else {
             self.arrival.active_to_quiet
         };
+        #[cfg(test)]
+        self.draw_stages.push("flip");
         self.arrival
             .advance_after_gap(self.rng.random_bool(flip_probability));
         if let Some(quiet) = self.arrival_override {
@@ -1085,6 +1116,8 @@ impl GeneratedSource {
     }
 
     fn begin_event(&mut self, materialize_quote: bool) {
+        #[cfg(test)]
+        self.draw_stages.clear();
         let (rate_mult, children_mult) = self
             .surge
             .as_ref()
@@ -1130,7 +1163,11 @@ impl GeneratedSource {
             self.clock_ns = calendar.next_open_ns(self.clock_ns);
         }
         self.reopen_frontier_ns = self.clock_ns;
+        #[cfg(test)]
+        self.draw_stages.push("latent_mid");
         let mid = self.next_latent_mid();
+        #[cfg(test)]
+        self.draw_stages.push("side_book");
         let (aggressor, fresh_book) = self.next_side_and_book(mid);
         // Sweep size is conditional on the arrival state, and the two branches
         // are constructed to reproduce the DECLARED unconditional shape:
@@ -1202,6 +1239,8 @@ impl GeneratedSource {
                 (active_mean, active_single)
             }
         };
+        #[cfg(test)]
+        self.draw_stages.push("child");
         let count = {
             // A single fraction at or above one means "always exactly one
             // child" - the floor branch's quiet state. The mixture solve

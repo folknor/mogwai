@@ -96,38 +96,13 @@ attribute buys, which is exclusion from the FAST lane rather than from the gate.
 
 `dwell_is_bounded_across_run_seeds`'s skip entry is gone and the test runs.
 
-## 5. Conformance "vectors" V4-V8 are green by construction
+## 5. Conformance "vectors" V4-V8 are green by construction - closed in round 3
 
-`arrival.rs`, `arrival_conformance_vectors_v1_through_v9`. The vectors are
-described as "independently-derived inputs" that "must be able to catch a
-plausible but wrong kernel result." Four of the nine cannot:
-
-- `execute_v4_event_markov_contract` asserts
-  `vector["expected"][0]["main_stream_order"] == json!(["gap","flip","latent_mid",...])`
-  - that is the FIXTURE COMPARED AGAINST A LITERAL IN THE TEST. No production
-  code is consulted. Same for `contract_a_order` / `contract_b_order` in
-  `execute_v5`.
-- `execute_v6_budget_traversal` re-implements the budget/segment traversal inline
-  in the test (`let spent = if open { remaining.min(seconds) } else { 0.0 }; ...`)
-  and checks it against the fixture. The kernel's real traversal is never called.
-- `execute_v7_degenerate_budget` computes `-uniform.ln()` and
-  `(budget * 1e9).ceil().max(1.0) as u64` in the test.
-- `execute_v8_reopen_seam` recomputes the crossing rule
-  (`from < at && at <= candidate`) and the shift locally; only
-  `CADENCE_STEP_NS`/`INTRA_EVENT_STEP_NS` are borrowed from production.
-
-Break the real `next_parent` budget traversal, the reopen-seam crossing
-condition, or the child-draw ordering and every one of these stays green. This is
-the "two implementations pinned by a fixture built on one side" failure the
-AGENTS.md lesson names, in its purest form: the fixture and the test-local
-arithmetic were derived from each other, and the production code is not in the
-loop. V1/V2/V3/V9 are fine - they drive `params.transition`, `params.level`,
-`transition_from_jumps` directly, and V5's probability arm does use `SweepShape`.
-
-Fix: route V6/V7/V8 through the kernel entry points, and for V4/V5's ordering
-claims, assert the order against something observable in production (a draw-tag
-trace, or the `arrival_transcripts` mechanism) rather than against a JSON array
-the test also hardcodes.
+The finding reproduced in full and every vector it named now runs against
+production. The per-vector verdict on whether the fixture was an independent
+derivation or a re-blessing, the five bite-checks, and the two things the
+bite-checks found that nobody had proposed are in
+`notes/bug-loop-carry-forward.md`. Nothing is left open from this cluster.
 
 ## 6. `garch_second_moment_instrumentation` reports on a process that has not shipped for two repairs
 

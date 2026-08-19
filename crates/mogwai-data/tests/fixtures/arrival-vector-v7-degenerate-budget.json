@@ -1,8 +1,20 @@
 {
   "vector": "V7",
-  "what_it_checks": "Degenerate constant-baseline exponential-budget conversion and nanosecond rounding for every family.",
-  "derivation": "With X=1, rate=1 and base_mean_s=1, section 4.2 gives delta_seconds=g. For U=exp(-1), g=-ln(U)=1. The integer-nanosecond conversion is ceil(1*1e9)=1,000,000,000, so all four families resolve the same parent timestamp before their family-specific dynamics matter.",
+  "version": 2,
+  "what_it_checks": "Degenerate constant-baseline exponential-budget conversion and nanosecond rounding, driven through ArrivalKernel::next_parent for every integrated family.",
+  "derivation": "With X=1, rate=1 and base_mean_s=1, section 4.2 gives delta_seconds = g. For U=exp(-1), g=-ln(U)=1. The integer-nanosecond conversion is ceil(1*1e9)=1,000,000,000, so every integrated family resolves the same parent timestamp before its family-specific dynamics matter. Version 2 routes the conversion through next_parent by scaling the intensity so the kernel's own drawn budget realizes g exactly, and drives EACH family in driven_families below rather than one of them - each parameterized to a latent multiplier of exactly 1.0, which is where the shared conversion has to be reached from. event_markov is deliberately absent from that list and is not a gap: it is the contract-A path and never enters next_parent at all, so the old four-name families field listed a family this vector could not have driven. The cadence step is widened to ten seconds so the resolved instant is strictly INSIDE its segment: at the shipped one-second step it coincides with the segment end, where the kernel's candidate.min(end) clamp masks the conversion the vector exists to check.",
   "params": { "base_mean_s": 1.0, "baseline_rate": 1.0 },
-  "inputs": [ { "uniform": "0x3fd78b56362cef38", "from_ns": 0 } ],
-  "expected": [ { "families": ["event_markov", "wall_mmpp", "log_ou_cox", "self_exciting"], "budget": "0x3ff0000000000000", "parent_ts_ns": 1000000000 } ]
+  "inputs": [
+    {
+      "uniform": "0x3fd78b56362cef38",
+      "from_ns": 0,
+      "cadence_step_ns": 10000000000,
+      "driven_families": ["wall_mmpp", "log_ou_cox", "self_exciting"]
+    }
+  ],
+  "expected": [ { "parent_ts_ns": 1000000000 } ],
+  "derivation_intermediates": {
+    "_doc": "READ BY NOTHING. g = -ln(U) for the uniform above, recorded so a reviewer can check the derivation without a calculator. It is not asserted, because the only way to check it in-test is to recompute -ln(U) and compare it with a fixture value produced by exactly that expression - fixture against itself, production absent. The gated claims are parent_ts_ns and the baseline rate.",
+    "budget": "0x3ff0000000000000"
+  }
 }
