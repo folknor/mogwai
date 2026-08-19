@@ -119,6 +119,36 @@ fn source_files(root: &Path) -> Vec<(PathBuf, Vec<String>)> {
     files
 }
 
+/// Every `.rs` file under `crates/*/examples` and `crates/*/benches`.
+///
+/// KEPT OUT OF [`source_files`] DELIBERATELY. An example target is the
+/// SANCTIONED home for a fixture generator - `no_test_binary_writes_a_committed
+/// _fixture` names it as the fix - so folding these into the shared list would
+/// make that gate refuse its own remedy. They carry no unit tests either, so
+/// the name reconstruction has nothing to say about them. What they CAN carry
+/// is a `#[test]` that declines to assert, which is a property of the code and
+/// not of the target kind, so the missing-input gate reads them too.
+fn example_and_bench_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let crates = root.join("crates");
+    let mut packages: Vec<PathBuf> = std::fs::read_dir(&crates)
+        .expect("the crates directory")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    packages.sort();
+    for package in packages {
+        for kind in ["examples", "benches"] {
+            let dir = package.join(kind);
+            let mut found = Vec::new();
+            walk(&dir, &dir, false, &mut found);
+            files.extend(found.into_iter().map(|(path, _)| path));
+        }
+    }
+    files
+}
+
 fn walk(dir: &Path, base: &Path, path_is_module: bool, out: &mut Vec<(PathBuf, Vec<String>)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -892,12 +922,10 @@ fn no_test_binary_writes_a_committed_fixture() {
          it is reading the wrong tree, and a scan that sees nothing accepts every writer there is",
         files.len()
     );
-    let this_file = Path::new(file!())
-        .file_name()
-        .expect("this file has a name")
-        .to_owned();
+    // One path, not one file NAME - see the note in the missing-input gate.
+    let this_file = root.join(file!());
     for (path, _) in files {
-        if path.file_name() == Some(this_file.as_os_str()) {
+        if path == this_file {
             continue;
         }
         let raw = std::fs::read_to_string(&path).expect("a scanned source file reads");
@@ -1258,6 +1286,305 @@ mod parser {
         ));
         assert!(found.is_empty(), "{found:?}");
     }
+
+    fn skips(code: &str) -> Vec<String> {
+        super::missing_input_skip_offenders("sample.rs", code)
+    }
+
+    /// The two spellings the tree shipped.
+    #[test]
+    fn both_shipped_skip_spellings_convict() {
+        let existence = skips(concat!(
+            "    #[test]\n",
+            "    fn pins_the_artifact() {\n",
+            "        let path = Path::new(\"analysis/a.json\");\n",
+            "        if !path.exists() {\n",
+            "            return;\n",
+            "        }\n",
+            "        assert!(true);\n",
+            "    }\n",
+        ));
+        assert_eq!(existence.len(), 1, "{existence:?}");
+        let fallible = skips(concat!(
+            "    #[test]\n",
+            "    fn pins_the_artifact() {\n",
+            "        let Ok(bytes) = std::fs::read(\"analysis/a.json\") else {\n",
+            "            return;\n",
+            "        };\n",
+            "        assert!(!bytes.is_empty());\n",
+            "    }\n",
+        ));
+        assert_eq!(fallible.len(), 1, "{fallible:?}");
+    }
+
+    /// THE WIDENING, PINNED. `#[test]` is not a substring of `#[tokio::test]`,
+    /// so the first cut of this gate could not see a single async test - and
+    /// "found zero offenders" from a scan that reads none of the socket suites
+    /// is not a finding. This is the whole guard against that regressing.
+    #[test]
+    fn an_async_test_that_skips_is_convicted_too() {
+        let found = skips(concat!(
+            "    #[tokio::test]\n",
+            "    async fn pins_the_artifact() {\n",
+            "        let Ok(bytes) = std::fs::read(\"analysis/a.json\") else {\n",
+            "            return;\n",
+            "        };\n",
+            "        assert!(!bytes.is_empty());\n",
+            "    }\n",
+        ));
+        assert_eq!(
+            found.len(),
+            1,
+            "an async test declining to assert is the same defect: {found:?}"
+        );
+    }
+
+    /// THE FALSE POSITIVE THE WIDENING EXPOSED, and the reason the probe is the
+    /// let-else form rather than the `let Ok(` substring. A socket drain binds
+    /// `while let Ok(..)` and RETURNS ON SUCCESS, panicking if the loop runs
+    /// out - nothing is skipped, and ten of these in `serving.rs` were the
+    /// entire yield of the widening. A gate that convicts them is as useless as
+    /// one that sees nothing.
+    #[test]
+    fn a_socket_drain_loop_is_not_a_missing_input_skip() {
+        assert!(
+            skips(concat!(
+                "    #[tokio::test]\n",
+                "    async fn reads_a_named_frame() {\n",
+                "        while let Ok(Some(Ok(message))) = next(deadline).await {\n",
+                "            if matches!(message, Message::Text(_)) {\n",
+                "                return;\n",
+                "            }\n",
+                "        }\n",
+                "        panic!(\"produced no frames\");\n",
+                "    }\n",
+            ))
+            .is_empty()
+        );
+        // The let-chain spelling reduces to the same thing.
+        assert!(
+            skips(concat!(
+                "    #[tokio::test]\n",
+                "    async fn reads_a_trade() {\n",
+                "        if let Message::Text(text) = message\n",
+                "            && let Ok(trade) = serde_json::from_str(&text)\n",
+                "        {\n",
+                "            return;\n",
+                "        }\n",
+                "        panic!(\"no trade\");\n",
+                "    }\n",
+            ))
+            .is_empty()
+        );
+    }
+
+    /// A PRODUCTION function that probes and returns is not a test, and most
+    /// of this workspace's early returns are exactly that. The bound is the
+    /// test body, so an ordinary function beside one is untouched - and so is
+    /// a test that probes without returning.
+    #[test]
+    fn production_probes_and_assertive_tests_are_left_alone() {
+        assert!(
+            skips(concat!(
+                "fn load(path: &Path) {\n",
+                "    if !path.exists() {\n",
+                "        return;\n",
+                "    }\n",
+                "}\n",
+            ))
+            .is_empty()
+        );
+        assert!(
+            skips(concat!(
+                "    #[test]\n",
+                "    fn asserts_the_file_is_there() {\n",
+                "        assert!(Path::new(\"a.json\").exists());\n",
+                "    }\n",
+            ))
+            .is_empty()
+        );
+        // `returned` is not a `return`.
+        assert!(
+            skips(concat!(
+                "    #[test]\n",
+                "    fn names_a_variable_returned() {\n",
+                "        let returned = Path::new(\"a\").exists();\n",
+                "        assert!(returned);\n",
+                "    }\n",
+            ))
+            .is_empty()
+        );
+    }
+}
+
+/// THE THIRD SOURCE GATE IN THIS FILE, and the class it holds shut has cost
+/// this workspace three tests that reported green while asserting nothing.
+///
+/// A cargo test - unit or integration - runs with its working directory set to
+/// the PACKAGE root, never the repository root. A test that reads a
+/// repo-relative input therefore reads `crates/<pkg>/analysis/...`, which does
+/// not exist; where the read was guarded by an existence check or a fallible
+/// binding with an early return, the guard fired on EVERY run and the body
+/// never executed. `mogwai-cli`'s `the_control_artifact_carries_no_b8_field`
+/// and `the_screen_artifact_carries_every_evaluated_cell_and_its_verdict` were
+/// both this, and the second was ALSO wrong on its merits underneath - the
+/// skip had hidden a false invariant for as long as it had existed. That is
+/// the general shape: a test that can decline to assert does not merely lose
+/// coverage, it preserves whatever is wrong inside it.
+///
+/// THE RULE IS ON THE SKIP, NOT ON THE PATH, because "repo-relative" is not
+/// decidable from source and the working directory is not the only way to make
+/// an input absent. A test whose input may legitimately be missing states that
+/// with `#[ignore]`, which the gate profile can then include deliberately;
+/// declining at runtime is invisible to every count libtest reports.
+///
+/// The scan is over `crates/*/src` and `crates/*/tests`, exempt from itself
+/// for the same structural reason the fixture-write gate is: it has to name
+/// the constructs it forbids, and `mod parser` below proves it bites on
+/// synthetic samples rather than on what the tree happens to hold.
+#[test]
+fn no_test_declines_to_assert_on_a_missing_input() {
+    let root = repo_root();
+    let files = source_files(&root);
+    assert!(
+        files.len() > 100,
+        "this scan found only {} source files under crates/, which is too few for this workspace",
+        files.len()
+    );
+    // THE EXEMPTION IS THIS FILE, not every file wearing its name. `file!()` is
+    // workspace-relative, so joining it against the root names exactly one
+    // path; matching on the bare file name would exempt any other
+    // `gate_skip_list.rs` anywhere under `crates/`, which is an exemption
+    // nobody wrote and nothing would report.
+    let this_file = root.join(file!());
+    let mut offenders = Vec::new();
+    for path in files
+        .into_iter()
+        .map(|(path, _)| path)
+        .chain(example_and_bench_files(&root))
+    {
+        if path == this_file {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).expect("a scanned source file reads");
+        let code = strip_comments_keeping_literals(&path, &raw);
+        let shown = path.strip_prefix(&root).unwrap_or(&path).display();
+        offenders.extend(missing_input_skip_offenders(&format!("{shown}"), &code));
+    }
+    assert!(
+        offenders.is_empty(),
+        "these tests return early when an input is absent, so on a run where it is absent they \
+         assert nothing and still report green:\n{}\n\nA cargo test's working directory is its \
+         PACKAGE root, so a repo-relative path is absent on every run - join it against the \
+         workspace root instead. Where the input may genuinely be missing, say so with \
+         `#[ignore]`, which is countable; a runtime skip is not.",
+        offenders.join("\n")
+    );
+}
+
+/// Every `#[test]` body that both probes for an input's absence and returns,
+/// reported as one line each.
+///
+/// TWO PROBE SPELLINGS, and only these two, because they are the two the tree
+/// has actually shipped: `path.exists()` as a condition, and a fallible read
+/// bound with `let Ok(..) = .. else`. A `return` ANYWHERE in the same test body
+/// convicts - a closure's `return` inside such a body is a false positive in
+/// principle, and no instance exists, so the tighter rule would be the more
+/// complicated one for no gain. The bound is the test body: a production
+/// function in the same file that legitimately probes and returns is out of
+/// scope, which is most of the `return`s in this workspace.
+///
+/// THE `let Ok(` PROBE IS THE LET-ELSE FORM ONLY, and the distinction is what
+/// makes this gate usable once it can see `#[tokio::test]`. A bare `let Ok(`
+/// substring also matches `while let Ok(Some(Ok(message))) = ..` and the
+/// let-chain `.. && let Ok(msg) = serde_json::from_str(&text)`, which are the
+/// socket suites' DRAIN loops: there the `return` is the SUCCESS exit and the
+/// loop falling through panics, so nothing is being skipped. Ten such loops in
+/// `serving.rs` were the entire yield of widening the attribute match, and
+/// suppressing them by exemption would have left a gate that convicts the
+/// wrong shape. A let-else is recognized structurally - `else` reached before
+/// the statement's `;` - so `while let`, `if let` and let-chains are excluded
+/// by what they are rather than by where they live.
+fn missing_input_skip_offenders(shown: &str, code: &str) -> Vec<String> {
+    let mut offenders = Vec::new();
+    for (from, to) in test_fn_body_spans(code) {
+        let body = &code[from..to];
+        if !body.contains(".exists()") && !has_fallible_let_else(body) {
+            continue;
+        }
+        let Some(at) = body.find("return") else {
+            continue;
+        };
+        // `returned`, `return_value` and friends are not returns.
+        let tail = body[at + "return".len()..].trim_start();
+        if !tail.starts_with(';') && !tail.starts_with('}') {
+            continue;
+        }
+        let line = code[..from + at].matches('\n').count() + 1;
+        offenders.push(format!(
+            "  {shown}:{line} returns early from a test that probes for a missing input"
+        ));
+    }
+    offenders.sort();
+    offenders
+}
+
+/// Whether `body` binds a fallible value with a `let Ok(..) = .. else` -
+/// the divergence-free spelling of "the input might not be there".
+///
+/// A `let` statement runs to its `;`; a LET-ELSE reaches its `else` first.
+/// `while let` and `if let` are excluded by the keyword before the `let`,
+/// which is also what a let-chain (`cond && let Ok(..) = ..`) reduces to once
+/// the leading `if`/`while` is found - so the check is on the statement
+/// position, not on the payload.
+fn has_fallible_let_else(body: &str) -> bool {
+    body.match_indices("let Ok(").any(|(at, _)| {
+        let before = body[..at].trim_end();
+        if before.ends_with("while") || before.ends_with("if") || before.ends_with("&&") {
+            return false;
+        }
+        // The statement ends at its `;`; a let-else opens a block first. Take
+        // whichever comes first and ask which one it was.
+        let rest = &body[at..];
+        let semicolon = rest.find(';').unwrap_or(rest.len());
+        let brace = rest.find('{').unwrap_or(rest.len());
+        brace < semicolon && rest[..brace].contains("else")
+    })
+}
+
+/// The body span of every function carrying a `#[test]` attribute, in
+/// comment-stripped, literal-KEEPING code.
+///
+/// A `#[test]` is followed by the attributes it stacks with (`#[ignore]`,
+/// `#[should_panic]`) and then the declaration, so the body wanted is the
+/// FIRST `fn` body beginning after the attribute. Nested spans are subsets of
+/// it and start later, so taking the earliest start is right.
+///
+/// BOTH SPELLINGS, and the omission of the second is why the class gate found
+/// nothing on the run that installed it. `#[test]` is not a substring of
+/// `#[tokio::test]`, so a scan keyed on the former alone is blind to every
+/// async test in the workspace - roughly sixty in `mogwai-cli`'s `serving.rs`
+/// alone, which is where the socket suites live. The name scan above already
+/// handled both spellings, so this was an inconsistency inside one file rather
+/// than a workspace with no async tests: a scanner that sees nothing passes
+/// trivially, and a full green gate is no evidence against it.
+fn test_fn_body_spans(code: &str) -> Vec<(usize, usize)> {
+    let mut spans = fn_body_spans(code);
+    spans.sort();
+    let mut out = Vec::new();
+    let mut starts: Vec<usize> = code
+        .match_indices("#[test]")
+        .chain(code.match_indices("#[tokio::test"))
+        .map(|(at, _)| at)
+        .collect();
+    starts.sort_unstable();
+    for at in starts {
+        if let Some(&span) = spans.iter().find(|&&(from, _)| from > at) {
+            out.push(span);
+        }
+    }
+    out.dedup();
+    out
 }
 
 impl std::fmt::Debug for Scan {

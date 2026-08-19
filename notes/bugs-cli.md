@@ -65,101 +65,149 @@ because a bump between the baseline and HEAD genuinely does void the byte
 comparison's premise; what was wrong was stating the accepted value by hand.
 `docs/cli.md` stopped naming a number in both places the hunter listed.
 
-## 2. Three unit tests in this crate are structurally dead - they resolve repo-relative paths from the crate directory (high confidence)
+## 2-5. RESOLVED 2026-08-19 (fix pass, round 1)
 
-A cargo integration or unit test runs with CWD = the PACKAGE root, i.e.
-`crates/mogwai-cli`. These tests read repo-root-relative paths and silently
-early-return:
+Findings 2, 3, 4 and 5 are closed. Four reported findings, five real defects
+plus one already-fixed half; what each turned out to be, so a later round does
+not re-derive it:
 
-- `arrival_control.rs:626` `the_control_artifact_carries_no_b8_field` reads
-  `DEFAULT_OUT` = `"analysis/mnq-arrival-control.json"`, which resolves to
-  `crates/mogwai-cli/analysis/...`, never exists,
-  `let Ok(bytes) = ... else { return }`. It has never asserted anything. The
-  same file's `repo_root()` helper exists two functions below and is used by the
-  ignored mid-run pin, so the fix was known and not applied here.
-- `arrival_screen.rs:660`
-  `the_screen_artifact_carries_every_evaluated_cell_and_its_verdict` - same
-  shape, `if !path.exists() { return }`.
+- FINDING 2 WAS HALF STALE. `the_control_artifact_carries_no_b8_field` had
+  ALREADY been fixed by commit `4a1e18e` ("Make a vacuous artifact pin
+  execute"), which is in the tree the hunter read; it joins `repo_root()` and
+  panics on a missing artifact. REFUSED as reported. The screen half was real
+  and is fixed: `the_screen_artifact_carries_every_evaluated_cell_and_its
+  _verdict` now joins the repository root, panics rather than skipping, and its
+  `tape_protocol_version` assertion no longer holds a FROZEN artifact against
+  the LIVE constant - the hunter was right that the dead path was hiding a
+  false invariant. It asserts the field is an identity, which is what a frozen
+  artifact can be held to. A non-vacuity assertion was added beside it: the
+  per-cell loop is the bulk of the test and an empty `cells` array would have
+  walked it in zero iterations, which is the same vacuity relocated inward.
+  The resurrected test PASSED immediately, which is only trustworthy because
+  the class gate below was bite-checked against the exact skip that was there.
+  THE CLASS IS NOW GATED, not the three instances patched.
+  `no_test_declines_to_assert_on_a_missing_input` in
+  `crates/mogwai-cli/tests/gate_skip_list.rs` scans every `#[test]` and
+  `#[tokio::test]` body under `crates/*/src`, `crates/*/tests`,
+  `crates/*/examples` and `crates/*/benches` for a body that probes for an
+  absent input and returns, on the existing literal-aware stripper and
+  function-span machinery.
+  THE FIRST CUT OF IT WAS BLIND, and the cold review caught it: its span walk
+  matched `#[test]` alone, and `#[test]` is not a substring of
+  `#[tokio::test]`, so it read no async test in the workspace - roughly sixty
+  in `serving.rs` alone, which is where the socket suites live. Its claim of
+  "zero further instances workspace-wide" was therefore worth nothing, and a
+  full green gate was no evidence against it: a scanner that sees nothing
+  passes trivially. THE CORRECTED ANSWER, with both spellings scanned: TEN
+  HITS, ALL IN `crates/mogwai-cli/tests/serving.rs`, ALL FALSE POSITIVES, AND
+  ZERO REAL INSTANCES. Every one is a socket DRAIN loop - `while let
+  Ok(Some(Ok(message)))` or the let-chain `&& let Ok(msg) = ..` - where the
+  `return` is the SUCCESS exit and the loop falling through panics, so nothing
+  declines to assert. They were closed by tightening the probe rather than by
+  exempting them: the `let Ok(` probe now recognizes the LET-ELSE form
+  structurally (an `else` reached before the statement's `;`), which excludes
+  `while let`, `if let` and let-chains by what they are rather than by where
+  they sit. A gate producing false positives is as useless as one producing
+  none. Two parser fixtures pin both halves -
+  `an_async_test_that_skips_is_convicted_too` and
+  `a_socket_drain_loop_is_not_a_missing_input_skip` - and both were
+  bite-checked as text edits, reading the named assertion: reverting the
+  `#[tokio::test` match failed the first on `left: 0, right: 1` with an empty
+  offender list, and reverting the let-else recognition failed the second on
+  the `while let` arm. Two lesser scope gaps went with it: `examples/` and
+  `benches/` are scanned now (kept OUT of the shared `source_files`, because
+  an example target is the sanctioned home for a fixture generator and the
+  fixture-write gate would otherwise refuse its own remedy), and both
+  self-exemptions match `root.join(file!())` rather than a bare file name,
+  which would have exempted any other `gate_skip_list.rs` anywhere.
+  `crates/mogwai-cli/src/test_paths.rs` is the one place a unit test in this
+  crate resolves the repository root or a scratch directory from.
+- FINDING 3 WAS REAL AND IS FIXED, by refusal rather than by a better guess.
+  `cache clean --stale` now requires `--keep <TOKEN>` and refuses without it;
+  `cache stats --entries` prints the tokens present. A cache entry's provenance
+  token binds the PRODUCING command's inputs, which a `cache` invocation cannot
+  derive, so the only correct options were "name it" or "refuse" - and the
+  synthesized token was destroying an hours-long screen cache on the safe-
+  looking invocation. `docs/cli.md` was wrong here (it described the intended
+  behaviour, not the code's) and was corrected.
+- FINDING 4 WAS REAL, AND THERE WERE TWO OF IT. `fit` now re-attests with
+  `fresh_tree_state` and refuses "the artifact is unbound", and writes through
+  `write_json_atomic`. Its module doc was RIGHT and needed no edit. The
+  seventh writer nobody had counted, `minute_range_envelope`, had the same
+  defect - an entry gate, a full corpus pass, then `clean_tree: true` written
+  as a constant - and got the same fix. THE CLASS IS GATED:
+  `every_tree_attested_writer_re_attests_before_its_write` in
+  `crates/mogwai-cli/src/attestation.rs` is a second source roster beside the
+  existing one, keyed on the GUARD CALL rather than on the binding key, because
+  `fit.rs` never names `harness_tree_commit` (the lab driver serializes it) and
+  the older roster is structurally blind to it. `arrival_envelope_diagnostic`
+  is exempt by construction and the exemption is stated in place: it takes no
+  entry gate and RECORDS the reading rather than asserting a constant, so it
+  has no stale claim to make.
+- FINDING 5 WAS REAL AND IS FIXED IN BOTH HALVES. The two unit tests write to
+  the WORKSPACE target directory through `test_paths::scratch_dir`
+  (`CARGO_TARGET_TMPDIR` is unavailable in a unit test - cargo sets it for
+  integration targets and benches only, which `mogwai-lab`'s
+  `unit_test_scratch` already records). Production's
+  `PathBuf::from("target/arrival-control")` is now a `ScratchDir` under the
+  storage policy's cache root: unique per process, removed on drop, and no
+  longer dependent on where the operator was standing. THE BINDING IS THE
+  GUARD there - the tidy-looking `ScratchDir::new(..)?.path().to_path_buf()`
+  compiles and deletes the directory before the first walk, and the first cut
+  of this fix wrote exactly that.
 
-And the arrival-screen one is ALSO wrong on its merits, which the dead path is
-hiding. It asserts
+Bite-checks, all as text edits, all reading the named assertion: restoring the
+skip shape failed the class gate on `arrival_screen.rs:746` by name; gutting
+`fit`'s re-attestation (imports included, so it compiled) failed the roster on
+`["fit.rs"]`; restoring the synthesized `--stale` token failed
+`stale_without_a_named_token_refuses_and_deletes_nothing` on `aaaa was
+deleted` - the RESOURCE assertion, which is why that test asserts the disk
+BEFORE the refusal. Asserted the other way round it went red on the
+`expect_err` without ever looking at the cache, which is a bite-check that
+proves the wrong thing.
 
-```rust
-artifact["binding"]["tape_protocol_version"] == json!(mogwai_data::TAPE_PROTOCOL_VERSION)
-```
+No tape version bump is owed: nothing on the tape generation path moved, and
+the scratch relocation changes where walk temporaries live, not a drawn byte.
 
-against the COMMITTED `analysis/mnq-arrival-screen.json`, which records 14,
-against a live constant of 20. Fix the path and the test goes red immediately -
-and correctly so, because the assertion encodes a false invariant: a frozen
-artifact from an old tape identity must not be invalidated by a later, unrelated
-bump. `TAPE_PROTOCOL_VERSION` bumps are declared FREE in `AGENTS.md`; this test
-makes them cost a red gate. Same defect family as finding 1: a moving constant
-pinned against a frozen artifact.
+### Cold review of the fix pass, closed 2026-08-19
 
-`analysis/mnq-arrival-control.json` records 11, incidentally, so the B8 test is
-stale by nine identities too.
+Six findings, all real, all closed in the same round. Beyond the class gate's
+blindness above:
 
-## 3. `mogwai cache clean --stale` is `clean` with extra steps - the token it computes can never match any producer's (high confidence)
-
-`crates/mogwai-cli/src/cache.rs:44-58`. `current_token()` folds
-`full_command = std::env::args().join(" ")` into the provenance hash. Invoked as
-`mogwai cache clean --stale`, that string is `".../mogwai cache clean --stale"`.
-The only real producer in the workspace (`mogwai-lab/src/arrival_screen.rs:687`)
-computes its token with
-`full_command = "arrival-screen:kernel-version=...:start=...:length=...:warmup=..."`
-and `subcontract_hash = <measure hash>`, while `cache.rs` passes
-`subcontract::subcontract_hash()`.
-
-So the "CURRENT provenance token" the `--stale` path preserves is a token no
-cache entry has ever carried. `clean --stale` deletes EVERYTHING, identically to
-bare `clean`. `docs/cli.md` states it "removes only the ones that do not match
-the CURRENT provenance token - the same pruning a cache write already does
-automatically" - a durable doc asserting behaviour the code does not have. This
-is a contract the code claims and does not keep, and it destroys data (an
-hours-long screen's walk cache) on an invocation the operator reaches for
-precisely because it is supposed to be the safe one.
-
-Secondary in the same function: `fingerprint_hash` reads
-`analysis/fingerprint.json` CWD-relative with `.ok()...unwrap_or_default()`, so
-outside the repo root it silently becomes `""` - a third way the token diverges.
-Folding the WHOLE argv into a cache key was probably never right; the key should
-be the inputs, not the command line that asked for them.
-
-## 4. `mogwai fit` writes non-atomically and never re-attests the tree, contradicting its own module doc (high confidence)
-
-`crates/mogwai-cli/src/fit.rs:63-78`. The module doc says fit "carries the same
-contract `mogwai measure` carries: `binding.harness_tree_commit` must name
-exactly the code that ran". It does not. `measure` (`measure.rs:398`) and
-`arrival_control` (`arrival_control.rs:445`) both re-read `fresh_tree_state()`
-immediately before serializing and bail "the artifact is unbound" if HEAD moved
-or the tree went dirty. `fit` takes `require_clean_tree()` at entry, runs a
-multi-minute fit, and writes - binding a commit that may no longer be what is
-checked out.
-
-It also writes with a bare `std::fs::write` where every sibling uses
-`write_json_atomic`, so an interrupted or failing fit truncates the artifact in
-place rather than leaving the previous one intact. Given `DEFAULT_OUT` is under
-`target/` this is currently low-blast-radius, but `--out` is documented as
-pointing anywhere.
-
-## 5. Test artifacts are written into a gitignore-shadowed `crates/mogwai-cli/target/` (medium-high confidence, real, small)
-
-The unit tests in `arrival_control.rs` write to
-`"target/arrival-control-b5/{green,red,truncated}.log"` and
-`"target/arrival-control-empty-baseline/MNQ.csv"`, CWD-relative from the crate
-dir. Those files exist on disk right now at `crates/mogwai-cli/target/...`. They
-are invisible to `git status` because the root `.gitignore`'s bare `target`
-pattern matches ANY directory of that name at any depth, and `cargo clean` never
-touches them because cargo's target dir is at the workspace root. So this is an
-untracked, unswept, permanently-growing scratch area that looks like a build
-directory and is not one.
-
-`arrival_control::run_with` has the same problem in production:
-`let scratch = PathBuf::from("target/arrival-control")` (line 388) - same as the
-module's default input paths, all CWD-relative. Run from anywhere but the repo
-root and the command writes its multi-GB walk scratch wherever you happened to
-be standing. Use `CARGO_TARGET_TMPDIR` in tests (as `characterize_cli.rs`
-correctly does) and resolve the scratch root explicitly in production.
+- `test_paths::scratch_dir` REINTRODUCED THE SHARED-PATH SHAPE the arc had just
+  recorded a burn from - a FIXED `target/<name>` per name, opening with
+  `remove_dir_all`, in a gate profile that runs two sweeps CONCURRENTLY. It
+  returns a `mogwai_lab::storage::ScratchDir` now, under
+  `target/cli-unit-scratch/<name>/`, with the pid-plus-nanosecond leaf that
+  makes a second concurrent test under one name unrepresentable rather than
+  merely unlikely, and drop-cleanup so the directories stop persisting. All
+  four call sites bind the guard rather than taking `.path().to_path_buf()`,
+  which is the guard-scope defect in the tidiest-looking line.
+- `cache clean --stale --keep <TOKEN>` STILL DELETED EVERYTHING ON A TYPO.
+  `clean_stale` only COMPARES names, so `--keep bbb` for `bbbb` kept nothing
+  and cleared the lot - the exact data loss `--keep` exists to prevent, moved
+  from unconditional to one keystroke away. An unknown token now refuses
+  against `cache_entry_tokens` and names the candidates.
+  `an_unknown_token_refuses_rather_than_pruning_everything` asserts the two
+  seeded directories still exist BEFORE it reads the error, for the same reason
+  its sibling does.
+- THE ARRIVAL-CONTROL SCRATCH PROSE OVERSTATED THE HARM. The comment claimed
+  the CWD-relative scratch dropped "multi-GB walk scratch" wherever the
+  operator stood; `control_generated_pass` writes one small
+  `arrival-control-<seed>.toml` there and deletes it immediately, the walk
+  being in memory. The relocation is right, the magnitude was invented, and a
+  durable comment asserting a fact the code contradicts is the family this
+  pass is closing. Corrected in place.
+- `reference/architecture.md` still described `clean --stale` as a working
+  prune. It names `clean --stale --keep TOKEN`, the two refusals and
+  `stats --entries` now, and its SCRATCH sentence states the per-process leaf.
+- `fit`'s CWD-relative half was only half swept: `scratch_dir:
+  PathBuf::from("target/mogwai-fit/scratch")` is a `ScratchDir` under the cache
+  root now, like `arrival-control`'s, and `resolve` takes the directory rather
+  than naming one. `DEFAULT_OUT` was deliberately LEFT: an ARTIFACT defaulting
+  to the working directory is the storage policy's stated behaviour, and
+  `preflight` and both `synth` outputs carry the identical convention, so it is
+  a crate-wide question rather than a defect in `fit`. Filed in `notes/todo.md`.
 
 ## 6. `--type trace` under-counts children of the last parent when the window ends at `end` (medium confidence)
 

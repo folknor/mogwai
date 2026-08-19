@@ -26,6 +26,17 @@
 //! artifact it binds is serialized by `mogwai_lab::fit::driver` out of the
 //! commit `fit::run` hands it. A writer that delegates its serialization the
 //! same way is likewise the reviewer's to catch.
+//!
+//! AND THE SEAM IS NOT THE ONLY WAY THE CLAIM GOES FALSE. A writer that takes
+//! `require_clean_tree` at entry and then runs for minutes binds a commit that
+//! may no longer be checked out by the time the bytes land - no double
+//! required, just a `git checkout` in another shell.
+//! `every_tree_attested_writer_re_attests_before_its_write` holds that half:
+//! every entry-gated writer re-reads the tree immediately before its write and
+//! declares the artifact unbound when it moved. `fit` and
+//! `minute_range_envelope` were missing it, and `fit`'s own module doc claimed
+//! it carried "the same contract `mogwai measure` carries" while not carrying
+//! it.
 
 use anyhow::{Result, bail};
 
@@ -107,6 +118,71 @@ mod tests {
         assert!(
             writers.len() >= 4,
             "the roster collapsed to {writers:?}; the binding key was probably renamed"
+        );
+    }
+
+    /// THE OTHER HALF OF THE SAME CONTRACT, and it went missing in two writers
+    /// of six before anything looked. A tree-attested binding names the commit
+    /// a gate read at the TOP of a run that then takes minutes; the claim is
+    /// only true if the tree is read again immediately before the write and
+    /// the run refuses when it moved. `measure`, `arrival-control`,
+    /// `arrival-screen` and `arrival-envelope-diagnostic` did this; `fit` and
+    /// `minute-range-envelope` took the entry gate and wrote whatever it said,
+    /// while `fit`'s own module doc asserted it carried "the same contract
+    /// `mogwai measure` carries". A doc stating an attestation the code does
+    /// not perform is worse than no doc.
+    ///
+    /// THE ROSTER IS KEYED ON THE GUARD CALL, not on the binding key, and that
+    /// is deliberate: `fit.rs` does not contain `"harness_tree_commit"` at
+    /// all, because `mogwai_lab::fit::driver` serializes it out of the commit
+    /// `fit::run` hands over, so the roster above cannot see it and this one
+    /// can. The two together cover the set from both directions.
+    #[test]
+    fn every_tree_attested_writer_re_attests_before_its_write() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut writers = Vec::new();
+        let mut unattested = Vec::new();
+        for entry in std::fs::read_dir(&src).expect("the crate's src directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_name().expect("a file name").to_string_lossy();
+            if name == "attestation.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a source file");
+            if !text.contains("refuse_scripted_tree_attestation()") {
+                continue;
+            }
+            // THE DEFECT IS AN ENTRY GATE WHOSE VERDICT IS RESTATED AT THE
+            // WRITE, so a writer that takes no entry gate is a different
+            // shape and not one of these. `arrival_envelope_diagnostic` reads
+            // the tree ONCE, immediately before assembling, and records
+            // `clean_tree: <what it read>` rather than a constant `true` - a
+            // MEASUREMENT, which cannot go stale between a gate and a write
+            // because there is no gate. Requiring a refusal there would
+            // demand it invent a claim it deliberately does not make.
+            if !text.contains("require_clean_tree()") {
+                continue;
+            }
+            writers.push(name.to_string());
+            // The re-read, and the refusal that makes reading it mean
+            // something. A `fresh_tree_state` whose verdict is discarded is
+            // the same defect wearing the fix's clothes.
+            if !text.contains("fresh_tree_state()") || !text.contains("the artifact is unbound") {
+                unattested.push(name.to_string());
+            }
+        }
+        assert!(
+            unattested.is_empty(),
+            "these commands bind a tree-attested artifact from a gate taken at entry and never \
+             re-attest before the write, so the commit they name may not be what is checked out \
+             by the time the bytes land: {unattested:?}"
+        );
+        assert!(
+            writers.len() >= 4,
+            "the roster collapsed to {writers:?}; the guard or the entry gate was probably renamed"
         );
     }
 }

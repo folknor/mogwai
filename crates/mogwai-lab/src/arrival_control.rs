@@ -849,13 +849,13 @@ mod tests {
             window_length_ns: 86_400_000_000_000,
             warmup: "0s".into(),
         };
-        let walk = control_walk(
-            Path::new("target/arrival-control-test"),
-            &binding,
-            None,
-            301,
-        )
-        .unwrap();
+        // The workspace scratch, not a relative `target/`: a unit test's
+        // working directory is its crate, so the relative form wrote
+        // `crates/mogwai-lab/target/`, which the root .gitignore hides and
+        // `cargo clean` never reaches. HOLD THE GUARD - it is what removes the
+        // directory, on the panic path included.
+        let scratch = crate::storage::unit_test_scratch("arrival-control-walk");
+        let walk = control_walk(scratch.path(), &binding, None, 301).unwrap();
         let by_hour = hourly_mean_parents(&walk.ctx);
         // The coverage assertion, not just a nonzero total: a shortened window
         // that still catches ONE busy hour would satisfy `parents > 0` and

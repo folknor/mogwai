@@ -20,6 +20,8 @@ mod segments;
 mod select_windows;
 mod session_profile;
 mod synth;
+#[cfg(test)]
+mod test_paths;
 mod tick_composition;
 mod tick_composition_ratios;
 

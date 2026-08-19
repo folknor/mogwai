@@ -11,13 +11,14 @@
 //! name exactly the code that ran, AND the Python's walk cache keys on that
 //! commit, so a dirty tree refuses outright.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use clap::Args;
+use mogwai_lab::aggregate::artifact::write_json_atomic;
 use mogwai_lab::fit::driver::{FitConfig, run_fit};
-use mogwai_lab::ledger::require_clean_tree;
-use mogwai_lab::storage::artifact_path;
+use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree};
+use mogwai_lab::storage::{ScratchDir, artifact_path, cache_root};
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
 const DEFAULT_LEDGER: &str = "analysis/databento-jobs.json";
@@ -68,7 +69,18 @@ pub fn run(args: &FitArgs) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let cfg = resolve(args, &harness_commit, &harness_commit);
+    // THE SCRATCH CLASS, same resolution as `arrival-control`'s. This was
+    // `PathBuf::from("target/mogwai-fit/scratch")` - CWD-relative, so a fit
+    // started anywhere but the repository root created a directory named
+    // `target` under the operator's feet and left it there. What goes in it is
+    // one small scratch config per walk. `ScratchDir` puts it under the storage
+    // policy's cache root with a leaf unique to this process, and removes it on
+    // drop, including on the early returns between here and the write.
+    //
+    // BIND THE GUARD. `ScratchDir::new(..)?.path().to_path_buf()` compiles and
+    // deletes the directory before the first walk.
+    let scratch = ScratchDir::new(&cache_root(None))?;
+    let cfg = resolve(args, &harness_commit, &harness_commit, scratch.path());
     let artifact = run_fit(&cfg).map_err(|e| anyhow!("the fit refused: {e}"))?;
     // The fit driver serialized `binding.harness_tree_commit` out of the
     // commit resolved above, so this artifact is tree-attested exactly as the
@@ -76,8 +88,19 @@ pub fn run(args: &FitArgs) -> anyhow::Result<()> {
     // the serialization is in `mogwai-lab`. Refuse a scripted attestation
     // before the bytes reach disk.
     crate::attestation::refuse_scripted_tree_attestation()?;
-    let bytes = serde_json::to_vec_pretty(&artifact)?;
-    std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
+    // AND RE-ATTEST, the way `measure` and `arrival-control` do. The gate at
+    // the top of this function ran minutes ago; `binding.harness_tree_commit`
+    // claims to name exactly the code that ran, so a HEAD that moved or a tree
+    // that went dirty in between makes that claim false and the artifact
+    // unbound. Checking only at entry states the contract without keeping it.
+    let (head, clean) = fresh_tree_state().map_err(|e| anyhow!("{e}"))?;
+    if !clean || head != harness_commit {
+        bail!("the tree changed during the fit run; the artifact is unbound");
+    }
+    // Atomic, like every sibling writer: a fit is a multi-minute run and a
+    // bare `fs::write` truncates the previous artifact in place before it has
+    // the new bytes, so an interruption leaves neither.
+    write_json_atomic(&out, &artifact).with_context(|| format!("writing {}", out.display()))?;
 
     let verdicts: serde_json::Map<String, serde_json::Value> = artifact["verdicts"]
         .as_object()
@@ -100,7 +123,12 @@ pub fn run(args: &FitArgs) -> anyhow::Result<()> {
 /// The config resolution, split out so the parity gate can build one
 /// without going through clap or the clean-tree gate.
 #[must_use]
-pub fn resolve(args: &FitArgs, harness_commit: &str, default_cache_commit: &str) -> FitConfig {
+pub fn resolve(
+    args: &FitArgs,
+    harness_commit: &str,
+    default_cache_commit: &str,
+    scratch_dir: &Path,
+) -> FitConfig {
     let python_cache_dir = args.cache_dir.clone().or_else(|| {
         let repo_default = PathBuf::from(DEFAULT_PYTHON_CACHE_DIR);
         repo_default.is_dir().then_some(repo_default)
@@ -123,7 +151,7 @@ pub fn resolve(args: &FitArgs, harness_commit: &str, default_cache_commit: &str)
             .cache_commit
             .clone()
             .unwrap_or_else(|| default_cache_commit.to_string()),
-        scratch_dir: PathBuf::from("target/mogwai-fit/scratch"),
+        scratch_dir: scratch_dir.to_path_buf(),
         harness_commit: harness_commit.to_string(),
         native_cache: None,
     }

@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail};
 use clap::Args;
 use mogwai_lab::{
     fit::observe::observe,
-    ledger::{require_clean_tree, verify_input},
+    ledger::{fresh_tree_state, require_clean_tree, verify_input},
     preflight::require_preflight,
     stream::{data_files, parse_stream},
     subcontract::{RESAMPLE_ENVELOPE_LEVEL, RESAMPLE_REPLICATES, RESAMPLE_SEED},
@@ -80,6 +80,15 @@ pub fn run(args: MinuteRangeEnvelopeArgs) -> anyhow::Result<Value> {
     // entirely on the `require_clean_tree` at the top of this function, so a
     // scripted reader would write it unchallenged.
     crate::attestation::refuse_scripted_tree_attestation()?;
+    // AND THE GATE AT THE TOP RAN BEFORE A FULL CORPUS PASS. `clean_tree:
+    // true` and `harness_tree_commit` claim the tree was this commit and clean
+    // when the artifact was produced; a HEAD that moved or a tree that went
+    // dirty during the pass makes both false. Re-attest, as `measure`,
+    // `arrival-control`, `arrival-screen` and `fit` do.
+    let (head, clean) = fresh_tree_state().map_err(|e| anyhow!("{e}"))?;
+    if !clean || head != commit {
+        bail!("the tree changed during the minute-range envelope run; the artifact is unbound");
+    }
     let artifact = json!({
         "binding": {
             "harness_tree_commit": commit,

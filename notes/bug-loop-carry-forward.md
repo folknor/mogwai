@@ -216,6 +216,33 @@ trusts yet.
     skip entry, and the sound-looking converse REFUSES THE LIVE CONFIG, where
     the `only` filter is the shorter of the two. What is owed is that every test
     the filter catches is excluded by some skip entry.
+  - IT CARRIES TWO MORE SOURCE GATES NOW, and both are scans of the same shape:
+    `no_test_binary_writes_a_committed_fixture` (nothing compiled into a test
+    binary may write under `tests/fixtures/`) and, from the `bugs-cli` round-1
+    fix pass, `no_test_declines_to_assert_on_a_missing_input` (no test may probe
+    for an absent input and return - a runtime skip is invisible to every count
+    libtest reports, and the two it was written for had ALSO been hiding a false
+    invariant apiece).
+  - EVERY SCAN IN THIS FILE MUST MATCH `#[tokio::test` AS WELL AS `#[test]`, and
+    it is worth stating because the file has already got this wrong INTERNALLY.
+    The missing-input gate shipped matching `#[test]` alone; `#[test]` is not a
+    substring of `#[tokio::test]`, so it read no async test in the workspace -
+    roughly sixty in `serving.rs`, which is where the socket suites live - and
+    reported zero offenders. The full gate profile was green throughout, which
+    is exactly what a scanner that sees nothing produces. Widening it yielded
+    ten hits, all in `serving.rs`, all FALSE POSITIVES: socket DRAIN loops
+    (`while let Ok(Some(Ok(msg)))`, or the let-chain `&& let Ok(..)`) where the
+    `return` is the success exit and the fall-through panics. They were closed
+    by making the probe recognize the LET-ELSE form structurally rather than by
+    exempting them, because a gate with false positives is as dead as one with
+    none. Both directions are pinned by fixtures in `mod parser`.
+  - ITS SELF-EXEMPTIONS MATCH `root.join(file!())`, not a bare file name. A
+    by-name exemption would silently cover any other `gate_skip_list.rs`
+    anywhere under `crates/`.
+  - `examples/` AND `benches/` ARE SCANNED BY THE MISSING-INPUT GATE ONLY, and
+    deliberately kept out of the shared `source_files`: an example target is the
+    SANCTIONED home for a fixture generator, so folding them in would make
+    `no_test_binary_writes_a_committed_fixture` refuse its own stated remedy.
   - It is the single excluded file in the `no-brokkr-in-rust-source` textlint
     rule, named explicitly - it reads the config with `std::fs` and spawns
     nothing, which is the distinction the rule is actually about. THAT
@@ -4952,3 +4979,52 @@ instead is the family it lives in, and that produced the second defect.
   orphaned, plus both socket suites by name. Completion hunt after the fix: 0
   failures in 60 rounds at 32 threads under 64 busy processes, against 2 in 40
   before.
+
+## The cli document, round 1 fix-and-commit: the gate that could not see async
+
+Sixth close pass running in which the round's OWN unreviewed half carried the
+serious defect - and this one is the sharpest instance of the arc's signature
+so far, because the blind thing was the CLASS GATE INSTALLED TO ABOLISH the
+class of things that read as gated and are not. It reported zero offenders
+under a fully green gate profile, and both facts were worthless: its span walk
+matched `#[test]` alone, `#[test]` is not a substring of `#[tokio::test]`, and
+the same file's older scanner had handled both spellings for months. A scanner
+that reads nothing passes trivially, so GREEN IS NOT EVIDENCE THAT A NEW SCAN
+IS LOOKING AT ANYTHING. What a new scanner owes is a count of what it READ, not
+only of what it found.
+
+- THE WIDENED GATE'S YIELD WAS TEN HITS AND ZERO DEFECTS, and the ten were the
+  interesting part. All in `crates/mogwai-cli/tests/serving.rs`, all socket
+  DRAIN loops - `while let Ok(Some(Ok(message)))`, or the let-chain
+  `&& let Ok(msg) = serde_json::from_str(..)` - where the `return` is the
+  SUCCESS exit and the loop falling through panics. Closed by teaching the
+  probe the LET-ELSE form structurally (an `else` reached before the
+  statement's `;`), which excludes `while let`, `if let` and let-chains by what
+  they are rather than by where they live. SUPPRESSING THEM BY EXEMPTION WAS
+  THE AVAILABLE WRONG ANSWER: a gate that convicts the wrong shape is as dead
+  as one that convicts nothing, and the exemption list would have started at
+  ten.
+- A SHARED TEST PATH CAME BACK ONE COMMIT AFTER THE LESSON LANDED.
+  `test_paths::scratch_dir` resolved a FIXED `target/<name>` and opened with
+  `remove_dir_all`, in a workspace whose full gate runs two sweeps
+  concurrently - the precise condition the 2026-08-19 `ETXTBSY` entry was
+  written from. It returns a `ScratchDir` guard with a pid-plus-nanosecond leaf
+  now. THE SHAPE TO CARRY: a helper installed to abolish a family is the next
+  place to look for that family, and "a path is per-process or it is a shared
+  resource" binds the helper as hard as what it replaced.
+- A REFUSAL THAT NARROWS A DATA LOSS IS NOT A REFUSAL THAT CLOSES IT.
+  `cache clean --stale` was made to require `--keep <TOKEN>`; `clean_stale`
+  only COMPARES names, so a mistyped token kept nothing and cleared the whole
+  cache - the same total loss, moved from unconditional to one keystroke away.
+  Closed by validating the token against `cache_entry_tokens` and naming the
+  candidates. Ask of every "now it refuses" fix what the ACCEPTED input does
+  when it is wrong.
+- A COMMENT ASSERTING A MAGNITUDE IS A DURABLE CLAIM. The arrival-control
+  scratch note said the CWD-relative path dropped "multi-GB walk scratch"; the
+  code writes one small TOML per walk and deletes it, the walk being in memory.
+  The relocation was right and its justification invented, which is the same
+  defect family the pass was closing, one level up.
+- Numbers: gate green at 1309 plus 466, 1832 pairs, 1775 run, 57 ignored, 0
+  orphaned. +3 on the workspace sweep over the pre-fix tree, which is exactly
+  the three tests added - two parser fixtures pinning both halves of the
+  widening, and the cache typo refusal.

@@ -513,10 +513,23 @@ gates.
 `cache` is the manual-case cover for the storage policy's CACHE class:
 `mogwai cache stats` reports entry/file/byte counts under the cache root
 (`$XDG_CACHE_HOME/mogwai/`, `~/.cache/mogwai/`, `MOGWAI_CACHE_DIR` or
-`--cache-dir`), `mogwai cache clean` removes every provenance directory, and
-`mogwai cache clean --stale` removes only the ones that do not match the
-CURRENT provenance token - the same pruning a cache write already does
-automatically, exposed for manual use.
+`--cache-dir`), and `mogwai cache clean` removes every provenance directory.
+
+`mogwai cache clean --stale --keep <TOKEN>` removes every provenance directory
+EXCEPT the named one - the same pruning a cache write already does
+automatically, exposed for manual use. The token is named rather than derived,
+and `mogwai cache stats --entries` prints the ones present. A cache entry's
+provenance token binds the command that PRODUCED it (its kernel version, window
+start, length and warmup, and its own sub-contract hash), so a `cache`
+invocation has nothing to compute one from; `--stale` without `--keep` refuses
+rather than guessing. It used to guess - it folded its own argv into a token,
+matched nothing, and deleted the whole cache on the invocation meant to be the
+safe one.
+
+A `--keep` naming a token that is not present refuses too, and prints the
+candidates. The prune only ever COMPARES names, so a mistyped token keeps
+nothing and clears everything - the same data loss the required `--keep` was
+introduced to prevent, one keystroke away instead of unconditional.
 
 ### `mogwai arrival-control`
 

@@ -720,24 +720,46 @@ mod tests {
     }
 
     /// Spec section 6: every evaluated cell appears, admissible or not, with
-    /// its per-condition verdicts. Run against the committed artifact once it
-    /// exists; before then the test returns, exactly as the landed control's
-    /// B8-absence pin does.
+    /// its per-condition verdicts, against the COMMITTED artifact - which is
+    /// in the tree, so a missing file is a failure rather than a reason to
+    /// skip.
+    ///
+    /// IT USED TO SKIP, AND THE SKIP WAS UNCONDITIONAL. `DEFAULT_OUT` is
+    /// relative to the REPOSITORY and a unit test's working directory is its
+    /// crate, so `path.exists()` asked about
+    /// `crates/mogwai-cli/analysis/mnq-arrival-screen.json`, which has never
+    /// existed: the early return ran on every invocation and not one assertion
+    /// below it ever executed. Same defect the control's B8-absence pin
+    /// carried, and the comment here cited that pin as its precedent.
+    ///
+    /// AND THE VERSION ASSERTION WAS FALSE ON ITS MERITS, which the dead path
+    /// was hiding. It held the committed artifact's recorded
+    /// `tape_protocol_version` against the LIVE constant, so every unrelated
+    /// bump - and `AGENTS.md` declares bumps free - would have turned this
+    /// red. A frozen artifact records the identity it was produced under; that
+    /// is the whole point of recording it. What is actually assertable is that
+    /// the field is there and is an identity, so that is what is asserted.
     #[test]
     fn the_screen_artifact_carries_every_evaluated_cell_and_its_verdict() {
-        let path = Path::new(DEFAULT_OUT);
-        if !path.exists() {
-            return;
-        }
+        let path = crate::test_paths::repo_root().join(DEFAULT_OUT);
         let artifact: Value =
-            serde_json::from_slice(&std::fs::read(path).expect("the screen artifact"))
-                .expect("valid JSON");
-        assert_eq!(
-            artifact["binding"]["tape_protocol_version"],
-            json!(mogwai_data::TAPE_PROTOCOL_VERSION),
-            "Stage A lands no generator change"
+            serde_json::from_slice(&std::fs::read(&path).unwrap_or_else(|e| {
+                panic!("the committed screen artifact {}: {e}", path.display())
+            }))
+            .expect("valid JSON");
+        assert!(
+            artifact["binding"]["tape_protocol_version"]
+                .as_u64()
+                .is_some_and(|v| v > 0),
+            "the screen artifact records no tape identity: {}",
+            artifact["binding"]
         );
         let cells = artifact["cells"].as_array().expect("cells");
+        // A LOOP OVER NOTHING SATISFIES EVERY ASSERTION INSIDE IT. The per-cell
+        // block below is the bulk of this test, and an empty `cells` array
+        // would walk it in zero iterations and report green - the same vacuity
+        // the early return above used to provide, relocated inward.
+        assert!(!cells.is_empty(), "the screen artifact evaluated no cells");
         let mut coarse: BTreeMap<String, usize> = BTreeMap::new();
         for cell in cells {
             for key in [

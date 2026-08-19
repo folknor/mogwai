@@ -74,6 +74,39 @@ impl ProvenanceToken {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// A token an OPERATOR named, as printed by `mogwai cache stats
+    /// --entries`. It is not computed from inputs and is not validated
+    /// against any: it is a directory name to keep, and the only caller is
+    /// `cache clean --stale --keep`. A token this process could compute for
+    /// itself must go through [`Self::compute`] instead - the whole reason
+    /// this exists is that `cache` has no producer's inputs to compute one
+    /// from, and synthesizing one anyway is what made `clean --stale` delete
+    /// the entire cache.
+    #[must_use]
+    pub fn named(token: &str) -> Self {
+        Self(token.to_string())
+    }
+}
+
+/// The provenance directory names under the cache root, sorted - the
+/// candidates for `cache clean --stale --keep`.
+pub fn cache_entry_tokens(root: &Path) -> io::Result<Vec<String>> {
+    let entries_root = root.join("entries");
+    let read = match std::fs::read_dir(&entries_root) {
+        Ok(r) => r,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut tokens = Vec::new();
+    for entry in read {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            tokens.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    tokens.sort();
+    Ok(tokens)
 }
 
 /// Where the user's own output files go: the `--out` path if the caller

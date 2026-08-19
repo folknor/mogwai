@@ -1101,9 +1101,16 @@ overridable by `MOGWAI_CACHE_DIR` or `--cache-dir`, keyed by a
 fingerprint hash, the full invoked command line, the measurement
 sub-contract hash and (when built from a tree) the git sha; entries under a
 stale token are unreachable by construction and pruned automatically on
-write, with `mogwai cache stats`/`clean`/`clean --stale` covering the manual
-case. SCRATCH (per-run temporaries) is a run-scoped directory under the
-cache root, deleted on clean process exit and safe to leave behind on a
-crash. Repo development pins `MOGWAI_CACHE_DIR` to the Python-era
+write, with `mogwai cache stats`, `mogwai cache stats --entries`,
+`mogwai cache clean` and `mogwai cache clean --stale --keep TOKEN` covering
+the manual case. `--keep` IS REQUIRED with `--stale`, and the token must name
+a directory that is actually present: a cache entry's provenance token binds
+the command that PRODUCED it, which a `cache` invocation cannot derive, and a
+token matching nothing keeps nothing - so both the missing and the mistyped
+token refuse rather than pruning the lot. `stats --entries` prints the
+candidates. SCRATCH (per-run temporaries) is a run-scoped directory under the
+cache root with a leaf unique to the process, removed when its guard drops -
+so two concurrent runs, or the two sweeps a full gate runs at once, cannot
+share one. Repo development pins `MOGWAI_CACHE_DIR` to the Python-era
 `analysis/out` layout so the phase 1-3b parity gates read the caches those
 scripts already produced; that pin is not the installed default.

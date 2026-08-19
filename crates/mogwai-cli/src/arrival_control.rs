@@ -28,6 +28,7 @@ use mogwai_lab::arrival_control::{
 };
 use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree, sha256_bytes, sha256_file};
 use mogwai_lab::sampler::ResourceSampler;
+use mogwai_lab::storage::{ScratchDir, cache_root};
 use serde_json::{Value, json};
 
 const DEFAULT_MEASURE: &str = "analysis/mnq-measure-12a.json";
@@ -438,11 +439,28 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
     // moves both together rather than leaving a hardcoded 21 to contradict it.
     let unexposed: Vec<i64> = (0..24_i64).filter(|h| !hours.contains(h)).collect();
     let observed = hourly_mean_parents(&obs);
-    let scratch = PathBuf::from("target/arrival-control");
+    // THE SCRATCH CLASS, RESOLVED AS ONE. This was `PathBuf::from(
+    // "target/arrival-control")` - CWD-relative, so a run started anywhere but
+    // the repository root created a directory named `target` wherever the
+    // operator happened to be standing. What lands in it is one small
+    // `arrival-control-<seed>.toml` per walk, written and deleted immediately
+    // (the walk itself is in memory), so the cost was the stray build-shaped
+    // directory rather than bulk - stated exactly, because a comment claiming a
+    // magnitude the code contradicts is the same defect family this pass is
+    // closing. `ScratchDir` is the storage policy's own answer: it lives
+    // under the cache root (`MOGWAI_CACHE_DIR` / XDG / `~/.cache/mogwai`), its
+    // leaf is unique per process, and it is removed on drop - including the
+    // early returns between here and the write.
+    //
+    // THE BINDING IS THE GUARD. `let scratch = ScratchDir::new(..)?.path()
+    // .to_path_buf()` compiles and deletes the directory before the first
+    // walk - the guard-scope family, in the one line that looks tidiest.
+    let scratch_dir = ScratchDir::new(&cache_root(None))?;
+    let scratch = scratch_dir.path();
     let fit_started = Instant::now();
     let mut fit_walks = Vec::new();
     for seed in CONTROL_FIT_SEEDS {
-        fit_walks.push(control_walk(&scratch, &binding, None, seed)?);
+        fit_walks.push(control_walk(scratch, &binding, None, seed)?);
     }
     let fit_s = fit_started.elapsed().as_secs_f64();
     // Once per seed, not once per (seed, hour): `hourly_mean_parents` scans
@@ -472,7 +490,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
     let test_started = Instant::now();
     let mut tests = Vec::new();
     for seed in CONTROL_TEST_SEEDS {
-        tests.push(control_walk(&scratch, &binding, Some(&new), seed)?);
+        tests.push(control_walk(scratch, &binding, Some(&new), seed)?);
     }
     let test_s = test_started.elapsed().as_secs_f64();
     if let Some(hook) = &seams.mid_run {
@@ -640,8 +658,13 @@ mod tests {
     /// thing: it is not evidence at all, so it REFUSES rather than failing.
     #[test]
     fn a_red_gate_reads_as_failed_and_a_summaryless_one_refuses() {
-        let dir = Path::new("target/arrival-control-b5");
-        std::fs::create_dir_all(dir).unwrap();
+        // The WORKSPACE target directory, not a relative `target/`: a unit
+        // test's working directory is its crate, so the relative form wrote
+        // `crates/mogwai-cli/target/`, which the root `.gitignore` hides and
+        // `cargo clean` never reaches. See `test_paths` - and BIND the guard,
+        // whose drop removes the leaf it made.
+        let scratch = crate::test_paths::scratch_dir("arrival-control-b5");
+        let dir = scratch.path();
         let green = dir.join("green.log");
         std::fs::write(
             &green,
@@ -672,9 +695,8 @@ mod tests {
         let missing = require_baseline(Path::new("target/no-such-b1-baseline/MNQ.csv"))
             .expect_err("a missing baseline must refuse");
         assert!(missing.to_string().contains("B1 refused"));
-        let empty_dir = Path::new("target/arrival-control-empty-baseline");
-        std::fs::create_dir_all(empty_dir).unwrap();
-        let empty = empty_dir.join("MNQ.csv");
+        let empty_dir = crate::test_paths::scratch_dir("arrival-control-empty-baseline");
+        let empty = empty_dir.path().join("MNQ.csv");
         std::fs::write(&empty, b"").unwrap();
         let err = require_baseline(&empty).expect_err("a zero-length baseline must refuse");
         assert!(err.to_string().contains("empty or not a file"));

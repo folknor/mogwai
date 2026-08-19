@@ -21,3 +21,5 @@ pub mod ordered_counts;
 pub mod slow_geometry;
 pub mod stage_m;
 pub mod stage_m_tier2;
+#[cfg(test)]
+mod test_paths;
