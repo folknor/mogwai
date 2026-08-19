@@ -3480,6 +3480,99 @@ three tests this round added and nothing was reclassified.
   not written. A test that constructs its subject cannot be bite-checked through
   the production call sites - say what it pins and say what stays unpinned.
 
+## The protocol document, round 4: finding L, refused - and the gap it named
+
+Ledger: 1245 + 451, 1753 pairs, 1696 run, 57 ignored, 0 orphaned. Round 3 ended
+at 1244 + 451 / 1752 / 1695, so the delta is exactly the one test this round
+added.
+
+- `Symbol` STAYS `Arc<str>`. THE TWENTIETH OVERTURNED ARGUMENT OF THE ARC, and
+  the first refused for MAGNITUDE rather than for a false mechanism - the
+  mechanism was true and the hunter UNDERSTATED it. Deserializing `Arc<str>`
+  costs TWO allocations per frame, not the one reported: serde takes a `String`
+  and copies it into a fresh `Arc`. An inline 32-byte `Copy` symbol removes both.
+  - MEASURED, `crates/mogwai-protocol/examples/symbol_decode_probe.rs`, 2 M
+    iterations per arm, release, run three times: landed `from_json_str`
+    239/220/219 ns at 2 allocs; the payload with today's `Arc<str>` 110/115/109 ns
+    at 2 allocs; the same payload with an inline symbol 103/111/103 ns at 0
+    allocs. So the edit buys 4 to 7 ns and 2 allocations per frame.
+  - THE FIRST TABLE SAID 19 ns AND THE PROBE WAS BIASED TWO WAYS AT ONCE, both
+    found by cold review, and this is the part to carry rather than the number.
+    A PROBE'S ARMS MUST DIFFER IN EXACTLY ONE WAY, and an arm's cost is only
+    measured if something OBSERVES the thing that costs. The inline arm
+    black-boxed `symbol.as_str().len()` - a read of the `len: u8` field, with
+    nothing observing `bytes`, so LLVM could elide the 32-byte `copy_from_slice`
+    that is the entire representation cost. And the inline arm alone ran
+    `validate_wire_symbol`, the opposite bias, undisclosed. Both arms now
+    black-box the whole tuple and neither validates; the omitted alphabet check
+    is a cost the proposal would carry, so the figure is an UPPER BOUND on the
+    saving. Neither bias changed the verdict, which is exactly why they survived
+    a round: A BIASED MEASUREMENT UNDER A CORRECT CONCLUSION IS STILL A DURABLE
+    NUMBER SOMEONE WILL QUOTE.
+  - WHAT REFUSES IT IS THE ARM NOBODY ASKED FOR, and this is the transferable
+    part: the probe also measures WHAT RUNS RIGHT AFTER THE DECODE.
+    `mogwai_adapter::convert::trade_id` `format!`s all five trade fields and
+    costs 154/155 ns and FIVE allocations, on its own, per trade - before the
+    nautilus event construction, `handler().await`, the tungstenite framing and
+    the `Message::Text` `String` the frame already arrived in. A 19 ns saving
+    inside a 217 ns decode whose immediate consumer spends 155 ns is not
+    observable at any rate this venue serves.
+    GENERAL FORM, and it is cheap enough to be a habit: WHEN A FINDING PROPOSES
+    OPTIMIZING ONE STAGE, MEASURE THE NEXT STAGE IN THE SAME PROBE. A per-frame
+    number alone cannot say whether the frame's budget is where the finding
+    thinks it is, and the neighbouring arm costs one function to write.
+  - THE ONLY DECODER OF `ServerMessage` IS THE ADAPTER'S READ LOOP.
+    `from_json_str` and `from_json_slice` have exactly one call site each, both
+    in `lifecycle.rs`. Nothing in `mogwai-server`, `mogwai-cli` or `mogwai-lab`
+    decodes one. Any future finding phrased as "the hot decode path" is talking
+    about those two lines and nothing else. READ THAT AS THE NARROW CLAIM IT IS:
+    symbols also reach the adapter through five UNTAGGED HTTP decodes that are
+    not `ServerMessage` and validate nothing - `client/shared.rs` (instruments),
+    two in `client/data.rs`, `client/exec.rs` and `clock.rs`. Deliberate, same
+    posture as the decode bullet below, but "the only decoder" and "the only
+    place a symbol arrives unvalidated" are different sentences and the round's
+    first draft ran them together.
+  - AND THE CORRECTNESS HALF - `MAX_SYMBOL_LEN` as a property of the type - IS
+    THE STRONGER ARGUMENT, AND ITS AUDIT WAS WRONG. The audit wrote "three kinds
+    of ingress and all three validate"; there are four, they check three
+    different things, and the client-inbound one WAS OPEN.
+    `validate_submit_order` checked `symbol.len() > MAX_SYMBOL_LEN` and nothing
+    else, so `""` and `"MNQ\n\u{7f}<script>"` were admitted at order entry - the
+    one ingress a hostile client controls - under a document asserting it closed.
+    It calls `validate_wire_symbol` now, which also covers
+    `ClientMessage::SubmitOrderGroup`'s up-to-`MAX_GROUP_ORDERS` symbols through
+    `validate_submit_group`. Nothing in the tree submits a symbol the alphabet
+    refuses, and the engine already refused an unknown instrument, so the change
+    tightens without narrowing any live caller. The other three: `http.rs` and
+    `source.rs` validate URL-carried symbols; `config.rs` validates an
+    instrument's `index_symbol` but NOT its own `symbol` (non-empty and length
+    only - filed in `notes/todo.md` as an owner-level policy question); and the
+    adapter's decoded symbol is unvalidated ON PURPOSE, with
+    `convert::instrument_id` using `NautilusSymbol::new_checked` and a doc
+    comment giving the reason - the conversion runs in an unsupervised spawned
+    task, so a hostile symbol must cost one frame rather than the task.
+    Validating at decode would MOVE that refusal, not close a hole. DO NOT
+    REOPEN L WITHOUT DISPLACING ONE OF THOSE.
+    THE SHAPE THAT GENERALISES, and it is the arc's own signature defect in a
+    new place: A REFUSAL'S AUDIT IS THE SENTENCE THAT TELLS THE NEXT READER NOT
+    TO LOOK, so an enumeration inside one is load-bearing in a way a passing
+    remark is not. This one enumerated from memory of the call sites rather than
+    from the validators' bodies, and the two disagreed at exactly one call.
+- THE PROBE IS KEPT AND DELIBERATELY UNREGISTERED, with the table and its
+  reading in `reference/performance.md`, a `NOT REGISTERED` note in
+  `brokkr.toml` beside `fill_walk_bench`'s, AND a bare `[[example]]` entry in
+  `mogwai-protocol/Cargo.toml` beside `tag_decode_probe`'s. The manifest entry
+  is not redundant with the `brokkr.toml` note: both probes wrap the global
+  allocator, so neither may ever gain `required-features`, and the person who
+  would add one is editing the manifest, not the tool config. The arc's rule that a refusal owes
+  the property that made it refusable applies to performance findings as
+  measurements rather than as tests: there is no assertion to write here, so
+  what is owed is a re-runnable number and the reason it decided. A registered
+  target would invite re-benching a settled decision.
+- NO `TAPE_PROTOCOL_VERSION` BUMP WAS OWED. Nothing in the tape-generation path
+  was touched and no artifact moved; the new file is an example target and the
+  production change is a wire-boundary validator.
+
 ## Loop conventions for this arc
 
 - Every stage runs as a foreground Opus subagent, including the fix pass and the

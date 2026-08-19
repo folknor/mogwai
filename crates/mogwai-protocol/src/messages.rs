@@ -1053,9 +1053,17 @@ pub enum Contingency {
 /// between them.
 pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
     validate_client_order_id(&order.client_order_id)?;
-    if order.symbol.len() > MAX_SYMBOL_LEN {
-        return Err("symbol exceeds MAX_SYMBOL_LEN");
-    }
+    // The SAME rule the URL-carried ingresses use, not a length check of its
+    // own. An order-entry symbol used to be bounded only by `MAX_SYMBOL_LEN`,
+    // so the empty string and any byte outside the wire alphabet - a newline, a
+    // control character, markup - reached the engine's instrument lookup and
+    // came back through the rejection path as a reason string. Nothing
+    // downstream depended on that latitude: every symbol the venue can actually
+    // serve comes from a config instrument or a preset, and the engine refuses
+    // an unknown one anyway. One alphabet across every client-inbound symbol is
+    // what makes "a symbol is 1 to 32 bytes of the URL-safe alphabet" a true
+    // sentence rather than one that holds at two ingresses out of three.
+    validate_wire_symbol(&order.symbol)?;
     if order
         .position_id
         .as_ref()
@@ -1829,6 +1837,72 @@ mod tests {
             assert!(
                 validate_wire_symbol(illegal).is_err(),
                 "{illegal:?} must be refused"
+            );
+        }
+    }
+
+    /// ORDER ENTRY JUDGES A SYMBOL BY THE SAME ALPHABET THE URL INGRESSES DO.
+    /// It did not until 2026-08-19: `validate_submit_order` carried a bare
+    /// `symbol.len() > MAX_SYMBOL_LEN` check, so the EMPTY string and any byte
+    /// outside the wire alphabet were admitted at the one client-inbound symbol
+    /// ingress this workspace has, while a round-4 audit recorded in
+    /// `notes/bugs-protocol.md` was asserting that all three ingresses
+    /// validated. The claim was wrong at exactly this call.
+    ///
+    /// BOTH INGRESS SHAPES ARE COVERED, because `SubmitOrderGroup` carries up
+    /// to `MAX_GROUP_ORDERS` symbols of its own and reaches this validator only
+    /// through `validate_submit_group`. A fix applied to the single-order path
+    /// alone would leave the group path open and this test would say so.
+    #[test]
+    fn an_order_entry_symbol_is_judged_by_the_wire_alphabet() {
+        let submit = |symbol: &str| SubmitOrder {
+            client_order_id: "O-1".to_string(),
+            symbol: Symbol::from(symbol),
+            position_id: None,
+            side: Side::Buy,
+            order_type: OrderType::Market,
+            quantity: Decimal::ONE,
+            price: None,
+            trigger_price: None,
+            trail_offset: None,
+            limit_offset: None,
+            time_in_force: TimeInForce::Gtc,
+            expire_time: None,
+            reduce_only: false,
+            post_only: false,
+            link: None,
+        };
+
+        for legal in ["MNQ", "BTCUSDT", "BTCUSDT.P", "BTCUSD-INV", "ES.c.0"] {
+            assert!(
+                validate_submit_order(&submit(legal)).is_ok(),
+                "{legal} names an instrument this venue can serve and must be admitted"
+            );
+        }
+        for illegal in [
+            "",
+            " ",
+            "MNQ ",
+            "MN Q",
+            "MNQ\n",
+            "MNQ\u{7f}",
+            "MNQ/1",
+            "<script>",
+            &"X".repeat(MAX_SYMBOL_LEN + 1),
+        ] {
+            let order = submit(illegal);
+            let refusal = validate_submit_order(&order)
+                .expect_err(&format!("{illegal:?} must be refused at order entry"));
+            // THE GROUP ASSERTION IS AN EQUALITY, not an `is_err`. A group of
+            // one unlinked order is refused for want of a link whatever its
+            // symbol says, so `is_err` would pass over a group path that never
+            // looked at the symbol at all. `validate_submit_group` runs the
+            // per-member validator BEFORE any linkage rule, so the symbol's
+            // refusal is the one that must come back.
+            assert_eq!(
+                validate_submit_group(std::slice::from_ref(&order)),
+                Err(refusal),
+                "{illegal:?} must be refused through the group carrier for the SAME reason"
             );
         }
     }

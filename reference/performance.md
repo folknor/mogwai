@@ -1390,3 +1390,92 @@ An earlier measurement of the same arms on a busier host read 244 / 121 / 245
 and is superseded here. The earlier plain-struct arm also carried an extra
 `trade_id` field that `TradeTick` does not have; the probe now asserts field
 parity between its arms.
+
+## 2026-08-19 what an inline `Symbol` would buy, and why it was not taken
+
+Host `bygg`, release, 2,000,000 iterations per arm, run three times.
+`crates/mogwai-protocol/examples/symbol_decode_probe.rs` decodes the same
+representative `Trade` frame the tag probe uses, counting allocator calls
+through its own wrapping global allocator. Run it with
+`brokkr run --release symbol_decode_probe -- 2000000`.
+
+| arm | ns / frame | allocations / frame |
+|---|---:|---:|
+| landed `ServerMessage::from_json_str` | 239, 220, 219 | 2 |
+| payload struct, `Symbol = Arc<str>` (today) | 110, 115, 109 | 2 |
+| payload struct, inline 32-byte `Copy` symbol | 103, 111, 103 | 0 |
+| `mogwai_adapter::convert::trade_id`, ONE trade | 162, 154, 153 | 5 |
+
+`Symbol` IS `Arc<str>`, and deserializing one costs TWO allocations, not the one
+a reader expects: serde takes a `String` off the wire and then copies it into a
+fresh `Arc`. An inline fixed-capacity symbol removes both, and about 4 to 7 ns.
+
+THE FIRST NUMBERS RECORDED HERE SAID 19 ns, AND THEY WERE BIASED. That table was
+taken from a probe whose arms differed in two uncontrolled ways at once, both
+found by the round's cold review, and it is worth knowing which because either
+one can recur in the next probe someone writes here:
+
+- THE INLINE ARM OBSERVED ONLY `symbol.as_str().len()`, a read of the `len: u8`
+  field, so nothing observed `bytes` and the 32-byte `copy_from_slice` that is
+  the inline representation's entire cost was free to be elided. Both arms now
+  `black_box` the whole decoded tuple, symbol value included.
+- THE INLINE ARM ALSO RAN `validate_wire_symbol` PER FRAME while the `Arc` arm
+  validated nothing - the opposite bias, undisclosed. Neither arm validates now,
+  so the delta is representation ONLY, and the alphabet check the proposal would
+  add is a cost NOT counted here. The measured saving is therefore an upper
+  bound on the real one.
+
+THE FOURTH ROW IS WHY THE CHANGE WAS REFUSED, and it is the row to reach for
+whenever a per-frame decode saving is proposed. The adapter's socket reader is
+the only decoder of `ServerMessage` that exists - `from_json_str` and
+`from_json_slice` have one call site each, both in `lifecycle.rs`'s read loop -
+and the first thing it does with a decoded trade is `convert::trade_id`, which
+`format!`s all five fields and costs ~155 ns and five allocations on its own,
+before the nautilus event construction, the `handler().await`, the tungstenite
+framing, and the `Message::Text` `String` the frame already arrived in. And five
+is itself a floor: the probe replicates `trade_id` down to its 56-bit mask but
+omits `TradeId::new_checked`, which interns the string. A ~5 ns saving inside a
+~220 ns decode, at the frame rates a paced venue serves, is not observable. THE
+ARC SHARING IS ALSO NOT WASTED, it is just not earned at DECODE: it pays inside
+the process afterwards, which is where `GeneratedSource` and `TickRuleAggressor`
+share one allocation (see the section above).
+
+THAT `ServerMessage` INVENTORY IS EXACTLY AS NARROW AS IT READS. Symbols also
+reach the adapter through five UNTAGGED HTTP decodes that are not
+`ServerMessage` at all and validate nothing - `client/shared.rs` (instruments),
+two in `client/data.rs` (trades and quotes), `client/exec.rs` and `clock.rs`.
+They are the same deliberate posture `convert::instrument_id` takes below, not
+an oversight, but a claim about "the decoders" has to name them.
+
+THE OTHER HALF OF THE SAME PROPOSAL was making `MAX_SYMBOL_LEN` a property of
+the type rather than a validator a caller must remember to call. Audited, it
+named one live gap, now closed in the same commit as this table:
+`validate_submit_order` checked ONLY `symbol.len() > MAX_SYMBOL_LEN`, so the
+empty string and any byte outside the wire alphabet were admitted at order
+entry - the one client-inbound symbol ingress - while this document asserted
+every ingress validated. It runs `validate_wire_symbol` now, on both the
+`SubmitOrder` and the `SubmitOrderGroup` carriers, pinned by
+`an_order_entry_symbol_is_judged_by_the_wire_alphabet`. What each ingress checks
+today:
+
+- ORDER ENTRY: the full wire alphabet, through `validate_submit_order` at
+  `http::boundary_error`, the one gate the websocket order carrier uses for
+  every command.
+- URL-CARRIED SYMBOLS: the full wire alphabet, in `http.rs` and `source.rs`.
+- CONFIG INSTRUMENTS: non-empty and `MAX_SYMBOL_LEN` only. `config.rs` calls
+  `validate_wire_symbol` on an instrument's `index_symbol` and NOT on its own
+  `symbol`, so a configured instrument may carry a symbol order entry would now
+  refuse. Filed as an owner-level item in `notes/todo.md` rather than tightened
+  here: it is operator-supplied rather than client-supplied, and it is a
+  `mogwai-server` decision.
+- THE ADAPTER'S DECODE: unvalidated DELIBERATELY, with `convert::instrument_id`
+  using `NautilusSymbol::new_checked` so a hostile symbol drops one frame rather
+  than an unsupervised task. Validating at decode would move that refusal, not
+  close a hole.
+
+So the type-level bound would have caught the order-entry gap for free, which is
+the honest point in its favour; it does not survive the cost of the edit, and a
+one-line call to the validator that already existed closed the gap instead.
+
+The probe is deliberately NOT a registered `brokkr mogwai` target: it settled one
+decision rather than opening a series.

@@ -266,23 +266,118 @@ from `JSON_ESCAPE_FACTOR * (MAX_CLIENT_ID_LEN + MAX_REASON_LEN + MAX_SYMBOL_LEN)
 + ADMISSION_ENVELOPE_BYTES`, but `AdmissionRejected` carries no symbol and the
 test's `analytic` correctly omits it. Stale term in the prose.
 
-## L. Structural and performance opportunity: `Symbol = Arc<str>` buys nothing on decode
+## L. `Symbol = Arc<str>` buys nothing on decode - REFUSED with measurement, 2026-08-19
 
-`ServerMessage::from_json_str` exists to skip serde's internally-tagged content
-buffer on the `Trade` and `Quote` hot path - a real optimization. But `Symbol`
-is `Arc<str>`, and serde's `rc` feature deserializes `Arc<str>` by ALLOCATING A
-FRESH `Arc` PER FRAME. So every decoded tick still does one heap allocation plus
-a refcount block for a string that is one of a handful of values, 32 ASCII bytes
-or fewer, validated by `validate_wire_symbol` against a fixed alphabet. The
-`Arc` sharing only pays off AFTER decode, inside one process.
+The MECHANISM IS TRUE AND UNDERSTATED, and the change is still refused. Both
+halves of the recommendation - the allocation and the type-level bound - were
+measured or audited rather than argued, and neither carries the change. The
+type-level half did, however, name a REAL GAP that this round closed by other
+means; see the correctness half below.
 
-Given the tag-probe work already done here, the obvious next move is an inline
-fixed-capacity symbol type (32 bytes, `Copy`, no allocation, `Deserialize`
-straight off the borrowed str) or a decode-side interner. That removes an
-allocation per tick on the one path the crate already treats as hot, and it
-makes `MAX_SYMBOL_LEN` a property of the type instead of a validator someone has
-to remember to call. Pre-1.0, changing `Symbol` is a mechanical workspace-wide
-edit.
+THE ALLOCATION HALF, measured by
+`crates/mogwai-protocol/examples/symbol_decode_probe.rs` (2,000,000 iterations,
+release, host `bygg`, run three times; the numbers and their reading are in
+`reference/performance.md`):
+
+| arm | ns / frame | allocations / frame |
+|---|---:|---:|
+| landed `ServerMessage::from_json_str` | 239, 220, 219 | 2 |
+| payload struct, `Symbol = Arc<str>` (today) | 110, 115, 109 | 2 |
+| payload struct, inline 32-byte `Copy` symbol | 103, 111, 103 | 0 |
+| `mogwai_adapter::convert::trade_id`, ONE trade | 162, 154, 153 | 5 |
+
+The hunter said ONE allocation; it is TWO - serde takes a `String` and then
+copies into a fresh `Arc`, and the inline type removes both. So the finding
+undersold its own mechanism, and the wall it buys is 4 to 7 ns per frame.
+
+AN EARLIER TABLE HERE SAID 19 ns, and the cold review found the probe biased in
+two directions at once: only the inline arm's `len` field was observed (so its
+32-byte copy could be elided) and only the inline arm validated. Both arms now
+`black_box` the whole decoded tuple and neither validates, so the delta is
+representation only - and the alphabet check the proposal would add is a cost
+NOT counted, making the figure an upper bound on the saving.
+
+WHAT REFUSES IT IS THE FOURTH ROW. The adapter's socket reader is the ONLY
+decoder of `ServerMessage` in existence - `from_json_str` and `from_json_slice`
+have exactly one call site each, both in `lifecycle.rs`'s read loop - and the
+first thing it does with a decoded trade is `convert::trade_id`, which
+`format!`s all five fields and costs ~155 ns and FIVE allocations, before
+`handler().await`, the nautilus event construction, the tungstenite framing and
+the `Message::Text` `String` the frame already arrived in. Five is a floor: the
+probe omits `TradeId::new_checked`, which interns the string. A ~5 ns saving
+inside a ~220 ns decode whose immediate consumer spends ~155 ns and 5
+allocations is not a per-tick win anyone can observe. At the paced rate the venue
+actually serves (measured elsewhere in this arc: MNQ prints ~89 content frames
+in a declared 2 s) the saving is well under a microsecond per second of trading.
+
+THE `ServerMessage` INVENTORY IS NARROW ON PURPOSE AND MUST BE READ THAT WAY.
+Symbols also reach the adapter through five UNTAGGED HTTP decodes that are not
+`ServerMessage` and validate nothing: `client/shared.rs` (instruments), two in
+`client/data.rs` (trades and quotes), `client/exec.rs` and `clock.rs`. Same
+deliberate posture as the decode bullet below, but a claim about "the decoders"
+has to name them.
+
+THE CORRECTNESS HALF - `MAX_SYMBOL_LEN` as a property of the type rather than a
+validator someone must remember to call - is the stronger argument, and the
+first audit of it OVERSTATED WHAT IT HAD CHECKED. It claimed three kinds of
+ingress, all validating. There are four kinds, they check three different
+things, and ONE OF THEM WAS A LIVE GAP, closed in this round's commit:
+
+- ORDER ENTRY. `SubmitOrder.symbol` is the client-inbound symbol
+  (`Subscribe` was retired with the subscription model, and
+  `client_and_server_messages_round_trip` pins the decoder's refusal of it),
+  and `ClientMessage::SubmitOrderGroup` carries up to `MAX_GROUP_ORDERS` more,
+  which reach the same validator through `validate_submit_group`.
+  `http::boundary_error` - the ONE gate the websocket order carrier uses for
+  every command, and the only caller - runs `validate_submit_order`.
+  THAT VALIDATOR CHECKED ONLY `symbol.len() > MAX_SYMBOL_LEN`, so the EMPTY
+  string and any byte outside the wire alphabet were admitted here while this
+  section said the ingress was closed. It runs `validate_wire_symbol` now,
+  pinned over both carriers by
+  `an_order_entry_symbol_is_judged_by_the_wire_alphabet`. The `sizing.rs` row
+  bounds only ever needed the length, so nothing downstream loosened; nothing
+  in this tree submits a symbol the alphabet refuses (audited: `MNQ`,
+  `BTCUSDT`, `BTCUSDT.P`, `BTCUSD-INV`, `XBTUSD`, `EURUSD`, `AAPL`), and an
+  unknown symbol was already refused by the engine's instrument lookup.
+- URL-CARRIED SYMBOLS. `http.rs` and `source.rs` each call
+  `validate_wire_symbol`.
+- CONFIG INSTRUMENTS. `config.rs` does NOT - it validates an instrument's
+  `index_symbol` with `validate_wire_symbol` and its own `symbol` with only a
+  non-empty check and `MAX_SYMBOL_LEN`. So a configured instrument may carry a
+  symbol order entry now refuses. Operator-supplied rather than client-supplied,
+  and a `mogwai-server` decision, so it is filed in `notes/todo.md` rather than
+  tightened from this document.
+- THE ADAPTER'S DECODE. Here a symbol genuinely is unvalidated, and the adapter
+  handles it DELIBERATELY AND FALLIBLY: `convert::instrument_id` uses
+  `NautilusSymbol::new_checked` precisely because "`mogwai_protocol::Symbol` is
+  an unvalidated `Arc<str>` straight off the wire", with a doc comment saying
+  so and giving the reason (the conversion runs in an unsupervised spawned
+  task, so a hostile symbol must drop one frame rather than the task). A
+  validating `Deserialize` would move that refusal from the conversion to the
+  frame - a BEHAVIOUR CHANGE to the adapter's hostile-venue handling, not the
+  closing of a hole.
+
+So the type-level bound would have caught the order-entry gap for free, which is
+the honest point in its favour and the reason the finding is only PARTLY refused
+- the change is refused, the concern behind it was real. What closed the gap was
+a one-line call to the validator that already existed. What the type would have
+cost is a mechanical workspace-wide edit across the wire
+types, the engine, the server, the data crate and the adapter, plus a new
+hand-written `Deserialize`, `Display`, `Borrow<str>` and serialization surface
+for a type `Arc<str>` gives for free. That is the fourth structural
+recommendation this arc has refused on a measurement (after the shared-venue
+split, the `StubState` split and the per-case slack ceiling).
+
+NO `TAPE_PROTOCOL_VERSION` BUMP IS OWED: nothing in the tape-generation path was
+touched, and the probe is an example target.
+
+WHAT THE ROUND OWES AND PAID, per the arc's standing rule that a refused finding
+usually names a property nobody had written down: the probe is kept, and
+`reference/performance.md` carries the four-arm table with the reading. The next
+reader who notices the `Arc` finds the number instead of re-deriving the
+argument. It is deliberately NOT registered as a `brokkr mogwai` target - it
+settles one decision rather than opening a series - and `brokkr.toml` says so
+beside the other deliberate non-registration.
 
 ## M. Smell: the 50 ms sleep in the `NoRecord` path
 

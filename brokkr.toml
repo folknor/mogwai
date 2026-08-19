@@ -513,6 +513,15 @@ example = "tag_decode_probe"
 # live in an example target at all - so it would collide with the mode flag.
 # Run it with `brokkr run --release fill_walk_bench -- --bench`.
 
+# NOT REGISTERED: `symbol_decode_probe`, an example target in `mogwai-protocol`.
+# It answered one question - what an inline fixed-capacity `Symbol` would buy the
+# adapter's decode path against what the per-tick path spends right after it -
+# and the answer was a refusal, recorded in `reference/performance.md`. A
+# registered target invites re-benching a decision already made; a plain example
+# keeps the measurement reproducible without inviting that. Run it with
+# `brokkr run --release symbol_decode_probe -- 2000000`. It wraps the global
+# allocator, so the profiler modes would not apply to it either.
+
 # The delivered corpus, per host. This records WHICH delivery a row was measured
 # against so a cross-month comparison can tell two corpora apart. It does NOT
 # replace the run's own verification: `measure` refuses a corpus whose SHA-256

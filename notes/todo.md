@@ -278,6 +278,24 @@ group by any other route has no API for it, and none is owed until one is wanted
   but it owes its own thinking about the band draw and about what a
   market-to-limit's `fill_trigger_px` should be.
 
+- A CONFIGURED INSTRUMENT MAY CARRY A SYMBOL ORDER ENTRY NOW REFUSES. Filed
+  2026-08-19 by the `bugs-protocol` round-4 fix-and-commit pass, which closed the
+  order-entry half and stopped there. `validate_submit_order` runs
+  `validate_wire_symbol` as of that commit, so a client-inbound symbol is 1 to 32
+  bytes of the URL-safe alphabet; `mogwai-server`'s `config.rs` checks an
+  instrument's own `symbol` for non-empty and `MAX_SYMBOL_LEN` ONLY (it does run
+  `validate_wire_symbol` on `index_symbol`), so a config naming `MNQ!` loads, is
+  served, and cannot be ordered. Nothing in this tree does that - every shipped
+  preset and test config is inside the alphabet - so this is a latent
+  inconsistency rather than a live defect.
+  IT IS AN OWNER-LEVEL QUESTION BECAUSE THE ANSWER IS A POLICY: the alphabet
+  exists so a symbol can be concatenated into a URL without percent encoding, and
+  `AGENTS.md` says the instrument set is OPEN and the venue does not gate on it.
+  Tightening config to the same alphabet makes one sentence true everywhere and
+  narrows what an operator may list; leaving it means the venue can serve a tape
+  under a symbol no client can trade or fetch over HTTP. Whichever way it goes,
+  the two validators should stop being able to disagree silently.
+
 - NOTHING ON THE WIRE SAYS WHETHER A SUBMIT TOOK A MARKET READING, which forces
   one integration test to read the venue's LOG instead. Filed 2026-08-18 by the
   lifecycle-test fix pass.
