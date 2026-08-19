@@ -224,6 +224,18 @@ pub fn validate_session_id(session: &str) -> Result<(), &'static str> {
 /// happened, whereas a refused frame would not be.
 pub const MAX_REASON_LEN: usize = 512;
 
+/// The refusal a `post_only` order on the wrong type earns, at the wire gate
+/// and in the engine's own validator alike. ONE STRING, because the two gates
+/// carried two copies of it and a client cannot tell which of them spoke.
+///
+/// IT NAMES BOTH SETS - the legal types and then the refused ones - rather than
+/// stating a rule the client has to apply. The rule it used to state, "legal
+/// only on orders that rest as a limit", is FALSE for `MarketToLimit`, which
+/// rests its remainder as a limit and is refused anyway. The LEGAL half is what
+/// `mogwai-engine`'s admission-table test parses, up to the first " orders", so
+/// the second half may grow or change freely.
+pub const POST_ONLY_REFUSAL: &str = "post_only is legal only on Limit, StopLimit, LimitIfTouched and TrailingStopLimit orders; not on Market, StopMarket, TrailingStopMarket, MarketIfTouched or MarketToLimit";
+
 /// Maximum byte length of a currency code, an instrument base or an instrument
 /// quote as configured. Operator-supplied config strings reach the wire through
 /// `AccountState`'s balance rows and every position row, so
@@ -373,6 +385,25 @@ pub enum OrderType {
     /// is "take what is available at the touch and rest the remainder" - which
     /// is the behaviour a real market-to-limit gives and which an IOC market
     /// cannot, since IOC cancels its remainder instead of resting it.
+    ///
+    /// THAT ARGUMENT IS ABOUT WHY THE TYPE EXISTS, NOT A REFUSAL OF `Ioc` ON
+    /// IT, and the wire admits the combination deliberately. The precedence,
+    /// which the crate previously left unstated: THE TIME IN FORCE GOVERNS THE
+    /// REMAINDER. Where a remainder exists, `Fok` rejects the order before
+    /// acceptance, `Ioc` cancels the remainder, and `Gtc`/`Day`/`Gtd` keep it.
+    /// Pinned by `mogwai-engine`'s test
+    /// `a_market_to_limit_remainder_is_governed_by_its_time_in_force`.
+    ///
+    /// WHAT THE ENGINE ACTUALLY DOES WITH THIS TYPE TODAY IS BROKEN IN BOTH
+    /// HALVES, and neither half is a design choice this doc endorses. Its fill
+    /// takes the WHOLE quantity at the order's OWN limit price with no
+    /// reference to the tape, so a buy limited at 200 against a last print of
+    /// 100 fills at 200 - the opposite of taking what the touch offers - which
+    /// is also why no remainder arises on the clean path at all. Where an armed
+    /// divergence manufactures one, the kept remainder rests INERT rather than
+    /// as a limit, so it is scanned by nothing and can never fill or expire.
+    /// The two are one open engine defect with two symptoms, recorded here so a
+    /// reader does not mistake either for the intended model.
     MarketToLimit,
     /// A trailing stop that RESTS AS A LIMIT once it fires, rather than taking
     /// liquidity - `TrailingStopMarket` is to this what `StopMarket` is to
@@ -418,6 +449,23 @@ impl OrderType {
             self,
             Self::StopLimit | Self::LimitIfTouched | Self::TrailingStopLimit
         )
+    }
+
+    /// Whether `post_only` means anything on this type - THE ONE RULE, read by
+    /// the wire gate and by the engine's own validator, which used to spell it
+    /// twice and disagree about `TrailingStopLimit`.
+    ///
+    /// `post_only` says "reject rather than take liquidity", so it is legal
+    /// exactly where the order's whole purpose is to REST: a `Limit`, and the
+    /// three types that become a limit once their trigger fires. It is refused
+    /// on `MarketToLimit` even though that type does rest a remainder as a
+    /// limit, and the exclusion is deliberate rather than an oversight: its
+    /// FIRST act is to take what the touch offers, which is the thing
+    /// `post_only` forbids, so the two together ask for an order that must not
+    /// do the one thing the type exists to do.
+    #[must_use]
+    pub const fn may_be_post_only(self) -> bool {
+        matches!(self, Self::Limit) || self.rests_after_trigger()
     }
 
     /// Whether the trigger fires when the tape reaches it from BELOW for a buy
@@ -817,7 +865,12 @@ pub struct SubmitOrder {
     #[serde(default)]
     pub reduce_only: bool,
     /// An order that would take liquidity is rejected rather than filled.
-    /// Legal on Limit and StopLimit only.
+    ///
+    /// Legal on `Limit`, `StopLimit`, `LimitIfTouched` and
+    /// `TrailingStopLimit`. See [`OrderType::may_be_post_only`], which is the
+    /// rule both gates read. This doc said "Limit and StopLimit only" while the
+    /// code admitted four types, so take the predicate as the contract and this
+    /// sentence as its spelling.
     #[serde(default)]
     pub post_only: bool,
     /// The order list this order belongs to, and what its membership MEANS.
@@ -1084,15 +1137,28 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         {
             Err("trail_offset must be > 0")
         }
-        _ if order.post_only
-            && !(order.order_type == OrderType::Limit
-                || order.order_type.rests_after_trigger()) =>
-        {
-            Err("post_only is legal only on orders that rest as a limit")
-        }
+        // NAMES THE LEGAL SET rather than stating a rule. The message used to
+        // read "legal only on orders that rest as a limit", which is FALSE for
+        // `MarketToLimit` - a type that does rest its remainder as a limit and
+        // is refused here anyway, for the reason on `may_be_post_only`. A
+        // refusal whose stated reason does not hold for one of the orders it
+        // refuses is how the rule gets "corrected" wrongly later.
+        //
+        // IT SITS AHEAD OF THE CONDITIONAL-IOC ARM DELIBERATELY, and
+        // `Engine::validate_submit` checks the two in the SAME order. An order
+        // can break both rules at once - a post-only `StopMarket` marked
+        // `Ioc` - and if the two gates reached them in opposite orders they
+        // would name different reasons for one order, which is the exact
+        // defect the shared predicate exists to remove.
+        _ if order.post_only && !order.order_type.may_be_post_only() => Err(POST_ONLY_REFUSAL),
         // A conditional cannot be now-or-never: an order that must fill
         // immediately cannot also wait for a trigger. Day and Gtd CAN wait, so
         // they are admitted where Ioc and Fok are not.
+        //
+        // `MarketToLimit` IS NOT CONDITIONAL AND IS DELIBERATELY NOT CAUGHT
+        // HERE. It waits for nothing - it acts at once and only its REMAINDER
+        // is in question - so the type and the time in force are not in
+        // conflict, and the precedence between them is stated on the variant.
         _ if order.order_type.is_conditional()
             && matches!(order.time_in_force, TimeInForce::Ioc | TimeInForce::Fok) =>
         {

@@ -1965,7 +1965,8 @@ fn venue_order_sequence(id: &str) -> u64 {
 mod tests {
     use super::*;
     use mogwai_protocol::{
-        Balance, InstrumentClass, OrderFilled, OrderType, Side, TimeInForce, WireAssetClass,
+        Balance, InstrumentClass, OrderFilled, OrderType, POST_ONLY_REFUSAL, Side, TimeInForce,
+        WireAssetClass,
     };
     use rust_decimal::prelude::FromPrimitive;
 
@@ -2330,7 +2331,7 @@ mod tests {
                 |o| {
                     o.post_only = true;
                 },
-                "post_only is legal only on orders that rest as a limit",
+                POST_ONLY_REFUSAL,
             ),
         ];
         for (name, shape, reason) in cases {
@@ -2340,6 +2341,242 @@ mod tests {
             let out = e.process(ClientMessage::SubmitOrder(order), 10);
             assert_eq!(reject_reason(&out), reason, "{name}");
         }
+    }
+
+    /// ONE post-only admission rule, stated once and read by both gates.
+    ///
+    /// The wire gate and the engine gate used to carry SEPARATE spellings of
+    /// it - the wire `Limit || rests_after_trigger()`, the engine a hand-rolled
+    /// `Limit | StopLimit | LimitIfTouched` - and they disagreed on
+    /// `TrailingStopLimit`, which the wire admitted and the engine then rejected
+    /// after the client had already been told its order was on its way. The
+    /// order type that came apart is the one added LAST, which is what a
+    /// hand-rolled list does to the next type anyone adds.
+    ///
+    /// The table is exhaustive over `OrderType` deliberately: a new variant
+    /// fails to compile the match below rather than quietly inheriting a
+    /// verdict nobody chose.
+    #[test]
+    fn post_only_is_admitted_by_one_rule_at_the_wire_and_in_the_engine() {
+        use mogwai_protocol::validate_submit_order;
+        let types = [
+            OrderType::Market,
+            OrderType::Limit,
+            OrderType::StopMarket,
+            OrderType::StopLimit,
+            OrderType::TrailingStopMarket,
+            OrderType::TrailingStopLimit,
+            OrderType::MarketIfTouched,
+            OrderType::LimitIfTouched,
+            OrderType::MarketToLimit,
+        ];
+        // THE MESSAGE NAMES THE SET, and this is checked rather than assumed:
+        // both gates return the same constant, so an equality against it is
+        // vacuous by construction. What is not vacuous is that the text's LEGAL
+        // LIST holds every legal type and no illegal one. The message it
+        // replaced - "legal only on orders that rest as a limit" - names none of
+        // them and is false for `MarketToLimit`, which rests its remainder as a
+        // limit and is refused anyway.
+        //
+        // THE LIST IS PARSED, NOT SEARCHED FOR SUBSTRINGS, and the difference is
+        // the whole point of this block. A `contains` check asks only whether a
+        // name appears ANYWHERE in the message, so a strictly better message
+        // that also spelled out the illegal types - "... and TrailingStopLimit
+        // orders; not on Market, StopMarket, ..." - would fail it, reporting
+        // illegal types as named legal. A GUARD THAT REFUSES AN IMPROVEMENT TO
+        // THE ARTIFACT IT GUARDS GETS DELETED RATHER THAN UNDERSTOOD. Parsing
+        // the segment between "legal only on" and the first " orders" reads the
+        // list by POSITION, so any suffix the message grows is ignored, and
+        // exact name comparison removes the `StopLimit`-inside-`TrailingStopLimit`
+        // hazard that the old anchored needles were working around.
+        let list = POST_ONLY_REFUSAL
+            .split_once("legal only on ")
+            .expect("the refusal introduces its legal list with 'legal only on'")
+            .1;
+        let list = list
+            .split_once(" orders")
+            .expect("the refusal's legal list ends at ' orders'")
+            .0;
+        let named: Vec<&str> = list
+            .split(&[',', ' '][..])
+            .map(str::trim)
+            .filter(|word| !word.is_empty() && *word != "and")
+            .collect();
+        for ty in types {
+            let legal = matches!(
+                ty,
+                OrderType::Limit
+                    | OrderType::StopLimit
+                    | OrderType::LimitIfTouched
+                    | OrderType::TrailingStopLimit
+            );
+            assert_eq!(
+                named.contains(&format!("{ty:?}").as_str()),
+                legal,
+                "the refusal's legal list must hold the legal types and no others: {ty:?} in {named:?}"
+            );
+        }
+        assert_eq!(
+            named.len(),
+            4,
+            "the legal list must not name anything that is not an order type: {named:?}"
+        );
+
+        for ty in types {
+            // The legal set, written out rather than derived from the predicate
+            // the production code uses: a test that reuses the rule cannot
+            // catch the rule being wrong.
+            let legal = match ty {
+                OrderType::Limit
+                | OrderType::StopLimit
+                | OrderType::LimitIfTouched
+                | OrderType::TrailingStopLimit => true,
+                OrderType::Market
+                | OrderType::StopMarket
+                | OrderType::TrailingStopMarket
+                | OrderType::MarketIfTouched
+                | OrderType::MarketToLimit => false,
+            };
+            let mut submit = match ty {
+                OrderType::TrailingStopLimit => trailing_stop_limit("PO", Side::Sell, 90, 10, 2),
+                OrderType::TrailingStopMarket => trailing_stop("PO", Side::Sell, 90, 10),
+                OrderType::StopMarket | OrderType::MarketIfTouched => {
+                    stop_order("PO", Side::Buy, ty, 110, None)
+                }
+                OrderType::StopLimit | OrderType::LimitIfTouched => {
+                    stop_order("PO", Side::Buy, ty, 110, Some(100))
+                }
+                OrderType::Market | OrderType::Limit | OrderType::MarketToLimit => {
+                    let mut submit = order("PO", 1);
+                    submit.order_type = ty;
+                    submit
+                }
+            };
+            submit.post_only = true;
+            let wire = validate_submit_order(&submit);
+            assert_eq!(
+                wire.is_ok(),
+                legal,
+                "the wire gate must admit post_only on exactly the resting-limit types: {ty:?}"
+            );
+            let mut engine = banded(14);
+            let out = engine.process(ClientMessage::SubmitOrder(submit), 10);
+            if legal {
+                assert!(
+                    matches!(out[0], ServerMessage::OrderAccepted { .. }),
+                    "an order the wire admitted must not be rejected by the engine: {ty:?}"
+                );
+            } else {
+                assert_eq!(
+                    wire.unwrap_err(),
+                    POST_ONLY_REFUSAL,
+                    "both gates state the legal set rather than a rule that is false for MarketToLimit: {ty:?}"
+                );
+                assert_eq!(reject_reason(&out), POST_ONLY_REFUSAL, "{ty:?}");
+                // The refusal touches nothing: no book entry, no closed row, no
+                // reserved client order id.
+                assert!(engine.open.is_empty(), "{ty:?} left an open order");
+                assert!(engine.closed.is_empty(), "{ty:?} left a closed row");
+                assert!(
+                    engine.seen_client_order_ids.is_empty(),
+                    "{ty:?} burned its client order id"
+                );
+            }
+        }
+
+        // AN ORDER THAT BREAKS BOTH RULES AT ONCE. Every case above carries the
+        // default `Gtc`, so none of them can see the second half of the defect:
+        // unifying the PREDICATE while the two gates reach it in opposite
+        // orders leaves one order earning two different refusals depending on
+        // which gate spoke, which is the same "a client cannot tell which of
+        // them spoke" the shared constant exists to remove. A post-only
+        // `StopMarket` marked `Ioc` is illegal twice over - post-only on a
+        // market-on-trigger type, and now-or-never on a conditional - and both
+        // gates must name post-only, because both check it first.
+        let mut both = stop_order("PO-BOTH", Side::Buy, OrderType::StopMarket, 110, None);
+        both.post_only = true;
+        both.time_in_force = TimeInForce::Ioc;
+        assert_eq!(
+            validate_submit_order(&both).unwrap_err(),
+            POST_ONLY_REFUSAL,
+            "the wire gate checks post-only before the conditional-IOC rule"
+        );
+        let mut engine = banded(14);
+        let out = engine.process(ClientMessage::SubmitOrder(both), 10);
+        assert_eq!(
+            reject_reason(&out),
+            POST_ONLY_REFUSAL,
+            "the engine must reach the same rule in the same order as the wire"
+        );
+    }
+
+    /// The precedence a `MarketToLimit` order's type and its time in force
+    /// would otherwise argue over: THE TIME IN FORCE GOVERNS THE REMAINDER.
+    ///
+    /// The type's own doc says it rests the remainder and an IOC's says it
+    /// cancels one, which reads as a contradiction the venue admits. Measured,
+    /// there is nothing to arbitrate on the clean path - though for a REASON
+    /// that is itself an open defect rather than the model: the submit path
+    /// fills every non-`Market` type at the order's own stated price with no
+    /// reference to the tape, so a `MarketToLimit` takes its whole quantity at
+    /// its limit and leaves nothing behind. A remainder exists only where an
+    /// armed `PartialFillNext` manufactures one, and there the time in force
+    /// decides it, which is why the combination is admitted rather than
+    /// refused.
+    #[test]
+    fn a_market_to_limit_remainder_is_governed_by_its_time_in_force() {
+        let armed = |id: &str, tif| {
+            let mut submit = order(id, 2);
+            submit.order_type = OrderType::MarketToLimit;
+            submit.time_in_force = tif;
+            let mut engine = banded(14);
+            engine.arm(Divergence::PartialFillNext {
+                client_order_id: id.into(),
+                fraction: Decimal::new(5, 1),
+            });
+            let out = engine.process_with_market(
+                ClientMessage::SubmitOrder(submit),
+                10,
+                Some(reading(0)),
+            );
+            (engine, out)
+        };
+
+        // FOK is now-or-never and the partial makes it never: rejected before
+        // acceptance, so nothing is booked at all.
+        let (engine, out) = armed("mtl-fok", TimeInForce::Fok);
+        assert_eq!(reject_reason(&out), "fill-or-kill could not fully fill");
+        assert!(engine.open.is_empty());
+        assert!(engine.closed.is_empty());
+
+        // IOC cancels its remainder. The type wanted to rest it; the time in
+        // force wins, and the client is told so with an explicit cancel.
+        let (engine, out) = armed("mtl-ioc", TimeInForce::Ioc);
+        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(
+            &out[1],
+            ServerMessage::OrderFilled(fill)
+                if fill.last_qty == Decimal::ONE && fill.leaves_qty == Decimal::ONE
+        ));
+        assert!(matches!(out[2], ServerMessage::OrderCanceled { .. }));
+        assert!(engine.open.is_empty(), "an IOC remainder does not rest");
+        assert_eq!(engine.closed["mtl-ioc"].status, WireOrderStatus::Canceled);
+
+        // GTC keeps the remainder on the book. WHAT IT DOES NOT DO IS REST IT AS
+        // A LIMIT: the record's `resting` is `Inert`, so the remainder is
+        // scanned by nothing and can never fill. That is the type's documented
+        // behaviour unimplemented, filed as an open engine defect rather than
+        // closed here - this assertion pins today's truth so a later fix has to
+        // be deliberate, and must be UPDATED rather than deleted when it lands.
+        let (engine, out) = armed("mtl-gtc", TimeInForce::Gtc);
+        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
+        assert_eq!(engine.open.len(), 1);
+        assert_eq!(engine.open[0].leaves_qty, Decimal::ONE);
+        assert!(matches!(engine.open[0].resting, Resting::Inert));
+        assert!(
+            engine.pending_scans().is_empty(),
+            "an inert remainder is offered to no sweep"
+        );
     }
 
     #[test]

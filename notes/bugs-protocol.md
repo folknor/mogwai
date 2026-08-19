@@ -6,9 +6,9 @@ Reconnaissance report, 2026-08-18. One Opus hunter, read-only, scope
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 Confidence labels are the hunter's own.
 
-Round 1 (2026-08-19) closed G and J; both sections are deleted rather than
-annotated, per the discrepancies-doc rule. What they cost and what binds later
-work is in `notes/bug-loop-carry-forward.md`.
+Round 1 (2026-08-19) closed G and J and round 2 closed H and I; those sections
+are deleted rather than annotated, per the discrepancies-doc rule. What they
+cost and what binds later work is in `notes/bug-loop-carry-forward.md`.
 
 The hunter read the whole crate (`launch.rs`, `messages.rs`, `control.rs`,
 `havoc.rs`, `sizing.rs`, `ready.rs`, `clock.rs`, `decimal.rs`, `lib.rs`) plus
@@ -165,30 +165,6 @@ venue binary \<owning thread\>: ... If the binary is elsewhere, point the
 launcher at it - whatever your launcher calls that setting, it ends up as
 LaunchSpec::binary". The operator is told to reconfigure a binary path in
 response to EAGAIN on thread creation. This deserves its own variant.
-
-## H. `validate_submit_order`: two prose contracts the code does not keep
-
-- The `post_only` field doc says "Legal on Limit and StopLimit only." The code
-  allows `Limit` plus `rests_after_trigger()` =
-  `StopLimit | LimitIfTouched | TrailingStopLimit`. The doc is two types short.
-- The refusal message reads "post_only is legal only on orders that rest as a
-  limit", but `MarketToLimit` - whose entire documented behaviour is "take what
-  is available at the touch and REST THE REMAINDER" as a limit - is refused by
-  it. The rule may well be right; the stated reason is false for that one type,
-  which is the kind of thing that gets "fixed" wrongly later by someone reading
-  the message.
-
-## I. `MarketToLimit` plus `Ioc`/`Fok` is accepted at the wire gate and is self-contradictory
-
-`MarketToLimit`'s doc argues it exists precisely because "an IOC market cannot
-[rest its remainder], since IOC cancels its remainder instead of resting it."
-Yet `validate_submit_order` only refuses `Ioc` and `Fok` on `is_conditional()`
-types, and `MarketToLimit` is not conditional. So the wire admits an order whose
-type says "rest the remainder" and whose TIF says "cancel the remainder", and
-the crate has no statement of which wins. Either refuse the combination here or
-state the precedence. Medium confidence this is worth a refusal rather than an
-engine-side rule - the argument the type's own doc makes is the argument for
-refusing it.
 
 ## K. `sizing.rs`: two bounds have derivations but no run derivation
 

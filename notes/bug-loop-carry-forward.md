@@ -2897,6 +2897,119 @@ worse than reported.
   reads as live to anyone who has not seen `bugs-tests-engine-protocol` r1's
   measurement. G and J are deleted outright.
 
+## The protocol document, round 2: the post-only rule and the market-to-limit precedence
+
+BOTH FINDINGS WERE ABOUT PROSE AND ONE OF THEM WAS HIDING A LIVE WIRE/ENGINE
+DISAGREEMENT. The brief's instruction to establish the engine's actual behaviour
+before deciding is what found it; neither the hunter nor the report knew it was
+there.
+
+- THE WIRE ADMITTED A POST-ONLY `TrailingStopLimit` AND THE ENGINE THEN REJECTED
+  IT. Measured over all nine order types: the wire gate spelled the rule as
+  `Limit || rests_after_trigger()` (four types) while `mogwai-engine`'s
+  `validate_submit` carried a hand-rolled `Limit | StopLimit | LimitIfTouched`
+  (three), so a client sending the fourth was told its order had passed the front
+  door and then that it had not. `on_trigger` HAS ALWAYS enforced post-only on
+  that type - the arm at `StopLimit | LimitIfTouched | TrailingStopLimit` does
+  it - so the hand-rolled list was the only thing refusing it, and the type that
+  came apart is the one added LAST. That is what a hand-rolled list does to the
+  next variant anyone adds.
+  - CLOSED WITH ONE PREDICATE, `OrderType::may_be_post_only`, read by both
+    gates, plus ONE MESSAGE, `mogwai_protocol::POST_ONLY_REFUSAL`, returned by
+    both. The engine now accepts what the wire admits.
+  - AND THE FIRST CUT UNIFIED THE PREDICATE WHILE LEAVING THE GATE ORDER SPLIT,
+    which reinstated the round's own defect one layer up. Cold review caught it:
+    the wire checked post-only BEFORE the conditional-IOC arm and the engine
+    checked it AFTER, so a post-only `StopMarket` marked `Ioc` - illegal twice
+    over - earned `POST_ONLY_REFUSAL` from one gate and the conditional-IOC
+    message from the other. Every case the new test built carried the default
+    `Gtc`, so it could not see it. CARRY THE SHAPE: deduplicating the PREDICATE
+    two gates share does nothing about the ORDER they reach it in, and an input
+    that breaks two rules at once is the only input that can tell. The engine's
+    check moved ahead of the conditional-IOC arm, both sites say the order is
+    part of the contract, and the test carries a both-rules case.
+  - AND THE MESSAGE NAMES THE LEGAL SET rather than stating a rule. The old
+    text - "post_only is legal only on orders that rest as a limit" - is FALSE
+    for `MarketToLimit`, which does rest its remainder as a limit and is refused
+    anyway. The refusal is right (its FIRST act is to take what the touch
+    offers, which is the thing post-only forbids) and the reason was wrong,
+    which is the shape that gets "corrected" wrongly later.
+  - THE EQUALITY ASSERTION AGAINST THE SHARED CONSTANT IS VACUOUS BY
+    CONSTRUCTION and the test says so in place. Once one string feeds production
+    and test, `assert_eq!(err, POST_ONLY_REFUSAL)` cannot fail. What is live is
+    a check on the TEXT: it must name every legal type and no illegal one. Carry
+    the shape - deduplicating a message into a constant DELETES the assertion
+    that the message says anything, and something has to replace it.
+    THE CHECK PARSES THE LEGAL LIST RATHER THAN SEARCHING THE MESSAGE, which
+    is the second thing cold review corrected. The first cut used anchored
+    `contains` needles (`" StopLimit,"` for the `TrailingStopLimit` substring
+    hazard) and three of the nine were still unanchored on the left - so a
+    STRICTLY BETTER message that also spelled out the illegal types ("... and
+    TrailingStopLimit orders; not on Market, StopMarket, ...") would have FAILED
+    the test, reporting illegal types as named legal. A GUARD THAT REFUSES AN
+    IMPROVEMENT TO THE ARTIFACT IT GUARDS GETS DELETED RATHER THAN UNDERSTOOD,
+    and that is a general rule for any test asserting on a message's text: the
+    property wanted is a POSITION in the string, not containment. It now splits
+    the segment between "legal only on" and the first " orders" and compares
+    exact names, so a suffix is ignored and the substring hazard is gone
+    outright rather than worked around. THE IMPROVEMENT WAS THEN ADOPTED: the
+    shipped message names the refused types too, which is worth having and which
+    the guard now tolerates by construction. Bite-checked both ways - the longer
+    message passes, dropping `TrailingStopLimit` from the legal half fails
+    naming it.
+  - `post_only_is_admitted_by_one_rule_at_the_wire_and_in_the_engine` is
+    EXHAUSTIVE OVER `OrderType` by a match with no wildcard, so a tenth variant
+    fails to compile rather than inheriting a verdict nobody chose. Its legal
+    set is written out longhand rather than derived from `may_be_post_only`: a
+    test that reuses the production predicate cannot catch the predicate being
+    wrong. Bite-checked by restoring the hand-rolled list (fails naming
+    `TrailingStopLimit`) and by restoring the old message text (fails naming
+    `Limit`).
+- FINDING I WAS REFUSED AS A REFUSAL AND CLOSED AS A PRECEDENCE, on the
+  measurement. `MarketToLimit` + `Ioc`/`Fok` is admitted at the wire, and it
+  should be: THE FILL MODEL HAS NO BOOK TO SWEEP, so a `MarketToLimit` takes its
+  whole quantity at its own stated limit price under every time in force and
+  leaves no remainder to argue about. The type's doc argues about why the type
+  EXISTS, not about what its time in force may be, and refusing the combination
+  would have broken something the engine handles.
+  - THE PRECEDENCE, now written on the variant, in `docs/oms-types.md` and
+    pinned: THE TIME IN FORCE GOVERNS THE REMAINDER. A remainder exists only
+    where an armed `PartialFillNext` manufactures one, and there `Fok` rejects
+    before acceptance, `Ioc` cancels the remainder, `Gtc`/`Day`/`Gtd` keep it.
+  - AND THE MEASUREMENT FOUND A REAL DEFECT THE FINDING HAD NOT SUSPECTED: the
+    KEPT remainder rests `Resting::Inert`, offered to no sweep, so it can never
+    fill or expire. `orders.rs` gates both the `Resting::Limit` assignment and
+    the partial-tranche redraw on `order_type == OrderType::Limit`. The type's
+    whole name is unimplemented. FILED IN `notes/todo.md` FOR `bugs-engine`
+    rather than fixed here - it is an engine behaviour change with its own
+    thinking owed about the band draw - and
+    `a_market_to_limit_remainder_is_governed_by_its_time_in_force` pins today's
+    truth INERT INCLUDED, saying in place that it must be updated rather than
+    deleted when the fix lands.
+  - AND THE ROUND BLESSED THE OTHER HALF OF THAT SAME DEFECT IN A MUST-BE-TRUE
+    DOCUMENT, which is A NEW SHAPE FOR THIS ARC and the one worth carrying.
+    `docs/oms-types.md` gained the sentence "the venue's fill model has no book
+    to sweep, so the order takes its whole quantity at its stated limit price
+    and leaves no remainder at all" - written as the MODEL, while `notes/todo.md`
+    filed the inert remainder as a bug in the same change. Cold review verified
+    it against `orders.rs` and it is a defect: the slipped market draw is taken
+    only for `OrderType::Market`, every other type fills at `risk_px`, and
+    `marketable` is consulted only for `Limit`, so a buy `MarketToLimit` limited
+    at 200 against a last print of 100 fills 100% AT 200 - the opposite of
+    taking what the touch offers. The two are ONE defect with two symptoms, the
+    fill price being why the remainder is unreachable, and they are filed
+    together now. THE RULE: when a round explains an absence ("there is no
+    remainder to argue about"), ask whether the explanation is the design or a
+    bug, BEFORE writing it into `docs/` or `reference/` - those folders certify
+    what they describe, and a defect written there stops being findable.
+    Describing the gap explicitly, as `docs/oms-types.md` now does, is the fix;
+    deleting the sentence would have left the client to discover it.
+- NO PEER BREAKS. The refusal string had exactly one in-tree reader, the engine's
+  own refusal matrix, updated in the same change; `mogwai-adapter` forwards
+  `post_only` for any order type and now gets an end-to-end post-only
+  `TrailingStopLimit` that used to die at the engine, which is a widening rather
+  than a break; `scripts/smoke.py` sends no post-only order.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -3165,6 +3278,12 @@ worse than reported.
     tool bug `AGENTS.md` describes. It did not recur on any later run in the
     same tree with the same tool. Suspect a concurrent workspace lock before
     the tree.
+  - protocol r2: 1241 + 451, 1749 pairs, 1692 run, 57 ignored, 0 orphaned, 14
+    skips, 1m03s. +2 IN THE WORKSPACE SWEEP AND NOTHING IN THE INSTRUMENTED
+    ONE, which is the whole of the round: two new `mogwai-engine` unit tests
+    (the post-only admission table and the market-to-limit remainder pin), and
+    `mogwai-engine` is workspace-sweep only. The existing refusal matrix was
+    rewritten in place to read the shared constant and moves no count.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

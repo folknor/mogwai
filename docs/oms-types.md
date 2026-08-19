@@ -56,6 +56,32 @@ limit as well. The difference shows when the tape gaps past both: the trailing
 stop market takes whatever the gap offers, while the trailing stop limit rests
 and waits rather than trading through your limit.
 
+`post_only` - reject rather than take liquidity - is legal on `Limit`,
+`StopLimit`, `LimitIfTouched` and `TrailingStopLimit`, and refused on every
+other type. Those four are the ones whose purpose is to REST. It is refused on
+`MarketToLimit` even though that type rests a remainder as a limit, because its
+FIRST act is to take what the touch offers, which is exactly what `post_only`
+forbids. The refusal names the legal set rather than stating a rule, so a client
+reading it does not have to infer which types it meant.
+
+A `MarketToLimit` may carry any time in force, and THE TIME IN FORCE GOVERNS
+THE REMAINDER: `Fok` rejects the order before acceptance, `Ioc` cancels the
+remainder, and `Gtc`, `Day` and `Gtd` keep it. The type's own doc argues it
+exists because an IOC market cannot rest a remainder; that argues about why the
+type exists, not about which time in force it may carry, so the combination is
+admitted rather than refused.
+
+MARKET-TO-LIMIT IS THE ONE TYPE THIS VENUE DOES NOT YET SERVE FAITHFULLY, and
+the gap is stated here rather than papered over, because a client testing
+against it will see the divergence. Two symptoms, one open engine defect: the
+fill takes the WHOLE quantity at the order's own stated limit price with no
+reference to the tape - a buy limited at 200 against a last print of 100 fills
+at 200, rather than taking what the touch offers - so no remainder arises on
+the clean path at all; and where an armed `PartialFillNext` manufactures one,
+the kept remainder rests inert, offered to no sweep, so it can never fill or
+expire. Neither is intended behaviour. Every other type behaves as described
+above.
+
 ORDER LISTS are served, so a genuine bracket needs no workaround. See
 [Order lists](order-lists.md) for the rules and what each one does.
 

@@ -2079,18 +2079,29 @@ impl Engine {
             _ => {}
         }
         let price = risk_px(order);
+        // THE SAME PREDICATE THE WIRE GATE READS, IN THE SAME POSITION. This
+        // was a hand-rolled `Limit | StopLimit | LimitIfTouched` and it had
+        // drifted: the wire admitted a post-only `TrailingStopLimit` and this
+        // then rejected it, so a client was told its order was on its way and
+        // then that it was not. `on_trigger` has always enforced post-only on
+        // that type, so the list was the only thing refusing it.
+        //
+        // THE ORDER OF THESE TWO CHECKS IS PART OF THE CONTRACT, not an
+        // accident of how they were written. An order can break both rules at
+        // once - a post-only `StopMarket` marked `Ioc` - and unifying the
+        // PREDICATE while leaving the two gates to reach it in opposite orders
+        // reinstates the same defect one layer up: two gates, one order, two
+        // different reasons, and a client that still cannot tell which of them
+        // spoke. Post-only is checked FIRST here because `validate_submit_order`
+        // checks it first. Pinned by
+        // `post_only_is_admitted_by_one_rule_at_the_wire_and_in_the_engine`.
+        if order.post_only && !order.order_type.may_be_post_only() {
+            return Err(mogwai_protocol::POST_ONLY_REFUSAL.into());
+        }
         if order.order_type.is_conditional()
             && matches!(order.time_in_force, TimeInForce::Ioc | TimeInForce::Fok)
         {
             return Err("conditional orders cannot be immediate-or-cancel: a now-or-never order cannot wait for a trigger".into());
-        }
-        if order.post_only
-            && !matches!(
-                order.order_type,
-                OrderType::Limit | OrderType::StopLimit | OrderType::LimitIfTouched
-            )
-        {
-            return Err("post_only is legal only on orders that rest as a limit".into());
         }
         if let Some(trigger) = order.trigger_price
             && !on_increment(trigger, instrument.price_increment)
