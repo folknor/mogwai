@@ -32,7 +32,9 @@ use mogwai_adapter::{
     MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig, MogwaiExecClientConfig,
     MogwaiExecutionClient,
 };
-use mogwai_protocol::{ClientHavoc, ConnHavoc, HavocLatency, HavocSpec, control::Divergence};
+use mogwai_protocol::{
+    ClientHavoc, ConnHavoc, EventKind, HavocLatency, HavocSpec, control::Divergence,
+};
 use nautilus_common::{
     cache::Cache,
     clients::{DataClient, ExecutionClient},
@@ -413,13 +415,26 @@ async fn havoc_latency_delays_inbound_event() {
         .lock()
         .expect("ws trades mutex")
         .push(trade_json(10, "100.00"));
-    let delay = Duration::from_millis(50);
+    let armed = HavocLatency {
+        base_nanos: 20_000_000,
+        data_nanos: 30_000_000,
+        ..HavocLatency::default()
+    };
+    // THE BOUND IS THE COMPOSED DELAY, DERIVED RATHER THAN WRITTEN DOWN. It read
+    // 50 ms - the ARMED half alone - which under-stated the contract by the
+    // always-on 30 ms baseline and left the bite margin at ~20 ms: zeroing the
+    // armed latency, the injection that proves this test alive, still delivered
+    // at ~31.7 ms and cleared 50. Stating the sum the client actually owes moves
+    // the discriminator to 50 ms for no wall cost at all, and deriving it from
+    // `BASELINE_LATENCY` means a change to either half cannot leave a stale
+    // literal here. It cannot flake low: the pump sleeps until a deadline
+    // anchored at arrival, and `ws_first_frame_at` is stamped strictly before
+    // the send, so the measured interval is >= the composed delay by
+    // construction.
+    let delay = mogwai_protocol::BASELINE_LATENCY.delay_for(EventKind::Data)
+        + armed.delay_for(EventKind::Data);
     let havoc = data_havoc(ClientHavoc {
-        latency: Some(HavocLatency {
-            base_nanos: 20_000_000,
-            data_nanos: 30_000_000,
-            ..HavocLatency::default()
-        }),
+        latency: Some(armed),
         ..ClientHavoc::default()
     });
 
@@ -1302,13 +1317,11 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
         ..HavocSpec::default()
     };
 
-    let start = Instant::now();
+    let state_probe = Arc::clone(&state);
     let (_client, mut rx) = submit_stop_exec_client(state, havoc).await;
 
     // Submitted is emitted locally by the client, never over the wire, so it
-    // pays no inbound latency. The clock starts before connect, which only ever
-    // ADDS setup time to the measurement - the lower bound stays honest and the
-    // upper bound is loose enough to absorb it.
+    // pays no inbound latency.
     assert!(matches!(
         next_exec_event(&mut rx, Duration::from_secs(6)).await,
         ExecutionEvent::Order(OrderEventAny::Submitted(_))
@@ -1321,24 +1334,48 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
         ExecutionEvent::Order(OrderEventAny::Triggered(_)) => {}
         other => panic!("expected the held OrderTriggered, got {other:?}"),
     }
-    let triggered_at = start.elapsed();
+    let triggered = Instant::now();
     match next_exec_event(&mut rx, Duration::from_secs(6)).await {
         ExecutionEvent::Order(OrderEventAny::Filled(_)) => {}
         other => panic!("expected the held fill behind the trigger, got {other:?}"),
     }
-    let filled_at = start.elapsed();
+    let filled = Instant::now();
+
+    // THE CLOCK STARTS AT THE STUB'S SEND. It used to start before `connect()`,
+    // on the reasoning that setup time only ever ADDS and so leaves the lower
+    // bound honest. That reasoning was wrong here, and measurably so: connect
+    // does not return until `await_account_registered` sees the seeded snapshot,
+    // which arrives through this very pump and therefore pays the armed 400 ms
+    // exec delay INSIDE connect. Setup measured 416.7-418.7 ms over 40 runs -
+    // past the 400 ms hold on its own, so the lower bound below passed in every
+    // run before a single execution frame was classified. `ws_first_exec_frame_at`
+    // is the instant the stub put the OrderAccepted on the wire; the interval
+    // from there is the filter's contribution and nothing else.
+    let sent = state_probe
+        .ws_first_exec_frame_at
+        .lock()
+        .expect("ws first exec frame instant mutex")
+        .expect("the stub recorded when it put the exec frames on the wire");
+    let triggered_at = triggered.duration_since(sent);
+    let filled_at = filled.duration_since(sent);
 
     assert!(
         triggered_at >= held,
-        "OrderTriggered arrived in {triggered_at:?}, before the {held:?} execution hold: \
-         it is not classified as execution traffic"
+        "OrderTriggered arrived {triggered_at:?} after the stub sent it, before the \
+         {held:?} execution hold: it is not classified as execution traffic"
     );
     assert!(
         filled_at >= held,
-        "the fill behind the trigger arrived in {filled_at:?}, before the {held:?} hold"
+        "the fill behind the trigger arrived {filled_at:?} after the stub sent it, \
+         before the {held:?} hold"
     );
+    // Anchored at the send, the honest arrival is the 30 ms baseline plus the
+    // 400 ms exec hold - measured at ~475 ms end to end before the re-anchor.
+    // The defect is the 4,030 ms DATA bucket, so two seconds sits ~1.5 s above
+    // the honest value and ~2 s below the defect, where the old three seconds
+    // was measuring from a clock that had already spent 418 ms.
     assert!(
-        triggered_at < Duration::from_secs(3) && filled_at < Duration::from_secs(3),
+        triggered_at < Duration::from_secs(2) && filled_at < Duration::from_secs(2),
         "trigger {triggered_at:?} / fill {filled_at:?} paid the four-second DATA bucket: \
          one of them is misfiled as market data"
     );

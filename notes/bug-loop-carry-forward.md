@@ -455,6 +455,120 @@ trusts yet.
   sleep was standing in for. GENERAL FORM: when replacing a fixed wait, ask what
   the DURATION was buying, not only what the wait was waiting for.
 
+## The adapter document, round 3: the wall-clock bounds
+
+THE ROUND'S ONE MOVE, and it settled every bullet: WIDEN THE SIGNAL, NOT THE
+ASSERTION. Four of the five bounds were not tight against the CLOCK at all -
+measured, they sat 20x to 60x clear of their ceilings on an idle box - they were
+tight against THE DEFECT THEY DISCRIMINATE, and three of them could not
+discriminate it. Retuning a constant in that situation moves the goalposts
+toward the defect. Separating the two outcomes further costs wall time and buys
+headroom on both sides at once. THE WHOLE ROUND COST ~200 ms: the serial sweep
+`brokkr test -p mogwai-adapter "" --debug` went 37.61 s to 37.80 s, with the two
+sweeps of the same commit 70 ms apart, so the round's spend is at the edge of
+what this measurement resolves.
+
+- `StubState` GREW `ws_first_exec_frame_at`, the exec leg's twin of
+  `ws_first_frame_at`, stamped before the first `ws_exec_frames` send. REACH FOR
+  IT rather than building a third anchor.
+  - THE REASON IT HAD TO EXIST IS A FACT ABOUT THE EXEC LEG THAT BITES ANY
+    LATENCY TEST ON IT: `connect()` does not return until
+    `await_account_registered` sees the seeded account snapshot, `AccountState`
+    is `EventKind::Exec` (same bucket as `OrderAccepted`/`OrderTriggered`), so an
+    armed exec delay IS PAID ONCE INSIDE CONNECT before an order is submitted.
+    `havoc_reaches_the_order_a_trigger_produces` measured setup at 416.7-418.7 ms
+    over 40 runs against its own `triggered_at >= 400ms` lower bound - the bound
+    was satisfied by setup alone in every run and could not fail. The report
+    called this "the margin is not what it reads as"; it was vacuous. Anchored at
+    the send it is live, bite-checked at 72.8 ms with the exec hold zeroed, and
+    its upper bound moved 3 s to 2 s (honest value ~473 ms, defect 4,073 ms,
+    bite-checked by misfiling `OrderTriggered` as `EventKind::Data`).
+- ROUND 1'S 50 ms BITE-MARGIN QUESTION IS SETTLED, AND NEITHER WAY IT WAS
+  FRAMED. `havoc_latency_delays_inbound_event` asserted `>= 50 ms`, which is the
+  ARMED half alone; the contract is `BASELINE_LATENCY + armed` = 80 ms. The
+  assertion was under-stated, not the injection under-sized, so widening the
+  armed delay (round 1's recommendation) would have bought margin by spending
+  wall time on a bound that was still wrong. It now DERIVES the sum -
+  `BASELINE_LATENCY.delay_for(EventKind::Data) + armed.delay_for(...)` - so
+  neither half can drift a literal out from under it. Bite margin 20 ms -> 50 ms
+  (zeroed armed delivers at 30.5 ms) at ZERO wall cost. It cannot flake low: the
+  pump sleeps to an arrival-anchored deadline and the stamp precedes the send.
+- `reconnect_backoff_throttles_...` HAS AN ESCALATING LADDER NOW (factor 2.0,
+  initial 100, max 1000), so the two legal outcomes are 300 ms and ~700 ms rather
+  than 200 and 300, and the window is `250..500`. Measured before: 202.9-204.6 ms
+  over 40 runs, i.e. the three dials, three WS handshakes and three task spawns
+  cost 0.3-4.5 ms, not the 100 ms the old window budgeted. Bite-checked BOTH
+  sides as text edits in `backoff_or_exhausted`: sleeping the final backoff gives
+  703 ms, deleting the sleep entirely gives 294 us.
+- `alert_timer_fires_with_sim_event_timestamp` HAD TWO BUDGETS AND NEITHER COULD
+  SEE THE PROPERTY. It armed 20 ms of sim at speed 10 - 2 ms of wall, measured
+  4.3-8.0 ms over 60 runs - and asserted `< 50 ms`, but a timer that IGNORED
+  `speed` and slept the sim interval raw lands at ~20 ms and passes. It arms
+  500 ms of sim now (50 ms of wall) under ONE ceiling of 250 ms, which the poll
+  loop itself carries; the trailing assertion is gone. Bite-checked by
+  substituting `speed = 1.0` in `sleep_until_sim`: fails at 252 ms.
+- `latency_pump_pipelines_a_burst_instead_of_serializing` is `< serial / 4`
+  (300 ms) rather than `< per_msg * 3` (90 ms). Measured 31.1-31.6 ms over 60
+  runs against a 1.2 s serial alternative, so the bound moved an order of
+  magnitude away from the pipelined side and stayed 900 ms clear of the defect.
+  - AND THE HOLE THE ROUND FLAGGED IN ITSELF DOES NOT EXIST. The fix pass
+    reported that a pump re-anchoring each deadline at the PREVIOUS RELEASE would
+    pass this test unchanged, because a burst enqueued at one instant makes the
+    two anchors coincide, and asked a later round for a staggered-arrival twin.
+    MEASURED, and the argument is wrong: the anchors coincide for the FIRST
+    message only, chaining releases gives `i * per_msg`, and the defect installed
+    as a text edit in `havoc_deadline` fails THIS test at 1.202 s against its
+    300 ms bound with the burst test run alone. The staggered twin was built
+    anyway before the measurement - N=20, 5 ms apart, honest 127-129 ms over ten
+    runs against the same 600 ms compounded defect - and DELETED as strictly
+    weaker: twenty windows of separation where the burst has forty, for 128 ms of
+    added wall. Per-message spacing and compounding deadlines are one failure
+    here, because the only way to space the output is to stop anchoring at
+    arrival. The reasoning is now in the test beside the bound so it is not
+    re-derived a third time.
+- REFUSED: shrinking the 400 ms / 4 s havoc buckets to halve
+  `havoc_reaches_the_order_a_trigger_produces` (measured 0.94 s, not the report's
+  1.5-2 s). Halving them saves ~440 ms and cuts the lower bound's discrimination
+  against the 30 ms baseline from 13x to 6.7x. The buckets ARE the signal; this
+  round spent wall to widen signals, and spending it back here for the largest
+  one would be incoherent.
+- `notes/bugs-tests-adapter.md`'s "Binary-level timing" section is now WRONG in
+  four places and carries an in-place warning saying so, because round 5 owns it
+  and rounds 2 and 3 would otherwise be editing under its feet. Stale: the test
+  count (19, not 17), the 100 ms pre-push sleep it costs out (gone since round 2,
+  replaced by `PushGate`), the trigger test's 1.5-2 s (measured 0.94 s), and the
+  2 s floor (the round-1 dead-socket test can spend 3 s). Round 5 re-measures
+  rather than editing the numbers in place.
+- A LEAD ON THE UNEXPLAINED ~37 s, not chased: the account-snapshot wait above
+  puts at least one full inbound-latency window inside EVERY exec client's
+  connect - the 30 ms baseline at minimum, the armed exec delay where one is
+  armed - and `adapter_smoke`, `reconciliation` and much of `havoc` build one per
+  test. Nobody has a per-test distribution yet; libtest's `--report-time` is
+  nightly-only, so getting one needs another route - a `Drop` timer on a
+  per-test guard, or wrapping each `#[tokio::test]` body, or simply running the
+  binaries under `--test-threads=1` and reading the tool's own per-test walls,
+  which `brokkr test -p mogwai-adapter <NAME>` already prints one test at a time.
+- THE ROUND'S OWN COLD REVIEW FOUND NO DEFECT IN ITS CODE, the first time in
+  twelve rounds, and independently re-derived all four mechanisms against
+  production source. It found three WORDING defects instead, all in the second
+  half nobody else reads, and all of the same family the round had just closed -
+  a comment that says something the code does not do:
+  - `ws_first_exec_frame_at`'s doc did not say it is SINGLE-SHOT ACROSS THE WHOLE
+    `StubState`, though `get_or_insert_with` makes it so and its data-leg twin's
+    comment does say it. A later test submitting two orders, or letting the exec
+    leg reconnect, would silently measure from the first submit. Now stated on
+    the field, because the entry above invites later rounds to reach for it.
+  - Both its doc and the stamp site said the stub "put the frame ON THE WIRE",
+    while the stamp is taken BEFORE `ws.send`. Conservative for a `>=` bound - an
+    earlier anchor only inflates the measured interval - but that makes the bound
+    very slightly WEAKER, which is the opposite of what the phrasing implies.
+  - `alert_timer_fires_with_sim_event_timestamp`'s new comment read "roughly 5x
+    of headroom" as though it were an improvement. It is not: RELATIVE headroom
+    SHRANK, 6-12x to ~4.6x, while ABSOLUTE slack grew 42 ms to 196 ms. The
+    improvement is that the bound can see the property at all. Both figures and
+    the trade are now written down, because the next reader tuning this will
+    otherwise read the ratio as the thing that got better.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform

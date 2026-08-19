@@ -784,10 +784,34 @@ mod tests {
             assert_eq!(ts_event, expected, "the pump preserves arrival order");
         }
         let elapsed = start.elapsed();
+        // THE BOUND IS STATED AGAINST THE DEFECT, NOT AGAINST THE MEASUREMENT.
+        // A pipelined drain is ONE window (measured 31.1-31.6 ms over 60 runs
+        // against a 30 ms `per_msg`); the serialization this exists to catch is
+        // forty of them, 1.2 s. Anything strictly between is not a shape the
+        // pump can take - the deadlines are either arrival-anchored or they
+        // compound - so a quarter of the serial cost separates the two as
+        // cleanly as three windows did while sitting an order of magnitude
+        // further from the pipelined side, which is the side a loaded host
+        // pushes on.
+        //
+        // AND IT CATCHES BOTH SHAPES, which was doubted and then measured. The
+        // worry was that a pump RE-ANCHORING each deadline at the previous
+        // RELEASE rather than at arrival would slip through, on the reasoning
+        // that a simultaneous burst makes the two anchors coincide. They
+        // coincide for the FIRST message only: chaining releases gives
+        // `i * per_msg`, so this burst finishes at 40 windows, and the defect
+        // installed as a text edit in `havoc_deadline` fails this assertion at
+        // 1.202 s against its 300 ms bound. A staggered-arrival twin was built
+        // to cover the supposed gap, measured 127-129 ms honest against the same
+        // 600 ms compounded defect, and deleted as strictly weaker than this
+        // one - twenty windows of separation where this has forty. Per-message
+        // SPACING and compounding deadlines are the same failure here because
+        // the only way to space the output is to stop anchoring at arrival.
+        let serial = per_msg * u32::try_from(N).unwrap();
         assert!(
-            elapsed < per_msg * 3,
-            "the burst drained in {elapsed:?}; a serial drain would need ~{:?}",
-            per_msg * u32::try_from(N).unwrap()
+            elapsed < serial / 4,
+            "the burst drained in {elapsed:?}; one pipelined window is ~{per_msg:?} \
+             and a serial drain would need ~{serial:?}"
         );
         drop(pump);
     }

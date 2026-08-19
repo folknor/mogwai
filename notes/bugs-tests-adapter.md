@@ -26,33 +26,12 @@ ordering is not observable from a test).
 
 ## Wall-clock upper bounds that will bite under parallelism
 
-- `lifecycle.rs::reconnect_backoff_throttles_accept_then_die_and_trips_attempt_cap`:
-  `(200ms..300ms).contains(&elapsed)` across three real TCP dials plus three WS
-  handshakes, dev profile. 100 ms of headroom for three round trips and three
-  task spawns. This is the tightest budget in the crate and the most likely first
-  flake. The INTENT is "three dials span two backoffs, not three" - assert that
-  structurally (count the backoffs, or assert `elapsed < 250ms` with a 100 ms
-  initial and drop the lower bound, which is already implied by `dials == 3`).
-- `clock.rs::alert_timer_fires_with_sim_event_timestamp`: the poll loop tolerates
-  200 ms, then the test asserts `started.elapsed() < 50ms`. Two contradictory
-  budgets; the 50 ms one is the real gate and it is a 2 ms-wall timer measured in
-  a dev build under 8-way load. Not `#[ignore]`d - this runs in every
-  `brokkr check`.
-- `client/shared.rs::latency_pump_pipelines_a_burst_instead_of_serializing`:
-  `elapsed < per_msg * 3` where `per_msg` is the default baseline (~30 ms) ->
-  ~90 ms for 40 messages through an unbounded channel. Probably fine, but it is a
-  wall budget in a non-ignored test; the property (pipelined, not serialized)
-  would be more honestly asserted as `elapsed < per_msg * (N/4)` or similar, far
-  from the boundary.
-- `havoc::havoc_reaches_the_order_a_trigger_produces`: upper bound `< 3s` on a
-  clock started *before* `connect()`, with a 400 ms hold and a 4 s data bucket as
-  the discriminator. The comment acknowledges the clock placement. It is the
-  widest gap of the timing tests, but it is also the slowest test in the slowest
-  binary (~1.5-2 s minimum) and therefore sets `havoc`'s floor.
-- `havoc::havoc_reaches_the_order...` lower bound `triggered_at >= 400ms` is
-  measured from before connect, so ~100 ms of stub sleep plus setup already
-  contributes; it would still fail with latency off, but the margin is not what
-  it reads as.
+CLOSED IN ROUND 3. All five bullets settled, four by widening the SIGNAL rather
+than the assertion and one by re-anchoring the clock; the fifth finding was
+confirmed WORSE than reported (the lower bound could not fail at all). See
+`notes/bug-loop-carry-forward.md` for the measured distributions, the new
+`StubState::ws_first_exec_frame_at` anchor later rounds should reach for, and
+the one thing this test set still cannot see.
 
 ## Harness defects
 
@@ -133,6 +112,13 @@ longest test. Distribution is lopsided:
 - `havoc` (17 tests) holds essentially all the slow ones: two 600 ms sleeps, a
   300 ms sleep, a 400 ms dark window, two 2 s `wait_for_at_least` calls, and the
   ~2 s trigger-latency test. Floor about 2 s, total about 6-8 s serial content.
+  ROUNDS 1-3 HAVE INVALIDATED THIS BULLET'S FIGURES, and round 5 owns correcting
+  it rather than trusting it: `havoc` holds 19 tests, not 17; the 100 ms pre-push
+  sleep the section's last paragraph costs out is GONE, replaced by
+  `common::PushGate`; and the trigger-latency test measures 0.94 s, not the
+  1.5-2 s written here. The dead-socket test round 1 added can spend up to 3 s in
+  `wait_for_at_least`, so the "floor about 2 s" is the more misleading of the two
+  numbers left. Re-measure before quoting any of it.
 - `reconciliation` (14 tests) is all fast request/response - floor about 300 ms.
 - `adapter_smoke` (10) and `data_client_transport` (12) are fast except the two
   `MAX_HISTORY_LIMIT` paging tests, which build large tapes and serialize them

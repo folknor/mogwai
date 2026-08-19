@@ -620,7 +620,26 @@ mod tests {
         });
         let mut clock = MogwaiClock::new(sim, Some(sender));
         clock.register_default_handler(TimeEventCallback::from(|_| {}));
-        let target = clock.timestamp_ns().as_u64() + 20_000_000;
+        // ONE BUDGET, AND IT DISCRIMINATES. This used to arm 20 ms of SIM time
+        // and hold two contradictory ceilings - a 200 ms one in the poll loop
+        // and a 50 ms one after it - neither of which could see the property.
+        // At speed 10 the fire is 2 ms of wall, so a timer that IGNORED `speed`
+        // and slept the sim interval raw would land at ~20 ms and pass the
+        // tighter of the two. Arming 500 ms of sim instead puts the honest fire
+        // at ~50 ms of wall (measured 4-8 ms at the old scale, so the poll's own
+        // 1 ms granularity and dev-build slop are the only additions) and the
+        // speed-blind failure at ~500 ms. The single ceiling below sits between
+        // them, and the loop's own assertion IS the bound - reaching the end of
+        // the loop is what proves it.
+        //
+        // THE IMPROVEMENT IS THAT THE BOUND CAN SEE THE PROPERTY AT ALL, not
+        // that it is roomier in relative terms: 250 ms over a ~54 ms honest fire
+        // is ~4.6x, where the old 50 ms over a 4-8 ms fire was 6-12x. What grew
+        // is the ABSOLUTE slack a scheduler stall has to eat through - 196 ms
+        // rather than 42 ms - and that is the trade worth making under an
+        // eight-way gate. The relative figure got smaller on purpose.
+        let target = clock.timestamp_ns().as_u64() + 500_000_000;
+        let speed_bound = Duration::from_millis(250);
         let started = Instant::now();
 
         clock
@@ -628,12 +647,17 @@ mod tests {
             .expect("timer arms");
 
         while events.lock().expect("events lock").is_empty() {
-            assert!(started.elapsed() < Duration::from_millis(200));
+            assert!(
+                started.elapsed() < speed_bound,
+                "the alert armed 500ms of SIM time at speed 10, so it owes ~50ms of \
+                 wall; {:?} without a fire says the timer slept the sim interval \
+                 raw instead of scaling it by `speed`",
+                started.elapsed()
+            );
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         let event = events.lock().expect("events lock")[0].clone();
         assert_eq!(event.ts_event, UnixNanos::from(target));
-        assert!(started.elapsed() < Duration::from_millis(50));
     }
 
     #[tokio::test]

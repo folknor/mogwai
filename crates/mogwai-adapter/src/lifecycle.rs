@@ -1045,10 +1045,21 @@ mod tests {
             }
         });
 
+        // THE LADDER ESCALATES ON PURPOSE, and that is what buys this test its
+        // margin. With a FLAT 100 ms backoff the two legal outcomes sit 100 ms
+        // apart - two sleeps (200 ms) versus the pointless third (300 ms) - so
+        // the upper bound had 100 ms to cover three loopback dials, three WS
+        // handshakes and three task spawns, measured here at 3-4.5 ms on an idle
+        // box but unbudgeted under an eight-way gate. Doubling instead makes the
+        // first two sleeps 100 + 200 = 300 ms and a third 400 ms more, so the
+        // window below is 250..500 against a defect that lands at ~700: ~200 ms
+        // of headroom on each side for 100 ms of extra wall. The separation is
+        // the SIGNAL, not the assertion - widening the window would only have
+        // moved the goalposts toward the defect.
         let conn = ConnHavoc {
             reconnect_delay_initial_ms: 100,
-            reconnect_delay_max_ms: 100,
-            reconnect_backoff_factor: 1.0,
+            reconnect_delay_max_ms: 1_000,
+            reconnect_backoff_factor: 2.0,
             reconnect_max_attempts: Some(3),
             ..Default::default()
         };
@@ -1064,11 +1075,12 @@ mod tests {
             "a three-attempt cap must dial exactly three unproven connections"
         );
         assert!(
-            (Duration::from_millis(200)..Duration::from_millis(300)).contains(&elapsed),
-            "three dials span exactly two 100ms backoffs (~200ms): the first two \
-             unproven drops sleep before redialing, but the third, exhausting \
-             cycle returns immediately instead of sleeping a pointless final \
-             backoff (F12) - a third sleep would push elapsed to ~300ms \
+            (Duration::from_millis(250)..Duration::from_millis(500)).contains(&elapsed),
+            "three dials span exactly two backoffs, 100ms then 200ms (~300ms): the \
+             first two unproven drops sleep before redialing, but the third, \
+             exhausting cycle returns immediately instead of sleeping a pointless \
+             final backoff (F12) - a third sleep would add 400ms and push elapsed \
+             to ~700ms, and skipping the sleeps altogether leaves it near zero \
              (elapsed {elapsed:?})"
         );
         server.abort();

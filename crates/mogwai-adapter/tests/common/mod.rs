@@ -157,6 +157,32 @@ pub struct StubState {
     /// harness grows next - is otherwise counted as client-side latency, and a
     /// delay the client never applied passes the assertion.
     pub ws_first_frame_at: Mutex<Option<Instant>>,
+    /// `ws_first_frame_at`'s twin for the EXEC leg: the wall instant at which
+    /// the stub was ABOUT TO SEND its first `ws_exec_frames` frame in reply to a
+    /// `SubmitOrder`. Stamped strictly before the send, exactly as the data leg
+    /// is, so everything above the stamp is stub time and the measured interval
+    /// is `>=` the client's own contribution rather than `==` it - the phrasing
+    /// matters because an earlier anchor makes a `>=` lower bound very slightly
+    /// WEAKER, never stricter.
+    ///
+    /// SINGLE-SHOT ACROSS THE WHOLE `StubState`, like its data-leg twin: it
+    /// records the first exec frame of the FIRST socket and never moves again.
+    /// A test that submits two orders, or that lets the exec leg reconnect,
+    /// would silently measure from the first submit - which is the "the anchor
+    /// is not what it reads as" defect this field was added to remove. Such a
+    /// test owes a per-submit anchor, not this one.
+    ///
+    /// It exists for the same reason and against a measured instance of the same
+    /// defect. An exec-latency test that measures from before `connect()` is
+    /// charging the client for the connect ladder, and on this leg that ladder
+    /// is not small: `await_account_registered` blocks connect until the seeded
+    /// account snapshot has come back through the very latency pump under test,
+    /// so an armed 400 ms exec delay is paid ONCE INSIDE CONNECT before the
+    /// order is even submitted. Setup measured 416.7-418.7 ms over 40 runs of
+    /// `havoc_reaches_the_order_a_trigger_produces`, whose lower bound was
+    /// 400 ms: satisfied by setup alone, in every run, whatever the client did
+    /// with the trigger.
+    pub ws_first_exec_frame_at: Mutex<Option<Instant>>,
     /// Venue-truth order rows returned to reconciliation queries.
     pub venue_orders: Mutex<Vec<OrderStatusInfo>>,
     /// Venue-truth fill rows returned to reconciliation queries.
@@ -726,6 +752,16 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
                             .expect("ws exec frames mutex")
                             .clone();
                         for frame in frames {
+                            // Stamped BEFORE the send, and only for the first
+                            // frame of the first socket, exactly as
+                            // `ws_first_frame_at` is on the data leg.
+                            // Everything above this line is stub time, not
+                            // client time. See its doc comment.
+                            state
+                                .ws_first_exec_frame_at
+                                .lock()
+                                .expect("ws first exec frame instant mutex")
+                                .get_or_insert_with(Instant::now);
                             drop(ws.send(Message::Text(frame.into())).await);
                         }
                     }
