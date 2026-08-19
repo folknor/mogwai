@@ -11,6 +11,11 @@ cannot fail, fixtures that cannot represent their shape, and anything else weird
 
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 
+CLOSED BY THE CLOSE PASS, 2026-08-19. Every finding is resolved; the only
+things still open are the two named as CARRIED in section 8, and they are
+carried deliberately. The close pass's own findings, all in durable prose, are
+in `notes/bug-loop-carry-forward.md`.
+
 UNLIKE THE OTHER TWO HUNTS, THIS ONE RAN THINGS - focused `brokkr test --debug`
 invocations, including the fixture-writing test in finding 1. The wall times
 below are therefore measured rather than estimated. The tree was verified clean

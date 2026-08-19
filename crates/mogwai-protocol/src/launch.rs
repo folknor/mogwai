@@ -1119,17 +1119,30 @@ mod tests {
     /// test - and because a committed fixture would carry an executable bit that
     /// has to survive a checkout.
     ///
-    /// THE PATH IS PID-QUALIFIED, AND THAT IS A CROSS-PROCESS FIX, NOT A
-    /// CROSS-THREAD ONE. This helper has exactly one caller and the write closes
-    /// its handle before `set_permissions` and the exec, so nothing inside one
-    /// test binary races here. What DOES race is two test BINARIES: the full
-    /// gate runs several sweeps, and the dev and instrumented ones both build
-    /// and run this crate's unit tests, so two processes run this same test at
-    /// once, one writing the script while the other execs it - and Linux answers
-    /// the exec with `ETXTBSY`. It was observed once, intermittently, green on
-    /// rerun with no tree change. Embedding the test's NAME would have fixed
-    /// nothing, since both processes compute the same name; only something
-    /// per-process does.
+    /// THE PATH IS PID-QUALIFIED, WHICH CLOSES THE CROSS-PROCESS RACE ONLY. The
+    /// full gate runs several sweeps, and the dev and instrumented ones both
+    /// build and run this crate's unit tests, so two processes run this test at
+    /// once; without the pid one would write the script while the other execed
+    /// it, and Linux answers that exec with `ETXTBSY`. Embedding the test's NAME
+    /// would have fixed nothing, since both processes compute the same name.
+    ///
+    /// THAT FIX IS NOT SUFFICIENT, AND THE ETXTBSY RECURRED UNDER IT. There is a
+    /// SECOND, INTRA-PROCESS race that a unique path cannot touch: while this
+    /// helper holds the script open for writing, any other thread in this test
+    /// binary that forks - and `a_missing_binary_reports_the_binary_it_tried`,
+    /// `stdout_closing_with_no_line_is_a_boot_failure` and
+    /// `a_line_that_is_not_a_record_is_refused` all spawn children, in parallel
+    /// by default - inherits that write descriptor. Rust opens files `O_CLOEXEC`,
+    /// so the child drops it at ITS exec, but between the fork and that exec the
+    /// descriptor is open in a process we do not control, and an exec of the
+    /// script in that window is `ETXTBSY`. Closing our own handle earlier cannot
+    /// help: the inherited copy is what the kernel counts.
+    ///
+    /// So the caller RETRIES on `ETXTBSY` rather than pretending the window is
+    /// gone. The window is bounded by another process's fork-to-exec latency,
+    /// which is microseconds; the retry budget is orders of magnitude above it,
+    /// and a genuine wedge still fails the test because the retry only covers
+    /// that one errno.
     fn silent_venue() -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1152,21 +1165,41 @@ mod tests {
     /// then never returned.
     #[test]
     fn the_ready_bound_returns_on_time_against_a_silent_venue() {
+        /// Linux's `ETXTBSY`. Spelled numerically rather than as
+        /// `ErrorKind::ExecutableFileBusy` so the retry does not depend on that
+        /// variant's stabilization.
+        const ETXTBSY: i32 = 26;
+
         let script = silent_venue();
-        let started = std::time::Instant::now();
-        let error = launch(LaunchSpec {
-            binary: Some(script.clone().into_os_string()),
-            ready_timeout: Some(Duration::from_millis(400)),
-            stderr: StderrSink::Discard,
-            ..LaunchSpec::default()
-        })
-        .expect_err("a venue that never speaks must time out");
-        let elapsed = started.elapsed();
+        let mut attempts = 0;
+        let (error, elapsed) = loop {
+            let started = std::time::Instant::now();
+            let error = launch(LaunchSpec {
+                binary: Some(script.clone().into_os_string()),
+                ready_timeout: Some(Duration::from_millis(400)),
+                stderr: StderrSink::Discard,
+                ..LaunchSpec::default()
+            })
+            .expect_err("a venue that never speaks must time out");
+            let elapsed = started.elapsed();
+            let busy = matches!(
+                &error,
+                LaunchError::Spawn { source, .. } if source.raw_os_error() == Some(ETXTBSY)
+            );
+            attempts += 1;
+            if !busy || attempts >= 40 {
+                break (error, elapsed);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
         // The name is per-process, so nothing collects it between runs; unlink
         // it here rather than accumulating one script per test-binary pid.
         drop(std::fs::remove_file(&script));
 
-        assert!(matches!(error, LaunchError::Timeout { .. }), "{error:?}");
+        assert!(
+            matches!(error, LaunchError::Timeout { .. }),
+            "{error:?} after {attempts} attempt(s)"
+        );
         assert!(
             elapsed < Duration::from_secs(10),
             "launch must return on its own bound, took {elapsed:?}"

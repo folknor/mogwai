@@ -38,8 +38,11 @@ THE GATE, `brokkr check --gate`, full and unscoped: **58.3 s -> 41.4 s and
 one is not a number: the gate runs eight threads against a loaded desktop and
 its wall is the noisiest figure in this file, so treat it as "faster, by
 something between 8 and 17 seconds" and re-derive it before quoting it. The
-coverage counts are NOT noisy and are the ones to check: 1191 + 436 = 1688
-pairs, 1627 run, 61 ignored, 0 orphaned, 16 skips. The gate runs
+coverage counts are NOT noisy and are the ones to check: 1191 + 436 = 1627
+run across the two sweeps, 61 ignored, so 1688 pairs, 0 orphaned, 16 skips.
+The two summands are the SWEEPS, and the pair count is run plus ignored - an
+earlier draft wrote the sum as the pair count, which is the one arithmetic in
+this entry a reader would otherwise carry forward wrong. The gate runs
 `workspace` and `instrumented` only, and it DOES apply `skip`, so its
 arithmetic is not the table's. IN THE GATE'S `workspace` SWEEP THE TWO DWELL
 CHANGES CANCEL - the twin's deletion is about -6.5 s and un-skipping
@@ -148,9 +151,9 @@ round's tree.
 THE GATE, `brokkr check --gate`, on the round's tree: **49.0 s** on the fix
 pass and **52.4 s** after the review repairs, which changed no test count.
 Against the 41.4 s / 50.4 s pair recorded above this is inside the noise that
-entry warns about; the counts are the readable part. 1195 + 440 = 1692 pairs,
-1635 run, 57 ignored, 0 orphaned, 14 skips. The deltas from 1191 + 436 / 1688 /
-1627 / 61 / 16 decompose exactly: two new `mogwai-data` tests in
+entry warns about; the counts are the readable part. 1195 + 440 = 1635 run,
+57 ignored, so 1692 pairs, 0 orphaned, 14 skips. The deltas from
+1191 + 436 = 1627 run / 61 ignored / 1688 pairs / 16 skips decompose exactly: two new `mogwai-data` tests in
 `tests/tape_version_prose.rs` are +2 in each sweep and +4 pairs, and the two
 un-ignored instruments are +2 run in each sweep, -4 ignored and -2 skips while
 adding no pair, having already been pairs.

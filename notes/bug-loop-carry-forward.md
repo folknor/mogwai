@@ -757,7 +757,17 @@ document. What generalises:
   gate runs several sweeps of the same package at once. A write-then-exec on
   one intermittently fails `ETXTBSY`, and the obvious fix - the test's own name
   in the filename - changes NOTHING, since both processes compute it. Only a
-  pid or a tempdir closes it. Note also that a single crashed test aborts the
+  pid or a tempdir closes it. THE PID IS NECESSARY AND NOT SUFFICIENT, WHICH
+  IS WHY THE FAILURE CAME BACK ON THE TAPE DOCUMENT: a write-then-exec has a
+  SECOND, INTRA-PROCESS window that no unique path can touch. Rust opens files
+  `O_CLOEXEC`, so a concurrently forking sibling test drops the inherited write
+  descriptor at ITS exec - but not before it, and an exec of the script in that
+  window is `ETXTBSY` all the same. `launch.rs` has three sibling tests that
+  spawn children, running in parallel by default. The close pass RETRIES on
+  that one errno rather than pretending the window is gone; the window is a
+  fork-to-exec latency, so the retry budget dwarfs it and a genuine wedge still
+  fails, because nothing else is retried. WRITE-THEN-EXEC IN A TEST OWES BOTH
+  HALVES. Note also that a single crashed test aborts the
   sweep and makes brokkr report a whole package's tests as ORPHANED, which is
   indistinguishable in the output from the known tool bug: check for a crash
   before blaming the tool.
@@ -804,8 +814,16 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
   is one run is one ledger", the same retired premise, about the SERVER side.
   Out of every arc's scope so far. It is a one-line correction whenever
   something touches that file.
-- `target/tmp` still accumulates `*d-*.log`, `bad-*.toml` and `stale-*.pid`.
-  Recorded on the lifecycle document, still outside every arc.
+- `target/tmp`'s `d-*.log`, `bad-*.toml` and `stale-*.pid` debris is CLOSED by
+  the tape close pass, and it was never a live leak: every one of those files
+  is dated 2026-08-01 or 2026-08-02 and their writers went with the daemon era
+  (the PID file, the log file, the `stop` subcommand). Nothing in the tree
+  writes that shape any more, so the pile was stale build-tree debris rather
+  than accumulation, and it was deleted. What DOES land there now is
+  `common/mod.rs`'s `Scratch`, whose `Drop` removes it except on a panic (kept
+  on purpose, for triage) or a kill - which is the whole explanation for the
+  `characterize_*-<pid>` directories a reader will find. `cargo clean` collects
+  those; do not read them as a leak.
 
 ## The tape document, round 1: the gate runs ignored tests, and one of them wrote
 
@@ -1379,8 +1397,10 @@ The tape mechanics die with that document. What generalises, from the six
     `Symbol` for the key: the new assertion fires, the neighbouring one passes.
   - `size_of::<PublishedBook>() == 48` is a layout pin with no `#[repr]` behind
     it. Stated as `2 * size_of::<f64>() + 2 * size_of::<Decimal>()` it is the
-    same check on today's layout, immune to reordering and to a field type
-    changing width, and it reads as the claim. Bite-checked by adding a
+    same check on today's layout, immune to reordering, and it reads as the
+    claim. IT IS NOT IMMUNE TO A FIELD CHANGING WIDTH - see the review repair
+    further down this section, which is the counterexample to the sentence
+    that used to stand here. Bite-checked by adding a
     `CalibrationProvenance` field: fails 72 against 48 on the named assertion.
   - A `#[cfg(test)]` `thread_local!` counter mutated from a production loop is
     process-global state whose safety rests on a `.set(0)` one line above the
@@ -1463,6 +1483,54 @@ The tape mechanics die with that document. What generalises, from the six
   release. No constant, no fingerprint, no artifact moved, and the gate's counts
   are unchanged at 1195 + 440 over 1692 pairs, 0 orphaned - no test added or
   removed, four rewritten. `TAPE_PROTOCOL_VERSION` next takes 21.
+
+## The tape document, close pass: what the five commits left
+
+The arc is SOUND. The gate is green at 1195 + 440, 1692 pairs, 1635 run, 57
+ignored, 0 orphaned, and the two claims most worth not taking on trust were
+re-run rather than read: `shipped_garch_rails_sit_above_the_clean_tail` prints
+57.2x, 3.3252e-3 and an RMS of 1.2393e-5 over its 16M updates, exactly the
+figures `consts.rs` cites, in 0.39 s; and `dwell_is_bounded_across_run_seeds`
+reports PASS / SKIP / PASS over the three sweeps, so the `cfg` really does
+produce a reasoned skip rather than a silent zero-match green. No finding in
+this pass was in production behaviour.
+
+- THE ETXTBSY RACE IS FIXED, AND THE ADAPTER DOCUMENT'S DIAGNOSIS WAS HALF OF
+  IT. Pid-qualifying the silent-venue script closed the cross-process half and
+  is still needed. The half it missed is intra-process and is what fired again
+  here: `launch.rs` has three sibling tests that spawn children, libtest runs
+  them in parallel, and a fork inherits this helper's write descriptor until
+  that child's own exec clears it. The test retries on that one errno, bounded,
+  with the attempt count in the failure message. It is not a silent-degradation
+  shape: `busy` is derived from the error variant, so an exhausted budget still
+  fails on the Timeout assertion, and no other error is retried at all.
+- TWO ARITHMETIC ERRORS IN `reference/performance.md`, the same one twice:
+  "1191 + 436 = 1688 pairs, 1627 run" and "1195 + 440 = 1692 pairs, 1635 run".
+  Both sums are the RUN count; the pair count is run plus ignored. The
+  decomposition either side of the wrong equals sign was right, which is how it
+  survived two corrections of this file - A FALSE EQUATION BETWEEN TWO TRUE
+  NUMBERS reads as a typo and gets copied forward as a fact.
+- THE CARRY-FORWARD CONTRADICTED ITSELF WITHIN ONE SECTION. The round-5 entry
+  said the new `size_of::<PublishedBook>()` assertion is "immune to reordering
+  and to a field type changing width", and eleven bullets later the review
+  repair states that immunity is false and gives the counterexample. The fix
+  pass wrote the first, the repair pass wrote the second, and nothing walked
+  back. WHEN A ROUND RETRACTS ITS OWN CLAIM, GREP THE DOCUMENT FOR THE CLAIM;
+  appending the correction leaves the falsehood in the live voice above it.
+- `AGENTS.md`'s new `segments` entry described `tape` as "writing trades or
+  bars out of a generated source". It composes a SEGMENT LIBRARY - the thing
+  `cut` produced - which is the whole point of the subcommand, the fitted
+  generator being what it is the A/B against. Corrected.
+- `target/tmp` IS CLOSED AND WAS NEVER A LEAK; see the adapter close pass's
+  lateral list above for the dating that settles it.
+- NOT A DEFECT, BUT KNOW IT IS THERE: round 3 added a `#[cfg(test)]`
+  `draw_stages` field that `begin_event` pushes to, and round 5 removed a
+  `#[cfg(test)]` `thread_local!` that `settlement_scan` pushed to. That is not
+  an inconsistency - the objection to the thread-local was that it is
+  PROCESS-GLOBAL state whose safety rested on a `.set(0)` one line above the
+  read, and a field on `&mut self` cannot be shared - but the two look alike at
+  a glance and a later round will notice. The line is shared state, not
+  `cfg(test)` in a production body.
 
 ## Facts a later round would otherwise re-derive wrong
 
@@ -1627,9 +1695,14 @@ The tape mechanics die with that document. What generalises, from the six
   - A GATE FAILURE THAT REPORTS 440 ORPHANS IS ONE FAILURE, NOT 441. The
     repair pass's first gate run died on
     `launch::tests::the_ready_bound_returns_on_time_against_a_silent_venue`
-    with `ExecutableFileBusy` - `ETXTBSY`, the test writing its silent-venue
-    shell script and exec'ing it before the write handle is closed, a
-    real race but an unrelated and transient one - and the WHOLE
+    with `ExecutableFileBusy` - `ETXTBSY`, a real race, unrelated to the round,
+    and FIXED BY THE CLOSE PASS rather than left to fire a third time. The
+    mechanism first recorded here was wrong: the helper's own write handle IS
+    closed before the exec. What is not closed is the copy a CONCURRENTLY
+    FORKING sibling test inherits between its fork and its exec, which the
+    adapter document's pid qualification cannot reach because it is inside one
+    process. See the write-then-exec entry under "Facts a later round would
+    otherwise re-derive wrong". The WHOLE
     `instrumented` sweep then never ran, so coverage reported every one of its
     440 tests as orphaned. This looks exactly like the 2026-08-16 brokkr
     coverage bug `AGENTS.md` warns about and is NOT it: the tell is that the
@@ -1735,7 +1808,12 @@ The tape mechanics die with that document. What generalises, from the six
   budget's own reset moving an anchor forward, and a durable performance number
   recorded from a draft of the instrument that the same commit then fixed. BOTH
   WERE IN THE UNREVIEWED HALF. Budget a close pass per arc, and point it there
-  first.
+  first. THREE DOCUMENTS, THREE CONFIRMATIONS: the tape close pass's findings
+  are all in that half too, and all of them are PROSE - a false equation, a
+  self-contradicting section, a subcommand description - which is what the
+  unreviewed half of a round about tests produces once the tests themselves
+  are being written carefully. Point the close pass at the durable prose the
+  round touched, not only at its code.
 - Any ADJUDICATOR launched in this arc reads `notes/todo.md` and `brokkr.toml`
   in addition to its fork framing and the usual contracts. Owner instruction.
   `brokkr.toml` carries the gate profile's parallelism and skip list, which
