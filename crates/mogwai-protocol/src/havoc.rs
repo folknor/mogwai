@@ -494,18 +494,27 @@ impl EventKind {
     /// (the split-brain that classified `AccountState` as data on one end and
     /// execution on the other).
     ///
-    /// Phrased as a positive list rather than `!matches!(Data)` on purpose: a
-    /// new kind must opt IN to being delayed, rather than being delayed by
-    /// default the day it is added.
+    /// Written as an EXHAUSTIVE MATCH rather than `matches!` so the compiler
+    /// carries the claim: a new kind must opt IN to being delayed, and a
+    /// `matches!` would silently opt it out (or, phrased as `!matches!(Data)`,
+    /// silently opt it in) the day it is added. Here the crate does not build
+    /// until the new variant is classified deliberately.
     #[must_use]
     pub fn is_execution(self) -> bool {
-        matches!(self, EventKind::Exec | EventKind::Fill)
+        match self {
+            EventKind::Exec | EventKind::Fill => true,
+            EventKind::Data | EventKind::Admission => false,
+        }
     }
     /// Whether this kind rides the priority lane on the server and bypasses the
-    /// execution delay pump.
+    /// execution delay pump. Exhaustive for the same reason as
+    /// [`Self::is_execution`].
     #[must_use]
     pub fn is_admission(self) -> bool {
-        matches!(self, EventKind::Admission)
+        match self {
+            EventKind::Admission => true,
+            EventKind::Exec | EventKind::Fill | EventKind::Data => false,
+        }
     }
 }
 
@@ -850,6 +859,54 @@ mod tests {
         assert_eq!(latency.delay_for(EventKind::Exec).as_nanos(), 11);
         assert_eq!(latency.delay_for(EventKind::Fill).as_nanos(), 12);
         assert_eq!(latency.delay_for(EventKind::Data).as_nanos(), 13);
+        // Admission buckets with Exec by design (the doc on `delay_for` argues
+        // it); without this line moving it to `data_nanos` moves nothing red.
+        assert_eq!(
+            latency.delay_for(EventKind::Admission).as_nanos(),
+            11,
+            "admission frames ride exec_event_nanos, not a knob of their own"
+        );
+    }
+
+    /// The whole classification table, enumerated. The exhaustive `match` below
+    /// is what makes this a claim about EVERY kind rather than a spot check:
+    /// adding a variant fails to compile here and in `is_execution` /
+    /// `is_admission`, so the "a new kind must opt IN to being delayed" comment
+    /// cannot outlive its implementation.
+    #[test]
+    fn every_event_kind_is_classified_deliberately() {
+        let latency = HavocLatency {
+            base_nanos: 0,
+            exec_event_nanos: 1,
+            fill_nanos: 2,
+            data_nanos: 3,
+        };
+        for kind in [
+            EventKind::Exec,
+            EventKind::Fill,
+            EventKind::Data,
+            EventKind::Admission,
+        ] {
+            // (is_execution, is_admission, latency bucket)
+            let expected: (bool, bool, u128) = match kind {
+                EventKind::Exec => (true, false, 1),
+                EventKind::Fill => (true, false, 2),
+                EventKind::Data => (false, false, 3),
+                // Admission is neither execution nor data: it is transport
+                // truth, and being outside `is_execution` is exactly what
+                // exempts it from the server's `DelayAcks` hold.
+                EventKind::Admission => (false, true, 1),
+            };
+            assert_eq!(
+                (
+                    kind.is_execution(),
+                    kind.is_admission(),
+                    latency.delay_for(kind).as_nanos(),
+                ),
+                expected,
+                "{kind:?} is misclassified"
+            );
+        }
     }
 
     #[test]
@@ -949,10 +1006,20 @@ mod tests {
             );
         }
 
-        // Every non-numeric variant is unconditionally valid.
+        // Every non-numeric variant is unconditionally valid. The two reason
+        // carriers and the id carrier are here at legal values because the
+        // loop used to skip them entirely, so nothing established that a
+        // well-formed arm of theirs is ACCEPTED - only that a malformed one is
+        // refused, which a validator refusing everything also satisfies.
         for div in [
             control::Divergence::RejectNextSubmit {
                 reason: "nope".into(),
+            },
+            control::Divergence::RejectNextCancel {
+                reason: "nope".into(),
+            },
+            control::Divergence::CancelOpenOrderSilently {
+                client_order_id: "O-1".into(),
             },
             control::Divergence::DuplicateNextFill,
             control::Divergence::DropNextAccountUpdate,
@@ -960,6 +1027,105 @@ mod tests {
         ] {
             validate_divergence(&div).expect("non-numeric variants are always valid");
         }
+
+        // The oversized-reason ceiling is per-variant code, so the cancel side
+        // owes its own case; only the submit side had one.
+        assert_eq!(
+            validate_divergence(&control::Divergence::RejectNextCancel {
+                reason: "R".repeat(crate::MAX_REASON_LEN + 1),
+            }),
+            Err("RejectNextCancel reason exceeds MAX_REASON_LEN")
+        );
+        for blank in ["", " ", "\t\n  "] {
+            assert_eq!(
+                validate_divergence(&control::Divergence::CancelOpenOrderSilently {
+                    client_order_id: blank.into(),
+                }),
+                Err("CancelOpenOrderSilently client_order_id is invalid")
+            );
+        }
+    }
+
+    /// `FlowSurge` carries three independent bounds and had none of them
+    /// pinned. `rate_mult`'s is the odd one - an inclusive `[1, 1000]` range
+    /// MINUS the point 1.0, because a surge that multiplies by one is an armed
+    /// divergence that does nothing.
+    #[test]
+    fn validate_divergence_bounds_flow_surge() {
+        let surge =
+            |rate_mult: f64, children_mult: f64, duration_ms: u64| control::Divergence::FlowSurge {
+                rate_mult,
+                children_mult,
+                duration_ms,
+            };
+
+        // In range on every axis, including both inclusive edges.
+        for div in [
+            surge(1.000_001, 1.0, 0),
+            surge(2.0, 3.0, 1_000),
+            surge(1_000.0, 100.0, control::MAX_DIVERGENCE_MS),
+        ] {
+            validate_divergence(&div).expect("an in-range surge is valid");
+        }
+
+        // rate_mult: the excluded lower point, below it, above the ceiling,
+        // and non-finite.
+        for bad in [1.0, 0.999, 0.0, -1.0, 1_000.1, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                validate_divergence(&surge(bad, 2.0, 0)),
+                Err("FlowSurge rate_mult must be in (1, 1000]"),
+                "rate_mult {bad} must be refused"
+            );
+        }
+
+        // children_mult: inclusive at 1, so only below it and above 100 fail.
+        for bad in [0.999, 0.0, -1.0, 100.1, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                validate_divergence(&surge(2.0, bad, 0)),
+                Err("FlowSurge children_mult must be in [1, 100]"),
+                "children_mult {bad} must be refused"
+            );
+        }
+
+        assert_eq!(
+            validate_divergence(&surge(2.0, 2.0, control::MAX_DIVERGENCE_MS + 1)),
+            Err("FlowSurge duration_ms must be <= 3600000")
+        );
+    }
+
+    /// `FeeSurcharge` is the `Decimal` twin of the surge bounds, and was
+    /// likewise untested. `mult` is half-open `(0, 100]`: a zero multiplier
+    /// would make every fill free, which is not a surcharge.
+    #[test]
+    fn validate_divergence_bounds_fee_surcharge() {
+        let fee =
+            |mult: Decimal, window_ms: u64| control::Divergence::FeeSurcharge { mult, window_ms };
+
+        for div in [
+            fee(Decimal::new(1, 2), 0),
+            fee(Decimal::ONE, 1_000),
+            fee(Decimal::from(100), control::MAX_DIVERGENCE_MS),
+        ] {
+            validate_divergence(&div).expect("an in-range surcharge is valid");
+        }
+
+        for bad in [
+            Decimal::ZERO,
+            Decimal::new(-1, 2),
+            Decimal::from(-100),
+            Decimal::new(1_0001, 2),
+        ] {
+            assert_eq!(
+                validate_divergence(&fee(bad, 0)),
+                Err("FeeSurcharge mult must be in (0, 100]"),
+                "mult {bad} must be refused"
+            );
+        }
+
+        assert_eq!(
+            validate_divergence(&fee(Decimal::ONE, control::MAX_DIVERGENCE_MS + 1)),
+            Err("FeeSurcharge window_ms must be <= 3600000")
+        );
     }
 
     #[test]

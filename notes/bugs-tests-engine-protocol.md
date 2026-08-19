@@ -31,39 +31,7 @@ tuition here.
 
 ## A. Tests that cannot fail for the reason they name
 
-**A1. `risk.rs :: a_nonpositive_drawdown_is_refused` - shadowed by a different
-rule.** The fixture is
-`AccountPolicy { trailing_drawdown: Some(..amount: ZERO..), ..default() }`, which
-leaves `currency: None`. Setting any rule makes `is_unpoliced()` false, so
-`validate()`'s CURRENCY check fires unconditionally for this fixture. The test
-asserts only `is_err()`. Delete the `trailing_drawdown.amount <= ZERO` branch
-from production and this test stays green. The same fixture shape would shadow
-the daily/overall/max_position amount checks too - except those have no tests at
-all. Fix: assert the exact message (the module already returns distinct
-`String`s), and set `currency: Some("USD")` so only the rule under test can fire.
-Then add the four missing sibling cases plus a positive case.
-
-**A2. `risk.rs` - the currency rule and the `SHIPPED_POLICIES`/`shipped_policy`
-inverse are unpinned.** `every_shipped_policy_is_usable` iterates the constant
-list, so a policy added to `shipped_policy()` but forgotten in
-`SHIPPED_POLICIES` is invisible to every test. Nothing asserts
-`shipped_policy("nonsense") == None` either, and nothing tests the currency
-requirement directly.
-
-**A3. `havoc.rs :: havoc_latency_composes_base` omits `EventKind::Admission`.**
-The production doc argues at length that `Admission` buckets with `Exec` and that
-`is_execution()` is the single place implementing the `DelayAcks` exemption ("a
-new kind must opt IN to being delayed"). Neither `is_execution()` nor
-`is_admission()` has a single test, and `delay_for(Admission)` is never called.
-Move `Admission` to `data_nanos`, or flip `is_execution` to `!matches!(Data)`,
-and nothing in either crate goes red.
-
-**A4. `havoc.rs` - `FlowSurge` and `FeeSurcharge` validation is entirely
-untested.** `validate_divergence` has nine distinct bound checks across those two
-variants (`rate_mult` in (1,1000] WITH an explicit `== 1.0` rejection,
-`children_mult` in [1,100], both `duration_ms`/`window_ms` ceilings, `mult` in
-(0,100]). Zero coverage. The "every non-numeric variant" loop also skips
-`RejectNextCancel` and `CancelOpenOrderSilently`.
+A1 through A4 are CLOSED - see "Round 2" below.
 
 **A5. `engine :: arm_drops_temporal_variants_without_blocking_engine_divergences`
 covers 4 of 8 dropped variants.** It arms
@@ -221,8 +189,93 @@ FAILED launch and nothing on any other path.
   around 4074 and 8631) and admits a lot; every other `contains` in the engine
   names a specific phrase and is fine.
 
+## Round 2: A1-A4, the risk-policy and havoc-validation cluster
+
+All four reproduced exactly as reported, verified by measurement rather than by
+reading. Nothing was refused.
+
+- A1's shadow is REAL and was measured from both sides. With
+  `trailing.amount <= ZERO` weakened to `< ZERO`, the old fixture
+  (`currency: None`) still refuses - on the currency rule - so
+  `a_nonpositive_drawdown_is_refused` stayed green over a deleted branch. The
+  replacement `every_rule_carrying_an_amount_refuses_a_nonpositive_one_by_name`
+  builds every fixture through a `policed()` helper that names `currency:
+  "USD"`, so only the rule under test can fire, and asserts the exact `String`.
+  Each of the four amount branches was bite-checked SEPARATELY as a `<=` to `<`
+  text edit, and each failed on ITS OWN assertion with `left: Ok(())` - which is
+  the whole point: under the old fixture the left side would have been the
+  currency error. The positive case (all four rules at amount 1) is there so a
+  validator refusing every amount cannot pass.
+- A2's inverse is closed STRUCTURALLY, not by a test, because nothing can
+  enumerate a `match`'s arms. `shipped_policy` now returns `None` for any name
+  absent from `SHIPPED_POLICIES` before it reaches its match, so the list is
+  authoritative and an arm forgotten in the list is unreachable rather than
+  silently shipped. Bite-checked in two steps: with a `"nonsense"` arm added and
+  the gate present, `a_name_this_build_does_not_ship_resolves_to_nothing` PASSES
+  (the gate is what closes it); with the gate deleted it FAILS by name. The
+  currency rule itself is now pinned in all three directions by
+  `a_policy_naming_any_rule_must_name_its_currency` - `None`, `Some("")`, and
+  the unpoliced account that owes no currency - and each direction was
+  bite-checked with a different weakening of that one `if`.
+- A3 IS CARRIED BY THE COMPILER NOW, which was the stronger of the two options
+  on the table. `is_execution` and `is_admission` are exhaustive `match`es
+  instead of `matches!`, so the "a new kind must opt IN to being delayed"
+  comment cannot outlive its implementation: adding a variant fails to compile
+  at four sites (`delay_for`, both predicates, and the new test's expectation
+  match), measured by adding a `BiteCheck` variant. `delay_for` was already
+  exhaustive; the two predicates were not. The test
+  `every_event_kind_is_classified_deliberately` asserts the whole
+  (is_execution, is_admission, latency bucket) table per kind, and
+  `havoc_latency_composes_base` grew its missing `Admission` line. Bite-checked
+  by moving `Admission` to `data_nanos` (both tests fail, naming Admission) and
+  by folding `Admission` into `is_execution` (the table test fails on
+  `(true, true, 1)` against `(false, true, 1)`).
+- A4's nine bounds all have cases now, in
+  `validate_divergence_bounds_flow_surge` and
+  `..._bounds_fee_surcharge`, each with the in-range edges as well as the
+  refusals. Bite-checked one perturbation per bound: dropping `rate_mult`'s
+  `== 1.0` clause, widening `children_mult` to `[0, 1000]`, doubling each of the
+  two ms ceilings, dropping `mult`'s lower gate, and widening its upper one -
+  six edits, each failing on its own named case. The skipped variants are in the
+  valid loop now (`RejectNextCancel`, `CancelOpenOrderSilently`), with the
+  cancel-side reason ceiling and the blank-id refusal added; both were
+  bite-checked (`2 * MAX_REASON_LEN`, and `trim().is_empty()` to `is_empty()`,
+  which is what catches the whitespace-only id).
+
+COLD REVIEW OF THE ROUND FOUND THREE, all real, all fixed in the same commit:
+
+- `a_reset_minute_outside_the_day_is_refused` WAS LEFT IN THE EXACT A1 SHAPE -
+  bare `is_err()`, no message, no boundary - because it was not one of the four
+  branches A1 named, even though it is the sixth branch of the same `validate()`.
+  It was unshadowed only by accident: its fixture was unpoliced, so the currency
+  branch could not fire. Now pinned through `policed()` WITH a real rule set, at
+  1439/1/0 accepted and 1440/1441/`u32::MAX` refused, against the exact message.
+  Bite-checked as a `>=` to `>` text edit: fails on the 1440 case naming it.
+- WHITESPACE CURRENCY WAS ACCEPTED, and the two validators in the crate
+  disagreed about what blank means - `validate_divergence` refuses a blank
+  `client_order_id` on `trim().is_empty()` while `validate()` used a bare
+  `is_empty()`. Made to agree on TRIM, which is the production side moving.
+  The reason: the currency is a lookup key that equity is summed over, so a
+  whitespace code matches no balance and freezes a policed account's equity at
+  zero rather than refusing the policy at registration, which is what `validate`
+  is for. `a_policy_naming_any_rule_must_name_its_currency` now loops six blank
+  forms; bite-checked by reverting the `trim()`, which fails on `" "`.
+  NOT CLOSED, and deliberately: `" USD "` is still accepted and still matches no
+  balance. Neither validator normalizes. The stronger rule - refuse any code
+  differing from its trimmed form - belongs on both sides at once, not smuggled
+  in here.
+- The two adjacent docs read as contradicting each other, `SHIPPED_POLICIES`
+  "AUTHORITATIVE" ten lines above `shipped_policy` "ILLUSTRATIVE RATHER THAN
+  AUTHORITATIVE". They are about different axes - the set of NAMES versus the
+  TERMS behind them - and the second now says which axis it disclaims.
+
+LATERAL, fixed in passing: `messages.rs :: ServerMessage::category`'s doc glossed
+`is_execution` as "everything but `Data`", which is false - `Admission` is not
+execution, and that exemption is exactly what the paragraph three lines up is
+about.
+
 ## The hunter's own ordering
 
-C is done. Then A1/A5/A3 (three cases where production comments assert a property
-no test holds), then B1 (six unpinned wire-size constants that a reservation
-system depends on).
+C and A1-A4 are done. Then A5 (a production comment asserting a property no test
+holds), then B1 (six unpinned wire-size constants that a reservation system
+depends on).

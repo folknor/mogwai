@@ -214,7 +214,13 @@ impl AccountPolicy {
         if self.reset_minute_utc >= 24 * 60 {
             return Err("reset_minute_utc must be a minute of the day, 0 to 1439".to_owned());
         }
-        if !self.is_unpoliced() && self.currency.as_ref().is_none_or(String::is_empty) {
+        // BLANK MEANS TRIMS-TO-EMPTY, matching the divergence validators in
+        // `havoc.rs`, which refuse a `client_order_id` on `trim().is_empty()`.
+        // A currency is a LOOKUP KEY: equity is summed over the balances
+        // carrying exactly this code, so a whitespace code names no currency
+        // any balance can ever match and would freeze equity at zero forever
+        // rather than refuse the policy at registration.
+        if !self.is_unpoliced() && self.currency.as_ref().is_none_or(|c| c.trim().is_empty()) {
             return Err(
                 "a policy with any rule must name the currency its thresholds are stated in; \
                  equity is computed in that currency alone and the venue has no exchange rate"
@@ -286,6 +292,13 @@ pub enum BreachedRule {
 }
 
 /// The names this build ships a policy under.
+///
+/// AUTHORITATIVE, not a parallel listing: [`shipped_policy`] refuses any name
+/// that is not in here before it reaches its match, so the two cannot disagree
+/// about what ships. Nothing can enumerate a `match`'s arms, so the direction
+/// that used to be unpinned - an arm added here but forgotten in the list -
+/// is closed structurally instead of by a test: such an arm is simply
+/// unreachable, and the list stays the one place a name is announced.
 pub const SHIPPED_POLICIES: &[&str] = &[
     "intraday-trail",
     "eod-trail",
@@ -296,7 +309,12 @@ pub const SHIPPED_POLICIES: &[&str] = &[
 
 /// A policy this build ships, by name.
 ///
-/// ILLUSTRATIVE RATHER THAN AUTHORITATIVE, and deliberately few. These show the
+/// ILLUSTRATIVE RATHER THAN AUTHORITATIVE **as to TERMS** - a different axis
+/// from the one [`SHIPPED_POLICIES`] above calls authoritative, which is the
+/// set of NAMES. The list settles which names exist; this doc disclaims that
+/// the numbers behind them describe any real programme. Both hold at once.
+///
+/// Deliberately few, too. These show the
 /// SHAPES a funded-account programme comes in - a hard intraday trail, a softer
 /// end-of-day trail that stops at breakeven, a daily limit that locks rather
 /// than kills - so an operator has something to copy and a test something to
@@ -308,6 +326,12 @@ pub const SHIPPED_POLICIES: &[&str] = &[
 /// TOML dependency to state a handful of constants.
 #[must_use]
 pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
+    // `SHIPPED_POLICIES` is the announcement; this match is the construction.
+    // Gating on the list makes a name that is not announced unresolvable, so
+    // the pair cannot drift in the direction no test can see.
+    if !SHIPPED_POLICIES.contains(&name) {
+        return None;
+    }
     let usd = || Some("USD".to_owned());
     match name {
         "intraday-trail" => Some(AccountPolicy {
@@ -402,27 +426,190 @@ mod tests {
         assert!(AccountPolicy::default().is_unpoliced());
     }
 
-    #[test]
-    fn a_nonpositive_drawdown_is_refused() {
-        let policy = AccountPolicy {
-            trailing_drawdown: Some(TrailingDrawdown {
-                amount: Decimal::ZERO,
-                basis: TrailingBasis::PeakEquity,
-                lock_at_equity: None,
-                on_breach: BreachAction::Terminate,
-            }),
+    /// A policy carrying exactly one rule, with the currency named so the
+    /// currency check below cannot fire and take the credit for a rule check.
+    ///
+    /// THAT SHADOWING IS WHY THIS HELPER EXISTS. Setting any rule makes
+    /// `is_unpoliced()` false, so a fixture leaving `currency: None` is refused
+    /// whatever the rule's own amount says - and a test asserting only
+    /// `is_err()` on such a fixture stays green with the amount branch deleted.
+    fn policed(mutate: impl FnOnce(&mut AccountPolicy)) -> AccountPolicy {
+        let mut policy = AccountPolicy {
+            currency: Some("USD".to_owned()),
             ..AccountPolicy::default()
         };
-        assert!(policy.validate().is_err());
+        mutate(&mut policy);
+        policy
     }
 
+    fn trailing(amount: Decimal) -> TrailingDrawdown {
+        TrailingDrawdown {
+            amount,
+            basis: TrailingBasis::PeakEquity,
+            lock_at_equity: None,
+            on_breach: BreachAction::Terminate,
+        }
+    }
+
+    /// Each of the four rules that carries an amount refuses a nonpositive one
+    /// BY NAME, and accepts a positive one. The exact message is asserted
+    /// because it is the only thing separating these four branches from the
+    /// currency branch that fires for every policed fixture.
     #[test]
-    fn a_reset_minute_outside_the_day_is_refused() {
-        let policy = AccountPolicy {
-            reset_minute_utc: 1_440,
+    fn every_rule_carrying_an_amount_refuses_a_nonpositive_one_by_name() {
+        let nonpositive = [Decimal::ZERO, Decimal::from(-1)];
+        for bad in nonpositive {
+            assert_eq!(
+                policed(|p| p.trailing_drawdown = Some(trailing(bad))).validate(),
+                Err("trailing_drawdown.amount must be positive".to_owned())
+            );
+            assert_eq!(
+                policed(|p| p.daily_loss_limit = Some(DailyLossLimit {
+                    amount: bad,
+                    on_breach: BreachAction::LockUntilReset,
+                }))
+                .validate(),
+                Err("daily_loss_limit.amount must be positive".to_owned())
+            );
+            assert_eq!(
+                policed(|p| p.overall_drawdown = Some(OverallDrawdown {
+                    amount: bad,
+                    on_breach: BreachAction::Terminate,
+                }))
+                .validate(),
+                Err("overall_drawdown.amount must be positive".to_owned())
+            );
+            assert_eq!(
+                policed(|p| p.max_position = Some(MaxPosition { quantity: bad })).validate(),
+                Err("max_position.quantity must be positive".to_owned())
+            );
+        }
+
+        // The positive case: the same four rules, each on its own, validate.
+        // Without this a validator refusing EVERY amount would pass above.
+        let ok = Decimal::from(1);
+        policed(|p| p.trailing_drawdown = Some(trailing(ok)))
+            .validate()
+            .expect("a positive trailing drawdown is usable");
+        policed(|p| {
+            p.daily_loss_limit = Some(DailyLossLimit {
+                amount: ok,
+                on_breach: BreachAction::LockUntilReset,
+            });
+        })
+        .validate()
+        .expect("a positive daily loss limit is usable");
+        policed(|p| {
+            p.overall_drawdown = Some(OverallDrawdown {
+                amount: ok,
+                on_breach: BreachAction::Terminate,
+            });
+        })
+        .validate()
+        .expect("a positive overall drawdown is usable");
+        policed(|p| p.max_position = Some(MaxPosition { quantity: ok }))
+            .validate()
+            .expect("a positive position cap is usable");
+    }
+
+    /// The currency requirement itself, which nothing tested directly: it binds
+    /// exactly when a rule is set, and an empty string does not satisfy it.
+    #[test]
+    fn a_policy_naming_any_rule_must_name_its_currency() {
+        let expected = "a policy with any rule must name the currency its thresholds are \
+             stated in; equity is computed in that currency alone and the venue has no \
+             exchange rate";
+        let policed_no_currency = AccountPolicy {
+            trailing_drawdown: Some(trailing(Decimal::from(2_000))),
             ..AccountPolicy::default()
         };
-        assert!(policy.validate().is_err());
+        assert_eq!(
+            policed_no_currency.validate(),
+            Err(expected.to_owned()),
+            "a policed account naming no currency is refused by name"
+        );
+
+        // An empty currency is the same defect wearing a value - and so is a
+        // whitespace one, which is not a narrower case but the SAME one: the
+        // code is a lookup key against balance currencies, and no balance
+        // carries a blank code. `havoc.rs` refuses a blank client_order_id on
+        // `trim().is_empty()`; the two validators mean the same thing by blank.
+        for blank in ["", " ", "   ", "\t", "\n", " \t\n "] {
+            let policy = AccountPolicy {
+                currency: Some(blank.to_owned()),
+                ..policed_no_currency.clone()
+            };
+            assert_eq!(
+                policy.validate(),
+                Err(expected.to_owned()),
+                "a currency of {blank:?} names nothing"
+            );
+        }
+
+        // Naming it is what makes the same policy usable ...
+        AccountPolicy {
+            currency: Some("USD".to_owned()),
+            ..policed_no_currency
+        }
+        .validate()
+        .expect("a named currency satisfies the rule");
+
+        // ... and an UNPOLICED account owes no currency at all, which is the
+        // default account and every client that predates this policy layer.
+        assert!(AccountPolicy::default().currency.is_none());
+        AccountPolicy::default()
+            .validate()
+            .expect("an unpoliced account needs no currency");
+    }
+
+    /// The inverse of `every_shipped_policy_is_usable`: a name this build does
+    /// not ship resolves to nothing. Nothing asserted this, so a match arm
+    /// resolving a name absent from `SHIPPED_POLICIES` was invisible - the
+    /// membership gate in `shipped_policy` is what makes that unrepresentable
+    /// rather than merely untested.
+    #[test]
+    fn a_name_this_build_does_not_ship_resolves_to_nothing() {
+        for absent in ["", "nonsense", "Intraday-Trail", "intraday-trail ", "trail"] {
+            assert!(
+                shipped_policy(absent).is_none(),
+                "{absent} is not in SHIPPED_POLICIES and must not resolve"
+            );
+            assert!(!SHIPPED_POLICIES.contains(&absent));
+        }
+    }
+
+    /// The sixth branch of `validate`, held to the same standard as the five
+    /// above: the exact message, and the BOUNDARY pinned from both sides.
+    /// 1439 is the last minute of a UTC day and must be accepted; 1440 is the
+    /// first that is not and must be refused. Without both, an off-by-one from
+    /// `>=` to `>` admits a reset minute that no day contains.
+    #[test]
+    fn a_reset_minute_outside_the_day_is_refused() {
+        let expected = "reset_minute_utc must be a minute of the day, 0 to 1439";
+        // A real rule is set as well, so the fixture is genuinely policed and
+        // the accepted cases below prove the reset branch passed rather than
+        // that no branch was reachable.
+        let at = |minute: u32| {
+            policed(|p| {
+                p.daily_loss_limit = Some(DailyLossLimit {
+                    amount: Decimal::from(500),
+                    on_breach: BreachAction::LockUntilReset,
+                });
+                p.reset_minute_utc = minute;
+            })
+        };
+        for outside in [1_440, 1_441, u32::MAX] {
+            assert_eq!(
+                at(outside).validate(),
+                Err(expected.to_owned()),
+                "{outside} is not a minute of the day"
+            );
+        }
+        for inside in [0, 1, 22 * 60, 1_439] {
+            at(inside)
+                .validate()
+                .expect("a minute of the day is accepted");
+        }
     }
 
     /// The default reset is a convention and the default breach actions differ

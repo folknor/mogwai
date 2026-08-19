@@ -1530,7 +1530,8 @@ impl ServerMessage {
     /// the exec / fill / data buckets that both ends key their havoc off.
     ///
     /// The server's outbound delay path (`DelayAcks`) delays every execution
-    /// event ([`EventKind::is_execution`], i.e. everything but `Data`), and the
+    /// event ([`EventKind::is_execution`], i.e. `Exec` and `Fill` only -
+    /// `Admission` is transport truth and is exempt, as is `Data`), and the
     /// adapter's inbound latency knob buckets each variant with the full
     /// three-way split. Both consult this one classifier, so a variant can
     /// never be data on one end and execution on the other.

@@ -1631,6 +1631,70 @@ this pass was in production behaviour.
   forever right after it decided to report a boot failure. Do not re-open
   without answering that.
 
+## The engine/protocol document, round 2: risk policy and havoc validation
+
+- `risk.rs`'s TEST MODULE HAS A `policed()` FIXTURE HELPER and no test there may
+  hand-build a policy again. It names `currency: "USD"` so the currency rule -
+  which fires for EVERY policed fixture, whatever the rule under test says -
+  cannot fire and take the credit. That shadowing was A1: a fixture leaving
+  `currency: None` is refused either way, so a test asserting only `is_err()`
+  stayed green over a deleted amount branch. THE GENERAL SHAPE, and it is worth
+  carrying to any validator with a cross-cutting precondition: A FIXTURE MUST
+  SATISFY EVERY RULE EXCEPT THE ONE UNDER TEST, and the exact message is what
+  proves it did.
+- `SHIPPED_POLICIES` IS AUTHORITATIVE OVER `shipped_policy`, by a membership
+  gate at the top of the function. The unpinnable direction was a match arm
+  resolving a name absent from the list; nothing can enumerate a `match`'s arms,
+  so the honest close is structural - such an arm is now unreachable rather than
+  merely untested. A test can only observe the gate, not the arm, and the
+  bite-check has to be run in two steps to show that: add the unlisted arm WITH
+  the gate (test passes, which is the point) and then delete the gate (test
+  fails). Same lesson as `gate_skip_list.rs`: state the rule the code can
+  enforce.
+- `EventKind::is_execution` / `is_admission` ARE EXHAUSTIVE MATCHES, NOT
+  `matches!`, and that is load-bearing rather than stylistic. The production
+  comment claims a new kind "must opt IN to being delayed" - a claim about every
+  variant, present and future - and `matches!` cannot carry it. Written as
+  exhaustive matches the crate does not build until a new variant is classified,
+  at four sites. WHEN A COMMENT MAKES A CLAIM ABOUT VARIANTS THAT DO NOT EXIST
+  YET, THE COMPILER IS THE ONLY THING THAT CAN HOLD IT; a test can only pin
+  today's variants, so write both and let the test's expectation be an
+  exhaustive match too, which makes it fail to compile alongside production.
+- WHERE A VALIDATOR'S BRANCHES RETURN DISTINCT MESSAGES, ONE PERTURBATION PER
+  BRANCH IS THE ONLY HONEST BITE-CHECK. This round ran thirteen separate text
+  edits across `validate()` and `validate_divergence`, and every one had to name
+  which assertion fired - four amount branches whose fixtures are otherwise
+  identical, three currency directions in one `if`, and six numeric bounds. A
+  single perturbation that reddens a multi-assertion test proves only that ONE
+  of its assertions is alive.
+- A `Result<(), &'static str>` VALIDATOR'S "ALWAYS VALID" LOOP IS A COVERAGE
+  CLAIM AND HAS TO LIST EVERY SUCH VARIANT. `validate_divergence`'s loop skipped
+  `RejectNextCancel` and `CancelOpenOrderSilently`, so nothing established that a
+  WELL-FORMED arm of theirs is accepted - only that a malformed one is refused,
+  which a validator refusing everything also satisfies.
+- BLANK MEANS TRIMS-TO-EMPTY, ACROSS BOTH VALIDATORS IN THIS CRATE.
+  `validate_divergence` refuses a `client_order_id` on `trim().is_empty()`;
+  `AccountPolicy::validate` used a bare `is_empty()` on the currency, so
+  `Some("   ")` was accepted. Made to agree on the TRIM side, which is a
+  production change and needs its reason stated: the currency is a LOOKUP KEY -
+  the server sums equity over balances carrying exactly that code - so a
+  whitespace code matches no balance and would freeze a policed account's equity
+  at zero forever rather than refuse the policy at registration. Refusing at
+  registration is the whole point of `validate`. LATERAL, NOT CLOSED: a currency
+  with SURROUNDING whitespace, `" USD "`, is still accepted and still matches no
+  balance. Neither validator normalizes, only rejects; a later round wanting the
+  stronger rule should refuse any code differing from its trimmed form on both
+  sides at once.
+- THE ROUND'S OWN DEFECT CLASS SURVIVED IN A SIBLING THE ROUND DID NOT LOOK AT.
+  `validate()` has SIX branches; round 2 pinned five by name and left
+  `a_reset_minute_outside_the_day_is_refused` as a bare `is_err()` with no
+  boundary - the exact A1 shape the round existed to eliminate. It escaped
+  because it was not one of the four A1 named. WHEN A ROUND FIXES A DEFECT CLASS
+  IN A FUNCTION, SWEEP THE WHOLE FUNCTION, not the reported instances: the
+  finding names where the class was noticed, never where it lives. Now pinned at
+  1439-accepted / 1440-refused with the exact message; bite-checked by flipping
+  `>=` to `>`, which fails on the 1440 case by name.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
