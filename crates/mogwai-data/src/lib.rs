@@ -835,7 +835,17 @@ mod tests {
             unreachable!()
         };
         assert!(std::sync::Arc::ptr_eq(&symbol, &out.symbol));
-        assert_eq!(std::sync::Arc::strong_count(&symbol), 3);
+        // The permuter's own carried state reuses the SAME allocation for its
+        // map key. This was `strong_count == 3` - the local, the outgoing tick
+        // and the map key - which counts the handles rather than naming them,
+        // so any change in how the tick is moved through `apply` breaks it
+        // without a defect. `ptr_eq` on the key says what the count was there
+        // for and cannot be moved by the plumbing.
+        let (key, _) = perm
+            .state
+            .get_key_value(&symbol)
+            .expect("the first trade of a symbol inserts its carried state");
+        assert!(std::sync::Arc::ptr_eq(&symbol, key));
     }
 
     #[test]

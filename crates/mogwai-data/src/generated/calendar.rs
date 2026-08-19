@@ -8,11 +8,6 @@ const MINUTES_PER_WEEK: i128 = 10_080;
 const NS_PER_MINUTE: u64 = 60_000_000_000;
 const UNIX_EPOCH_LOCAL_WEEK_MINUTE: i128 = 4 * MINUTES_PER_DAY;
 
-#[cfg(test)]
-thread_local! {
-    static SETTLEMENT_CANDIDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WeeklyWindow {
@@ -105,11 +100,26 @@ impl SessionCalendar {
 
     #[must_use]
     pub fn settlement_instants(&self, from_ns: u64, to_ns: u64) -> Vec<u64> {
+        self.settlement_scan(from_ns, to_ns).0
+    }
+
+    /// The scan behind `settlement_instants`, returning the crossings AND how
+    /// many day-step candidates it considered to find them.
+    ///
+    /// The count is what separates "steps a day at a time from the first
+    /// crossing" from "steps a minute at a time and filters", and only a test
+    /// wants it - but it is RETURNED rather than recorded in a counter. The
+    /// previous shape was a `#[cfg(test)]` `thread_local!` incremented from
+    /// this loop and read one line after a `.set(0)` in the single test that
+    /// looked at it. That was safe only for as long as libtest gives each test
+    /// its own thread and no second test reads it without resetting, and both
+    /// of those failures are silent. A return value cannot be shared.
+    fn settlement_scan(&self, from_ns: u64, to_ns: u64) -> (Vec<u64>, usize) {
         let Some(target) = self.settlement_minute_of_day else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
         if to_ns <= from_ns {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let first_minute = from_ns / NS_PER_MINUTE + 1;
         let last_minute = to_ns / NS_PER_MINUTE;
@@ -118,12 +128,12 @@ impl SessionCalendar {
         let first_remainder = i128::from(first_minute).rem_euclid(MINUTES_PER_DAY);
         let delta = (target_utc_day_minute - first_remainder).rem_euclid(MINUTES_PER_DAY);
         let Ok(mut utc_minute) = u64::try_from(i128::from(first_minute) + delta) else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
         let mut result = Vec::new();
+        let mut candidates = 0_usize;
         while utc_minute <= last_minute {
-            #[cfg(test)]
-            SETTLEMENT_CANDIDATES.update(|count| count + 1);
+            candidates += 1;
             let instant = utc_minute.saturating_mul(NS_PER_MINUTE);
             if instant > from_ns && instant <= to_ns && self.is_open(instant) {
                 result.push(instant);
@@ -133,7 +143,7 @@ impl SessionCalendar {
             };
             utc_minute = next;
         }
-        result
+        (result, candidates)
     }
 
     fn local_week_minute(&self, clock_ns: u64) -> i128 {
@@ -197,7 +207,6 @@ mod tests {
 
     #[test]
     fn settlement_day_step_respects_local_offset_and_open_filter() {
-        SETTLEMENT_CANDIDATES.set(0);
         let value = SessionCalendar {
             utc_offset_minutes: 90,
             open_windows: vec![WeeklyWindow {
@@ -209,12 +218,16 @@ mod tests {
         value.validate().unwrap();
         let day_ns = 86_400_000_000_000;
         let expected_first = 30 * NS_PER_MINUTE;
+        let (instants, candidates) = value.settlement_scan(0, 10 * day_ns);
         assert_eq!(
-            value.settlement_instants(0, 10 * day_ns),
+            instants,
             (0..10)
                 .map(|day| expected_first + day * day_ns)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(SETTLEMENT_CANDIDATES.get(), 10);
+        // Ten days, ten candidates: the scan steps a DAY from the first
+        // crossing rather than walking minutes and filtering. Without this the
+        // instant list above is satisfied by either implementation.
+        assert_eq!(candidates, 10);
     }
 }

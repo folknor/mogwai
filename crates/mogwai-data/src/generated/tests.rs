@@ -1100,13 +1100,44 @@ fn liquidity_drought_imitates_dying_symbol() {
     let max_gap = gaps.iter().copied().fold(0.0_f64, f64::max);
     // What this test is about is the RATIO the drought applies to the PARENT
     // gap: `thin_factor` multiplies the clean gap, so the realized mean must
-    // land near `thin_factor * mean_event_duration_s`. The 0.5x-to-2x band is
-    // sampling slack on a 50,000-gap draw whose gaps are additionally stretched
-    // and squeezed by the session envelope; it is not a fitted window.
+    // land near `thin_factor * mean_event_duration_s`.
+    //
+    // THE WINDOW IS AN ENSEMBLE, NOT A TASTE. It used to be 0.5x to 2x, on the
+    // stated ground that a 50,000-gap draw is noisy - and it is not: the ratio
+    // is a systematic quantity, measured 0.8898 to 0.9739 over the run seeds 0
+    // through 7 and 42, an 8.4 percent spread with no seed anywhere near the
+    // old edges.
+    //
+    // WHY IT SITS BELOW ONE: event-weighted sampling, and one site only. A
+    // draft of this comment blamed the envelope dividing the arrival rate as
+    // well as multiplying the gap - that second site is `low_intensity_gap_ns`
+    // and it is GATED on `arr_mult < LOW_INTENSITY_ARR_MULT`, which is 0.01,
+    // while the committed calendar-free `session_profile` bottoms out at
+    // `min intensity_hour * 24 * min dow_weight * 7`, about 0.584. It is
+    // unreachable here, so the only site in play is the open-market
+    // `duration_s = duration_s / arr_mult * arrival_thin`. Its mean is
+    // sampled PER EVENT, and busy hours emit more events, so the sample
+    // over-represents large `arr_mult` and the mean of `1 / arr_mult` lands
+    // under one.
+    //
+    // THE CATCH SET, measured by scaling `thin_factor` while holding
+    // `expected_gap` at the unscaled value - which is exactly a production
+    // multiplier off by that factor. Because the low-intensity branch is
+    // unreachable, the gap really is proportional to `arrival_thin` draw by
+    // draw; the LINEARITY IS STILL ONLY STATISTICAL, because a scaled gap
+    // advances `clock_ns` and so changes which hours the later gaps sample.
+    // That feedback is where the 8.4 percent ensemble spread comes from. At the
+    // old window: caught below 0.55x and above 2.25x, so a multiplier off by
+    // 50 percent UPWARD passed (1.5x reads 1.351, inside 2). At this one:
+    // caught below ~0.83x and above ~1.27x, with the nine-seed ensemble still
+    // clearing both edges by about 18 percent. A tape change that legitimately
+    // moves the envelope re-blesses this number, which is the bump it already
+    // owes.
     let expected_gap = THIN_FACTOR * scalars.mean_event_duration_s;
+    let gap_ratio = mean_gap / expected_gap;
     assert!(
-        (expected_gap / 2.0..=expected_gap * 2.0).contains(&mean_gap),
-        "mean_gap={mean_gap} expected~{expected_gap}"
+        (0.75..=1.15).contains(&gap_ratio),
+        "mean_gap={mean_gap} expected~{expected_gap} ratio={gap_ratio}"
     );
     assert_near(
         "drought_duration_acf_lag1",
@@ -1765,8 +1796,15 @@ fn the_integral_floor_lifts_the_realized_mean_above_the_notional_target() {
     // target here is 0.476 of one, so ANY grid passes it, including a broken
     // one that returns the floor for every draw. What is pinned instead is the
     // measured RATIO, so a later change to the rounding rule has to re-bless
-    // the number rather than move it silently. A truncating grid reads 1.00
-    // (all mass on the floor); half-away-from-zero reads the value below.
+    // the number rather than move it silently. MEASURED, because this comment
+    // used to claim a truncating grid "reads 1.00, all mass on the floor",
+    // which is not what happens: substituting `RoundingStrategy::ToZero` for
+    // the shipped `MidpointAwayFromZero` in `materialize_size` reads 2.2642
+    // and fails this assertion by 0.012 past its window. The floor is doing
+    // most of the lifting either way - what separates the two is the mass
+    // between one and two contracts, not the mass at the floor - so the
+    // window's bite against a rounding change is thin and is stated rather
+    // than assumed.
     let ratio = realized / target;
     assert_near("integral floor lift", ratio, 2.326, 0.05);
 }

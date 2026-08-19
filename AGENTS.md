@@ -70,8 +70,10 @@ A Cargo workspace, seven crates under `crates/`:
   public surface and `mogwai-cli` calls them.
 - `mogwai-cli` - the `mogwai` BINARY. A clap dispatcher plus the offline
   subcommands that never bind a socket: `gen` (the tape generator and its
-  measurement consumers, including `measure12a`), `tick-composition`, `presets`
-  and `man`. `serve` does no work here - it hands its three arguments to
+  measurement consumers, including `measure12a`), `tick-composition`,
+  `segments` - a subcommand tree of its own, `cut` turning a delivered TBBO
+  month into a returns-space segment library and `tape` writing trades or bars
+  out of a generated source - `presets` and `man`. `serve` does no work here - it hands its three arguments to
   `mogwai_server::serve`. The bin TARGET name is `mogwai`, not the package name,
   and that is load-bearing: `brokkr run mogwai` and the shipped launcher both
   exec `target/release/mogwai` by that name. The Python measurement harness

@@ -177,7 +177,27 @@ mod tests {
 
     #[test]
     fn published_book_carries_values_without_calibration_metadata() {
-        assert_eq!(std::mem::size_of::<PublishedBook>(), 48);
+        // The four published values and NOTHING ELSE. This was a bare `== 48`,
+        // which is a layout pin with no `#[repr]` behind it - a struct
+        // reordering tripwire wearing a size test's clothes, and a number that
+        // says nothing about what the struct holds. Stated as the sum of the
+        // four field types it is the same check on today's layout, immune to
+        // reordering, and it reads as the claim it is making.
+        //
+        // IT IS NOT IMMUNE TO A FIELD TYPE CHANGING WIDTH, and an earlier
+        // draft of this comment said it was. "Sum of the field sizes equals
+        // `size_of`" is itself a layout claim - it asserts ZERO PADDING - and
+        // it holds only because 2*8 + 2*16 happens to pack exactly under
+        // `f64`'s align 8 and `Decimal`'s align 4. Narrow `bid_ticks` to
+        // `f32`, a pure width change adding no calibration metadata, and the
+        // sum reads 44 while `size_of` rounds to 48: this fires on a change
+        // the test's name says it does not police. The honest scope is
+        // immune to reordering, and to width changes only while the field set
+        // still packs without padding.
+        assert_eq!(
+            std::mem::size_of::<PublishedBook>(),
+            2 * std::mem::size_of::<f64>() + 2 * std::mem::size_of::<Decimal>()
+        );
         assert!(
             std::mem::size_of::<PublishedBook>()
                 < 2 * std::mem::size_of::<f64>() + std::mem::size_of::<TopOfBookSizes>()

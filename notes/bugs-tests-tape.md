@@ -63,8 +63,8 @@ The full gate went 58.3 s to 41.4 s and 50.4 s on two post-change runs - a
 noisy figure, and all of whatever it saved comes from the `instrumented`
 sweep; the focused `brokkr test -p mogwai-data "" --debug` went
 133.66 s to 86.15 s over its three sweeps. The numbers, the lane split and the
-one measured loss are in `reference/performance.md`. What is left open from
-this cluster, for whoever takes it:
+one measured loss are in `reference/performance.md`. The two skip entries this
+cluster left behind are closed, so nothing here is open:
 
 - CLOSED IN ROUND 4, with finding 6. Both entries are out of `skip` and both
   tests are un-ignored. `synthetic_spread_decomposition_at_protocol_seven` at
@@ -79,10 +79,18 @@ sub-case was enforced instead. The reasoning lives on
 `gate_skip_list::no_test_binary_writes_a_committed_fixture` and in the
 carry-forward; it is not repeated here.
 
-What is left open, for a later round if it wants it: an ignore REASON is free
-text, so nothing can tell a COST ignore from an ENVIRONMENT one, and that
-classification is what any stronger rule in this area would need. There is no
-longer a reasonless `#[ignore]` anywhere in the tree: round 2 gave
+THE RESIDUE IS REFUSED IN ROUND 5, not carried further. It was stated as "an
+ignore REASON is free text, so nothing can tell a COST ignore from an
+ENVIRONMENT one, and that classification is what any stronger rule in this area
+would need". The classification is only worth having if some rule gates on it,
+and after rounds 1 through 4 there is no such rule left to write: the one
+silent case is enforced by `no_test_binary_writes_a_committed_fixture`, the
+cost half of the `skip` list was audited against measurement in round 2 and
+now carries per-entry numbers, and every remaining ignore reason is prose
+addressed to a human reader. Introducing a machine-readable taxonomy to
+classify reasons nothing dispatches on would be a scanner whose verdict no
+gate consumes. There is no longer a reasonless `#[ignore]` anywhere in the
+tree: round 2 gave
 `session_modulation_reproduces_curves` a COST reason that also states what the
 attribute buys, which is exclusion from the FAST lane rather than from the gate.
 
@@ -128,44 +136,43 @@ REFUSED as fail-closed behaviour a gate certifying complete coverage should
 have. The measurements are in `notes/bug-loop-carry-forward.md`. Nothing is
 left open from this cluster.
 
-## 8. Smaller things
+## 8. Smaller things - closed in round 5
 
-- **`empty_hour_stats_match_the_shared_conformance_fixture` is the good pattern**
-  and worth keeping in view as the model: versioned JSON under `analysis/`,
-  `assert_eq!(spec.version, 1)` so a fixture bump forces a re-read, both
-  implementations kept separate. Same for
-  `stratified_roll_matches_the_shared_conformance_fixture`. These two are the only
-  cross-implementation gates in scope that actually satisfy the shared-fixture
-  rule.
-- **`SETTLEMENT_CANDIDATES`** (`calendar.rs:13`) is a `#[cfg(test)]`
-  `thread_local!` mutated by production code and asserted in
-  `settlement_day_step_respects_local_offset_and_open_filter`. It survives
-  `--test-threads=8` (libtest gives each test its own thread) AND
-  `--test-threads=1` (the test resets to 0 first), so it is safe today - but it is
-  process-global state reachable from a production path, and its safety rests on
-  a `.set(0)` one line above the assertion. If a second test ever asserts on it
-  without resetting, or if libtest ever pools threads, it breaks silently. A
-  returned count would be strictly better than a thread-local counter.
-- **`published_book_carries_values_without_calibration_metadata`** asserts
-  `size_of::<PublishedBook>() == 48`. That is a layout pin with no `#[repr]`
-  guarantee behind it; it is a struct-reordering tripwire dressed as a size test.
-  The second assertion in the same test (size is less than the naive sum) is the
-  one carrying the actual claim.
-- **`tick_rule_reuses_the_trade_symbol_allocation`** asserts
-  `Arc::strong_count == 3`. Correct today, but strong-count assertions are
-  brittle against any change in how the tick is moved through `apply`.
-  `Arc::ptr_eq` on the line above already carries the claim.
-- **`liquidity_drought_imitates_dying_symbol`** accepts `mean_gap` anywhere in
-  `[0.5x, 2x]` of expected - a 4x window. Combined with the fixed seed this is
-  deterministic, so it is not flaky, but it will not catch a drought multiplier
-  that is off by 50%. The comment acknowledges the band is slack rather than
-  fitted; worth a note that it is wide enough that only a broken-outright drought
-  fails.
-- **`the_integral_floor_lifts_the_realized_mean_above_the_notional_target`**
-  deserves credit: its comment explicitly identifies that the obvious assertion
-  (`realized > target`) is green by construction and pins the measured ratio
-  2.326 plus or minus 0.05 instead. That is the reasoning the V4-V8 vectors above
-  are missing.
+All six items are resolved. The measurements and the bite-checks are in
+`notes/bug-loop-carry-forward.md`; the verdicts, because two of the six were
+praise rather than defects:
+
+- BOTH PRAISED PATTERNS DESERVE THEIR PRAISE, verified rather than taken on
+  trust, with one asymmetry found and closed in the Roll pair - the Python half
+  PRINTED the fixture version where the Rust half asserts it. The integral-floor
+  test's reasoning holds and its ratio has not drifted, but its parenthetical
+  claim about what a truncating grid reads was false and is now the measured
+  number.
+- The three brittle-assertion items are converted rather than deleted, because
+  each was the only thing asserting something real: a returned candidate count
+  replaces the `#[cfg(test)]` thread-local, a sum over the four field types
+  replaces the `== 48` layout pin, and a `ptr_eq` on the permuter's retained map
+  key replaces the `strong_count == 3`.
+- The drought window is an ensemble now, and the finding's own claim about it
+  was half wrong: at 0.5x-to-2x a multiplier off by 50 percent DOWNWARD was
+  caught and one off by 50 percent upward was not.
+
+TWO THINGS ARE CARRIED, NOT CLOSED, and they are named here rather than left to
+the carry-forward alone, because a section that says "nothing is open" over
+residue recorded elsewhere in the same change is the exact defect this round
+spent itself correcting.
+
+- CARRIED: the Roll conformance fixture's Python half is manual. It runs as
+  `python3 analysis/roll_estimator.py conformance` and NO LANE RUNS IT, so the
+  version guard fixed above only fires for a human who thinks to invoke it. The
+  dwell pair has automated tests on both sides; this pair does not. Not fixed
+  because a Rust test may not spawn Python.
+- CARRIED, and it is a hole in a rule `AGENTS.md` states as binding: NEITHER
+  shared fixture detects a quietly WIDENED `tolerance`. The version is a SCHEMA
+  version, and a tolerance edit weakens both implementations at once, so the
+  second implementation - whose whole purpose is to catch a one-sided drift -
+  is structurally blind to it. There is no re-derivation to compare against,
+  the way the arrival vectors have one. Naming it is all this round can do.
 
 ## Structural recommendation - closed in round 2
 

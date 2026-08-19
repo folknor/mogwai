@@ -1338,6 +1338,132 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
   and every `tests.rs` edit is inside `mod tests`, which `generated/mod.rs`
   declares `#[cfg(test)]`. No constant, no fingerprint, no artifact moved.
 
+## The tape document, round 5: what carries to `bugs-tests-engine-protocol`
+
+The tape mechanics die with that document. What generalises, from the six
+"smaller things" and the two praised patterns among them:
+
+- VERIFY THE PRAISE. Two of the round's six items were commendations rather
+  than defects, and BOTH held - but only after being run. The two checks that
+  earned their keep: the praised Python half of the Roll conformance fixture
+  only PRINTED `spec["version"]` where the Rust half asserts it, so a schema
+  bump would have gone through one gate and past the other; and the
+  integral-floor test's comment claimed "a truncating grid reads 1.00, all mass
+  on the floor", which measurement refuted at 2.2642. THE REASONING IN A
+  PRAISED COMMENT DECAYS LIKE ANY OTHER COMMENT, and a number written inside an
+  argument for why an assertion is not vacuous is exactly the kind nobody
+  re-runs.
+  - The praise itself is deserved and the pattern is the model: a versioned
+    language-neutral JSON under `analysis/` carrying `_doc`, `units`, `rules`
+    and per-case `why`, `include_str!`d by two implementations kept
+    deliberately separate. `dwell_conformance.json` is run by an automated test
+    on both sides; `spread_conformance.json`'s Python side is a manual
+    `python3 analysis/roll_estimator.py conformance` and no lane runs it.
+    Recorded rather than fixed: a Rust test may not spawn Python, and the
+    file's own docstring is where the invocation lives.
+  - WHAT NEITHER FIXTURE DETECTS, and it is the standing AGENTS.md hole: the
+    version is a SCHEMA version, so a quietly WIDENED `tolerance` weakens both
+    halves at once and stays green on both. Unlike the arrival vectors there is
+    no re-implementation to catch it, because catching it is precisely what
+    having two implementations buys - and a tolerance edit moves both.
+- A BRITTLE ASSERTION IS USUALLY A REAL CLAIM WEARING THE WRONG EXPRESSION, so
+  CONVERT RATHER THAN DELETE. Three instances in one round, and in all three the
+  proposal on the table was deletion:
+  - `Arc::strong_count(&symbol) == 3` counts handles instead of naming them. The
+    third handle was the permuter's HashMap KEY, and nothing else asserted that
+    the key reuses the trade's allocation - so deleting the count on the ground
+    that the neighbouring `ptr_eq` "already carries the claim" would have
+    unpinned a real property. It is a `ptr_eq` on the key from
+    `get_key_value` now, which says the same thing and does not move when the
+    tick's route through `apply` does. Bite-checked by allocating a fresh
+    `Symbol` for the key: the new assertion fires, the neighbouring one passes.
+  - `size_of::<PublishedBook>() == 48` is a layout pin with no `#[repr]` behind
+    it. Stated as `2 * size_of::<f64>() + 2 * size_of::<Decimal>()` it is the
+    same check on today's layout, immune to reordering and to a field type
+    changing width, and it reads as the claim. Bite-checked by adding a
+    `CalibrationProvenance` field: fails 72 against 48 on the named assertion.
+  - A `#[cfg(test)]` `thread_local!` counter mutated from a production loop is
+    process-global state whose safety rests on a `.set(0)` one line above the
+    read. A RETURNED COUNT CANNOT BE SHARED: `settlement_instants` delegates to
+    a private `settlement_scan` returning `(Vec<u64>, usize)`, and production
+    now carries no `cfg` at all. THE BITE-CHECK IS WHERE THE LESSON IS - the
+    obvious perturbation (step one minute instead of one day) fails on the
+    INSTANT LIST, not on the count, so it credits the wrong assertion. The
+    perturbation the count alone catches is the honest alternative
+    implementation: step a minute at a time AND filter on the minute-of-day,
+    which returns the identical list from 14,371 candidates against 10.
+- MEASURE THE CATCH SET BY SCALING THE FIXTURE'S OWN INPUT, not by perturbing
+  production, wherever the quantity is linear in it. `liquidity_drought_imitates
+  _dying_symbol` compared `mean_gap` against `thin_factor * mean_event_duration_s`
+  in a 0.5x-to-2x window justified as "sampling slack". It is not slack: the
+  ratio is systematic, 0.8898 to 0.9739 over run seeds 0-7 and 42, an 8.4
+  percent spread, sitting below one because the gap mean is sampled PER EVENT
+  and busy hours emit more events, so the sample over-represents large
+  `arr_mult` and the mean of `1 / arr_mult` lands under one. Scaling
+  `thin_factor` while
+  holding the expectation fixed is arithmetically identical to a production
+  multiplier off by that factor, so one test-local loop measured the whole catch
+  set in one run: caught below 0.55x and above 2.25x. The window is 0.75 to 1.15
+  now - caught below ~0.83x and above ~1.27x, ensemble clearing both edges by
+  ~18 percent. Bite-checked at `thin_factor * 1.5` in `regime.rs`: fails the
+  ratio assertion at 1.3508, which the old window passed, AND
+  `liquidity_drought_stretches_durations` passes under the same perturbation, so
+  no other test covered it.
+  - THE REPORT'S OWN CLAIM ABOUT THE WINDOW WAS HALF WRONG in the direction
+    nobody checks: "will not catch a multiplier off by 50%" is true upward
+    (1.5x reads 1.351, inside 2) and false downward (0.5x reads 0.451, outside
+    0.5). A window that is asymmetric ONLY because the honest value sits off
+    centre is the easiest kind to describe wrongly.
+- A DETERMINISTIC TEST IS NOT AUTOMATICALLY A TIGHT ONE, and the two get
+  conflated. Every window in this round was on a fixed seed, so none of them
+  could flake - and three of them were sized as though they could. Where the
+  seed is fixed, the ONLY thing a wide window buys is tolerance of legitimate
+  change, which under this workspace's rules already owes a
+  `TAPE_PROTOCOL_VERSION` bump and a re-bless. Size the window against the
+  seed ENSEMBLE and say so.
+- THE ROUND THAT CORRECTS FALSE COMMENTS WRITES FALSE COMMENTS. Round 5's whole
+  subject was claims that read as checked and were not, and its cold review
+  found three of its own, all in prose it had just written. Two general shapes,
+  both worth carrying to `bugs-tests-engine-protocol`:
+  - A REPLACEMENT ASSERTION INHERITS A SCOPE CLAIM NOBODY RE-DERIVES. "Immune
+    to the field types changing width" was written of
+    `size_of::<PublishedBook>() == 2 * size_of::<f64>() + 2 * size_of::<Decimal>()`.
+    It is false: sum-of-fields equals `size_of` IS a layout claim - it asserts
+    zero padding - and narrowing one `f64` to `f32` makes the sum 44 while
+    `size_of` rounds to 48, firing on exactly the change the claim exempted.
+    When a brittle assertion is converted, the new one's IMMUNITIES are a fresh
+    claim owing its own counterexample hunt, not something the conversion
+    confers.
+  - A MECHANISM NAMED IN A COMMENT MUST BE SHOWN REACHABLE. The drought comment
+    explained a sub-unity ratio by "two sites", where the second
+    - `low_intensity_gap_ns` - is gated on `arr_mult < 0.01` and the committed
+    calendar-free profile bottoms out near 0.584, so it never runs in that test.
+    The window derived from the wrong story was nonetheless correct, which is
+    the trap: a right number is not evidence for the argument printed above it.
+    Grep the gate before naming the branch.
+  - A GUARD PLACED AFTER WHAT IT GUARDS IS NOT A GUARD. The Python conformance
+    runner's new `spec["version"] != 1` check sat two lines below
+    `tol = spec["tolerance"]`, so the v2 fixture it exists to catch raises
+    `KeyError` first and the reader gets a traceback instead of the message.
+    Version and schema guards belong immediately after the parse, which is also
+    where the Rust half had always put its `assert_eq!`.
+- A DOCUMENT MUST NOT CLOSE WHAT ITS OWN CHANGE RECORDS AS OPEN. Round 5's
+  report said "nothing is left open from this cluster" while the carry-forward
+  edit in the same commit recorded two unfixed items, one of them a live hole
+  in a binding `AGENTS.md` rule. Residue is named as CARRIED in the report
+  itself; a pointer to another file is not a disclosure. The two carried here
+  are the manual-only Python conformance lane and, the one that matters, that
+  neither shared fixture detects a quietly widened `tolerance` - the version is
+  a SCHEMA version and a tolerance edit weakens both implementations at once,
+  so the second implementation is structurally blind to it.
+- NO `TAPE_PROTOCOL_VERSION` BUMP WAS OWED, checked rather than assumed. The
+  round's one production edit is `calendar.rs`'s `settlement_scan` extraction:
+  the loop, the pushes and the day step are character-identical, the count is
+  the only new binding, and the removed `#[cfg(test)]` update never existed in
+  release. No constant, no fingerprint, no artifact moved, and the gate's counts
+  are unchanged at 1195 + 440 over 1692 pairs, 0 orphaned - no test added or
+  removed, four rewritten. `TAPE_PROTOCOL_VERSION` next takes 21.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -1493,6 +1619,22 @@ LATERAL, UNOWNED BY ANY DOCUMENT IN THE ARC:
     because an ignored test was already a pair. The wall is inside the noise
     the r2 entry warns about; read the counts. The review-repair pass re-ran it
     at 52.4 s with every count identical.
+  - tape r5: 1195 + 440, 1692 pairs, 1635 run, 57 ignored, 0 orphaned, 14
+    skips, 53.4 s. IDENTICAL TO tape r4 IN EVERY COUNT, which is the evidence
+    the round added and removed no test: four existing tests were rewritten in
+    place and one production function was split without changing what it
+    returns. The review-repair pass re-ran it at 41.7 s, every count identical.
+  - A GATE FAILURE THAT REPORTS 440 ORPHANS IS ONE FAILURE, NOT 441. The
+    repair pass's first gate run died on
+    `launch::tests::the_ready_bound_returns_on_time_against_a_silent_venue`
+    with `ExecutableFileBusy` - `ETXTBSY`, the test writing its silent-venue
+    shell script and exec'ing it before the write handle is closed, a
+    real race but an unrelated and transient one - and the WHOLE
+    `instrumented` sweep then never ran, so coverage reported every one of its
+    440 tests as orphaned. This looks exactly like the 2026-08-16 brokkr
+    coverage bug `AGENTS.md` warns about and is NOT it: the tell is that the
+    orphan count equals the missing sweep's pass count. Read the first
+    `[error]` line, not the flood under it. A plain re-run was green.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

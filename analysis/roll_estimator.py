@@ -71,6 +71,16 @@ def roll_in_stratum(prices, change_vol, boundaries, stratum, tick, min_pairs):
 def conformance():
     with open(FIXTURE) as fh:
         spec = json.load(fh)
+    # FIRST STATEMENT AFTER THE PARSE, matching the Rust half's `assert_eq!`.
+    # The Rust half asserts this; printing it is not the same thing. A schema
+    # bump that ADDS a gated field leaves this runner green while reading the
+    # fixture under rules it was never re-read against, so the two halves would
+    # stop being held to one contract exactly when the contract moved. It has to
+    # precede every other read of `spec`: a v2 that renames or moves
+    # `tolerance` would otherwise raise `KeyError` before the guard ran, and a
+    # traceback is not the message this exists to deliver.
+    if spec["version"] != 1:
+        raise SystemExit(f"fixture version {spec['version']} != 1; re-read it")
     tol = spec["tolerance"]
     failures = 0
     print(f"spread conformance fixture v{spec['version']}, tolerance {tol:g}")
