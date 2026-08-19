@@ -41,7 +41,9 @@ the fix passes made to them:
   `Decimal` around 1.98e28 first and PANICS there. The silent one-tick print is
   real code and unreachable that way; the reachable damage was the panic.
 - 4 was HALF RIGHT. `ret[0] == 0` is a fixture rule neither side checked, and
-  both `validate`s now refuse it (plus the `side` alphabet, on the reader side).
+  both `validate`s now refuse it, and both refuse the `side` alphabet too - the
+  reader from round 2, the writer from the close pass, which found the alphabet
+  enforced on one side only under an argument that applied equally to both.
   `dt_ns` POSITIVITY IS NOT A FIXTURE RULE and must not become one: two prints
   at one nanosecond are ordinary in a swept book, `mogwai_lab::segments` records
   the difference verbatim, and refusing a zero would throw away real sessions.
@@ -105,8 +107,10 @@ cannot recur.
   kernel defects:
   - `ArrivalConfig::LogOuCox`'s `sigma_y` is checked only for finiteness and
     non-negativity. `x = exp(y - sigma^2 / 2)`, so the latent is unbounded BELOW
-    and the exposure per cell collapses. `sigma_y` 8 costs 115 ms per draw and
-    keeps succeeding; `sigma_y` 12 hits the full traversal and refuses. Every
+    and the exposure per cell collapses. `sigma_y` 8 costs 3.6 ms per draw on
+    average, peaking at 115 ms, and keeps succeeding, so unlike the cliff it
+    recurs draw after draw; `sigma_y` 12 hits the full traversal and refuses.
+    Every
     other family's latent has a floor - MMPP by construction, `SelfExciting` at
     `1 - phi` with `phi <= 0.98`, `ShotNoise` at `1 - m` with `m <= 0.8` - and
     every other family's parameters carry two-sided ranges. `sigma_y` is the odd
@@ -221,7 +225,9 @@ could not construct one, because `RegimeState::new` drops an already-elapsed arm
 and every later frontier advance either consumes the arm or leaves it strictly
 ahead. `SweepShape`'s `single_frac >= 1.0` division-by-zero is correctly
 special-cased in `begin_event` and unreachable from `next_count_scaled`.
-At the time of the hunt the live tape identity was 21; round 3 spent 22 on the
-FlowSurge repair in finding 7, so `TAPE_PROTOCOL_VERSION` is 22 and
+At the time of the hunt the live tape identity was 20. Round 1 owed no bump and
+took none, round 2 spent 21 on the composer's price and clock rails in findings
+3 through 5, and round 3 spent 22 on the FlowSurge repair in finding 7, so
+`TAPE_PROTOCOL_VERSION` is 22 and
 `TAPE_PROTOCOL_VERSION` next takes 23. `bars.rs` is correct and its out-of-order
 contract is deliberate and tested.

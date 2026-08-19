@@ -4032,3 +4032,47 @@ to find its defect in a NEW TEST rather than in production code:
   arc's documents are all scheduled for deletion; the substance was MOVED into
   `performance.md` rather than pointed at. Check this on every close pass that
   lands a durable measurement.
+
+### The `bugs-data` CLOSE PASS, 2026-08-19
+
+Scope `e2e58ee~1..HEAD`, three commits. The arc is SOUND: the central fix was
+re-measured rather than believed, and the two defects found were both in the
+unreviewed half, which is now SEVEN close passes out of seven.
+
+- THE HEADLINE NUMBER IS VERIFIED, NOT QUOTED. Reverting `* rate_mult` in
+  `advance_state_to` as a text edit reproduced the mean latent at 123.08 against
+  a neutral arm at 1.005, and the assertion that fired was the RATIO one - the
+  one that names the defect - not an earlier guard. The 15x claim in the commit
+  message, in `reference/performance.md`'s neighbourhood and in
+  `notes/bugs-data.md` is the measured number.
+- THE STAGE-A `plan_sha256` IS TREE-PRODUCED, not typed. Verified by running
+  `committed_manifest_is_self_consistent`, which re-derives the whole manifest
+  from the committed pilot artifact and compares structurally as well as
+  hashing - a typed digest could not survive it.
+- DEFECT ONE, A FALSE HISTORY IN THE ROUND-3 PROSE. `notes/bugs-data.md`'s
+  closing section said "at the time of the hunt the live tape identity was 21".
+  It was 20: `e2e58ee~1` carries 20, round 1 owed no bump, round 2 spent 21 and
+  round 3 spent 22. The sentence is a HISTORICAL claim in the prose gate's
+  reading, so `tape_version_prose.rs` was blind to it by design, and it is the
+  exact failure mode the gate's two pinned phrasings exist to bound rather than
+  to eliminate. A close pass that reads a version-history sentence must resolve
+  it against `git show <ref>:<path>`, never against the round's own memory.
+- DEFECT TWO, THE MEAN QUOTED AS THE PEAK, AGAIN, ONE DOCUMENT DOWNSTREAM. The
+  round-3 cold review caught `sigma_y` 8's 115 ms peak being reported as its
+  mean, and it was corrected in `notes/todo.md` and `reference/performance.md` -
+  but not in `notes/bugs-data.md`'s own finding 6, whose prose still said "costs
+  115 ms per draw" three lines under a table stating "3.6 ms mean, 115 ms peak".
+  A number corrected in the documents a reviewer was looking at is not corrected
+  everywhere it was written. GREP THE NUMBER, not the file.
+- THE SHARED FIXTURE'S ALPHABET WAS ENFORCED ON ONE SIDE ONLY. Round 2 added the
+  `ret[0]` refusal to BOTH `validate`s with an explicit argument - `cut`
+  guarantees it, but `load` reads a FILE - then added the B/A/N side refusal to
+  the reader alone, though `mogwai_lab::segments::SegmentLibrary::load` reads the
+  same file and the same argument applies verbatim. Closed here, with the
+  writer-side test bite-checked. The generalization: when a rule is added to both
+  sides FOR A REASON, the next rule in the same commit inherits the reason.
+- THE EXHAUSTED REPORT IS KEPT, matching `notes/bugs-protocol.md`'s precedent in
+  this same arc: no open findings, a header saying so, and the refusals and
+  measurements retained with their reasoning. Its durable substance already lives
+  in `reference/performance.md` and its three deferrals in `notes/todo.md`, so
+  nothing durable depends on it surviving.

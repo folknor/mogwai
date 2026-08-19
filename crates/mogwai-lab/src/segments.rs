@@ -245,6 +245,18 @@ impl SegmentLibrary {
                     segment.trade_date, segment.ret[0]
                 )));
             }
+            // The `units` block's aggressor alphabet, on the writer's side too,
+            // and for the same reason the anchor rule is here: `cut` can only
+            // emit what the corpus parser admitted, but `load` reads a FILE. The
+            // reader refuses this; a library that reaches only this side would
+            // otherwise be accepted here and refused there, which is the split
+            // the shared fixture exists to prevent.
+            if let Some(bad) = segment.side.iter().find(|c| !matches!(c, 'B' | 'A' | 'N')) {
+                return Err(LabError::refusal(format!(
+                    "segment {} carries side {bad:?}, outside the DBN alphabet B/A/N",
+                    segment.trade_date
+                )));
+            }
         }
         Ok(())
     }
@@ -836,6 +848,39 @@ mod tests {
         };
         let err = library.validate().unwrap_err().to_string();
         assert!(err.contains("ret[0]=17"), "{err}");
+    }
+
+    /// The writer's half of the aggressor-alphabet refusal, which `mogwai-data`
+    /// enforces on its own reading. The fixture states the alphabet in `units`,
+    /// and a rule enforced on one side only is a rule a hand-edited library gets
+    /// past by opening it with the other tool.
+    #[test]
+    fn a_segment_side_outside_the_dbn_alphabet_is_refused() {
+        let library = SegmentLibrary {
+            doc: String::new(),
+            version: SEGMENT_LIBRARY_VERSION,
+            window: "asia".into(),
+            tick_size: "0.25".into(),
+            provenance: LibraryProvenance {
+                symbol: "MNQ".into(),
+                month: "2026-04".into(),
+                source_dir: String::new(),
+                source_files: Vec::new(),
+                cut_at: String::new(),
+            },
+            segments: vec![Segment {
+                trade_date: "2026-04-01".into(),
+                window_start_ns: 0,
+                trade_count: 2,
+                open_gap_ret: None,
+                dt_ns: vec![0, 1],
+                ret: vec![0, 5],
+                size: vec![1, 1],
+                side: vec!['B', 'X'],
+            }],
+        };
+        let err = library.validate().unwrap_err().to_string();
+        assert!(err.contains("side 'X'"), "{err}");
     }
 
     #[test]
