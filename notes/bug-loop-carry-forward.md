@@ -263,6 +263,95 @@ trusts yet.
   It is the guard-scope family in a new costume - the drain outlives nothing it
   reports on.
 
+## The adapter document, round 1: machinery and rulings
+
+- `tests/common/StubState` GREW THREE FIELDS, and a later round reaching for the
+  same shapes should use them rather than build a second mechanism.
+  - `ws_first_frame_at` is the wall instant the WS leg put its FIRST `ws_trades`
+    frame on the wire. ANY LATENCY MEASUREMENT IN THESE BINARIES STARTS THERE,
+    never at the return of `connect()`. Measuring from connect charges the
+    client for everything the harness does between the upgrade and the push, and
+    the harness does a lot there - `havoc_latency_delays_inbound_event` passed
+    with `HavocLatency` ZEROED, satisfied entirely by stub time. Deliberately
+    independent of the 100 ms pre-push sleep, so whatever a later round does to
+    that sleep cannot revive the defect. It is also where a "nothing leaked
+    early" window should END: `assert_only_instrument_prologue` with a fixed
+    duration starts its window at the return of `connect()` and races the
+    harness's own delays, so a slow enough connect fails the test for nothing.
+    Poll until the stamp appears instead - it is set strictly before the send.
+  - `fail_health` makes `GET /health` answer 500, which is the ONLY way to
+    represent `IdentityOutcome::Unreachable` end to end - the stub could
+    previously model only a venue that answers, so the unanswerable branch had
+    no fixture. `health_hits` is its companion and is not optional: a test
+    concluding "the client did not refuse" must first establish that it ASKED,
+    or a client that skipped the probe passes for free.
+- A BARE `>= 0` LOWER BOUND ON INBOUND LATENCY IS NEVER ZERO. `BASELINE_LATENCY`
+  is always on at `base_nanos = 30_000_000`, and armed `ClientHavoc.latency` ADDS
+  to it rather than replacing it. Measured, not read: with the armed latency
+  zeroed the honest floor came out at 31.7 ms. A test wanting "no delay" cannot
+  get one, and a test wanting a discriminating bound must clear 30 ms.
+- THE IDLE TIMEOUT IS WHAT A CLIENT DECIDES A BLACKOUT WITH, and before this
+  round `ConnHavoc::idle_timeout_ms` had NO end-to-end coverage at all: deleting
+  the `break` from `WsAction::Idle` in `lifecycle.rs` left all 115 tests of this
+  crate green. That is now a two-sided gate in `havoc.rs` -
+  `divergence_go_dark_within_the_idle_timeout_is_ridden_out` (blackout under the
+  timeout: one handshake, client up, held frame delivered) and
+  `..._past_the_idle_timeout_is_read_as_a_dead_socket` (blackout over it: at
+  least two handshakes, nothing delivered before the re-dial, and the tape
+  served once the blackout lifts). Each catches an injection the other passes.
+  - THE GENERAL RULING BEHIND IT, which the next "this test only tests the stub"
+    finding should be closed the same way: where the stub models a VENUE-side
+    divergence, the test is not worthless, it is aimed at the wrong end. Ask
+    what the CLIENT must decide when the venue behaves that way, and pin that.
+    Deleting was the cheaper close and the worse one.
+- A REFUSAL PATH'S TEST DROPS THE CONNECT RESULT rather than unwrapping it.
+  `client.connect().await.expect(...)` in a test whose property is "this venue
+  is NOT refused" fails as `connect websocket ... timed out` when the property
+  breaks - a message naming the socket, not the check. Both identity tests in
+  `havoc.rs` now `drop(client.connect().await)` and assert on
+  `is_disconnected()`.
+- A BLACKOUT FIXTURE MUST SEED A FRAME, or `dark_ms` is not load-bearing and the
+  test pins the trivial case. This is the arc's signature defect - a fixture that
+  does not exclude the shape it claims - and it REAPPEARED INSIDE THE FIX for it:
+  the first cut of `..._past_the_idle_timeout_is_read_as_a_dead_socket` set
+  `dark_ms = 600` over an EMPTY `ws_trades`, and `serve_ws` only sleeps `dark_ms`
+  before draining that list, so the socket was application-silent forever
+  whatever the blackout said. Deleting the `dark_ms` line left the test passing
+  identically. The repair is a seeded trade plus an idle timeout STRADDLING the
+  harness's 100 ms pre-push delay: without the blackout the venue speaks inside
+  the idle window and no socket is ever declared dead. The general form: after
+  writing a divergence fixture, delete the divergence and confirm the test goes
+  red. Nothing else detects this.
+- `notes/bugs-tests-adapter.md`'s "Binary-level timing" section says `havoc` has
+  17 tests. It has 19 after this round - ONE ADDED, none deleted; the deletion
+  was in `reconciliation`, which went 15 to 14. It also says `havoc`'s floor is
+  about 2 s, and the new dead-socket test can spend up to 3 s in
+  `wait_for_at_least` before it gives up, so that floor is now the more
+  misleading of the two numbers. The section is descriptive prose owned by round
+  5; the counts were left as written rather than silently edited under a later
+  round's feet.
+- THE VENUE'S ACCOUNT ID IS A LABEL AND THE CLIENT KEEPS ITS OWN. A round-1 cold
+  review argued `an_account_labelled_differently_is_still_served` should assert
+  the emitted `account_id` equals the WIRE's `SANDBOX-042`, on the reasoning that
+  a regression relabelling the snapshot would otherwise pass. The measurement
+  overturned it: `handle_account_state` stamps `ctx.account_id` deliberately, and
+  `note_account_label` logs the difference once at connect and moves on - one
+  venue is one run is one ledger, so the id is documentation, not a key. The
+  assertion that belongs there is the OPPOSITE one, `MOGWAI-001`, and it bites:
+  emitting the wire id instead fails it. The seeded snapshot is now selected by
+  its `9900` USDT balance rather than by being the first `Account` event drained,
+  which is what the reviewer's id-matching was really reaching for.
+- ROUND 3 OWNS THE WALL-CLOCK BOUNDS AND INHERITS ONE TIGHT ONE.
+  `havoc_latency_delays_inbound_event` now measures from `ws_first_frame_at` and
+  asserts `>= 50 ms` against a composed `BASELINE_LATENCY + armed` of 30 + 50 ms.
+  The bound is a LOWER one, so a slow machine does not flake it; what is thin is
+  its BITE. Zeroing the armed latency leaves the ~30 ms baseline, which clears
+  the bound by only ~20 ms - so the injection that proves this test alive is
+  itself the tight measurement. Left at 50 ms deliberately: choosing the bounds
+  is round 3's call to make across the whole set, not a fix to smuggle in under
+  round 1. If the bite ever needs widening, widen the ARMED delay, which moves
+  the signal, rather than the assertion, which moves the goalposts.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform

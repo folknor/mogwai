@@ -352,6 +352,21 @@ async fn ships_server_havoc() {
         .await
         .expect("data connect does not ship");
 
+    // DRAINED TO A DEADLINE, not read on the next line. The count is written by
+    // the stub's handler tasks, so an immediate read cannot distinguish "the
+    // data client shipped nothing" from "the data client's POST has not landed
+    // yet" - a regression shipping divergences asynchronously would pass. The
+    // assertion is that the count STAYS 2 for a window, which is the same
+    // discipline `an_order_list_reaches_the_wire_as_linked_legs` uses.
+    let deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < deadline {
+        assert_eq!(
+            state.control_hits.load(Ordering::Relaxed),
+            2,
+            "the data client must never ship divergences; only the exec leg arms the venue"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(state.control_hits.load(Ordering::Relaxed), 2);
 }
 
@@ -374,20 +389,26 @@ async fn havoc_latency_delays_inbound_event() {
         ..ClientHavoc::default()
     });
 
-    // Connect + subscribe FIRST, then start the clock, so the lower bound
-    // measures only the latency filter's contribution and not the unbounded
-    // connect/subscribe/handshake setup. The reader task that owns the latency
-    // sleep does not see the trade until the stub pushes it after the Subscribe;
-    // the stub pushes immediately on Subscribe, so the only material delay
-    // between this instant and delivery is the composed latency.
-    let mut rx = subscribed_data_client(state, Some(havoc)).await;
-    let start = Instant::now();
+    // THE CLOCK STARTS AT THE STUB'S SEND, not at `connect()`. Measuring from
+    // the return of connect/subscribe charges the client for everything the stub
+    // does between the upgrade and the push, and the harness does a good deal
+    // there - so with `HavocLatency` zeroed the assertion still passed, satisfied
+    // entirely by stub time. `ws_first_frame_at` is the instant the trade went on
+    // the wire, and the interval from there to delivery is the latency filter's
+    // contribution and nothing else, whatever the harness grows in front of it.
+    let mut rx = subscribed_data_client(Arc::clone(&state), Some(havoc)).await;
     let _trade = next_trade(&mut rx).await;
+    let arrived = Instant::now();
 
-    let elapsed = start.elapsed();
+    let sent = state
+        .ws_first_frame_at
+        .lock()
+        .expect("ws first frame instant mutex")
+        .expect("the stub recorded when it put the trade on the wire");
+    let elapsed = arrived.duration_since(sent);
     assert!(
         elapsed >= delay,
-        "inbound trade arrived {elapsed:?} after subscribe, before the composed {delay:?} delay"
+        "inbound trade arrived {elapsed:?} after the stub sent it, before the composed {delay:?} delay"
     );
     assert!(
         elapsed < Duration::from_secs(5),
@@ -644,13 +665,25 @@ async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
 
 /// An identity check the venue cannot answer is NOT a mismatch. A probe fails
 /// for the same transport reasons a socket does, and refusing on that would turn
-/// a blip into a dead client - so a venue with no `/health` is used, not judged.
+/// a blip into a dead client - so a venue that cannot answer is used, not judged.
+///
+/// THE FIXTURE HAS TO EXCLUDE THE ANSWERABLE CASE, and it did not: the stub
+/// served a perfectly good `/health` naming the run the client expected, which
+/// is the plain matching-identity path. Turning `verify_run_identity` into a
+/// hard refusal on `Unreachable` left this test green, and left the whole
+/// refused-to-refuse BEHAVIOUR with no coverage anywhere - the pure-unit
+/// classifier test pins the sorting, not what the connection loop does with it.
+/// So the venue here answers `500`: probed, unresolvable, and used regardless.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn an_unanswerable_identity_probe_does_not_refuse() {
     let state = Arc::new(StubState::default());
-    // Serving the run this client expects, so the only question is reachability.
+    // The run this client expects - set so that a stub which ever starts
+    // answering again would answer FAVOURABLY, and this test would then be
+    // pinning the wrong branch loudly rather than passing quietly.
     state.run_seed.store(7, Ordering::Relaxed);
+    // ...but it does not answer. The probe is made and cannot be resolved.
+    state.fail_health.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
     let (sink_tx, _sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
@@ -666,12 +699,24 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs the data-event sink");
-    client.connect().await.expect("connect is spawned");
+    // The connect result is DROPPED rather than unwrapped, so a client that
+    // wrongly refuses this venue fails on the property below instead of on a
+    // generic "connect timed out" from the helper - the refusal path never
+    // reports connected, and its message would name the socket, not the check.
+    drop(client.connect().await);
 
     tokio::time::sleep(Duration::from_millis(600)).await;
+    // The probe was ASKED before anything is concluded from the client not
+    // having refused: a client that skipped the check entirely would satisfy
+    // the assertion below for free, which is the vacuity this test carried.
+    let probes = state.health_hits.load(Ordering::Relaxed);
+    assert!(
+        probes >= 1,
+        "the client must have probed /health at all; saw {probes} requests"
+    );
     assert!(
         !client.is_disconnected(),
-        "a matching run must be used, not refused"
+        "an unanswerable probe must be used, not refused"
     );
 }
 
@@ -940,11 +985,19 @@ async fn divergence_dropped_account_update_leaves_fill_without_snapshot() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn divergence_go_dark_suppresses_stream_during_window() {
-    // `GoDark { ms }` blacks the venue out for a window. The stub models the
-    // blackout on the data WS leg: after the Subscribe it holds (suppresses) all
-    // application frames for `dark_ms`, then resumes. The client must see NO
-    // trade during the dark window, and the trade only after it lifts.
+async fn divergence_go_dark_within_the_idle_timeout_is_ridden_out() {
+    // `GoDark { ms }` blacks the venue out for a window; the stub models it on
+    // the data WS leg by emitting no application frame for `dark_ms`.
+    //
+    // WHAT THE CLIENT DECIDES ABOUT A BLACKOUT IS THE IDLE CLOCK, and that is
+    // the production surface this pins. A blackout SHORTER than
+    // `idle_timeout_ms` must be ridden out: the socket stays up, nothing is
+    // re-dialled, and the frame held behind the blackout is delivered when it
+    // lifts. Its twin below pins the other side of the same decision.
+    //
+    // Without the idle timeout set this test asserted only that the stub slept,
+    // which no production edit could falsify - the blackout is the venue's
+    // behaviour, and the venue here is the harness.
     let dark_ms = 300usize;
     let state = Arc::new(StubState::default());
     state.dark_ms.store(dark_ms, Ordering::Relaxed);
@@ -953,14 +1006,45 @@ async fn divergence_go_dark_suppresses_stream_during_window() {
         .lock()
         .expect("ws trades mutex")
         .push(trade_json(10, "100.00"));
+    let base_url = bound_stub(Arc::clone(&state)).await;
 
     let start = Instant::now();
-    let mut rx = subscribed_data_client(state, None).await;
+    // Comfortably beyond the blackout plus the harness's own pre-push delay, so
+    // a green run means the idle clock tolerated the silence rather than that
+    // the two budgets happened not to overlap.
+    let (client, mut rx) = connect_data_client(
+        base_url,
+        Some(conn_havoc(ConnHavoc {
+            idle_timeout_ms: 1_500,
+            ..ConnHavoc::default()
+        })),
+    )
+    .await;
 
     // Within the dark window no stream frame arrives - the instrument
     // prologue does (connect() emits it to the sink directly, not over the
     // suppressed WS leg), so tolerate exactly that.
-    assert_only_instrument_prologue(&mut rx, Duration::from_millis(150)).await;
+    //
+    // THE WINDOW ENDS WHEN THE STUB SPEAKS, not at a fixed duration. A fixed
+    // window starts when `connect()` returns, which races the harness's own
+    // pre-push and blackout delays: on a slow debug build a long enough connect
+    // pushes the frame inside the window and fails the test for nothing.
+    // `ws_first_frame_at` is stamped strictly BEFORE the send, so observing it
+    // set is a sound place to stop looking.
+    while state
+        .ws_first_frame_at
+        .lock()
+        .expect("ws first frame instant mutex")
+        .is_none()
+    {
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                matches!(event, DataEvent::Instrument(_)),
+                "no stream data may reach the sink before the blackout lifts; got {event:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // After the window lifts, the held trade is delivered.
     let trade = next_trade(&mut rx).await;
@@ -968,6 +1052,93 @@ async fn divergence_go_dark_suppresses_stream_during_window() {
     assert!(
         start.elapsed() >= Duration::from_millis(dark_ms as u64),
         "the trade must not arrive before the dark window elapsed"
+    );
+    assert!(
+        !client.is_disconnected(),
+        "a blackout inside the idle timeout must not take the client down"
+    );
+    assert_eq!(
+        state.ws_handshakes.load(Ordering::Relaxed),
+        1,
+        "a blackout inside the idle timeout must not cost a re-dial"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
+    // The other side of the blackout decision: a `GoDark` window LONGER than
+    // `idle_timeout_ms` is indistinguishable from a dead socket, and the client
+    // must say so by dropping the connection and re-dialling. That is the cost
+    // of the divergence a host has to know about, and it is the arm that
+    // actually exercises `WsAction::Idle` - deleting that arm's `break` changed
+    // nothing anywhere in this crate before this test existed.
+    //
+    // Ping and Pong deliberately do NOT reset the idle clock (see `ConnHavoc`),
+    // so no heartbeat is armed here: the silence under test is application
+    // silence, and a heartbeat would neither rescue nor hasten it.
+    //
+    // THE FIXTURE SEEDS A TRADE, and that is what makes `dark_ms` load-bearing.
+    // With an empty tape the socket is application-silent forever whatever
+    // `dark_ms` says, so deleting the blackout would not have moved the verdict
+    // and the test would have pinned "a permanently dead venue is re-dialled" -
+    // the trivial case the blackout was supposed to exclude. With a trade
+    // seeded, the venue WOULD have spoken at ~100 ms and only the blackout
+    // keeps it quiet past the idle timeout, so the assertions below separate
+    // the two.
+    let state = Arc::new(StubState::default());
+    state.dark_ms.store(600, Ordering::Relaxed);
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(trade_json(11, "101.00"));
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (_client, mut rx) = connect_data_client(
+        base_url,
+        Some(conn_havoc(ConnHavoc {
+            // Longer than the harness's 100 ms pre-push delay and shorter than
+            // that plus the blackout: without the blackout the seeded trade
+            // lands INSIDE the idle window and no socket is ever declared dead.
+            idle_timeout_ms: 250,
+            // A flat, short backoff: the property is that a second dial happens
+            // at all, and the default one-second ladder would only make the
+            // window longer for no extra evidence.
+            reconnect_delay_initial_ms: 20,
+            reconnect_delay_max_ms: 20,
+            ..ConnHavoc::default()
+        })),
+    )
+    .await;
+
+    let handshakes = wait_for_at_least(&state.ws_handshakes, 2, Duration::from_secs(3)).await;
+    assert!(
+        handshakes >= 2,
+        "a blackout past the idle timeout must be declared dead and re-dialled; \
+         saw {handshakes} handshakes"
+    );
+    // ...and it was re-dialled BECAUSE of the blackout, not after being served.
+    // A venue that got its frame out before the idle clock expired has not gone
+    // dark at all, so nothing but the connect-time prologue may have arrived by
+    // the time the second dial happens.
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            matches!(event, DataEvent::Instrument(_)),
+            "the blackout, not a served-then-idle socket, must be what cost the \
+             re-dial; got {event:?} before the second handshake"
+        );
+    }
+
+    // The half a blackout test owes and the deleted one never had: the venue
+    // COMES BACK. Lifting `dark_ms` leaves the client's own reconnect loop to
+    // find the next socket serving normally, and the held trade is delivered.
+    state.dark_ms.store(0, Ordering::Relaxed);
+    let trade = next_trade(&mut rx).await;
+    assert_eq!(
+        trade.ts_event,
+        UnixNanos::from(11),
+        "the re-dialled socket must deliver the tape once the blackout lifts"
     );
 }
 

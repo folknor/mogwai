@@ -140,6 +140,23 @@ pub struct StubState {
     /// The run this stub reports on `GET /health`. A client configured with a
     /// different `expected_run_seed` must refuse to use the connection.
     pub run_seed: AtomicU64,
+    /// When true, `GET /health` answers `500` with an empty body, modelling a
+    /// venue whose identity probe CANNOT BE ANSWERED - the shape the adapter
+    /// classifies as `IdentityOutcome::Unreachable` and deliberately declines to
+    /// refuse on. Without this the stub can only model a venue that answers, so
+    /// the unreachable branch has no end-to-end fixture at all.
+    pub fail_health: AtomicBool,
+    /// Number of `GET /health` requests served. An identity test concluding
+    /// "the client did not refuse" must first establish that it ASKED: a client
+    /// that skipped the probe entirely satisfies the same assertion for free.
+    pub health_hits: AtomicUsize,
+    /// Wall instant at which the WS leg put its FIRST `ws_trades` frame on the
+    /// wire. A test measuring an inbound-latency contribution starts its clock
+    /// here rather than at `connect()`: everything the stub does between the
+    /// upgrade and the push - scheduling turns, blackout windows, whatever the
+    /// harness grows next - is otherwise counted as client-side latency, and a
+    /// delay the client never applied passes the assertion.
+    pub ws_first_frame_at: Mutex<Option<Instant>>,
     /// Venue-truth order rows returned to reconciliation queries.
     pub venue_orders: Mutex<Vec<OrderStatusInfo>>,
     /// Venue-truth fill rows returned to reconciliation queries.
@@ -228,6 +245,14 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             respond_json(stream, "404 Not Found", "").await;
         }
     } else if path.starts_with("/health") {
+        state.health_hits.fetch_add(1, Ordering::Relaxed);
+        if state.fail_health.load(Ordering::Relaxed) {
+            // Answered, but with nothing usable: the probe was made and could
+            // not be resolved, which is the `Unreachable` shape rather than a
+            // mismatch.
+            respond_json(stream, "500 Internal Server Error", "").await;
+            return;
+        }
         // The run this stub claims to be. A client bound to a different run must
         // refuse it - that is the whole of the venue-identity check.
         let run_seed = state.run_seed.load(Ordering::Relaxed);
@@ -488,6 +513,14 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     }
     let frames = state.ws_trades.lock().expect("ws trades mutex").clone();
     for trade in frames {
+        // Stamped BEFORE the send, and only for the first frame of the first
+        // socket: this is the instant a latency measurement is honest from.
+        // Everything above this line is stub time, not client time.
+        state
+            .ws_first_frame_at
+            .lock()
+            .expect("ws first frame instant mutex")
+            .get_or_insert_with(Instant::now);
         drop(ws.send(Message::Text(trade.into())).await);
     }
     if state.ws_server_pings.load(Ordering::Relaxed) > 0 {

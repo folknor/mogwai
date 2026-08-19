@@ -151,21 +151,6 @@ fn assert_mass_status(mass: &nautilus_model::reports::ExecutionMassStatus) {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn mass_status_reports_all_three_sets_over_ws() {
-    let fixture = fixture().await;
-    let mass = fixture
-        .client
-        .generate_mass_status(None)
-        .await
-        .expect("mass status generates")
-        .expect("mass status is Some, not the trait default");
-    assert_mass_status(&mass);
-    assert!(fixture.state.order_queries.load(Ordering::Relaxed) >= 1);
-    assert!(fixture.state.fill_queries.load(Ordering::Relaxed) >= 1);
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn mass_status_pairs_an_open_orders_fill_outside_the_lookback() {
     let fixture = fixture().await;
     // An older fill on the SAME open order, ahead of the fixture's own in the
@@ -244,6 +229,10 @@ async fn reconnect_after_stop_can_be_stopped_again() {
     }
 }
 
+/// The `..._over_ws` twin of this test was deleted: identical fixture,
+/// identical assertions, one strictly weaker - residue of the deleted
+/// `TransportProfile` parameterization, back when the two names meant two
+/// carriers. This is the stronger of the pair, so it is the one that survived.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn mass_status_reports_all_three_sets_over_the_single_ws_transport() {

@@ -16,52 +16,6 @@ against source: `replace_data_event_sender` is a `thread_local` in
 `research/nautilus_trader/crates/common/src/live/runner.rs`, and the 100 ms
 pre-push sleep is unconditional in `serve_ws` before `ws_trades` is drained.
 
-## Tests that cannot fail (green by construction)
-
-### 1. `havoc::havoc_latency_delays_inbound_event` - the assertion is satisfied by the stub, not the code under test
-
-The test starts its clock after `subscribed_data_client(...)` returns and asserts
-the trade arrives `>= 50ms` later. But `common::serve_ws` does
-`tokio::time::sleep(Duration::from_millis(100))` after the handshake *before*
-pushing `ws_trades`. `connect()` returns as soon as the upgrade completes, so
-~100 ms of the stub's own fixed sleep is still pending when the clock starts. Set
-`HavocLatency` to all zeros and this test still passes. Its comment ("the stub
-pushes immediately on Subscribe") is stale - the subscribe is local now and never
-reaches the wire; the frames go out at upgrade.
-
-### 2. `havoc::divergence_go_dark_suppresses_stream_during_window` - tests the stub only
-
-`subscribed_data_client(state, None)` - client havoc is `None`. The blackout is
-entirely `StubState::dark_ms` sleeping inside `serve_ws`. There is no production
-code path that could be edited to make this red except "trades get delivered at
-all". It is filed under the divergence-behaviour section as if it pinned
-`GoDark`; it pins a `sleep` in the test harness.
-
-### 3. `havoc::an_unanswerable_identity_probe_does_not_refuse` - the fixture excludes the shape it claims
-
-Doc: "a venue with no `/health` is used, not judged." The stub *serves*
-`/health`, with `run_seed = 7`, and the client expects 7. This is the plain
-matching-identity case; the unanswerable branch (`IDENTITY_UNREACHABLE` ->
-`IdentityOutcome::Unreachable`) is never exercised end to end. Make
-`classify_identity` refuse on unreachable and this test stays green. The real
-coverage is the pure-unit
-`a_venue_that_reports_no_run_is_skew_not_a_transport_failure`; the socket test
-adds nothing and misrepresents what is covered. Either make the stub refuse
-`/health` (500, or drop the connection) or delete it.
-
-### 4. `havoc::ships_server_havoc`'s second `control_hits == 2` is read with no window
-
-It asserts immediately after `data_client.connect()`. A regression where the data
-client ships divergences *asynchronously* would land the POST after the assertion
-and pass. It needs a drain-to-deadline that asserts the count *stays* 2, the
-mirror of the `an_order_list_reaches_the_wire_as_linked_legs` discipline already
-used in `adapter_smoke`.
-
-### 5. `reconciliation::mass_status_reports_all_three_sets_over_ws` and `..._over_the_single_ws_transport` are the same test
-
-Identical fixture, identical assertions, the second adds `ws_hits >= 1`. They are
-the residue of the deleted `TransportProfile` parameterization. Delete one.
-
 ## Fixed durations on the success path (the parked-completion-test family)
 
 - `common::serve_ws` line ~484: `sleep(100ms)` with the comment "give the client
@@ -224,10 +178,6 @@ here.
 - `next_exec_event`'s panic message ("execution event arrives") names neither the
   test's expectation nor the elapsed time, so a timeout in any of the ~20 call
   sites reads identically.
-- `an_account_labelled_differently_is_still_served` loops `for _ in 0..4` over
-  `next_exec_event`, which panics on timeout - so a regression that drops the
-  account snapshot fails with a timeout panic rather than the written
-  `saw_account` message. The `assert!(saw_account, ...)` line is unreachable.
 - `adapter_smoke::a_submitted_position_id_reaches_the_wire` reads
   `ws_client_messages` after draining two events rather than draining to a
   deadline like its sibling `an_order_list_reaches_the_wire_as_linked_legs` does.

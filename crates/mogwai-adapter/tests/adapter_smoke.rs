@@ -14,7 +14,7 @@ use std::{
     cell::RefCell,
     rc::Rc,
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use common::{
@@ -36,8 +36,8 @@ use nautilus_model::{
     enums::{ContingencyType, OrderStatus, TriggerType},
     events::OrderEventAny,
     identifiers::{
-        ClientId, ClientOrderId, InstrumentId, OrderListId, PositionId, StrategyId, Symbol,
-        TraderId, VenueOrderId,
+        AccountId, ClientId, ClientOrderId, InstrumentId, OrderListId, PositionId, StrategyId,
+        Symbol, TraderId, VenueOrderId,
     },
     orders::Order,
     types::{Price, Quantity},
@@ -265,23 +265,55 @@ async fn an_account_labelled_differently_is_still_served() {
         ))
         .expect("submit order");
 
-    let timeout = Duration::from_secs(2);
+    // DRAINED TO A DEADLINE RATHER THAN COUNTED, because `next_exec_event`
+    // PANICS on timeout: a regression that drops the differently-labelled
+    // snapshot produces fewer than four events, so the loop died on the panic
+    // "execution event arrives" and the written message below was unreachable -
+    // the failure named the harness instead of the property. Running out of
+    // events is now the loop's normal exit and the assertion does the talking.
+    //
+    // SELECTED BY BALANCE, and the LABEL IS ASSERTED. `9900` is the seeded
+    // snapshot's fingerprint against the connect-time snapshot's `10000`, so the
+    // right event is picked rather than assumed to be first. The id it carries
+    // must be the CONFIGURED `MOGWAI-001`, not the wire's `SANDBOX-042`: the
+    // venue's label is a label and `note_account_label` says so out loud while
+    // the client keeps its own id. Asserting the wire id here would pin the
+    // opposite of the design; asserting nothing, as this test did, would let a
+    // regression propagate the venue's label into every downstream event.
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut saw_account = false;
-    for _ in 0..4 {
-        if let ExecutionEvent::Account(account) = next_exec_event(&mut sink_rx, timeout).await {
+    let mut totals: Vec<String> = Vec::new();
+    while !saw_account {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Ok(Some(event)) = tokio::time::timeout(remaining, sink_rx.recv()).await else {
+            break;
+        };
+        if let ExecutionEvent::Account(account) = event {
             let usdt = account
                 .balances
                 .iter()
                 .find(|b| b.currency.code.as_str() == "USDT")
                 .expect("account carries a USDT balance");
-            assert_eq!(usdt.total.as_decimal(), rust_decimal::Decimal::from(9900));
+            if usdt.total.as_decimal() != rust_decimal::Decimal::from(9900) {
+                totals.push(usdt.total.to_string());
+                continue;
+            }
+            assert_eq!(
+                account.account_id,
+                AccountId::from("MOGWAI-001"),
+                "the venue's label is a label: a served snapshot must carry the \
+                 CONFIGURED account id, whatever the wire called the ledger"
+            );
             saw_account = true;
-            break;
         }
     }
     assert!(
         saw_account,
-        "a differently-labelled account snapshot must reach the sink, not be dropped"
+        "a differently-labelled account snapshot must reach the sink, not be \
+         dropped; saw USDT totals {totals:?}"
     );
 }
 
@@ -436,7 +468,7 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
     // to a DEADLINE rather than reading the stub once: reading immediately would
     // race the flush, and reading `the next` message would be the same mistake
     // in the other direction.
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(2);
     let submits = loop {
         let seen: Vec<String> = state
             .ws_client_messages
@@ -446,7 +478,7 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
             .filter(|text| text.contains("SubmitOrder"))
             .cloned()
             .collect();
-        if !seen.is_empty() || std::time::Instant::now() >= deadline {
+        if !seen.is_empty() || Instant::now() >= deadline {
             break seen;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
