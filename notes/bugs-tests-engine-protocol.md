@@ -82,44 +82,9 @@ FAILED launch and nothing on any other path.
 
 ## D. Weaker signals worth a note
 
-- **`worst_case_reservation_covers_actual_output` bounds only one direction.** It
-  asserts `actual <= bound` across a genuinely excellent matrix (escaped ids,
-  deep book, full-size `Ouo` group, hedged futures, armed divergences - this is
-  the best test in either crate). But a derivation that over-reserves by 1000x
-  also passes, and over-reservation silently costs every connection its byte
-  budget. The admission-frame test in `messages.rs` gets this right with
-  `ADMISSION_FRAME_MAX_BYTES < 2 * analytic`. Consider recording a slack ceiling
-  per case.
-- **`a_zero_initial_margin_policy_cannot_drift_the_reservation_cache`** has bite
-  only under `debug_assertions` (its whole point is that the reconciliation must
-  not panic), but it is NOT `#[cfg(debug_assertions)]`-gated. In a release sweep
-  it asserts only `engine.open.is_empty()` - vacuous. Not a failure, but its
-  coverage silently disappears in `brokkr test`, unlike its correctly-gated
-  sibling 20 lines up.
-- **`messages.rs` has 5 tests for 1992 lines.** `validate_submit_order`,
-  `validate_modify_order`, `validate_submit_group`, `validate_client_order_id`,
-  `validate_request_id`, `validate_session_id`, `AccountId::parse`,
-  `truncate_client_id`, `truncate_reason`, `touches_toward`, `touches_trigger`
-  are all exercised only indirectly through engine tests, or not at all.
-  `MAX_SESSION_LEN` / `validate_session_id` the hunter could find no test for on
-  either side.
-- **Doc/constant drift in `sizing.rs`** - CLOSED IN ROUND 4, out of turn,
-  because that round's stated purpose was making the derivations match their
-  structs and leaving one knowingly stale contradicts it. `FILL_ROW_MAX_BYTES`
-  said "rounded to 320" against a `384` constant and "three client-id-shaped
-  strings" against a term charging four; the derivation now names the four
-  (client, venue, trade, `position_id`), the commission currency, and 384.
-  `POSITION_ROW_MAX_BYTES` NEEDED NO FIX and the report was wrong about it:
-  its six fields are four `Decimal`s plus two strings, so "four decimals" is
-  the correct count of the decimals and the strings are charged separately on
-  the same line.
-- `engine :: submit_rejects_semantically_invalid_inputs` is the counter-example
-  to the recorded `min_price = 10.0` incident and is worth copying elsewhere: it
-  pins exact reason strings AND asserts balances, positions and the open book are
-  all untouched after each refusal.
-- Assertion-strength outliers: `reason.contains("trigger")` appears twice (lines
-  around 4074 and 8631) and admits a lot; every other `contains` in the engine
-  names a specific phrase and is fine.
+D is CLOSED - see "Round 5" below. Two of its items were closed by round 4 out
+of turn (the `FILL_ROW_MAX_BYTES` doc drift, fixed; the `POSITION_ROW_MAX_BYTES`
+"four decimals" claim, refused as already correct), and round 5 closed the rest.
 
 ## Round 2: A1-A4, the risk-policy and havoc-validation cluster
 
@@ -451,6 +416,172 @@ document and stays untracked.
   fails with `-60` against `60` and BOTH long tests stay green, which is the
   measurement behind the report's claim.
 
+## Round 5: section D, and one praised test that did not deserve it
+
+Four of the six reproduced, one was refused with a measurement, and one had
+already been closed by round 4. The round's own lateral find is the sizing
+module's prose naming the wrong widest frame.
+
+- THE SLACK CEILING IS `bound < 2 * actual` AND IT IS IN `sizing.rs`, NOT IN THE
+  ENGINE TEST THE FINDING NAMED. Both halves of that are measured.
+  - Every bound in `sizing.rs` now goes through one `brackets(label, bound,
+    actual)` helper that asserts BOTH sides against the maximal fixture that
+    defines the constant. Re-measured this round rather than inherited: balance
+    288/234, position 832/785, margin 480/405, order status 1856/1830, fill
+    2208/2184, snapshot envelope 512/474 and 512/466, account-state envelope
+    208/164, account state at seven rows of each kind 11408/10163, the two query
+    replies 13504/13290 and 15968/15760. Round 4's table is confirmed exactly.
+    Loosest is the account-state envelope at 1.27x. The factor 2 is the one
+    `admission_frames_fit_their_ceiling` already uses in `messages.rs`, and a
+    tighter one is deliberately NOT taken: these addends are rounded up to round
+    figures by design, so a small struct's rounding can legitimately approach 2.
+    Bite-checked by QUADRUPLING two addends - `BALANCE_ROW_MAX_BYTES` 192 to 768
+    and `account_state_max_bytes`'s 144 to 1000 - and both fired on the CEILING
+    assertion, at 864 against 234 and 1064 against 164.
+  - THE CEILING BELONGS TO THE DOMINATING FIXTURE, which cost the round one
+    correction and produced its lateral find. `ORDER_EVENT_MAX_BYTES` is the max
+    of two derivations, and measured, the WIDER frame is `OrderRejected` at 3545
+    bytes, not `OrderFilled` at 2205 - one `MAX_REASON_LEN` at the escape factor
+    outweighs four ids, a symbol and a currency. So the constant resolves to the
+    REJECTION arm (4032 against the fill term's 2400), the ceiling is asserted
+    against `OrderRejected` alone, and the module's prose saying "Widest shape is
+    `OrderFilled`" was FALSE and is corrected.
+  - REFUSED, WITH THE MEASUREMENT: a per-case ceiling in
+    `worst_case_reservation_covers_actual_output` itself. The bound there covers
+    the widest output a command CLASS can produce while the test feeds one
+    command to one book, so the ratio over the matrix runs 2.2x (a query against
+    the deep book, where the row terms really do carry it) to 249x (a cancel
+    refused on the deep book: one 152-byte frame against a bound that must also
+    cover a full linkage reap and a widened snapshot). Any table of per-case
+    numbers over that spread reads as a gate and is not one. The reasoning is now
+    in the test beside the assertion, naming where the two-sided bracket lives.
+- `a_zero_initial_margin_policy_cannot_drift_the_reservation_cache` IS
+  STRENGTHENED RATHER THAN GATED, which is the better of the two and was
+  available because the test module sits inside `lib.rs` and can read
+  `engine.order_locked` directly. It now asserts the cache is EMPTY while the two
+  zero-hold orders are still RESTING - the only instant the defect is visible,
+  because by the time both cancels have run the incremental remove has deleted
+  the key in the broken build too, so the end state cannot tell them apart.
+  Bite-checked by deleting the zero-hold `filter` in `order_reservation_entry`:
+  fails in the WORKSPACE (dev) sweep and in the TIMING (release) sweep alike,
+  naming `{"USD": 0}`. Worth recording: the reconciliation panic did NOT fire
+  first on that perturbation, so the debug-only witness the old test relied on
+  would not have caught it even in dev.
+  - THE CLASS WAS SWEPT AND THE FILE HAS EXACTLY ONE INSTANCE. Every
+    `debug_assert` and `cfg!(debug_assertions)` site in both crates was read:
+    two reconciliation call sites in `lib.rs`, two in `orders.rs`, three bare
+    `debug_assert!`s, and the `corrupt_order_locked_for_test` helper. The two
+    tests whose ONLY witness is a debug panic are correctly
+    `#[cfg(debug_assertions)]`-gated already; this was the third and it needed no
+    gate once it had an assertion of its own.
+- `messages.rs` GOT FOUR TESTS, chosen by what has NO coverage on either side
+  rather than by the function list. The audit first: `validate_submit_order`,
+  `validate_client_order_id` and `validate_submit_group` ARE covered, directly
+  and by name, from the engine's test module (the trailing-stop, conditional and
+  link rules) and through `mogwai-server`'s boundary. What was uncovered:
+  - `validate_session_id`, exactly as the hunter said. Its three existing uses
+    are all POSITIVE - two production call sites and `adapter_smoke.rs` using it
+    as an oracle on a minted session - so a body of `Ok(())` passed the whole
+    workspace. `session_ids_are_the_url_safe_alphabet` pins the alphabet, both
+    ends of the cap and the explicit empty ruling. Bite-checked by neutering the
+    length guard: fails on `""`.
+  - The char-boundary walk in `truncate_reason` / `truncate_client_id`, which
+    runs on the ECHO path of a refusal and is reached only by a multi-byte
+    character straddling the cap. Bite-checked by flipping `end -= 1` to
+    `end += 1`: fails at 66 against 62.
+  - `validate_request_id`'s own boundary, and the fact that BOTH echo guards
+    accept an empty id deliberately. Bite-checked with `<=` to `<`.
+  - `trades_through` / `touches_trigger` / `touches_toward` AT the price, which
+    is the only argument that separates them, plus `ScanKind::hit`'s dispatch.
+    The complement claim in `trades_through`'s doc comment - same side, same
+    price, exact logical complements - is now runnable. Bite-checked by relaxing
+    `trades_through` to `<=`: fails naming the side and the price.
+- THE PRAISE IN ITEM 4 IS HALF DESERVED AND THE HALF THAT IS NOT IS THE ARC'S
+  SIGNATURE DEFECT. `submit_rejects_semantically_invalid_inputs` really does pin
+  every reason by exact string, and `reject_reason` really does enforce exactly
+  one frame. But its "the ledger is untouched" assertions ran on `Engine::new()`,
+  which starts with NO BALANCES - so `balances.is_empty()` was the claim "no row
+  was created", not "no funds moved", and a refusal that debited or locked funds
+  it had no right to passed it for free. The fixture is `funded(10_000)` now and
+  the assertion is a real before/after on `(total, free, locked)`. Bite-checked
+  by debiting one USDT immediately before `validate_submit` in `on_submit_from`:
+  the new form fails at `(9999, 9999, 0)` against `(10000, 10000, 0)`, and the
+  OLD form passes that same perturbation untouched, because `and_modify` on an
+  absent key does nothing and the empty map stays empty.
+- BOTH `reason.contains("trigger")` SITES ARE EXACT STRINGS NOW. The two FOK
+  refusals they discriminate are one clause apart - "fill-or-kill could not fill
+  at its trigger" and "fill-or-kill could not fully fill" - and the second site's
+  positive `contains` admitted any future refusal that mentions a trigger price.
+  Bite-checked by swapping the two production strings and renaming one: each test
+  fails on its own expected text. Two OTHER tests in the file already pinned
+  these same strings exactly, which is the evidence that the two `contains` sites
+  were outliers rather than the house style.
+- LATERAL, fixed in passing: the `ORDER_FILLED_MAX_BYTES` doc's "Widest shape is
+  `OrderFilled`" (above) - the same doc-drift family round 4 spent itself on, in
+  the same file, found by measuring rather than by reading.
+- NOT CHANGED, deliberately: no document under `docs/` or `reference/` was
+  touched. The over-reservation claim lives in `sizing.rs`'s module header where
+  it is spent - which the cold review then made the round correct, see below -
+  the two-sided rule lives on the helper beside the tests that apply it, and
+  neither `reference/architecture.md` nor `docs/oms-types.md` makes a statement
+  this round falsified.
+
+COLD REVIEW OF THE ROUND FOUND SIX, all real, all fixed in the same commit. The
+first is the EIGHTEENTH instance of this arc's signature defect and a sub-shape
+it had not shown before: A FIX THAT TRADES ONE BLIND SPOT FOR ANOTHER while
+reading as strictly stronger.
+
+- THE FUNDED REWRITE ABOVE LOST THE CLAIM IT REPLACED. The old
+  `balances.is_empty()` said "no row was CREATED"; the new tuple on the USDT row
+  says "no funds moved" - and `funded()` seeds exactly ONE currency, so a
+  refusal that MINTED a second row is invisible to it. Not hypothetical:
+  `sizing.rs`'s own derivation notes the fill path mutates balances through
+  `entry(..).or_default()`, so a refusal reaching that path before refusing
+  introduces a zero BTC row. `assert_eq!(state.balances.len(), 1)` alongside the
+  tuple keeps BOTH claims, and both directions were bite-checked as text edits
+  in `on_submit_from` immediately before `validate_submit`: debiting one USDT
+  fails the TUPLE at `(9999, 9999, 0)` against `(10000, 10000, 0)` and leaves
+  the row count green, and `balances.entry("BTC").or_default()` fails the ROW
+  COUNT at 2 against 1 and leaves the tuple green. Neither assertion covers the
+  other.
+- THE `sizing.rs` MODULE HEADER CONTRADICTED THE CEILING THE SAME CHANGE ADDED.
+  It said the fixed addends "are rounded generously upward, because
+  over-reserving costs a connection some budget while under-reserving voids the
+  bound" - after `brackets`, rounding generously upward is a TEST FAILURE, and
+  the account-state fixture has only 208 against 164 of room. The header is what
+  a future implementer reads first, so it now states the ceiling, names
+  `brackets`, and says round generously WITHIN the factor.
+- `ScanKind::hit`'s DISPATCH ASSERTION CLAIMED MORE THAN IT CHECKS. `hit` is a
+  three-arm match over exactly the three functions the loop compares it against,
+  in the same file, so what it holds is that the arms are not TRANSPOSED - it
+  cannot see the engine assigning the wrong `ScanKind` to an order, which is the
+  drift the comment advertised. The comment is narrowed to what runs.
+- `session_ids_are_the_url_safe_alphabet` DID NOT PIN WHAT ITS LAST LINE SAID.
+  `assert_eq!(MAX_SESSION_LEN, 64, "the refusal message states the cap")`
+  asserts the CONSTANT against a literal; the production message is its own
+  hardcoded "session ids are 1 to 64 characters" and nothing held the two
+  together - the durable-prose-asserting-a-live-fact shape, in a string literal.
+  It now takes the refusal from an over-length id and asserts it contains
+  `MAX_SESSION_LEN`. Bite-checked by editing the literal to 32: fails naming
+  both the message and the cap, where the old form passes untouched.
+- THE TRUNCATION TEST WAS ASYMMETRIC. `truncate_reason` had its ASCII-overflow
+  case cutting exactly AT the cap; `truncate_client_id` had only the at-cap and
+  straddling cases, and the straddling cut lands SHORT of the cap, so nothing
+  pinned the ceiling `ORDER_EVENT_MAX_BYTES` charges `2 * MAX_CLIENT_ID_LEN`
+  for. One line added, bite-checked with `end = MAX_CLIENT_ID_LEN - 1`: fails at
+  63 against 64 while the straddling case stays green.
+- Style: `validate_client_order_id(&String::new())` reads as though the two echo
+  guards had different signatures. `ClientOrderId` is `pub type ... = String`,
+  so it is `ClientOrderId::new()` now, which says so.
+
+Findings two through four are ONE FAMILY - a durable statement or a comment
+that no longer matches what the code does or checks - and the round's own
+subject was assertions weaker than their names. A round that closes that class
+produces instances of it in its own prose; the check is to re-read every
+sentence the change made false, not only the code.
+
 ## The hunter's own ordering
 
-C, A1-A8 and B1-B5 are done. What remains is section D.
+C, A1-A8, B1-B5 and D are all done. The document is empty of open findings; what
+remains in it is the two recorded refusals - `read_ready`'s `NoRecord` pause in
+section C, and the per-case ceiling in section D's round-5 entry above.

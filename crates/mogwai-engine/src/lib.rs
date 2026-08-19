@@ -4066,13 +4066,17 @@ mod tests {
             fraction: Decimal::new(5, 1),
         });
         // Through its trigger, so the rejection is the all-or-nothing one the
-        // partial forces rather than the short-of-trigger one.
+        // partial forces rather than the short-of-trigger one. The two are
+        // pinned by their exact text: `validate_submit`'s two FOK refusals are
+        // one word apart, and a `contains("trigger")` test admits either the
+        // wrong FOK branch or any future refusal that happens to mention a
+        // trigger price.
         let rejected =
             e.process_with_market(ClientMessage::SubmitOrder(fok.clone()), 1, Some(reading(0)));
-        assert!(matches!(
-            rejected.as_slice(),
-            [ServerMessage::OrderRejected { reason, .. }] if !reason.contains("trigger")
-        ));
+        assert_eq!(
+            reject_reason(&rejected),
+            "fill-or-kill could not fully fill"
+        );
         let accepted = e.process_with_market(ClientMessage::SubmitOrder(fok), 2, Some(reading(0)));
         assert!(matches!(
             accepted.first(),
@@ -4276,6 +4280,21 @@ mod tests {
             order.order_type = OrderType::Limit;
             engine.process(ClientMessage::SubmitOrder(order), 1);
         }
+        // READ THE CACHE WHILE THE ZERO-HOLD ORDERS ARE STILL RESTING, which is
+        // the only instant the defect is visible, and the reason this test does
+        // not need a `#[cfg(debug_assertions)]` gate the way its sibling above
+        // does. The reconciliation panic is a DEBUG-only witness, so relying on
+        // it alone would make this test assert nothing but `open.is_empty()` in
+        // a release sweep - and by the time both cancels have run the
+        // incremental remove has deleted the key in the broken build too, so
+        // the end state cannot tell the two apart either. With the zero-hold
+        // filter in `order_reservation_entry` removed, each submit inserts a
+        // zero-amount entry here and this fires in BOTH profiles.
+        assert!(
+            engine.order_locked.is_empty(),
+            "a zero hold must be NO cache key, not a key holding zero: {:?}",
+            engine.order_locked
+        );
         engine.process(
             ClientMessage::CancelOrder {
                 client_order_id: "Z1".into(),
@@ -4498,12 +4517,40 @@ mod tests {
             ),
         ];
 
+        // A FUNDED book, deliberately. The refusals are pinned by exact reason
+        // AND by the ledger being untouched afterwards - but "untouched" read
+        // off `Engine::new()`, which starts with no balances at all, is only
+        // the claim "no row was CREATED". A refusal that debited or locked
+        // funds it had no right to would have left that reading green, because
+        // there was nothing there to debit. With a stated 10,000 USDT the
+        // assertion is a real before/after on a non-empty ledger, and `locked`
+        // is the field the reservation path would move.
+        const FUNDS: i64 = 10_000;
         for (order, expected) in cases {
-            let mut e = Engine::new();
+            let mut e = funded(FUNDS);
             let out = e.process(ClientMessage::SubmitOrder(order), 1);
 
             assert_eq!(reject_reason(&out), expected);
-            assert!(e.account_snapshot(2).balances.is_empty());
+            let state = e.account_snapshot(2);
+            let usdt = balance(&state, "USDT");
+            assert_eq!(
+                (usdt.total, usdt.free, usdt.locked),
+                (Decimal::from(FUNDS), Decimal::from(FUNDS), Decimal::ZERO),
+                "a refusal reserved or spent funds: {expected}"
+            );
+            // BOTH HALVES OF THE OLD CLAIM ARE KEPT. `funded` seeds exactly one
+            // currency, so reading the USDT row alone would no longer see a
+            // refusal that MINTED a row - and the fill path mutates balances
+            // through `entry(..).or_default()`, so a refusal that reached it
+            // before refusing would introduce a zero BTC row that the tuple
+            // above cannot observe. The row count is the "no row was created"
+            // claim the empty fixture used to make for free.
+            assert_eq!(
+                state.balances.len(),
+                1,
+                "a refusal created a currency row: {expected}, {:?}",
+                state.balances
+            );
             assert!(e.positions().is_empty());
             assert!(e.open_orders().is_empty());
         }
@@ -8240,6 +8287,22 @@ mod tests {
         // argue it. Ids and symbols are filled with `\u{0001}`, which serde
         // escapes to six bytes each: an ASCII fixture would pass a bound six
         // times too small.
+        //
+        // THIS TEST IS DELIBERATELY ONE-SIDED, and that is a ruling rather than
+        // an omission. An `actual <= bound` assertion is also satisfied by a
+        // derivation that over-reserves wildly, and over-reservation is not
+        // free - so every bound `worst_case_output_bytes` is BUILT from carries
+        // a two-sided bracket (`bound < 2 * actual` against its maximal
+        // fixture) in `mogwai_protocol::sizing`'s own tests. A ceiling HERE
+        // would be a different and much weaker claim, because this test feeds
+        // one particular command to one particular book while the bound covers
+        // the widest output that command CLASS can produce. Measured over this
+        // matrix the ratio runs from 2.2x (a query against the deep book, where
+        // the row terms really do carry the bound) to 249x (a cancel refused on
+        // the deep book: one 152-byte frame against a bound that must also
+        // cover a full linkage reap and a widened account snapshot). Any
+        // per-case ceiling over that spread is a table of magic numbers that
+        // reads as a gate and is not one.
         let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_CLIENT_ID_LEN);
 
         // Book 1: an empty venue, and a submit that fills - the first fill in a
@@ -8816,10 +8879,14 @@ mod tests {
             fraction: Decimal::new(5, 1),
         });
         let rejected = e.process(ClientMessage::SubmitOrder(fok.clone()), 1);
-        assert!(matches!(
-            rejected.as_slice(),
-            [ServerMessage::OrderRejected { reason, .. }] if reason.contains("trigger")
-        ));
+        // The short-of-trigger refusal by its exact text, not by the word
+        // "trigger": its sibling refusal ("could not fully fill") is the one
+        // this test must NOT be satisfied by, and only the full string
+        // separates them.
+        assert_eq!(
+            reject_reason(&rejected),
+            "fill-or-kill could not fill at its trigger"
+        );
         assert!(e.armed.is_empty(), "the rejected FOK left its arm standing");
         let resubmit = e.process_with_market(ClientMessage::SubmitOrder(fok), 2, Some(reading(0)));
         assert!(matches!(

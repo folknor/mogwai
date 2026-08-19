@@ -1708,6 +1708,198 @@ mod tests {
         }
     }
 
+    /// The session id's alphabet and bounds, which NOTHING held before this
+    /// test. `validate_session_id` has two production callers - `ws.rs`'s
+    /// upgrade refusal and the adapter's config check - and one use in
+    /// `adapter_smoke.rs` as an ORACLE on a minted session, so every existing
+    /// use is a POSITIVE case. A body of `Ok(())` passed the whole workspace:
+    /// the refusals are what those two call sites exist for, and nothing
+    /// exercised one.
+    ///
+    /// It is a separate function from `validate_wire_symbol` with the same
+    /// alphabet and a different cap, so a drift between them is representable;
+    /// this pins the half that is not a symbol. The empty case is called out
+    /// because the function makes an explicit ruling on it: `session=` with
+    /// nothing after it is a client that HAS spoken, and reading it as absent
+    /// would silently hand back the always-evict behaviour it was trying to
+    /// leave.
+    #[test]
+    fn session_ids_are_the_url_safe_alphabet() {
+        for legal in [
+            "mogwai-4242-1",
+            "a",
+            "0.1_2-3",
+            &"s".repeat(MAX_SESSION_LEN),
+        ] {
+            assert!(
+                validate_session_id(legal).is_ok(),
+                "{legal:?} must be accepted"
+            );
+        }
+        for illegal in [
+            "",
+            " ",
+            " abc",
+            "abc ",
+            "a b",
+            "a/b",
+            "a%20b",
+            "a?x=1",
+            "a&speed=2",
+            "a:b",
+            "caf\u{e9}",
+            &"s".repeat(MAX_SESSION_LEN + 1),
+        ] {
+            assert!(
+                validate_session_id(illegal).is_err(),
+                "{illegal:?} must be refused"
+            );
+        }
+        // THE MESSAGE AND THE CONSTANT ARE CHECKED AGAINST EACH OTHER, not the
+        // constant against a literal. The refusal text is a hardcoded "session
+        // ids are 1 to 64 characters" and nothing else would notice the cap
+        // moving out from under it - the durable-prose-asserting-a-live-fact
+        // shape, in a string literal.
+        let over = "s".repeat(MAX_SESSION_LEN + 1);
+        let refusal = validate_session_id(&over).unwrap_err();
+        assert!(
+            refusal.contains(&MAX_SESSION_LEN.to_string()),
+            "the refusal {refusal:?} must state the cap {MAX_SESSION_LEN} it enforces"
+        );
+    }
+
+    /// The two echo guards, which bound what a refusal frame may carry back.
+    /// Both are one-liners and both are exercised only INDIRECTLY today -
+    /// `validate_client_order_id` through `validate_submit_order`, and
+    /// `validate_request_id` through the server's query path - so neither had a
+    /// case at its own boundary.
+    #[test]
+    fn the_echo_id_guards_admit_exactly_their_cap() {
+        let at_cap = "x".repeat(MAX_CLIENT_ID_LEN);
+        let over = "x".repeat(MAX_CLIENT_ID_LEN + 1);
+        assert!(validate_client_order_id(&at_cap).is_ok());
+        assert!(validate_client_order_id(&over).is_err());
+        assert!(validate_request_id(&at_cap).is_ok());
+        assert!(validate_request_id(&over).is_err());
+        // EMPTY IS ACCEPTED BY BOTH, deliberately rather than by omission:
+        // these are LENGTH guards for an echo, and the emptiness rules live
+        // where they mean something (the engine refuses an empty
+        // `client_order_id` on submit, with its own message). Pinned so a
+        // reader does not infer a rule these functions do not make.
+        assert!(validate_client_order_id(&ClientOrderId::new()).is_ok());
+        assert!(validate_request_id("").is_ok());
+    }
+
+    /// The two truncations, whose whole content is the char-boundary walk.
+    /// Both run on the ECHO path of a refusal, so a panic here is a panic on
+    /// the frame that reports someone else's error - and a multi-byte
+    /// character straddling the cap is the only input that reaches the loop at
+    /// all.
+    #[test]
+    fn truncation_cuts_on_a_char_boundary_and_leaves_short_values_alone() {
+        // Untouched below the cap, and AT it: the guard is `<=`.
+        let at_cap = "x".repeat(MAX_CLIENT_ID_LEN);
+        assert_eq!(truncate_client_id(at_cap.clone()), at_cap);
+        let short = "O-1".to_string();
+        assert_eq!(truncate_reason(short.clone()), short);
+
+        // A four-byte character straddling the cap: the cut lands BEFORE it,
+        // never inside it, so the result is short of the cap rather than at it.
+        let straddling = format!("{}\u{1f600}", "x".repeat(MAX_CLIENT_ID_LEN - 2));
+        let cut = truncate_client_id(straddling);
+        assert_eq!(
+            cut.len(),
+            MAX_CLIENT_ID_LEN - 2,
+            "the cut must fall before the straddling character, not inside it"
+        );
+        assert!(cut.chars().all(|ch| ch == 'x'));
+
+        let reason = format!("{}\u{1f600}", "y".repeat(MAX_REASON_LEN - 1));
+        let cut = truncate_reason(reason);
+        assert_eq!(cut.len(), MAX_REASON_LEN - 1);
+        assert!(cut.chars().all(|ch| ch == 'y'));
+
+        // An ASCII overflow cuts exactly AT the cap on both, which is the term
+        // `ORDER_EVENT_MAX_BYTES` charges `MAX_REASON_LEN` and
+        // `2 * MAX_CLIENT_ID_LEN` for. Asserted on both because the straddling
+        // case above lands SHORT of the cap and so cannot pin the ceiling the
+        // reservation is derived from.
+        assert_eq!(
+            truncate_reason("z".repeat(MAX_REASON_LEN * 3)).len(),
+            MAX_REASON_LEN
+        );
+        assert_eq!(
+            truncate_client_id("z".repeat(MAX_CLIENT_ID_LEN * 3)).len(),
+            MAX_CLIENT_ID_LEN
+        );
+    }
+
+    /// The three tape predicates AT the price, which is the only argument that
+    /// separates them and the one a fixture built from a market away from the
+    /// level cannot reach. They are exercised through the engine and the data
+    /// walk today, never directly, and the strictness split is the whole
+    /// design: a limit is behind the queue at its own price, a conditional
+    /// holds no queue position at all.
+    ///
+    /// THE COMPLEMENT CLAIM IS `trades_through`'s DOC COMMENT MADE RUNNABLE -
+    /// it states that for the same side and the same price the two are exact
+    /// logical complements, and that is what silently stops being true if
+    /// either comparison is relaxed.
+    #[test]
+    fn the_scan_predicates_split_exactly_at_the_price() {
+        let px = Decimal::from(100);
+        let below = Decimal::from(99);
+        let above = Decimal::from(101);
+
+        for side in [Side::Buy, Side::Sell] {
+            for traded in [below, px, above] {
+                assert_eq!(
+                    trades_through(side, px, traded),
+                    !touches_trigger(side, px, traded),
+                    "{side:?} at {traded}: the limit and the stop predicate must \
+                     be exact complements at one price"
+                );
+            }
+        }
+
+        // A print AT the level: through for neither side, touching for both.
+        assert!(!trades_through(Side::Buy, px, px));
+        assert!(!trades_through(Side::Sell, px, px));
+        assert!(touches_trigger(Side::Buy, px, px));
+        assert!(touches_trigger(Side::Sell, px, px));
+        assert!(touches_toward(Side::Buy, px, px));
+        assert!(touches_toward(Side::Sell, px, px));
+
+        // ...and the two conditional predicates are direction-opposite, which
+        // is what stops them being collapsed behind a strictness flag.
+        assert!(touches_trigger(Side::Buy, px, above) && !touches_toward(Side::Buy, px, above));
+        assert!(touches_toward(Side::Buy, px, below) && !touches_trigger(Side::Buy, px, below));
+        assert!(touches_trigger(Side::Sell, px, below) && !touches_toward(Side::Sell, px, below));
+        assert!(touches_toward(Side::Sell, px, above) && !touches_trigger(Side::Sell, px, above));
+
+        // `ScanKind::hit` is a three-arm match over exactly these three
+        // functions, so what this holds is NARROW and worth stating as such:
+        // THE ARMS ARE NOT TRANSPOSED. It cannot see the engine assigning the
+        // wrong `ScanKind` to an order, which is the drift that would actually
+        // bite - that classification is held where an order is built, not here.
+        for side in [Side::Buy, Side::Sell] {
+            for traded in [below, px, above] {
+                assert_eq!(
+                    ScanKind::FillThrough.hit(side, px, traded),
+                    trades_through(side, px, traded)
+                );
+                assert_eq!(
+                    ScanKind::TriggerTouch.hit(side, px, traded),
+                    touches_trigger(side, px, traded)
+                );
+                assert_eq!(
+                    ScanKind::TriggerToward.hit(side, px, traded),
+                    touches_toward(side, px, traded)
+                );
+            }
+        }
+    }
+
     /// The post-subscription-retirement wire surface, pinned by BYTE form.
     ///
     /// `Subscribe`, `Unsubscribe` and the nine `SubscriptionIssue` variants are

@@ -14,8 +14,19 @@
 //! measurement would be 6x too small). The one string charged at its RAW cap
 //! is the account id, and only because its TYPE forbids an escapable byte -
 //! see `account_state_max_bytes`. The fixed addends are scaffolding and
-//! numerics only; they are rounded generously upward, because over-reserving
-//! costs a connection some budget while under-reserving voids the bound.
+//! numerics only; they are rounded upward to round figures, because
+//! under-reserving voids the bound outright while over-reserving only costs a
+//! connection some budget.
+//!
+//! THE UPWARD ROUNDING HAS A CEILING, AND IT IS ENFORCED. Over-reservation is
+//! not free - every constant here is multiplied by a row or member count and
+//! charged before the engine is allowed to mutate - so this module's tests
+//! bracket every bound from BOTH sides against the maximal fixture that
+//! defines it: `bound >= actual` and `bound < 2 * actual`, through the
+//! `brackets` helper, which carries the measured slack table. Round generously
+//! WITHIN that factor; a derivation that doubles its own struct is a test
+//! failure rather than a conservative choice.
+
 use crate::{
     ClientMessage, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
     MAX_LINKED_ORDERS, MAX_SYMBOL_LEN,
@@ -40,8 +51,12 @@ const ESC: usize = JSON_ESCAPE_FACTOR;
 /// Any single order-lifecycle frame (`OrderAccepted`, `OrderRejected`,
 /// `OrderCanceled`, `OrderExpired`, `OrderUpdated`, `OrderFilled`, the two
 /// modify/cancel rejections). `OrderExpired` carries `OrderCanceled`'s exact
-/// three fields, so it needs no bound of its own. Widest shape is
-/// `OrderFilled`: `type`, `client_order_id`,
+/// three fields, so it needs no bound of its own. Widest FIELD-BEARING shape,
+/// which is not the same thing as the widest frame: a reason-bearing rejection
+/// is wider still, and `ORDER_EVENT_MAX_BYTES` below is the max of the two -
+/// measured, it resolves to the REJECTION arm, 4032 against this term's 2400,
+/// because one `MAX_REASON_LEN` at the escape factor outweighs four ids, a
+/// symbol and a currency. `OrderFilled` is: `type`, `client_order_id`,
 /// `venue_order_id`, `trade_id`, `position_id`, `symbol`, `side`, `last_qty`,
 /// `last_px`, `leaves_qty`, `commission`, `currency`, `liquidity`, `ts_event`.
 /// The fixed addend covers ~190 bytes
@@ -369,6 +384,54 @@ mod tests {
         }
     }
 
+    /// EVERY BOUND IN THIS MODULE IS ASSERTED FROM BOTH SIDES, against the
+    /// maximal fixture that DEFINES it: it must dominate the fixture, and it
+    /// must not exceed twice it. A one-sided `actual <= bound` is satisfied by
+    /// a derivation that over-reserves by any factor at all, and
+    /// over-reservation is not free - every one of these constants is
+    /// multiplied by a row count or a member count and charged against a
+    /// connection's byte budget before the engine is allowed to mutate.
+    ///
+    /// THE CEILING IS `2 * actual` AND THE FACTOR IS NOT PICKED FROM THE AIR.
+    /// It is the ceiling `admission_frames_fit_their_ceiling` already uses on
+    /// `ADMISSION_FRAME_MAX_BYTES` in `messages.rs`, and the measured slack of
+    /// every bound here sits far inside it:
+    ///
+    /// | bound | maximal fixture | ratio |
+    /// |---|---|---|
+    /// | balance row 288 | 234 | 1.23 |
+    /// | position row 832 | 785 | 1.06 |
+    /// | margin row 480 | 405 | 1.19 |
+    /// | order status row 1856 | 1830 | 1.01 |
+    /// | fill row 2208 | 2184 | 1.01 |
+    /// | snapshot envelope 512 | 474 | 1.08 |
+    /// | account-state envelope 208 | 164 | 1.27 |
+    /// | order event 4032 | 3545 (`OrderRejected`) | 1.14 |
+    ///
+    /// So the loosest is the account-state envelope at 1.27, and a ceiling
+    /// tighter than 2 would still pass today - it is deliberately not taken,
+    /// because these addends are ROUNDED UP to round figures by design (the
+    /// module doc says so) and a small struct's rounding can legitimately
+    /// approach a factor of two. What 2 forecloses is the order-of-magnitude
+    /// over-reservation a one-sided assertion cannot see.
+    ///
+    /// THE FIXTURE MUST BE THE DOMINATING ONE. `ORDER_EVENT_MAX_BYTES` is the
+    /// max of two derivations, so its ceiling is asserted against
+    /// `OrderRejected` alone; the other arm is legitimately far below it and a
+    /// ceiling there would be a claim about the wrong struct.
+    fn brackets(label: &str, bound: usize, actual: usize) {
+        assert!(
+            bound >= actual,
+            "{label} bound {bound} must dominate {actual} wire bytes"
+        );
+        assert!(
+            bound < 2 * actual,
+            "{label} bound {bound} over-reserves against {actual} wire bytes - a \
+             reservation is charged before the engine mutates, so a derivation \
+             that doubles its struct costs every connection that budget"
+        );
+    }
+
     /// The row half of the module's claim, RUN rather than argued, on the model
     /// of `order_event_bound_covers_both_maximal_lifecycle_frames`. Each of
     /// these five constants is multiplied by a row count the server has no
@@ -408,11 +471,7 @@ mod tests {
             ),
         ];
         for (label, bound, bytes) in rows {
-            assert!(
-                bound >= bytes.len(),
-                "{label} row bound {bound} must dominate {} wire bytes",
-                bytes.len()
-            );
+            brackets(&format!("{label} row"), bound, bytes.len());
         }
     }
 
@@ -433,10 +492,10 @@ mod tests {
         });
         for (label, frame) in [("order status", &orders), ("fill", &fills)] {
             let bytes = serde_json::to_vec(frame).unwrap().len();
-            assert!(
-                SNAPSHOT_ENVELOPE_MAX_BYTES >= bytes,
-                "{label} envelope bound {SNAPSHOT_ENVELOPE_MAX_BYTES} must dominate {bytes} \
-                 wire bytes"
+            brackets(
+                &format!("{label} envelope"),
+                SNAPSHOT_ENVELOPE_MAX_BYTES,
+                bytes,
             );
         }
     }
@@ -463,10 +522,7 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&empty).unwrap().len();
         let bound = account_state_max_bytes(&empty_shape());
-        assert!(
-            bound >= bytes,
-            "empty account snapshot bound {bound} must dominate {bytes} wire bytes"
-        );
+        brackets("empty account snapshot", bound, bytes);
 
         const ROWS: usize = 7;
         let full = ServerMessage::AccountState(AccountState {
@@ -484,10 +540,7 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&full).unwrap().len();
         let bound = account_state_max_bytes(&shape);
-        assert!(
-            bound >= bytes,
-            "maximal account snapshot bound {bound} must dominate {bytes} wire bytes"
-        );
+        brackets("maximal account snapshot", bound, bytes);
     }
 
     /// The two query replies against the bound the server actually reserves
@@ -516,10 +569,7 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&reply).unwrap().len();
         let bound = worst_case_output_bytes(&query_orders, &shape);
-        assert!(
-            bound >= bytes,
-            "order status reply bound {bound} must dominate {bytes} wire bytes"
-        );
+        brackets("order status reply", bound, bytes);
 
         let query_fills = ClientMessage::QueryFills {
             request_id: worst(MAX_CLIENT_ID_LEN),
@@ -532,10 +582,7 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&reply).unwrap().len();
         let bound = worst_case_output_bytes(&query_fills, &shape);
-        assert!(
-            bound >= bytes,
-            "fill reply bound {bound} must dominate {bytes} wire bytes"
-        );
+        brackets("fill reply", bound, bytes);
     }
 
     /// THE PREMISE UNDER `account_state_max_bytes` CHARGING THE ACCOUNT ID AT
@@ -641,6 +688,15 @@ mod tests {
                 "{label} reservation {ORDER_EVENT_MAX_BYTES} must dominate {bytes} wire bytes"
             );
         }
+        // The CEILING is asserted against the dominating arm only. Measured,
+        // `OrderRejected` is the wider frame - 3545 bytes against
+        // `OrderFilled`'s 2205 - because `MAX_REASON_LEN` at the escape factor
+        // dwarfs four ids, a symbol and a currency. `ORDER_EVENT_MAX_BYTES` is
+        // therefore `ORDER_REJECTION_MAX_BYTES`, and a slack ceiling read off
+        // the fill would be a claim about the struct that does NOT set this
+        // constant.
+        let rejected_bytes = serde_json::to_vec(&rejected).unwrap().len();
+        brackets("OrderRejected event", ORDER_EVENT_MAX_BYTES, rejected_bytes);
     }
 
     #[test]

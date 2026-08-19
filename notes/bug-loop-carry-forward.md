@@ -8,7 +8,10 @@ Arc in progress: the eleven `notes/bugs-*.md` reports, worked one document at a
 time in this order. `bugs-tests-lifecycle` CLOSED on 2026-08-19 after five
 rounds plus a close pass over the whole commit arc, with no open findings;
 `bugs-tests-adapter` CLOSED the same way on 2026-08-19, five rounds plus its own
-close pass; `bugs-tests-tape` is next. The order is
+close pass; `bugs-tests-tape` CLOSED on 2026-08-19 after its five rounds and
+close pass; `bugs-tests-engine-protocol` finished its five rounds on 2026-08-19,
+empty of open findings apart from two recorded refusals, and goes to its close
+pass next, after which `bugs-tests-lab-cli` starts. The order is
 `bugs-tests-lifecycle`, `bugs-tests-adapter`,
 `bugs-tests-tape`, `bugs-tests-engine-protocol`, `bugs-tests-lab-cli`, then
 `bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
@@ -1826,6 +1829,82 @@ COLD REVIEW OF THE ROUND FOUND FOUR, all real, all fixed in the same commit:
   round-trip test correctly stayed green. The perturbation that bites is an
   explicit `#[serde(rename = "...")]` on one variant.
 
+## The engine/protocol document, round 5: what carries to `bugs-tests-lab-cli`
+
+The engine mechanics die with that document - the reservation cache, the FOK
+refusal texts, the sizing constants. What generalises:
+
+- A ONE-SIDED BOUND ASSERTION IS HALF A TEST, AND THE CEILING BELONGS TO THE
+  FIXTURE THAT DEFINES THE CONSTANT. `actual <= bound` is satisfied by a
+  derivation that over-reserves by any factor, and over-reservation is rarely
+  free. But the ceiling has to go where the constant is measured against its
+  MAXIMAL case, not on an end-to-end sample: measured across the engine's
+  reservation matrix the same claim ran 2.2x to 249x, because the bound covers
+  the widest output a command CLASS can produce while the sample feeds one
+  command to one book. MEASURE THE RATIO SPREAD BEFORE ADDING A CEILING - a
+  spread of two orders of magnitude means a per-case table of magic numbers that
+  reads as a gate and is not one, and the honest move is a reasoned refusal
+  written beside the assertion. Where the ceiling does belong, `2 * actual` is
+  this workspace's established factor and the loosest real bound sat at 1.27x.
+- "THE STATE IS UNTOUCHED" ASSERTED ON AN EMPTY FIXTURE IS A DIFFERENT CLAIM.
+  A praised refusal test asserted `balances.is_empty()` after each refusal - on
+  an engine constructed with no balances, so it said "no row was CREATED", never
+  "no funds moved", and a refusal that debited or locked funds passed it for
+  free. Measured: the perturbation that fails the funded form leaves the empty
+  form green. Any before/after assertion needs a starting state the defect could
+  actually damage, and this is the arc's signature defect wearing the costume of
+  a test everyone points at as the good example. VERIFY PRAISE BY PERTURBING,
+  not by re-reading.
+- A FUNCTION WHOSE EVERY EXISTING USE IS A POSITIVE CASE HAS NO COVERAGE. A
+  validator with two production call sites and one test using it as an ORACLE on
+  a known-good value passed the whole workspace with a body of `Ok(())`: the
+  refusals are what the call sites exist for and nothing exercised one. The
+  audit that finds this is grep-the-callers-and-ask-which-way-each-one-points,
+  and it is worth doing before writing tests for the whole file the finding
+  named - three of the functions on that list turned out to be covered directly
+  by another crate's test module.
+- A DEBUG-ONLY WITNESS IS A REASON TO FIND AN OBSERVABLE, NOT ONLY A REASON TO
+  ADD `#[cfg(debug_assertions)]`. The gate is correct when the panic really is
+  the only witness; where the test can read the state the debug check would have
+  compared, the assertion works in BOTH profiles and is strictly stronger. In
+  the instance found this round the debug reconciliation would not even have
+  fired on the perturbation, so the gate would have preserved coverage that was
+  not there. Ask what the check compares, and whether the test can compare it.
+- TWO SIBLING MESSAGES ONE CLAUSE APART ARE NOT DISCRIMINATED BY `contains`. The
+  bite-check is swapping the two production strings: an assertion that survives
+  the swap is naming a word both refusals share.
+- THE DOC-DRIFT FAMILY RECURS IN THE FILE A ROUND JUST FINISHED. A comment
+  naming the "widest" of two derivations had it backwards, in the same module a
+  previous round had spent itself correcting, and it was found by MEASURING both
+  fixtures rather than by reading the prose. A round that measures should print
+  what it measured and compare it against what the file claims.
+- A FIX MAY TRADE ONE BLIND SPOT FOR ANOTHER WHILE READING AS STRICTLY
+  STRONGER, and this is the sub-shape to check for whenever a weak assertion is
+  REPLACED rather than added to. The instance: `balances.is_empty()` on an empty
+  fixture ("no row was created") was replaced by a tuple on the one seeded
+  currency row ("no funds moved") - each catches a perturbation the other passes,
+  measured in both directions, and the replacement silently dropped the first
+  claim. THE BITE-CHECK THAT FINDS IT IS TWO-DIRECTIONAL: perturb for the new
+  claim AND for the claim being retired, and confirm the retired one still has
+  an assertion. Prefer keeping both lines to arguing that one subsumes the other.
+- A NEW CONSTRAINT INVALIDATES THE PROSE THAT LICENSED ITS ABSENCE. Adding a
+  slack ceiling made a module header advising "round generously upward" a
+  description of a test failure, three lines from the tests that now enforce it.
+  When a change adds a rule, grep the file it lives in for the sentence stating
+  the OLD policy - a durable header is what an implementer reads first, and it
+  will point them the wrong way for years.
+- AN ASSERTION ON A CONSTANT IS NOT AN ASSERTION ON THE MESSAGE THAT STATES IT.
+  `assert_eq!(CAP, 64, "the refusal message states the cap")` holds the constant
+  against a literal while the production message carries its own hardcoded "1 to
+  64" - the durable-prose-asserting-a-live-fact shape, inside a string literal
+  where no prose gate can see it. Assert that the refusal TEXT contains the
+  constant.
+- A DISPATCH TEST OVER A MATCH IN THE SAME FILE HOLDS ONE THING: THE ARMS ARE
+  NOT TRANSPOSED. `f(x) == f(x)` modulo the arm is worth a few lines, but the
+  drift a reader will assume it covers - the caller choosing the wrong variant -
+  is somewhere else entirely. Write the narrow claim on the assertion, or move
+  the broad one to a test that exercises the caller.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -2024,6 +2103,15 @@ COLD REVIEW OF THE ROUND FOUND FOUR, all real, all fixed in the same commit:
     (`account_state_bound_covers_a_max_length_account_id` to
     `..._covers_an_empty_and_a_maximal_snapshot`) and two rewritten in place,
     and none of that moves a count.
+  - engine/protocol r5: 1220 + 440, 1717 pairs, 1660 run, 57 ignored, 0
+    orphaned, 14 skips, 54.8 s. +4 IN THE WORKSPACE SWEEP AND NOTHING IN THE
+    INSTRUMENTED ONE: four new `mogwai-protocol` tests in `messages.rs`
+    (session ids, the two echo guards, the two truncations, the three scan
+    predicates), and `mogwai-protocol` is workspace-sweep only. Existing tests
+    were rewritten in place and move no count: five in `sizing.rs` gained the
+    two-sided bracket, the zero-margin cache test gained an assertion that bites
+    in both profiles, the refusal matrix moved to a funded fixture, and the two
+    `contains("trigger")` sites became exact strings.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is
