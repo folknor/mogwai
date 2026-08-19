@@ -10,83 +10,10 @@ This hunt looks for defects in the TESTS, not in the code they test.
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 
 ROUND 1 CLOSED A1, C1 AND C3 on 2026-08-19; ROUND 2 CLOSED A2 AND A3 the same
-day. Those sections are gone from this
+day; ROUND 3 CLOSED A4, A5, A6, A7, A8 AND A9, so section A is empty and gone.
+Those sections are gone from this
 document; what the rounds decided that a later reader would otherwise re-derive
 wrong is in `notes/bug-loop-carry-forward.md`.
-
-## A. Tests that cannot fail
-
-**A4. `frozen_12a_path_is_byte_identical_through_the_parameterized_seam` - a
-tautology.** `count_curve.rs` (~line 665)
-
-It compares `GeneratedAcc::new(a,b,c,d,e).finish()` against
-`GeneratedAcc::new_with_count_windows(a,b,c,d,e, COUNT_WINDOWS_S).finish()`. But
-`new` is LITERALLY
-`Self::new_with_count_windows(seed, start, end, offset, tick, crate::subcontract::COUNT_WINDOWS_S)`
-(`measure12a/generated.rs:97-106`). This is `f(x) == f(x)`. No edit to the seam
-can make it red. Only the trailing `assert_eq!(COUNT_WINDOWS_S, &[1,5,60])`
-carries signal - keep that, delete the rest, or rewrite it to assert that a
-DIFFERENT window list produces a DIFFERENT artifact (which is the property that
-would actually catch the seam being mis-plumbed).
-
-**A5. `excess_draw_is_session_order_independent` - degenerate fixture.**
-`stage_m_tier2.rs:1435`
-
-Every cell is constructed with `residual: 0.0`. It then asserts
-`excess(...) == 0` on both orderings and that the residuals are pairwise equal -
-a comparison of all-zeros against all-zeros. No order-dependent bug in `excess`
-could be detected. It needs distinct per-cell residuals, and the assertion should
-be on the multiset of residuals per hour after a genuine shuffle (the sibling
-`no_slow_uses_independent_hour_streams_deterministically` right below it gets
-this right and is the model to copy).
-
-**A6. `stamps_run_from_the_pinned_origin` - a type-level tautology.**
-`mogwai-lab/src/sidecar.rs:167`
-
-`assert!(second >= first)` over two successive `stamp_us()` calls backed by
-`Instant`. `Instant` is monotonic by construction in std; this cannot fail. The
-doc comment says "monotonic AND SMALL" but nothing checks smallness, which is the
-half that could actually catch a wrong epoch (e.g. `stamp_us` returning
-wall-clock micros since 1970 instead of since `init`). Assert the bound:
-`stamp_us()` right after `init()` is under, say, a second.
-
-**A7. `emission_without_a_fifo_is_inert` - no assertions, and ambient-env
-dependent.** `mogwai-lab/src/sidecar.rs:155`
-
-Four calls, zero asserts; it only fails on panic. Worse, its stated premise ("Run
-without the variable set") is unguarded: `BROKKR_MARKER_FIFO` is a real env var
-this workspace's own benchmarking harness sets, and `CHANNEL` is a process-wide
-`OnceLock`. Under `brokkr mogwai`-adjacent tooling or any lane that exports it,
-this test silently becomes a different test - and since the FIFO open is the
-thing being avoided, an accidental set turns a no-op test into an I/O test
-against a nonexistent FIFO. The `OnceLock` also means whichever test in the
-process calls `init()` first fixes the channel for all of them; the two sidecar
-tests are order-coupled by construction, which now matters at
-`test_threads = 8`. Fix: have the test assert
-`std::env::var(MARKER_FIFO_ENV).is_err()` as a precondition, and make `channel()`
-injectable so inertness is asserted rather than merely not-crashed.
-
-**A8. `the_hour_normalization_centers_the_exposure_weighted_mean_on_one` - flat
-input cancels the property.** `mogwai-lab/src/fit/curves.rs:357`
-
-The raw curve is `2.5` at every one of 24 hours. Under a flat input, ANY
-normalization that divides by ANY weighted average yields exactly 1.0 - the
-exposure weights cancel identically. The test name claims the exposure-weighting
-is pinned; it is not. Give the raw curve per-hour variation and a nonuniform
-exposure table, then the weighting scheme is observable. Same objection, milder,
-applies to `materialization_is_idempotent` immediately below (flat curve, so
-idempotence is trivial).
-
-**A9. `cache_root_prefers_override_then_env_then_xdg` - name promises three
-limbs, body tests one.** `mogwai-lab/src/storage.rs:334`
-
-The body is a single `assert_eq!(cache_root(Some(&cli)), cli)`. The env and XDG
-limbs - the ones with real precedence logic and real failure modes - are
-untested. Testing them requires env mutation, which is unsafe at
-`test_threads = 8`; the right fix is to make `cache_root` take the resolved env
-values as parameters (a pure function) and test all three orderings, rather than
-reaching into the process environment at all. Meanwhile the name is a lie and
-should at least be narrowed.
 
 ## B. Self-widening tolerances (statistical gates that get MORE permissive as the code gets worse)
 
@@ -228,11 +155,9 @@ throughout. The `protocol9_tape_oracle` re-blessing guard is the correct pattern
 
 ## The hunter's recommended order of work
 
-1. **A4, A5, A6, A8** - small, individually cheap, each currently counted as
-   coverage it does not provide.
-2. **B1/B2** - the envelope tolerances. This one needs a decision rather than a
+1. **B1/B2** - the envelope tolerances. This one needs a decision rather than a
    patch: a self-scaling 5-sigma band at n=32 is a choice, and tightening it will
    make the most expensive gate in the workspace occasionally red. Worth naming
    what a failure would change before touching it.
-3. **D** - a third `analysis/*_conformance.json` for the zero-fraction and
+2. **D** - a third `analysis/*_conformance.json` for the zero-fraction and
    exposure quantities, if the two-copy gates are meant to be permanent.

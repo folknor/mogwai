@@ -664,27 +664,153 @@ mod tests {
         assert!(!hours.contains(&21));
     }
 
-    #[test]
-    fn frozen_12a_path_is_byte_identical_through_the_parameterized_seam() {
+    /// 2026-07-06T22:00Z, the July 7 MNQ session open at offset -300.
+    const WALK_OPEN_NS: u64 = 1_783_375_200_000_000_000;
+    /// 2026-07-07T21:00Z, its close. The measured window has to span the WHOLE
+    /// session: `close_session` emits complete sessions only, so a shorter
+    /// window yields an empty `per_session` and no windowed counts at all.
+    const WALK_CLOSE_NS: u64 = 1_783_458_000_000_000_000;
+
+    /// A short crafted session walk through `GeneratedAcc`, parameterized on
+    /// the count-window list, returning the finished record's bytes.
+    ///
+    /// It has to carry real TRADES, and the mechanism is worth stating exactly
+    /// because it is not the obvious one. Block 2's cells come from
+    /// `window_schedule` over the session segment, INDEPENDENT of prints - so
+    /// window keys appear as soon as any session closes. What requires trades
+    /// is the session existing at all: `push_trade` is the only thing that
+    /// rotates one in, so a walk of quotes alone finishes with an empty
+    /// `per_session` and a record no window list can move. The trades span ten
+    /// minutes so all five windows this file's two lists mention (1, 5, 15, 60,
+    /// 300 s) have something to bin.
+    fn windowed_walk_bytes(windows: Option<&'static [i64]>) -> Vec<u8> {
         use mogwai_lab::measure12a::generated::GeneratedAcc;
+        use mogwai_protocol::{AggressorSide, QuoteTick, TradeTick};
         use rust_decimal::Decimal;
 
-        let original = GeneratedAcc::new(1, 1, 2, -300, Decimal::new(25, 2))
-            .finish()
-            .expect("original finish");
-        let parameterized = GeneratedAcc::new_with_count_windows(
-            1,
-            1,
-            2,
-            -300,
-            Decimal::new(25, 2),
-            mogwai_lab::subcontract::COUNT_WINDOWS_S,
-        )
-        .finish()
-        .expect("parameterized finish");
+        let tick = Decimal::new(25, 2);
+        let px = |level: i64| Decimal::from(23_000) + tick * Decimal::from(level);
+        let end = WALK_CLOSE_NS;
+        let mut acc = match windows {
+            None => GeneratedAcc::new(1, WALK_OPEN_NS, end, -300, tick),
+            Some(w) => GeneratedAcc::new_with_count_windows(1, WALK_OPEN_NS, end, -300, tick, w),
+        };
+        // A parent every 20 seconds, three prints each: enough occupied
+        // 1-second windows for the coarser bins to differ from each other.
+        for step in 0..30u64 {
+            let ts = WALK_OPEN_NS + step * 20_000_000_000;
+            let level = (step % 7) as i64;
+            acc.push_quote(
+                &QuoteTick {
+                    symbol: "MNQ".into(),
+                    bid_px: px(level - 1),
+                    ask_px: px(level + 1),
+                    bid_sz: Decimal::ONE,
+                    ask_sz: Decimal::ONE,
+                    ts_event: ts,
+                },
+                // Block 5 selects a forensic minute and refuses one with no
+                // traced parent, so every parent here carries a quiet trace.
+                Some(mogwai_data::VolTrace {
+                    innovation_raw: 0.5 * std::f64::consts::SQRT_2,
+                    innovation_std: 0.5,
+                    sigma2_candidate: 1.0e-8,
+                    sigma2_realized: 1.0e-8,
+                    sigma_cap_hit: false,
+                    garch_scale: 1.0e-4,
+                    base_return_unclipped: 1.0e-4,
+                    base_return: 1.0e-4,
+                    feedback_clamp_hit: false,
+                    session_vol_mult: 1.0,
+                    regime_vol_mult: 1.0,
+                    pre_realized_return: 0.0,
+                    realized_return: 1.0e-4,
+                    realized_clamp_hit: false,
+                    mid_before: 23_000.0,
+                    mid_after: 23_000.0 * (1.0 + 1.0e-4),
+                }),
+            )
+            .expect("quote");
+            for print in 0..3u64 {
+                acc.push_trade(&TradeTick {
+                    symbol: "MNQ".into(),
+                    price: px(level),
+                    size: Decimal::ONE,
+                    aggressor: AggressorSide::Buyer,
+                    ts_event: ts + print * 1_000_000_000,
+                })
+                .expect("trade");
+            }
+        }
+        serde_json::to_vec(&acc.finish().expect("finish")).expect("record")
+    }
+
+    /// The window keys a finished record's block-2 cells are binned on, sorted
+    /// and deduplicated. This is the artifact-visible face of the seam.
+    fn windows_in(bytes: &[u8]) -> Vec<String> {
+        let record: Value = serde_json::from_slice(bytes).expect("record");
+        let mut seen = std::collections::BTreeSet::new();
+        for session in record["per_session"].as_array().expect("per_session") {
+            for (_hour, windows) in session["block2"].as_object().expect("block2") {
+                for key in windows.as_object().expect("window map").keys() {
+                    seen.insert(key.clone());
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    /// The count-window seam: the default constructor really does carry the
+    /// frozen 12a list, and the list really does reach the artifact.
+    ///
+    /// THE SECOND HALF IS WHAT MAKES THE FIRST ONE MEAN ANYTHING. `new`
+    /// delegates to `new_with_count_windows` with `COUNT_WINDOWS_S`, so
+    /// comparing the two against that same constant goes red on exactly one
+    /// class of edit: one that re-points `new` at a different list, which
+    /// moves the `default` walk alone. That is a real class - it is what the
+    /// test is for - but it can only be OBSERVED if a different list produces
+    /// a different artifact in the first place. So the sensitivity is asserted
+    /// here rather than assumed: `CURVE_WINDOWS`, the list this file's own
+    /// month runs pass through the same seam, must move the bytes.
+    #[test]
+    fn frozen_12a_path_is_byte_identical_through_the_parameterized_seam() {
+        let default = windowed_walk_bytes(None);
+        let frozen = windowed_walk_bytes(Some(mogwai_lab::subcontract::COUNT_WINDOWS_S));
+        let curve = windowed_walk_bytes(Some(CURVE_WINDOWS));
+
+        // The record has to actually carry windowed counts, or the two lists
+        // have nothing to disagree about and the comparisons below are empty.
+        // Reported as the window keys the artifact ended up with, because a
+        // raw byte diff of these records is 20 KB of noise.
         assert_eq!(
-            serde_json::to_vec(&original).unwrap(),
-            serde_json::to_vec(&parameterized).unwrap()
+            windows_in(&default),
+            vec!["1".to_string(), "5".into(), "60".into()],
+            "the default walk did not bin on the frozen 12a windows"
+        );
+        assert_eq!(
+            windows_in(&curve),
+            vec![
+                "1".to_string(),
+                "15".into(),
+                "300".into(),
+                "5".into(),
+                "60".into()
+            ],
+            "the curve walk did not bin on CURVE_WINDOWS"
+        );
+        assert!(
+            default == frozen,
+            "the default constructor no longer carries the frozen 12a window \
+             list: {} bytes against {} on windows {:?} against {:?}",
+            default.len(),
+            frozen.len(),
+            windows_in(&default),
+            windows_in(&frozen)
+        );
+        assert!(
+            default != curve,
+            "the count-window list does not reach the artifact, so nothing here \
+             can observe the seam being mis-plumbed"
         );
         assert_eq!(mogwai_lab::subcontract::COUNT_WINDOWS_S, &[1, 5, 60]);
     }

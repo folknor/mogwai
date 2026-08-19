@@ -354,22 +354,82 @@ mod tests {
 
     /// Selftest: "the hour normalization centers the exposure-weighted mean
     /// on one" and hour 21 is exactly 1.0.
+    ///
+    /// THE RAW CURVE IS NOT FLAT, and that is the whole test. Under a flat
+    /// input every exposed hour normalizes to exactly 1.0 whatever the
+    /// weighting scheme is - any weighted average of a constant is that
+    /// constant, so the weights cancel identically and the assertion pins
+    /// nothing. Hour 20 carries 45 open minutes against every other exposed
+    /// hour's 60, so putting the outlier THERE is what makes the weights
+    /// observable: the weighted mean and the plain mean over 23 hours differ,
+    /// and only one of them centers this curve.
     #[test]
     fn the_hour_normalization_centers_the_exposure_weighted_mean_on_one() {
-        let raw: BTreeMap<usize, f64> = (0..24).map(|h| (h, 2.5)).collect();
+        let raw: BTreeMap<usize, f64> = (0..24)
+            .map(|h| (h, if h == 20 { 100.0 } else { 1.0 }))
+            .collect();
         let norm = normalize_hour_curve(&raw).unwrap();
+
+        // Written out rather than recomputed from `hour_exposure_weights`,
+        // which would pin the normalization against its own weight table:
+        // 22 hours at 60 minutes plus hour 20's 45, hour 21 unexposed.
+        let weighted_den: f64 = 22.0 * 60.0 + 45.0;
+        let weighted_mean: f64 = (22.0 * 60.0 * 1.0 + 45.0 * 100.0) / weighted_den;
+        assert!((weighted_mean - 4.263_736_263_736_264).abs() < 1e-12);
         for h in exposed_utc_hours() {
-            assert!((norm[h] - 1.0).abs() < 1e-12);
+            let expected = raw[&h] / weighted_mean;
+            assert!(
+                (norm[h] - expected).abs() < 1e-12,
+                "hour {h}: {} is not {expected}",
+                norm[h]
+            );
         }
         assert_eq!(norm[21], 1.0);
+
+        // The property the name claims, stated directly: the EXPOSURE-weighted
+        // mean of the normalized curve is one.
+        let exposed = exposed_utc_hours();
+        let centered = exposed
+            .iter()
+            .map(|&h| norm[h] * if h == 20 { 45.0 } else { 60.0 })
+            .sum::<f64>()
+            / weighted_den;
+        assert!((centered - 1.0).abs() < 1e-12);
+
+        // And the sensitivity that makes the two schemes distinguishable: an
+        // UNWEIGHTED mean over the same 23 hours is emphatically not one, so a
+        // normalization that dropped the weights would fail above rather than
+        // pass for free.
+        let unweighted = exposed.iter().map(|&h| norm[h]).sum::<f64>() / (exposed.len() as f64);
+        assert!(
+            (unweighted - 1.0).abs() > 0.2,
+            "the fixture must separate the weighted mean from the plain one, got {unweighted}"
+        );
     }
 
     /// Selftest: "materialization is idempotent".
+    ///
+    /// Non-flat for the same reason: a curve that is already exact at
+    /// `SESSION_ARRAY_DECIMALS` is a fixed point of any rounding, so a flat
+    /// input tests only that the second pass leaves an integer alone. These
+    /// values do not survive six decimals untouched - the first pass MOVES
+    /// them - and idempotence is then a claim about the rounding.
     #[test]
     fn materialization_is_idempotent() {
-        let raw: BTreeMap<usize, f64> = (0..24).map(|h| (h, 2.5)).collect();
-        let mat = materialize_curve(&normalize_hour_curve(&raw).unwrap());
+        let raw: BTreeMap<usize, f64> = (0..24)
+            .map(|h| (h, 1.0 + (h as f64) * std::f64::consts::PI / 7.0))
+            .collect();
+        let normalized = normalize_hour_curve(&raw).unwrap();
+        let mat = materialize_curve(&normalized);
         assert_eq!(materialize_curve(&mat), mat);
+        // The first pass has to be doing work, or the claim is vacuous.
+        assert!(
+            normalized
+                .iter()
+                .zip(&mat)
+                .any(|(before, after)| before != after),
+            "the fixture rounds to itself, so idempotence says nothing here"
+        );
     }
 
     /// Selftest: a sub-floor cell refuses by name.

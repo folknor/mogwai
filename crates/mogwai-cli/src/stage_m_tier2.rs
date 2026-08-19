@@ -1430,31 +1430,116 @@ mod tests {
         assert!((f_quantile_90(4, 3) - 5.342_644).abs() < 1e-5);
     }
 
+    /// The `excess` draw is keyed on the session DATE, so the order the cells
+    /// happen to sit in must not reach it.
+    ///
+    /// THE FIXTURE IS DELIBERATELY NOT DEGENERATE. Zero residuals on one date
+    /// make this a comparison of all-zeros against all-zeros: every cell would
+    /// carry the same value whether the draw were per-date, per-cell, or
+    /// chained across the vector in iteration order, so no order-dependent
+    /// defect could be seen. It needs distinct per-cell residuals, at least two
+    /// COMPLETE dates (one date cannot show a draw taken in the wrong order),
+    /// and an INCOMPLETE one, which is what the return count is about.
     #[test]
     fn excess_draw_is_session_order_independent() {
+        let residual = |day: usize, hour: u64| (day as f64) * 100.0 + (hour as f64);
+        let mut cells = Vec::new();
+        for (day, date) in ["2026-03-09", "2026-03-10"].iter().enumerate() {
+            for hour in 0..23 {
+                cells.push(Cell {
+                    date: (*date).into(),
+                    hour,
+                    residual: residual(day, hour),
+                });
+            }
+        }
+        // A third date missing hours 6..=22: not a complete session, so it
+        // draws nothing and is counted as excluded instead.
+        for hour in 0..6 {
+            cells.push(Cell {
+                date: "2026-03-11".into(),
+                hour,
+                residual: residual(2, hour),
+            });
+        }
+
         let mut a = Month {
             key: 202_603,
-            cells: (0..23)
-                .map(|hour| Cell {
-                    date: "2026-03-09".into(),
-                    hour,
-                    residual: 0.0,
-                })
-                .collect(),
+            cells,
             scores: BTreeMap::new(),
             thin: true,
         };
+        let before = a.cells.clone();
+
+        // A genuine shuffle rather than a reverse: a reverse preserves the
+        // date blocks intact, so a draw chained across cells in vector order
+        // would still see each date's cells consecutively.
         let mut b = a.clone();
-        b.cells.reverse();
-        assert_eq!(excess(&mut a, 17, 0.25).unwrap(), 0);
-        assert_eq!(excess(&mut b, 17, 0.25).unwrap(), 0);
-        a.cells.sort_by_key(|c| c.hour);
-        b.cells.sort_by_key(|c| c.hour);
-        assert!(
-            a.cells
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for i in (1..b.cells.len()).rev() {
+            state = splitmix64(state);
+            b.cells.swap(i, (state % (i as u64 + 1)) as usize);
+        }
+        assert_ne!(
+            b.cells.iter().map(|c| c.hour).collect::<Vec<_>>(),
+            a.cells.iter().map(|c| c.hour).collect::<Vec<_>>(),
+            "the shuffle must actually move cells"
+        );
+
+        // One date of the three is incomplete, so one is excluded.
+        assert_eq!(excess(&mut a, 17, 0.25).unwrap(), 1);
+        assert_eq!(excess(&mut b, 17, 0.25).unwrap(), 1);
+
+        let key = |c: &Cell| (c.date.clone(), c.hour);
+        a.cells.sort_by_key(key);
+        b.cells.sort_by_key(key);
+        let mut expected = before.clone();
+        expected.sort_by_key(key);
+        assert_eq!(
+            a.cells.iter().map(key).collect::<Vec<_>>(),
+            b.cells.iter().map(key).collect::<Vec<_>>()
+        );
+        for ((x, y), original) in a.cells.iter().zip(&b.cells).zip(&expected) {
+            assert_eq!(
+                x.residual, y.residual,
+                "{} hour {} moved with the cell order",
+                x.date, x.hour
+            );
+            let delta = x.residual - original.residual;
+            if original.date == "2026-03-11" {
+                // Incomplete: untouched, so the excess draw is not simply
+                // added to everything in sight.
+                assert_eq!(delta, 0.0, "an incomplete session drew an excess");
+            } else {
+                assert_ne!(delta, 0.0, "a complete session drew nothing");
+            }
+        }
+
+        // One draw PER DATE, shared by that date's cells - and the two dates
+        // draw differently, which is what makes a per-date stream observable
+        // at all.
+        let delta_of = |date: &str| {
+            let deltas = a
+                .cells
                 .iter()
-                .zip(&b.cells)
-                .all(|(x, y)| x.residual == y.residual)
+                .zip(&expected)
+                .filter(|(c, _)| c.date == date)
+                .map(|(c, o)| c.residual - o.residual)
+                .collect::<Vec<_>>();
+            // Recovered by subtraction, so the cells only agree to within the
+            // rounding of `original + g` at their own magnitudes - the draw
+            // itself is one number, but `residual` spans 0 to 122 here.
+            assert!(
+                deltas.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12),
+                "{date} did not share one draw across its cells: {deltas:?}"
+            );
+            deltas[0]
+        };
+        let first = delta_of("2026-03-09");
+        let second = delta_of("2026-03-10");
+        assert!(
+            (first - second).abs() > 1e-6,
+            "the two sessions drew the same excess: {first} and {second}"
         );
     }
 

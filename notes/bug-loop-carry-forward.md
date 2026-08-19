@@ -2233,6 +2233,173 @@ RESIDUALS CARRIED, all three left standing on their stated grounds:
   see it; scripting that reading would pin the test against itself. It keeps
   its `#[ignore]`, its clean-tree precondition and its drop guard.
 
+## The lab/cli document, round 3: the six tests that could not fail
+
+Section A is CLOSED. The fix pass's gate was green at 1227 + 447, 1731 pairs,
+1674 run, 57 ignored, 0 orphaned - one new test in each sweep,
+`a_fifo_attaches_only_for_a_nonempty_openable_path`; the review repair below
+took it to 1229 + 449. Two production seams were made PURE rather than
+injectable, which is round 2's ruling applied ahead of time: a pure function
+taking already-read values is strictly better than an installable double,
+because there is nothing to install and therefore nothing to spoof.
+
+- `storage::cache_root_from(Option<&Path>, CacheEnv)` IS THE
+  PRECEDENCE RULE and `cache_root` is now a two-line wrapper that reads the
+  environment and holds no logic. `CacheEnv` carries the three readings as
+  `Option<&str>`, and the EMPTY-IS-UNSET rule lives in the pure function, so all
+  four limbs plus every empty-string fall-through are asserted without touching
+  the process environment. No call site changed. Bite-checked by transposing the
+  XDG and HOME limbs: fails naming `/from/home/.cache/mogwai` against
+  `/from/xdg/mogwai`. Reach for this shape before reaching for a seam.
+  - BOTH NAMES ARE `pub(crate)`, NOT `pub`, and the reason is round 2's
+    shipped-seam incident: a testability helper made public took a cargo feature
+    AND a runtime refusal to withdraw. `mod tests` is in the same file, so
+    `pub` bought nothing. WHEN A PURE RULE IS EXTRACTED FOR A TEST, EXTRACT IT
+    AT THE NARROWEST VISIBILITY THE TEST CAN REACH.
+  - AND MAKING THE RULE PURE DID NOT REMOVE THE UNTESTED HOP, IT RELOCATED IT -
+    the arc's twenty-second signature instance, in a sub-shape worth naming:
+    A REFACTOR THAT MOVES AN UNTESTED HOP RATHER THAN ELIMINATING IT. The first
+    cut had `CacheEnv::read()` returning a bare
+    `(Option<String>, Option<String>, Option<String>)` and `cache_root` doing
+    the positional unpack. THREE SAME-TYPED VALUES IN AN UNNAMED TUPLE, and the
+    only wrapper assertion was `cache_root(Some(&cli))`, which returns on the
+    first line before any reading is consulted - so transposing the `HOME` and
+    `XDG_CACHE_HOME` slots left the whole suite green while a real run resolved
+    its cache to `~/mogwai` instead of `~/.cache/mogwai`. MEASURED, not argued:
+    the transposition installed as a text edit passes
+    `cache_root_prefers_override_then_env_then_xdg` on all three sweeps.
+    The read now goes through an owned `AmbientCacheEnv` whose fields carry the
+    three names, so both hops - variable to field, field to borrow - are
+    name-to-name, and `the_ambient_reading_binds_each_variable_to_its_own_limb`
+    pins the variable literals at the read site. Bite-checked with the same
+    transposition: fails "the XDG limb is not fed from XDG_CACHE_HOME",
+    `Some("/home/folk")` against `None`. The test SAYS SO on stderr when the
+    ambient environment cannot discriminate (all three readings equal), rather
+    than passing silently as a check that did not happen.
+- `mogwai_lab::sidecar::resolve_fifo(Option<OsString>)` IS THE ATTACHMENT RULE,
+  same move. Unset, empty and unopenable all degrade to no channel, and that is
+  now asserted rather than traversed. `write_line_to(&Channel, &str) -> bool`
+  reports whether a line reached a handle, which is what turned a
+  four-calls-zero-asserts test into one with an observable; production callers
+  bind it to `_inert`, because the module's own header forbids a return value a
+  caller can branch on. Bite-checked twice: falling back to `/dev/null` on a
+  failed open fails the attachment test on the `"/"` case, and returning `true`
+  with no FIFO fails `emission_without_a_fifo_is_inert` on `!write_line(...)`.
+  - THE `OnceLock` ORDER-COUPLING IS REAL BUT NOT A DEFECT, measured rather than
+    argued. Whichever test reaches `init()` first fixes `CHANNEL` for the whole
+    binary - but the resolution is a pure function of one environment variable
+    that no test in this workspace mutates, so both orders resolve identically.
+    What the coupling DOES bind is the epoch, which is why A6's bound below is
+    the sweep's rather than the test's.
+  - THE SAME RELOCATED HOP WAS IN `channel()`, smaller blast radius and the
+    same residual: it was the ONLY code naming `MARKER_FIFO_ENV`, and no test
+    named the variable at all, so re-pointing the channel at a different
+    variable left every sidecar test green while the harness's FIFO went unread
+    forever. The reading is `configured_fifo_path()` now - one named function,
+    the single hop from variable to rule - and
+    `the_channel_reads_the_documented_variable` writes the literal
+    `BROKKR_MARKER_FIFO` out rather than taking it from the constant, which
+    would pin the constant against itself. Bite-checked by re-pointing the
+    constant at `BROKKR_MARKER_PIPE`: fails naming both strings. Its second
+    assertion, that `configured_fifo_path` really reads that variable, is
+    VACUOUS while the variable is unset - the literal-vs-constant half is the
+    one that always bites, and it is enough to catch the shape that was open.
+  - THE PREMISE ASSERTION IS A SKIP NOW, reversing round 3's ruling on cold
+    review. `emission_without_a_fifo_is_inert` used to `assert!` that
+    `BROKKR_MARKER_FIFO` was unset - but that is a variable THIS WORKSPACE'S
+    OWN BENCHMARK TOOLING SETS, so a `brokkr mogwai` lane turned a correct
+    process into a RED SUITE indistinguishable from a regression. The
+    guarantee is not lost, because the test's environment-proof half - a
+    locally built `Channel` with `resolve_fifo(None)` - establishes inertness
+    whatever the environment says, and it now runs FIRST and unconditionally.
+    The process-channel half `eprintln!`s and returns when the variable is set.
+    Bite-checked in both directions as text edits: forcing
+    `configured_fifo_path` to return a path prints the skip line and passes,
+    and making `write_line_to` return `true` with no FIFO fails on the
+    unconditional `!write_line_to(&inert, ...)`. GENERAL FORM: a precondition
+    on an AMBIENT variable may refuse only when the property cannot be
+    established any other way; where a second, environment-proof half already
+    establishes it, the precondition is a skip.
+  - `channel()` OPENS THE FIFO BEFORE IT STAMPS THE EPOCH. The pure-function
+    refactor had inverted this into `Channel { epoch: Instant::now(), fifo:
+    resolve_fifo(...) }`, which is field order and therefore evaluation order.
+    Microseconds and no consumer can see it, but the origin is defined as the
+    instant the channel exists, so it is taken where that becomes true.
+- A6'S BOUND IS TWO BOUNDS, AND NEITHER CAN ROT. A LOCAL origin (`stamp_from(
+  Instant::now()) < 1_000_000`) is exact - the two statements are adjacent, so a
+  second is enormous - and it is the one that bites: substituting wall-clock
+  micros since 1970 fails THERE. The process origin gets one day of microseconds
+  instead, because `CHANNEL`'s epoch belongs to whichever test called `init`
+  first and the honest ceiling is the SWEEP's runtime, not this test's. It is
+  four orders of magnitude under the ~1.8e15 a UNIX-epoch stamp reports, so it
+  discriminates the defect without pinning a number anyone has to re-measure.
+  The monotonicity assertion is kept: it costs nothing and it is what the
+  protocol says.
+- A4 WAS A TAUTOLOGY OVER AN EMPTY RECORD, WHICH IS WORSE THAN THE REPORT SAID,
+  and the comparison was the only implementation of NOTHING - `new` and
+  `new_with_count_windows` are both exercised in production
+  (`measure.rs::run_final_walk` and `count_curve.rs`'s month runs on
+  `CURVE_WINDOWS`), and no other test drove either. Its `GeneratedAcc::new(1, 1,
+  2, ...)` window is two NANOSECONDS wide, so both sides finished an empty
+  artifact and even a genuine seam defect had nothing to move. The rewrite drives
+  a crafted July-7 MNQ session through the accumulator three times - default,
+  explicit `COUNT_WINDOWS_S`, and `CURVE_WINDOWS` - and asserts the first two
+  agree and the third DIFFERS, which is what makes the agreement falsifiable.
+  Bite-checked by re-pointing `new` at `&[1, 5, 15, 60, 300]`: fails naming the
+  window keys.
+  - AND `default == frozen` IS NOT A DEAD ASSERTION, which the first write-up
+    here implied by naming only the window-keys failure. Cold review corrected
+    it: re-pointing `new` moves the `default` walk ALONE, because `frozen`
+    passes `COUNT_WINDOWS_S` explicitly - so that comparison goes red on the
+    same edit. It is close to `f(x) == f(x)` in the sense that `new` delegates
+    to `new_with_count_windows`, not in the sense that nothing can falsify it.
+  - THREE FIXTURE FACTS THE NEXT `GeneratedAcc` TEST WILL OTHERWISE REDISCOVER.
+    The measured window must span a WHOLE session (`close_session` emits
+    complete sessions only, so a short window yields an empty `per_session`), and
+    every parent needs a `VolTrace` (block 5 selects a forensic minute and
+    REFUSES one with no traced parent). Both cost a round-trip here.
+    The third is a MECHANISM the fixture comment stated wrongly for one round,
+    with the right conclusion: the walk needs real TRADES, but not because
+    prints are what produce window keys. Block 2 builds its cells from
+    `window_schedule` over the session segment, INDEPENDENT of prints, so keys
+    appear as soon as any session closes. What needs trades is the session
+    existing at all - `push_trade` is the only thing that rotates one in, so a
+    walk of quotes alone finishes with an empty `per_session` and a record no
+    window list can move.
+  - AND THE FAILURE MESSAGE IS DELIBERATELY NOT A BYTE DIFF. `assert_eq!` over
+    the two records dumps 20 KB of decimal byte values. The test reports the
+    window KEYS the artifact ended up with instead, and uses `assert!` with a
+    written message for the byte comparisons.
+- A5'S FIXTURE NEEDED THREE THINGS, not just non-zero residuals: at least TWO
+  complete dates (one date cannot show a draw taken in the wrong order), an
+  INCOMPLETE one (so the return count is something other than 0 and the
+  untouched-cells claim exists), and a real shuffle rather than a reverse - a
+  reverse keeps each date's cells contiguous, so a draw chained in vector order
+  would still see them together. Bite-checked by mixing the cell's POSITION into
+  the draw's seed tuple: fails on the order-independence assertion by name, and
+  the OLD all-zeros single-date fixture passes that same defect.
+  - THE PER-DATE DRAW IS RECOVERED BY SUBTRACTION AND THEREFORE NEEDS A
+    TOLERANCE. `excess` adds one `g` to every cell of a date, but the residuals
+    span 0 to 122 here, so `residual + g - residual` differs in the last ulp
+    across cells. The cells' agreement is `< 1e-12`; the two dates' separation is
+    `> 1e-6`. The cross-ORDER comparison stays exact, because both sides add the
+    same `g` to the same operand.
+- A8 WAS THE PUREST DEGENERATE FIXTURE IN THE DOCUMENT and the repair needed no
+  new machinery: `hour_exposure_weights` is ALREADY nonuniform (hour 20 carries
+  45 open minutes against everyone else's 60, hour 21 zero), so the weighting is
+  observable the moment the RAW curve stops being flat. Putting the outlier at
+  hour 20 is what does it. The expected mean is written out as literals
+  (`(22*60*1 + 45*100) / (22*60 + 45)`) rather than recomputed from the weight
+  table, which would pin the normalization against itself. The test also asserts
+  that the UNWEIGHTED mean of the normalized curve is NOT one, which is the
+  sensitivity that makes the whole thing discriminating. Bite-checked by
+  replacing the weights with 1.0: fails per hour, naming hour 0.
+  - `materialization_is_idempotent` GOT THE SAME TREATMENT, unasked but one
+    line: a curve already exact at six decimals is a fixed point of any
+    rounding, so the flat version tested nothing. It now asserts that the FIRST
+    pass moved something, which is the same "the fixture must exercise the
+    property" check.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -2450,6 +2617,14 @@ RESIDUALS CARRIED, all three left standing on their stated grounds:
     without an entry here, and the arithmetic above shows it moved no count.
     Whoever reconciles r1's own effect on the ignored count owes it a
     measurement rather than a reading of its commit message.
+  - lab/cli r3: 1229 + 449, 1735 pairs, 1678 run, 57 ignored, 0 orphaned, 14
+    skips, 1m00s. The fix pass itself was 1227 + 447 / 1731 pairs (+1 in each
+    sweep over lab/cli r2, the `mogwai-lab` sidecar attachment test); the
+    review-repair pass added `the_ambient_reading_binds_each_variable_to_its
+    _own_limb` and `the_channel_reads_the_documented_variable`, both
+    `mogwai-lab` and therefore +2 IN EACH SWEEP and +4 pairs. Six tests were
+    rewritten in place across `count_curve.rs`, `stage_m_tier2.rs` and
+    `fit/curves.rs` and move no count.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is
@@ -2533,7 +2708,16 @@ RESIDUALS CARRIED, all three left standing on their stated grounds:
   a drop guard, and it composes with a test whose property needs the child alone
   signalled: kill the child explicitly, let the guard take the group afterwards.
 - `analysis/asia_jump_probe.py` is untracked, unrelated to this arc, and
-  predates it. It is not to be swept into a commit.
+  predates it. It is not to be swept into a commit. Seventeen cold reviewers
+  have now analysed it unprompted; the standing answer is that it is out of
+  scope and stays untracked.
+  - ONE THING FROM THAT NOISE IS WORTH KEEPING, because it is the shared-fixture
+    trap in a form that would not be caught by a gate: the probe's percentile
+    convention does not match `mogwai_lab::kernel::nearest_rank_list`. A number
+    out of that script must therefore never land in a durable doc labelled
+    "p95" and get compared against a Rust-computed one - two implementations of
+    a quantity, no shared fixture, and both sides green because neither is
+    checked. This is a note about the CONVENTION, not a request to fix the file.
 
 ## Loop conventions for this arc
 
