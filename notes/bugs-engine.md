@@ -8,116 +8,20 @@ the divergence-injection seam.
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 Confidence labels are the hunter's own.
 
+FINDINGS 1 THROUGH 3 ARE FIXED AND REMOVED; FINDING 4 IS WITHDRAWN, see section
+11 below for why and for the process lesson it cost. The three that landed
+reproduced as described and were three defects rather than symptoms of one; the
+two that touched `Resting::Held` (the orphaned children and the amend that
+promoted a child) were independent. The reap rule now has one home,
+`Engine::close_out` with its unrested twin `close_unrested`, which every terminal
+path routes through except `reap_children_of` itself. Section numbering is
+unchanged: later briefs and the carry-forward cite these by their original
+numbers.
+
 The hunter read all four source files (`orders.rs`, `account.rs`, `lib.rs`
 non-test region, `divergence.rs`) plus the protocol-side helpers the engine
 leans on (`InstrumentDef::unrealized`, `validate_submit_group`,
 `InstrumentClass`). No files modified.
-
-## 1. Venue-originated cancels consume client-armed divergences (serious)
-
-`Engine::liquidate_all`, `retire_off_river` and `cancel_unreadable_orders`
-(lib.rs) all cancel through `self.on_cancel(...)`. `on_cancel` consumes two
-client arms:
-
-- `RejectNextCancel` - if armed, the FIRST order the venue tries to flatten
-  comes back `OrderCancelRejected` and STAYS RESTING. A risk-breach
-  `liquidate_all` then proceeds to close the positions while leaving a live
-  resting order behind - precisely the hazard its own doc comment ("RESTING
-  ORDERS GO FIRST... or the account could re-open the position it was just
-  closed out of") says it exists to prevent.
-- `DropNextAccountUpdate` - spent on a venue action the scenario author never
-  aimed it at.
-
-Contrast the care taken on the fill side: every venue-originated submit
-(`close_at_mark`, `apply_margin_breaches`, `liquidate_all`) passes
-`apply_divergences: false` explicitly, and `validate_fill_funds` even documents
-"a venue-originated order pays no client-armed FeeSurcharge, so checking it
-against one could cancel a forced liquidation." The cancel path has no
-equivalent. `on_cancel` needs an `apply_divergences` parameter (or a
-`cancel_silently`-style internal twin) exactly as `on_submit_from` has.
-
-Confidence: high. This is a straight asymmetry in the same invariant the crate
-already states.
-
-## 2. Terminal conditional paths orphan their held children (frontier/guard family)
-
-`reap_children_of` is called from exactly four sites: `expire_orders`, the OCO
-cancel, the OUO zero-leaves cancel, and `on_cancel`. It is NOT called from:
-
-- `on_trigger`'s reduce-only cap-zero cancel (orders.rs ~1545)
-- `on_trigger`'s post-only rejection (~1663)
-- `on_trigger`'s `cancel_triggered` funds-check cancel
-- `on_trigger`'s cap-clamped remainder cancel (both arms)
-- `apply_scans_on_clock`'s cap-zero cancel and its resting funds-check cancel
-- `cancel_open_order_silently`
-
-Every one of these takes an order terminal WITHOUT it having filled. Any
-`Resting::Held` child of that order is now waiting for a release that can never
-come: it is never scanned (`pending_scans` skips `Held`), holds no reservation,
-is not covered by `expire_orders` unless it happens to be GTD or Day, and only a
-client cancel ends it. `on_cancel`'s own comment states the rule - "a held child
-left behind would rest for the life of the run holding a promise nothing can
-keep" - and six other terminal paths violate it.
-
-The structural fix is not six more call sites. The rule is "an order leaving the
-book without having filled reaps its children", and it belongs inside `take_open`
-or `record_closed` (or a single
-`close_order(pos, status, ts) -> Vec<ServerMessage>` that every terminal path
-routes through). Right now the invariant is maintained by remembering, at ten
-sites, which is how it got missed at six of them.
-
-Confidence: high on the mechanism; the hunter did not construct a failing test.
-
-## 3. `on_modify` promotes a `Held` child into a live limit
-
-orders.rs, the price-amend block:
-
-```rust
-if !matches!(order.resting, Resting::Conditional { .. }) {
-    order.resting = Resting::Limit { fill_trigger_px: draw_trigger(...) };
-    order.scanned_ns = ts;
-}
-```
-
-`Resting::Held` is not `Conditional`, so a price amend on an order-list child
-that is still waiting for its parent TURNS IT INTO A SCANNABLE LIVE LIMIT, takes
-its reservation via `refresh_open_reservation` (the `Held` short-circuit in
-`order_reservation_entry` no longer applies), and lets it fill before its parent
-ever executes. That is one-triggers-the-other defeated by a client amend - the
-exact hazard `Resting::Held` exists to prevent.
-
-The condition wanted is `matches!(order.resting, Resting::Limit { .. })`, or the
-amend of a `Held` child should mutate `submit.price` only and leave the resting
-state alone.
-
-Related, cosmetic: a `trigger_price` amend on a held CONDITIONAL child is
-refused with "order has already triggered", which is false - it has not
-triggered, it has not been released. Wrong reason on the wire.
-
-Confidence: high.
-
-## 4. An IOC or FOK order with a parent rests forever
-
-In `on_submit_from`, the held-child branch is placed AHEAD of every
-marketability, TIF and post-only decision (deliberately, per its comment). But
-it is also ahead of the FOK rejection and the IOC cancel. So a standalone
-`SubmitOrder` with `time_in_force: Ioc` (or `Fok`) and a
-`link.parent_order_id` naming an unfilled parent is accepted and rests `Held`;
-`release_child` later promotes it to `Resting::Limit`, where it behaves as a
-GTC. `expire_orders` handles only `Gtd` and `Day`, so nothing ever ends it.
-
-Now-or-never orders resting indefinitely is a contract break. Note the wire
-layer already knows this is nonsense - `validate_submit_group` refuses an
-IOC/FOK GROUP MEMBER with "a now-or-never order's fate is not decided by
-admission" - but the per-leg route (`ClientMessage::SubmitOrder` with a link)
-reaches the engine unfiltered, and `validate_submit` refuses IOC/FOK only for
-CONDITIONALS. The rule belongs in `validate_submit`: a child (any order carrying
-`link.parent_order_id`) may not be IOC or FOK.
-
-Confidence: high on reachability, given `validate_submit_order` does not itself
-refuse this (the hunter checked the group validator; it did not exhaustively
-read `validate_submit_order`, so treat the single-order path as roughly 85
-percent).
 
 ## 5. Inverse contracts: two P and L formulas, and the wrong one is used at the decision points
 
@@ -283,11 +187,13 @@ applies `projected_qty` to equity sells; nothing in this crate does.
 
 Six of the ten findings (1 aside: findings 2, 3, 6, 7, 8, and the
 `account_changed` gap) share one cause: A RULE WITH ONE STATED HOME AND SEVERAL
-HAND-ROLLED COPIES. The reservation formula exists in `order_reservation`, and
+HAND-ROLLED COPIES. The reap half of that is now closed - `Engine::close_out` is
+the single home and every terminal path routes through it - and the reservation
+and P and L halves are still open below. The reservation formula exists in `order_reservation`, and
 again in `on_modify`'s futures branch, and again in its buy/sell branch, and
 `margin_requirement` has a fourth. The P and L formula exists in
 `InstrumentDef::unrealized` and again in three places in lib.rs. The "reap
-children on non-filling terminal" rule exists at four of ten call sites. The
+children on non-filling terminal" rule existed at four of ten call sites. The
 prose in this crate is unusually good at STATING each invariant - and in each
 case the statement sits next to one implementation while the others drift.
 
@@ -299,3 +205,40 @@ call by constructing the candidate `SubmitOrder`, and deleting every hand-rolled
 P and L expression in favour of `def.unrealized`. `reconcile_order_locked`
 already proves the aggregate-cache half of this is worth doing; nothing plays
 that role for the other two.
+
+## 11. WITHDRAWN, and finding 4 with it: both rested on a misreading
+
+Filed by the round-1 fix pass, refuted by the round-1 cold review, and settled
+here by reading the code. `mogwai_protocol::validate_order_link` ALREADY refuses
+both shapes, and has for longer than this hunt: a `Market` child with
+"a Market order cannot be an order-list child...", and an `Ioc`/`Fok` child with
+"an order-list child cannot be immediate-or-cancel...". It is called from
+`validate_submit_order`, which `mogwai-server`'s `boundary_error` runs on every
+inbound `SubmitOrder` and, through `validate_submit_group`, on every member of
+every inbound `SubmitOrderGroup`. Those two frames are the whole client-facing
+order-entry surface - the `POST /orders` carrier is gone - and `boundary_error`
+additionally refuses a LINKED bare `SubmitOrder` outright, so the "per-leg route"
+finding 4 said reached the engine unfiltered does not exist over the wire at all.
+The pre-existing test `linkage_shapes_the_venue_cannot_honour_are_refused` was
+asserting both refusals the whole time, in the same file the fix pass edited.
+
+So: `docs/order-lists.md` was RIGHT before the round-1 edit and has been restored
+to what it said. The `Engine::validate_submit` copy of the IOC rule has been
+removed rather than kept as defence in depth, because a second home for a rule
+that has one is the exact defect the structural note names, and the engine's real
+exposure - a caller that reaches `process_with_market` without the protocol
+validator - is finding 10's group-validation gap, closed by having
+`on_submit_group` call `validate_submit_group` rather than by copying one arm of
+it into the engine. A later round taking finding 10 should not re-derive any of
+this.
+
+Two process notes, since this cost a round. The fix pass self-rated finding 4 at
+85 percent for not having read `validate_submit_order`, and that reservation was
+the correct one: an "is this already refused" question is answered by reading the
+validator, not by reading the path that would have needed it. And its regression
+test asserted `reason.contains("order-list child cannot be immediate-or-cancel")`
+while driving `process_with_market` directly - a substring the protocol crate's
+own message also carries. The test has been deleted, and
+`linkage_shapes_the_venue_cannot_honour_are_refused` now asserts the FULL refusal
+string for both shapes plus the group route, so deleting either arm of
+`validate_order_link` fails it by name.

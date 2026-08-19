@@ -582,7 +582,7 @@ impl Engine {
                         venue_order_id: record.venue_order_id.clone(),
                         ts_event: ts,
                     });
-                    self.record_closed(&record, WireOrderStatus::Canceled, ts);
+                    out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
                 }
                 TimeInForce::Fok => unreachable!("FOK rejected above"),
             }
@@ -670,7 +670,7 @@ impl Engine {
                 venue_order_id,
                 ts_event: ts,
             });
-            self.record_closed(&record, WireOrderStatus::Canceled, ts);
+            out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
             return out;
         }
@@ -747,7 +747,7 @@ impl Engine {
                 venue_order_id: record.venue_order_id.clone(),
                 ts_event: ts,
             });
-            self.record_closed(&record, WireOrderStatus::Canceled, ts);
+            out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
         } else if leaves_qty > Decimal::ZERO {
             // Every partial increments `band_draw`, and the sweep is not the
             // only place a partial happens: a marketable-on-arrival limit cut
@@ -777,12 +777,12 @@ impl Engine {
                         venue_order_id: record.venue_order_id.clone(),
                         ts_event: ts,
                     });
-                    self.record_closed(&record, WireOrderStatus::Canceled, ts);
+                    out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
                 }
                 TimeInForce::Fok => unreachable!("FOK partials are rejected before acceptance"),
             }
         } else {
-            self.record_closed(&record, WireOrderStatus::Filled, ts);
+            out.extend(self.close_unrested(&record, WireOrderStatus::Filled, ts));
         }
 
         // Untargeted: applies to this submit's account-state snapshot. Scanned
@@ -873,8 +873,8 @@ impl Engine {
             let Some(pos) = self.open.position(&client_order_id) else {
                 continue;
             };
-            let order = self.take_open(pos);
-            self.record_closed(&order, WireOrderStatus::Expired, ts);
+            let order = self.open[pos].clone();
+            let reaped = self.close_out(pos, &order, WireOrderStatus::Expired, ts);
             // EXPIRED, not Canceled. Nobody cancelled this order: the client
             // stated its lifetime at submit and the clock reached the end of
             // it. Reporting a cancel says an actor pulled the order, which is
@@ -894,10 +894,9 @@ impl Engine {
                 venue_order_id: order.venue_order_id.clone(),
                 ts_event: ts,
             });
-            // An expired parent is a parent that will never fill.
-            if !self.has_filled(&order.submit.client_order_id) {
-                out.extend(self.reap_children_of(vec![order.submit.client_order_id.clone()], ts));
-            }
+            // An expired parent is a parent that will never fill; `close_out`
+            // already decided that and reaped accordingly.
+            out.extend(reaped);
         }
         if !out.is_empty() {
             out.push(ServerMessage::AccountState(self.snapshot(ts)));
@@ -1071,13 +1070,14 @@ impl Engine {
             let last_qty = cap.map_or(planned_qty, |cap| planned_qty.min(cap));
             let new_leaves = leaves - last_qty;
             if cap == Some(Decimal::ZERO) {
-                let order = self.take_open(pos);
-                self.record_closed(&order, WireOrderStatus::Canceled, ts);
+                let order = self.open[pos].clone();
+                let reaped = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
                 out.push(ServerMessage::OrderCanceled {
                     client_order_id: submit.client_order_id,
                     venue_order_id,
                     ts_event: ts,
                 });
+                out.extend(reaped);
                 emitted += 1;
                 continue;
             }
@@ -1098,13 +1098,14 @@ impl Engine {
                 true,
             ) {
                 tracing::warn!(client_order_id = %submit.client_order_id, %reason, "resting order canceled at funds check");
-                let order = self.take_open(pos);
-                self.record_closed(&order, WireOrderStatus::Canceled, ts);
+                let order = self.open[pos].clone();
+                let reaped = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
                 out.push(ServerMessage::OrderCanceled {
                     client_order_id: submit.client_order_id,
                     venue_order_id,
                     ts_event: ts,
                 });
+                out.extend(reaped);
                 emitted += 1;
                 continue;
             }
@@ -1145,13 +1146,14 @@ impl Engine {
                 continue;
             };
             if new_leaves > Decimal::ZERO && cap.is_some_and(|cap| cap < planned_qty) {
-                let order = self.take_open(pos);
-                self.record_closed(&order, WireOrderStatus::Canceled, ts);
+                let order = self.open[pos].clone();
+                let reaped = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
                 out.push(ServerMessage::OrderCanceled {
                     client_order_id: order.submit.client_order_id,
                     venue_order_id: order.venue_order_id,
                     ts_event: ts,
                 });
+                out.extend(reaped);
             } else if new_leaves > Decimal::ZERO {
                 let before = self.open[pos].clone();
                 let order = &mut self.open[pos];
@@ -1190,8 +1192,8 @@ impl Engine {
                 order.revision = order.revision.saturating_add(1);
                 self.refresh_open_reservation(pos, &before);
             } else {
-                let order = self.take_open(pos);
-                self.record_closed(&order, WireOrderStatus::Filled, ts);
+                let order = self.open[pos].clone();
+                out.extend(self.close_out(pos, &order, WireOrderStatus::Filled, ts));
             }
         }
         // ONE snapshot for the whole batch, taken after every transition it
@@ -1286,8 +1288,8 @@ impl Engine {
                         self.note_absent_sibling(&order.client_order_id, sibling, "Oco");
                         continue;
                     };
-                    let canceled = self.take_open(pos);
-                    self.record_closed(&canceled, WireOrderStatus::Canceled, ts);
+                    let canceled = self.open[pos].clone();
+                    let reaped = self.close_out(pos, &canceled, WireOrderStatus::Canceled, ts);
                     tracing::debug!(
                         filled = %order.client_order_id,
                         sibling = %canceled.submit.client_order_id,
@@ -1298,9 +1300,7 @@ impl Engine {
                         venue_order_id: canceled.venue_order_id.clone(),
                         ts_event: ts,
                     });
-                    out.extend(
-                        self.reap_children_of(vec![canceled.submit.client_order_id.clone()], ts),
-                    );
+                    out.extend(reaped);
                 }
             }
             Contingency::Ouo => {
@@ -1313,19 +1313,13 @@ impl Engine {
                     let new_total = before.submit.quantity.saturating_sub(last_qty);
                     let new_leaves = before.leaves_qty.saturating_sub(last_qty);
                     if new_leaves <= Decimal::ZERO {
-                        let canceled = self.take_open(pos);
-                        self.record_closed(&canceled, WireOrderStatus::Canceled, ts);
+                        let reaped = self.close_out(pos, &before, WireOrderStatus::Canceled, ts);
                         out.push(ServerMessage::OrderCanceled {
-                            client_order_id: canceled.submit.client_order_id.clone(),
-                            venue_order_id: canceled.venue_order_id.clone(),
+                            client_order_id: before.submit.client_order_id.clone(),
+                            venue_order_id: before.venue_order_id.clone(),
                             ts_event: ts,
                         });
-                        out.extend(
-                            self.reap_children_of(
-                                vec![canceled.submit.client_order_id.clone()],
-                                ts,
-                            ),
-                        );
+                        out.extend(reaped);
                         continue;
                     }
                     let updated = {
@@ -1439,6 +1433,63 @@ impl Engine {
         tracing::debug!(child = %client_order_id, "order-list child released by its parent's fill");
     }
 
+    /// Freeze a terminal order into the truth store and reap the held children
+    /// its own terminality has just orphaned. THE SINGLE HOME OF THAT RULE.
+    ///
+    /// `record` is the copy that goes into the store - the caller's own where
+    /// it has mutated it (a triggered order's leaves), the book's otherwise -
+    /// and `pos` is where the order still sits on the book. The invariant used
+    /// to be maintained by REMEMBERING at ten sites and was missed at six of
+    /// them: the reduce-only cap-zero cancels, the post-only trigger
+    /// rejection, the trigger-time and resting funds cancels, and the silent
+    /// control-plane cancel all took an order terminal while leaving any
+    /// `Resting::Held` child of it waiting for a release nothing could ever
+    /// perform.
+    ///
+    /// THE SET THIS COVERS, stated exactly, because a comment claiming a wider
+    /// set than it has is how the rule got lost the first time. Every terminal
+    /// path that closes an order the CLIENT submitted routes through here or
+    /// through `close_unrested` - including the several whose reap is provably
+    /// a no-op because the order filled, since a site that skips the call on
+    /// the strength of an early return three hundred lines up is maintained by
+    /// remembering again. The one path that does NOT is `reap_children_of`
+    /// itself, which closes the children: it must not re-enter, and it carries
+    /// the generation walk in its own worklist instead.
+    ///
+    /// Returns the child cancellations, which the caller emits AFTER its own
+    /// terminal event so the wire reads parent-then-children.
+    pub(crate) fn close_out(
+        &mut self,
+        pos: usize,
+        record: &OpenOrder,
+        status: WireOrderStatus,
+        ts: u64,
+    ) -> Vec<ServerMessage> {
+        self.take_open(pos);
+        self.close_unrested(record, status, ts)
+    }
+
+    /// `close_out` for an order that never reached the book - a submit that
+    /// closed inside `on_submit_from`. It can still be a parent: a group may
+    /// name its parent AFTER a child (`validate_link` admits the forward
+    /// reference on purpose), so the child is already resting `Held` when the
+    /// parent's own submit cancels it out.
+    fn close_unrested(
+        &mut self,
+        record: &OpenOrder,
+        status: WireOrderStatus,
+        ts: u64,
+    ) -> Vec<ServerMessage> {
+        self.record_closed(record, status, ts);
+        // Asked AFTER `record_closed`, so the store answers for an order that
+        // is no longer on the book. A parent that filled at all can still
+        // release its children, so only a wholly unfilled terminal reaps.
+        if self.has_filled(&record.submit.client_order_id) {
+            return Vec::new();
+        }
+        self.reap_children_of(vec![record.submit.client_order_id.clone()], ts)
+    }
+
     /// Cancel every held child of an order that has gone terminal WITHOUT ever
     /// filling, so a bracket whose entry was cancelled does not leave its exits
     /// waiting for a release that can never come.
@@ -1543,14 +1594,14 @@ impl Engine {
         // armed `PartialFillNext` on the way to its cancel.
         let cap = self.reduce_only_cap(&order.submit);
         if cap == Some(Decimal::ZERO) {
-            self.take_open(pos);
-            self.record_closed(&order, WireOrderStatus::Canceled, ts);
+            let reaped = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
             tracing::warn!(client_order_id = %order.submit.client_order_id, "reduce-only order canceled at trigger: nothing left to reduce");
             out.push(ServerMessage::OrderCanceled {
                 client_order_id: order.submit.client_order_id,
                 venue_order_id: order.venue_order_id,
                 ts_event: ts,
             });
+            out.extend(reaped);
             return out;
         }
         let increment = self.instruments[&order.submit.symbol].price_increment;
@@ -1587,7 +1638,7 @@ impl Engine {
                     ts,
                     true,
                 ) {
-                    out.push(self.cancel_triggered(pos, &order, &reason, ts));
+                    out.extend(self.cancel_triggered(pos, &order, &reason, ts));
                     return out;
                 }
                 let leaves = order.leaves_qty - fill_qty;
@@ -1607,17 +1658,18 @@ impl Engine {
                 self.take_open(pos);
                 order.leaves_qty = leaves;
                 if leaves == Decimal::ZERO {
-                    self.record_closed(&order, WireOrderStatus::Filled, ts);
+                    out.extend(self.close_unrested(&order, WireOrderStatus::Filled, ts));
                 } else if cap.is_some_and(|cap| cap < planned) {
                     // A cap-clamped remainder can never again have a non-zero
                     // cap, and `Inert` reaches no further fill decision, so it
                     // would sit open forever. Close it in the same batch.
-                    self.record_closed(&order, WireOrderStatus::Canceled, ts);
+                    let reaped = self.close_unrested(&order, WireOrderStatus::Canceled, ts);
                     out.push(ServerMessage::OrderCanceled {
                         client_order_id: order.submit.client_order_id.clone(),
                         venue_order_id: order.venue_order_id.clone(),
                         ts_event: ts,
                     });
+                    out.extend(reaped);
                 } else {
                     order.resting = Resting::Inert;
                     self.rest_open(order);
@@ -1662,12 +1714,13 @@ impl Engine {
                 }
                 if order.submit.post_only {
                     self.take_open(pos);
-                    self.record_closed(&order, WireOrderStatus::Rejected, ts);
+                    let reaped = self.close_unrested(&order, WireOrderStatus::Rejected, ts);
                     out.push(ServerMessage::OrderRejected {
                         client_order_id: order.submit.client_order_id,
                         reason: "post-only order would take liquidity".into(),
                         ts_event: ts,
                     });
+                    out.extend(reaped);
                     return out;
                 }
                 let planned = self.plan_fill(&order.submit, order.leaves_qty, true);
@@ -1682,7 +1735,7 @@ impl Engine {
                     ts,
                     true,
                 ) {
-                    out.push(self.cancel_triggered(pos, &order, &reason, ts));
+                    out.extend(self.cancel_triggered(pos, &order, &reason, ts));
                     return out;
                 }
                 let leaves = order.leaves_qty - fill_qty;
@@ -1702,14 +1755,15 @@ impl Engine {
                 self.take_open(pos);
                 order.leaves_qty = leaves;
                 if leaves == Decimal::ZERO {
-                    self.record_closed(&order, WireOrderStatus::Filled, ts);
+                    out.extend(self.close_unrested(&order, WireOrderStatus::Filled, ts));
                 } else if cap.is_some_and(|cap| cap < planned) {
-                    self.record_closed(&order, WireOrderStatus::Canceled, ts);
+                    let reaped = self.close_unrested(&order, WireOrderStatus::Canceled, ts);
                     out.push(ServerMessage::OrderCanceled {
                         client_order_id: order.submit.client_order_id.clone(),
                         venue_order_id: order.venue_order_id.clone(),
                         ts_event: ts,
                     });
+                    out.extend(reaped);
                 } else {
                     // A partial makes the remainder a new tranche, exactly as
                     // it does for any other limit.
@@ -1767,15 +1821,18 @@ impl Engine {
         order: &OpenOrder,
         reason: &str,
         ts: u64,
-    ) -> ServerMessage {
+    ) -> Vec<ServerMessage> {
         tracing::warn!(client_order_id = %order.submit.client_order_id, %reason, "triggered order canceled at funds check");
-        self.take_open(pos);
-        self.record_closed(order, WireOrderStatus::Canceled, ts);
-        ServerMessage::OrderCanceled {
+        let reaped = self.close_out(pos, order, WireOrderStatus::Canceled, ts);
+        let mut out = vec![ServerMessage::OrderCanceled {
             client_order_id: order.submit.client_order_id.clone(),
             venue_order_id: order.venue_order_id.clone(),
             ts_event: ts,
-        }
+        }];
+        // A conditional that never filled cannot release the children waiting
+        // on it, so they leave with it - the cancel goes out first.
+        out.extend(reaped);
+        out
     }
 
     /// The size this fill WOULD be, and nothing else: consumes the targeted
@@ -2103,6 +2160,17 @@ impl Engine {
         {
             return Err("conditional orders cannot be immediate-or-cancel: a now-or-never order cannot wait for a trigger".into());
         }
+        // THE CHILD FORM OF THIS RULE IS NOT REPEATED HERE, deliberately.
+        // `mogwai_protocol::validate_order_link` already refuses a `Market`
+        // child and an `Ioc`/`Fok` child for exactly these reasons, and
+        // `validate_submit_order` runs it on every wire submit - the standalone
+        // `SubmitOrder` frame and every member of a `SubmitOrderGroup` alike -
+        // so no client-reachable route delivers one here. Restating it in this
+        // function would be a second home for a rule that has one, which is the
+        // defect the reap consolidation above just closed. The engine's own
+        // exposure to a caller that skips the protocol validator is the whole
+        // group-validation gap filed as finding 10, and it is closed by having
+        // `on_submit_group` call the validator, not by copying one arm of it.
         if let Some(trigger) = order.trigger_price
             && !on_increment(trigger, instrument.price_increment)
         {
@@ -2374,10 +2442,33 @@ impl Engine {
         }
     }
 
+    /// `apply_divergences` is FALSE for every venue-originated cancel, exactly
+    /// as it is for every venue-originated submit.
+    ///
+    /// `liquidate_all`, `retire_off_river` and `cancel_unreadable_orders` all
+    /// flatten the book through here, and an arm the client aimed at its own
+    /// next cancel must not be spent on one of those. `RejectNextCancel` was
+    /// the serious half: the first order a risk-breach liquidation tried to
+    /// pull came back `OrderCancelRejected` AND STAYED RESTING, so the
+    /// liquidation went on to close the positions while leaving live orders
+    /// behind - precisely the hazard `liquidate_all`'s "resting orders go
+    /// first" rule exists to prevent. `DropNextAccountUpdate` was the quiet
+    /// half: spent on a transition the scenario author never aimed at.
+    ///
+    /// ONE FLAG, TWO EFFECTS, and the second is worth stating because it
+    /// changes what a liquidation puts on the wire. With `apply_divergences`
+    /// false the `DropNextAccountUpdate` check is not merely unspent, it is not
+    /// consulted, so a flatten emits one `AccountState` per cancelled order
+    /// unconditionally. That is the same stream a run with no arm produces, and
+    /// it is the right one: a snapshot suppressed here would leave the client's
+    /// ledger disagreeing with the venue's over a transition the client did not
+    /// ask for. They stay one flag because both effects answer the same
+    /// question - is this cancel the client's, or the venue's.
     pub(crate) fn on_cancel(
         &mut self,
         client_order_id: ClientOrderId,
         ts: u64,
+        apply_divergences: bool,
     ) -> Vec<ServerMessage> {
         // Divergence: refuse a cancel the venue COULD have honoured, leaving the
         // order resting. Checked before the book is touched, so the refusal
@@ -2388,11 +2479,12 @@ impl Engine {
         // already-terminal id would spend the arm on a rejection that was going
         // to happen anyway, which is the failure mode a scenario author would
         // never see and would misread as the arm not firing.
-        if let Some(resting) = self
-            .open
-            .iter()
-            .find(|order| order.submit.client_order_id == client_order_id)
-            .map(|order| order.venue_order_id.clone())
+        if apply_divergences
+            && let Some(resting) = self
+                .open
+                .iter()
+                .find(|order| order.submit.client_order_id == client_order_id)
+                .map(|order| order.venue_order_id.clone())
             && let Some(Divergence::RejectNextCancel { reason }) =
                 self.take_armed(|d| matches!(d, Divergence::RejectNextCancel { .. }))
         {
@@ -2404,20 +2496,18 @@ impl Engine {
             }];
         }
         if let Some(pos) = self.open.position(&client_order_id) {
-            let o = self.take_open(pos);
-            self.record_closed(&o, WireOrderStatus::Canceled, ts);
+            let o = self.open[pos].clone();
+            // A cancelled parent that never filled can never release its
+            // children, and a held child left behind would rest for the life of
+            // the run holding a promise nothing can keep. `close_out` owns that
+            // rule for every terminal path, this one included.
+            let reaped = self.close_out(pos, &o, WireOrderStatus::Canceled, ts);
             let mut out = vec![ServerMessage::OrderCanceled {
                 client_order_id: client_order_id.clone(),
                 venue_order_id: o.venue_order_id,
                 ts_event: ts,
             }];
-            // A cancelled parent that never filled can never release its
-            // children, and a held child left behind would rest for the life of
-            // the run holding a promise nothing can keep. Reaped here rather
-            // than swept later, for the same reason the OCO cancel is.
-            if !self.has_filled(&client_order_id) {
-                out.extend(self.reap_children_of(vec![client_order_id], ts));
-            }
+            out.extend(reaped);
             // A cancel takes the order OFF the book and gives its hold back, so
             // the snapshot it owes is exactly the account movement
             // `DropNextAccountUpdate` exists to hide - suppressing it leaves the
@@ -2425,9 +2515,10 @@ impl Engine {
             // The arm is spent on transitions, not on fills specifically; the
             // one carve-out is an order merely COMING TO REST, which `on_submit`
             // holds open for the fill the author is aiming at.
-            if self
-                .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
-                .is_none()
+            if !apply_divergences
+                || self
+                    .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
+                    .is_none()
             {
                 out.push(ServerMessage::AccountState(self.snapshot(ts)));
             }
@@ -2491,10 +2582,19 @@ impl Engine {
         if trigger_price.is_some() && !matches!(self.open[pos].resting, Resting::Conditional { .. })
         {
             let conditional = self.open[pos].submit.order_type.is_conditional();
+            // A HELD child has NOT triggered - it has not been released, and
+            // saying it triggered is a false statement about the venue's own
+            // state on the wire. Its trigger is still amendable in principle;
+            // refusing it is the conservative answer while the child holds
+            // nothing, and the reason now says which of the two it is.
+            let held = conditional && matches!(self.open[pos].resting, Resting::Held);
             return vec![ServerMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
-                reason: if conditional {
+                reason: if held {
+                    "order-list child is held: its trigger is not live until its parent executes"
+                        .into()
+                } else if conditional {
                     "order has already triggered".into()
                 } else {
                     "order carries no trigger to amend".into()
@@ -2787,7 +2887,16 @@ impl Engine {
                 // against) but leaves the order conditional and does NOT
                 // restart the trigger window - promoting it here would make the
                 // venue fill a stop that never triggered.
-                if !matches!(order.resting, Resting::Conditional { .. }) {
+                //
+                // AND A HELD CHILD STAYS HELD. `Resting::Held` is not
+                // `Conditional`, so this used to promote an order-list child
+                // still waiting on its parent into a live, scannable limit -
+                // taking a reservation it had deliberately not taken and
+                // letting it fill before its parent ever executed. That is
+                // one-triggers-the-other defeated by a client amend. The amend
+                // moves `submit.price`, which is the price the child will rest
+                // at when its parent releases it and re-draws.
+                if !matches!(order.resting, Resting::Conditional { .. } | Resting::Held) {
                     order.resting = Resting::Limit {
                         fill_trigger_px: draw_trigger(
                             self.fill_seed,

@@ -1081,7 +1081,7 @@ impl Engine {
             .map(|order| order.submit.client_order_id.clone())
             .collect();
         for client_order_id in resting {
-            events.extend(self.on_cancel(client_order_id, ts));
+            events.extend(self.on_cancel(client_order_id, ts, false));
         }
         let positions: Vec<_> = self
             .account
@@ -1170,7 +1170,7 @@ impl Engine {
                 bound = %symbol,
                 "cancelling a resting order off the river this account is bound to",
             );
-            events.extend(self.on_cancel(client_order_id, ts));
+            events.extend(self.on_cancel(client_order_id, ts, false));
         }
         let positions: Vec<_> = self
             .account
@@ -1243,7 +1243,7 @@ impl Engine {
                 %client_order_id,
                 "cancelling a resting order on a river no cursor is reading",
             );
-            events.extend(self.on_cancel(client_order_id, ts));
+            events.extend(self.on_cancel(client_order_id, ts, false));
         }
         events
     }
@@ -1607,7 +1607,9 @@ impl Engine {
         let events = match msg {
             ClientMessage::SubmitOrder(order) => self.on_submit(order, ts, reading),
             ClientMessage::SubmitOrderGroup { orders } => self.on_submit_group(orders, ts, reading),
-            ClientMessage::CancelOrder { client_order_id } => self.on_cancel(client_order_id, ts),
+            ClientMessage::CancelOrder { client_order_id } => {
+                self.on_cancel(client_order_id, ts, true)
+            }
             ClientMessage::ModifyOrder {
                 client_order_id,
                 price,
@@ -1786,8 +1788,23 @@ impl Engine {
                 None => "unknown order".into(),
             });
         };
-        let order = self.take_open(pos);
-        self.record_closed(&order, WireOrderStatus::Canceled, ts);
+        let order = self.open[pos].clone();
+        // The children go with it, and they go silently too. A held child of an
+        // order that will now never fill is waiting on a release nothing can
+        // perform; the fault class here is "the venue cancelled and the client
+        // never heard", so the reaped cancellations are recorded in the truth
+        // store and DROPPED rather than emitted, exactly as the parent's own is.
+        //
+        // THIS WIDENS THE FAULT, deliberately, and a scenario author should
+        // know by how much: the divergence stops meaning "the client's view of
+        // ONE order is stale" and starts meaning "and of every held child of
+        // it", up to `MAX_LINKED_ORDERS` of them. That is the honest
+        // simulation. The alternative - reap the children but emit their
+        // cancels - would tell a client its bracket's exits were pulled while
+        // the entry it hung them on still reads live, which is a state no real
+        // venue produces and which no reconciliation could make sense of.
+        // Aim this arm at a parent only if you mean the whole bracket.
+        let _silent = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
         Ok(())
     }
 
@@ -6983,6 +7000,148 @@ mod tests {
         );
     }
 
+    /// A CONDITIONAL PARENT CANCELLED AT ITS OWN TRIGGER REAPS ITS HELD CHILD.
+    ///
+    /// The reduce-only cap-zero cancel inside `on_trigger` is one of six
+    /// terminal paths that used to take an order off the book without reaping:
+    /// the child was left resting `Held`, scanned by nothing, holding nothing,
+    /// waiting for a release that could never come, and only a client cancel
+    /// could ever end it. `close_out` now owns the rule for every terminal
+    /// path.
+    #[test]
+    fn a_parent_cancelled_at_its_trigger_takes_its_held_child_with_it() {
+        let mut e = linked_engine();
+        let mut entry = order("ENTRY", 1);
+        entry.order_type = OrderType::StopMarket;
+        entry.price = None;
+        entry.trigger_price = Some(Decimal::from(300));
+        // Reduce-only against no position at all: its cap is zero the moment it
+        // fires, so it cancels at the trigger without ever having filled.
+        entry.reduce_only = true;
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(300));
+        let exit = linked(
+            exit,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+        assert!(
+            e.open
+                .iter()
+                .any(|open| open.submit.client_order_id == "EXIT"
+                    && matches!(open.resting, Resting::Held)),
+            "premise: the child is held on the untriggered parent"
+        );
+
+        let scans = e.pending_scans();
+        assert_eq!(scans.len(), 1, "premise: only the parent is scanned");
+        let (out, _) = e.apply_scans(&[result(&scans[0], true, 5)], 5);
+
+        let canceled: Vec<&str> = out
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::OrderCanceled {
+                    client_order_id, ..
+                } => Some(client_order_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            canceled,
+            ["ENTRY", "EXIT"],
+            "the parent's cancel goes out first and the orphaned child follows it: {out:?}"
+        );
+        assert!(
+            e.open.is_empty(),
+            "and nothing is left resting: {:?}",
+            e.open.iter().collect::<Vec<_>>()
+        );
+    }
+
+    /// A PRICE AMEND ON A HELD CHILD LEAVES IT HELD.
+    ///
+    /// `Resting::Held` is not `Resting::Conditional`, so the amend's promotion
+    /// guard used to let it through: the child became a live scannable limit,
+    /// took a reservation it had deliberately not taken, and could fill before
+    /// its parent ever executed - one-triggers-the-other defeated by an amend.
+    #[test]
+    fn a_price_amend_does_not_release_a_held_child() {
+        let mut e = linked_engine();
+        let mut entry = limit_order("ENTRY", 1);
+        entry.price = Some(Decimal::from(100));
+        let entry = linked(
+            entry,
+            link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+
+        let mut exit = limit_order("EXIT", 1);
+        exit.side = Side::Sell;
+        exit.price = Some(Decimal::from(300));
+        let exit = linked(
+            exit,
+            link_of(
+                mogwai_protocol::Contingency::NoContingency,
+                &[],
+                Some("ENTRY"),
+            ),
+        );
+        e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+
+        let out = e.process_with_market(
+            ClientMessage::ModifyOrder {
+                client_order_id: "EXIT".into(),
+                price: Some(Decimal::from(250)),
+                quantity: None,
+                trigger_price: None,
+            },
+            3,
+            Some(away_reading()),
+        );
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderUpdated { .. })),
+            "the amend itself is honoured: {out:?}"
+        );
+
+        let child = e
+            .open
+            .iter()
+            .find(|open| open.submit.client_order_id == "EXIT")
+            .expect("the child is still open");
+        assert!(
+            matches!(child.resting, Resting::Held),
+            "the amended child is still held, not promoted to a live limit: {:?}",
+            child.resting
+        );
+        assert_eq!(
+            child.submit.price,
+            Some(Decimal::from(250)),
+            "and the amend moved the price it will rest at when released"
+        );
+        assert_eq!(
+            e.pending_scans().len(),
+            1,
+            "only the parent is scanned; an amended child is offered no tape"
+        );
+        assert_eq!(
+            balance(&e.snapshot(3), "BTC").locked,
+            Decimal::ZERO,
+            "and it still holds nothing"
+        );
+    }
+
     /// A child of a parent that already filled has nothing to wait for. This is
     /// the fast-market bracket: a market entry that filled on arrival.
     #[test]
@@ -7122,8 +7281,15 @@ mod tests {
             order("M", 1),
             link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
         );
-        assert!(
-            validate_submit_order(&market_child).is_err(),
+        // NAMED, not merely `is_err`. Both of these orders break exactly one
+        // rule, so a bare `is_err` would go on passing if the child arm were
+        // deleted and some unrelated arm caught them instead - which is how a
+        // 2026-08-19 fix pass came to believe neither rule existed and started
+        // installing a second copy in `Engine::validate_submit`.
+        assert_eq!(
+            validate_submit_order(&market_child).unwrap_err(),
+            "a Market order cannot be an order-list child: a released child rests, and a market \
+             order has nothing to rest on",
             "a market child has nothing to rest on once released"
         );
 
@@ -7133,9 +7299,18 @@ mod tests {
             ioc_child,
             link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
         );
-        assert!(
-            validate_submit_order(&ioc_child).is_err(),
+        assert_eq!(
+            validate_submit_order(&ioc_child).unwrap_err(),
+            "an order-list child cannot be immediate-or-cancel: it must outlive the submit that \
+             placed it to be released at all",
             "a now-or-never child would expire before its parent ever fills"
+        );
+        // And it is reached on the GROUP route too, which is the only route a
+        // linked order may legally travel: `boundary_error` refuses a linked
+        // standalone `SubmitOrder` outright.
+        assert!(
+            mogwai_protocol::validate_submit_group(std::slice::from_ref(&ioc_child)).is_err(),
+            "the group route runs the same per-member validation"
         );
 
         // Venue-state refusals: an unknown parent, and a child of a child.
@@ -7836,6 +8011,54 @@ mod tests {
             out.iter()
                 .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
             "the order should have survived the refused cancel and be cancellable now"
+        );
+    }
+
+    /// A VENUE-ORIGINATED CANCEL PAYS NO CLIENT-ARMED DIVERGENCE, exactly as a
+    /// venue-originated submit does not.
+    ///
+    /// `liquidate_all` flattens the book through `on_cancel`, and an armed
+    /// `RejectNextCancel` used to be spent there: the first order the
+    /// liquidation tried to pull came back rejected AND STAYED RESTING, so the
+    /// liquidation went on to close the positions while leaving a live order
+    /// behind - the exact hazard its own "resting orders go first" rule exists
+    /// to prevent. `retire_off_river` and `cancel_unreadable_orders` share the
+    /// path and the fix.
+    #[test]
+    fn a_venue_liquidation_neither_spends_nor_suffers_a_cancel_arm() {
+        let mut e = Engine::new();
+        e.process(ClientMessage::SubmitOrder(limit_order("O1", 10)), 1);
+        assert_eq!(e.open.len(), 1, "premise: the order is resting");
+        e.arm(Divergence::RejectNextCancel {
+            reason: "venue said no".into(),
+        });
+
+        let out = e.liquidate_all(2);
+        assert!(
+            !out.events
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderCancelRejected { .. })),
+            "the venue's own cancel is not refused by an arm aimed at the client: {:?}",
+            out.events
+        );
+        assert!(
+            e.open.is_empty(),
+            "and the liquidation really did clear the book"
+        );
+
+        // The arm is UNSPENT: it is still there for the client cancel the
+        // scenario author aimed it at.
+        e.process(ClientMessage::SubmitOrder(limit_order("O2", 10)), 3);
+        let out = e.process(
+            ClientMessage::CancelOrder {
+                client_order_id: "O2".into(),
+            },
+            4,
+        );
+        assert_eq!(
+            cancel_reject_reason(&out),
+            "venue said no",
+            "the liquidation must not have consumed the arm"
         );
     }
 

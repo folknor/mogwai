@@ -132,14 +132,30 @@ A child of a parent that has ALREADY filled is live at once. That is the
 fast-market bracket: a market entry that filled on arrival leaves its exits
 nothing to wait for.
 
-A parent that goes terminal WITHOUT filling - cancelled, or expired - takes its
-held children with it, in the same batch. A child left waiting for a release
-that can never come would rest for the life of the run.
+A parent that goes terminal WITHOUT filling takes its held children with it, in
+the same batch. A child left waiting for a release that can never come would
+rest for the life of the run. EVERY terminal path counts, not just the client's
+own cancel and the clock's expiry: a reduce-only parent cancelled at its trigger
+because there is nothing left to reduce, a post-only stop-limit rejected when it
+would have taken liquidity, a resting or triggered order cancelled at its funds
+check, and the control plane's silent out-of-band cancel all reap the same way.
+The silent one reaps silently - the children leave the book and the truth store
+records them cancelled, with no wire frame for either, which is the whole point
+of that fault class.
+
+AMENDING A HELD CHILD LEAVES IT HELD. A price amend moves the price the child
+will rest at once it is released; it does not promote the child to a live limit,
+does not give it a reservation, and does not offer it any tape. A trigger amend
+on a held conditional child is refused, and says which of the two it is - the
+child is held, not triggered.
 
 ## What the venue refuses, and why
 
 - A child that is a `Market` order, or `Ioc`/`Fok`. A released child RESTS, and
-  a now-or-never child would be gone before its parent ever filled.
+  a now-or-never child would be gone before its parent ever filled. Both are
+  refused at the protocol boundary, so they are refused on every route a linked
+  order can legally take: a linked bare `SubmitOrder` is refused for being bare,
+  and every member of a `SubmitOrderGroup` is validated individually.
 - `Oco` or `Ouo` naming nothing. It would silently behave like a standalone
   order, which a client discovers only by watching a stop it thought was reaped
   go on to fill.
