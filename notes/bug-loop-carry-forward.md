@@ -5210,3 +5210,71 @@ time was record-keeping rather than code. Every load-bearing claim checked out.
   whose lesson is not here did not happen as far as the next arc is concerned.
 - Numbers: gate green at 1316 plus 466, 1839 pairs, 1782 run, 57 ignored, 0
   orphaned - the ledger the document opened against, exactly.
+
+## The adapter-crate document, round 1: libtest threading, and a refuted headline
+
+THE ELEVENTH AND LAST DOCUMENT OF THE ARC. Round 1 closed findings 1, 2 and 3
+of `notes/bugs-adapter.md`: three real defects, zero refusals. Findings 4-7 and
+the relayed broadarrow section belong to round 2.
+
+- THE COLD REVIEW'S HEADLINE FINDING WAS WRONG, AND ITS ERROR IS THE ONE WORTH
+  CARRYING. It argued at length that the new
+  `connect_refuses_a_client_with_no_execution_event_sink` CANNOT pass under the
+  release-lane runner, on the model that libtest at `--test-threads=1` runs
+  tests INLINE on the main thread rather than spawning one. That model is false.
+  LIBTEST SPAWNS A FRESH NAMED THREAD PER TEST UNCONDITIONALLY on any threaded
+  target - the thread name is how a panic gets attributed to a test in the
+  failure report - and `--test-threads` caps how many run AT ONCE, not whether
+  a thread is created. Verified rather than argued: an `eprintln!` probe of
+  `thread::current().id()`, `.name()` and the runner thread-local, run in the
+  disputed lane, showed distinct ThreadIds named for each test and an EMPTY
+  `EXEC_EVENT_SENDER` slot on entry. Carry the fact: a `thread_local!` IS
+  per-test-isolated in every lane, and any future reasoning about
+  `--test-threads=1` sharing process state starts from a wrong premise.
+- BUT THE REVIEW WAS RIGHT ABOUT WHERE THE RISK LIVED, which is why the fix is
+  not "nothing to do". Every negative sink window in the three adapter test
+  binaries (`assert_no_exec_event`, the bounded tail drains) is sound ONLY
+  because each test owns its `EXEC_EVENT_SENDER`. That was a prose claim in
+  `tests/common/mod.rs`'s header with nothing checking it - the arc's signature
+  defect, a thing that reads as gated and is not, on a claim covering a whole
+  CLASS of assertions. It is now pinned: `assert_owns_a_fresh_exec_sink` plus
+  `common::owns_a_fresh_exec_sink_on_every_lane`, which compiles into all three
+  binaries and therefore runs in every lane, and which asserts both the empty
+  slot and the per-test thread NAME. Both new regression tests call the helper,
+  so a libtest change fails on the PREMISE rather than on whatever the test was
+  really asserting. THE SHAPE: when a durable comment explains why a class of
+  assertions is sound, the explanation is itself an assertion and wants a test.
+- BITE-CHECKED IN THE LANE THAT WAS DISPUTED. With the `ensure!` removed as a
+  text edit, `connect_refuses_...` goes red in the release-lane runner on the
+  ERROR-TEXT assertion, `connect()` having returned the transport error
+  `fetch instruments` instead of the named refusal. That is the single
+  assertion that separates "refused for the right reason" from "failed for any
+  reason", and no other site in the crate emits that string. The premise test
+  was bitten too, by installing a sender in it.
+- A REFUSAL A SHIPPED CONSUMER CAN HIT IS DOCUMENTATION, NOT A NOTE. `connect()`
+  now refuses a client that was never started - a breaking behavioural change to
+  the crate a nautilus host constructs - and it was recorded only in a code
+  comment and `notes/todo.md`. Nothing durable may cite `notes/`, and a host
+  author does not read either. The contract now lives in
+  `docs/adapter-lifecycle.md`, linked from the README's "Using it" list, with
+  the nautilus-side mechanism (a `Clone` emitter owning its sender by value, a
+  `send_order_event` that only warns, a thread-local the async fn may not be
+  polled on) spelled out, plus the note that the DATA client has the identical
+  unguarded shape. The `todo.md` entry now says the contract is durable
+  elsewhere and that the entry dies when nautilus ships a shareable emitter.
+- TWO IDIOMS FOR ONE MUTEX INSIDE ONE FUNCTION IS A DEFECT EVEN WHEN BOTH ARE
+  CORRECT. `subscribe_bars` took the bar mutex with `map_err("bar mutex
+  poisoned")?` on the increment and `lock_recover` on the rollback eight lines
+  later, so a poisoned guard would fail the increment and recover the rollback -
+  a poisoned path taking a branch no test covers. Both are `lock_recover` now.
+  Same family: `commit_submitted` silently BROADENED poison recovery on the
+  single-order path (`announce_submitted` used to return an error), which is
+  right but was justified in the doc only for the list case. The comment now
+  says it applies to both callers and why.
+- Numbers: full unscoped gate green at 1323 plus 466, 1843 pairs, 1786 run, 57
+  ignored, 0 orphaned. The adapter's four socket binaries are green in the dev
+  profile on both the workspace and timing sweeps.
+- STILL OPEN AND KNOWN: the `-p mogwai-adapter` package-scoped check fails its
+  TIMING sweep with "zero tests ran". Investigating the lane question did not
+  explain it, and it is not a property of the adapter code - it is `-p` scoping
+  a filter whose test lives in another package. The unscoped gate is unaffected.

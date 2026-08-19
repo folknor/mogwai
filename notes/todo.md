@@ -222,6 +222,54 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- CROSS-REPO: NAUTILUS'S `ExecutionEventEmitter` CANNOT SHARE ITS SENDER, so
+  this adapter can only refuse rather than heal. The emitter derives `Clone`
+  and owns `sender: Option<UnboundedSender<ExecutionEvent>>` BY VALUE, and the
+  sender is installed once, by the adapter's `start()`, from
+  `try_get_exec_event_sender()` - which reads a `thread_local!` in
+  `nautilus_common::live::runner`, set on the runner's thread. Every clone
+  taken after that point therefore FREEZES the sender state of the instant it
+  was taken, and `send_order_event` on a clone with no sender only writes
+  `log::warn!("Cannot send order event: sender not initialized")`: no error, no
+  return value.
+  - THE SYMPTOM HERE: `MogwaiExecutionClient::connect()` clones the emitter into
+    the WS pump's `ExecContext`, so a client connected before it was started
+    would report success and then silently drop every accept, fill, cancel and
+    reject the venue pushed, for the whole run, while `submit_order`'s own
+    `Submitted` still reached nautilus off the live field. Nautilus would see
+    Submitted and nothing else, forever.
+  - WHAT THE OTHER SIDE WOULD HAVE TO SHIP: an emitter holding its sender
+    behind a shared cell (or resolving it per send from a process-wide rather
+    than thread-local slot), so a clone taken before `set_sender` still emits.
+    `research/nautilus_trader` is read-only reference and is not a build input,
+    so nothing here can do it.
+  - WHAT WAS DONE INSTEAD (2026-08-20, `bugs-adapter` round 1): `connect()`
+    retries `try_get_exec_event_sender()` - free, and it succeeds whenever
+    connect really is polled on the runner's thread - and then REFUSES with a
+    named error when the emitter still has no sender. `start()` warns when the
+    lookup comes back empty. Pinned by
+    `adapter_smoke::connect_refuses_a_client_with_no_execution_event_sink`.
+  - WHAT REMAINS: the refusal is a HOST-ORDERING contract, not a repair. A host
+    that starts its clients on one thread and connects them on another gets a
+    refusal rather than a working client. Nautilus's own kernel starts clients
+    via `start_engines` before `connect_*_clients` on one current-thread
+    runtime, so no shipped host hits it; a host that does will see the error
+    text rather than a deaf run, which is the point. THE CONTRACT ITSELF IS
+    DURABLE and lives in `docs/adapter-lifecycle.md`; this entry is only the
+    record of the upstream defect that forced it, and dies when nautilus ships
+    a shareable emitter.
+
+- THE DATA CLIENT HAS THE SAME SHAPE AND NO GUARD. `MogwaiDataClient::sink` is
+  an `Option` filled in `start()` from `get_data_event_sender()`, and several
+  delivery sites are `if let Ok(sink) = self.sink()`, so a data client
+  connected without being started drops ticks and bars with no error - the
+  finding-1 family on the data leg. It was NOT fixed in that round: it is out
+  of that round's scope, and unlike the exec side the symmetric guard would
+  have to be checked against the `data_client_transport` binary's own
+  start/connect orderings first. `get_data_event_sender()` PANICS rather than
+  returning `None`, so the start-with-no-runner case is at least loud; it is
+  the connect-without-start case that is silent.
+
 - `run_b1`'S BUILD-IDENTITY GUARD HAS NO TEST, and the `bugs-cli` round-3 fix
   pass refused the binary split partly on the strength of that guard. It bails
   unless `current_exe()` ends with `target/release/mogwai`, so B1's byte

@@ -234,6 +234,9 @@ Using it:
   provenance.
 - [`docs/oms-types.md`](docs/oms-types.md) - the run-level `oms_type` choice,
   and how netting and hedging differ on the wire.
+- [`docs/adapter-lifecycle.md`](docs/adapter-lifecycle.md) - the order a
+  nautilus host must call the shipped clients in, and why `connect()` refuses a
+  client that was never started.
 
 Changing it:
 

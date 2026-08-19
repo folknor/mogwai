@@ -350,6 +350,14 @@ async fn ships_server_havoc() {
         conn: ConnHavoc::default(),
     };
 
+    // An exec client with no event sink is DEAF - nautilus's emitter drops
+    // every order event with a log line and no error - so `connect()` refuses
+    // one outright (AE20). This test cares only about the HTTP control leg,
+    // but it still has to be a client that could hear an answer; hold the
+    // receiver alive for the duration rather than dropping it.
+    let (sink_tx, _sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
     let cache = Rc::new(RefCell::new(Cache::default()));
     let exec_config = MogwaiExecClientConfig {
         account_id: AccountId::from("MOGWAI-001"),

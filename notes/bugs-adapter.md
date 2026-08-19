@@ -12,72 +12,52 @@ Confidence labels are the hunter's own.
 The hunter read the full crate plus the nautilus emitter source in `research/`,
 and skimmed the four socket test binaries. Nothing was built or run.
 
-## 1. The exec pump can hold an emitter with no sender: every venue-pushed order event silently dropped (high)
+Round 1 closed findings 1, 2 and 3: all three were real defects, all three are
+fixed, each with a bite-checked regression test. They are removed rather than
+annotated, per the arc's convention. Numbering is unchanged. Two things the
+round learned that the removed text would otherwise have carried:
 
-`MogwaiExecutionClient::start()` (exec.rs ~859) is the only place
-`self.emitter.set_sender(..)` happens. `connect()` builds
-`pump_ctx = self.exec_context()`, which CLONES the emitter
-(`ExecContext.emitter: ExecutionEventEmitter`, a `#[derive(Clone)]` struct
-owning `sender: Option<...>` by value - see
-`research/nautilus_trader/crates/live/src/execution/emitter.rs:60-92`). The
-clone freezes whatever sender state existed at `connect()` time.
-
-- `connect()`'s own doc comment explicitly says "hosts may connect without
-  calling start, and reconnect after stop". If a host does that, the pump's
-  emitter has `sender: None` for the whole life of the connection, and
-  `send_order_event` just does
-  `log::warn!("Cannot send order event: sender not initialized")` - no error, no
-  return value. Fills, accepts, cancels, rejects all vanish while `submit_order`
-  (which uses the live `self.emitter`) keeps working. The asymmetry is the worst
-  part: nautilus sees Submitted and nothing else, forever.
-- `start()` also does `if let Some(sender) = try_get_exec_event_sender()` - a
-  `None` there is swallowed entirely. There is no assertion anywhere that the
-  emitter is initialized before `connect()` returns;
-  `ExecutionEventEmitter::is_initialized()` exists and is never called.
-- All four socket test binaries call `client.start()` before `connect()`
-  (`tests/common/mod.rs:732`), so this ordering is untested by construction.
-
-Fix direction: don't clone the emitter into `ExecContext` at all. Share it
-(`Arc<Mutex<..>>` or resolve the sender lazily per send), or make `connect()`
-hard-fail when `self.emitter.is_initialized()` is false. The hunter would take
-the second as a minimum and the first as the right shape - the emitter-by-value
-clone is the same "snapshot of mutable state captured into a long-lived task"
-pattern that `retire_connected_flag` exists to fight, just unrecognised here.
-
-## 2. `submit_order_list` can announce half a bracket and dispatch none (high)
-
-exec.rs:1154-1202. The conversion loop is correctly all-or-nothing before
-anything is dispatched, and the doc comment says exactly that. But the SECOND
-loop calls `self.announce_submitted(..)?` per leg, and `announce_submitted` is
-fallible (`self.core.get_order(client_order_id)?`, plus the mutex-poison arm).
-If leg 3 fails, legs 1 and 2 have already had `OrderSubmitted` emitted and
-mirror records inserted, and the `?` returns before `dispatch_order` - so no
-`SubmitGroup` frame goes out and no reject is synthesized for the legs already
-announced. Those orders sit `Submitted` in both nautilus and the mirror forever,
-exactly the "half a bracket is worse than none" outcome the doc claims to
-prevent.
-
-Fix: build all `OrderSubmitted` events first (or pre-resolve every `get_order`),
-and only then emit and dispatch; or synthesize `OrderRejected` for the
-already-announced prefix on the error path, the way
-`synthesize_transport_reject`'s `SubmitGroup` arm already does.
-
-## 3. `subscribe_bars` leaks a bar ref when the bound-symbol check refuses (medium)
-
-data.rs:606-626. `bars.entry(cmd.bar_type).or_default().refs += 1` happens
-BEFORE `self.subscribe_symbol(..)`, which can return `Err` on the `config.symbol`
-mismatch (`ensure!` at data.rs:154-159). The per-`BarType` ref is now
-incremented while the per-symbol `SubState.bars` count is not.
-
-This is precisely the cross-counter desync AD10's comment in `unsubscribe_bars`
-describes, arriving from the subscribe side that the AD10 fix did not cover: a
-later `unsubscribe_bars` for that bar type finds `refs > 0`, so
-`matched == true`, and it decrements `SubState.bars` - a decrement belonging to
-a DIFFERENT bar type's live subscription. Drop the shared count to zero and the
-surviving feed stops forwarding bars.
-
-Fix: increment `refs` only after `subscribe_symbol` succeeds, or roll it back on
-error.
+- The hunter's claim that finding 1's ordering was "untested by construction"
+  because every socket binary starts before connecting was HALF right. The
+  ordering is untested, but `havoc.rs`'s `ships_server_havoc` installed no
+  execution sink at all, so its client's `start()` found nothing on the
+  thread-local and it connected DEAF - the new guard failed it on the first
+  run. The test now installs a sink. That is the defect the finding describes,
+  standing live in the crate's own suite.
+- The fix is the REFUSAL, not the shared emitter. `try_get_exec_event_sender`
+  reads a `thread_local!` set on the runner's thread, so resolving the sender
+  lazily from `exec_context()` - the hunter's preferred shape - is not reliably
+  possible from a spawned task. `connect()` retries the lookup (free when it
+  really is on that thread) and then refuses. The nautilus-side fix would be an
+  emitter that shares its sender; `research/` is read-only, so this is the
+  local fail-loud mitigation. Filed in `notes/todo.md`; the HOST-FACING
+  contract it creates is durable and now lives in `docs/adapter-lifecycle.md`,
+  because a refusal a shipped consumer can hit is documentation, not a note.
+- THE COLD REVIEW'S HEADLINE FINDING WAS EMPIRICALLY REFUTED, AND THE MECHANISM
+  IS WORTH KEEPING. The reviewer argued that
+  `connect_refuses_a_client_with_no_execution_event_sink` cannot pass under
+  `brokkr test`, on the model that libtest at `--test-threads=1` runs tests
+  INLINE on the main thread, which would share one `EXEC_EVENT_SENDER` across a
+  whole binary and let an alphabetically-earlier test install a sender this one
+  would then find. THE MODEL IS WRONG. libtest spawns a fresh named thread per
+  test unconditionally on any threaded target - the thread name is how a panic
+  is attributed to a test - and `--test-threads` caps how many run AT ONCE, not
+  whether a thread is created. Measured, not argued: an `eprintln!` probe under
+  `brokkr test -p mogwai-adapter "" --debug` reported distinct `ThreadId`s named
+  for each test and an EMPTY sender slot on entry to both new tests. So the
+  test's doc comment is literally true, and `tests/common/mod.rs`'s isolation
+  claim - which every negative sink window in these binaries rests on - is
+  sound. The claim now says so with the mechanism spelled out, and it is PINNED
+  rather than asserted: `common::owns_a_fresh_exec_sink_on_every_lane` runs in
+  all three binaries and in all lanes, and `assert_owns_a_fresh_exec_sink` lets
+  an individual test restate the premise it depends on so a libtest change
+  fails on the premise rather than on whatever the test was really asserting.
+  Both new tests call it. The close pass bite-checked the refusal in the
+  `brokkr test` lane specifically: with the `ensure!` removed as a text edit,
+  the test goes red on the ERROR-TEXT assertion, `connect()` having failed with
+  the transport error `fetch instruments` instead of the named refusal - which
+  is the one assertion that distinguishes "refused for the right reason" from
+  "failed for any reason", and no other site emits that string.
 
 ## 4. The subscription resume cursor is entirely dead state, and its documentation asserts a contract nothing keeps (medium, structural)
 

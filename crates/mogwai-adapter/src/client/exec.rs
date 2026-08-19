@@ -385,9 +385,25 @@ impl MogwaiExecutionClient {
         init: &nautilus_model::events::OrderInitialized,
         ts_command: UnixNanos,
     ) -> anyhow::Result<()> {
+        let submitted = self.build_submitted(client_order_id)?;
+        self.commit_submitted(
+            submitted,
+            client_order_id,
+            strategy_id,
+            instrument_id,
+            init,
+            ts_command,
+        );
+        Ok(())
+    }
+
+    /// The FALLIBLE half of an announcement: resolve the cached order and build
+    /// its `OrderSubmitted`. Nothing here is observable, which is what lets a
+    /// multi-leg submission resolve every leg before any leg is announced.
+    fn build_submitted(&self, client_order_id: &ClientOrderId) -> anyhow::Result<OrderSubmitted> {
         let order = self.core.get_order(client_order_id)?;
         let ts_init = now_unix_nanos(self.sim);
-        let submitted = OrderSubmitted::new(
+        Ok(OrderSubmitted::new(
             self.core.trader_id,
             order.strategy_id(),
             order.instrument_id(),
@@ -396,12 +412,37 @@ impl MogwaiExecutionClient {
             UUID4::new(),
             ts_init,
             ts_init,
-        );
+        ))
+    }
+
+    /// The INFALLIBLE half: insert the mirror record and emit the event. It
+    /// takes no `Result` on purpose - once the first leg of a list has been
+    /// announced there is no honest way to fail the second, so the mutex is
+    /// taken through `lock_recover` (poison-recovering, as everywhere else in
+    /// this client) rather than through a `?`.
+    ///
+    /// THIS APPLIES TO BOTH CALLERS, and the single-order path inherits a
+    /// CHANGE: `announce_submitted` used to return `Err("execution state mutex
+    /// poisoned")`, and through `submit_order` that failure mode is now gone.
+    /// Deliberate, and not merely collateral to the list fix. `lock_recover` is
+    /// the idiom everywhere else in this client and in the data client, for the
+    /// reason it was adopted: this mutex guards a MIRROR of venue state, a
+    /// poisoning means some other thread panicked mid-update, and refusing
+    /// every subsequent submission forever is a worse answer than recovering
+    /// the guard and continuing against a possibly-stale mirror that the next
+    /// venue message corrects. A caller that saw the old error had no recovery
+    /// for it either.
+    fn commit_submitted(
+        &self,
+        submitted: OrderSubmitted,
+        client_order_id: &ClientOrderId,
+        strategy_id: nautilus_model::identifiers::StrategyId,
+        instrument_id: InstrumentId,
+        init: &nautilus_model::events::OrderInitialized,
+        ts_command: UnixNanos,
+    ) {
         {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("execution state mutex poisoned"))?;
+            let mut state = lock_recover(&self.state, "exec state");
             state.orders.insert(
                 *client_order_id,
                 OrderRecord {
@@ -419,7 +460,6 @@ impl MogwaiExecutionClient {
         }
         self.emitter
             .send_order_event(OrderEventAny::Submitted(submitted));
-        Ok(())
     }
 
     fn exec_context(&self) -> ExecContext {
@@ -861,8 +901,17 @@ impl ExecutionClient for MogwaiExecutionClient {
             return Ok(());
         }
 
+        // A `None` here is not fatal on its own - `start()` is also called in
+        // contexts with no runner - but it is the only chance this thread has
+        // to see the runner's thread-local, so say so rather than swallowing
+        // it. `connect()` refuses later if nothing ever installs a sender.
         if let Some(sender) = try_get_exec_event_sender() {
             self.emitter.set_sender(sender);
+        } else if !self.emitter.is_initialized() {
+            tracing::warn!(
+                "no execution event sender on this thread at start(): connect() will refuse \
+                 until one is installed"
+            );
         }
         self.core.set_started();
         Ok(())
@@ -904,8 +953,10 @@ impl ExecutionClient for MogwaiExecutionClient {
 
     async fn connect(&mut self) -> anyhow::Result<()> {
         // A client owns exactly one transport generation. This cleanup is
-        // unconditional and independent of the component started flag: hosts
-        // may connect without calling start, and reconnect after stop.
+        // unconditional and independent of the component started flag: a host
+        // may reconnect after stop. It may NOT connect without starting - see
+        // the emitter guard below, which refuses that ordering outright. The
+        // host-facing statement of this contract is `docs/adapter-lifecycle.md`.
         self.ws_cmd = None;
         abort_tasks(&self.task_handles);
         self.retire_connected_flag();
@@ -914,6 +965,33 @@ impl ExecutionClient for MogwaiExecutionClient {
             pending.orders.clear();
             pending.fills.clear();
         }
+        // REFUSE A DEAF CONNECTION (AE20). Nautilus's `ExecutionEventEmitter`
+        // derives Clone and owns `sender: Option<..>` BY VALUE, so every
+        // `exec_context()` clone - the WS pump's above all - freezes whatever
+        // sender state exists at the instant it is taken. The sender is
+        // installed exactly once, by `start()`, and `send_order_event` on an
+        // emitter without one only writes `log::warn!("Cannot send order
+        // event: sender not initialized")`: no error, no return value. So a
+        // host that connects without starting gets a client that reads as
+        // connected and is not - accepts, fills, cancels and rejects all
+        // vanish for the life of the connection, silently.
+        //
+        // The sender cannot simply be resolved here for everyone:
+        // `try_get_exec_event_sender` reads a THREAD_LOCAL set on the runner's
+        // thread, and this async fn may already be polled on another. Try it
+        // anyway - it costs nothing and succeeds whenever connect really is on
+        // that thread - and REFUSE loudly when it does not, rather than
+        // proceeding into a run whose every venue event is dropped.
+        if !self.emitter.is_initialized()
+            && let Some(sender) = try_get_exec_event_sender()
+        {
+            self.emitter.set_sender(sender);
+        }
+        ensure!(
+            self.emitter.is_initialized(),
+            "execution event sender not initialized: call start() on the runner's thread before \
+             connect(), or every order event this connection receives would be dropped silently"
+        );
         let http_base_url = self.config.http_base_url();
         // The execution client rides only the affine map; the tape boundary in
         // the envelope is the data client's concern.
@@ -1173,16 +1251,36 @@ impl ExecutionClient for MogwaiExecutionClient {
         // are what let leg one fill before leg two is admitted. That is the
         // hazard the group frame exists to close, and the venue now refuses the
         // per-leg route for linked orders outright.
-        let mut orders = Vec::with_capacity(wires.len());
-        let mut members = Vec::with_capacity(wires.len());
-        for ((client_order_id, wire), init) in wires.into_iter().zip(&cmd.order_inits) {
-            self.announce_submitted(
+        //
+        // THE ANNOUNCEMENT LOOP IS PASS-INVARIANT BY CONSTRUCTION. Resolving
+        // the cached order is fallible, and doing it INSIDE the announcing loop
+        // meant a failure on leg three left legs one and two already emitted as
+        // `OrderSubmitted` and already mirrored, while the `?` returned before
+        // `dispatch_order` - so no `SubmitGroup` frame went out, no reject was
+        // synthesized, and the announced prefix sat `Submitted` forever in both
+        // nautilus and the mirror. That is exactly the half-a-bracket outcome
+        // the doc above claims this method prevents. Build every leg's event
+        // first: the fallible pass is now entirely unobservable, and the pass
+        // that emits cannot fail.
+        let mut built = Vec::with_capacity(wires.len());
+        for (client_order_id, wire) in wires {
+            built.push((
+                self.build_submitted(&client_order_id)?,
+                client_order_id,
+                wire,
+            ));
+        }
+        let mut orders = Vec::with_capacity(built.len());
+        let mut members = Vec::with_capacity(built.len());
+        for ((submitted, client_order_id, wire), init) in built.into_iter().zip(&cmd.order_inits) {
+            self.commit_submitted(
+                submitted,
                 &client_order_id,
                 cmd.strategy_id,
                 init.instrument_id,
                 init,
                 cmd.ts_init,
-            )?;
+            );
             members.push(client_order_id);
             orders.push(wire);
         }

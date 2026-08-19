@@ -32,6 +32,24 @@
 //! process-wide either - no global logger, no capture buffer, no environment
 //! variable, and every listener is `127.0.0.1:0`.
 //!
+//! AND THAT HOLDS IN EVERY LANE, INCLUDING `--test-threads=1`. This is the one
+//! part of the claim that invites a wrong model, and a cold review reached the
+//! wrong one: it read `--test-threads=1` as making libtest run tests INLINE on
+//! the main thread, which would share one `EXEC_EVENT_SENDER` across a whole
+//! binary and make every negative window above leaky. It does not. libtest
+//! spawns a fresh named thread per test unconditionally on any threaded
+//! target, because the thread name is how a panic gets attributed to a test,
+//! and `--test-threads` caps how many run AT ONCE rather than whether a thread
+//! is made at all.
+//! MEASURED, NOT ASSUMED: with the serial runner in the release lane (the one
+//! that passes `--test-threads=1`), a probe of `thread::current()` and the
+//! runner slot reported a distinct `ThreadId` named for each test in
+//! `adapter_smoke`, and an EMPTY sender slot on entry to every one of them.
+//! `owns_a_fresh_exec_sink_on_every_lane` below pins it, and
+//! [`assert_owns_a_fresh_exec_sink`] lets an individual test restate the
+//! premise it depends on, so a libtest change fails on the premise rather than
+//! on whatever the test was really asserting.
+//!
 //! THE ONE GENUINELY PROCESS-WIDE THING IS THE SESSION ID.
 //! `mogwai_adapter::config`'s `process_session_id` is a `OnceLock`, by design -
 //! one worker process is one client, so its data and execution legs present one
@@ -97,6 +115,40 @@ use tokio::{
     sync::mpsc::UnboundedReceiver,
 };
 use tokio_tungstenite::tungstenite::Message;
+
+/// Asserts THE PREMISE every negative sink assertion in these binaries rests
+/// on: this test entered on a thread of its own, so the runner's
+/// `EXEC_EVENT_SENDER` slot is empty until this test fills it, and a timed
+/// "nothing arrived" window cannot observe another test's client.
+///
+/// Call it at the top of any test that installs a sender and then asserts on
+/// the ABSENCE of an event, and of any test whose point is that no sender
+/// exists. It is cheap and it converts a silent unsoundness into a named
+/// failure.
+pub fn assert_owns_a_fresh_exec_sink() {
+    assert!(
+        nautilus_common::live::runner::try_get_exec_event_sender().is_none(),
+        "an execution event sender was already installed on this test's thread: libtest is no \
+         longer giving each test a fresh thread, so every negative sink window in these binaries \
+         is now leaky and every test asserting no-sender is now vacuous. Fix the isolation, do \
+         not relax this assertion"
+    );
+}
+
+/// Pins the isolation claim in this module's header directly, in every binary
+/// that includes it and therefore in every lane. One lane runs libtest
+/// multi-threaded and the other at `--test-threads=1`; the per-test thread is
+/// a property of libtest itself and not of the concurrency setting, so this
+/// must hold in both, and it is the only test here that says so.
+#[test]
+fn owns_a_fresh_exec_sink_on_every_lane() {
+    assert_owns_a_fresh_exec_sink();
+    assert!(
+        std::thread::current().name() == Some("common::owns_a_fresh_exec_sink_on_every_lane"),
+        "libtest names the per-test thread after the test; got {:?}",
+        std::thread::current().name()
+    );
+}
 
 /// The canonical single-instrument `/instruments` seed both ends agree on.
 pub const INSTRUMENTS_JSON: &str = r#"[{"symbol":"BTCUSDT","class":{"class":"spot","base":"BTC","quote":"USDT"},"price_precision":2,"size_precision":8,"price_increment":"0.01","size_increment":"0.00000001"}]"#;

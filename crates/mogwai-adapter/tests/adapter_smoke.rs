@@ -18,10 +18,14 @@ use std::{
 };
 
 use common::{
-    StubState, bound_stub, cached_order, cached_stop_limit, cached_stop_market,
-    cached_trailing_stop, connected_exec_client, instrument_id, next_exec_event, submit_command,
+    StubState, assert_owns_a_fresh_exec_sink, bound_stub, cached_order, cached_stop_limit,
+    cached_stop_market, cached_trailing_stop, connected_exec_client, instrument_id,
+    next_exec_event, submit_command,
 };
-use mogwai_adapter::{MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig};
+use mogwai_adapter::{
+    MOGWAI_VENUE, MogwaiDataClient, MogwaiDataClientConfig, MogwaiExecClientConfig,
+    MogwaiExecutionClient,
+};
 use nautilus_common::{
     cache::Cache,
     clients::{DataClient, ExecutionClient},
@@ -32,8 +36,9 @@ use nautilus_common::{
     },
 };
 use nautilus_core::{UUID4, UnixNanos};
+use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
-    enums::{ContingencyType, OrderStatus, TriggerType},
+    enums::{ContingencyType, OmsType, OrderStatus, TriggerType},
     events::OrderEventAny,
     identifiers::{
         AccountId, ClientId, ClientOrderId, InstrumentId, OrderListId, PositionId, StrategyId,
@@ -893,6 +898,133 @@ async fn a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered() {
         .find(|text| text.contains("ModifyOrder"))
         .expect("the client sent a ModifyOrder");
     assert!(modify.contains(r#""trigger_price":"96.00""#), "{modify}");
+}
+
+/// Builds a started-but-unconnected execution client over `cache`, with no
+/// socket anywhere: both regressions below are refusals that fire before any
+/// transport is touched, which is exactly why they are cheap enough to run in
+/// the default sweep rather than behind `#[ignore]`.
+fn unconnected_exec_client(cache: Rc<RefCell<Cache>>) -> MogwaiExecutionClient {
+    let config = MogwaiExecClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
+        base_url: "ws://127.0.0.1:1".into(),
+        ..MogwaiExecClientConfig::default()
+    };
+    let core = ExecutionClientCore::new(
+        config.trader_id,
+        ClientId::from("MOGWAI-EXEC"),
+        *MOGWAI_VENUE,
+        OmsType::Netting,
+        config.account_id,
+        config.account_type,
+        None,
+        cache,
+    );
+    MogwaiExecutionClient::new(core, config).expect("client builds")
+}
+
+/// AE20. A CONNECTION WITH NO EVENT SINK IS DEAF, AND MUST REFUSE.
+///
+/// Nautilus's `ExecutionEventEmitter` is `Clone` and owns its sender BY VALUE,
+/// so the WS pump's context freezes the sender state at connect time and
+/// `send_order_event` on a sender-less emitter only logs. A client that
+/// connected without one would report success and then drop every accept,
+/// fill, cancel and reject the venue pushed, for the whole run, silently.
+///
+/// This test installs NO sender - `replace_exec_event_sender` is a
+/// `thread_local!` and libtest gives each test its own thread (in EVERY lane,
+/// `--test-threads=1` included - see `common`'s header), so the runner slot
+/// this test's client reads is genuinely empty. That premise is asserted
+/// rather than assumed: were it ever to break, this test would otherwise fail
+/// on the error-text assertion below and read as a regression in the guard it
+/// is pinning.
+#[tokio::test(flavor = "current_thread")]
+async fn connect_refuses_a_client_with_no_execution_event_sink() {
+    assert_owns_a_fresh_exec_sink();
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let mut client = unconnected_exec_client(cache);
+    // start() cannot find a sender on this thread and says so; it is connect()
+    // that must refuse rather than proceed deaf.
+    client.start().expect("start is not the gate");
+    let error = client
+        .connect()
+        .await
+        .expect_err("a deaf connection must be refused, not reported connected");
+    assert!(
+        error
+            .to_string()
+            .contains("execution event sender not initialized"),
+        "{error}"
+    );
+}
+
+/// A LIST THAT CANNOT RESOLVE EVERY LEG ANNOUNCES NO LEG.
+///
+/// `submit_order_list` announces each leg and then dispatches ONE group frame.
+/// Announcing inside the fallible loop meant a leg the cache could not resolve
+/// returned after the earlier legs had already been emitted as `OrderSubmitted`
+/// and mirrored, and before any frame went out - half a bracket announced, none
+/// dispatched, and no reject to end it. The resolve pass now runs to completion
+/// before the first announcement.
+#[tokio::test(flavor = "current_thread")]
+async fn a_list_whose_second_leg_is_unresolvable_announces_neither() {
+    assert_owns_a_fresh_exec_sink();
+    let (sink_tx, mut sink_rx) = unbounded_channel::<ExecutionEvent>();
+    replace_exec_event_sender(sink_tx);
+
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let entry = cached_order(&cache);
+    // Built against a THROWAWAY cache: a well-formed second leg that the
+    // client's own cache has never heard of, which is what `get_order` fails on.
+    let orphan_cache = Rc::new(RefCell::new(Cache::default()));
+    let exit = cached_stop_market(&orphan_cache);
+
+    let mut client = unconnected_exec_client(Rc::clone(&cache));
+    // START IT. Without this the emitter holds no sender and every emitted
+    // event is swallowed by nautilus's warn - which would leave
+    // `assert_no_exec_event` below passing against the defect it exists to
+    // catch, with only the mirror assertion doing any work.
+    client.start().expect("start installs this thread's sink");
+
+    let list_id = OrderListId::from("OL-1");
+    let mut entry_init = entry.init_event().clone();
+    entry_init.order_list_id = Some(list_id);
+    entry_init.contingency_type = Some(ContingencyType::Oto);
+    entry_init.linked_order_ids = Some(vec![exit.client_order_id()]);
+    let mut exit_init = exit.init_event().clone();
+    exit_init.order_list_id = Some(list_id);
+    exit_init.parent_order_id = Some(entry.client_order_id());
+
+    let list = nautilus_model::orders::OrderList::new(
+        list_id,
+        instrument_id(),
+        StrategyId::from("S-001"),
+        vec![entry.client_order_id(), exit.client_order_id()],
+        UnixNanos::default(),
+    );
+    let cmd = nautilus_common::messages::execution::SubmitOrderList::new(
+        TraderId::from("MOGWAI-001"),
+        Some(ClientId::from("MOGWAI-EXEC")),
+        StrategyId::from("S-001"),
+        list,
+        vec![entry_init, exit_init],
+        None,
+        None,
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+    );
+    let error = client
+        .submit_order_list(cmd)
+        .expect_err("a leg the cache cannot resolve fails the list");
+
+    assert_no_exec_event(&mut sink_rx).await;
+    assert_eq!(
+        client.mirrored_order_status(entry.client_order_id()),
+        None,
+        "and no leg was mirrored either: {error}"
+    );
 }
 
 /// Asserts nothing reaches the execution sink inside a short window. A refusal

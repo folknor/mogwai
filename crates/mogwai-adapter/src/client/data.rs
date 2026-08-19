@@ -616,13 +616,36 @@ impl DataClient for MogwaiDataClient {
         );
         let symbol = symbol_from_instrument(cmd.bar_type.instrument_id());
         {
-            let mut bars = self
-                .bars
-                .lock()
-                .map_err(|_| anyhow::anyhow!("bar mutex poisoned"))?;
+            // `lock_recover`, matching the rollback below and every other bar
+            // lock in this client. The two halves of one increment-then-roll-
+            // back pair must not disagree about poisoning: failing the
+            // increment on a poisoned guard while the rollback recovers it
+            // would make the poisoned path take a branch no test covers.
+            let mut bars = lock_recover(&self.bars, "bar");
             bars.entry(cmd.bar_type).or_default().refs += 1;
         }
-        self.subscribe_symbol(symbol, SubKind::Bars, start_ts_param(&cmd.params))
+        // ROLL THE REF BACK WHEN THE SYMBOL SUBSCRIPTION REFUSES (AD27). The
+        // per-`BarType` ref and the per-symbol `SubState.bars` count are the
+        // two halves of one subscription and must move together - that is the
+        // whole of AD10's rule in `unsubscribe_bars`, stated there from the
+        // release side. `subscribe_symbol` can refuse (the bound-symbol check),
+        // and a ref left standing over a refusal is the same cross-counter
+        // desync arriving from the subscribe side: a later `unsubscribe_bars`
+        // for that bar type finds `refs > 0`, so it matches, and it spends a
+        // symbol-count decrement belonging to a DIFFERENT bar type's live
+        // subscription - which, at zero, darkens the surviving feed.
+        if let Err(err) = self.subscribe_symbol(symbol, SubKind::Bars, start_ts_param(&cmd.params))
+        {
+            let mut bars = lock_recover(&self.bars, "bar");
+            if let Some(state) = bars.get_mut(&cmd.bar_type) {
+                state.refs = state.refs.saturating_sub(1);
+                if state.refs == 0 {
+                    bars.remove(&cmd.bar_type);
+                }
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn unsubscribe_quotes(&mut self, cmd: &UnsubscribeQuotes) -> anyhow::Result<()> {
@@ -1859,6 +1882,7 @@ fn start_ts_param(params: &Option<Params>) -> Option<u64> {
 #[cfg(test)]
 mod quote_cache_tests {
     use super::*;
+    use nautilus_core::UUID4;
     use rust_decimal::Decimal;
 
     fn quote_for(symbol: &str, ts_event: u64) -> mogwai_protocol::QuoteTick {
@@ -1897,6 +1921,37 @@ mod quote_cache_tests {
         client
             .subscribe_symbol(Arc::from("MES"), SubKind::Trades, None)
             .expect("an absent binding applies no client-side check");
+    }
+
+    /// AD27. The bar ref and the per-symbol bars count are one subscription in
+    /// two counters, and a refused `subscribe_bars` must leave BOTH at zero.
+    /// A ref surviving the refusal makes a later `unsubscribe_bars` for that
+    /// bar type "match", so it spends a symbol decrement belonging to another
+    /// bar type's live subscription.
+    #[test]
+    fn a_refused_bar_subscription_leaves_no_ref_behind() {
+        let mut client = client_bound_to(Some("MNQ"));
+        let cmd = SubscribeBars::new(
+            BarType::from("MES.MOGWAI-1-MINUTE-LAST-EXTERNAL"),
+            Some(ClientId::from("MOGWAI-DATA")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        );
+        let error = client
+            .subscribe_bars(cmd)
+            .expect_err("a bar type outside the bound river cannot be served");
+        assert!(error.to_string().contains("bound to (MNQ)"), "{error}");
+        assert!(
+            lock_recover(&client.bars, "bar").is_empty(),
+            "the refused subscription must leave no bar ref standing"
+        );
+        assert!(
+            lock_recover(&client.subs, "subscriptions").is_empty(),
+            "and no symbol subscription either"
+        );
     }
 
     #[test]

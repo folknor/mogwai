@@ -177,9 +177,12 @@ child is held, not triggered.
 
 A host submits an `OrderList` and the adapter sends its legs as ONE
 `SubmitOrderGroup`, in the list's own order, each carrying its own linkage. A
-leg that fails conversion aborts the whole list before anything is dispatched:
-half a bracket is worse than none, and a strategy that gets a rejection for its
-entry can retry, while one whose stop silently never reached the venue cannot.
+leg the adapter cannot convert, or cannot resolve against the cache, aborts the
+whole list before any leg is ANNOUNCED and before anything is dispatched: half a
+bracket is worse than none, and a strategy that gets a rejection for its entry
+can retry, while one whose stop silently never reached the venue cannot. Both
+fallible passes run to completion first, so the pass that emits `OrderSubmitted`
+and writes the mirror cannot fail partway and strand the legs behind it.
 
 A group refusal names the LIST rather than a member, since a group is refused
 whole; the adapter remembers which legs it dispatched under which list id and
