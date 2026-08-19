@@ -2400,6 +2400,188 @@ because there is nothing to install and therefore nothing to spoof.
     pass moved something, which is the same "the fixture must exercise the
     property" check.
 
+## The lab/cli document, round 4: the envelope gate's tolerances
+
+Section B is CLOSED - B1 and B3 fixed, B2 REFUSED on measurement. Gate counts
+did not move (1229 + 449, 1735 pairs), because the round rewrote assertions
+inside four existing tests and added none.
+
+- THE DECISION A FIDELITY FAILURE CHANGES, named before anything was touched
+  because CLAUDE.md's process reset requires it, and it is a real one rather
+  than "re-run and widen". `simulate_month` is a DELIBERATELY IDEALIZED count
+  process - the candidate law without the kernel's arrival-budget traversal,
+  child dead time, nanosecond rounding and projection boundaries - and Stage A
+  screens cells with it instead of with real generator walks because the
+  idealization is orders of magnitude cheaper. The fidelity gate is the ONLY
+  thing standing behind that substitution. Its verdict decides whether Stage A's
+  admissible region, and therefore Stage B's search space, may be read off the
+  surrogate at all; the spec calls a miss "a blocking defect in the envelope
+  machinery". A failure is not a number to retune, it is a stop on using the
+  screen's output.
+- B1 WAS REAL AND THE MEASUREMENT IS BRUTAL. `assert_fidelity`'s whole tolerance
+  was `5 * sqrt(idealized_var / 32 + candidate_var / 32)`, so the candidate's
+  own dispersion bought its own band. Installed as a text edit, a candidate
+  sample spread to 100x the reference variance PASSED ALL FORTY comparisons of
+  `wall_mmpp_1s` - and every mean slack IMPROVED, from a healthy 0.003-0.34 of
+  the band down to 0.0001-0.05. THE GATE REPORTED MORE AGREEMENT THE MORE BROKEN
+  THE CANDIDATE WAS. The catch set for the dispersion-inflation class was
+  EMPTY at every factor tried; it is not a loose bound, it is a bound pointing
+  the wrong way.
+- THE FIX IS AN ABSOLUTE ARM PLUS A SELF-PROOF, not a smaller constant.
+  `fidelity_verdict` is now a pure predicate carrying both arms, and
+  `FIDELITY_DISPERSION_BAND = 6.5` requires the two variances to agree within a
+  two-sided ratio. Post-fix catch set: the first bite lands at a 2x spread (4x
+  variance) on the hours whose healthy ratio already sat near 1.8, and any
+  inflation past 6.5x of the reference is caught everywhere. The licence a
+  still-passing candidate can buy is bounded at 1.94x of the honest standard
+  error instead of unbounded.
+  - 6.5 IS THE FLOOR n = 32 PERMITS, and the next reader wanting it tighter
+    should know the arithmetic rather than re-derive it. A FULL GATE RUN MAKES
+    400 COMPARISONS, and that number is settled BY COUNTING rather than by
+    recollection: `A3_GATED_HOURS` is 20 entries, each hour is compared on two
+    statistics, and there are ten macro-generated parts, so 40 per part and 400
+    in total. An earlier draft of the constant's own doc comment said 240 over
+    "six of the ten gate parts, both grid steps", which is both wrong and
+    internally impossible - six parts cannot span both steps of five families -
+    while the arithmetic underneath it was stated against 400. Over those 400
+    the raw ratio spans 0.3445 to 2.9489, which is F(31, 31) TO THE QUANTILE:
+    the two implementations have genuinely equal variances and everything seen
+    is sampling noise. F(31, 31) puts P(F > 6.5) at 6.0e-7, two-sided 1.2e-6,
+    so 6.5 costs about one false red per TWO thousand runs at 400 comparisons.
+    A band of 2 would be red most runs. MORE SENSITIVITY HERE COSTS REPLICATE
+    MONTHS, which is wall time, not a smaller literal.
+  - AND THE SENSITIVITY IS PROVEN ON EVERY RUN AT ZERO WALK COST, which is the
+    report's own recommendation (copy `arch_coefficients_match_the_shipped
+    _recursion`). Both probes are arithmetic over the 32 values already
+    collected: the sample displaced six combined standard errors must be
+    rejected by the mean arm, and the sample spread to twice the band edge must
+    be rejected by the dispersion arm. Two details are load-bearing and were
+    both wrong in the first cut. The shift is taken AWAY from the idealized mean
+    - a blind `+` moves a candidate that was already sitting low back TOWARDS
+    agreement, and the probe then fails for being satisfied. And the inflation
+    is sized RELATIVE TO THE IDEALIZED VARIANCE (`sqrt(2 * band * iv / cv)`),
+    not by a fixed factor: a fixed 10x applied to a sample already at the low
+    end of the F band lands inside the band and the probe fires spuriously.
+- DEGENERATE COMPARISONS EXIST AND THE BAND MUST NOT DIVIDE BY THEM. This was
+  found by the diagnostics, not predicted: `hourly_zero_fraction` at the
+  high-rate hours is often CONSTANT across all 32 months. Measured, in a
+  healthy run: `shot_noise_1s` reports BOTH variances exactly zero at hours 13
+  and 19, and ONE SIDE zero at hours 17 (0 against 2.220e-11) and 18
+  (1.279e-11 against 0); `event_markov_1s` reports 0 against 3.235e-11 at hour
+  13; `self_exciting_1s` reports 2.988e-10 against 1.029e-10 at hour 13.
+- AND THE FIRST CUT OF THE FIX LEFT THE DEFECT LIVE IN EXACTLY THOSE ROWS -
+  the twenty-third instance of this arc's signature defect, in its most
+  self-referential form: THE GUARD ADDED TO CLOSE A SELF-WIDENING TOLERANCE
+  ITSELF WAIVED THE ARM WHERE THE DEFECT LIVES, AND THE SELF-PROOF PROBE WAS
+  BLIND THERE FOR THE SAME REASON. The guard read `idealized_variance > 0.0 &&
+  candidate_variance > 0.0`, justified for the BOTH-zero case - with a zero
+  combined standard error the mean arm already demands exact equality of two
+  constants, which is stricter than any band - but that reasoning does not hold
+  when only ONE side is zero. With the idealized sample constant the mean band
+  is `5 * sqrt(candidate_var / 32)`, bought entirely by the candidate's own
+  dispersion: a candidate alternating 10.5 and -9.5 about a constant reference
+  of 0.5 has variance 103 and a band of 8.9, its mean difference is zero, and
+  it PASSED. The mirror case is waved through too, a candidate frozen at one
+  value against a reference that genuinely moves being the loudest possible
+  disagreement. And the inflation probe carried the SAME guard, so the one
+  configuration where the arm was absent was the one where its bite could never
+  be demonstrated; the row printed `var_ratio=inf` and the test stayed green.
+- THE REPAIR IS A FLOOR, NOT A BRANCH. Both variances are floored at
+  `FIDELITY_VARIANCE_FLOOR = 1e-9` before the ratio is taken, so EVERY
+  comparison reaches the arm and no case is exempt. 1e-9 is a standard
+  deviation of 3.2e-5, constancy at the resolution of either order-one
+  statistic; the degenerate rows above all sit at or below 5.6e-10 while the
+  smallest genuinely dispersed pair seen sits at 2.0e-9. Two constants read
+  exactly 1.0000 and pass; a constant against real dispersion reads far outside
+  the band in whichever direction and fails. FLOORING CANNOT MANUFACTURE A RED:
+  it raises whichever side is below it, which moves any ratio monotonically
+  towards 1, so no comparison that passed the raw ratio can fail the floored
+  one - which is why the whole ten-part suite did not need re-running to prove
+  the change safe, only the two parts carrying degenerate rows.
+- AND THE DISPERSION PROBE NOW RUNS ON EVERY ROW. It could not simply drop its
+  guard, because scaling a constant sample by a spread factor leaves it
+  constant; it injects the dispersion ADDITIVELY instead, alternating plus and
+  minus a half-width about the candidate's own mean over the even 32 months, so
+  the mean is preserved EXACTLY, the mean arm's band only widens, and the
+  rejection is necessarily the dispersion arm's. Both probes now assert WHICH
+  ARM fired by matching the verdict's prefix, so a probe satisfied by the wrong
+  arm is a failure rather than a pass.
+- A CHEAP UNIGNORED TEST NOW PINS THE PREDICATE,
+  `the_fidelity_predicate_bites_where_one_sample_never_moves`. The ten parts
+  that exercise `fidelity_verdict` for real are `#[ignore]`d cost gates, so
+  without it the predicate shipped unexecuted by `brokkr check` - and the hole
+  above was in the predicate, not in the walks. Bite-checked by restoring the
+  `both variances strictly positive` guard as a text edit: the test fails at
+  "unbounded dispersion around a constant reference must be refused", which is
+  the 103-variance-against-a-constant case, and passes with the floor restored.
+- B2 IS A REFUSAL, and the measurement is in `notes/bugs-tests-lab-cli.md`
+  rather than repeated here. The one line worth carrying: THE `0.5 * closed` CAP
+  NEVER BINDS - the plug-in arm is binding in all 36 comparisons at 0.15x-0.59x
+  of the cap - so the report's suggested `0.1 * closed` would have REPLACED a
+  healthy adaptive tolerance with a fixed band tighter than the Monte Carlo
+  error in most cells. Both gates now print their arms per comparison
+  (`conformance_arms ...` and `fidelity_arms ...`), which is what keeps either
+  claim from decaying into prose nothing re-checks.
+- B3: THE WALL ASSERTION IS GONE, the counter stays. `assert!(elapsed <=
+  CONFORMANCE_BUDGET_S)` was a host-property claim inside a correctness gate -
+  the `tape_lateness_under_acceleration` shape - and the 12b spec itself asks
+  for a REPORT here ("checked by running, not asserted"). It now prints
+  `conformance_wall_s=... budget_s=900`. NO NEW BENCHMARK TARGET WAS
+  REGISTERED, deliberately: `envelope_evaluation` already measures the
+  per-replicate-month unit price the whole budget is derived from, so the cost
+  claim is re-runnable without a second instrument for the same quantity.
+  - WHAT ACTUALLY BINDS THIS GATE IS NOT THE 900 s BUDGET. Measured 167.6 s and
+    168.2 s, so the assertion had 5.3x of headroom and was catching nothing.
+    The live ceiling is the RUNNER's - `brokkr test --timeout` refuses anything
+    over 280 s - and no assertion inside the test can see it. If this gate ever
+    grows, that is the number it collides with.
+- COST: ZERO MEASURABLE WALL. Both arms and both probes are arithmetic over 32
+  f64s; the walks are untouched. Serial release re-runs of the same parts before
+  and after: `wall_mmpp_1s` 54.22 s -> 54.22 s, `log_ou_cox_1s` 58.47 s ->
+  58.47 s, `self_exciting_1s` 55.72 s -> 55.97 s, `event_markov_1s` 138.99 s ->
+  138.24 s, conformance 167.60 s -> 168.15 s. The other five parts, measured for
+  the first time here: `event_markov_250ms` 142.5 s, `shot_noise_250ms` 106.2 s,
+  `shot_noise_1s` 78.0 s, `log_ou_cox_250ms` 77.5 s, `self_exciting_250ms`
+  75.7 s, `wall_mmpp_250ms` 70.2 s. THE WHOLE ELEVEN-PART ENVELOPE SUITE IS
+  ABOUT 16 MINUTES SERIAL, every part inside the 280 s runner ceiling - so the
+  `brokkr.toml` skip entry's cost justification for these two patterns is
+  CORRECT, unlike the entries the tape round found overstated.
+- THE FIDELITY GATE HAS NO ONE-COMMAND FORM, and `brokkr.toml` documented one
+  that cannot run - the instruction the next reader would have followed.
+  `--timeout` is honored only when the filter matches exactly ONE test and
+  `brokkr test` ERRORS BEFORE RUNNING when it matches more, so the frozen
+  prefix, which matches all ten parts, fails with a config error rather than
+  running anything. Confirmed by running it. The comment now names the ten
+  family-and-step suffixes and gives a worked per-part example; the conformance
+  gate is a single test, so its own documented command was always fine.
+- TWO STALE COST FRAMINGS went with the wall assertion. The
+  `#[ignore]` reason said "bounded by 900 seconds" and the `brokkr.toml`
+  comment said "spec ceiling 900 s"; nothing bounds either at 900 any more, so
+  both now state the measured cost instead.
+- DIAGNOSTICS MUST BE FINITE ON THE INTERESTING ROWS, which is where they were
+  worst. `var_ratio` printed NaN on the both-zero rows and `inf` on the
+  one-sided ones - the exact rows the defect lived in - and `mean_slack`
+  printed NaN wherever the band was zero. The ratio is now the FLOORED one, so
+  it reads 1.0000 there while the raw variances beside it still identify the
+  row, and a zero band prints `mean_slack=exact` rather than NaN. Same shape
+  fixed in the conformance gate's `slack_ratio`. A diagnostic presented as what
+  keeps a claim from decaying into prose has to be legible on the rows that
+  matter.
+- THE ZERO-BAND SHIFT PROBE WAS MAGNITUDE-FRAGILE. Its fallback displacement
+  was a fixed `1e-12`, which is A NO-OP UNDER FLOAT ADDITION once sample values
+  exceed about 1e4 - the ulp at 1e5 is 1.5e-11 - at which point the shifted
+  sample equals the original, the verdict is `None`, and A GREEN GATE IS
+  REPORTED AS A CORRECTNESS FAILURE. Safe today only because both gated
+  statistics are order one, which is a property of today's statistic list and
+  not of the probe. It is now `8 * f64::EPSILON` times the sample's own level,
+  which cannot be swallowed at any magnitude.
+- LATERAL, UNFIXED, AND NOT THIS ROUND'S: `brokkr test`'s PASS/FAIL footer wall
+  is not a reading of the assertion phase. A run that panicked on the FIRST of
+  40 comparisons still reported 77.97 s, identical to the green run - because
+  all 64 month walks happen before the assertion loop, so the footer measures
+  the walks and nothing else. Harmless here; do not use that footer to time a
+  change to an assertion.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -2625,6 +2807,18 @@ because there is nothing to install and therefore nothing to spoof.
     `mogwai-lab` and therefore +2 IN EACH SWEEP and +4 pairs. Six tests were
     rewritten in place across `count_curve.rs`, `stage_m_tier2.rs` and
     `fit/curves.rs` and move no count.
+  - lab/cli r4: 1230 + 450, 1737 pairs, 1680 run, 57 ignored, 0 orphaned, 14
+    skips, 54.7 s. +1 per sweep and +2 pairs over lab/cli r3, and the +1 is the
+    whole visible footprint of the round: everything else it changed lives
+    inside `the_envelope_matches_the_closed_forms_where_they_are_exact` and the
+    ten macro-generated fidelity parts, all already `#[ignore]`d and already
+    skipped, so those could move no count. THE +1 IS THE POINT rather than an
+    accident - `the_fidelity_predicate_bites_where_one_sample_never_moves` is
+    the round's only assertion that a general check lane ever executes, and the
+    defect the cold review caught was in the predicate it pins. A round whose
+    subject is `#[ignore]`d tests otherwise leaves this ledger flat by
+    construction; the evidence for the rest is in the eleven named release runs
+    recorded in its section above, not here.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

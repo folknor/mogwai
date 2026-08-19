@@ -266,12 +266,27 @@ skip = [
     "parity12a_",
     # The 12b brick E envelope gates, both `#[ignore]`d at the source for a
     # COST reason: the closed-form conformance cross-check walks 12 cells by
-    # 2,000 simulated exposures (spec ceiling 900 s), and the fidelity gate
+    # 2,000 simulated exposures, measured at about 168 s, and the fidelity gate
     # runs 32 real candidate walks against 32 idealized months per probe cell
-    # at two grid steps. Both outlive the 20-second watchdog by design. Run
-    # them by name:
-    # `brokkr test -p mogwai-lab the_envelope_matches_the_closed_forms_where_they_are_exact --timeout 279`
-    # `brokkr test -p mogwai-lab the_envelope_simulator_is_faithful_to_the_candidate_walks --timeout 279`.
+    # at two grid steps, 54 s to 142 s per part. Both outlive the 20-second
+    # watchdog by design; the whole suite is about 16 minutes serial, and every
+    # part is inside the runner's 280 s ceiling. Per-part walls are tabulated
+    # in `reference/performance.md`.
+    #
+    # THE FIDELITY GATE HAS NO ONE-COMMAND FORM, and this comment used to give
+    # one that cannot run. `--timeout` is honored only when the filter matches
+    # exactly ONE test, and `brokkr test` errors out before running when it
+    # matches more; the prefix below matches all ten macro-generated parts, so
+    # `brokkr test -p mogwai-lab the_envelope_simulator_is_faithful_to_the_candidate_walks --timeout 279`
+    # fails with a config error rather than running anything. Run the parts one
+    # at a time, appending each family and step suffix to the prefix -
+    # `_event_markov_1s`, `_event_markov_250ms`, `_wall_mmpp_1s`,
+    # `_wall_mmpp_250ms`, `_log_ou_cox_1s`, `_log_ou_cox_250ms`,
+    # `_self_exciting_1s`, `_self_exciting_250ms`, `_shot_noise_1s`,
+    # `_shot_noise_250ms` - for example:
+    # `brokkr test -p mogwai-lab the_envelope_simulator_is_faithful_to_the_candidate_walks_shot_noise_1s --timeout 279`.
+    # The conformance gate is a single test, so its own command does run:
+    # `brokkr test -p mogwai-lab the_envelope_matches_the_closed_forms_where_they_are_exact --timeout 279`.
     "the_envelope_matches_the_closed_forms_where_they_are_exact",
     "the_envelope_simulator_is_faithful_to_the_candidate_walks",
     # Protocol 12b brick N3's two pins, both `#[ignore]`d at the source and

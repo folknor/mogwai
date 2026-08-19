@@ -592,6 +592,52 @@ the construction removal kept, reproducing `Exp`'s own reciprocal-multiply
 arithmetic so the result stays bit-identical. This is a reading on one
 toolchain, not a claim about every future one.
 
+## The eleven envelope gate parts' wall, 2026-08-19
+
+Host `bygg`, release, ONE PART PER INVOCATION - which is not a preference but
+the only form that runs. `brokkr test --timeout` is honored only when the
+filter matches exactly one test and errors out before running when it matches
+more, so the ten fidelity parts have to be named individually by appending
+their family and step suffix to the frozen prefix; `brokkr.toml` carries the
+suffix list. Every part is `#[ignore]`d at the source and skipped by the gate
+profile, so none of these seconds is ever paid by `brokkr check --gate`; this
+is what the suite costs when it is run deliberately.
+
+| part | wall |
+|---|---:|
+| `..._matches_the_closed_forms_where_they_are_exact` | 168.2 s |
+| `..._faithful_to_the_candidate_walks_event_markov_250ms` | 142.5 s |
+| `..._faithful_to_the_candidate_walks_event_markov_1s` | 138.2 s |
+| `..._faithful_to_the_candidate_walks_shot_noise_250ms` | 106.2 s |
+| `..._faithful_to_the_candidate_walks_shot_noise_1s` | 78.0 s |
+| `..._faithful_to_the_candidate_walks_log_ou_cox_250ms` | 77.5 s |
+| `..._faithful_to_the_candidate_walks_self_exciting_250ms` | 75.7 s |
+| `..._faithful_to_the_candidate_walks_wall_mmpp_250ms` | 70.2 s |
+| `..._faithful_to_the_candidate_walks_log_ou_cox_1s` | 58.5 s |
+| `..._faithful_to_the_candidate_walks_self_exciting_1s` | 56.0 s |
+| `..._faithful_to_the_candidate_walks_wall_mmpp_1s` | 54.2 s |
+
+About sixteen minutes for the whole suite, every part inside the runner's 280 s
+ceiling - which is the number that actually binds these, not the 900 s
+`CONFORMANCE_BUDGET_S` the spec names. The conformance gate sits 5.3x inside
+that budget, which is why its wall is now REPORTED
+(`conformance_wall_s=... budget_s=900`) rather than asserted: an assertion with
+that much headroom catches no cost regression and can only fire on host load.
+
+THE GRID STEP IS NOT THE COST DRIVER FOR FAMILY 1. `event_markov` runs real
+`advance_parent` walks rather than a grid sweep, so its two steps measure 138 s
+and 142 s; every other family's 250 ms part costs 1.3x to 1.4x its 1 s twin
+rather than the 4x the cell count would suggest, because the per-cell draw
+dominates the cell count only for the jump-heavy laws. The per-replicate-month
+unit prices behind all of this are the `envelope_evaluation` table above.
+
+The degeneracy-floor repair to the dispersion arm, landed the same day, moves
+none of this: re-runs of the two parts carrying degenerate rows came back at
+79.5 s for `shot_noise_1s` and 140.2 s for `event_markov_1s`, inside the
+run-to-run spread of the table. Both arms and both self-proof probes are
+arithmetic over the 32 f64 values a part has already collected, so they cannot
+show up against walks measured in minutes.
+
 ## Stage A batch instrument and Steps 1-4, 2026-08-10
 
 Host `bygg`. Batch rows through Step 2 use release without profiling features

@@ -11,53 +11,43 @@ Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 
 ROUND 1 CLOSED A1, C1 AND C3 on 2026-08-19; ROUND 2 CLOSED A2 AND A3 the same
 day; ROUND 3 CLOSED A4, A5, A6, A7, A8 AND A9, so section A is empty and gone.
+ROUND 4 CLOSED B1 AND B3 and REFUSED B2 on measurement, so what remains of
+section B is that refusal. B1 TOOK TWO PASSES: the round's first cut of the
+dispersion arm skipped it whenever EITHER sample's variance was zero, which
+left the self-widening defect live in precisely the degenerate rows the round
+had itself documented, and its self-proof probe was guarded by the same
+condition so it could never have shown it. The cold review caught that; the
+floor that closed it, and the cheap unignored predicate test that now pins it,
+are in the carry-forward.
 Those sections are gone from this
 document; what the rounds decided that a later reader would otherwise re-derive
 wrong is in `notes/bug-loop-carry-forward.md`.
 
 ## B. Self-widening tolerances (statistical gates that get MORE permissive as the code gets worse)
 
-**B1. `assert_fidelity` in the envelope gate.**
-`mogwai-lab/src/arrival_envelope.rs:1180`
+**B2. REFUSED, and the finding's own conditional is what refuses it.** The
+report said: "if the plug-in SE at M=2000 is much tighter than that, the cap
+never binds and the test is fine; if it does bind, the test is nearly useless.
+MEASURE WHICH." Measured, over all 36 comparisons the gate makes: THE CAP NEVER
+BINDS. The plug-in arm is the binding one in every cell and every hour, and it
+sits between 0.15x and 0.59x of the `0.5 * closed` cap, so the cap would need
+the plug-in SE to inflate by 1.7x before it could take effect at all. The
+observed deviations use 0.01 to 0.43 of the tolerance actually applied.
 
-```rust
-let combined_se = (idealized_variance / n + candidate_variance / n).sqrt();
-assert!(difference <= 5.0 * combined_se);
-```
+Tightening the cap to `0.1 * closed`, as the report suggested, would therefore
+NOT tighten a loose gate - it would REPLACE a healthy plug-in arm with a fixed
+band in most cells, since `0.1 * closed` is below the plug-in arm nearly
+everywhere (0.10 vs 0.157 of `closed` in the domain-centre `wall_mmpp` cell, for
+instance). The gate would go from a tolerance sized by the run's own Monte Carlo
+error to one that ignores it, and its margin against the observed deviation
+would shrink from about 5x to about 3x for no gained sensitivity to any defect.
+That is the tape document's round-4 lesson exactly: a principled-looking
+correction that makes the gate strictly more fragile. The cap and the arm are
+also frozen by the 12b spec section 9.7, which reasons them out explicitly.
 
-The tolerance is derived from the CANDIDATE'S OWN SAMPLE VARIANCE, over
-`FIDELITY_MONTHS = 32`. A regression that widens the candidate's dispersion
-widens the acceptance band with it - the gate's sensitivity is inversely
-proportional to the severity of the class of defect it exists to catch. At n=32
-and 5 sigma this is already a very loose bound; the failure mode is that a
-genuinely broken candidate walk passes BECAUSE it is broken. This gate is 10
-tests times 32 idealized plus 32 candidate month-scale walks and is the most
-expensive thing in scope; it deserves an absolute component - also require the
-candidate variance itself to sit inside a band around the idealized variance - so
-that inflated dispersion is itself a failure rather than a license.
-
-**B2. `the_envelope_matches_the_closed_forms_where_they_are_exact`.**
-`mogwai-lab/src/arrival_envelope.rs:1156`
-
-```rust
-let tolerance = (5.0 * se_plugin).min(0.5 * closed);
-```
-
-The `.min` caps the self-widening, which is the right instinct - but it caps it
-at 50% OF THE CLOSED-FORM VALUE. A sample variance 1.49x the analytic truth
-passes. For a gate whose whole premise is "where the closed forms are exact",
-half is not a tolerance, it is a shrug. If the plug-in SE at M=2000 is much
-tighter than that (it should be), the cap never binds and the test is fine; if it
-does bind, the test is nearly useless. Worth printing the two terms and picking a
-cap that reflects the actual Monte Carlo error, e.g. `0.1 * closed`.
-
-**B3. Wall-clock assertion inside the same gate.**
-`assert!(elapsed <= CONFORMANCE_BUDGET_S)` (900 s) at the end. This is the
-`tape_lateness_under_acceleration` shape that `brokkr.toml` already documents at
-length as environment-sensitive and unresolvable. It is less likely to bite at
-900 s, but it is a host-property assertion sitting inside a correctness gate, so
-a loaded machine reports a CORRECTNESS failure. It should be an `eprintln!`
-counter (the `sidecar` module exists for exactly this) and not an assertion.
+The two arms are now PRINTED per comparison (`conformance_arms ...
+binding=plugin slack_ratio=...`), so the claim "the cap never binds" is
+re-checked by every run rather than resting on this note.
 
 ## C. Skip-list and `#[ignore]` reconciliation
 
@@ -155,9 +145,7 @@ throughout. The `protocol9_tape_oracle` re-blessing guard is the correct pattern
 
 ## The hunter's recommended order of work
 
-1. **B1/B2** - the envelope tolerances. This one needs a decision rather than a
-   patch: a self-scaling 5-sigma band at n=32 is a choice, and tightening it will
-   make the most expensive gate in the workspace occasionally red. Worth naming
-   what a failure would change before touching it.
+1. ~~**B1/B2**~~ - closed and refused respectively by round 4; see above and the
+   carry-forward.
 2. **D** - a third `analysis/*_conformance.json` for the zero-fraction and
    exposure quantities, if the two-copy gates are meant to be permanent.

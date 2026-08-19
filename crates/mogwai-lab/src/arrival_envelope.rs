@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "release-mode conformance gate, bounded by 900 seconds"]
+    #[ignore = "release-mode conformance gate, minutes of walks, reports its wall"]
     fn the_envelope_matches_the_closed_forms_where_they_are_exact() {
         let started = Instant::now();
         let profile = mogwai_server::config::profile_from_preset("MNQ").expect("MNQ profile");
@@ -1168,16 +1168,44 @@ mod tests {
                     / M_CONF as f64)
                     .max(0.0)
                     .sqrt();
-                let tolerance = (5.0 * se_plugin).min(0.5 * closed);
+                let plugin_arm = 5.0 * se_plugin;
+                let absolute_arm = 0.5 * closed;
+                let tolerance = plugin_arm.min(absolute_arm);
+                // Finite on every row: a zero tolerance would make the ratio
+                // NaN or infinite on exactly the row whose arithmetic the
+                // reader most needs to see, and the assertion below is the
+                // thing that decides anyway.
+                let slack_ratio = if tolerance > 0.0 {
+                    format!("{:.4}", (sample_var - closed).abs() / tolerance)
+                } else {
+                    "exact".to_string()
+                };
+                eprintln!(
+                    "conformance_arms cell={cell:?} hour={hour} closed={closed:.6e} sample={sample_var:.6e} plugin_arm={plugin_arm:.6e} absolute_arm={absolute_arm:.6e} binding={} slack_ratio={slack_ratio}",
+                    if plugin_arm <= absolute_arm {
+                        "plugin"
+                    } else {
+                        "absolute"
+                    },
+                );
                 assert!(
                     (sample_var - closed).abs() <= tolerance,
                     "{cell:?} hour {hour}: sample={sample_var} closed={closed} tolerance={tolerance}"
                 );
             }
         }
+        // REPORTED, NOT ASSERTED, and the spec asks for exactly that: "the
+        // conformance gate reports its measured wall time in the artifact so
+        // the claim is checked by running, not asserted". An `assert` here is a
+        // statement about the HOST sitting inside a correctness gate, so a
+        // loaded machine returns a CORRECTNESS failure for a load average -
+        // the `tape_lateness_under_acceleration` shape this workspace already
+        // retired for the same reason. Measured 167.6 s on 2026-08-19 against
+        // the 900 s budget, so nothing was being caught by asserting it; what
+        // does bind in practice is the runner's own 280 s watchdog ceiling,
+        // which no assertion in here can see.
         let elapsed = started.elapsed().as_secs_f64();
-        eprintln!("conformance_wall_s={elapsed:.3}");
-        assert!(elapsed <= CONFORMANCE_BUDGET_S);
+        eprintln!("conformance_wall_s={elapsed:.3} budget_s={CONFORMANCE_BUDGET_S}");
     }
 
     fn mean_and_variance(values: &[f64]) -> (f64, f64) {
@@ -1188,6 +1216,171 @@ mod tests {
             .sum::<f64>()
             / (values.len() - 1) as f64;
         (mean, variance)
+    }
+
+    /// The two-sided variance ratio the candidate sample may occupy around the
+    /// idealized one.
+    ///
+    /// IT IS THE ABSOLUTE ARM, and it exists because the mean comparison alone
+    /// derives its whole tolerance from the two samples' own dispersion - so a
+    /// regression that WIDENS the candidate walk's spread widens the band that
+    /// is supposed to catch it, and a badly enough broken candidate passes
+    /// BECAUSE it is broken. With this arm, inflated dispersion is itself a
+    /// failure rather than a licence, and the licence a still-passing candidate
+    /// can buy is bounded: at the band edge the combined standard error is
+    /// `sqrt((1 + 6.5) / 2)` = 1.94x its healthy value, not unbounded.
+    ///
+    /// 6.5 IS MEASURED, NOT CHOSEN FOR ROUNDNESS. A full gate run makes 400
+    /// comparisons - 20 gated hours x 2 statistics x 10 parts, so 40 per part -
+    /// and over those the observed ratio spans 0.34 to 2.95 BEFORE the
+    /// degeneracy floor below is applied, which is the
+    /// F(31, 31) reference distribution to the quantile: the two
+    /// implementations really do have equal variances, so the spread here is
+    /// pure sampling noise at n = 32. F(31, 31) puts its two-sided 1.2e-6
+    /// points at 0.154 and 6.5, so a band of 6.5 costs about one false failure
+    /// in two thousand runs. THAT IS AS TIGHT AS n = 32 PERMITS: a band tight
+    /// enough to catch a 2x dispersion regression would be red most runs.
+    /// Buying more sensitivity here means more replicate months, which is wall
+    /// time, not a smaller constant. The band assumes approximate normality of
+    /// the per-month statistic, to which a variance ratio is sensitive; the
+    /// observed extremes are consistent with it, which is the only check n = 32
+    /// supports. The floor cannot cost a false red: it raises whichever
+    /// variance is below it, which moves any ratio MONOTONICALLY TOWARDS 1, so
+    /// no comparison that passed the raw ratio can fail the floored one.
+    const FIDELITY_DISPERSION_BAND: f64 = 6.5;
+
+    /// Below this, a sample is CONSTANT rather than dispersed, and the ratio is
+    /// taken between floored variances instead of raw ones.
+    ///
+    /// THIS IS NOT A CONVENIENCE AGAINST DIVISION BY ZERO - it is what keeps
+    /// the degenerate rows inside the arm instead of exempt from it. Skipping
+    /// the comparison whenever EITHER variance is zero reopens exactly the
+    /// self-widening hole the arm was added to close: with the idealized sample
+    /// constant, the mean arm's band is `5 * sqrt(candidate_var / 32)`, which
+    /// the candidate's own dispersion sets, so a candidate scattered
+    /// arbitrarily wide around a constant reference agrees with it by
+    /// construction and the ratio arm would never be consulted. Flooring
+    /// instead means a zero variance behaves as a very small one: two constant
+    /// samples give a ratio of exactly 1 and pass, a constant against a
+    /// genuinely dispersed sample gives a ratio far outside the band and fails.
+    ///
+    /// 1e-9 IS MEASURED. Both gated statistics are order one - `hourly_rate`
+    /// runs 1e-4 to 1e0 in variance and `hourly_zero_fraction` is a fraction on
+    /// the unit interval - so 1e-9 is a standard deviation of 3.2e-5, which is
+    /// constancy at either statistic's own resolution. In a healthy run the
+    /// rows it captures are `shot_noise`'s zero fraction at hours 13 and 19
+    /// (both variances exactly 0), hour 17 (0 against 2.2e-11), hour 18
+    /// (1.3e-11 against 0) and `self_exciting` hour 13 (3.0e-10 against
+    /// 1.0e-10); the smallest genuinely dispersed pair seen sits at 2.0e-9,
+    /// twice the floor, so nothing with real spread is waved through.
+    const FIDELITY_VARIANCE_FLOOR: f64 = 1e-9;
+
+    /// The two-sided variance ratio, taken between floored variances so that a
+    /// degenerate sample is compared rather than exempted.
+    fn fidelity_variance_ratio(idealized_variance: f64, candidate_variance: f64) -> f64 {
+        candidate_variance.max(FIDELITY_VARIANCE_FLOOR)
+            / idealized_variance.max(FIDELITY_VARIANCE_FLOOR)
+    }
+
+    /// The gate's predicate, extracted so the test can run it against
+    /// DELIBERATELY BROKEN samples and prove its own bite. `None` is agreement.
+    fn fidelity_verdict(idealized: &[f64], candidate: &[f64]) -> Option<String> {
+        let (idealized_mean, idealized_variance) = mean_and_variance(idealized);
+        let (candidate_mean, candidate_variance) = mean_and_variance(candidate);
+        let combined_se = (idealized_variance / idealized.len() as f64
+            + candidate_variance / candidate.len() as f64)
+            .sqrt();
+        let difference = (idealized_mean - candidate_mean).abs();
+        if difference > 5.0 * combined_se {
+            return Some(format!(
+                "mean: idealized={idealized_mean} candidate={candidate_mean} difference={difference} combined_se={combined_se}"
+            ));
+        }
+        // EVERY comparison reaches the ratio arm, degenerate ones included; the
+        // floor is what makes that well defined. See
+        // `FIDELITY_VARIANCE_FLOOR` for why exempting a zero variance rather
+        // than flooring it reopens the self-widening hole in the one place the
+        // reference sample cannot constrain the candidate at all.
+        let ratio = fidelity_variance_ratio(idealized_variance, candidate_variance);
+        if ratio > FIDELITY_DISPERSION_BAND || ratio < 1.0 / FIDELITY_DISPERSION_BAND {
+            return Some(format!(
+                "dispersion: idealized_var={idealized_variance} candidate_var={candidate_variance} ratio={ratio} band={FIDELITY_DISPERSION_BAND} floor={FIDELITY_VARIANCE_FLOOR}"
+            ));
+        }
+        None
+    }
+
+    /// The predicate's own bite, on cases the 640 walks behind the gate cannot
+    /// be relied on to contain - and specifically on the ONE-SIDED DEGENERATE
+    /// pair, where a reference sample that never moves leaves the mean arm's
+    /// band entirely in the candidate's gift.
+    ///
+    /// This is cheap and unignored on purpose. The ten gate parts that exercise
+    /// `fidelity_verdict` for real are `#[ignore]`d cost gates, so without this
+    /// the predicate ships unexecuted by any general check lane - and the hole
+    /// this test names lived in the predicate, not in the walks.
+    #[test]
+    fn the_fidelity_predicate_bites_where_one_sample_never_moves() {
+        const MONTHS: usize = 32;
+        let constant = [0.5_f64; MONTHS];
+
+        // Two constants that agree: the mean arm demands exact equality, the
+        // ratio arm sees two floored variances and reads exactly 1.
+        assert_eq!(fidelity_verdict(&constant, &constant), None);
+        let nudged = [0.5_f64 + 1e-9; MONTHS];
+        assert!(
+            fidelity_verdict(&constant, &nudged)
+                .expect("two constants must agree exactly")
+                .starts_with("mean:"),
+            "a displaced constant must be caught by the mean arm"
+        );
+
+        // THE DEFECT ITSELF. A candidate scattered with variance 100 around a
+        // CONSTANT reference: the mean arm cannot see it, because the band it
+        // computes is `5 * sqrt(100 / 32)` = 8.84, which the candidate's own
+        // dispersion bought. Exempting the ratio arm here - as a `both
+        // variances strictly positive` guard does - passes it.
+        let mut scattered = [0.0_f64; MONTHS];
+        for (index, value) in scattered.iter_mut().enumerate() {
+            *value = if index % 2 == 0 { 10.5 } else { -9.5 };
+        }
+        let (scattered_mean, scattered_variance) = mean_and_variance(&scattered);
+        assert!((scattered_mean - 0.5).abs() < 1e-12);
+        assert!(scattered_variance > 90.0);
+        let (_, constant_variance) = mean_and_variance(&constant);
+        assert_eq!(constant_variance, 0.0);
+        let combined_se =
+            (constant_variance / MONTHS as f64 + scattered_variance / MONTHS as f64).sqrt();
+        assert!(
+            (scattered_mean - 0.5).abs() <= 5.0 * combined_se,
+            "the mean arm is blind here by construction, which is the point"
+        );
+        assert!(
+            fidelity_verdict(&constant, &scattered)
+                .expect("unbounded dispersion around a constant reference must be refused")
+                .starts_with("dispersion:"),
+            "the dispersion arm must be what refuses it"
+        );
+
+        // AND THE MIRROR IMAGE: a candidate that produced the identical value
+        // in all 32 months against a reference that genuinely moves is the
+        // loudest possible disagreement, and it is refused for the same reason.
+        assert!(
+            fidelity_verdict(&scattered, &constant)
+                .expect("a frozen candidate against a dispersed reference must be refused")
+                .starts_with("dispersion:")
+        );
+
+        // The floor is a floor, not a blanket refusal: a reference that is
+        // constant against a candidate whose dispersion is below the resolution
+        // of the statistic still agrees. These are the real `shot_noise` hour
+        // 17 and hour 18 rows.
+        let mut imperceptible = constant;
+        imperceptible[0] += 2.7e-5;
+        let (_, imperceptible_variance) = mean_and_variance(&imperceptible);
+        assert!(imperceptible_variance < FIDELITY_VARIANCE_FLOOR);
+        assert_eq!(fidelity_verdict(&constant, &imperceptible), None);
+        assert_eq!(fidelity_verdict(&imperceptible, &constant), None);
     }
 
     fn assert_fidelity(
@@ -1204,9 +1397,93 @@ mod tests {
             + candidate_variance / candidate.len() as f64)
             .sqrt();
         let difference = (idealized_mean - candidate_mean).abs();
+        // BOTH DIAGNOSTICS ARE FINITE ON EVERY ROW. The ratio is the gated one,
+        // so it reads 1.0000 on a degenerate pair rather than NaN, and the raw
+        // variances beside it still say which rows those are. The mean slack is
+        // undefined rather than infinite where the band is exactly zero, and it
+        // says so: that row is holding two constants to exact equality.
+        let slack = if combined_se > 0.0 {
+            format!("{:.4}", difference / (5.0 * combined_se))
+        } else {
+            "exact".to_string()
+        };
+        eprintln!(
+            "fidelity_arms {statistic} step_ns={step_ns} hour={hour} idealized_var={idealized_variance:.6e} candidate_var={candidate_variance:.6e} var_ratio={:.4} mean_slack={slack}",
+            fidelity_variance_ratio(idealized_variance, candidate_variance),
+        );
+        let verdict = fidelity_verdict(idealized, candidate);
         assert!(
-            difference <= 5.0 * combined_se,
-            "{cell:?} step_ns={step_ns} {statistic} hour={hour}: idealized={idealized_mean} candidate={candidate_mean} difference={difference} combined_se={combined_se}"
+            verdict.is_none(),
+            "{cell:?} step_ns={step_ns} {statistic} hour={hour}: {}",
+            verdict.unwrap_or_default()
+        );
+
+        // THE SENSITIVITY IS PROVEN ON EVERY RUN, on this very sample, at no
+        // walk cost: both perturbations are arithmetic over the 32 values
+        // already collected. A tolerance whose bite is demonstrated where it is
+        // applied cannot decay into a shrug, which is the standard
+        // `arch_coefficients_match_the_shipped_recursion` sets.
+        //
+        // The shift is taken AWAY from the idealized mean rather than in a
+        // fixed direction: a candidate mean already sitting four standard
+        // errors low would be moved TOWARDS agreement by a blind `+`, and the
+        // probe would then fail for being satisfied.
+        let away = if candidate_mean >= idealized_mean {
+            1.0
+        } else {
+            -1.0
+        };
+        // Where the combined standard error is exactly zero the mean band is
+        // zero too, so any displacement at all is a rejection - but it has to
+        // SURVIVE THE ADDITION. A fixed `1e-12` is a no-op once the sample
+        // exceeds about 1e4, which would report a green gate as a correctness
+        // failure; a few ulps AT THE SAMPLE'S OWN MAGNITUDE cannot be.
+        let level = idealized_mean.abs().max(candidate_mean.abs()).max(1.0);
+        let shift = if combined_se > 0.0 {
+            away * 6.0 * combined_se
+        } else {
+            away * 8.0 * f64::EPSILON * level
+        };
+        let shifted: Vec<f64> = candidate.iter().map(|value| value + shift).collect();
+        let shifted_verdict = fidelity_verdict(idealized, &shifted)
+            .expect("the mean arm must reject a displaced candidate");
+        assert!(
+            shifted_verdict.starts_with("mean:"),
+            "{cell:?} step_ns={step_ns} {statistic} hour={hour}: the MEAN arm must be what rejects a candidate displaced from agreement, got {shifted_verdict}"
+        );
+
+        // THE DISPERSION PROBE RUNS ON EVERY ROW, degenerate ones included -
+        // which is the whole point, since the degenerate rows are where the
+        // arm's absence was the defect, and a probe guarded by the same
+        // condition as the arm could never have shown it. Multiplying a
+        // constant sample by a spread factor leaves it constant, so the
+        // dispersion is INJECTED ADDITIVELY instead: alternating plus and minus
+        // about the candidate's own mean, over an even number of months, so the
+        // mean is preserved EXACTLY and the mean arm's band only widens. Any
+        // rejection is therefore the dispersion arm's, which the assertion
+        // demands by name.
+        let target_variance =
+            2.0 * FIDELITY_DISPERSION_BAND * idealized_variance.max(FIDELITY_VARIANCE_FLOOR);
+        assert!(
+            candidate.len().is_multiple_of(2),
+            "the additive dispersion probe needs an even number of replicate months"
+        );
+        let half_width =
+            (target_variance * (candidate.len() - 1) as f64 / candidate.len() as f64).sqrt();
+        let inflated: Vec<f64> = (0..candidate.len())
+            .map(|index| {
+                if index % 2 == 0 {
+                    candidate_mean + half_width
+                } else {
+                    candidate_mean - half_width
+                }
+            })
+            .collect();
+        let inflated_verdict = fidelity_verdict(idealized, &inflated)
+            .expect("the dispersion arm must reject a candidate spread past the band edge");
+        assert!(
+            inflated_verdict.starts_with("dispersion:"),
+            "{cell:?} step_ns={step_ns} {statistic} hour={hour}: the DISPERSION arm must be what rejects a candidate spread to twice the band edge, got {inflated_verdict}"
         );
     }
 

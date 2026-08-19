@@ -1944,7 +1944,13 @@ conformance test's comment.
   `X >= 1 - m` EXACT, never banded.
 - Cost: the conformance suite is a runnable gate with a wall ceiling
   of 900 s (`CONFORMANCE_BUDGET_S`), so it cannot become an accepted
-  multi-hour computation.
+  multi-hour computation. AMENDED 2026-08-19: the ceiling is REPORTED
+  and not asserted, which is what the section 6 wording already asked
+  for. Measured at 167.6 s and 168.2 s, an assertion at 900 s had 5.3x
+  of headroom, could catch no cost regression, and could only fire on
+  host load - a statement about the machine inside a correctness gate.
+  What binds in practice is the test runner's own 280 s per-test
+  ceiling, which no assertion inside the test can see.
 
 FIXTURES: conformance vector V9 - three hand-tabulated transition
 steps including one multi-jump step with the decay arithmetic written
@@ -2516,6 +2522,52 @@ tuple_mix identity with side values 2 (candidate walk) and 3
 `the_envelope_simulator_is_faithful_to_the_candidate_walks`. The cost
 probe below measures the per-month cost claim rather than trusting
 it.
+
+AMENDED 2026-08-19, the self-widening repair. The five-combined-
+standard-error mean comparison above derives its whole tolerance from
+the two samples' own dispersion, which section 9's conformance
+tolerance explicitly guards against ("TOLERANCE, not self-widening")
+and this gate did not. Measured: a candidate sample spread to 100x
+the reference variance passed all forty comparisons of one gate part,
+with every mean slack IMPROVING - the gate reported more agreement the
+more broken the candidate was. So the mean comparison now carries an
+ABSOLUTE ARM beside it: where both variances are strictly positive,
+the candidate variance must sit within a two-sided ratio of 6.5 of the
+idealized one. 6.5 is the tightest band n = 32 admits - over the 400
+comparisons a full run makes, which is 20 gated hours x 2 statistics x
+10 parts, so 40 per part, the ratio spans 0.34 to 2.95, which is
+F(31, 31) to the quantile, and F(31, 31) puts P(F > 6.5) at 6.0e-7, so
+a two-sided 6.5 costs about one false red per two thousand runs.
+
+AMENDED AGAIN THE SAME DAY, because the first cut of the arm left the
+hole open in the only place the reference cannot constrain the
+candidate at all. Degenerate rows are REAL - `shot_noise`'s zero
+fraction reports both variances exactly zero at hours 13 and 19, and
+ONE side zero against 2.2e-11 and 1.3e-11 at hours 17 and 18, and
+`event_markov` reports zero against 3.2e-11 at hour 13 - and the first
+cut skipped the ratio whenever EITHER variance was zero. Where BOTH are
+zero that is sound, since a zero combined standard error already
+demands exact equality; where only the IDEALIZED side is zero it is the
+self-widening defect verbatim, because the mean band is then
+`5 * sqrt(candidate_var / 32)`, bought entirely by the candidate's own
+dispersion. A candidate of variance 100 scattered around a constant
+reference passes such a gate. The ratio is therefore taken between
+variances FLOORED at 1e-9 - a standard deviation of 3.2e-5, which is
+constancy at the resolution of either order-one statistic - so every
+comparison reaches the arm: two constants read exactly 1, a constant
+against a genuinely dispersed sample reads far outside the band in
+whichever direction, and flooring moves any ratio only towards 1, so it
+can never manufacture a red.
+
+The gate additionally REJECTS two known perturbations of its own
+collected samples on every run, so each arm's bite is demonstrated
+where it is applied rather than assumed, and BOTH probes now run on
+every row including the degenerate ones - the first cut guarded the
+dispersion probe with the same condition as the arm, so the one
+configuration where the arm was absent was also the one where its bite
+was never demonstrated. The dispersion probe injects its spread
+ADDITIVELY, alternating about the candidate's own mean over an even
+number of months, because scaling a constant sample leaves it constant.
 
 SEED IDENTITY, collision-free by construction: replicate draws come
 from a dedicated `ChaCha12Rng` seeded by the 12a 3.4a `tuple_mix`
