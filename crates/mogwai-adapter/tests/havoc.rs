@@ -585,6 +585,53 @@ async fn havoc_reorder_swaps_adjacent() {
     );
 }
 
+/// The `close_after_trades` stub serves its batch ONCE, and the reconnect that
+/// its own close provokes gets a live, silent socket rather than the batch
+/// again.
+///
+/// This pins the harness, not the client, and it is here because the switch is
+/// armed here. The close is what makes the client re-dial, so a leg that
+/// re-reads `ws_trades` on every upgrade re-serves and re-closes for as long as
+/// the test runs - a stub spinning underneath a green test, which surfaces later
+/// as an unrelated-looking flake in whatever else shares the box. The reorder
+/// test above cannot see it: it stops reading after three trades.
+///
+/// THE HANDSHAKE COUNT IS NOT DECORATION. Without a re-dial there is nothing to
+/// replay and the trade assertion below would pass for free, so the reconnect is
+/// established first and the silence asserted after it.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_close_after_trades_leg_does_not_replay_its_batch_on_the_reconnect() {
+    let state = Arc::new(StubState::default());
+    state.close_after_trades.store(true, Ordering::Relaxed);
+    {
+        let mut trades = state.ws_trades.lock().expect("ws trades mutex");
+        trades.push(trade_json(10, "100.00"));
+        trades.push(trade_json(20, "101.00"));
+    }
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (_client, mut rx) = connect_data_client(base_url, &state, None).await;
+
+    let first = next_trade(&mut rx).await;
+    let second = next_trade(&mut rx).await;
+    assert_eq!(first.ts_event, UnixNanos::from(10));
+    assert_eq!(second.ts_event, UnixNanos::from(20));
+
+    let handshakes = wait_for_at_least(&state.ws_handshakes, 2, Duration::from_secs(3)).await;
+    assert!(
+        handshakes >= 2,
+        "the stub's close must drive the client back for a second upgrade, or this \
+         test cannot observe a replay at all (saw {handshakes})"
+    );
+    // A negative assertion with a bounded window, opened only after the re-dial
+    // above is a fact.
+    let replayed = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await;
+    assert!(
+        replayed.is_err(),
+        "the reconnected leg must serve nothing; the batch was replayed as {replayed:?}"
+    );
+}
+
 /// A client bound to a run refuses an address serving a DIFFERENT run, and says
 /// so in one named line rather than dying as a generic connect failure.
 ///

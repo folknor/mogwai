@@ -872,3 +872,88 @@ async fn off_tape_window_still_answers_the_request() {
         "an off-tape window must be refused before any /trades fetch"
     );
 }
+
+/// The harness's own request reader, pinned against a SEGMENTED head.
+///
+/// `common::read_request` used to take a single `read` into a 4096-byte buffer
+/// and return `None` when `\r\n\r\n` was not in it - dropping the connection
+/// with no diagnostic, so the symptom was an unexplained connect failure
+/// attributed to the adapter. Two shapes reach that branch and neither is
+/// exotic: a head split across TCP segments (the terminator itself straddling
+/// the boundary is the worst case, and it is what this test writes), and a head
+/// larger than the buffer, which one `Authorization` header or a cookie jar
+/// would produce. Loopback with today's small heads made both latent rather
+/// than absent.
+///
+/// This test lives in a test binary rather than beside the helper because
+/// `tests/common` is compiled into four of them and a pin there would run four
+/// times for one property.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn the_harness_reads_a_request_head_split_across_segments() {
+    use tokio::{
+        io::AsyncWriteExt,
+        net::{TcpListener, TcpStream},
+    };
+
+    // A head comfortably past the old 4096-byte buffer, so the oversize shape
+    // and the segmented shape are both exercised by one exchange.
+    let padding = "x".repeat(6000);
+    let head = format!(
+        "POST /control/divergence HTTP/1.1\r\nHost: stub\r\nAuthorization: {padding}\r\nContent-Length: 5\r\n\r\n"
+    );
+    // Split so the terminator itself straddles the boundary: the first segment
+    // ends inside `\r\n\r\n`, which defeats any scan of only the newest bytes.
+    let split = head.len() - 2;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        common::read_request(&mut stream).await
+    });
+
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    client
+        .write_all(&head.as_bytes()[..split])
+        .await
+        .expect("first segment");
+    client.flush().await.expect("flush first segment");
+    // Let the reader observe the short segment before the rest arrives, so the
+    // test really does present two reads rather than relying on the kernel to
+    // split them.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // NOT `expect`ed, and that is the point. A reader that gave up on the short
+    // first segment has already dropped its socket, so these writes fail with
+    // ECONNRESET - an error naming the write, not the property. The verdict
+    // belongs to what the reader RETURNED, which is asserted below; letting the
+    // write panic would report a bound rather than the check.
+    drop(client.write_all(&head.as_bytes()[split..]).await);
+    drop(client.write_all(b"hello").await);
+    drop(client.flush().await);
+
+    // BOUNDED for the same reason the writes above are not `expect`ed: the
+    // failure this test discriminates is "the reader gave up", and a future
+    // regression could express that as a BLOCK rather than a `None`. Without a
+    // bound of its own the test would hang to the libtest watchdog and report
+    // nothing attributable.
+    let (read_head, body) = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("the request reader must finish rather than block on a segmented head")
+        .expect("reader task")
+        .expect("a segmented head must be read, not dropped as an unparseable request");
+    assert!(
+        read_head.starts_with("POST /control/divergence "),
+        "the request line must survive segmentation (head={:?})",
+        &read_head[..read_head.len().min(80)]
+    );
+    assert!(
+        read_head.contains(&padding),
+        "a head larger than the read buffer must be accumulated in full"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "hello",
+        "the body must still be read once the head loop has finished"
+    );
+}

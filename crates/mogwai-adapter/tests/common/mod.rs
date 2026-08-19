@@ -68,6 +68,29 @@ pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
 /// Test scenario state shared between the stub and the test body. A test mutates
 /// the relevant fields before connecting, then reads the counters/recorded
 /// bodies afterwards. Defaults model a clean, honest venue.
+///
+/// THE AXIS THAT MATTERS HERE IS DATA-LEG VERSUS EXEC-LEG, NOT HTTP VERSUS WS,
+/// and it is written down because getting it wrong is how the dead block in
+/// `serve_exec_message`'s doc comment survived. Splitting this struct by
+/// transport would have put `ws_trades`, `dark_ms`, `close_after_trades`,
+/// `ws_server_pings`, `ws_exec_frames` and `ws_modify_frames` in ONE bucket
+/// together - which is precisely the confusion that produced the defect, so
+/// that split localizes nothing. The ownership is:
+///
+/// - DATA LEG, all of it served before the read loop in `serve_ws`:
+///   `ws_trades`, `push_gate`, `dark_ms`, `close_after_trades`,
+///   `ws_server_pings`, `ws_first_frame_at`.
+/// - EXEC LEG, all of it served inside `serve_exec_message`: `ws_exec_frames`,
+///   `ws_modify_frames`, `venue_orders`, `venue_fills`, `order_queries`,
+///   `fill_queries`, `ws_first_exec_frame_at`.
+/// - EITHER LEG: the handshake and socket bookkeeping (`ws_handshakes`,
+///   `ws_hits`, `ws_requests`, `active_ws`, `refuse_ws`, `ws_pings`,
+///   `ws_pongs`, `ws_client_messages`) and everything HTTP.
+///
+/// A NEW FIELD BELONGS IN EXACTLY ONE OF THOSE THREE, and a fixture that arms a
+/// data-leg switch on a test whose client is an exec client is arming nothing:
+/// exec clients never enter the tape push, data clients never send a
+/// `ClientMessage`.
 #[derive(Default)]
 pub struct StubState {
     /// Optional body served by `/instruments`; absent uses BTCUSDT spot.
@@ -191,8 +214,10 @@ pub struct StubState {
     pub order_queries: AtomicUsize,
     /// Number of venue-truth fill queries served over either transport.
     pub fill_queries: AtomicUsize,
-    /// Timestamps of each HTTP request to `/orders` and `/trades`. The quota
-    /// tests assert the gaps between consecutive entries.
+    /// Timestamps of each HTTP request the stub served. The quota tests assert
+    /// the gaps between consecutive entries. Today every entry is a `/trades`
+    /// fetch: order entry is websocket-only, so there is no HTTP order carrier
+    /// left to time.
     pub http_request_times: Mutex<Vec<Instant>>,
     /// Count of `GET /trades` requests served (polling-repeat assertion).
     pub trades_hits: AtomicUsize,
@@ -209,9 +234,6 @@ pub struct StubState {
     /// modelling a venue that refuses the socket. The handshake is still counted
     /// so the attempt-cap test can pin the count.
     pub refuse_ws: AtomicBool,
-    /// When true, the order POST handler accepts the request but never replies,
-    /// so the client's per-request timeout must turn the order into a reject.
-    pub hang_orders: AtomicBool,
     /// When set, the WS leg suppresses application frames sent within this many
     /// ms of the subscribe instant, modelling a `GoDark` blackout window.
     pub dark_ms: AtomicUsize,
@@ -222,9 +244,18 @@ pub struct StubState {
     /// path that releases a message the reorder filter is holding at stream end
     /// (the flush never runs on a client-side `stop()`, which merely aborts the
     /// reader task: that is finding A.5). On any later (reconnected) subscribe
-    /// the leg serves nothing, so the held trade is not replayed.
+    /// the leg serves nothing and STAYS UP, so the held trade is not replayed
+    /// and the client is not driven into a re-serve/close loop. Enforced by
+    /// `served_once`.
     pub close_after_trades: AtomicBool,
-    /// Internal: set once the close-after-trades leg has served its one batch.
+    /// Internal: latched once a `close_after_trades` leg has served its one
+    /// batch and closed. THE SENTENCE ABOVE IS THIS FIELD - without it the leg
+    /// re-reads `ws_trades` on every upgrade, and since the close it just sent
+    /// is exactly what makes the client re-dial, the stub spins re-serving the
+    /// whole batch and closing again for as long as the test runs. Nothing
+    /// asserts on it, which is why it went unnoticed: the one test using this
+    /// switch stops reading after three trades and passes over a stub still
+    /// looping underneath it.
     served_once: AtomicBool,
     /// Gate on the WS leg's FIRST application push. See [`PushGate`].
     pub push_gate: PushGate,
@@ -530,17 +561,51 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
     }
 }
 
+/// The largest request head this stub will accumulate before giving up. A peer
+/// that never sends `\r\n\r\n` must not be able to grow the buffer without
+/// bound; nothing the adapter sends comes near this.
+const MAX_HEAD_BYTES: usize = 64 * 1024;
+
 /// Reads one HTTP request, honouring `Content-Length` so POST bodies (the
 /// `/control/divergence` divergence payloads) are read in full rather than
 /// truncated at the header boundary.
+///
+/// BOTH READS LOOP. The body loop below is the obvious one; the HEAD loop is
+/// the one that was missing, and its absence was invisible rather than benign.
+/// A single `read` into a fixed 4 KiB buffer is not a request - it is one
+/// SEGMENT of one - so a `/ws` upgrade split across two TCP segments, or any
+/// head over 4 KiB (which one `Authorization` header or a cookie jar would
+/// produce), found no `\r\n\r\n`, returned `None`, and dropped the connection
+/// with no diagnostic at all. The client then reports a connect failure and the
+/// test blames the adapter. On loopback with today's small heads it practically
+/// always fit in one segment, which is exactly why it survived: the defect is
+/// latent in the harness, not in what it is testing.
 pub async fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
     let mut buf = vec![0u8; 4096];
-    let n = stream.read(&mut buf).await.ok()?;
-    if n == 0 {
-        return None;
-    }
-    let mut bytes = buf[..n].to_vec();
-    let header_end = find_header_end(&bytes)?;
+    let mut bytes = Vec::new();
+    let header_end = loop {
+        // Re-scanned from the start each pass, deliberately: the terminator can
+        // straddle a segment boundary, so a scan of only the newest bytes would
+        // miss it. Heads are small enough that the rescan is free.
+        if let Some(end) = find_header_end(&bytes) {
+            break end;
+        }
+        // The cap bounds what is ACCUMULATED, so the read is clamped to the
+        // remaining room rather than checked after the fact. Checking a
+        // whole-buffer read afterwards makes the true bound
+        // `MAX_HEAD_BYTES + 4096` and fires one pass late, which is the sort of
+        // off-by-one-read that turns a stated exact bound into prose.
+        let room = MAX_HEAD_BYTES - bytes.len();
+        if room == 0 {
+            return None;
+        }
+        let take = room.min(buf.len());
+        let n = stream.read(&mut buf[..take]).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    };
     let head = String::from_utf8_lossy(&bytes[..header_end]).to_string();
     let content_length = content_length(&head);
     let body_start = header_end + 4;
@@ -658,7 +723,17 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     // The venue streams the one run-wide tape without a subscribe frame, so the
     // test - not a fixed sleep - says when the push may happen. See `PushGate`.
     // A leg with nothing to push never waits.
-    let mut frames = state.ws_trades.lock().expect("ws trades mutex").clone();
+    // A `close_after_trades` leg serves its one batch on the FIRST upgrade only.
+    // The close it sends is what makes the client re-dial, so re-reading
+    // `ws_trades` on the second upgrade is a re-serve/close loop rather than a
+    // second scenario: the replay leg pushes nothing and stays up.
+    let close_after = state.close_after_trades.load(Ordering::Relaxed);
+    let is_replay = close_after && state.served_once.swap(true, Ordering::Relaxed);
+    let mut frames = if is_replay {
+        Vec::new()
+    } else {
+        state.ws_trades.lock().expect("ws trades mutex").clone()
+    };
     if !frames.is_empty() && !state.push_gate.wait().await {
         // The gate never opened. Push NOTHING - pushing anyway would restore
         // the raciness the gate replaced - but keep the socket alive and fall
@@ -685,7 +760,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     if state.ws_server_pings.load(Ordering::Relaxed) > 0 {
         drop(ws.send(Message::Ping(Vec::new().into())).await);
     }
-    if state.close_after_trades.load(Ordering::Relaxed) {
+    if close_after && !is_replay {
         drop(ws.close(None).await);
         return;
     }
@@ -703,83 +778,91 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
                     .lock()
                     .expect("ws client messages mutex")
                     .push(text.to_string());
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(ClientMessage::ModifyOrder { .. }) => {
-                        let frames = state
-                            .ws_modify_frames
-                            .lock()
-                            .expect("ws modify frames mutex")
-                            .clone();
-                        for frame in frames {
-                            drop(ws.send(Message::Text(frame.into())).await);
-                        }
-                        // A close-after-trades leg serves its one batch only on
-                        // the first subscribe; a reconnect after the close gets
-                        // an empty, silent socket so the held trade is not
-                        // replayed when the client re-dials.
-                        if state.close_after_trades.load(Ordering::Relaxed)
-                            && state.served_once.swap(true, Ordering::Relaxed)
-                        {
-                            return;
-                        }
-                        // Optionally open the blackout window first so the
-                        // suppressed-during-dark frames are dropped by the stub.
-                        let dark = state.dark_ms.load(Ordering::Relaxed);
-                        if dark > 0 {
-                            // During the dark window the stub holds (drops) every
-                            // application frame, then resumes. We model the
-                            // suppression by emitting nothing for `dark` ms.
-                            tokio::time::sleep(Duration::from_millis(dark as u64)).await;
-                        }
-                        // After the data frames, optionally probe the client's
-                        // inbound Ping -> Pong reply path.
-                        if state.ws_server_pings.load(Ordering::Relaxed) > 0 {
-                            drop(ws.send(Message::Ping(Vec::new().into())).await);
-                        }
-                        // A clean stream end: send a Close and return, so the
-                        // client's reader loop exits normally and runs its
-                        // on-disconnect flush callback (releasing any message the
-                        // reorder filter is holding). See `close_after_trades`.
-                        if state.close_after_trades.load(Ordering::Relaxed) {
-                            drop(ws.close(None).await);
-                            return;
-                        }
-                    }
-                    Ok(ClientMessage::SubmitOrder(_)) => {
-                        let frames = state
-                            .ws_exec_frames
-                            .lock()
-                            .expect("ws exec frames mutex")
-                            .clone();
-                        for frame in frames {
-                            // Stamped BEFORE the send, and only for the first
-                            // frame of the first socket, exactly as
-                            // `ws_first_frame_at` is on the data leg.
-                            // Everything above this line is stub time, not
-                            // client time. See its doc comment.
-                            state
-                                .ws_first_exec_frame_at
-                                .lock()
-                                .expect("ws first exec frame instant mutex")
-                                .get_or_insert_with(Instant::now);
-                            drop(ws.send(Message::Text(frame.into())).await);
-                        }
-                    }
-                    Ok(
-                        ref message @ (ClientMessage::QueryOrders { .. }
-                        | ClientMessage::QueryFills { .. }),
-                    ) => {
-                        if let Some(reply) = venue_query_reply(message, &state) {
-                            let json =
-                                serde_json::to_string(&reply).expect("encode venue query reply");
-                            drop(ws.send(Message::Text(json.into())).await);
-                        }
-                    }
-                    _ => {}
+                if let Ok(message) = serde_json::from_str::<ClientMessage>(&text) {
+                    serve_exec_message(&mut ws, &message, &state).await;
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// The EXEC leg's whole behaviour: a reply to one client command.
+///
+/// WHY THIS IS A SEPARATE FUNCTION. The two legs share the handshake and
+/// nothing else. The data leg is entirely ABOVE the read loop in `serve_ws` -
+/// it pushes the tape at upgrade and then only counts control frames, because
+/// a data client's subscription never crosses the wire and it sends no
+/// `ClientMessage` at all (only `ExecWsCommand`s become frames, in
+/// `client/exec.rs`). So every `Message::Text` a stub socket receives is exec
+/// traffic by construction, and keeping the reply logic inline invited the
+/// defect that was actually found here: the `ModifyOrder` arm had grown a copy
+/// of the DATA leg's `close_after_trades` / `dark_ms` / server-ping / close
+/// tail, written as though the read loop were the data path.
+///
+/// That block was unreachable three ways over and is deleted. Two of them are
+/// structural rather than a fact about today's tests, which is why deleting it
+/// is safe: `close_after_trades` returns from `serve_ws` before the read loop
+/// is ever entered, so its guard here could not run under any fixture; and no
+/// data client sends a `ClientMessage`, so no socket that has `dark_ms` or
+/// `ws_server_pings` armed for the data path reaches this code by any route a
+/// client can take. The `served_once` guard the block held was structurally
+/// unreachable HERE and moved to the data leg above, where the behaviour its
+/// field documents actually lives; the `dark_ms`, server-ping and close tails
+/// were duplicates of code already running there and are simply gone.
+///
+/// The stub CANNOT dispatch the two legs at the upgrade, and that is a fact
+/// about the adapter rather than a shortcut taken here: `MogwaiDataClientConfig`
+/// and `MogwaiExecClientConfig` build the same `/ws?account=...&session=...`
+/// URL (`config.rs`), so the request line does not distinguish them. The split
+/// is therefore by WHERE the behaviour sits - before the loop, or in here - not
+/// by two handlers chosen at the handshake.
+async fn serve_exec_message<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+    message: &ClientMessage,
+    state: &StubState,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::SinkExt;
+
+    match message {
+        ClientMessage::ModifyOrder { .. } => {
+            let frames = state
+                .ws_modify_frames
+                .lock()
+                .expect("ws modify frames mutex")
+                .clone();
+            for frame in frames {
+                drop(ws.send(Message::Text(frame.into())).await);
+            }
+        }
+        ClientMessage::SubmitOrder(_) => {
+            let frames = state
+                .ws_exec_frames
+                .lock()
+                .expect("ws exec frames mutex")
+                .clone();
+            for frame in frames {
+                // Stamped BEFORE the send, and only for the first frame of the
+                // first socket, exactly as `ws_first_frame_at` is on the data
+                // leg. Everything above this line is stub time, not client
+                // time. See its doc comment.
+                state
+                    .ws_first_exec_frame_at
+                    .lock()
+                    .expect("ws first exec frame instant mutex")
+                    .get_or_insert_with(Instant::now);
+                drop(ws.send(Message::Text(frame.into())).await);
+            }
+        }
+        ClientMessage::QueryOrders { .. } | ClientMessage::QueryFills { .. } => {
+            if let Some(reply) = venue_query_reply(message, state) {
+                let json = serde_json::to_string(&reply).expect("encode venue query reply");
+                drop(ws.send(Message::Text(json.into())).await);
+            }
+        }
+        _ => {}
     }
 }
 

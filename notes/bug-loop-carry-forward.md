@@ -569,6 +569,121 @@ what this measurement resolves.
     the trade are now written down, because the next reader tuning this will
     otherwise read the ratio as the thing that got better.
 
+## The adapter document, round 4: the harness itself
+
+- `common::read_request` LOOPS BOTH READS NOW. The head loop was missing: one
+  `read` into a 4096-byte buffer, and `None` if `\r\n\r\n` was not in it, which
+  DROPS THE CONNECTION WITH NO DIAGNOSTIC - so the symptom is a connect failure
+  attributed to the adapter. Two shapes reach it and neither is exotic: a head
+  straddling a segment boundary, and a head over 4 KiB (one `Authorization`
+  header or a cookie jar). The rescan is from byte zero each pass, deliberately,
+  because the terminator itself can straddle the boundary. A `MAX_HEAD_BYTES`
+  cap of 64 KiB bounds a peer that never terminates.
+  - PINNED BY `the_harness_reads_a_request_head_split_across_segments` in
+    `data_client_transport.rs`, which writes a 6 KB head in two segments split
+    INSIDE the terminator. It is in a test binary rather than beside the helper
+    on purpose: `tests/common` compiles into four binaries and a pin there would
+    run four times for one property.
+  - ITS CLIENT-SIDE WRITES ARE DELIBERATELY NOT `expect`ed, and the first draft
+    got this wrong. A reader that gave up has already dropped its socket, so the
+    second write fails ECONNRESET and the test reports `second segment: Os {
+    code: 104 }` - an error naming the write, not the property. Bite-checked
+    both ways: with the writes `expect`ed the revert fails on ECONNRESET, with
+    them dropped it fails on "a segmented head must be read, not dropped as an
+    unparseable request". Same family as the standing rule that a test observing
+    only an ERROR cannot distinguish a bound from a check.
+- THE DEAD `ModifyOrder` TAIL IS GONE. The block held the
+  `close_after_trades` re-serve guard, the
+  `dark_ms` sleep, the server-ping probe and a close-and-return, written as
+  though the read loop were the data path. TWO OF THE THREE UNREACHABILITY
+  ARGUMENTS ARE STRUCTURAL rather than facts about today's tests, which is what
+  made deleting it safe: `close_after_trades` returns from `serve_ws` BEFORE the
+  read loop is entered, so its guard could not run under any fixture; and NO
+  DATA CLIENT SENDS A `ClientMessage` AT ALL (only `ExecWsCommand`s become
+  frames, `client/exec.rs`), so no socket with `dark_ms` or `ws_server_pings`
+  armed reaches that code by any route a client can take. The three switches are
+  set only in `havoc.rs`, all on data clients; `ws_modify_frames` only in
+  `adapter_smoke.rs`.
+- THE DELETION EXPOSED A LIVE DEFECT ONE LAYER UP, and the round's cold review
+  caught it: `served_once` was the only code that even PURPORTED to implement
+  `close_after_trades`'s documented "on any later reconnected subscribe the leg
+  serves nothing", and deleting it left the claim standing over nothing. THE
+  SURVIVING DATA LEG RE-READ `ws_trades` ON EVERY UPGRADE - and the close it had
+  just sent is exactly what makes the client re-dial - so the stub sat in a
+  re-serve/close loop for the whole test. `havoc_reorder_swaps_adjacent` passed
+  over it because it stops reading after three trades. THE GATE IS RESTORED ON
+  THE DATA LEG rather than the sentence deleted, and its meaning is now stated
+  in one place: serve the batch and close ONCE, then serve nothing and STAY UP,
+  so the reconnect is a live silent socket rather than another close. Staying
+  up is the part that ends the loop; closing again would have kept it. Pinned by
+  `havoc::a_close_after_trades_leg_does_not_replay_its_batch_on_the_reconnect`,
+  which establishes the re-dial from `ws_handshakes` FIRST - without a reconnect
+  there is nothing to replay and the silence assertion passes for free.
+  Bite-checked by forcing the replay flag false: the batch is replayed and the
+  test names it. THE SHAPE IS NEW FOR THIS ARC and worth carrying: not a guard
+  that cannot fail, but a documented behaviour whose implementation was removed
+  while its claim and its dependent test stayed. A green test is not evidence
+  that the stub underneath it is quiet.
+- `StubState::hang_orders` WAS DEAD AND IS GONE. It modelled the order POST
+  handler accepting and never replying; `POST /orders` went with the HTTP
+  transport profiles, so nothing sets it and nothing reads it. The
+  `#![allow(dead_code)]` on `common/` is why the compiler never said so - the
+  same decay the facts section below warns about, found by reading rather than
+  by tooling. `http_request_times`'s doc claimed to time `/orders` too and now
+  says what it actually holds.
+- `MAX_HEAD_BYTES` IS AN EXACT BOUND ON WHAT IS ACCUMULATED, because the read is
+  CLAMPED to the remaining room. The first cut checked the cap before the read
+  that grows the buffer, making the true bound `MAX_HEAD_BYTES + 4096` and
+  firing one pass late - cosmetic for a stub, but the comment stated the bound
+  as exact, and a comment that overstates a bound is the same defect family this
+  round spent itself on.
+- THE SEGMENTED-HEAD PIN CARRIES ITS OWN TIMEOUT. A future regression could
+  express "the reader gave up" as a BLOCK rather than a `None`, and an unbounded
+  `server.await` would then hang to the libtest watchdog with no attributable
+  verdict - the same reasoning the test already applies to its client-side
+  writes. Bite-checked both ways: the single-read revert fails on "a segmented
+  head must be read", a `pending()` in the loop fails on "the request reader
+  must finish rather than block on a segmented head".
+- THE `HttpStub` / `WsStub` SPLIT IS REFUSED, on two measured grounds rather
+  than on cost. DO NOT REOPEN IT WITHOUT ANSWERING BOTH.
+  - THE AXIS IS WRONG AND WOULD NOT HAVE CAUGHT THE DEFECT. Every field the dead
+    block touched - `ws_trades`, `dark_ms`, `close_after_trades`,
+    `ws_server_pings`, `ws_modify_frames` - is a WS field, so a transport split
+    puts all of them in one bucket together. The causal claim ("the flat struct
+    is why the dead branch survived") fails against its own remedy. The axis that
+    DOES separate them is data-leg versus exec-leg, and it is now written on
+    `StubState`'s doc comment as a three-way ownership table with the rule that a
+    new field belongs in exactly one of them.
+  - TWO HANDLERS CHOSEN AT THE HANDSHAKE ARE NOT IMPLEMENTABLE. Read from
+    `config.rs`: `MogwaiDataClientConfig` and `MogwaiExecClientConfig` build the
+    SAME `/ws?account=...&session=...` URL (`symbol=` is optional on the data
+    side and absent by default), so the request line does not distinguish the
+    legs and the stub has nothing to dispatch on until a `ClientMessage`
+    arrives - which is what the code already did.
+  - WHAT WAS DONE INSTEAD, the part of the proposal with real content: the exec
+    leg's whole behaviour is extracted into `serve_exec_message`, generic over
+    the socket, so the data leg is visibly ALL ABOVE the read loop and the read
+    loop reads as "count control frames, record the text, hand it to the exec
+    handler". Pure code move, no behaviour change; bite-checked by emptying the
+    extracted `ModifyOrder` arm, which fails
+    `a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered`.
+- THE ROUND COST ~1.9 s OF WALL, ALL OF IT ONE TEST, and the accounting is
+  exact enough to state: the serial sweep `brokkr test -p mogwai-adapter ""
+  --debug` was 37.80 s at the end of round 3, 37.81 s after the fix pass (whose
+  extraction and head loop cost nothing measurable, as expected of a code move),
+  and 39.71 s once the replay pin landed - which measures 2.03 s run alone,
+  because it waits out a real client reconnect and then a 400 ms silence window.
+  That is the price of seeing the loop at all; nothing cheaper observes it. The
+  unexplained ~37 s is
+  untouched and the handler split did NOT illuminate it - the extraction moved
+  no await, and the exec leg's cost is the account-snapshot wait inside
+  `connect()` that round 3 already identified, not the dispatch.
+- LATERAL, AND IT IS ROUND 5'S ITEM ALREADY: the `ModifyOrder` bite-check failed
+  as `execution event arrives: Elapsed(())` at `common/mod.rs`, naming neither
+  the test nor what was expected - a live instance of the `next_exec_event`
+  message bullet in the report's "Smaller notes". It was observed here, not
+  fixed here.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -663,7 +778,10 @@ what this measurement resolves.
   touching the harness; it is the invocation AGENTS.md prescribes and the only
   one that exercises `--test-threads=1`.
 - `brokkr check` is blind to the socket-backed suites; `brokkr check --gate` is
-  the invocation. Baseline after the close pass: 1183 workspace + 442
+  the invocation. Baseline after the adapter document's round 4: 1185 workspace
+  + 442 instrumented, in 1m05s, with 63 ignored, 17 skips and 0 orphaned pairs,
+  1690 coverage pairs - two tests up, the segmented-head pin and the replay pin.
+  Serial adapter sweep 39.71 s. Before that: 1183 + 442
   instrumented, in 1m06s, with 63 ignored, 17 skips and 0 orphaned pairs. It was
   1181 at the end of round 5 and 1179 / 65 / 19 at the end of round 4: the
   round-5 difference is the two completion gates it un-parked, which now RUN

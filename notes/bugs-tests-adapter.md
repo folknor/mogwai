@@ -35,37 +35,16 @@ the one thing this test set still cannot see.
 
 ## Harness defects
 
-### `common::read_request` cannot handle a segmented request head
-
-It does one `read()` into 4096 bytes and returns `None` if `\r\n\r\n` is not in
-it - dropping the connection silently. The body loop exists, the header loop does
-not. On loopback with small requests this practically always works, but a WS
-upgrade split across two segments (or a header set over 4096 B, which a future
-`Authorization`/cookie would produce) turns into an unexplained connect failure.
-Loop the header read too.
-
-### The `ClientMessage::ModifyOrder` arm in `serve_ws` carries a large block of dead code
-
-Inside it: the `close_after_trades` re-serve guard, the `dark_ms` sleep, the
-server-ping probe, and the close-and-return. All four are also implemented at the
-top of `serve_ws` (post-handshake), which is the path every data test actually
-takes since `Subscribe` stopped being a wire frame. No test sends a `ModifyOrder`
-AND sets `dark_ms`/`close_after_trades`/`ws_server_pings`, so that whole block is
-unreachable - and it is written as though it were the data path, which is
-actively misleading to the next reader. `served_once` is only touched there, so
-it is dead too. Rip it out; the `ModifyOrder` arm should push `ws_modify_frames`
-and nothing else.
-
-### `StubState` is one flat god-object with 30 fields, ~4 of which any given test sets
-
-It is why the dead branch above survived: nothing localizes which fields belong
-to which leg. Given pre-1.0 latitude, the hunter would split it into `HttpStub`
-(instruments/trades/quotes/account/clock/control plus the tapes and cursors) and
-`WsStub` (frames, counters, refusal/close/dark switches), with the data-leg and
-exec-leg WS behaviours as two separate handlers rather than one function
-branching on a parsed message. The exec leg's semantics (reply to
-submit/modify/query) and the data leg's (push tape at upgrade) share nothing but
-the handshake.
+CLOSED IN ROUND 4. The segmented-head defect and the dead `ModifyOrder` block
+are fixed, along with two defects the deletion exposed: a stub re-serve/close
+loop running under a passing test, and a dead `hang_orders` field left by the
+retired HTTP order carrier. The `HttpStub`/`WsStub` struct split is REFUSED ON
+EVIDENCE and the part of the proposal with real content was done instead. See
+`notes/bug-loop-carry-forward.md` for the facts round 5 would otherwise
+re-derive wrong: that the two WS legs are INDISTINGUISHABLE at the handshake,
+that the proposed split's axis does not separate the fields the defect
+involved, and what `close_after_trades` now means. The negative-assertion
+bullet below is a do-not-break item and stays.
 
 ### The negative-assertion windows are sound, and should stay that way
 
