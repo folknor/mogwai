@@ -4076,3 +4076,144 @@ unreviewed half, which is now SEVEN close passes out of seven.
   measurements retained with their reasoning. Its durable substance already lives
   in `reference/performance.md` and its three deferrals in `notes/todo.md`, so
   nothing durable depends on it surviving.
+
+## The engine document, round 1: the lifecycle cluster, and a phantom finding
+
+Landed as `26b9168`. Ledger 1263 + 466, 1786 pairs, 1729 run, 0 orphaned - ONE
+PAIR DOWN, the only round in the arc whose test count fell while its coverage
+improved, because the round DELETED a test that could not fail and strengthened
+a pre-existing one in its place. `notes/bugs-engine.md` findings 1 through 3 are
+fixed, 4 is WITHDRAWN, 5 through 10 remain unrenumbered.
+
+MACHINERY LATER ROUNDS MAY BUILD ON AND MUST NOT BREAK:
+
+- `Engine::close_out` plus `close_unrested` is now THE ONE HOME of the rule that
+  an unfilled terminal order reaps its held children. Every terminal path routes
+  through it, including three submit-time closes the report did not name -
+  `validate_link` admits a FORWARD REFERENCE, so a group may name its parent
+  after a child and an `on_submit_from` cancel can orphan too. `close_out`'s doc
+  states its set exactly and names `reap_children_of` as the single exempt path.
+  Sites that are provably no-ops still make the call, deliberately, so the
+  comment stays true without depending on an early return three hundred lines
+  away.
+- `on_cancel` takes `apply_divergences`. The three venue-originated flatteners
+  (`liquidate_all`, `retire_off_river`, `cancel_unreadable_orders`) pass `false`;
+  only `ClientMessage::CancelOrder` passes `true`. TWO EFFECTS RIDE ON ONE FLAG
+  and this is deliberate and documented at the site: it also skips the
+  `DropNextAccountUpdate` check, so a flatten emits one `AccountState` per
+  cancelled order.
+- `on_modify`'s promotion guard excludes `Conditional | Held`. Held is excluded
+  RATHER than switching to a `Limit`-only test, because that would also change
+  `Inert` remainder behaviour and collide with the `MarketToLimit` item still
+  open in `notes/todo.md` for this document's round 3.
+
+FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
+
+- FINDINGS 4 AND 11 WERE PHANTOMS AND ARE WITHDRAWN; `notes/bugs-engine.md`
+  section 11 carries the full route enumeration so nobody re-derives them.
+  `validate_order_link` ALREADY refuses `Market` and `Ioc`/`Fok` children, its
+  only caller is `validate_submit_order`, `validate_submit_group` runs that per
+  member, and `http.rs`'s `boundary_error` handles exactly two order-creating
+  frames and is the first statement of `process_order_cmd` - the single wire
+  gate, now that `POST /orders` is gone. It ALSO refuses a linked bare
+  `SubmitOrder` outright, so the "per-leg route that reaches the engine
+  unfiltered" does not exist. The hunter self-rated finding 4 at 85 percent for
+  not having read `validate_submit_order`, and that reservation was the correct
+  one.
+- THE ENGINE COPY WAS REMOVED RATHER THAN KEPT AS DEFENCE IN DEPTH, and the
+  reasoning binds later rounds: one arm of a validator copied into the engine is
+  worse than the gap it pretends to close, because it reads as the rule's home
+  while implementing a fraction of it. The engine's REAL exposure is finding 10,
+  `on_submit_group` not calling `validate_submit_group`, and that is where the
+  closure belongs.
+- INSTANCE 32, AND IT IS A NEW SUB-SHAPE WORTH THE NAME: A BITE-CHECK WHOSE
+  ASSERTION CANNOT DISCRIMINATE. The deleted test asserted
+  `reason.contains("order-list child cannot be immediate-or-cancel")` while
+  driving `Engine::process_with_market` directly - a substring the PROTOCOL
+  crate's own refusal also carries, so it passed with or without the production
+  change and the gate was green on it. Reading which assertion fired is not
+  enough; the assertion must be one only the intended branch can produce. A
+  shared substring is not a discriminator.
+- THREE OF THE FOUR FIXES MADE AN ALREADY-PUBLISHED DOC CLAIM TRUE.
+  `docs/havoc.md` already said venue-originated maintenance leaves client arms
+  armed; `docs/order-lists.md` already said a terminal-without-filling parent
+  takes its held children with it. The durable prose was RIGHT and the code was
+  wrong - the reverse of this arc's usual finding, and worth checking for
+  directly in the remaining production documents.
+
+## The engine document, round 2: the P and L, margin and reservation cluster
+
+Ledger 1276 + 466, 1799 pairs, 1742 run, 57 ignored, 0 orphaned. Both socket
+suites pass. `notes/bugs-engine.md` findings 5 through 9 are fixed - FOUR
+defects for five findings, because 7 and 8 were one rule with two drifted
+copies. Finding 10 and the `MarketToLimit` item in `notes/todo.md` are round 3's
+and were not touched.
+
+THE ROUND'S OWN LESSON, AND IT IS THE ARC'S SIGNATURE DEFECT AT INSTANCE 33:
+THE FIX PASS'S EQUITY SHORT CHECK OPENED TWO REGRESSIONS AND THE FULL GATE WAS
+GREEN ON BOTH. The cold review caught them; nothing else could have. One of
+them - a group's dry pass and its real pass computing different numbers - would
+have DEFEATED THE GUARD `58a9557` INSTALLED EARLIER IN THIS SAME ARC, because
+`report_group_member_refusal` re-asks the dry question AFTER the refusal, by
+which time the siblings are resting and it refuses again, landing on the benign
+"disclosed funds carve-out" warn branch instead of the `debug_assert`. A guard
+that classifies by re-running a state-dependent question cannot see a
+state-dependent divergence. Where a new term makes an admission check read
+mutable book state, ASK WHETHER THE TWO PASSES STILL AGREE before anything else.
+
+MACHINERY LATER ROUNDS MAY BUILD ON AND MUST NOT BREAK:
+
+- `Engine::worst_case_leaves(symbol, side, pending)` is THE ONE HOME of what
+  "worst fill order" means for this crate. Two rules live in it and nowhere
+  else: a `Resting::Held` child contributes NOTHING (the same rule
+  `order_reservation_entry` applies when it declines to hold funds against one),
+  and an `Oco`/`Ouo` group contributes THE MAX OF ITS LEGS rather than their
+  sum, keyed by `order_list_id`. Both consumers read it - `projected_qty`'s
+  magnitude cap and `validate_submit`'s equity short check - and a third
+  consumer must read it too rather than sum `self.open` again.
+- THE GROUP'S MEMBER ORDERS, NOT THEIR IDS, now travel through `dry_refusal`,
+  `report_group_member_refusal`, `on_submit_from`, `validate_submit` and
+  `validate_link`. `on_submit_group` takes `&[SubmitOrder]`. This is what makes
+  `worst_case_leaves` PASS-INVARIANT: a member appearing in both `pending` and
+  the book is counted from `pending`, so the answer does not depend on how many
+  members have already rested. Any future refusal that reads mutable book state
+  gets its pass-invariance the same way.
+- `position_unrealized_checked` is the one unrealized expression;
+  `position_unrealized` is its saturating wrapper. FOUR readers, and the fourth
+  (`valuation_at`) is the one the fix pass missed. The checked form exists
+  because `InstrumentDef::unrealized` answers `None` for two unrelated reasons,
+  and UNDEFINED IS NOT OVERFLOW: flat, and inverse-at-zero-price, are both
+  DEFINED as zero; `None` now means overflow alone.
+- `on_modify`'s funds block short-circuits on `Resting::Held`. It calls
+  `order_reservation` directly (it must - it prices an order not on the book in
+  that shape yet), which BYPASSES the held-child rule living one level up in
+  `order_reservation_entry`, so the test is made explicitly at the site.
+
+FACTS A LATER ROUND WOULD OTHERWISE RE-DERIVE WRONG:
+
+- FINDING 5's "wrong in sign as well as magnitude" IS FALSE. `1/avg - 1/mark`
+  and `mark - avg` always carry the same sign; the linear form is wrong in
+  MAGNITUDE only, by up to four orders of magnitude. The finding survives; the
+  sign claim does not, and both the fix pass and the cold review agree.
+- `projected_qty` HAD THE SAME OCO/HELD BLIND SPOT and now shares the fix. It
+  was never a wrong ADMISSION there - the cap bounds magnitude, so the blind
+  spot only over-refused - which is why nothing surfaced it. Its `additional`
+  argument is still counted additively, filed in `notes/todo.md`, because the
+  caller passes a `Decimal` and not the order.
+- `margin_requirement`'s reconciliation is a `<=`, NOT an equality, and its doc
+  now names the three carve-outs (`account.unsettled` credits, holds on
+  unmargined or unmarked symbols, `Reservation::Base` holds). The test that
+  pins the equality sits inside all three, and says so.
+- `valuation_at`'s "equity is LINEAR in the price" was false for `Inverse`. The
+  property the two-point extreme evaluation actually needs is MONOTONICITY, and
+  `-1/mark` is monotone over every positive price, so the sweep was never wrong,
+  only its justification was. It says MONOTONE now.
+- A ZERO PRICE ON AN INVERSE IS A PRODUCT CALL, filed in `notes/todo.md` rather
+  than decided here. It is REACHABLE two ways (`settle` guards nothing, and a
+  zero-price fill is warned about and booked), and the local answer is zero; the
+  alternative is refusing it upstream so an unpriceable position cannot exist.
+- THE CHECK-TIME `clipped` FLAG IS DROPPED EVERYWHERE, `held_for` included, and
+  that is deliberate: the RECORDING path (`add_order_reservation` through
+  `order_reservation_entry`) re-derives it when the order actually rests. A
+  future reviewer noticing it dropped in `on_modify` should read the comment
+  there before calling it a defect.

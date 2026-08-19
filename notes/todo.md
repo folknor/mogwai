@@ -217,6 +217,58 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- PRODUCT CALL: IS A ZERO PRICE LEGAL ON AN INVERSE INSTRUMENT? Raised by the
+  `notes/bugs-engine.md` round-2 cold review and answered locally rather than
+  ruled on. An `Inverse` contract's value is `1/price`, which has no value at
+  zero, and `InstrumentDef::unrealized` reports that as `None` - the same answer
+  it gives for arithmetic overflow. Two live paths reach it:
+  `Engine::settle(&[(symbol, px)], ts)` passes the caller's settlement price
+  straight through with no zero guard, and a ZERO-PRICE FILL is explicitly
+  warned about and then BOOKED (`warn_zero_px`), so a position can carry
+  `mark_px == 0`. `position_unrealized_checked` now answers ZERO for both cases,
+  which stops a zero settlement price crediting `Decimal::MAX` to the balance
+  and is the conservative reading, but it is a choice: the alternative is
+  REFUSING a zero price on an inverse instrument upstream, at `settle` and at
+  the fill, so an unpriceable position cannot exist at all. That is a statement
+  about what the venue permits rather than about arithmetic, so it wants an
+  owner ruling before either is called settled.
+
+- `projected_qty` TAKES A BARE QUANTITY, so an incoming order that is itself one
+  leg of an `Oco` pair is counted ADDITIVELY against the exclusive group it
+  belongs to. Noticed while closing the round-2 regressions. The resting book is
+  now counted correctly by `Engine::worst_case_leaves` - held children
+  contribute nothing, an exclusive group contributes its max - but the
+  `additional` argument cannot be, because the caller does not pass the order.
+  The effect is a conservative over-projection in `mogwai-server`'s optional
+  `max_position` cap: it can refuse an order the book could not actually have
+  reached, never admit one it could. Fixing it means giving `projected_qty` the
+  `SubmitOrder` rather than a `Decimal`, which is a signature change through
+  `http.rs`; stated at the site and left alone until the cap matters enough.
+
+- AN EQUITY SELL'S RESERVATION STILL HANDS THE SAME HELD SHARES TO EVERY RESTING
+  SELL, filed by the `notes/bugs-engine.md` round-2 fix pass as the residual of
+  finding 9. `Engine::order_reservation`'s margin-equity sell arm computes
+  `uncovered = leaves - max(0, net_position)`, so a margin account holding 100
+  shares with two resting sells of 100 posts collateral for neither, where the
+  worst fill order leaves it short 100. ADMISSION IS NOW CORRECT -
+  `validate_submit`'s short check reads `Engine::worst_case_leaves`, so nothing
+  is accepted that the account cannot post for - and what is left is
+  the HOLD carried between acceptance and fill.
+  NOT FIXED BECAUSE THE OBVIOUS FIX BREAKS A DIFFERENT INVARIANT.
+  `order_reservation` is per-order BY CONSTRUCTION: `Engine`'s incremental
+  `order_locked` cache adds and removes one order's entry at a time, and
+  `reconcile_order_locked` panics on any drift from a fresh fold. Any formula
+  that reads the OTHER resting sells makes one order's reservation a function of
+  the book, so removing one order silently changes another's entry and the debug
+  reconciliation fires. Closing this properly means moving the cover allocation
+  out of the per-order derivation and into the aggregate, which is a redesign of
+  the cache rather than an edit to the formula - and the report's own suggested
+  expression does not do it either, since summing
+  `leaves - max(0, net - other_sells)` over both sells reserves for 200.
+  There is also a product call inside it: what a venue SHOULD hold against a
+  covered sell that another resting sell might consume first is a policy
+  question, not only an arithmetic one.
+
 - TWO ARRIVAL KNOBS HAVE NO UPPER BOUND, and both let an operator config buy a
   half-second parent draw. `ArrivalConfig::LogOuCox`'s `sigma_y` is validated
   only as finite and non-negative, and `x = exp(y - sigma^2 / 2)` is unbounded

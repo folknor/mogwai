@@ -91,7 +91,7 @@ impl Engine {
     /// the shape this whole path exists to make impossible.
     pub(crate) fn on_submit_group(
         &mut self,
-        orders: Vec<SubmitOrder>,
+        orders: &[SubmitOrder],
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<ServerMessage> {
@@ -124,17 +124,20 @@ impl Engine {
         // NOW, not as it will be after earlier members fill - which is why the
         // funds carve-out on `ClientMessage::SubmitOrderGroup` exists and is
         // stated there rather than papered over here.
-        for order in &orders {
-            if let Some(reason) = self.dry_refusal(order, ts, &ids) {
+        for order in orders {
+            if let Some(reason) = self.dry_refusal(order, ts, orders) {
                 return reject_all(&reason, Some(&order.client_order_id));
             }
         }
 
-        // PASS TWO.
+        // PASS TWO. The WHOLE member list travels into both passes, not just
+        // the ids: a check that reads the working book - the equity short check
+        // does - has to see the members that have not rested yet, or pass one
+        // and pass two compute different numbers over the same intent.
         let mut out = Vec::new();
         let mut filled: Vec<(SubmitOrder, Decimal)> = Vec::new();
         for order in orders {
-            let events = self.on_submit_from(order.clone(), ts, reading, true, &ids);
+            let events = self.on_submit_from(order.clone(), ts, reading, true, orders);
             // Pass one said every member was admissible, so a refusal here is
             // either the disclosed funds carve-out or a hole in the dry pass.
             // Which one it is decides whether this is a warning or a defect,
@@ -147,7 +150,7 @@ impl Engine {
                 } if *client_order_id == order.client_order_id => Some(reason.clone()),
                 _ => None,
             }) {
-                self.report_group_member_refusal(&order, &reason, ts, &ids);
+                self.report_group_member_refusal(order, &reason, ts, orders);
             }
             let member_filled: Decimal = events
                 .iter()
@@ -161,7 +164,7 @@ impl Engine {
                 })
                 .sum();
             if member_filled > Decimal::ZERO {
-                filled.push((order, member_filled));
+                filled.push((order.clone(), member_filled));
             }
             out.extend(events);
         }
@@ -200,7 +203,14 @@ impl Engine {
     /// Pure: it clones what it must mutate and touches no engine state, which
     /// is what lets it run twice per member without the second run meaning
     /// anything different from the first.
-    fn dry_refusal(&self, order: &SubmitOrder, ts: u64, group: &[ClientOrderId]) -> Option<String> {
+    ///
+    /// `group` is the member ORDERS, not their ids, and that is load-bearing
+    /// rather than a convenience. A refusal computed from the working book -
+    /// the equity short check - has to count the members that have not rested
+    /// yet, or this pass and the real pass judge different books and the
+    /// difference is misfiled as the disclosed funds carve-out by
+    /// `report_group_member_refusal`. See `Engine::worst_case_leaves`.
+    fn dry_refusal(&self, order: &SubmitOrder, ts: u64, group: &[SubmitOrder]) -> Option<String> {
         if let Some(reason) = self.hedging_refusal(order) {
             return Some(reason);
         }
@@ -243,7 +253,7 @@ impl Engine {
         order: &SubmitOrder,
         reason: &str,
         ts: u64,
-        group: &[ClientOrderId],
+        group: &[SubmitOrder],
     ) {
         if self.dry_refusal(order, ts, group).is_some() {
             tracing::warn!(
@@ -303,7 +313,7 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
         apply_divergences: bool,
-        group: &[ClientOrderId],
+        group: &[SubmitOrder],
     ) -> Vec<ServerMessage> {
         if let Some(reason) = self.hedging_refusal(&order) {
             return vec![ServerMessage::OrderRejected {
@@ -316,7 +326,7 @@ impl Engine {
             self.position_seq = self.position_seq.saturating_add(1);
             order.position_id = Some(format!("{}-{}", order.symbol, self.position_seq));
         }
-        // The group's ids travel into `validate_link` on THIS pass too, not just
+        // The group's members travel into `validate_link` on THIS pass too, not just
         // the dry one. A child may name a parent that has not been accepted yet,
         // and a group is not required to list parents before children - so a
         // pass that dropped the group context here refused a forward parent
@@ -2000,7 +2010,7 @@ impl Engine {
     fn validate_link(
         &self,
         link: &mogwai_protocol::OrderLink,
-        group: &[ClientOrderId],
+        group: &[SubmitOrder],
     ) -> Result<(), String> {
         if matches!(link.contingency, Contingency::Oto) && link.linked_order_ids.is_empty() {
             return Err("Oto must name the orders it triggers".into());
@@ -2013,7 +2023,9 @@ impl Engine {
         // the time this child does. Narrowed to the existence question alone -
         // every rule below still runs once the parent is really on the book,
         // which it is on the second pass.
-        if group.contains(parent) && !self.seen_client_order_ids.contains_key(parent.as_str()) {
+        if group.iter().any(|member| member.client_order_id == *parent)
+            && !self.seen_client_order_ids.contains_key(parent.as_str())
+        {
             return Ok(());
         }
         if !self.seen_client_order_ids.contains_key(parent.as_str()) {
@@ -2054,7 +2066,7 @@ impl Engine {
         order: &SubmitOrder,
         ts: u64,
         apply_divergences: bool,
-        group: &[ClientOrderId],
+        group: &[SubmitOrder],
     ) -> Result<(), String> {
         if order.client_order_id.trim().is_empty() {
             return Err("empty client_order_id".into());
@@ -2236,10 +2248,38 @@ impl Engine {
                         None => notional,
                     },
                     Side::Sell => {
-                        // How short this order would leave the account. Selling
-                        // shares you hold is not a short and needs neither a
-                        // borrow nor collateral.
-                        let short = (self.net_position(&order.symbol) - order.quantity)
+                        // How short this order would leave the account IN THE
+                        // WORST FILL ORDER. Selling shares you hold is not a
+                        // short and needs neither a borrow nor collateral - but
+                        // the shares can only cover one sale, and this check
+                        // used to hand the same holding to every resting sell
+                        // independently. Holding 100 shares, two sells of 100
+                        // each computed `short = 0`, so both passed the cash
+                        // account's by-name short refusal and the locate, and a
+                        // cash equity account ended the run short 100 through an
+                        // order path that refuses shorting outright.
+                        //
+                        // WORST FILL ORDER IS `worst_case_leaves`, NOT A SUM,
+                        // and this order is one of its inputs rather than a
+                        // term added to it. A plain bracket - a take-profit sell
+                        // and a stop sell over the same held shares - is one
+                        // exclusive group whose legs cannot both fill, and a
+                        // held child cannot fill at all; a sum over the resting
+                        // sells counted both and refused the second leg of every
+                        // bracket a cash equity account ever placed.
+                        //
+                        // The group's members travel in as `pending` so this
+                        // number is the same on the dry pass and the real one.
+                        let mut pending: Vec<SubmitOrder> = group.to_vec();
+                        if !pending
+                            .iter()
+                            .any(|member| member.client_order_id == order.client_order_id)
+                        {
+                            pending.push(order.clone());
+                        }
+                        let worst_sells =
+                            self.worst_case_leaves(&order.symbol, Side::Sell, &pending);
+                        let short = (self.net_position(&order.symbol) - worst_sells)
                             .min(Decimal::ZERO)
                             .abs();
                         if short.is_zero() {
@@ -2791,68 +2831,153 @@ impl Engine {
                         }];
                     }
                 }
-                // A future posts collateral, not notional, and it posts the
-                // same collateral on either side. Comparing an amended futures
-                // order against `new_leaves * price` would reject every amend
-                // the moment margin is a fraction of notional, which is always.
-                let (currency, held, required) = if instrument.class.is_future() {
-                    let Some(policy) = self.margin.get(&order.submit.symbol) else {
-                        return vec![ServerMessage::OrderModifyRejected {
-                            client_order_id,
-                            venue_order_id: Some(venue_order_id),
-                            reason: "cash-settled futures require the margin ledger".into(),
-                            ts_event: ts,
-                        }];
-                    };
-                    (
-                        instrument.class.settlement_currency(),
-                        policy.initial(
-                            instrument,
-                            order.leaves_qty,
-                            order
-                                .submit
-                                .price
-                                .or(order.submit.trigger_price)
-                                .unwrap_or_default(),
-                        ),
-                        policy
-                            .initial(instrument, new_leaves, price.unwrap_or_default())
-                            .saturating_add(commission),
-                    )
-                } else {
-                    match order.submit.side {
-                        Side::Buy => {
-                            let old_price = order
-                                .submit
-                                .price
-                                .or(order.submit.trigger_price)
-                                .unwrap_or_default();
-                            (
-                                instrument.class.settlement_currency(),
-                                order.leaves_qty * old_price,
-                                (new_leaves * effective_price).saturating_add(commission),
-                            )
-                        }
-                        Side::Sell => {
-                            let Some(currency) = instrument.class.base_currency() else {
-                                return vec![ServerMessage::OrderModifyRejected {
-                                    client_order_id,
-                                    venue_order_id: Some(venue_order_id),
-                                    reason: "cash-settled futures require the margin ledger".into(),
-                                    ts_event: ts,
-                                }];
-                            };
-                            (currency, order.leaves_qty, new_leaves)
-                        }
-                    }
-                };
-                if self.free_balance(currency).saturating_add(held) < required {
+                // BOTH SIDES OF THE COMPARISON COME FROM `order_reservation`,
+                // the one home of the hold's shape. This block used to be a
+                // fourth hand-rolled copy of that formula, and it had drifted
+                // twice over: the futures arm priced the amended requirement at
+                // the amend's own optional `price` rather than
+                // `effective_price`, so a quantity-only amend of a futures order
+                // under a notional policy required `initial(new_leaves, 0)` -
+                // zero - and the funds check could not fail however far the
+                // amend grew the position; and the buy arm reserved the full
+                // notional even for a margined equity, which posts the Reg-T
+                // initial instead. The refusals below stay explicit because they
+                // name a MISCONFIGURED instrument rather than a funding
+                // shortfall, and `order_reservation` answers `None` for both.
+                if instrument.class.is_future() && !self.margin.contains_key(&order.submit.symbol) {
                     return vec![ServerMessage::OrderModifyRejected {
                         client_order_id,
                         venue_order_id: Some(venue_order_id),
-                        reason: format!("insufficient {currency} balance"),
+                        reason: "cash-settled futures require the margin ledger".into(),
                         ts_event: ts,
                     }];
+                }
+                // A NON-FUTURE, NON-EQUITY SELL reserves its BASE asset, so an
+                // instrument declaring no base currency has nowhere to take the
+                // hold from. The reason string used to say "cash-settled futures
+                // require the margin ledger" here, carried over verbatim from
+                // the futures arm it shared a block with, which named the wrong
+                // class of instrument for the wrong reason - the order being
+                // refused is a SPOT sell, not a future.
+                if !instrument.class.is_future()
+                    && !instrument.class.is_equity()
+                    && order.submit.side == Side::Sell
+                    && instrument.class.base_currency().is_none()
+                {
+                    return vec![ServerMessage::OrderModifyRejected {
+                        client_order_id,
+                        venue_order_id: Some(venue_order_id),
+                        reason: "a sell of this instrument reserves its base asset, which it \
+                                 declares none of"
+                            .into(),
+                        ts_event: ts,
+                    }];
+                }
+                // A HELD order-list child holds nothing on either side of this
+                // comparison, and an amend does not release it - round 1's
+                // promotion guard excludes `Held` deliberately - so the amended
+                // order is still held and still holds nothing. The rule's home
+                // is `order_reservation_entry`, which declines a held child
+                // before it computes anything; asking `order_reservation`
+                // directly (as the two calls below do, because they must price
+                // an order that is not on the book in this shape yet) BYPASSES
+                // that home, so the test is made here rather than left implicit.
+                // Without it an amend of a bracket's held exit leg was checked
+                // against a hold the venue would never take, and could be
+                // refused for funds an unheld order would not have needed.
+                if !matches!(order.resting, Resting::Held) {
+                    // The AMENDED order, built as a submit and priced at
+                    // `effective_price`, is what the venue would hold once the
+                    // amend lands - the same construction `held_for` makes for a
+                    // resting order, so an amend can never be checked against a
+                    // requirement the reservation would not actually take.
+                    let mut amended = order.submit.clone();
+                    amended.quantity = new_total;
+                    if let Some(new_price) = price {
+                        amended.price = Some(new_price);
+                    }
+                    if let Some(new_trigger) = trigger_price {
+                        amended.trigger_price = Some(new_trigger);
+                    }
+                    // `clipped` is DROPPED, exactly as `held_for` drops it and
+                    // every other check-time reservation site does. The flag
+                    // belongs to the RECORDING path: `add_order_reservation`
+                    // re-derives it through `order_reservation_entry` when the
+                    // amend actually lands below, and that is what puts the
+                    // currency into `order_locked_clipped` and raises the
+                    // saturation warning. Recording it here would warn about a
+                    // hold the venue may yet refuse to take.
+                    let mut clipped = false;
+                    // `unwrap_or_default` rather than `risk_px`: the order being
+                    // amended may be a Market remainder resting inert with
+                    // neither a price nor a trigger, and its hold is zero either
+                    // way.
+                    let held_price = order
+                        .submit
+                        .price
+                        .or(order.submit.trigger_price)
+                        .unwrap_or_default();
+                    let held_reservation = self.order_reservation(
+                        &order.submit,
+                        order.leaves_qty,
+                        held_price,
+                        &mut clipped,
+                    );
+                    let required_reservation =
+                        self.order_reservation(&amended, new_leaves, effective_price, &mut clipped);
+                    let settlement = instrument.class.settlement_currency();
+                    let base = instrument.class.base_currency().unwrap_or(settlement);
+                    let amount_in = |currency: &str, reservation: &crate::account::Reservation| {
+                        match reservation {
+                            crate::account::Reservation::None => Decimal::ZERO,
+                            crate::account::Reservation::Settlement(amount) => {
+                                if currency == settlement {
+                                    *amount
+                                } else {
+                                    Decimal::ZERO
+                                }
+                            }
+                            crate::account::Reservation::Base(amount) => {
+                                if currency == base {
+                                    *amount
+                                } else {
+                                    Decimal::ZERO
+                                }
+                            }
+                        }
+                    };
+                    // The currency the check runs in is whichever one the
+                    // AMENDED hold lands in, falling back to the current hold's
+                    // when the amend reserves nothing at all - a comparison
+                    // against a currency neither side touches is vacuously true,
+                    // which is exactly what it should be.
+                    let currency = match (&required_reservation, &held_reservation) {
+                        (crate::account::Reservation::Base(_), _)
+                        | (
+                            crate::account::Reservation::None,
+                            crate::account::Reservation::Base(_),
+                        ) => base,
+                        _ => settlement,
+                    };
+                    let held = amount_in(currency, &held_reservation);
+                    let required = amount_in(currency, &required_reservation).saturating_add(
+                        // Commission is paid in settlement cash; a base-currency
+                        // hold's fee was already checked against the settlement
+                        // balance by the spot-sell branch above.
+                        if currency == settlement {
+                            commission
+                        } else {
+                            Decimal::ZERO
+                        },
+                    );
+                    if self.free_balance(currency).saturating_add(held) < required {
+                        return vec![ServerMessage::OrderModifyRejected {
+                            client_order_id,
+                            venue_order_id: Some(venue_order_id),
+                            reason: format!("insufficient {currency} balance"),
+                            ts_event: ts,
+                        }];
+                    }
                 }
             }
         }

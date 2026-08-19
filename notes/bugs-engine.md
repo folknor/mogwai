@@ -18,135 +18,99 @@ path routes through except `reap_children_of` itself. Section numbering is
 unchanged: later briefs and the carry-forward cite these by their original
 numbers.
 
+FINDINGS 5 THROUGH 9 ARE FIXED AND REMOVED. All five reproduced; they were FOUR
+defects, because 7 and 8 were one rule with two drifted copies and were closed by
+one collapse. What landed, in the shape the structural note asked for rather than
+five site patches:
+
+- `position_unrealized_checked` in `lib.rs` is now the ONE unrealized
+  expression, with `position_unrealized` as its saturating wrapper; both
+  delegate to `InstrumentDef::unrealized`. FOUR readers, not three:
+  `unrealized_pnl` (and thence the margin breach test and forced liquidation),
+  the `positions()` wire rows, `settle`'s realized credit and `valuation_at`'s
+  derivative contribution - the last one was missed by the first pass and closed
+  by the cold review, and until it was, one FLAT inverse position made
+  `valuation_at` answer `None` for the whole account and the tick-resolution risk
+  sweep silently declined to value it.
+  The split exists because `InstrumentDef::unrealized` answers `None` for two
+  unrelated reasons and the first pass conflated them: an inverse at a ZERO
+  PRICE is undefined rather than overflowed, and saturating it credited
+  `Decimal::MAX` to the balance on any zero settlement price. The checked form
+  answers zero for both defined-but-degenerate cases (flat, and inverse at zero)
+  and reserves `None` for genuine overflow.
+  `valuation_at`'s doc said equity is LINEAR in the price of a held instrument,
+  which is false for `Inverse`; it now says MONOTONE, which is both true and
+  what the two-point extreme evaluation actually needs.
+  Correction to the report's finding 5,
+  so a later round does not re-derive it wrong: the linear form is wrong in
+  MAGNITUDE only, never in sign. `1/avg - 1/mark` and `mark - avg` always carry
+  the same sign, so no inverse position was ever liquidated in the wrong
+  direction - it was liquidated on a number that can be four orders of magnitude
+  too large. The regression fixtures pick a 20,000-times separation for exactly
+  that reason.
+- `margin_requirement` reads `policy.maintenance` for its positions and the
+  order's OWN `order_reservation_entry` for its resting orders, so no `initial`
+  row can disagree with the hold it reports. Its doc's "sum is exactly what
+  `locked_balances` reserves" was still overstated after that, and now names
+  three carve-outs that make the general statement a `<=`: `locked_balances`
+  also folds `account.unsettled` credits, holds on unmargined or unmarked
+  symbols, and `Reservation::Base` holds this function must skip because a
+  margin row is denominated in settlement currency.
+  `the_reported_margin_reconciles_with_the_reported_locked` sits inside all
+  three, so its doc now says it pins the EQUALITY CASE and not the wider claim.
+- `order_reservation` uses its `price` ARGUMENT. `on_modify`'s hand-rolled
+  fourth copy is gone: it builds the amended `SubmitOrder` and calls
+  `order_reservation` for both sides of the comparison, the way `held_for`
+  already did. Three follow-ups from the cold review landed with it: the block
+  now short-circuits for a `Resting::Held` child (`order_reservation` has no
+  Held rule - that lives one level up in `order_reservation_entry` - so the two
+  consumers had disagreed about the same question and an amend of a bracket's
+  unreleased exit leg was checked against a hold the venue never takes); the
+  spot-sell misconfiguration refusal no longer emits the FUTURES reason string;
+  and the rework's incidental fix of the equity-sell amend - every equity sell
+  amend used to hit the `base_currency()` else arm and be refused with "cash-
+  settled futures require the margin ledger" - now has `an_equity_sell_can_be_amended`
+  standing over it. The dropped `clipped` flag was checked and left as it is:
+  every CHECK-TIME reservation site drops it, `held_for` included, and the
+  RECORDING path re-derives it when the amend lands. That is now stated at the
+  site rather than left to be re-discovered.
+- `validate_submit`'s equity short check reads `Engine::worst_case_leaves`, the
+  new single home of what "worst fill order" means, which `projected_qty` also
+  reads. Verified reachable first: `projected_qty` has exactly one consumer,
+  `mogwai-server`'s optional `max_position` cap in `http.rs`, which bounds
+  magnitude and says nothing about shorting, so no upstream layer closed this.
+  THE FIRST VERSION OF THIS FIX WAS A PLAIN SUM AND OPENED TWO REGRESSIONS the
+  cold review caught; both are closed and both have tests:
+  - It counted `Resting::Held` children and BOTH legs of an `Oco` exit pair, so
+    an ordinary bracket over held shares read as a short and a cash equity
+    account refused the second leg by name. The rule is now: a held child
+    contributes nothing (the same rule `order_reservation_entry` applies), and
+    an `Oco`/`Ouo` group contributes the MAX of its legs rather than their sum,
+    keyed by `order_list_id`. `projected_qty` SHARED THE BLIND SPOT and is fixed
+    by the same helper; there it was an over-refusal of a magnitude cap rather
+    than a wrong admission, which is why nothing had surfaced it.
+  - It made the group's two passes disagree, because it read `self.open` and the
+    dry pass runs before any member rests. `report_group_member_refusal`
+    re-asks the dry question AFTER the refusal, so the siblings are resting by
+    then and it refuses again - landing on the benign "disclosed funds
+    carve-out" warn branch and never tripping the `debug_assert` that commit
+    `58a9557` installed for exactly this. The fix makes the number
+    pass-invariant: the group's MEMBER ORDERS (not their ids) now travel through
+    `dry_refusal`, `on_submit_from`, `validate_submit` and `validate_link`, and
+    `worst_case_leaves` counts a member from that list instead of from the book
+    whenever it appears in both. A group of two independent equity sells over
+    one holding is now refused WHOLE on pass one, which is the atomic answer.
+
+One residual is filed in `notes/todo.md` rather than fixed here: the equity sell
+RESERVATION still hands the same held shares to every resting sell, because
+`order_reservation` is per-order by construction and the incremental
+`order_locked` cache depends on that independence. Admission is now correct; the
+hold a margin equity account carries while several sells rest is not.
+
 The hunter read all four source files (`orders.rs`, `account.rs`, `lib.rs`
 non-test region, `divergence.rs`) plus the protocol-side helpers the engine
 leans on (`InstrumentDef::unrealized`, `validate_submit_group`,
 `InstrumentClass`). No files modified.
-
-## 5. Inverse contracts: two P and L formulas, and the wrong one is used at the decision points
-
-`InstrumentDef::unrealized` carries the inverse arithmetic
-(`multiplier * qty * (1/entry - 1/exit)`), and `apply_fill` deliberately routes
-realized P and L through it - its comment says "Realized and unrealized must
-come from the same expression or a position's value would jump the moment it
-closed." Three places compute the linear form by hand instead, and all three see
-`Inverse` because `is_future()` includes it:
-
-- `Engine::unrealized_pnl` (lib.rs) - `(mark - avg) * qty * multiplier`. This
-  feeds `collateral_contribution`, which feeds `apply_margin_breaches`. MARGIN
-  BREACH AND FORCED LIQUIDATION FOR AN INVERSE CONTRACT ARE DECIDED ON THE WRONG
-  NUMBER, and it is wrong in sign as well as magnitude for a move of any size.
-- `Engine::positions()` - same hand-rolled expression, so the wire
-  `Position.unrealized_pnl` is wrong for inverses, and contradicts what
-  `valuation_at` reports for the same position.
-- `Engine::settle` - `(settle_px - avg_px) * qty * multiplier` credited to the
-  balance. An inverse future's REALIZED SETTLEMENT is booked with the linear
-  formula while an inverse fill's realized P and L is booked with the inverse
-  one.
-
-All three should call `def.unrealized(...)`. The duplication is the bug; there
-should be one expression, as `apply_fill` already says.
-
-Confidence: high.
-
-## 6. `margin_requirement` ignores `MarginBasis`, contradicting its own doc
-
-lib.rs `margin_requirement` computes rows as `maintenance_per_contract * |qty|`
-and `initial_per_contract * leaves_qty` - raw multiplication, not
-`policy.maintenance(...)` and `policy.initial(...)`. Under
-`MarginBasis::Notional` those fields are FRACTIONS, so a 40 percent requirement
-on two contracts is reported as `0.8`.
-
-Its own doc says "Their sum is exactly what `locked_balances` reserves, so the
-reported margin reconciles with the reported `locked` by construction" - and
-`locked_balances` and `order_reservation` both go through the policy methods,
-honouring `basis`. So for any notional-basis account the invariant the comment
-asserts is simply false, and the wire `AccountState.margins` disagrees with
-`AccountState.balances[].locked`.
-
-This is the exact defect `apply_margin_breaches` was already fixed for - that
-function carries a comment about a notional policy having "read a 40 percent
-requirement on two contracts as eighty cents". The same fix was not applied
-here.
-
-Confidence: high.
-
-## 7. `order_reservation` reads `submit.price` while its caller passes a `price` it then ignores
-
-account.rs `order_reservation(submit, leaves, price, clipped)` takes a `price`
-argument, and the futures and equity branches DISCARD it, using
-`submit.price.unwrap_or_default()` instead. Its caller `order_reservation_entry`
-computes `price = submit.price.or(submit.trigger_price)` precisely so a
-price-less `StopMarket` has one - and that work is thrown away. Consequences:
-
-- A `StopMarket` ON A FUTURE OR MARGINED EQUITY UNDER `MarginBasis::Notional`
-  RESERVES NOTHING AT ALL while resting (`initial(qty, 0)` = 0). It holds no
-  collateral until it triggers.
-- `held_for` (which routes through the same function) correspondingly returns 0,
-  so the two agree - but `on_modify`'s hand-rolled futures branch does NOT: it
-  adds back `policy.initial(instrument, leaves, submit.price.or(submit.trigger_price))`,
-  i.e. the full trigger-priced requirement the order never held. An amend is
-  checked against free balance plus money that was never locked.
-
-Either the argument should be used (`price`, not `submit.price`), or it should
-be removed. Having it present and ignored is what let the caller believe the
-trigger fallback was in effect.
-
-Confidence: high on the code path; the bite is confined to
-`MarginBasis::Notional`, since `PerContract` ignores price by construction.
-
-## 8. `on_modify`'s futures funds check uses the amend's `price`, not `effective_price`
-
-Same block, orders.rs ~2708:
-
-```rust
-policy.initial(instrument, new_leaves, price.unwrap_or_default())
-    .saturating_add(commission)
-```
-
-`price` is the amend's optional new price. Every other branch in this function
-uses `effective_price` (`price.or(submit.price)`, or the trigger for a
-`StopMarket`), and `commission` two lines above is computed against
-`effective_price`. So a QUANTITY-ONLY amend of a futures order under a notional
-policy computes `required = initial(new_leaves, 0) + commission = commission`,
-against `held` = the full old requirement - the funds check cannot fail, and an
-amend that doubles the size of a leveraged position is admitted unconditionally.
-
-Confidence: high. Note this whole block is a fourth hand-rolled copy of the
-reservation formula; findings 7 and 8 are both symptoms of that. `on_modify`
-should compute the prospective reservation by building the amended
-`SubmitOrder` and calling `order_reservation` - one expression, as `held_for`
-already does.
-
-## 9. Equity short reservation double-counts held shares across resting sells
-
-`order_reservation`, equity sell with a margin policy:
-
-```rust
-let uncovered = leaves - self.net_position(&submit.symbol).max(Decimal::ZERO);
-```
-
-and `validate_submit`'s short check:
-
-```rust
-let short = (self.net_position(&order.symbol) - order.quantity).min(ZERO).abs();
-```
-
-Neither subtracts the quantity already committed by OTHER resting sells. Holding
-100 shares, two resting sells of 100 each both compute `uncovered = 0` and
-`short = 0`, reserve nothing, and pass the cash-account short refusal - so a
-cash equity account can end the run short 100 shares through an order path that
-refuses shorting by name. The locate check (`borrowable`) is bypassed the same
-way.
-
-The quantity that matters is
-`leaves - max(0, net_position - other_resting_sell_leaves)`, i.e. the same
-"worst-case fill order" reasoning `projected_qty` already implements carefully
-for position caps. That function exists and states the argument; the reservation
-path does not use it.
-
-Confidence: medium-high. The hunter has not checked whether an upstream layer
-applies `projected_qty` to equity sells; nothing in this crate does.
 
 ## 10. Smaller and lower-confidence
 
@@ -186,25 +150,26 @@ applies `projected_qty` to equity sells; nothing in this crate does.
 ## Structural note
 
 Six of the ten findings (1 aside: findings 2, 3, 6, 7, 8, and the
-`account_changed` gap) share one cause: A RULE WITH ONE STATED HOME AND SEVERAL
-HAND-ROLLED COPIES. The reap half of that is now closed - `Engine::close_out` is
-the single home and every terminal path routes through it - and the reservation
-and P and L halves are still open below. The reservation formula exists in `order_reservation`, and
-again in `on_modify`'s futures branch, and again in its buy/sell branch, and
-`margin_requirement` has a fourth. The P and L formula exists in
-`InstrumentDef::unrealized` and again in three places in lib.rs. The "reap
-children on non-filling terminal" rule existed at four of ten call sites. The
-prose in this crate is unusually good at STATING each invariant - and in each
-case the statement sits next to one implementation while the others drift.
+`account_changed` gap) shared one cause: A RULE WITH ONE STATED HOME AND SEVERAL
+HAND-ROLLED COPIES. The reap half closed in round 1 - `Engine::close_out` is the
+single home and every terminal path routes through it - and rounds 2 closed the
+other two. The reservation formula lived in `order_reservation`, again in
+`on_modify`'s futures branch, again in its buy/sell branch, and
+`margin_requirement` had a fourth; all four now route to `order_reservation`,
+`margin_requirement` through `order_reservation_entry` because it needs the
+held-child and currency rules that wrap it. The P
+and L formula lived in `InstrumentDef::unrealized` and again in FOUR places in
+lib.rs; those four now read `position_unrealized_checked`, which delegates. THE PROSE
+WAS RIGHT EVERY TIME - `apply_fill`'s "realized and unrealized must come from the
+same expression", `margin_requirement`'s "reconciles by construction",
+`architecture.md`'s "`InstrumentDef` carries the one implementation of both
+forms, so realized and unrealized can never disagree". In each case the statement
+sat next to one implementation while the others drifted, which is why the fixes
+were collapses rather than corrections: correcting a copy leaves the next drift
+undetectable, and collapsing it makes the stated invariant true by construction.
 
-Given pre-1.0, the hunter would spend the next change on collapsing those three,
-not on patching the ten sites: a single
-`close_order(pos, status, ts) -> Vec<ServerMessage>` funnel, a single
-prospective-reservation entry point that `on_modify` and `validate_submit` both
-call by constructing the candidate `SubmitOrder`, and deleting every hand-rolled
-P and L expression in favour of `def.unrealized`. `reconcile_order_locked`
-already proves the aggregate-cache half of this is worth doing; nothing plays
-that role for the other two.
+Only the `account_changed` gap in finding 10 is left of this family, and it is
+open below.
 
 ## 11. WITHDRAWN, and finding 4 with it: both rested on a misreading
 

@@ -229,6 +229,72 @@ impl MarginPolicy {
     }
 }
 
+/// One position's unrealized P and L through the instrument's OWN arithmetic,
+/// `None` ONLY when the arithmetic overflowed.
+///
+/// The single expression every unrealized reader in this crate uses -
+/// `unrealized_pnl` (and thence the margin breach test), the `positions()` wire
+/// rows, `settle`'s realized credit and `valuation_at`'s derivative
+/// contribution. It exists because those readers each carried a hand-rolled
+/// `(mark - avg) * qty * multiplier`, which is the LINEAR form: for an
+/// `Inverse` contract that is wrong by up to four orders of magnitude, so a
+/// coin-margined book was liquidated on a number `apply_fill` disagreed with
+/// while booking the same position's REALIZED P and L through `InstrumentDef`.
+/// (It is wrong in magnitude only - `1/avg - 1/mark` and `mark - avg` always
+/// carry the same sign, so an earlier claim of a sign error here was false.)
+/// `apply_fill`'s rule - realized and unrealized must come from the same
+/// expression - now holds by construction rather than by comment.
+///
+/// UNDEFINED IS NOT OVERFLOW, and this function is where the two are separated,
+/// because `InstrumentDef::unrealized` answers `None` for both.
+///
+/// - A FLAT POSITION IS ZERO. A closed position is stored with `qty`, `avg_px`
+///   and `mark_px` all zero and is never removed from the map, so every reader
+///   would otherwise have to guard it and `valuation_at` would answer `None`
+///   for a whole account holding one flat inverse row.
+/// - AN INVERSE POSITION AT A ZERO PRICE IS ZERO. The inverse form is `1/price`,
+///   which has no value at zero, and a zero price is REACHABLE: `apply_fill`
+///   warns about a zero-price fill and books it, and `settle` passes the
+///   caller's settlement price through with no guard of its own. Answering zero
+///   says the position contributed no mark-to-market, which is the conservative
+///   reading; treating it as overflow credited `Decimal::MAX` to the balance.
+///   Whether the venue should instead REFUSE a zero price on an inverse
+///   instrument is a product question, filed in `notes/todo.md`.
+fn position_unrealized_checked(
+    def: &mogwai_protocol::InstrumentDef,
+    qty: Decimal,
+    avg_px: Decimal,
+    mark_px: Decimal,
+) -> Option<Decimal> {
+    if qty.is_zero() {
+        return Some(Decimal::ZERO);
+    }
+    if def.class.is_inverse() && (avg_px.is_zero() || mark_px.is_zero()) {
+        return Some(Decimal::ZERO);
+    }
+    def.unrealized(qty, avg_px, mark_px)
+}
+
+/// [`position_unrealized_checked`], saturating in the position's direction on
+/// overflow.
+///
+/// For the readers that must answer with a number - the margin breach test, the
+/// wire rows, the settlement credit. `valuation_at` uses the checked form
+/// instead, because a valuation that saturated would be a lie rather than a
+/// bound.
+fn position_unrealized(
+    def: &mogwai_protocol::InstrumentDef,
+    qty: Decimal,
+    avg_px: Decimal,
+    mark_px: Decimal,
+) -> Decimal {
+    position_unrealized_checked(def, qty, avg_px, mark_px).unwrap_or(if qty.is_sign_negative() {
+        Decimal::MIN
+    } else {
+        Decimal::MAX
+    })
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BreachAction {
     #[default]
@@ -685,11 +751,22 @@ impl Engine {
     /// priced at the given prices instead of at their last marks.
     ///
     /// This is what makes tick-resolution risk possible without a tick-resolution
-    /// evaluation. Equity is LINEAR in the price of a held instrument, so its
+    /// evaluation. Equity is MONOTONE in the price of a held instrument, so its
     /// extreme over a span is attained at a price extreme; asking this question
     /// at the span's high and its low answers what a per-tick walk would have
     /// found, at two evaluations rather than thousands. The engine lock is taken
     /// once, by the sweeper, exactly as before.
+    ///
+    /// MONOTONE, NOT LINEAR, and the distinction is load-bearing now that the
+    /// derivative contribution runs the instrument's own arithmetic. A linear
+    /// class contributes `(mark - avg) * qty * multiplier`, which is affine in
+    /// `mark`; an `Inverse` contributes `(1/avg - 1/mark) * qty * multiplier`,
+    /// which is strictly convex or concave and NOT affine. What the two-point
+    /// evaluation actually needs is only that the contribution never turns
+    /// around inside the span, and `-1/mark` is monotonically increasing over
+    /// every positive price, so it does not. The property fails only at a price
+    /// of zero, which is not a price the tape's extremes can take and which
+    /// [`position_unrealized_checked`] answers as zero in any case.
     ///
     /// An override for a symbol the account does not hold changes nothing, and a
     /// symbol with no override keeps its last mark - so a span on one river
@@ -739,12 +816,20 @@ impl Engine {
             // of its symbol - a fresh position is marked at its fill price
             // before any pass has marked it - so only an explicit override
             // displaces it.
+            // THROUGH THE SAME ONE EXPRESSION the other unrealized readers use,
+            // in its checked form: a flat inverse row (stored with every field
+            // zero and never removed from the map) made the raw
+            // `InstrumentDef::unrealized` answer `None`, and this `?` turned
+            // that into a `None` for the WHOLE ACCOUNT - the risk sweep silently
+            // declining to value an account that held one closed coin-margined
+            // position. `None` survives here for genuine overflow only, which is
+            // the case this function's refusal-to-answer contract is about.
             let mark_px = overridden(symbol).unwrap_or(position.mark_px);
             let contribution =
                 if matches!(def.class, mogwai_protocol::InstrumentClass::Equity { .. }) {
                     def.notional(position.qty, mark_px)?
                 } else {
-                    def.unrealized(position.qty, position.avg_px, mark_px)?
+                    position_unrealized_checked(def, position.qty, position.avg_px, mark_px)?
                 };
             total = total.checked_add(contribution)?;
         }
@@ -765,17 +850,12 @@ impl Engine {
             .iter()
             .filter(|((position_symbol, _), _)| position_symbol.as_ref() == symbol)
             .fold(Decimal::ZERO, |sum, (_, position)| {
-                let value = position
-                    .mark_px
-                    .checked_sub(position.avg_px)
-                    .and_then(|points| points.checked_mul(position.qty))
-                    .and_then(|value| value.checked_mul(def.class.multiplier()))
-                    .unwrap_or(if position.qty.is_sign_negative() {
-                        Decimal::MIN
-                    } else {
-                        Decimal::MAX
-                    });
-                sum.saturating_add(value)
+                sum.saturating_add(position_unrealized(
+                    def,
+                    position.qty,
+                    position.avg_px,
+                    position.mark_px,
+                ))
             })
     }
 
@@ -848,10 +928,43 @@ impl Engine {
     /// misreport the requirement and under-reserve the admission budget.
     ///
     /// `maintenance` is what the open positions require; `initial` is what the
-    /// resting non-reduce-only orders require. Their sum is exactly what
-    /// `locked_balances` reserves, so the reported margin reconciles with the
-    /// reported `locked` by construction. Reduce-only orders reserve nothing
-    /// and appear here as nothing.
+    /// resting non-reduce-only orders require, taken from each order's OWN
+    /// reservation. Reduce-only orders reserve nothing and appear here as
+    /// nothing.
+    ///
+    /// WHAT RECONCILES, EXACTLY. Every `initial` row here is a settlement-
+    /// currency term `locked_balances` also folds, computed by the same
+    /// expression, so no `initial` row can disagree with the hold it reports.
+    /// The reported `locked` is nonetheless a WIDER sum than
+    /// `sum(initial) + sum(maintenance)`, and the difference is not a defect on
+    /// either side - it is three deliberate carve-outs:
+    ///
+    /// - `locked_balances` also folds `account.unsettled` sale proceeds, which
+    ///   are not collateral and have no margin row;
+    /// - it also folds holds on symbols carrying no margin policy, and on
+    ///   unmarked classes, which this function skips because a spot symbol posts
+    ///   no collateral;
+    /// - a `Reservation::Base` hold - the spot sell's base-currency hold - is
+    ///   skipped here, because a margin row is denominated in the settlement
+    ///   currency and a base-currency amount cannot be added to it.
+    ///
+    /// So the reconciliation is an equality only on an account whose whole
+    /// locked balance comes from margined, marked symbols with nothing
+    /// unsettled, and it is a `<=` in general. Do not read the tests that pin
+    /// the equality as pinning more than that case.
+    ///
+    /// BOTH HALVES READ THE DERIVATIONS `locked_balances` READS rather than
+    /// restating them.
+    /// This function used to multiply `maintenance_per_contract` by a contract
+    /// count and `initial_per_contract` by a leaves quantity - the raw fields,
+    /// not `policy.maintenance` and `policy.initial` - so under
+    /// `MarginBasis::Notional`, where those fields are FRACTIONS, a 40 percent
+    /// requirement on two contracts was reported as eighty cents while
+    /// `locked_balances` correctly reserved the notional fraction. The reported
+    /// `margins` and the reported `locked` then contradicted each other on every
+    /// notional-basis account, and the invariant this comment asserts was simply
+    /// false. It is the same defect `apply_margin_breaches` was already fixed
+    /// for.
     #[must_use]
     pub(crate) fn margin_requirement(&self) -> Vec<mogwai_protocol::PostedMargin> {
         let mut rows: HashMap<&Symbol, (Decimal, Decimal)> = HashMap::new();
@@ -859,24 +972,46 @@ impl Engine {
             let Some(policy) = self.margin.get(symbol) else {
                 continue;
             };
-            let row = rows.entry(symbol).or_default();
-            row.1 = row.1.saturating_add(
-                policy
-                    .maintenance_per_contract
-                    .saturating_mul(position.qty.abs()),
-            );
-        }
-        for order in &self.open {
-            if order.submit.reduce_only {
-                continue;
-            }
-            let Some(policy) = self.margin.get(&order.submit.symbol) else {
+            // Only a MARKED class posts maintenance collateral, the same gate
+            // `locked_balances` applies: a margin policy attached to a spot
+            // symbol must move no number on either side of the reconciliation.
+            let Some(def) = self
+                .instruments
+                .get(symbol)
+                .filter(|def| def.class.is_marked())
+            else {
                 continue;
             };
-            let row = rows.entry(&order.submit.symbol).or_default();
-            row.0 = row
-                .0
-                .saturating_add(policy.initial_per_contract.saturating_mul(order.leaves_qty));
+            let row = rows.entry(symbol).or_default();
+            row.1 = row
+                .1
+                .saturating_add(policy.maintenance(def, position.qty, position.mark_px));
+        }
+        for order in &self.open {
+            let symbol = &order.submit.symbol;
+            if !self.margin.contains_key(symbol) {
+                continue;
+            }
+            let Some(def) = self
+                .instruments
+                .get(symbol)
+                .filter(|def| def.class.is_marked())
+            else {
+                continue;
+            };
+            // THE ORDER'S OWN RESERVATION, not a second derivation of it. This
+            // is what makes the stated reconciliation true for reduce-only
+            // orders, held order-list children and the equity sell's
+            // already-covered portion alike: each of those reserves nothing, so
+            // each posts nothing, and neither rule has to be repeated here.
+            let Some((currency, amount, _)) = self.order_reservation_entry(order) else {
+                continue;
+            };
+            if currency != def.class.settlement_currency() {
+                continue;
+            }
+            let row = rows.entry(symbol).or_default();
+            row.0 = row.0.saturating_add(amount);
         }
         let mut margins: Vec<_> = rows
             .into_iter()
@@ -1419,10 +1554,12 @@ impl Engine {
                         (position_symbol == symbol).then_some(position)
                     })
             {
-                let pnl = settle_px
-                    .saturating_sub(position.avg_px)
-                    .saturating_mul(position.qty)
-                    .saturating_mul(def.class.multiplier());
+                // Through the instrument's own arithmetic, exactly as the
+                // unrealized readers and `apply_fill` do: settlement REALIZES
+                // the position at `settle_px`, so booking it linearly while the
+                // mark-to-market it replaces was inverse would move the
+                // account's value at the instant of settlement.
+                let pnl = position_unrealized(def, position.qty, position.avg_px, *settle_px);
                 let total = self
                     .account
                     .balances
@@ -1606,7 +1743,9 @@ impl Engine {
         }
         let events = match msg {
             ClientMessage::SubmitOrder(order) => self.on_submit(order, ts, reading),
-            ClientMessage::SubmitOrderGroup { orders } => self.on_submit_group(orders, ts, reading),
+            ClientMessage::SubmitOrderGroup { orders } => {
+                self.on_submit_group(&orders, ts, reading)
+            }
             ClientMessage::CancelOrder { client_order_id } => {
                 self.on_cancel(client_order_id, ts, true)
             }
@@ -1829,6 +1968,123 @@ impl Engine {
         self.snapshot(ts)
     }
 
+    /// The largest quantity of `symbol` that can execute on `side` in the WORST
+    /// FILL ORDER, over the working book plus `pending`.
+    ///
+    /// THE ONE HOME OF "WORST FILL ORDER" for this crate, because two consumers
+    /// ask it - `projected_qty`'s magnitude cap and `validate_submit`'s equity
+    /// short check - and a naive sum is wrong for both in the same two ways:
+    ///
+    /// - A `Resting::Held` order-list child CANNOT EXECUTE until its parent
+    ///   fills, so it contributes nothing. This is the same rule
+    ///   `order_reservation_entry` applies when it declines to hold funds
+    ///   against a held child, and for the same reason; a bracket's two exit
+    ///   legs must not be counted against the entry that has to fill first.
+    /// - MUTUALLY EXCLUSIVE LEGS CONTRIBUTE THEIR MAX, NOT THEIR SUM. An `Oco`
+    ///   group cancels its siblings on any fill and an `Ouo` group shrinks them
+    ///   by the filled quantity, so in both cases the whole group can execute at
+    ///   most its largest leg. Summing them is what made a plain bracket - a
+    ///   take-profit sell 100 and a stop sell 100 against 100 held shares - read
+    ///   as a 100-share short and get refused by name on a cash equity account.
+    ///   The group is keyed by `order_list_id`, and the sides are already
+    ///   separated by the caller, so a parent and its children never share a
+    ///   slot.
+    ///
+    /// `pending` is the orders admitted in the SAME FRAME that are not resting
+    /// yet - a `SubmitOrderGroup`'s members. A resting order whose
+    /// `client_order_id` appears in `pending` is counted from `pending` and not
+    /// from the book, which is what makes this answer INDEPENDENT OF HOW MANY
+    /// MEMBERS HAVE ALREADY RESTED. Without that, the group's dry pass (nothing
+    /// resting) and its real pass (earlier members resting) would compute
+    /// different numbers, and a check reading it could admit a member on pass
+    /// one and refuse it on pass two - an admission divergence
+    /// `report_group_member_refusal` would then have misfiled as the disclosed
+    /// funds carve-out, because re-running the dry question after the refusal
+    /// refuses again.
+    ///
+    /// Reduce-only orders are excluded on both sides; see `projected_qty` for
+    /// why that exclusion is what makes an oversized reduce-only leave safe.
+    pub(crate) fn worst_case_leaves(
+        &self,
+        symbol: &str,
+        side: Side,
+        pending: &[SubmitOrder],
+    ) -> Decimal {
+        // Additive legs accumulate into `total`; each exclusive group keeps only
+        // its largest leg in `exclusive`, keyed by `order_list_id`.
+        fn count<'a>(
+            total: &mut Decimal,
+            exclusive: &mut HashMap<&'a str, Decimal>,
+            qty: Decimal,
+            link: Option<&'a mogwai_protocol::OrderLink>,
+        ) {
+            match link.filter(|link| {
+                matches!(
+                    link.contingency,
+                    mogwai_protocol::Contingency::Oco | mogwai_protocol::Contingency::Ouo
+                )
+            }) {
+                Some(link) => {
+                    let slot = exclusive
+                        .entry(link.order_list_id.as_str())
+                        .or_insert(Decimal::ZERO);
+                    if qty > *slot {
+                        *slot = qty;
+                    }
+                }
+                None => *total = total.saturating_add(qty),
+            }
+        }
+        let mut total = Decimal::ZERO;
+        let mut exclusive: HashMap<&str, Decimal> = HashMap::new();
+        for order in &self.open.orders {
+            if order.submit.symbol.as_ref() != symbol
+                || order.submit.side != side
+                || order.submit.reduce_only
+                || matches!(order.resting, Resting::Held)
+                || pending
+                    .iter()
+                    .any(|member| member.client_order_id == order.submit.client_order_id)
+            {
+                continue;
+            }
+            count(
+                &mut total,
+                &mut exclusive,
+                order.leaves_qty,
+                order.submit.link.as_ref(),
+            );
+        }
+        for member in pending {
+            // A pending member's held-ness is read off its LINK rather than off
+            // a `Resting` it does not have yet: a child naming a parent is
+            // exactly what `on_submit_from` rests as `Resting::Held`.
+            if member.symbol.as_ref() != symbol
+                || member.side != side
+                || member.reduce_only
+                || member
+                    .link
+                    .as_ref()
+                    .is_some_and(|link| link.parent_order_id.is_some())
+            {
+                continue;
+            }
+            // A member already resting has been partially filled at most; its
+            // remaining leaves are what can still execute, and its full
+            // quantity is the bound on that. Using the quantity keeps the two
+            // passes identical, which is the whole point of `pending`.
+            count(
+                &mut total,
+                &mut exclusive,
+                member.quantity,
+                member.link.as_ref(),
+            );
+        }
+        exclusive
+            .values()
+            .fold(total, |sum, qty| sum.saturating_add(*qty))
+    }
+
     /// How large a position in `symbol` this account can carry if `additional`
     /// (already signed: buy positive, sell negative) joins the live book.
     ///
@@ -1853,22 +2109,24 @@ impl Engine {
     /// position - it is clamped at the FILL, not at rest - and counting that
     /// one would invent a short it can never open, refusing an order over a
     /// size the book cannot reach.
+    ///
+    /// Held children and mutually exclusive legs are handled by
+    /// [`Engine::worst_case_leaves`], which is the one home of what "worst-case
+    /// fill order" means; `additional` is added on top of it because the caller
+    /// hands this function a bare quantity and not the order it came from, so
+    /// an incoming order that is ITSELF one leg of an exclusive pair is still
+    /// counted additively here. That is conservative for a magnitude cap - it
+    /// can only make the projection larger - and is stated rather than hidden.
     #[must_use]
     pub fn projected_qty(&self, symbol: &str, additional: Decimal) -> Decimal {
-        let (mut buys, mut sells) = (Decimal::ZERO, Decimal::ZERO);
+        let (mut buys, mut sells) = (
+            self.worst_case_leaves(symbol, Side::Buy, &[]),
+            self.worst_case_leaves(symbol, Side::Sell, &[]),
+        );
         if additional > Decimal::ZERO {
             buys += additional;
         } else {
             sells += -additional;
-        }
-        for order in &self.open.orders {
-            if order.submit.symbol.as_ref() != symbol || order.submit.reduce_only {
-                continue;
-            }
-            match order.submit.side {
-                mogwai_protocol::Side::Buy => buys += order.leaves_qty,
-                mogwai_protocol::Side::Sell => sells += order.leaves_qty,
-            }
         }
         match self.oms_type {
             mogwai_protocol::OmsType::Netting => {
@@ -1918,16 +2176,7 @@ impl Engine {
                     .get(symbol)
                     .filter(|def| def.class.is_future())
                     .map_or(Decimal::ZERO, |def| {
-                        state
-                            .mark_px
-                            .checked_sub(state.avg_px)
-                            .and_then(|points| points.checked_mul(state.qty))
-                            .and_then(|value| value.checked_mul(def.class.multiplier()))
-                            .unwrap_or(if state.qty.is_sign_negative() {
-                                Decimal::MIN
-                            } else {
-                                Decimal::MAX
-                            })
+                        position_unrealized(def, state.qty, state.avg_px, state.mark_px)
                     }),
             })
             .collect();
@@ -9948,5 +10197,608 @@ mod tests {
         let kept_fees = engine.fees.get(&symbol).unwrap();
         assert!(matches!(kept_fees.maker, FeeRate::BasisPoints { rate } if rate == Decimal::ONE));
         assert!(matches!(kept_fees.taker, FeeRate::BasisPoints { rate } if rate == Decimal::ONE));
+    }
+
+    // --- The P and L, margin and reservation cluster --------------------------
+
+    /// One inverse contract worth 100 quote units, settling in the base asset.
+    fn inverse_engine() -> Engine {
+        Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![InstrumentDef {
+                symbol: "XBTUSD".into(),
+                class: InstrumentClass::Inverse {
+                    underlying: "BTC".into(),
+                    settlement_currency: "XBT".into(),
+                    quote_currency: "USD".into(),
+                    multiplier: Decimal::from(100),
+                    asset_class: WireAssetClass::Cryptocurrency,
+                },
+                price_precision: 1,
+                size_precision: 0,
+                price_increment: Decimal::new(5, 1),
+                size_increment: Decimal::ONE,
+            }],
+            balances: HashMap::from([("XBT".to_string(), Decimal::ZERO)]),
+            fill_seed: 3,
+        })
+    }
+
+    /// Ten inverse contracts bought at 100 and marked at 200.
+    ///
+    /// The inverse answer is `100 * 10 * (1/100 - 1/200)` = 5 settlement units.
+    /// The LINEAR answer the three readers used to hand-roll is
+    /// `(200 - 100) * 10 * 100` = 100,000 - twenty thousand times larger, which
+    /// is the discrimination this fixture is chosen for. No coincidence of
+    /// rounding can put the wrong formula on 5.
+    fn inverse_position(engine: &mut Engine) {
+        engine.account.positions.insert(
+            (Symbol::from("XBTUSD"), None),
+            crate::account::PositionState {
+                qty: Decimal::from(10),
+                avg_px: Decimal::from(100),
+                mark_px: Decimal::from(200),
+            },
+        );
+    }
+
+    /// The margin breach test reads `unrealized_pnl`, so an inverse book was
+    /// liquidated (or spared) on a number computed by the linear formula, while
+    /// `apply_fill` booked the same position's realized P and L through
+    /// `InstrumentDef::unrealized`. Realized and unrealized now come from one
+    /// expression for every class, which is what `apply_fill` always claimed.
+    #[test]
+    fn an_inverse_positions_unrealized_pnl_uses_the_inverse_arithmetic() {
+        let mut e = inverse_engine();
+        inverse_position(&mut e);
+        assert_eq!(
+            e.unrealized_pnl("XBTUSD"),
+            Decimal::from(5),
+            "the linear form would report 100000 here"
+        );
+        let wire = e.positions();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(
+            wire[0].unrealized_pnl,
+            Decimal::from(5),
+            "and the wire row must not contradict the number the venue decides on"
+        );
+    }
+
+    /// Settlement REALIZES the position, so it must credit exactly what the
+    /// mark-to-market it replaces reported - otherwise an inverse account's
+    /// value jumps at the settlement instant, which is the same discontinuity
+    /// `apply_fill` refuses at a fill.
+    #[test]
+    fn an_inverse_future_settles_through_the_inverse_arithmetic() {
+        let mut e = inverse_engine();
+        inverse_position(&mut e);
+        e.settle(&[(Symbol::from("XBTUSD"), Decimal::from(200))], 5);
+        assert_eq!(
+            *e.account.balances.get("XBT").expect("settlement balance"),
+            Decimal::from(5),
+            "the linear form would credit 100000 here"
+        );
+    }
+
+    /// `margin_requirement`'s doc says its rows sum to exactly what
+    /// `locked_balances` reserves. Under a NOTIONAL basis it multiplied the raw
+    /// fraction by a contract count instead of asking the policy, so a Reg-T
+    /// account's reported `margins` said 37.50 while its reported `locked` said
+    /// 3,750 - the wire contradicting itself on every leveraged account. The
+    /// assertion is the invariant itself, not a restatement of the number.
+    ///
+    /// WHAT IT PINS IS THE EQUALITY CASE, deliberately: one margined marked
+    /// symbol, nothing unsettled, no base-currency hold. Those are exactly the
+    /// three carve-outs `margin_requirement`'s doc now names, and the general
+    /// statement is a `<=` rather than an equality, so a fixture sitting inside
+    /// the carve-outs cannot be read as pinning the wider claim.
+    #[test]
+    fn the_reported_margin_reconciles_with_the_reported_locked() {
+        let mut e = equity_engine(&Shares {
+            cash: 20_000,
+            margin: Some(reg_t()),
+            ..Shares::default()
+        });
+        trade(&mut e, share_order("BUY", Side::Buy, 150), 1);
+        let state = e.account_snapshot(2);
+        let margin = state
+            .margins
+            .iter()
+            .find(|row| row.symbol.as_ref() == "AAPL")
+            .expect("a held position posts margin");
+        assert_eq!(
+            margin.maintenance,
+            Decimal::from(3_750),
+            "a quarter of 150 shares at 100, not a quarter of 150 contracts"
+        );
+        let locked = state
+            .balances
+            .iter()
+            .find(|balance| balance.currency == "USD")
+            .expect("settlement balance")
+            .locked;
+        assert_eq!(
+            margin.initial.saturating_add(margin.maintenance),
+            locked,
+            "the reported margin must sum to the reported locked"
+        );
+    }
+
+    /// A leveraged futures engine: ten-to-one, stated as a fraction of notional.
+    fn leveraged_futures(cash: i64) -> Engine {
+        let mut engine = futures_engine(cash, BreachAction::Refuse);
+        engine.set_margin_policy(
+            "MNQ".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::new(1, 1),
+                maintenance_per_contract: Decimal::new(1, 1),
+                breach_action: BreachAction::Refuse,
+                basis: MarginBasis::Notional,
+            },
+        );
+        engine
+    }
+
+    /// `order_reservation` took a `price` argument and ignored it, reaching back
+    /// into `submit.price` - which a `StopMarket` does not have. Under a
+    /// notional basis that made its requirement `initial(qty, 0)`, so a resting
+    /// stop held NO collateral at all until it triggered, while the caller had
+    /// already resolved the trigger fallback the branch threw away.
+    #[test]
+    fn a_resting_stop_market_reserves_against_its_trigger() {
+        let mut e = leveraged_futures(200_000);
+        let mut stop = mnq_order("S1", Side::Buy, 1, 21_000);
+        stop.order_type = OrderType::StopMarket;
+        stop.price = None;
+        stop.trigger_price = Some(Decimal::from(21_000));
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(stop),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(20_000),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "{out:?}"
+        );
+        let locked = e
+            .account_snapshot(2)
+            .balances
+            .iter()
+            .find(|balance| balance.currency == "USD")
+            .expect("settlement balance")
+            .locked;
+        // One contract at 21,000 with a multiplier of two is 42,000 of
+        // notional; a tenth of that is 4,200. Reading `submit.price` gave zero.
+        assert_eq!(locked, Decimal::from(4_200));
+    }
+
+    /// `on_modify`'s futures branch priced the AMENDED requirement at the
+    /// amend's own optional `price` rather than `effective_price`, so a
+    /// quantity-only amend computed `initial(new_leaves, 0)` - zero under a
+    /// notional basis - and the funds check could not fail however far the
+    /// amend grew the position.
+    ///
+    /// "insufficient USD balance" IS NOT A DISCRIMINATOR ON ITS OWN - several
+    /// branches of `on_modify` produce it - so the test runs the identical
+    /// amend twice, once on an account that cannot afford it and once on one
+    /// that can. Every other refusal `on_modify` can reach for these inputs
+    /// (the increment checks, the notional overflow guard, the missing margin
+    /// ledger) is balance-independent and would refuse BOTH, so a refusal that
+    /// flips with the balance can only be the funds comparison.
+    #[test]
+    fn a_quantity_only_amend_of_a_leveraged_future_is_checked_against_its_price() {
+        let amend = |cash: i64| -> Vec<ServerMessage> {
+            let mut e = leveraged_futures(cash);
+            let mut resting = mnq_order("A1", Side::Buy, 1, 21_000);
+            resting.order_type = OrderType::Limit;
+            e.process_with_market(
+                ClientMessage::SubmitOrder(resting),
+                1,
+                Some(MarketReading {
+                    last_px: Decimal::from(22_000),
+                    ts_ns: 1,
+                    band_ticks: 0,
+                }),
+            );
+            e.process_with_market(
+                ClientMessage::ModifyOrder {
+                    client_order_id: "A1".into(),
+                    quantity: Some(Decimal::from(10)),
+                    price: None,
+                    trigger_price: None,
+                },
+                2,
+                Some(MarketReading {
+                    last_px: Decimal::from(22_000),
+                    ts_ns: 2,
+                    band_ticks: 0,
+                }),
+            )
+        };
+        let funded = amend(100_000);
+        assert!(
+            !funded
+                .iter()
+                .any(|event| matches!(event, ServerMessage::OrderModifyRejected { .. })),
+            "the same amend on an account that can afford it must be admitted, or the \
+             refusal below is not the funds check: {funded:?}"
+        );
+
+        let mut e = leveraged_futures(5_000);
+        // RESTING, so the amend has something to amend: a buy limit under the
+        // market at 22,000 takes nothing.
+        let mut resting = mnq_order("A1", Side::Buy, 1, 21_000);
+        resting.order_type = OrderType::Limit;
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrder(resting),
+            1,
+            Some(MarketReading {
+                last_px: Decimal::from(22_000),
+                ts_ns: 1,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "{out:?}"
+        );
+        // Ten contracts would need 42,000 against an account holding 5,000.
+        let out = e.process_with_market(
+            ClientMessage::ModifyOrder {
+                client_order_id: "A1".into(),
+                quantity: Some(Decimal::from(10)),
+                price: None,
+                trigger_price: None,
+            },
+            2,
+            Some(MarketReading {
+                last_px: Decimal::from(22_000),
+                ts_ns: 2,
+                band_ticks: 0,
+            }),
+        );
+        let reason = out
+            .iter()
+            .find_map(|event| match event {
+                ServerMessage::OrderModifyRejected { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the amend must be refused: {out:?}"));
+        assert_eq!(reason, "insufficient USD balance");
+    }
+
+    /// A cash equity account refuses shorting BY NAME, and could nonetheless end
+    /// the run short: the check asked how short THIS order alone would leave the
+    /// account, so a hundred held shares covered every resting sell
+    /// independently. Two sells of a hundred against a hundred held both read
+    /// `short = 0`, and both passed.
+    #[test]
+    fn resting_sells_cannot_each_claim_the_same_held_shares() {
+        let mut e = equity_engine(&Shares::default());
+        trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
+        let mut first = order_with("S1", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        first.order_type = OrderType::Limit;
+        let out = trade(&mut e, first, 2);
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "selling what the account holds is not a short: {out:?}"
+        );
+        let mut second = order_with("S2", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        second.order_type = OrderType::Limit;
+        let out = trade(&mut e, second, 3);
+        let reason = out
+            .iter()
+            .find_map(|event| match event {
+                ServerMessage::OrderRejected { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the second sell must be refused: {out:?}"));
+        assert!(
+            reason.starts_with("a cash equity account cannot sell AAPL short"),
+            "{reason}"
+        );
+        // THE RESOURCE THE FINDING NAMED, not merely the refusal: the point is
+        // that the account cannot be made short, and an error message is not
+        // evidence of that on its own.
+        assert_eq!(e.net_position("AAPL"), Decimal::from(100));
+        assert_eq!(
+            e.worst_case_leaves("AAPL", Side::Sell, &[]),
+            Decimal::from(100),
+            "one working sell, so the held shares cover exactly the book"
+        );
+    }
+
+    /// The bracket the first version of the short check broke. Two exit legs
+    /// over one holding are an `Oco` group: whichever fills cancels the other,
+    /// so the pair can execute AT MOST its largest leg, and a hundred held
+    /// shares cover it. Summing them read as a hundred-share short and a cash
+    /// equity account refused the second leg BY NAME - a refusal of the most
+    /// ordinary order list there is.
+    #[test]
+    fn a_bracket_s_two_exit_legs_are_not_two_shorts() {
+        let mut e = equity_engine(&Shares::default());
+        trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
+        let exits = ["TP", "SL"];
+        for (index, id) in exits.iter().enumerate() {
+            let mut leg = order_with(id, Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+            leg.order_type = OrderType::Limit;
+            let siblings: Vec<&str> = exits.iter().copied().filter(|other| other != id).collect();
+            let leg = linked(
+                leg,
+                link_of(mogwai_protocol::Contingency::Oco, &siblings, None),
+            );
+            let out = trade(&mut e, leg, 2 + index as u64);
+            assert!(
+                !out.iter()
+                    .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                "exit leg {id} must be admitted: {out:?}"
+            );
+        }
+        assert_eq!(
+            e.worst_case_leaves("AAPL", Side::Sell, &[]),
+            Decimal::from(100),
+            "the exclusive pair contributes its max, not its sum"
+        );
+    }
+
+    /// A `Resting::Held` order-list child cannot execute until its parent fills,
+    /// which is exactly why `order_reservation_entry` holds no funds against
+    /// one. The worst-fill-order accounting has to apply the SAME rule, or a
+    /// bracket's held exit legs count as working shorts against an entry that
+    /// has not filled.
+    #[test]
+    fn a_held_child_is_not_a_working_sell() {
+        let mut e = equity_engine(&Shares::default());
+        let mut parent = order_with("P", Side::Buy, "AAPL", 100, Some(Decimal::from(50)));
+        parent.order_type = OrderType::Limit;
+        let parent = linked(
+            parent,
+            link_of(mogwai_protocol::Contingency::Oto, &["C"], None),
+        );
+        let out = trade(&mut e, parent, 1);
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "{out:?}"
+        );
+        let mut child = order_with("C", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        child.order_type = OrderType::Limit;
+        let child = linked(
+            child,
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
+        );
+        let out = trade(&mut e, child, 2);
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "a held child sells nothing yet, so it is not a short: {out:?}"
+        );
+        assert_eq!(
+            e.worst_case_leaves("AAPL", Side::Sell, &[]),
+            Decimal::ZERO,
+            "a held child contributes nothing to what can execute"
+        );
+    }
+
+    /// THE GROUP'S TWO PASSES MUST AGREE, and a check reading the working book
+    /// is the way they stop agreeing: the dry pass runs before any member
+    /// rests, the real pass after earlier members do. Two independent equity
+    /// sells over one holding really are inadmissible, and the group must be
+    /// refused WHOLE on pass one - not admitted by the dry pass and then broken
+    /// open on pass two, which `report_group_member_refusal` would have filed
+    /// as the disclosed funds carve-out because re-asking after the refusal
+    /// refuses again.
+    #[test]
+    fn a_group_of_two_equity_sells_over_one_holding_is_refused_whole() {
+        let mut e = equity_engine(&Shares::default());
+        trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
+        let mut first = order_with("G1", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        first.order_type = OrderType::Limit;
+        let mut second = order_with("G2", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        second.order_type = OrderType::Limit;
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup {
+                orders: vec![first, second],
+            },
+            2,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 2,
+                band_ticks: 0,
+            }),
+        );
+        let rejected: Vec<&str> = out
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::OrderRejected {
+                    client_order_id,
+                    reason,
+                    ..
+                } => Some((client_order_id.as_str(), reason.as_str())),
+                _ => None,
+            })
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(
+            rejected,
+            vec!["G1", "G2"],
+            "pass one refuses the group whole: {out:?}"
+        );
+        assert!(
+            e.open.is_empty(),
+            "and no member is left resting: {:?}",
+            e.open.len()
+        );
+        // Whereas the SAME two legs as an exclusive pair are admissible, which
+        // is what makes the assertion above about the sells and not about
+        // groups refusing sells in general.
+        let legs = ["H1", "H2"];
+        let orders: Vec<SubmitOrder> = legs
+            .iter()
+            .map(|id| {
+                let mut leg = order_with(id, Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+                leg.order_type = OrderType::Limit;
+                let siblings: Vec<&str> =
+                    legs.iter().copied().filter(|other| other != id).collect();
+                linked(
+                    leg,
+                    link_of(mogwai_protocol::Contingency::Oco, &siblings, None),
+                )
+            })
+            .collect();
+        let out = e.process_with_market(
+            ClientMessage::SubmitOrderGroup { orders },
+            3,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 3,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "an Oco exit pair is one short's worth, not two: {out:?}"
+        );
+    }
+
+    /// `InstrumentDef::unrealized` answers `None` for an inverse at a zero
+    /// price because `1/0` has no value - which is a DIFFERENT answer from
+    /// "the arithmetic overflowed", and collapsing the two into one
+    /// `unwrap_or(Decimal::MAX)` credited the whole Decimal range to the
+    /// balance. `settle` passes the caller's price straight through with no
+    /// zero guard, so this is reachable from the public settlement path.
+    #[test]
+    fn settling_an_inverse_at_a_zero_price_credits_nothing() {
+        let mut e = inverse_engine();
+        inverse_position(&mut e);
+        e.settle(&[(Symbol::from("XBTUSD"), Decimal::ZERO)], 5);
+        assert_eq!(
+            *e.account.balances.get("XBT").expect("settlement balance"),
+            Decimal::ZERO,
+            "an undefined mark contributes nothing; saturating credited Decimal::MAX"
+        );
+    }
+
+    /// A closed position is stored with every field zero and is NEVER REMOVED
+    /// from the map, so for an inverse instrument the raw `unrealized` answers
+    /// `None` forever. `valuation_at` propagates a `None` to the whole account,
+    /// so one flat coin-margined row made the tick-resolution risk sweep
+    /// silently decline to value the account at all.
+    #[test]
+    fn a_flat_inverse_position_does_not_void_the_accounts_valuation() {
+        let mut e = inverse_engine();
+        e.account.positions.insert(
+            (Symbol::from("XBTUSD"), None),
+            crate::account::PositionState::default(),
+        );
+        assert_eq!(
+            e.valuation_in("XBT"),
+            Some(Decimal::ZERO),
+            "a flat row is worth zero, not unanswerable"
+        );
+    }
+
+    /// `order_reservation_entry` declines a `Resting::Held` child before it
+    /// computes anything, so the venue takes NO hold against a bracket's
+    /// unreleased exit leg. `on_modify` reached past that home into
+    /// `order_reservation` for both sides of its funds comparison, so amending
+    /// such a child was judged against a hold the venue would never take, and
+    /// an amend the account could plainly afford (it costs nothing) was refused
+    /// for funds.
+    #[test]
+    fn amending_a_held_bracket_child_is_not_checked_against_a_hold_the_venue_never_takes() {
+        let mut e = equity_engine(&Shares {
+            cash: 20_000,
+            margin: Some(reg_t()),
+            ..Shares::default()
+        });
+        let mut parent = order_with("P", Side::Buy, "AAPL", 100, Some(Decimal::from(50)));
+        parent.order_type = OrderType::Limit;
+        let parent = linked(
+            parent,
+            link_of(mogwai_protocol::Contingency::Oto, &["C"], None),
+        );
+        trade(&mut e, parent, 1);
+        let mut child = order_with("C", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        child.order_type = OrderType::Limit;
+        let child = linked(
+            child,
+            link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
+        );
+        let out = trade(&mut e, child, 2);
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+            "{out:?}"
+        );
+        // Held, and therefore holding nothing: growing it to a quantity whose
+        // hypothetical Reg-T initial (50,000) exceeds everything the account
+        // has must still be admitted, because no hold is taken either way.
+        let out = e.process_with_market(
+            ClientMessage::ModifyOrder {
+                client_order_id: "C".into(),
+                quantity: Some(Decimal::from(500)),
+                price: None,
+                trigger_price: None,
+            },
+            3,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 3,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderModifyRejected { .. })),
+            "a held child holds nothing, so nothing about it can be underfunded: {out:?}"
+        );
+    }
+
+    /// `on_modify`'s pre-rework funds block sent every non-future SELL down a
+    /// branch that demanded a `base_currency`, which an `Equity` does not
+    /// have - so amending ANY equity sell was refused, with a message about the
+    /// futures margin ledger. The rework fixed it incidentally; without a test
+    /// the next person restoring the original condition restores the bug.
+    #[test]
+    fn an_equity_sell_can_be_amended() {
+        let mut e = equity_engine(&Shares::default());
+        trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
+        let mut sell = order_with("S1", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        sell.order_type = OrderType::Limit;
+        trade(&mut e, sell, 2);
+        let out = e.process_with_market(
+            ClientMessage::ModifyOrder {
+                client_order_id: "S1".into(),
+                quantity: Some(Decimal::from(50)),
+                price: None,
+                trigger_price: None,
+            },
+            3,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 3,
+                band_ticks: 0,
+            }),
+        );
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderModifyRejected { .. })),
+            "amending an equity sell is not a futures margin question: {out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|event| matches!(event, ServerMessage::OrderUpdated { .. })),
+            "{out:?}"
+        );
     }
 }

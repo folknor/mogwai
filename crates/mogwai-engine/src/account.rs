@@ -84,7 +84,10 @@ impl Engine {
         self.add_order_reservation(&after);
     }
 
-    fn order_reservation_entry(&self, order: &crate::OpenOrder) -> Option<(String, Decimal, bool)> {
+    pub(crate) fn order_reservation_entry(
+        &self,
+        order: &crate::OpenOrder,
+    ) -> Option<(String, Decimal, bool)> {
         // A HELD order-list child reserves nothing. It cannot execute until its
         // parent fills, and holding funds against it would let a bracket's exit
         // legs starve the entry that has to fill before either can do anything.
@@ -546,14 +549,15 @@ impl Engine {
         };
         if instrument.class.is_future() {
             return match self.margin.get(&submit.symbol) {
-                // Priced at the ORDER's price, since that is the notional the
+                // Priced at the CALLER'S `price`, since that is the notional the
                 // account is committing to; there is no mark for an order that
-                // has not filled.
-                Some(policy) => Reservation::Settlement(policy.initial(
-                    instrument,
-                    leaves,
-                    submit.price.unwrap_or_default(),
-                )),
+                // has not filled. It is the argument and not `submit.price`
+                // because a price-less `StopMarket` commits at its TRIGGER, and
+                // every caller already resolves that fallback - reaching back
+                // into `submit` discarded the resolution and reserved
+                // `initial(qty, 0)`, which under `MarginBasis::Notional` is
+                // nothing at all, so a resting stop held no collateral.
+                Some(policy) => Reservation::Settlement(policy.initial(instrument, leaves, price)),
                 None => Reservation::None,
             };
         }
@@ -566,7 +570,6 @@ impl Engine {
         // is not a short.
         if instrument.class.is_equity() {
             let policy = self.margin.get(&submit.symbol);
-            let price = submit.price.unwrap_or_default();
             return match (submit.side, policy) {
                 (Side::Buy, Some(policy)) => {
                     Reservation::Settlement(policy.initial(instrument, leaves, price))
