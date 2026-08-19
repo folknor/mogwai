@@ -117,6 +117,28 @@ pub(crate) struct SocketSession {
     /// teardown - the boat ticket above must outlive the writer's close frame,
     /// and the account must not be swept for that long.
     pub(crate) admission: Option<crate::run::Admission>,
+    /// THIS SESSION'S CLAIM ON THE PROCESS, taken in `ws_upgrade` BEFORE the
+    /// 101 is returned and dropped with the session, after the writer has
+    /// flushed its close.
+    ///
+    /// Taken in the upgrade handler rather than at the top of `handle_socket`,
+    /// and the difference is a real window rather than tidiness. `handle_socket`
+    /// runs in the task `on_upgrade` spawns, which is polled only AFTER hyper's
+    /// connection future has already resolved at the 101 - so a guard taken
+    /// there is not yet held when `axum::serve` can complete, and a completion
+    /// landing in that gap sees `sessions_drained` answer with this session
+    /// counted at zero and the runtime drops the task before its first poll.
+    /// That is the same defect `sessions_tx` closes, one window smaller. Taken
+    /// here it is held before the 101 exists, so there is no instant at which
+    /// this connection is upgraded and uncounted.
+    ///
+    /// Never read. It is a `watch::Receiver` whose LIVENESS is the whole
+    /// signal; see `Run::sessions_tx`.
+    #[expect(
+        dead_code,
+        reason = "its LIVENESS is the signal; reading it would be meaningless"
+    )]
+    pub(crate) alive: tokio::sync::watch::Receiver<()>,
 }
 
 /// THE SEAT IS RELEASED HERE, and it has to be here rather than at the freeze.
@@ -383,6 +405,8 @@ pub(crate) async fn ws_upgrade(
         passenger,
         client_session: query.session.clone(),
         admission: Some(admission),
+        // Before the 101, not inside the spawned handler. See the field.
+        alive: state.run.session_guard(),
     };
     ws.max_message_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
         .max_frame_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
@@ -499,6 +523,10 @@ fn completion_on_boat_clock(boat_sim: mogwai_protocol::SimClock) -> (u64, u64) {
     (now, now.saturating_sub(boat_sim.sim_epoch_ns))
 }
 
+/// Wall floor under the converted heartbeat period. See the comment at its one
+/// use; the sweeper's `MIN_SWEEP_WALL` is the precedent, not the source.
+const MIN_HEARTBEAT_WALL: std::time::Duration = std::time::Duration::from_millis(5);
+
 fn current_completion(
     completion: &mut tokio::sync::watch::Receiver<Option<(u64, u64)>>,
 ) -> Option<(u64, u64)> {
@@ -594,6 +622,10 @@ async fn run_writer(
 
 async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSession) {
     tracing::info!(symbol = %session.symbol, "socket bound to river");
+    // The session's claim on the process - `SocketSession::alive` - is already
+    // held, taken before the 101 rather than here. `session` lives to the end
+    // of this function, past the writer's close flush, which is where the claim
+    // is given up.
     let (sink, mut stream) = socket.split();
     let (out_tx, out_rx) = mpsc::channel(256);
     let (held_tx, held_rx) = mpsc::unbounded_channel();
@@ -758,8 +790,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
     let heartbeat = (state.cfg.server_heartbeat_ms > 0).then(|| {
         let out_tx = out_tx.clone();
         let beat_state = state.clone();
-        let period =
-            boat_sim.wall_duration(sim_duration_from_millis(beat_state.cfg.server_heartbeat_ms));
+        // FLOORED IN WALL TIME, for the same reason `MIN_SWEEP_WALL` exists on
+        // the sweep side and with the same 5 ms. The configured period is
+        // SIMULATED, so `wall_duration` shrinks it linearly with `speed` while
+        // the cost of a beat - a serialization, a channel send, a writer wake -
+        // does not, and `wall_duration`'s own floor is one NANOSECOND. At a high
+        // speed the heartbeat task therefore degenerated into a
+        // timer-granularity loop pushing uncharged frames into a 256-slot
+        // channel the peer has to read. Liveness needs a frame now and then, not
+        // a frame per timer tick, so the floor costs the signal nothing.
+        //
+        // ITS OWN CONSTANT, not the sweeper's, though the number matches
+        // today: these floor two different costs against two different
+        // budgets, and one name shared between them would make a change to
+        // either silently move the other.
+        let period = boat_sim
+            .wall_duration(sim_duration_from_millis(beat_state.cfg.server_heartbeat_ms))
+            .max(MIN_HEARTBEAT_WALL);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(period).await;
@@ -816,8 +863,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                 .await,
         );
     } else {
+        // THE VENUE'S OWN CLOSE ENDS THIS LOOP, without waiting on the peer.
+        // Every other exit below needs the client to act - its close frame, its
+        // EOF, or the run ending - so an evicted socket whose peer ignores the
+        // close frame stayed here, and its `SocketSession` held the account's
+        // SEAT on that boat. The connection that evicted it was then refused
+        // its own reconnect at a different speed. See `ExecLanes::closed`.
+        let closed = lanes.closed();
         loop {
             tokio::select! {
+                () = closed.notified() => break,
                 changed = completion.changed() => {
                     let completed = if changed.is_ok() { *completion.borrow_and_update() } else { None };
                     if completed.is_some() {

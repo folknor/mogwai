@@ -48,6 +48,15 @@ unpaced delivery, not a stopped clock - the underlying sim time still advances
 at wall rate. `server_heartbeat_ms` sets the server-originated liveness
 cadence; zero disables it.
 
+The heartbeat period is SIMULATED, so `speed` divides it: 1000 ms at speed 100
+is one beat per 10 ms of wall time. It is floored at 5 ms of wall time, whatever
+the configuration says. The cost of a beat - a serialization, a channel send, a
+writer wake - does not shrink with `speed`, so without the floor a high speed
+turns the heartbeat into a timer-granularity loop pushing frames the peer has to
+read. Liveness needs a frame now and then rather than one per timer tick, so
+nothing about the signal is lost; what it means is that a configured period
+below `5 ms / speed` is served at 5 ms rather than as written.
+
 ## Accounts that outlive their connection
 
 An account is the CLIENT'S and outlives the socket that named it, so a client

@@ -39,13 +39,27 @@ trusts yet.
 
 ## Machinery later rounds may build on and must not break
 
+- A `/ws` SESSION HOLDS A `Run::session_guard` FOR ITS WHOLE LIFE, and the
+  planned-completion shutdown waits on that set. Do not take a receiver for
+  anything else: the count IS the number of live sessions, and one other holder
+  makes `sessions_drained` a wait on something other than what it names. Do not
+  extend the wait to the SIGNAL path either - see the server round-3 section.
+- `scripts/flake_hunt.py` IS HOW A LIFECYCLE INTERMITTENT IS REPRODUCED in this
+  workspace. `brokkr test -N` cannot see the class: it always runs at
+  `--test-threads=1`, and these failures need a crowded host. Point the script
+  at the built libtest binary with a thread count and a busy-process count.
 - `mogwai-server` HAS EXACTLY TWO PASSENGER MINT SITES, and anything a ledger
   must be born holding is owed at BOTH: `Run::passenger` (first sight, and
-  therefore `seat`, `reopen` and `default_passenger`, which all route through it)
-  and `Run::open_account` (`POST /account`). A third one is a new invariant to
-  satisfy, not a convenience. The server round-2 close pass found the venue-arm
-  replay wired to only the first, with a full green gate and a doc asserting it
-  reached both.
+  therefore `seat` and `reopen`, which route through it) and `Run::open_account`
+  (`POST /accounts`). A third one is a new invariant to satisfy, not a
+  convenience. The server round-2 close pass found the venue-arm replay wired to
+  only the first, with a full green gate and a doc asserting it reached both.
+  THE ENGINE CONSTRUCTION IS A SEPARATE COUNT FROM THE MINT COUNT, which round 3
+  paid for: `Run::unopened_ledger` is a THIRD engine-construction site and is
+  correctly NOT a mint (nothing survives the call), so "two mint sites" was true
+  while a third hand-copy of the template quietly existed. Both mints and the
+  preview now build through `Run::template_engine`; add a template setting there
+  and nothing is owed anywhere else.
 - `Run::arm(account, arm)` IS THE ONE ARMING PATH, and `VenueArms` is the record
   that makes a late-boarding ledger indistinguishable from a seated one. Both
   halves of a control request - the record and the live application - are one
@@ -4717,3 +4731,161 @@ its defect in the machinery installed to abolish that defect family.
   contract before the code was.
 - Gate green, and the socket suites with it. No tape-generation path is touched,
   so no `TAPE_PROTOCOL_VERSION` bump is owed.
+
+## The server document, round 3: finding 8, lead 9 closed - DOCUMENT EXHAUSTED
+
+Finding 8's bullets plus the two intermittent lifecycle leads. FIVE DEFECTS
+FIXED, one refused, lead 9 CLOSED as a real serving-path bug, lead 10 not
+reproduced and left open with its evidence. Nothing here touches tape
+generation, so no `TAPE_PROTOCOL_VERSION` bump is owed.
+
+- LEAD 9 IS VENUE-SIDE AND THE MECHANISM IS `axum::serve`. Its graceful
+  shutdown tracks HYPER CONNECTIONS, and an upgraded connection's hyper future
+  resolves AT THE 101 - `axum-0.8.9/src/serve/mod.rs` drops the per-connection
+  `close_rx` the moment `serve_connection_with_upgrades` returns. So the
+  deadline task published completion on a watch channel, stopped the accept
+  loop in the next statement, the serve future resolved with sessions still
+  mid-frame, `main` returned, and the runtime dropped them - taking the
+  `RunComplete` and the WS 1000 close. THE COMMENT ABOVE IT CLAIMED THE
+  ORDERING IT DID NOT HAVE, which is the signature defect again, and
+  `docs/cli.md` had also been right and the code wrong - it says the venue
+  "drains live connections for up to the shutdown grace" - which is the seventh
+  instance of that reverse finding.
+- THE FIX IS `Run::session_guard` / `Run::sessions_drained`, a watch whose
+  RECEIVERS ARE THE LIVE SESSIONS. `handle_socket` takes one first and drops it
+  last, so the guard's lifetime is the session's rather than the hyper
+  connection's; a PLANNED completion waits for the set to empty inside the
+  existing `SHUTDOWN_GRACE`. A SIGNAL DELIBERATELY DOES NOT WAIT - nothing tells
+  a session to end on that path, so waiting would idle out the grace on any
+  venue with a socket attached and turn a clean stop into a bailed one. That
+  asymmetry is stated in `Run::sessions_drained`, in `serve_until_drained` and
+  in `docs/cli.md`; a later round widening the wait to the signal path breaks
+  `sigterm_closes_without_announcing_run_complete` and should read those first.
+- HOW TO REPRODUCE THIS FAMILY AT ALL, because no round before this one could.
+  `brokkr test` always passes `--test-threads=1`, which is the one condition
+  under which these never fire. `scripts/flake_hunt.py` runs an already-built
+  libtest binary at a chosen thread count with a chosen number of busy
+  processes: at 32 threads under 64 busy processes on a 32-core host the
+  completion binary produced 5 failures in 78 rounds, and 0 in 80 after the fix.
+  Use it before declaring a lifecycle intermittent unreproducible; do not reach
+  for `brokkr test -N`, which cannot see this class.
+- THE ENDING THE FILING RULED OUT WAS THE ONE THAT HAPPENED. The captured
+  message reads "after 15 content frames and a Failed ending" - a reset without
+  a closing handshake - and `watch_a_bounded_run` discards only
+  `Ending::Deadline`, so a run the helper "would have discarded" was accepted.
+  A discard argument is only as strong as the endings the helper enumerates.
+- LEAD 10 NOT REPRODUCED: 20 rounds of the lifecycle binary at 16 threads under
+  64 busy processes, zero failures, on the same harness that fired lead 9 five
+  times. What round 3 fixed instead is the AMBIGUITY, which was the thing
+  costing a cycle: `Venue::wait_for_exit` clamps its bound to the test's
+  remaining wall budget and reported "within 10s (or the test's remaining
+  budget)", which is two opposite verdicts in one sentence - a venue that hung,
+  or a test whose earlier phases spent the budget. It now reports how long it
+  actually waited and WHICH bound produced that. Read the next occurrence
+  against that before theorising about the shutdown path.
+- FINDING 8'S FIVE DEFECTS. `GET /account` minted a ledger for any id in an
+  unauthenticated query string - closed by `peek_passenger` plus
+  `Run::unopened_ledger`, which builds what the mint would have and retains
+  nothing, and DELIBERATELY DOES NOT REPLAY THE ARMS because replaying would
+  CONSUME a pending named arm on a read. `Run::passenger_holding` took an
+  account parameter, so a silent cancel no longer walks a stranger's book. The
+  run deadline slept a SPAN from wherever the spawn landed and now sleeps to
+  `sim.wall_ns(deadline_ns)` - `reference/architecture.md` already said the run
+  duration "starts at `run_start_ns` rather than boot", so that is the doc being
+  right again. An evicted socket held its cadence seat until the peer
+  cooperated, closed by `ExecLanes::closed` waking the read loop. The heartbeat
+  period floored at ONE NANOSECOND and now floors at 5 ms, in its own constant
+  rather than the sweeper's.
+- A BITE-CHECK CAUGHT A COIN-FLIP TEST BEFORE IT LANDED, and this is the one to
+  carry. The first shape of the silent-cancel test had two accounts BOTH resting
+  the same client order id and asserted that targeting one left the other alone.
+  Which book an unqualified walk finds first is `HashMap` iteration order, so it
+  passed against the defect half the time - and it passed the bite-check. The
+  shape that bites every run asks a book that holds NOTHING to cancel an id
+  another book DOES hold: one right answer whatever the order, and the
+  unqualified walk always reaches the holder. WHERE THE DEFECT'S OUTCOME IS
+  CHOSEN BY A HASH ORDER, TEST THE CASE WITH ONE OUTCOME.
+- Bite-checks: four perturbations, one at a time, each firing the assertion it
+  was aimed at - `sessions_drained` gutted, firing the live-guard assertion with
+  the empty-venue one passing first; `passenger_holding`'s scoping gutted,
+  firing the 404; `peek_passenger` swapped back to `passenger`, firing the 201;
+  and `send_close`'s notify removed, firing the reconnect poll red for its full
+  10 seconds rather than momentarily.
+- Gate green: 1296 plus 466, 0 orphaned, 59.9 s, plus both socket suites by
+  name. `a_socket_drained_alongside_other_work_reports_its_own_close` prints a
+  panic in that output and is a `should_panic` test - expected noise, not a
+  failure.
+
+## The server document, round 3 fix-and-commit: the fix that reopened its own finding
+
+The cold review over the round-3 fix pass found THE ROUND'S OWN FIX
+REINTRODUCING THE DEFECT IT CLOSED, one line below the fix. Closed here, with
+five smaller findings. The document is EXHAUSTED; lead 10 stays open with its
+evidence.
+
+- A DIAGNOSIS THAT MUTATES IS NOT A DIAGNOSIS, and this is the shape to carry.
+  `arm_divergence`'s `CancelOpenOrderSilently` arm scoped its SEARCH by the
+  request's `account` - the finding - and then, when the scoped search missed,
+  ran `Engine::cancel_open_order_silently` ON THE DEFAULT ACCOUNT to obtain a
+  reason from the `Err`. That call is not a query: on `Ok` it closes the order
+  out and reaps its held children. Before the scoping the fallback could only
+  ever err, because the unscoped walk had already found any resting id; after
+  it, `POST /control/divergence` naming an account that does NOT hold the id,
+  on a venue where the default account DOES, silently cancelled the default's
+  order and answered `404 unknown order` because the `Err` was `None`. THE
+  SCOPING FIX SUPPLIED THE PRECONDITION ITS OWN FALLBACK RELIED ON NOT HOLDING.
+  Closed two ways: the diagnosis now runs on the TARGETED ledger, and it runs
+  through `Engine::silent_cancel_refusal`, a query sharing its wording with the
+  cancel through `not_resting_reason`. The old `None` arm - build an unopened
+  ledger and ask IT - was dead by construction, since a ledger built and thrown
+  away can only answer "unknown order"; it is now that literal.
+- THE EXISTING TEST COULD NOT SEE IT because its holder was a NAMED account, so
+  the default ledger had nothing to lose. The new test makes THE DEFAULT ACCOUNT
+  the holder and a named account the target, and its bite is the SECOND cancel
+  rather than the 404: both shapes answer `404 unknown order`, so the only
+  observable is whether the order survived. Bite-checked by restoring the
+  mutating diagnosis as a text edit - the intended assertion fired, and the
+  venue's own log named the mechanism, "order already terminal (filled or
+  canceled)" on an order nothing had cancelled.
+- THREE ENGINE CONSTRUCTIONS, ONE TEMPLATE. `Run::unopened_ledger` argued in its
+  docstring that it is "not a third mint site", which is true about LIFECYCLE
+  and says nothing about CONSTRUCTION: `Engine::build` plus `set_oms_type` plus
+  `set_liquidation_band_ticks` was written out at three places and a future
+  template setting would have been owed at all three. All three now call
+  `Run::template_engine`. The general form: a claim that two things differ in
+  lifetime does not answer whether they are BUILT the same way.
+- THE SESSION GUARD MOVED TO THE UPGRADE HANDLER. Taken in `handle_socket` it
+  was inside the task `on_upgrade` spawns, which is polled only after hyper's
+  connection future has already resolved at the 101 - so a completion landing in
+  that gap saw `sessions_drained` answer with the session counted at zero. Same
+  shape as the defect it closed, one window smaller. It is now a
+  `SocketSession::alive` field taken before the 101 and dropped with the session
+  after the writer flush, which is the same move round 1 made for `Admission`.
+- THE DEADLINE SLEEP IS NOW A LOOP to `sim_ns(now) >= deadline_ns`. Waking once
+  at `wall_ns(deadline_ns)` can land a few hundred nanoseconds SHORT at speed
+  100, because `wall_ns` truncates - and only the scheduler's sleep overshoot
+  covered `elapsed_ns >= 30_000_000_000` in
+  `a_short_accelerated_run_is_not_over_before_it_is_ready`. That test's added
+  prose also claimed "the assertions below hold either way, since both readings
+  serve AT LEAST the declared duration", which is FALSE under the new reading:
+  the boot interval now comes out of the served window. Corrected in place. A
+  test whose margin is an accident of the scheduler is what this arc has warned
+  about most.
+- `scripts/flake_hunt.py` IS COMMITTED, and its red-round report no longer grows
+  quadratically - the panic extraction had no `break`, so each panic line dumped
+  the whole remaining output again. Lead 10 is open, so the question it answers
+  demonstrably recurs; a durable note citing an untracked file is a broken
+  reference the moment anyone else clones.
+- `docs/config.md` NOW DESCRIBES THE HEARTBEAT FLOOR. The 5 ms wall floor is a
+  user-visible change to what `server_heartbeat_ms` means at high `speed`, and
+  the durable doc described only the configured period.
+- `unopened_ledger`'s claim that skipping the arms costs nothing rests on no
+  armed effect being rendered in an `AccountState` or a `RiskState`. Verified
+  against both types as they stand - balances, positions, margins, timestamp -
+  and now STATED AT THE SITE as an assumption about the snapshot shape, because
+  a field added to either that does render one makes a preview and a real ledger
+  differ and nothing detects it.
+- Flake hunt re-run after the guard move: 0 failures in 80 rounds, 16 threads
+  under 64 busy processes, matching the fix pass's post-fix baseline.
+- Gate green: 1297 plus 466, 1820 pairs, 1763 run, 57 ignored, 0 orphaned, plus
+  both socket suites by name.

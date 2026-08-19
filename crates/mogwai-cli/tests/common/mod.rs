@@ -274,15 +274,39 @@ impl Venue {
     /// would otherwise absorb every overrun the phases before it left - and
     /// "the venue did not exit" is a claim about the venue, which a starved
     /// teardown has no standing to make.
+    /// WHICH BOUND FIRED IS REPORTED, and that is not cosmetic. The old message
+    /// read "within `{timeout}` (or the test's remaining budget)", and the two
+    /// readings are opposite verdicts: the venue outliving its shutdown grace is
+    /// a defect in the venue, while the clamp landing early is a statement about
+    /// how much budget the phases before this one spent on a loaded host. One
+    /// intermittent in `lifecycle.rs` was filed against the venue for two
+    /// documents of this arc on exactly that ambiguity. The waited-for time and
+    /// the requested cap are both printed, so the next reader compares them
+    /// instead of guessing.
     pub fn wait_for_exit(&mut self, timeout: Duration) -> VenueExit {
+        let waited_from = Instant::now();
         let deadline = teardown_deadline(timeout);
+        let clamped = deadline < waited_from + timeout;
         loop {
             if let Some(exit) = self.inner.exited() {
                 return exit;
             }
             assert!(
                 Instant::now() < deadline,
-                "venue did not exit within {timeout:?} (or the test's remaining budget)"
+                "venue did not exit. It was waited on for {:?}{}",
+                waited_from.elapsed(),
+                if clamped {
+                    format!(
+                        " - which is the TEST'S REMAINING BUDGET, not the {timeout:?} asked for, \
+                         so an earlier phase of this test spent the budget and this is not \
+                         evidence about the venue's shutdown"
+                    )
+                } else {
+                    format!(
+                        " - the full {timeout:?} asked for, with budget to spare, so the venue \
+                         itself did not stop"
+                    )
+                }
             );
             std::thread::sleep(Duration::from_millis(10));
         }

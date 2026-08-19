@@ -580,7 +580,26 @@ async fn sigterm_closes_without_announcing_run_complete() {
 /// the deadline were measured from boot instead of from the post-warmup
 /// `started_ns`, the accelerated duration would elapse DURING warmup and the
 /// run would be over before the launcher could connect. It must instead serve
-/// its whole declared duration after readiness.
+/// its whole declared duration from `run_start_ns`, which is what
+/// `reference/architecture.md` states the run duration is measured from.
+///
+/// FROM `run_start_ns`, NOT FROM READINESS, and the difference is small but
+/// real: the deadline task now sleeps to `sim.wall_ns(deadline_ns)` rather than
+/// for `deadline_ns - started_ns` from wherever the spawn happened to land. The
+/// clock is anchored right after warmup, so what used to be added on top was
+/// the boot interval - boat placement, the listener bind, the readiness write -
+/// which at speed 100 is a large multiple of the declared duration in simulated
+/// terms.
+///
+/// SO THIS TEST HAS LESS MARGIN THAN IT USED TO, and the honest statement is
+/// that it has none: the old span-based sleep served the declared duration PLUS
+/// the boot interval, and the fixed one serves the declared duration exactly.
+/// `elapsed_ns >= 30_000_000_000` is therefore a near-equality rather than a
+/// bound with room in it. What makes it hold is the deadline task's own loop -
+/// it sleeps until `sim_ns(now) >= deadline_ns` rather than once to a
+/// truncating conversion of it - and NOT the scheduler's sleep overshoot, which
+/// is what would have to cover the gap otherwise. If this ever goes red by a
+/// few hundred nanoseconds, that loop is what regressed.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {

@@ -8,6 +8,19 @@ foreground lifecycle and readiness line, config loading, and its tests.
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 Confidence labels are the hunter's own.
 
+EXHAUSTED AS OF ROUND 3, 2026-08-19. Every finding is fixed or recorded as
+refused, lead 9 is closed, and lead 10 is the one open item - not reproduced,
+with what was measured and what it rules out written into that section. A close
+pass follows.
+
+THE COLD REVIEW OVER ROUND 3 FOUND THE ROUND'S OWN FIX REINTRODUCING ITS OWN
+FINDING, closed in the fix-and-commit pass: scoping the silent cancel's SEARCH
+by account left the miss path's "diagnose why it missed" fallback running
+`cancel_open_order_silently` - which is not a query - unconditionally against
+the DEFAULT account, so a request naming an account that did not hold the id
+silently cancelled the default account's order and answered `404`. See finding
+8 below and the carry-forward's fix-and-commit section.
+
 The hunter read `ws`, `run`, `http`, `serve`, `sweeper`, `admission`,
 `boatyard`, `extremes` plus the `SimClock` contract they ride on. Nothing was
 built or run.
@@ -146,39 +159,29 @@ makes ties possible has to break that test first.
 
 ## 8. Smaller things
 
-- `GET /account?account=<anything>` creates a passenger. `run.passenger(&account_id)`
-  is create-on-first-sight, so an unauthenticated read endpoint mints ledgers.
-  They are born frozen and TTL-collectable, so it is bounded ONLY IF
-  `account_ttl_ms > 0`, and the default is "keep accounts forever"
-  (`serve_async` skips the reaper entirely at 0). A read should not allocate;
-  resolve-or-report-opening-balances without inserting.
-- `Run::passenger_holding` first-match-wins. Already flagged in its own doc
-  comment. `CancelOpenOrderSilently` names a client-chosen id with no account,
-  so on a multi-account venue it silently cancels the wrong trader's order. That
-  is a scenario control writing into an unrelated ledger - worth an account
-  parameter rather than a comment.
-- The run deadline over-runs by the boot interval. `serve_async` anchors `sim`
-  at `build_run_clock(&cfg, now_ns())` right after warmup, then spawns the
-  deadline task AFTER boat placement, listener bind and readiness write,
-  sleeping the full `deadline_ns - started_ns`. The declared duration is
-  therefore measured from an instant later than the sim epoch. Should sleep to
-  `sim.wall_ns(deadline_ns)`, not for a span.
-- An evicted socket that ignores its close frame holds its seat. `evict_account`
-  sends `Outbound::Close`; `run_writer` writes it and breaks; but
-  `handle_socket`'s read loop only exits on the peer's own close or EOF. Until
-  then the `SocketSession` lives and `try_sit` still holds the seat, so the
-  newcomer's DIFFERENT-SPEED reconnect is refused with "already seated". The
-  eviction should also wake the read loop.
-- Heartbeat period floors at 1 ns. `wall_duration` clamps to 1 ns, so at a high
-  `speed` the heartbeat task becomes a timer-granularity loop (roughly 1 kHz)
-  pushing uncharged frames into a 256-slot channel. `MIN_SWEEP_WALL` exists for
-  exactly this reason on the sweep side; the heartbeat has no equivalent floor.
-- `refuse_all` reserves `submitted_orders(cmd).len()` and
-  `try_reserve_boundary_frames` does `frames.max(1)`. For a non-submit command
-  that path would reserve one frame and produce zero events - harmless today
-  because every `refuse_all` call site is guarded by a
-  `submitted_orders(...).first()`, but the `max(1)` is papering over a shape
-  that should be `NonZeroUsize`.
+FIVE OF THE SEVEN BULLETS WERE DEFECTS AND ARE FIXED, 2026-08-19, and are
+deleted rather than annotated. What each was and how it was closed is in
+`notes/bug-loop-carry-forward.md` under the round-3 section. What is left below
+is the one bullet refused and the two that are owner questions rather than
+defects.
+
+THE CROSS-ACCOUNT SILENT CANCEL TOOK TWO PASSES. Scoping
+`Run::passenger_holding` closed the SEARCH; the miss path's diagnosis still ran
+the mutating cancel against the default account, which reopened the same defect
+on the miss path only. It now diagnoses off the TARGETED ledger through
+`Engine::silent_cancel_refusal`, a query. The regression test that catches this
+half has THE DEFAULT ACCOUNT as the holder, which is the case the first test
+structurally could not express.
+
+- `refuse_all`'s `frames.max(1)` REFUSED as a defect, kept as a shape note.
+  The claim was that a non-submit command reaching that path would reserve one
+  frame and produce zero events. Every `refuse_all` call site is guarded by a
+  `submitted_orders(...).first()`, which the report itself says, so the branch
+  is unreachable and the `max(1)` costs one unspent reservation that the
+  `Reservation` returns on drop. Turning the count into a `NonZeroUsize` is a
+  signature change across the admission boundary to make an unreachable state
+  unrepresentable, which is worth doing and is not a bug fix; filed in
+  `notes/todo.md` rather than done inside a fix pass.
 
 - `reject_while_closed` JUDGES MARKETABILITY AGAINST THE STATED PRICE while the
   engine judges it against the BAND-DRAWN trigger, so the two can disagree by up
@@ -216,44 +219,64 @@ makes ties possible has to break that test first.
   that is asked, the venue serves the type one way standalone and another way as
   a child, and says so in the durable doc rather than in a comment.
 
-## 9. LEAD, not a finding: a completion announcement that reached one socket and not another
+## 9. CLOSED 2026-08-19: the venue outran its own completion announcement
 
-Filed 2026-08-19 from the `bugs-tests-lab-cli` close pass, and repeated here
-because that document is CLOSED and its carry-forward section will be trimmed.
-Nothing else is watching this.
+REPRODUCED AND FIXED. It is venue-side, it was never about the test, and the
+mechanism is one sentence: `axum::serve`'s graceful shutdown tracks HYPER
+CONNECTIONS, and an upgraded connection's hyper future resolves AT THE 101, not
+when the websocket ends. Read it in `axum-0.8.9/src/serve/mod.rs` - the
+per-connection task drops its `close_rx` the moment
+`serve_connection_with_upgrades` returns. So the deadline task published
+completion on a watch channel, stopped the accept loop in the very next
+statement, the serve future resolved with every session still mid-frame, `main`
+returned and the runtime dropped them - taking the `RunComplete` frame and the
+WS 1000 close with it. The peer saw a reset.
 
-`crates/mogwai-cli/tests/completion.rs`'s
-`run_complete_is_stamped_on_the_receiving_sockets_clock` failed ONE of that
-pass's two full `brokkr check --gate` runs and passed the other, on
-`.expect("second boat receives completion")`.
+THAT MATCHES THE FILED SYMPTOM EXACTLY, including the part that made it read as
+a venue lead: the socket WAS a live session, the venue HAD served it content,
+and the drain ended - on `Ending::Failed`, a reset without a closing handshake,
+which `watch_a_bounded_run` accepts because it discards only `Ending::Deadline`.
+The `serve.rs` comment claimed the ordering it did not have - "announces
+completion on every open socket and only then stops the accept loop" - which is
+this arc's signature defect once more.
 
-WHY THAT IS A VENUE LEAD RATHER THAN A FLAKY TEST. The whole family of
-attach-race failures in that file was closed by `watch_a_bounded_run`, and the
-`expect` sits PAST every premise that helper checks: it launches, attaches a
-socket per boat, drains each, and DISCARDS the whole run unless every socket
-saw at least one `Message::Text` frame and its drain ended cleanly rather than
-on the deadline. So reaching the `expect` at all establishes that the second
-socket was a live session, that the venue served content on it, and that the
-drain ran to a clean end - and the announcement still was not there. The
-remaining explanations are venue-side: a bounded run whose completion frame is
-not written to every attached socket before teardown closes them. Suspect the
-per-socket writer's ordering against the deadline task rather than the test.
+HOW IT WAS REPRODUCED, since `brokkr test` never fires it: the runner always
+passes `--test-threads=1`, and the failure needs a crowded host. Running the
+built `completion` binary directly at `--test-threads=32` under 64 busy
+processes (`scripts/flake_hunt.py`) produced 5 failures in 78 rounds - the filed
+test, `run_complete_reaches_every_open_socket` and
+`a_short_accelerated_run_is_not_over_before_it_is_ready`, all three the same
+shape. The captured message names the mechanism: "after 15 content frames and a
+Failed ending".
 
-REPRODUCE BEFORE BELIEVING IT: one failure in two full gate runs on this host,
-and it has not been seen since. A round that cannot reproduce it should say so
-rather than close it.
+FIXED by `Run::session_guard` / `Run::sessions_drained`: every `/ws` session
+holds a watch receiver from BEFORE THE 101 until after its writer has flushed,
+and a PLANNED completion waits for that set to empty before the process leaves,
+inside the existing `SHUTDOWN_GRACE`. A SIGNAL deliberately does not wait -
+nothing tells a session to end on that path, so waiting would idle out the grace
+- and `docs/cli.md` now states both halves. 80 rounds at the same load and
+thread count, zero failures.
 
-IT REPRODUCED, 2026-08-19, on the `bugs-data` round-1 gate - same test, same
-`.expect("second boat receives completion")` at `completion.rs:510`, on a tree
-whose changes were confined to `mogwai-data`, one `mogwai-cli` comment and
-markdown. It passed on the immediately following gate run of the identical tree.
-So it is INTERMITTENT AND REAL, not an artifact of one pass, and the venue-side
-reading above stands. Note what it costs when it fires: this test aborts the
-parallel sweep, which reports every `mogwai-data` test as orphaned - the exact
-ambiguity `AGENTS.md` warns reads as a brokkr coverage bug. Check for a crashed
-test first, and this is the one to expect.
+THE GUARD MOVED ONCE MORE IN THE FIX-AND-COMMIT PASS, and the reason is the same
+mechanism one notch smaller. Taken at the top of `handle_socket` it sat inside
+the task `on_upgrade` spawns, which is polled only AFTER hyper's connection
+future has already resolved at the 101 - so a completion landing in that window
+saw the session counted at zero and the runtime dropped the task before its
+first poll. It is now a `SocketSession::alive` field, taken in `ws_upgrade`
+before the 101 and dropped with the session after the writer flush. 80 rounds
+after the move, zero failures.
 
-## 10. LEAD, not a finding: a SECOND intermittent lifecycle test, on shutdown rather than completion
+WHAT THE ORIGINAL LEAD GOT RIGHT AND WHAT IT GOT WRONG, kept because the
+reasoning is reusable. Right: it insisted the failure sat PAST every premise
+`watch_a_bounded_run` checks, so the socket really was a live session the venue
+really had served, and it named the writer's ordering against the deadline task
+as the place to look. Wrong: it read a discarded run as impossible, when
+`Ending::Failed` is accepted by that helper and is precisely what a reset
+produces - the helper discards only `Ending::Deadline`. The general lesson is
+that "the helper would have discarded it" is only as strong as the ENDINGS the
+helper enumerates, and this one enumerated four and rejected one.
+
+## 10. LEAD, STILL OPEN: a SECOND intermittent lifecycle test, on shutdown rather than completion
 
 Filed 2026-08-19 from the `bugs-data` round-2 close pass. DISTINCT from lead 9 -
 different test, different file, different failure mode - and recorded separately
@@ -281,8 +304,33 @@ is that the orphan count equals the missing sweep's pass count. There are now
 TWO tests known to produce that wall; check for a crashed test before suspecting
 the tool.
 
-Not chased by the filing round - out of its scope. Reproduce before believing a
-verdict: one failure in two runs on one host.
+NOT REPRODUCED BY ROUND 3, 2026-08-19, and here is exactly what was tried and
+what it rules out. The built `lifecycle` binary was run directly at
+`--test-threads=16` for 20 rounds under 64 busy processes on a 32-core host -
+the same harness that DID reproduce lead 9 five times in 78 rounds, so the load
+is not the reason nothing fired. Zero failures. That does not close it, and
+"not seen since" is not a closure.
+
+WHAT ROUND 3 DID CHANGE IS THE AMBIGUITY, which was the cheaper prize and is the
+thing that was costing a cycle. The message the filing quotes - "venue did not
+exit within 10s (or the test's remaining budget)" - is TWO OPPOSITE VERDICTS in
+one sentence. `Venue::wait_for_exit` clamps its bound to the test's remaining
+wall budget, so on a crowded 32-way sweep the wait may have been far shorter
+than the 10 s the caller asked for, and the failure would then be a statement
+about what the phases before it spent rather than about the venue's shutdown.
+The helper now reports HOW LONG it actually waited and WHICH bound produced
+that, so the next occurrence arrives as one verdict. Re-read the lead against
+that output before theorising about the shutdown path; the boring reading is
+still the one to rule out first, and it is now readable rather than inferable.
+
+STILL UNRULED-OUT if the clamp turns out not to be it: a shutdown path that
+waits on something the signal does not interrupt. The two concrete candidates a
+later round should look at are `spawn_blocking` work in flight at signal time -
+the sweeper's tape walk and the boatyard's `worker.join()` both run there, and a
+tokio runtime being dropped WAITS for blocking tasks that have started - and the
+boat worker's own responsiveness to its cancel flag. Note that round 3's
+completion-path session wait does NOT touch this path: a signal deliberately
+does not wait for sessions, so nothing here got slower.
 
 ## What the hunter would actually rewrite
 

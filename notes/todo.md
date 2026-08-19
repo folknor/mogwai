@@ -217,6 +217,26 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- `try_reserve_boundary_frames` TAKES A `usize` AND DOES `frames.max(1)`, which
+  is an unreachable state made harmless rather than unrepresentable. Round 3 of
+  `notes/bugs-server.md` refused it as a defect - every `refuse_all` call site
+  is guarded by a `submitted_orders(...).first()`, so the zero-frame case cannot
+  arrive, and an unspent reservation is returned when the `Reservation` drops.
+  Turning the count into a `NonZeroUsize` moves the guarantee from the call
+  sites to the signature, which is worth doing and is a change across the
+  admission boundary rather than a bug fix.
+
+- A REFUSED `/ws` UPGRADE CAN STILL MINT A LEDGER, and it is now the only
+  allocating read left. `ws_upgrade` calls `Run::passenger` on the
+  non-resetting path in order to take the seat before the eviction, and the
+  cadence refusal comes AFTER it, so a request refused with the 400 leaves a
+  fresh account behind. Round 3 closed the sibling case - `GET /account` no
+  longer mints, resolving through `peek_passenger` and previewing an unopened
+  ledger with `Run::unopened_ledger` - and deliberately did not touch this one,
+  because the ordering it stands on is the round-1 ruling that every refusal is
+  decided before the seat. Whether a refusal may allocate an account is the
+  question; `peek_passenger`'s doc states the limit in place.
+
 - `/control/divergence` ALLOCATES A PENDING ARM RECORD PER NAMED ACCOUNT that
   has not connected yet, capped at `MAX_PENDING_ACCOUNT_ARMS` (64) and shed from
   the oldest end. It does NOT mint a ledger - a draft of the round-2 fix did,

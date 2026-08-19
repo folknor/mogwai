@@ -1940,6 +1940,34 @@ impl Engine {
         }
     }
 
+    /// Why `cancel_open_order_silently` would refuse `client_order_id`, or
+    /// `None` when it is resting and the cancel would succeed.
+    ///
+    /// A QUERY, and it exists because the control plane's miss path needs one.
+    /// That path ran the CANCEL itself to obtain its diagnosis and read the
+    /// `Err`, which performs the operation it is explaining: on the ledger that
+    /// happened to hold the id, the "diagnosis" silently cancelled a resting
+    /// order and its held children and then reported `Ok` as "unknown order".
+    /// A DIAGNOSIS THAT MUTATES IS NOT A DIAGNOSIS.
+    ///
+    /// The wording is shared with the cancel through `not_resting_reason`, so
+    /// the two can only agree.
+    pub fn silent_cancel_refusal(&self, client_order_id: &str) -> Option<String> {
+        self.open
+            .position(client_order_id)
+            .is_none()
+            .then(|| self.not_resting_reason(client_order_id))
+    }
+
+    /// Why an id is not currently resting: unknown to this ledger, or seen and
+    /// already terminal. One wording, two readers.
+    fn not_resting_reason(&self, client_order_id: &str) -> String {
+        match self.seen_client_order_ids.get(client_order_id) {
+            Some(_) => "order already terminal (filled or canceled)".into(),
+            None => "unknown order".into(),
+        }
+    }
+
     /// The control-plane out-of-band cancel (`CancelOpenOrderSilently`):
     /// remove a RESTING order from the book and free its reservation,
     /// emitting no lifecycle event - the fault class where the venue
@@ -1954,10 +1982,7 @@ impl Engine {
         ts: u64,
     ) -> Result<(), String> {
         let Some(pos) = self.open.position(client_order_id) else {
-            return Err(match self.seen_client_order_ids.get(client_order_id) {
-                Some(_) => "order already terminal (filled or canceled)".into(),
-                None => "unknown order".into(),
-            });
+            return Err(self.not_resting_reason(client_order_id));
         };
         let order = self.open[pos].clone();
         // The children go with it, and they go silently too. A held child of an

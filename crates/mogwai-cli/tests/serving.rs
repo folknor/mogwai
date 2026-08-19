@@ -3335,6 +3335,280 @@ fn a_generator_arm_on_an_unboated_river_is_accepted() {
     );
 }
 
+/// AN EVICTED SOCKET RELEASES ITS SEAT WITHOUT THE PEER'S COOPERATION.
+///
+/// `evict_account` writes a close frame and retires the lane, but the evicted
+/// socket's own read loop used to leave only on the peer's close, the peer's
+/// EOF, or the run ending. A client that ignores its close frame - or is merely
+/// slow to act on it - therefore kept its `SocketSession`, and with it the
+/// account's SEAT on that boat's cadence, for as long as it liked. The next
+/// connection wanting that account at a DIFFERENT speed was then refused with
+/// "already seated", by a socket the venue had already thrown off.
+///
+/// THE EVICTED SOCKET IS NEVER READ AFTER THE EVICTION, deliberately: reading
+/// it is what a cooperative client does, and a test that reads it is testing
+/// the cooperative path. It is held in scope so its TCP connection stays up.
+///
+/// THE FINAL CONNECT IS POLLED, because the seat is released by the evicted
+/// session's teardown and there is no venue surface that reports it. The
+/// distinction the poll rests on is not a margin: under the defect the seat is
+/// held until the peer acts and no amount of waiting frees it, so a bounded
+/// retry separates "released" from "held forever" rather than betting on how
+/// fast a host is.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let at = |session: &str, speed: &str| {
+        format!(
+            "{}?account=WYRD-920&session={session}&speed={speed}",
+            venue.ws_url()
+        )
+    };
+    let served = async |socket: &mut WsSocket| {
+        let deadline = common::deadline(Duration::from_secs(10));
+        loop {
+            let message = tokio::time::timeout_at(deadline, socket.next())
+                .await
+                .expect("the venue serves this socket a frame")
+                .expect("the socket stays open")
+                .expect("a well-formed frame");
+            if matches!(message, Message::Text(_)) {
+                return;
+            }
+        }
+    };
+
+    let (mut ignored, _) = tokio_tungstenite::connect_async(at("alpha", "1"))
+        .await
+        .expect("the first socket seats the account at speed 1");
+    served(&mut ignored).await;
+
+    let (mut evicting, _) = tokio_tungstenite::connect_async(at("beta", "1"))
+        .await
+        .expect("a second client claims the account at the same speed");
+    served(&mut evicting).await;
+
+    // The evicting socket leaves properly, so the only thing that can still be
+    // holding the speed-1 seat is the socket that was thrown off.
+    evicting
+        .close(None)
+        .await
+        .expect("close the evicting socket");
+    while evicting.next().await.is_some() {}
+
+    let deadline = common::wall_deadline(Duration::from_secs(10));
+    let reconnected = loop {
+        match tokio_tungstenite::connect_async(at("gamma", "2")).await {
+            Ok((socket, _)) => break socket,
+            Err(refusal) => assert!(
+                std::time::Instant::now() < deadline,
+                "the account never came free at a new cadence, so the socket the venue evicted is \
+                 still holding its seat: {refusal}"
+            ),
+        }
+    };
+    drop(reconnected);
+    drop(ignored);
+}
+
+/// A SILENT CANCEL NAMING AN ACCOUNT SEARCHES THAT ACCOUNT'S BOOK AND NO
+/// OTHER.
+///
+/// Client order ids are CLIENT-CHOSEN, so two subagents numbering their orders
+/// from one collide on a shared exchange. The lookup walked every passenger and
+/// took the first match, so a scenario cancelling `ORD-1` on one subagent could
+/// cancel a stranger's `ORD-1` instead - and a silent cancel emits no lifecycle
+/// event by design, so the victim would learn of it only by querying.
+///
+/// THE SUBJECT IS AN ACCOUNT WHOSE BOOK IS EMPTY, and that is what makes the
+/// statement deterministic rather than a coin flip. Two accounts BOTH resting
+/// the same id is the scenario, but it is not a testable one: which book an
+/// unqualified walk finds first is `HashMap` iteration order, so a test built
+/// that way passes against the defect half the time and a bite-check on it
+/// proves nothing. Asking a book that holds NOTHING to cancel an id another
+/// book DOES hold has one right answer whatever the order - a miss - and the
+/// unqualified walk always reaches the holder, so the perturbation fires every
+/// run.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_silent_cancel_naming_an_account_reaches_only_that_accounts_book() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut mine, _) =
+        tokio_tungstenite::connect_async(format!("{}?account=WYRD-910", venue.ws_url()))
+            .await
+            .expect("open an account socket");
+    mine.send(Message::Text(
+        format!(
+            r#"{{"type":"SubmitOrder","client_order_id":"COLLIDE-1","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+            venue.symbol
+        )
+        .into(),
+    ))
+    .await
+    .expect("submit");
+    // Waited for BEFORE the control request, or the cancel below can
+    // legitimately find nothing resting and the whole test passes vacuously.
+    await_acceptance(&mut mine, "COLLIDE-1").await;
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-911","balances":{"USDT":"1000"}}"#,
+    );
+    assert_eq!(status, 201, "the stranger's account opens: {body}");
+
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"account":"WYRD-911","type":"CancelOpenOrderSilently","client_order_id":"COLLIDE-1"}"#,
+    );
+    assert_eq!(
+        status, 404,
+        "WYRD-911 rests no COLLIDE-1, so the request misses rather than reaching into WYRD-910's \
+         book: {body}"
+    );
+
+    // And the order it must not have touched is still there, which the venue
+    // states by accepting the properly-targeted cancel of it.
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"account":"WYRD-910","type":"CancelOpenOrderSilently","client_order_id":"COLLIDE-1"}"#,
+    );
+    assert_eq!(
+        status, 202,
+        "WYRD-910's own COLLIDE-1 was still resting, so the stranger's request did not take it: \
+         {body}"
+    );
+}
+
+/// AND THE MISS PATH'S DIAGNOSIS DOES NOT CANCEL EITHER.
+///
+/// The scoped lookup above closes the SEARCH, and the round-3 cold review found
+/// the same round's fix reintroducing the defect one line below it. When the
+/// scoped search misses, the handler asks a ledger WHY, so it can tell "unknown
+/// id" from "already terminal" - and it asked by running
+/// `cancel_open_order_silently` and reading the `Err`. That call is not a query:
+/// on `Ok` it closes the order out and reaps its held children. It also asked
+/// the DEFAULT account rather than the one the request named, which was safe
+/// only while the search was unscoped, because then any id the default rested
+/// had already been found and the diagnosis could only ever err.
+///
+/// SO THE HOLDER HERE IS THE DEFAULT ACCOUNT, which is exactly what the scoping
+/// test above cannot express: its holder is a named account, so the default's
+/// ledger has nothing to lose and the perturbation is invisible. A socket that
+/// names no account rests the id; a named account that does not hold it is the
+/// target; and the resting order must still be there afterwards.
+///
+/// THE BITE IS THE SECOND CANCEL, not the 404. Both shapes answer `404 unknown
+/// order` - under the defect because the cancel SUCCEEDED and `.err()` was
+/// `None`. The only observable difference is whether the order survived, and an
+/// unqualified cancel of it afterwards is how the venue states that: `202` if it
+/// was still resting, `404` if the diagnosis ate it.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_missed_silent_cancel_diagnoses_without_cancelling_the_default_accounts_order() {
+    let venue = spawn(&["--config", &fast_config()]);
+    // NO `account=`, so this socket trades the venue's default account - the
+    // ledger the miss path used to diagnose off.
+    let (mut mine, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("open a default-account socket");
+    mine.send(Message::Text(
+        format!(
+            r#"{{"type":"SubmitOrder","client_order_id":"COLLIDE-2","symbol":"{}","side":"Buy","order_type":"Limit","quantity":"0.01","price":"1","time_in_force":"Gtc"}}"#,
+            venue.symbol
+        )
+        .into(),
+    ))
+    .await
+    .expect("submit");
+    await_acceptance(&mut mine, "COLLIDE-2").await;
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-912","balances":{"USDT":"1000"}}"#,
+    );
+    assert_eq!(status, 201, "the stranger's account opens: {body}");
+
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"account":"WYRD-912","type":"CancelOpenOrderSilently","client_order_id":"COLLIDE-2"}"#,
+    );
+    assert_eq!(
+        status, 404,
+        "WYRD-912 rests no COLLIDE-2, so the request misses: {body}"
+    );
+
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"type":"CancelOpenOrderSilently","client_order_id":"COLLIDE-2"}"#,
+    );
+    assert_eq!(
+        status, 202,
+        "the default account's COLLIDE-2 was still resting after the missed request, so the \
+         diagnosis did not cancel it: {body}"
+    );
+}
+
+/// A PULLED SNAPSHOT DOES NOT OPEN THE ACCOUNT IT REPORTS ON.
+///
+/// `GET /account?account=` is unauthenticated and resolved through the same
+/// account id space `/ws` and `POST /accounts` use. It used to resolve through
+/// the create-on-first-sight mint, so reading about an id CREATED a ledger
+/// under it - and the default `account_ttl_ms = 0` never collects one, so a
+/// scanner walking ids left one ledger behind per id, permanently.
+///
+/// THE OBSERVABLE IS `POST /accounts`, NOT THE SNAPSHOT, and that is the whole
+/// design of this test. The snapshot's CONTENT is identical either way, by
+/// construction - the preview is built from the same template the mint uses -
+/// so asserting on the body would pass against both shapes and prove nothing.
+/// `POST /accounts` refuses an id that is already open with a 409, so a 201
+/// after the read is the venue stating that the read left nothing behind. The
+/// 409 half is asserted too, on a second post, so the first assertion cannot be
+/// read as `/accounts` simply never refusing.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn a_pulled_snapshot_does_not_open_the_account_it_reports_on() {
+    let venue = spawn(&["--config", &fast_config()]);
+
+    let (status, body) = http_get(&venue.http_base(), "/account?account=WYRD-READ");
+    assert_eq!(status, 200, "an unopened account still answers: {body}");
+    let snapshot: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        snapshot["account_id"], "WYRD-READ",
+        "the answer is about the account that was asked for: {body}"
+    );
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-READ","balances":{"USDT":"1000"}}"#,
+    );
+    assert_eq!(
+        status, 201,
+        "the read left no ledger behind, so the client's own open still states its terms: {body}"
+    );
+
+    let (status, body) = http_post_json(
+        &venue.http_base(),
+        "/accounts",
+        r#"{"account_id":"WYRD-READ","balances":{"USDT":"1000"}}"#,
+    );
+    assert_eq!(
+        status, 409,
+        "and `/accounts` does refuse an id that IS open, so the 201 above is evidence: {body}"
+    );
+
+    // The client's own balance is what the account carries, not the venue
+    // template a mint on the read path would have handed it.
+    let (_, body) = http_get(&venue.http_base(), "/account?account=WYRD-READ");
+    assert!(
+        body.contains("1000"),
+        "the opened ledger carries the client's balance: {body}"
+    );
+}
+
 /// `CancelOpenOrderSilently` takes its clock from the TARGETED ORDER: the id
 /// already determines the order, hence its symbol and its river. A request that
 /// also supplies a `symbol` may not disagree - the venue refuses rather than

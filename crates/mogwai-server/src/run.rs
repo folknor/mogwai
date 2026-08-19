@@ -767,6 +767,27 @@ pub(crate) struct Run {
     /// materialized before readiness; other rivers materialize it on first read.
     pub(crate) warmup_ns: u64,
     complete_tx: watch::Sender<Option<(u64, u64)>>,
+    /// One receiver per LIVE WEBSOCKET SESSION, held from BEFORE THE 101 until
+    /// after that session's writer has flushed its close, so the process can
+    /// tell whether anything is still being served.
+    ///
+    /// THE ACCEPT LOOP IS NOT THE ANSWER TO THAT QUESTION, which is the whole
+    /// reason this exists. `axum::serve`'s graceful shutdown tracks HYPER
+    /// CONNECTIONS, and an upgraded connection's hyper future resolves at the
+    /// 101 rather than when the websocket ends - `serve/mod.rs` drops its
+    /// `close_rx` the moment `serve_connection_with_upgrades` returns. So a
+    /// venue that waited only on axum was racing its own sessions: the run's
+    /// completion was published on a watch channel, the accept loop stopped, the
+    /// serve future resolved, `main` returned, and the runtime dropped every
+    /// session task mid-flight - taking the `RunComplete` frame and the WS 1000
+    /// close with it. The peer then saw a reset rather than a completed run,
+    /// intermittently and only on a loaded host, which is exactly the shape the
+    /// two lifecycle leads reported.
+    ///
+    /// Nothing else may take a receiver. The count is the number of live
+    /// sessions, and a holder that is not one makes `sessions_drained` a wait on
+    /// something other than what it names.
+    sessions_tx: watch::Sender<()>,
     /// Every live connection's outbound lanes, so venue-ORIGINATED output - a
     /// trigger fill nobody commanded - reaches the connection it belongs to.
     ///
@@ -834,6 +855,7 @@ impl Run {
             started_ns,
         );
         let (complete_tx, _) = watch::channel(None);
+        let (sessions_tx, _) = watch::channel(());
         // No engine is built here. A ledger belongs to a PASSENGER, and no
         // passenger exists until a connection arrives, so the run carries only
         // what one is opened from.
@@ -860,9 +882,46 @@ impl Run {
             deadline_ns: run_duration_ns.map(|duration| started_ns.saturating_add(duration)),
             warmup_ns,
             complete_tx,
+            sessions_tx,
             lanes: Mutex::new(Vec::new()),
             order_owners: Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// An engine built from the venue template, for `account_id`, holding
+    /// `balances`.
+    ///
+    /// THE ONE PLACE THE TEMPLATE IS APPLIED. Three callers build an engine -
+    /// the mint on first sight, the client's own `open_account`, and the
+    /// throwaway preview `unopened_ledger` - and each carried its own copy of
+    /// `Engine::build` plus the two `set_*` calls. Those copies are the
+    /// two-implementations-without-a-gate shape: the next setting added to the
+    /// template would be owed at three sites, nothing would notice two of them,
+    /// and the preview would then answer for a ledger the venue would never
+    /// actually open. Lifecycle still differs per caller - only this
+    /// construction is shared.
+    ///
+    /// `balances` is a parameter rather than read from the template because
+    /// `open_account` is the client stating its own; the other two pass the
+    /// template's.
+    fn template_engine(
+        &self,
+        account_id: &mogwai_protocol::AccountId,
+        balances: std::collections::HashMap<String, Decimal>,
+    ) -> Engine {
+        // The ledger starts EMPTY of instruments. One becomes tradable when a
+        // passenger binds a symbol or names it on an order, through
+        // `ensure_instrument` - which is per passenger for the same reason the
+        // engine is.
+        let mut engine = Engine::build(EngineConfig {
+            account_id: account_id.clone(),
+            instruments: Vec::new(),
+            balances,
+            fill_seed: self.template.fill_seed,
+        });
+        engine.set_oms_type(self.template.oms_type);
+        engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
+        engine
     }
 
     /// The passenger trading under `account_id`, created on first sight.
@@ -881,18 +940,7 @@ impl Run {
         if let Some(seated) = passengers.get(account_id.as_str()) {
             return Arc::clone(seated);
         }
-        // The ledger starts EMPTY of instruments. One becomes tradable when this
-        // passenger binds a symbol or names it on an order, through
-        // `ensure_instrument` - which is per passenger for the same reason the
-        // engine is.
-        let mut engine = Engine::build(EngineConfig {
-            account_id: account_id.clone(),
-            instruments: Vec::new(),
-            balances: self.template.opening_balances.clone(),
-            fill_seed: self.template.fill_seed,
-        });
-        engine.set_oms_type(self.template.oms_type);
-        engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
+        let mut engine = self.template_engine(account_id, self.template.opening_balances.clone());
         // Opened with whatever the operator has armed - venue-wide, and against
         // this account by name before it existed - so this ledger is
         // indistinguishable from one that was seated when the arm arrived. Held
@@ -943,6 +991,46 @@ impl Run {
         drop(arms);
         passengers.insert(account_id.as_str().to_owned(), Arc::clone(&seated));
         seated
+    }
+
+    /// The ledger an account nobody has opened WOULD open with, built here and
+    /// retained nowhere.
+    ///
+    /// THIS IS NOT A THIRD MINT SITE, and the difference is exactly that
+    /// nothing survives the call: no passenger is inserted, no pending named
+    /// arm is consumed, no seat and no freeze clock start. The CONSTRUCTION is
+    /// nevertheless shared with both real mint sites, through
+    /// `template_engine`, because "not a mint" is a claim about lifecycle and
+    /// says nothing about whether a preview is built the same way as the thing
+    /// it previews. It exists so a READ
+    /// can answer for an unknown account without allocating one -
+    /// `GET /account?account=<anything>` is unauthenticated, and creating a
+    /// ledger per id anybody names makes an endpoint that changes nothing into
+    /// an unbounded allocator, bounded only when `account_ttl_ms > 0` and the
+    /// default is to keep accounts forever.
+    ///
+    /// THE ARMS ARE DELIBERATELY NOT REPLAYED, which is what keeps this honest
+    /// rather than a fourth thing to keep in sync. Replaying the venue record
+    /// would CONSUME this account's pending arm, so a read would disarm what an
+    /// operator armed against an account that has not connected. Nothing the
+    /// arms touch - a fee surcharge, an armed engine divergence, a transport
+    /// window - is rendered in an `AccountState` or a `RiskState`, so the
+    /// answer is identical either way. THAT LAST SENTENCE IS AN ASSUMPTION
+    /// ABOUT THE SNAPSHOT SHAPE, stated here rather than left implicit: it
+    /// holds for every field those two types carry today, and a field added to
+    /// either that DOES render an armed effect makes a preview and a real
+    /// ledger differ. Nothing detects that; this comment is the notice.
+    pub(crate) fn unopened_ledger(
+        &self,
+        account_id: &mogwai_protocol::AccountId,
+    ) -> (Engine, crate::risk::RiskLedger) {
+        let engine = self.template_engine(account_id, self.template.opening_balances.clone());
+        let ledger = crate::risk::RiskLedger::new(
+            mogwai_protocol::risk::AccountPolicy::default(),
+            opening_equity(&self.template.opening_balances),
+            self.started_ns,
+        );
+        (engine, ledger)
     }
 
     /// Apply one control-plane arm, to the ledgers that exist AND to the ones
@@ -1075,11 +1163,6 @@ impl Run {
         }
     }
 
-    /// The passenger a connection that named no account is served under.
-    pub(crate) fn default_passenger(&self) -> Arc<Passenger> {
-        self.passenger(&self.default_account_id)
-    }
-
     /// Seat a CONNECTION on an account: evict whoever holds it, then hand over
     /// the ledger or a clean one.
     ///
@@ -1169,10 +1252,12 @@ impl Run {
     /// would be the over-claim this comment used to make. `/ws` calls
     /// `Run::passenger` on the non-resetting path - to take the seat before the
     /// eviction - and the cadence refusal comes after it, so a refused upgrade
-    /// can still leave a fresh ledger behind, and `GET /account` mints the same
-    /// way on an unauthenticated read. Whether a read or a refusal may allocate
-    /// an account at all is an open question about those two call sites; what
-    /// this method promises is only that IT does not mint.
+    /// can still leave a fresh ledger behind. That is now the ONLY such site:
+    /// `GET /account` used to mint the same way on an unauthenticated read and
+    /// resolves through this method instead, previewing an unopened ledger with
+    /// `unopened_ledger` when there is nothing to find. Whether a REFUSAL may
+    /// allocate an account remains open; what this method promises is only that
+    /// IT does not mint.
     pub(crate) fn peek_passenger(
         &self,
         account_id: &mogwai_protocol::AccountId,
@@ -1339,14 +1424,7 @@ impl Run {
             return Err(AccountRefusal::AlreadyOpen);
         }
         let opening = opening_equity(&balances);
-        let mut engine = Engine::build(EngineConfig {
-            account_id: account_id.clone(),
-            instruments: Vec::new(),
-            balances,
-            fill_seed: self.template.fill_seed,
-        });
-        engine.set_oms_type(self.template.oms_type);
-        engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
+        let mut engine = self.template_engine(account_id, balances);
         // Under the `passengers` lock this call already holds, in the same lock
         // order `Run::arm` takes, so an arm racing this open lands in exactly
         // one of the two paths.
@@ -1400,15 +1478,38 @@ impl Run {
     /// The passenger whose book holds `client_order_id` as a RESTING order, and
     /// the symbol it rests on.
     ///
-    /// The control plane names an order without naming an account, so the target
-    /// has to be found. Ids are client-chosen and therefore not unique across
-    /// passengers; the first match wins, which is a real ambiguity to close when
-    /// the control plane grows an account parameter of its own.
+    /// `account` IS THE REQUEST'S OWN `account` FIELD, and naming it is how a
+    /// caller resolves the ambiguity rather than losing to it. Client order ids
+    /// are CLIENT-CHOSEN, so they are unique within one trader's book and not
+    /// across a venue serving fifty of them: two subagents that both number
+    /// their orders from one collide, and an unqualified search returns
+    /// whichever passenger the map iterated first. That is a scenario control
+    /// cancelling a stranger's resting order - silently, since a silent cancel
+    /// emits no lifecycle event by design, so the victim learns of it only by
+    /// querying. With an account named, exactly one book is searched and a miss
+    /// is a miss.
+    ///
+    /// `None` still searches every book, because that is what a control request
+    /// naming no account means everywhere else on this plane - the venue - and
+    /// on the single-account venue an operator usually drives, it is the only
+    /// book there is.
     pub(crate) async fn passenger_holding(
         &self,
+        account: Option<&str>,
         client_order_id: &str,
     ) -> Option<(Arc<Passenger>, Symbol)> {
-        for passenger in self.passengers() {
+        let candidates = match account {
+            Some(named) => self
+                .passengers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(named)
+                .map(Arc::clone)
+                .into_iter()
+                .collect(),
+            None => self.passengers(),
+        };
+        for passenger in candidates {
             let symbol = passenger
                 .engine
                 .lock()
@@ -1859,6 +1960,34 @@ impl Run {
     pub(crate) fn completion(&self) -> watch::Receiver<Option<(u64, u64)>> {
         self.complete_tx.subscribe()
     }
+
+    /// A live-session token. Taken by `ws::ws_upgrade` BEFORE the 101 is
+    /// returned, carried on the `SocketSession`, and dropped only after that
+    /// session's writer has flushed - so the token's lifetime strictly contains
+    /// the session's, and strictly contains the hyper connection's, which ends
+    /// at the 101. Taking it inside the spawned handler instead would leave a
+    /// window in which the connection is upgraded and this count has not yet
+    /// risen. See `sessions_tx`.
+    pub(crate) fn session_guard(&self) -> watch::Receiver<()> {
+        self.sessions_tx.subscribe()
+    }
+
+    /// Resolves once no websocket session is live. Immediately, when none is.
+    ///
+    /// Awaited on the PLANNED-COMPLETION shutdown only, and that limit is
+    /// deliberate rather than an oversight. A planned completion is a promise
+    /// the venue made about its declared duration - every open socket is told,
+    /// and each session ends itself the moment it hears - so waiting here is
+    /// bounded by the sessions' own teardown and is the difference between an
+    /// announced run and a reset one. A SIGNAL is not that promise: the
+    /// launcher ended the run, `RunComplete` is deliberately NOT published, and
+    /// nothing tells a session to stop - so waiting would idle out the whole
+    /// shutdown grace on any venue with a socket attached and turn a clean stop
+    /// into a bailed one. The signal path therefore keeps its abrupt teardown,
+    /// which is what `sigterm_closes_without_announcing_run_complete` observes.
+    pub(crate) async fn sessions_drained(&self) {
+        self.sessions_tx.closed().await;
+    }
 }
 
 /// Equity at open, before anything is marked: the funded balances summed.
@@ -2085,6 +2214,59 @@ mod tests {
             std::collections::HashMap::new(),
             std::sync::mpsc::channel().0,
         )
+    }
+
+    /// The planned-completion shutdown waits on a LIVE SESSION and not merely
+    /// on the accept loop.
+    ///
+    /// THE DIFFERENTIAL IS THE POINT, and both halves are asserted because the
+    /// second alone passes against the broken shape too. `sessions_drained`
+    /// must NOT resolve while a guard is held - that is the whole defect: the
+    /// venue's serve future can complete while a websocket session is still
+    /// mid-announcement, because axum stops tracking an upgraded connection at
+    /// the 101 - and it must resolve promptly once the last guard drops, or a
+    /// clean completion would idle out the shutdown grace and bail.
+    ///
+    /// A WALL TIMEOUT IS THE OBSERVABLE HERE RATHER THAN A BET, because the
+    /// negative half of a "does not resolve" claim has no positive event to
+    /// wait for. 200 ms against an operation that is a single atomic wake is
+    /// three orders of magnitude of margin, and losing it means the guard was
+    /// ignored outright rather than that the host was slow.
+    #[tokio::test]
+    async fn a_live_session_guard_holds_the_shutdown_open() {
+        let run = run(1_000, 400, None);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                run.sessions_drained()
+            )
+            .await
+            .is_ok(),
+            "with no session live the venue owes nobody an announcement and must not wait"
+        );
+
+        let session = run.session_guard();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                run.sessions_drained()
+            )
+            .await
+            .is_err(),
+            "a live session still owes its RunComplete and its close; exiting here is what \
+             reset the peer instead of announcing to it"
+        );
+
+        drop(session);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                run.sessions_drained()
+            )
+            .await
+            .is_ok(),
+            "the last session ended, so the wait must release rather than run out the grace"
+        );
     }
 
     /// A query reply carries the asking connection's orders and nobody else's.

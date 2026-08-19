@@ -322,6 +322,9 @@ async fn serve_async(
         )),
     };
     let completing_run = Arc::clone(&state.run);
+    // The run, kept past `with_state` below, for `serve_until_drained`'s
+    // session wait.
+    let sessions = Arc::clone(&state.run);
     let (fault_shutdown_tx, mut fault_shutdown_rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         if let Ok(fault) = fault_rx.recv() {
@@ -381,13 +384,48 @@ async fn serve_async(
     // Without a deadline the sender is parked here rather than dropped: a
     // dropped sender makes `changed()` resolve immediately, which would shut an
     // indefinite run down the instant it started serving.
+    // Set by the deadline task and read by `serve_until_drained`: a PLANNED
+    // completion owes its announcement to every open socket, a signal does not.
+    let planned_completion = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let deadline_completion = Arc::clone(&planned_completion);
     let _stop_tx_parked = match completing_run.deadline_ns {
         Some(deadline_ns) => {
-            let remaining_ns = deadline_ns.saturating_sub(completing_run.started_ns);
+            // SLEPT TO AN INSTANT, NOT FOR A SPAN. `sim` is anchored at
+            // `build_run_clock(&cfg, now_ns())`, taken right after warmup, and
+            // everything between that anchor and here - boat placement, the
+            // listener bind, the readiness write - is wall time the run has
+            // already spent. Sleeping `deadline_ns - started_ns` from HERE
+            // measured the declared duration from the wrong epoch and overran
+            // it by the whole boot interval, which at speed 100 is a large
+            // multiple of the declared duration in sim terms.
+            //
+            // The remainder is already WALL nanoseconds - `wall_ns` did the
+            // scaling - so it is slept raw rather than through `wall_duration`,
+            // which would scale it a second time.
+            //
+            // SLEPT IN A LOOP UNTIL THE SIM CLOCK IS ACTUALLY PAST THE
+            // DEADLINE, rather than once to a computed instant. `wall_ns`
+            // truncates through the scaled conversion, so waking exactly at
+            // `wall_ns(deadline_ns)` can leave `sim_ns(now)` a few hundred
+            // nanoseconds SHORT of `deadline_ns` at a high speed - and the run
+            // would then announce a completion carrying less elapsed sim time
+            // than it declared. Nothing but the scheduler's own overshoot
+            // covered that. The loop makes serving the whole declared duration
+            // a property of this code instead.
             tokio::spawn(async move {
-                tokio::time::sleep(sim.wall_duration(remaining_ns)).await;
+                loop {
+                    let wall_now = now_ns();
+                    if sim.sim_ns(wall_now) >= deadline_ns {
+                        break;
+                    }
+                    let remaining = sim.wall_ns(deadline_ns).saturating_sub(wall_now);
+                    // A truncated remainder can be zero while the sim clock is
+                    // still short; yield rather than spin on a zero sleep.
+                    tokio::time::sleep(Duration::from_nanos(remaining.max(1))).await;
+                }
                 let sim_now = sim.sim_ns(now_ns());
                 completing_run.complete(sim_now, sim_now.saturating_sub(completing_run.started_ns));
+                deadline_completion.store(true, std::sync::atomic::Ordering::Release);
                 stop_tx.send(true).ok();
             });
             None
@@ -396,7 +434,7 @@ async fn serve_async(
     };
     let terminal_fault = Arc::new(std::sync::Mutex::new(None));
     let terminal_fault_for_shutdown = Arc::clone(&terminal_fault);
-    serve_until_drained(listener, app, async move {
+    serve_until_drained(listener, app, sessions, planned_completion, async move {
         tokio::select! {
             // A signal means the launcher ended the run, not that its declared
             // simulated duration completed. Do not publish a false RunComplete.
@@ -433,9 +471,22 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// websocket peer that never reads can hold one open indefinitely; an
 /// unbounded wait would turn a completed or signalled venue into exactly the
 /// orphan this lifecycle exists to remove.
+///
+/// AXUM'S DRAIN IS NOT THE WHOLE DRAIN, and that gap is what `run` and
+/// `planned_completion` close. `axum::serve` waits on hyper CONNECTION futures,
+/// and an upgraded connection's resolves at the 101 - so its serve future can
+/// complete while every websocket session is still mid-frame. Returning there
+/// drops the runtime and every session with it, which is how a planned
+/// completion's `RunComplete` and its WS 1000 close went missing on a loaded
+/// host. On a planned completion this therefore also waits for the sessions
+/// themselves, still inside `SHUTDOWN_GRACE`; on a signal or a fault it does
+/// not, because nothing has told those sessions to end and the wait would only
+/// idle out the grace. See `Run::sessions_drained`.
 async fn serve_until_drained(
     listener: tokio::net::TcpListener,
     app: Router,
+    run: Arc<run::Run>,
+    planned_completion: Arc<std::sync::atomic::AtomicBool>,
     trigger: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let (grace_tx, grace_rx) = tokio::sync::oneshot::channel();
@@ -446,7 +497,13 @@ async fn serve_until_drained(
     let serve = std::future::IntoFuture::into_future(serve);
     tokio::pin!(serve);
     tokio::select! {
-        result = &mut serve => result?,
+        result = async {
+            let served = (&mut serve).await;
+            if planned_completion.load(std::sync::atomic::Ordering::Acquire) {
+                run.sessions_drained().await;
+            }
+            served
+        } => result?,
         () = async move {
             // Only starts counting once the shutdown was actually triggered,
             // so this never bounds the run itself.

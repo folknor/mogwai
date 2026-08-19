@@ -1104,22 +1104,52 @@ pub(crate) async fn arm_divergence(
             // symbol and its river, and a request-supplied `symbol` can disagree
             // with it. A mismatch is refused rather than silently preferred
             // either way.
-            // The order names no account, so its passenger is found rather than
-            // supplied.
-            let Some((holder, order_symbol)) = run.passenger_holding(&client_order_id).await else {
+            // SCOPED BY THE REQUEST'S `account` WHEN IT NAMES ONE, exactly like
+            // every other arm on this plane. Client order ids are unique within
+            // a trader's own book and not across the venue's, so an unqualified
+            // search on a multi-account exchange can silently cancel a
+            // stranger's resting order; naming the account is how a scenario
+            // driving fifty subagents says which book it meant.
+            let Some((holder, order_symbol)) =
+                run.passenger_holding(target, &client_order_id).await
+            else {
                 // No passenger rests this id. Let a ledger say WHY - unknown id
-                // and already-terminal are different diagnoses, and this arm must
-                // not flatten them into one message. The DEFAULT passenger
-                // answers because the call can only fail and its wording does not
-                // depend on which ledger produced it.
-                let reason = run
-                    .default_passenger()
-                    .engine
-                    .lock()
-                    .await
-                    .cancel_open_order_silently(&client_order_id, sim_now_ns(state.venue_sim()))
-                    .err()
-                    .unwrap_or_else(|| "unknown order".to_owned());
+                // and already-terminal are different diagnoses, and this arm
+                // must not flatten them into one message.
+                //
+                // OFF THE LEDGER THE REQUEST TARGETED, which is the same scope
+                // the search above used. Diagnosing off the DEFAULT account
+                // whatever the request named - which is what this did - asks
+                // the wrong book, and the answer it gives is about an account
+                // the operator did not name.
+                //
+                // AND WITH A QUERY, NEVER THE CANCEL. This ran
+                // `cancel_open_order_silently` for its `Err`, which is not a
+                // read: on `Ok` it closes the order out and reaps its held
+                // children. So a request naming an account that does NOT hold
+                // the id, on a venue where the default account DOES, silently
+                // cancelled the default's order and answered `404 unknown
+                // order` because the `Err` was `None` - the exact cross-account
+                // cancel the scoping above closes. `silent_cancel_refusal` is
+                // the non-mutating form and shares its wording with the cancel.
+                //
+                // A ledger that does not exist is not built for the sentence:
+                // an unopened ledger holds nothing, so its only possible answer
+                // is the "unknown order" default below, and constructing one to
+                // hear it back was dead by construction.
+                let diagnosed = match target {
+                    Some(named) => mogwai_protocol::AccountId::parse(named).ok(),
+                    None => Some(run.default_account_id()),
+                };
+                let reason = match diagnosed.as_ref().and_then(|id| run.peek_passenger(id)) {
+                    Some(ledger) => ledger
+                        .engine
+                        .lock()
+                        .await
+                        .silent_cancel_refusal(&client_order_id),
+                    None => None,
+                }
+                .unwrap_or_else(|| "unknown order".to_owned());
                 tracing::warn!(%client_order_id, reason, "refusing silent cancel");
                 return (StatusCode::NOT_FOUND, reason);
             };
@@ -1307,8 +1337,16 @@ enum ClockAxis {
 /// WHOSE ACCOUNT is named by `?account=`, defaulting to the venue's default
 /// account - the same resolution the socket does, so a client that named no
 /// account on either surface sees one ledger. An id nobody has traded under is
-/// not an error: the passenger is created, and the answer is its opening
-/// balances, which is what a client asking before its first order expects.
+/// not an error: the answer is the opening balances a ledger under that id
+/// WOULD carry, which is what a client asking before its first order expects.
+///
+/// A READ DOES NOT ALLOCATE, and it used to. This resolved through
+/// `Run::passenger`, which is create-on-first-sight, so an unauthenticated GET
+/// minted a ledger for any id in the query string - born frozen and collectable
+/// only when `account_ttl_ms > 0`, and the default is to keep accounts forever.
+/// The answer is unchanged, because `Run::unopened_ledger` builds exactly what
+/// the mint would have and then throws it away; what changed is that asking
+/// about an account is no longer the same act as opening one.
 ///
 /// STAMPED ON THE VENUE CLOCK, deliberately. A ledger spans every river its
 /// passenger has touched, so there is no boat axis to put it on: stamp from one
@@ -1320,9 +1358,9 @@ pub(crate) async fn account(
     Query(query): Query<AccountQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    let passenger = match &query.account {
+    let account_id = match &query.account {
         Some(named) => match mogwai_protocol::AccountId::parse(named) {
-            Ok(account_id) => state.run.passenger(&account_id),
+            Ok(account_id) => account_id,
             Err(error) => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -1331,38 +1369,61 @@ pub(crate) async fn account(
                     .into_response();
             }
         },
-        None => state.run.default_passenger(),
+        None => state.run.default_account_id(),
     };
     let ts = sim_now_ns(state.venue_sim());
-    let mut engine = passenger.engine.lock().await;
-    let account = engine.account_snapshot(ts);
-    // Published for the EVALUATOR, not for the strategy. A real trader reads
-    // its remaining drawdown off the firm's dashboard; mogwai presents none, so
-    // a run that ended flat having spent 90 percent of its budget would be
-    // indistinguishable from one that never came close.
-    let ledger = passenger
-        .risk
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // An unpoliced account still reports its equity, which is the one number an
-    // evaluator wants whether or not anything is enforced against it. With no
-    // policy currency there is nothing to compute it in, so it reports the
-    // settlement currency's balance only when exactly one is held.
-    let currency = ledger
-        .currency()
-        .map(str::to_owned)
-        .or_else(|| sole_currency(&account));
-    let equity = currency
-        .and_then(|currency| crate::risk::equity_in(&engine, &currency))
-        .unwrap_or_default();
-    let risk = ledger.state(equity);
-    drop(ledger);
+    let (account, risk) = match state.run.peek_passenger(&account_id) {
+        Some(passenger) => {
+            let mut engine = passenger.engine.lock().await;
+            let account = engine.account_snapshot(ts);
+            // Published for the EVALUATOR, not for the strategy. A real trader
+            // reads its remaining drawdown off the firm's dashboard; mogwai
+            // presents none, so a run that ended flat having spent 90 percent
+            // of its budget would be indistinguishable from one that never came
+            // close.
+            let ledger = passenger
+                .risk
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let risk = risk_state(&engine, &ledger, &account);
+            drop(ledger);
+            (account, risk)
+        }
+        None => {
+            let (mut engine, ledger) = state.run.unopened_ledger(&account_id);
+            let account = engine.account_snapshot(ts);
+            let risk = risk_state(&engine, &ledger, &account);
+            (account, risk)
+        }
+    };
     Json(AccountSnapshot {
         clock: ClockAxis::Venue,
         account,
         risk,
     })
     .into_response()
+}
+
+/// The risk half of an account snapshot, over whichever ledger produced the
+/// account half - a seated passenger's or a preview of an unopened one.
+///
+/// An unpoliced account still reports its equity, which is the one number an
+/// evaluator wants whether or not anything is enforced against it. With no
+/// policy currency there is nothing to compute it in, so it reports the
+/// settlement currency's balance only when exactly one is held.
+fn risk_state(
+    engine: &mogwai_engine::Engine,
+    ledger: &crate::risk::RiskLedger,
+    account: &AccountState,
+) -> mogwai_protocol::risk::RiskState {
+    let currency = ledger
+        .currency()
+        .map(str::to_owned)
+        .or_else(|| sole_currency(account));
+    let equity = currency
+        .and_then(|currency| crate::risk::equity_in(engine, &currency))
+        .unwrap_or_default();
+    ledger.state(equity)
 }
 
 #[derive(Default, Deserialize)]

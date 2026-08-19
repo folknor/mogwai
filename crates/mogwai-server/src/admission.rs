@@ -404,6 +404,21 @@ pub(crate) struct ExecLanes {
     prio_tx: mpsc::UnboundedSender<Outbound>,
     prio_budget: FrameBudget,
     promise_budget: FrameBudget,
+    /// Fires once `send_close` has been called on this connection, so the
+    /// socket's own read loop can end rather than waiting on a peer.
+    ///
+    /// WRITING THE CLOSE IS NOT ENDING THE SESSION, which is the gap this
+    /// closes. `run_writer` writes the frame and breaks, but `handle_socket`'s
+    /// loop only leaves on the peer's close, the peer's EOF or the run's
+    /// completion - so a client that ignores its close frame (or is simply
+    /// slow to act on it) kept its `SocketSession` alive, and with it the
+    /// account's SEAT on that boat. The newcomer that evicted it was then
+    /// refused its own reconnect at a different speed, because the account
+    /// still sat on the old one. The venue must not need the evicted peer's
+    /// cooperation to finish evicting it.
+    ///
+    /// Shared across clones, because every clone is the same connection.
+    closed: Arc<tokio::sync::Notify>,
 }
 
 /// Mints `ExecLanes::id`. Monotonic and never reused within a process, so a
@@ -435,6 +450,7 @@ impl ExecLanes {
             held_budget: ByteBudget::new(limits.held_budget_bytes),
             prio_budget: FrameBudget::new(limits.lane_frames),
             promise_budget: FrameBudget::new(limits.promise_tickets),
+            closed: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -620,10 +636,27 @@ impl ExecLanes {
     /// Deliberately needs no ticket: a close is the venue's last word, and
     /// making it queue behind the market data the peer is not reading is how a
     /// reasoned close turns into a bare socket teardown.
+    /// NOTIFIED AS WELL AS QUEUED, and both halves of that are load-bearing.
+    /// The frame is handed to the writer FIRST, so a reader woken by the
+    /// notification cannot tear the session down before the close it is
+    /// reacting to was queued. And `notify_one`, never `notify_waiters`,
+    /// because `notify_waiters` wakes only tasks ALREADY parked: a close that
+    /// beats the reader to its own `select!` would be lost and the seat held
+    /// exactly as before. `notify_one` stores a permit for a reader that is not
+    /// there yet, and tokio returns the permit if the `Notified` holding it is
+    /// dropped - which a `select!` arm losing to another arm does every poll.
     pub(crate) fn send_close(&self, close: CloseSpec) -> Result<(), LaneClosed> {
-        self.prio_tx
+        let queued = self
+            .prio_tx
             .send(Outbound::Close(close))
-            .map_err(|_| LaneClosed)
+            .map_err(|_| LaneClosed);
+        self.closed.notify_one();
+        queued
+    }
+
+    /// Resolves once this connection has been told to close. See `closed`.
+    pub(crate) fn closed(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.closed)
     }
 }
 

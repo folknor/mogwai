@@ -193,6 +193,20 @@ the process is still alive. A consumer watching for child exit sees nothing
 during that window, and a client that only knows where to dial cannot tell its
 own run from whatever answers there next.
 
+THAT DRAIN COVERS WEBSOCKET SESSIONS, and saying so is not redundant: an
+upgraded connection stops being an HTTP connection at the 101, so a venue that
+waited only on its accept loop would consider itself drained while sessions were
+still mid-frame - and it did, which is how a completed run's `RunComplete` and
+its WS 1000 close went missing on a loaded host, leaving the peer with a reset
+instead of an announcement. A DECLARED COMPLETION now waits for the sessions
+themselves, inside the same grace.
+
+A SIGNAL DOES NOT, and that is the deliberate difference. A signal means the
+launcher ended the run rather than the run completing, so no `RunComplete` is
+published and nothing tells a session to end; waiting for one would idle out
+the whole grace on any venue with a socket attached. A signalled venue takes its
+sockets with it.
+
 A venue whose live connections do NOT drain within that grace exits NONZERO. It
 used to log a warning and exit 0, which made an abandoned connection
 indistinguishable from a clean teardown to a launcher inspecting exit status. A
