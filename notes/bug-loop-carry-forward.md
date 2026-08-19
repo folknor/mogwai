@@ -2759,6 +2759,144 @@ test rather than dated; the sampler `Drop`, the `cache_root` purity split, the
 `resolve_fifo` split and the two named error messages are behaviour-preserving
 or intentionally not, and each says which.
 
+## The protocol document, round 1: the decimal wire and the duration grammars
+
+THE ARC'S FIRST PRODUCTION-CODE ROUND, and the first fix that changes what the
+venue does ON THE WIRE. Both findings reproduced, one of them differently and
+worse than reported.
+
+- EVERY `Decimal` IN `mogwai-protocol::messages` IS NOW STRING-ONLY ON THE WIRE,
+  in both directions, and a JSON NUMBER IS REFUSED. The mechanism was measured
+  before it was fixed, and the hunter's account was incomplete in two ways:
+  - The rounding is real. `{"price": 12345678901234567890.123}` decoded to
+    `12345678901234567000`; `0.1234567890123456789` to `0.12345678901234568`.
+    Small values are exact by luck - `0.1` and `100.005` round-trip - so a
+    casual probe reports "it is fine" and the loss only appears at width.
+  - THE TWO GRAMMARS ARE NOT NESTED, which nobody had noticed: `1e-30` was
+    ACCEPTED as a number and decoded to `Decimal::ZERO` at scale 28, while the
+    same text as a STRING was refused outright. A quantity that becomes zero
+    depending on its spelling is a different and worse defect than a rounded
+    one, and it is the fact that settled the "tolerate or refuse" question.
+  - WHO ACTUALLY SENDS DECIMALS, established before choosing: nothing in the
+    tree sends a number. `mogwai-adapter` builds a real
+    `mogwai_protocol::SubmitOrder` and serializes it (strings); every hand-rolled
+    frame in `mogwai-cli`'s serving suite and the adapter's stub uses strings;
+    `scripts/smoke.py` sends `"0.001"`. broadarrow consumes these same Rust
+    types. So the breaking change breaks no known peer.
+  - THE LINE IS MONEY, NOT "Decimal everywhere" AND NOT "the module called
+    `messages`", and the round's cold review is what forced that phrasing. The
+    fix pass wrote the scope as "the execution and market-data wire" and made
+    the call on a field list drawn from ONE FILE, which missed two live decode
+    paths carrying money and mis-described a third of what it did annotate
+    (`AccountState`, `Balance`, `Position` and `PostedMargin` are account
+    frames, neither order nor market data). SCOPE STATED BY MODULE IS THE
+    DEFECT; the axis is what the number MEANS.
+    - STRING-ONLY, and this list is the whole of it: `messages`'s 35 serde
+      `Decimal` fields; `risk::RiskState` and its nested `Breach`, published on
+      `GET /account` as `AccountSnapshot.risk`; and
+      `mogwai-server`'s `OpenAccountRequest.balances`, the `POST /accounts`
+      opening balances. The last two were the review's finds. Both are
+      OUTPUT-ONLY or string-spelled by every in-tree caller already, so
+      annotating them broke nothing and cost two tests -
+      `a_published_risk_state_refuses_a_numeric_decimal` and
+      `an_opening_balance_must_be_spelled_as_a_string`.
+      `RiskState` is the instructive one: nothing in this workspace decodes it,
+      which is precisely why the tolerance would never have been observed here
+      and would have shipped to a consumer's decoder.
+    - TOLERANT, deliberately: `control::Divergence` (POST
+      `/control/divergence`), `risk::RiskPolicy` and `risk::AccountPolicy`, and
+      `instruments::InstrumentSpec`. The last three are also TOML config, where
+      `multiplier = 2` is the natural spelling, and all of them are
+      operator-supplied fractions and thresholds rather than booked quantities.
+      Refusing numbers there would be a usability regression with no rounding
+      hazard behind it. The `an_opening_balance...` test asserts BOTH halves in
+      one place, so the exception cannot decay into an oversight.
+    - `mogwai-protocol::decimal` IS PUBLIC NOW, for `str_map` - the `POST
+      /accounts` balances are a `HashMap<String, Decimal>`, which no
+      `rust_decimal` helper covers. A later map-shaped wire decimal uses it
+      rather than a second newtype.
+  - THE FIX OPENED A HOLE ONE LAYER UP, AND THE GATE CAUGHT IT - the arc's
+    signature failure, on schedule. `rust_decimal::serde::str_option` REFUSES an
+    explicit `null`, and `"price":null` is what the venue and the adapter emit
+    for every priceless order. Two socket tests went red
+    (`adapter_submits_a_stop_market_and_sees_triggered_then_filled`,
+    `a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered`) with the
+    unattributable symptom "no execution event reached the sink", because the
+    stub's decode is a silent `if let Ok`. SECOND HOLE IN THE SAME FIX: a
+    `with = ...` field loses serde's implicit Option-is-optional handling, so an
+    ABSENT `price` - what every `Market` fixture in the serving suite sends -
+    became a missing-field error. The repair is a local
+    `crate::decimal::str_option` (null and absent are `None`, `visit_some`
+    delegates to the dependency's `str` deserializer so the one rule lives in
+    one place) plus `default` on all five optional decimal fields that lacked
+    it. Pinned by `an_absent_or_null_optional_wire_decimal_is_still_none`,
+    bite-checked BOTH ways.
+  - NOTHING DETECTS A NEW `Decimal` WIRE FIELD THAT FORGETS THE ANNOTATION.
+    `every_wire_decimal_refuses_a_numeric_spelling` is a hand-maintained table,
+    exhaustive over `messages`'s 35 serde `Decimal` fields across TEN struct
+    shapes - `SubmitOrder` 5, `ModifyOrder` 3, `OrderUpdated` 4, `OrderFilled`
+    4, `OrderStatusInfo` 4, `Balance` 3, `Position` 4, `PostedMargin` 2,
+    `TradeTick` 2, `QuoteTick` 4, with the non-serde `Hit.px` excluded - and a
+    new field owes a row. THE COUNT IS LOAD-BEARING, because it IS the argument
+    that the hand-maintained table is complete, and the fix pass first wrote it
+    as "32 across nine". A count nobody recomputed is the same defect family as
+    the prose the whole document is about; recount it whenever a row moves.
+    A source-text scanner in the `gate_skip_list.rs` style was
+    considered and refused: the `Decimal` occurrences in that file include
+    function parameters and a non-serde `Hit` struct, so a parser that fails
+    open would be worse than the habit. Same shape as the standing open item on
+    durable prose asserting a live fact.
+  - Its hot-path block runs FIRST in the test, deliberately.
+    `ServerMessage::from_json_str` is a second decode path over the same fields;
+    a block placed after the tables could never fire first and so could never be
+    bite-checked. It covers EVERY decimal of both market-data frames, not the
+    two the first cut sampled: the fields do share one `Deserialize`, but a
+    block whose stated claim is "the same fields" has to check all of them, and
+    both frames are now consts the table and the block share.
+  - THE `SubmitOrder` FIXTURE NEEDS TWO ROWS, and the first cut's single row was
+    a frame the venue REFUSES: it spelled all five decimals on a
+    `TrailingStopLimit`, which rejects `price` because it derives the limit from
+    `limit_offset`. Decode-only tests never call the validator, so it passed
+    while pinning an illegal shape for the next reader auditing the table. The
+    loop now runs `validate_submit_order` over every decoded `SubmitOrder`, so a
+    fixture cannot be illegal silently again. GENERAL FORM: a decode fixture in
+    a table read as an exhaustiveness argument owes a legality check, because
+    nothing else in a decode test performs one.
+- `serve`'s DURATION GRAMMAR IS NOW PINNED ACROSS THE REAL BOUNDARY. G held -
+  `serve` takes `humantime::Duration` and `gen`'s in-house `parse_duration` is
+  never on that path - but nothing said so, and the two grammars disagree on
+  exactly the three things the launcher emits (`0s`, `ms`, `ns`).
+  - MAKING `serve_argv` PUBLIC MADE ITS `std::process::id()` A DEFECT, and the
+    cold review caught it. The pid it stamps into `--launcher-pid` is the
+    liveness inference the venue makes about its owner, and the justification
+    for taking it from this process ("`launch` spawns the child from a thread it
+    owns") holds only for the IN-CRATE call site. A consumer rendering argv here
+    and spawning elsewhere - a systemd unit, a shell, a supervising helper -
+    would get a venue watching a stranger: it exits at once if that pid is
+    already gone, or never notices its real owner dying. IT IS A PARAMETER NOW,
+    `serve_argv(&spec, launcher_pid)`, and the unit tests pass a pid that is
+    deliberately not this process's so a regression back to `process::id()`
+    fails. THE SHAPE TO CARRY: widening a function's visibility can turn a
+    correct ambient assumption into a defect without changing a line of its
+    body. Ask what the function reads from its environment before making it
+    `pub`.
+  - THE TEST CROSSES THE BOUNDARY RATHER THAN ROUND-TRIPPING ONE CRATE'S OWN
+    PAIR. `mogwai-protocol`'s `serve_argv` is now `pub` for this, and
+    `mogwai-cli`'s `serve_argv_parses_in_the_venues_own_grammar` lives in the BIN
+    crate's unit tests - the only place `ServeArgs` is visible - rendering with
+    the launcher's function and parsing with the `Cli` that `main` runs. Its
+    cases are the ones `durations_render_in_the_coarsest_exact_unit` enumerates,
+    so the two cannot drift onto different values.
+  - Bite-checked by installing the regression it names, as a text edit: a clap
+    `value_parser` routing `--duration` through `gen::parse_duration` fails it at
+    `invalid value '0s' ... must be at least 1`. A companion test,
+    `the_in_house_gen_grammar_cannot_read_what_the_launcher_renders`, asserts the
+    refusal directly so the first test cannot be read as "any parser would do";
+    `gen::parse_duration` is `pub(crate)` for it and says why in place.
+- FINDING M IS ANNOTATED IN THE REPORT RATHER THAN DELETED, because the smell
+  reads as live to anyone who has not seen `bugs-tests-engine-protocol` r1's
+  measurement. G and J are deleted outright.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform
@@ -3010,6 +3148,23 @@ or intentionally not, and each says which.
     place: three refusal assertions in `stage_a_batch.rs`, one value assertion
     in `exact.rs`, the five scratch call sites, and the `summary`/`session`
     collapse.
+  - lab/cli close pass: 1233 + 451, 1741 pairs, 1684 run, 57 ignored, 0
+    orphaned.
+  - protocol r1: 1239 + 451, 1747 pairs, 1690 run, 57 ignored, 0 orphaned, 14
+    skips, 54.7 s. +6 IN THE WORKSPACE SWEEP AND NOTHING IN THE INSTRUMENTED
+    ONE, which is the expected arithmetic: two `mogwai-protocol` unit tests
+    from the fix pass (the numeric refusal and the absent/null companion), two
+    `mogwai-cli` bin-crate unit tests (the argv crossing and its companion
+    refusal), and two from the round's review repair
+    (`a_published_risk_state_refuses_a_numeric_decimal` in `mogwai-protocol`,
+    `an_opening_balance_must_be_spelled_as_a_string` in `mogwai-server`). None
+    is in a package the instrumented sweep covers. The launcher-pid test was
+    RENAMED rather than added, so it moves no count.
+    A NOTE ON A FALSE ALARM WORTH NOT RE-DERIVING: the first gate run of this
+    round reported 451 orphaned `mogwai-data` pairs, exactly the 2026-08-16
+    tool bug `AGENTS.md` describes. It did not recur on any later run in the
+    same tree with the same tool. Suspect a concurrent workspace lock before
+    the tree.
   The `mogwai-cli` serial socket suite is green in 6.5 s throughout.
 - THE GATE'S `skip` LIST NO LONGER CARRIES A PARKED TEST, and `notes/todo.md`'s
   parked list is empty. What remains in `skip` is cost and environment, which is

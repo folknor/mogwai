@@ -17,6 +17,26 @@ are keyed within it. Two accounts on one venue never share a position book.
   one; a fill reports the id the venue actually booked it against, which
   under hedging may not be the id the client sent.
 
+EVERY PRICE AND QUANTITY ON THE WIRE IS A JSON STRING, in both directions:
+`"quantity":"2"`, `"price":"100.25"`, never `"price":100.25`. A numeric
+spelling is REFUSED with a decode error rather than accepted, because a JSON
+number goes through `f64` and a peer sending `12345678901234567890.123` would
+otherwise get `12345678901234567000` booked as its price, silently and only on
+the values wide enough to lose digits. An optional price spells "no value" two
+ways - the field ABSENT, or present and `null` - and both decode as absent.
+
+THE LINE IS MONEY, not "every decimal". String-only, everywhere it decodes:
+the ORDER, EXECUTION, ACCOUNT and MARKET-DATA frames (submits, amends, order
+updates and fills, `AccountState` with its balances, positions and margins,
+order-status snapshots, trades and quotes); the `risk` block `GET /account`
+publishes; and the opening balances in a `POST /accounts` body.
+
+Still taking bare numbers, deliberately: `POST /control/divergence`, the
+account policy inside a `POST /accounts` body, and the TOML run config. Those
+are operator-supplied fractions and thresholds - a havoc probability, a
+drawdown limit, an instrument multiplier - most of them spelled in TOML as
+well as JSON, and none of them a quantity the venue books.
+
 ORDER TYPES the venue serves: Market, Limit, StopMarket, StopLimit,
 TrailingStopMarket, TrailingStopLimit, MarketIfTouched, LimitIfTouched and
 MarketToLimit. That is every order type nautilus expresses; none is refused.

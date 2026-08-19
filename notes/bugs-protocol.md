@@ -6,6 +6,10 @@ Reconnaissance report, 2026-08-18. One Opus hunter, read-only, scope
 Not verified by the orchestrator. Findings may be wrong; the fix pass decides.
 Confidence labels are the hunter's own.
 
+Round 1 (2026-08-19) closed G and J; both sections are deleted rather than
+annotated, per the discrepancies-doc rule. What they cost and what binds later
+work is in `notes/bug-loop-carry-forward.md`.
+
 The hunter read the whole crate (`launch.rs`, `messages.rs`, `control.rs`,
 `havoc.rs`, `sizing.rs`, `ready.rs`, `clock.rs`, `decimal.rs`, `lib.rs`) plus
 the two things it contracts against outside itself (`mogwai-cli`'s `serve` argv
@@ -162,28 +166,6 @@ launcher at it - whatever your launcher calls that setting, it ends up as
 LaunchSpec::binary". The operator is told to reconfigure a binary path in
 response to EAGAIN on thread creation. This deserves its own variant.
 
-## G. `format_duration` - checked, and it holds (with one caveat)
-
-The hunter chased this because `format_duration` emits `ms` and `ns` units and
-`0s`, and `mogwai-cli`'s `parse_duration` in `gen.rs` accepts only
-`s m h d w mo y`, rejects `count == 0`, and would read `"1500ms"` as
-unknown-unit `"ms"` (it has `"mo"`, not `"ms"`). That would have broken every
-non-second duration and the documented `Some(Duration::ZERO)` override.
-
-It does not bite, because `serve` uses `humantime::Duration` via clap, not
-`gen`'s parser - humantime takes `ms`, `ns` and `0s`. But the two duration
-grammars in one binary differ on exactly the units the shipped launcher emits,
-and nothing pins that `serve`'s parser is the humantime one. If `serve` is ever
-switched to the in-house parser for consistency, the launcher breaks silently on
-`Duration::ZERO`, every millisecond value, and every nanosecond value. A test
-asserting `parse(format_duration(d)) == d` across the same cases
-`durations_render_in_the_coarsest_exact_unit` enumerates would close it; right
-now `format_duration`'s claim ("every value renders into something the venue
-accepts") is asserted only against itself.
-
-The `u64::try_from(nanos)` fallback to `{}s` is fine - humantime accepts
-`u64::MAX` seconds.
-
 ## H. `validate_submit_order`: two prose contracts the code does not keep
 
 - The `post_only` field doc says "Legal on Limit and StopLimit only." The code
@@ -207,26 +189,6 @@ the crate has no statement of which wins. Either refuse the combination here or
 state the precedence. Medium confidence this is worth a refusal rather than an
 engine-side rule - the argument the type's own doc makes is the argument for
 refusing it.
-
-## J. Decimal decode is asymmetric with encode, unremarked
-
-`rust_decimal` with `serde-with-str`: every `Decimal` SERIALIZES as a JSON
-string (`"quantity":"2"`, pinned by `client_and_server_messages_round_trip`),
-but the default `Deserialize` also accepts JSON NUMBERS, going through `f64`. So
-a client sending `{"quantity": 0.1}` or a 20-significant-digit number gets a
-silently f64-rounded price or quantity, while a client sending `"0.1"` gets the
-exact decimal. On a venue whose whole point is exercising a live execution path,
-a price that decodes differently depending on how the peer spelled it is a real
-hazard, and it is nowhere documented - the byte-form round-trip test only
-exercises the string spelling. Either add
-`#[serde(with = "rust_decimal::serde::str")]` on the wire fields to refuse
-numeric spellings outright, or pin the numeric-acceptance behaviour with a test
-so it is a chosen contract rather than a dependency default.
-
-Confidence: high on the mechanism, medium on whether the project considers
-tolerance a bug. The hunter would refuse numbers - this is the "single source of
-truth both ends serialize against", and one-of-two-accepted-spellings with
-different precision is not a source of truth.
 
 ## K. `sizing.rs`: two bounds have derivations but no run derivation
 
@@ -270,6 +232,17 @@ to remember to call. Pre-1.0, changing `Symbol` is a mechanical workspace-wide
 edit.
 
 ## M. Smell: the 50 ms sleep in the `NoRecord` path
+
+REFUSED, with measurement, by `notes/bugs-tests-engine-protocol.md` round 1
+(`a3a796d`). The finding's premise - "the child is dead by then" - is FALSE:
+`NoRecord` is EOF on the STDOUT pipe, and a venue that closes its own stdout or
+hands it to a grandchild reaches that branch ALIVE, so a bounded join would
+block rather than being deterministic.
+`a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure` pins it.
+Do not reopen. Kept here rather than deleted because the smell reads as live to
+anyone who has not seen that measurement.
+
+Original report follows.
 
 ```rust
 Err(LaunchError::NoRecord { .. }) => { std::thread::sleep(Duration::from_millis(50)); ... }

@@ -439,7 +439,9 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
 /// scheduler. Production has exactly one caller and it passes [`OWNER_POLL`].
 fn launch_with_poll(spec: LaunchSpec, owner_poll: Duration) -> Result<LaunchedVenue, LaunchError> {
     let binary = spec.binary();
-    let argv = serve_argv(&spec);
+    // This process spawns the child, from a thread it owns, so its own pid is
+    // the one the venue must watch.
+    let argv = serve_argv(&spec, std::process::id());
     let timeout = spec.ready_timeout();
     // A zero bound cannot be met by any venue: readiness comes after warmup
     // generation, which is never instantaneous. Accepting it produced a launch
@@ -541,18 +543,38 @@ fn launch_with_poll(spec: LaunchSpec, owner_poll: Duration) -> Result<LaunchedVe
 
 /// The argv for `serve`, split out so it is testable without spawning anything.
 ///
-/// `--launcher-pid` is always passed. It lets the venue prove it still has the
-/// parent it was started by, rather than inferring a death from a change in
-/// `getppid()` - an inference blind to a launcher that was already gone before
-/// the venue ran its first instruction, which is exactly what a launcher that
-/// spawns and exits produces. This process is that parent: `launch` spawns the
-/// child from a thread it owns, so the pid recorded here is the one the venue
-/// will see.
-fn serve_argv(spec: &LaunchSpec) -> Vec<OsString> {
+/// PUBLIC so the venue's own argv parser can be held against it. The launcher
+/// renders `--duration` through `format_duration`, which emits `ms` and `ns`
+/// units and `0s`; `mogwai-cli` parses it with `humantime`, which takes all
+/// three. That binary's OTHER duration grammar, `gen`'s `parse_duration`,
+/// takes only `s m h d w mo y`, refuses a zero count, and would read `1500ms`
+/// as an unknown unit. Two grammars in one binary differing on exactly the
+/// units this function emits is a live trap for anyone unifying them "for
+/// consistency", and the only thing that closes it is a test that renders here
+/// and parses THERE. `mogwai-cli`'s `serve_argv_parses_in_the_venues_own_grammar`
+/// is that test, and it needs this function.
+///
+/// Not `serve`'s full grammar: this renders only what the launcher passes.
+///
+/// `--launcher-pid` is always passed, and IT IS A PARAMETER rather than
+/// `std::process::id()` because this function is public. It lets the venue
+/// prove it still has the parent it was started by, rather than inferring a
+/// death from a change in `getppid()` - an inference blind to a launcher that
+/// was already gone before the venue ran its first instruction, which is
+/// exactly what a launcher that spawns and exits produces. That inference is
+/// only as good as the pid being the pid of whatever will actually own the
+/// child, and a caller that renders argv HERE and spawns ELSEWHERE - into a
+/// systemd unit, a shell, a supervising helper - would otherwise silently ship
+/// this process's pid and get a venue watching a stranger: it exits at once if
+/// that pid is already gone, or never notices its real owner dying. `launch`
+/// passes `std::process::id()` because it spawns the child from a thread it
+/// owns; every other caller passes the pid of the process that will.
+#[must_use]
+pub fn serve_argv(spec: &LaunchSpec, launcher_pid: u32) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("serve"),
         OsString::from("--launcher-pid"),
-        OsString::from(std::process::id().to_string()),
+        OsString::from(launcher_pid.to_string()),
     ];
     if let Some(config) = &spec.config {
         argv.push(OsString::from("--config"));
@@ -910,33 +932,47 @@ fn parse_ready(line: &str) -> Result<ReadyRecord, LaunchError> {
 mod tests {
     use super::*;
 
+    /// A pid that is deliberately NOT this process's, so a rendering that
+    /// reached for `std::process::id()` instead of the argument would fail.
+    const NOT_THIS_PROCESS: u32 = 4_242_424;
+
     /// Not "no flags": the launcher's own pid always goes, because it is what
     /// lets the venue refuse to serve after its owner is already gone.
+    ///
+    /// AND THE PID IS THE CALLER'S. `serve_argv` is public, so a consumer that
+    /// renders here and spawns somewhere else - a systemd unit, a supervising
+    /// helper - must be able to name the process that will actually own the
+    /// venue. Stamping this process's pid unconditionally would hand such a
+    /// caller a venue watching a stranger.
     #[test]
-    fn a_bare_spec_still_identifies_its_launcher() {
+    fn a_bare_spec_still_identifies_the_launcher_the_caller_named() {
+        assert_ne!(NOT_THIS_PROCESS, std::process::id());
         assert_eq!(
-            serve_argv(&LaunchSpec::default()),
+            serve_argv(&LaunchSpec::default(), NOT_THIS_PROCESS),
             vec![
                 OsString::from("serve"),
                 OsString::from("--launcher-pid"),
-                OsString::from(std::process::id().to_string()),
+                OsString::from(NOT_THIS_PROCESS.to_string()),
             ]
         );
     }
 
     #[test]
     fn config_and_duration_reach_the_argv() {
-        let argv = serve_argv(&LaunchSpec {
-            config: Some(PathBuf::from("/venue/run.toml")),
-            duration: Some(Duration::from_secs(30)),
-            ..LaunchSpec::default()
-        });
+        let argv = serve_argv(
+            &LaunchSpec {
+                config: Some(PathBuf::from("/venue/run.toml")),
+                duration: Some(Duration::from_secs(30)),
+                ..LaunchSpec::default()
+            },
+            NOT_THIS_PROCESS,
+        );
         assert_eq!(
             argv,
             vec![
                 OsString::from("serve"),
                 OsString::from("--launcher-pid"),
-                OsString::from(std::process::id().to_string()),
+                OsString::from(NOT_THIS_PROCESS.to_string()),
                 OsString::from("--config"),
                 OsString::from("/venue/run.toml"),
                 OsString::from("--duration"),
@@ -947,11 +983,14 @@ mod tests {
 
     #[test]
     fn zero_duration_is_preserved_as_an_explicit_cli_override() {
-        let argv = serve_argv(&LaunchSpec {
-            config: Some(PathBuf::from("/venue/finite.toml")),
-            duration: Some(Duration::ZERO),
-            ..LaunchSpec::default()
-        });
+        let argv = serve_argv(
+            &LaunchSpec {
+                config: Some(PathBuf::from("/venue/finite.toml")),
+                duration: Some(Duration::ZERO),
+                ..LaunchSpec::default()
+            },
+            NOT_THIS_PROCESS,
+        );
         assert_eq!(argv.last(), Some(&OsString::from("0s")));
     }
 

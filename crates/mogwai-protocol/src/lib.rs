@@ -12,7 +12,10 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 mod clock;
-mod decimal;
+/// `Decimal` conversions, and the serde glue that makes a wire decimal a JSON
+/// string rather than a JSON number. Public for the one decode path outside
+/// this crate that carries money: `mogwai-server`'s `POST /accounts` balances.
+pub mod decimal;
 mod havoc;
 mod instruments;
 mod messages;

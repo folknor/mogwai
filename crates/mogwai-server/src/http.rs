@@ -1375,6 +1375,17 @@ pub(crate) struct OpenAccountRequest {
     /// unnamed account gets; this is the same value stated per account, which
     /// is what makes a 25k experiment and a 100k experiment runnable on one
     /// venue.
+    ///
+    /// STRING-SPELLED, like every other money quantity that crosses into the
+    /// venue: `{"USDT":"250000"}`, never `{"USDT":250000}`. A bare JSON number
+    /// goes through `f64`, so a wide opening balance would be silently rounded
+    /// and `1e-30` would fund the account with zero. This is a live decode path
+    /// the wire-decimal round nearly missed - it is not in `messages` and does
+    /// not look like a frame - and it is pinned by
+    /// `an_opening_balance_must_be_spelled_as_a_string`. The policy fields
+    /// BELOW stay number-tolerant on purpose: they are thresholds and fractions
+    /// that are also spelled in TOML.
+    #[serde(with = "mogwai_protocol::decimal::str_map")]
     balances: std::collections::HashMap<String, rust_decimal::Decimal>,
     /// The rules the venue ENFORCES against this account, stated inline.
     /// Absent means unpoliced unless `policy_preset` names one.
@@ -2400,6 +2411,50 @@ mod calendar_tests {
 
     fn generated_profiles() -> std::sync::Arc<source::Rivers> {
         crate::fills::test_rivers()
+    }
+
+    /// `POST /accounts` IS THE THIRD LIVE DECODE PATH CARRYING MONEY INTO THE
+    /// VENUE, after the execution wire and the market-data wire, and it was
+    /// missed when those were annotated - it is not a frame, it does not live
+    /// in `messages`, and it looks like config while behaving like a request.
+    ///
+    /// An opening balance decoded through `f64` would be silently rounded at
+    /// width and `1e-30` would fund the account with nothing, which is the same
+    /// hazard the wire fields carry. Every in-tree caller already spells these
+    /// as strings, so refusing numbers breaks no known peer.
+    ///
+    /// THE POLICY FIELDS BESIDE IT ARE DELIBERATELY STILL TOLERANT, and the
+    /// second half of this test says so: they are thresholds and fractions that
+    /// are also spelled in TOML, so `max_position = 5` is their natural form.
+    #[test]
+    fn an_opening_balance_must_be_spelled_as_a_string() {
+        let string_spelled = r#"{"account_id":"WYRD-900","balances":{"USDT":"250000.75"}}"#;
+        let request: OpenAccountRequest =
+            serde_json::from_str(string_spelled).expect("the string spelling must decode");
+        assert_eq!(
+            request.balances.get("USDT").copied(),
+            Some(rust_decimal::Decimal::new(25_000_075, 2))
+        );
+
+        for numeric in [
+            r#"{"account_id":"WYRD-900","balances":{"USDT":250000.75}}"#,
+            r#"{"account_id":"WYRD-900","balances":{"USDT":1e-30}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<OpenAccountRequest>(numeric).is_err(),
+                "a numeric opening balance must be refused: {numeric}"
+            );
+        }
+
+        // The deliberate exception, asserted rather than described: a policy
+        // threshold in the same body still takes a bare number.
+        let policy_numeric = r#"{"account_id":"WYRD-901","balances":{"USDT":"1000"},"policy":{"currency":"USDT","max_position":{"quantity":5}}}"#;
+        let request: OpenAccountRequest =
+            serde_json::from_str(policy_numeric).expect("a numeric policy threshold stays legal");
+        assert_eq!(
+            request.policy.max_position.map(|cap| cap.quantity),
+            Some(rust_decimal::Decimal::from(5))
+        );
     }
 
     #[test]

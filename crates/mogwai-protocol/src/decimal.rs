@@ -34,6 +34,119 @@ pub fn decimal_from_f64(x: f64) -> Decimal {
     Decimal::from_f64(x).unwrap_or(if x > 0.0 { Decimal::MAX } else { Decimal::MIN })
 }
 
+/// `serde` glue for an OPTIONAL wire `Decimal`: a JSON string or `null`, never
+/// a JSON number.
+///
+/// `rust_decimal::serde::str_option` looks like it would do this and does not:
+/// it REFUSES an explicit `null`, and the venue's own frames carry
+/// `"price":null` for every priceless order - a stop-market submit, a
+/// still-priceless amend. Annotating the wire fields with it made the adapter's
+/// stop-market and trigger-amend paths undecodable, which the socket suites
+/// caught. The required (non-`Option`) fields keep using
+/// `rust_decimal::serde::str` directly, because no `null` can reach them.
+///
+/// `visit_some` delegates to that same `str` deserializer, so the ONE rule -
+/// a number is refused, a string is exact - is stated in one place and the
+/// optional case cannot drift away from the required one.
+pub(crate) mod str_option {
+    use rust_decimal::Decimal;
+    use serde::{Deserializer, Serializer, de};
+
+    pub(crate) fn serialize<S>(value: &Option<Decimal>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(decimal) => serializer.serialize_str(&decimal.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    struct OptionalWireDecimal;
+
+    impl<'de> de::Visitor<'de> for OptionalWireDecimal {
+        type Value = Option<Decimal>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("null, or a decimal spelled as a JSON string")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            rust_decimal::serde::str::deserialize(deserializer).map(Some)
+        }
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_option(OptionalWireDecimal)
+    }
+}
+
+/// `serde` glue for a MAP of wire decimals keyed by currency: every VALUE is a
+/// JSON string, never a JSON number.
+///
+/// Exists for one field, `POST /accounts`'s `balances`, which is the third live
+/// decode path carrying money into the venue and was missed when the wire fields
+/// in `messages` were annotated. An opening balance is a money quantity in
+/// exactly the sense a fill price is, so it takes the same rule; the thresholds
+/// and fractions alongside it in that request body (`AccountPolicy`, and the
+/// `RiskPolicy` inside it) stay tolerant, because they are also TOML config.
+///
+/// `serialize` is here for completeness of the `with = ...` pair rather than
+/// because a caller needs it today - the request type is deserialize-only.
+pub mod str_map {
+    use std::collections::HashMap;
+
+    use rust_decimal::Decimal;
+    use serde::{Deserialize, Deserializer, Serializer, ser::SerializeMap};
+
+    /// One map value, deserialized by the same rule a required wire decimal
+    /// uses, so the map cannot drift away from the scalar case.
+    struct WireDecimal(Decimal);
+
+    impl<'de> Deserialize<'de> for WireDecimal {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            rust_decimal::serde::str::deserialize(deserializer).map(WireDecimal)
+        }
+    }
+
+    /// # Errors
+    /// Propagates the serializer's own errors.
+    pub fn serialize<S>(value: &HashMap<String, Decimal>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(value.len()))?;
+        for (key, decimal) in value {
+            map.serialize_entry(key, &decimal.to_string())?;
+        }
+        map.end()
+    }
+
+    /// # Errors
+    /// Fails when a value is spelled as anything but a decimal in a JSON string.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<String, Decimal>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = HashMap::<String, WireDecimal>::deserialize(deserializer)?;
+        Ok(raw.into_iter().map(|(key, value)| (key, value.0)).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

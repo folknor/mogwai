@@ -124,6 +124,10 @@ struct PresetArgs {
 struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+    /// KEEP THIS ON `humantime`. The shipped launcher renders `--duration`
+    /// with `mogwai-protocol`'s `format_duration`, which emits `0s`, `ms` and
+    /// `ns`; `gen`'s in-house `parse_duration` reads none of the three. See
+    /// `serve_argv_parses_in_the_venues_own_grammar` below.
     #[arg(long, value_name = "DURATION")]
     duration: Option<humantime::Duration>,
     /// The launcher's own pid, so the venue can prove it still has the owner it
@@ -195,5 +199,102 @@ fn main() -> anyhow::Result<()> {
         Command::Synth { command } => synth::run(command),
         Command::CadenceFeasible(args) => synth::run_cadence_feasible(args),
         Command::Segments { command } => segments::run(command),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use clap::Parser;
+    use mogwai_protocol::launch::{LaunchSpec, serve_argv};
+
+    use super::{Cli, Command, r#gen};
+
+    /// THE LAUNCHER'S RENDERING AND THE VENUE'S PARSER ARE ONE CONTRACT, AND
+    /// THIS IS THE ONLY PLACE THE TWO MEET.
+    ///
+    /// `mogwai-protocol`'s `format_duration` promises that "every value renders
+    /// into something the venue accepts", and until this test that promise was
+    /// asserted only against itself - a golden-string test in the same module,
+    /// with nothing on the parsing side. It matters because this binary carries
+    /// TWO duration grammars that disagree on exactly the units the launcher
+    /// emits: `serve` takes `humantime::Duration`, which accepts `ms`, `ns` and
+    /// `0s`, while `gen`'s in-house `parse_duration` accepts only
+    /// `s m h d w mo y`, refuses a zero count, and reads `1500ms` as an unknown
+    /// unit (it has `mo`, not `ms`). Switching `serve` to the in-house parser
+    /// "for consistency" would silently break `Duration::ZERO` and every
+    /// millisecond and nanosecond value the launcher can produce, and nothing
+    /// else would notice.
+    ///
+    /// It is a real crossing rather than the two-copy shape - a round trip
+    /// through one crate's own pair of functions - because the rendering side
+    /// is `mogwai-protocol`'s shipped `serve_argv` and the parsing side is the
+    /// `Cli` this binary's `main` actually runs. It lives in the bin crate's
+    /// unit tests because `ServeArgs` is private to it.
+    ///
+    /// THE CASES ARE THE ONES `durations_render_in_the_coarsest_exact_unit`
+    /// ENUMERATES, so the two tests cannot drift onto different values: zero,
+    /// a whole-second span, a millisecond remainder, one nanosecond, and a
+    /// microsecond that renders as nanoseconds.
+    #[test]
+    fn serve_argv_parses_in_the_venues_own_grammar() {
+        for duration in [
+            Duration::ZERO,
+            Duration::from_secs(90),
+            Duration::from_millis(1_500),
+            Duration::from_nanos(1),
+            Duration::from_micros(1),
+        ] {
+            let spec = LaunchSpec {
+                duration: Some(duration),
+                ..LaunchSpec::default()
+            };
+            let mut argv = vec![std::ffi::OsString::from("mogwai")];
+            argv.extend(serve_argv(&spec, std::process::id()));
+            let rendered = format!("{argv:?}");
+            let cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| {
+                panic!("the venue must parse its own launcher's argv {rendered}: {e}")
+            });
+            let Command::Serve(args) = cli.command else {
+                panic!("serve_argv must render the serve subcommand, got {rendered}");
+            };
+            let parsed: Duration = args
+                .duration
+                .unwrap_or_else(|| panic!("--duration must survive the round trip: {rendered}"))
+                .into();
+            assert_eq!(
+                parsed, duration,
+                "the venue must read back the duration the launcher rendered, from {rendered}"
+            );
+        }
+    }
+
+    /// The companion refusal, so the test above cannot be read as "any parser
+    /// would do". `gen`'s grammar is the one a later unification would reach
+    /// for, and these are the renderings it cannot read.
+    #[test]
+    fn the_in_house_gen_grammar_cannot_read_what_the_launcher_renders() {
+        for duration in [
+            Duration::ZERO,
+            Duration::from_millis(1_500),
+            Duration::from_nanos(1),
+        ] {
+            let spec = LaunchSpec {
+                duration: Some(duration),
+                ..LaunchSpec::default()
+            };
+            let argv = serve_argv(&spec, std::process::id());
+            let rendered = argv
+                .last()
+                .expect("--duration is last")
+                .to_str()
+                .expect("ascii")
+                .to_owned();
+            assert!(
+                r#gen::parse_duration(&rendered).is_err(),
+                "gen's grammar must not be assumed compatible: it read {rendered}"
+            );
+        }
     }
 }

@@ -549,11 +549,17 @@ pub enum ClientMessage {
     },
     ModifyOrder {
         client_order_id: ClientOrderId,
+        #[serde(default, with = "crate::decimal::str_option")]
         price: Option<Decimal>,
+        #[serde(default, with = "crate::decimal::str_option")]
         quantity: Option<Decimal>,
         /// Amending the trigger of an UNTRIGGERED conditional restarts its
         /// trigger window; on anything else it is rejected.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::decimal::str_option"
+        )]
         trigger_price: Option<Decimal>,
     },
     /// Reconciliation query: ask the venue for the CURRENT status of its
@@ -693,15 +699,22 @@ pub struct OrderStatusInfo {
     pub time_in_force: TimeInForce,
     pub status: WireOrderStatus,
     /// Current total order quantity (post-amend, if any).
+    #[serde(with = "rust_decimal::serde::str")]
     pub quantity: Decimal,
     /// Quantity filled so far.
+    #[serde(with = "rust_decimal::serde::str")]
     pub filled_qty: Decimal,
     /// Current order price. Always present in practice (the server stamps
     /// Market orders before the engine sees them), optional on the wire to
     /// mirror `SubmitOrder`.
+    #[serde(default, with = "crate::decimal::str_option")]
     pub price: Option<Decimal>,
     /// The conditional's stop price, `None` for a non-conditional order.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub trigger_price: Option<Decimal>,
     /// Sim unix-ns the trigger fired, `None` while untriggered or for a
     /// non-conditional order.
@@ -747,11 +760,17 @@ pub struct SubmitOrder {
     pub position_id: Option<String>,
     pub side: Side,
     pub order_type: OrderType,
+    #[serde(with = "rust_decimal::serde::str")]
     pub quantity: Decimal,
+    #[serde(default, with = "crate::decimal::str_option")]
     pub price: Option<Decimal>,
     /// The price the tape must touch for a conditional to become live.
     /// REQUIRED on StopMarket/StopLimit, refused on Market/Limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub trigger_price: Option<Decimal>,
     /// How far a trailing stop's trigger sits from the extreme the tape has
     /// reached. REQUIRED on `TrailingStopMarket` and `TrailingStopLimit`, and
@@ -760,7 +779,11 @@ pub struct SubmitOrder {
     /// An absolute price distance, not a fraction: Pine states a trail in points
     /// or in ticks, and converting a fraction back would need a reference price
     /// nothing here agrees on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub trail_offset: Option<Decimal>,
     /// How far a `TrailingStopLimit`'s LIMIT sits from its own trigger, on the
     /// fillable side of it. REQUIRED on that type and refused on every other.
@@ -775,7 +798,11 @@ pub struct SubmitOrder {
     /// again on every ratchet, which is why `price` is refused on this type: a
     /// trigger that moves and a limit that does not would drift apart until the
     /// limit is unreachable, and nautilus models the same materialization.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub limit_offset: Option<Decimal>,
     pub time_in_force: TimeInForce,
     /// Sim instant a `Gtd` order expires at. REQUIRED on `Gtd` and refused on
@@ -1389,14 +1416,21 @@ pub enum ServerMessage {
         client_order_id: ClientOrderId,
         venue_order_id: VenueOrderId,
         /// New total order quantity after the amend.
+        #[serde(with = "rust_decimal::serde::str")]
         quantity: Decimal,
         /// New price after the amend. `None` for a still-priceless order.
+        #[serde(default, with = "crate::decimal::str_option")]
         price: Option<Decimal>,
         /// New trigger price after the amend. `None` for a non-conditional
         /// order, and for an amend that did not touch the trigger.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::decimal::str_option"
+        )]
         trigger_price: Option<Decimal>,
         /// Remaining quantity after the amend.
+        #[serde(with = "rust_decimal::serde::str")]
         leaves_qty: Decimal,
         ts_event: u64,
     },
@@ -1592,10 +1626,14 @@ pub struct OrderFilled {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_id: Option<String>,
     pub side: Side,
+    #[serde(with = "rust_decimal::serde::str")]
     pub last_qty: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub last_px: Decimal,
     /// Remaining quantity. `> 0` ⇒ this is a partial fill.
+    #[serde(with = "rust_decimal::serde::str")]
     pub leaves_qty: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub commission: Decimal,
     pub commission_currency: String,
     pub liquidity_side: LiquiditySide,
@@ -1624,15 +1662,20 @@ pub struct AccountState {
 pub struct PostedMargin {
     pub symbol: Symbol,
     pub currency: String,
+    #[serde(with = "rust_decimal::serde::str")]
     pub initial: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub maintenance: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Balance {
     pub currency: String,
+    #[serde(with = "rust_decimal::serde::str")]
     pub total: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub free: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub locked: Decimal,
 }
 
@@ -1642,19 +1685,31 @@ pub struct Position {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_id: Option<String>,
     /// Signed net quantity: positive is long, negative is short, zero is flat.
+    #[serde(with = "rust_decimal::serde::str")]
     pub quantity: Decimal,
     /// Volume-weighted average entry price of the open quantity. Zero when flat.
+    #[serde(with = "rust_decimal::serde::str")]
     pub avg_px: Decimal,
-    #[serde(default, skip_serializing_if = "Decimal::is_zero")]
+    #[serde(
+        default,
+        skip_serializing_if = "Decimal::is_zero",
+        with = "rust_decimal::serde::str"
+    )]
     pub mark_px: Decimal,
-    #[serde(default, skip_serializing_if = "Decimal::is_zero")]
+    #[serde(
+        default,
+        skip_serializing_if = "Decimal::is_zero",
+        with = "rust_decimal::serde::str"
+    )]
     pub unrealized_pnl: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeTick {
     pub symbol: Symbol,
+    #[serde(with = "rust_decimal::serde::str")]
     pub price: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub size: Decimal,
     pub aggressor: AggressorSide,
     pub ts_event: u64,
@@ -1663,9 +1718,13 @@ pub struct TradeTick {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuoteTick {
     pub symbol: Symbol,
+    #[serde(with = "rust_decimal::serde::str")]
     pub bid_px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub ask_px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub bid_sz: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub ask_sz: Decimal,
     pub ts_event: u64,
 }
@@ -1895,6 +1954,272 @@ mod tests {
                 assert_eq!(
                     ScanKind::TriggerToward.hit(side, px, traded),
                     touches_toward(side, px, traded)
+                );
+            }
+        }
+    }
+
+    /// THE HOLE THE REFUSAL FIX OPENED ONE LAYER UP, and the reason
+    /// `crate::decimal::str_option` exists instead of
+    /// `rust_decimal::serde::str_option`.
+    ///
+    /// An optional wire decimal has TWO legal spellings for "no value" - the
+    /// field ABSENT, or present and `null` - and the first cut of the numeric
+    /// refusal broke BOTH of them, each by a different mechanism. (An earlier
+    /// draft of this comment counted three by listing "absent" and "omitted"
+    /// as separate spellings; they are one.) The dependency's
+    /// `str_option` REFUSES an explicit `null`, which is exactly what the venue
+    /// and the adapter emit for a priceless order - a stop-market submit, an
+    /// amend that does not touch the price - and it made
+    /// `adapter_submits_a_stop_market_and_sees_triggered_then_filled` and
+    /// `a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered` fail with
+    /// no execution event at all, because the stub decodes with a silent
+    /// `if let Ok`. And a `with = ...` field loses serde's implicit
+    /// Option-is-optional handling, so an ABSENT `price` - which every
+    /// `Market`-order fixture in the serving suite sends - became a
+    /// missing-field error until the `default`s went back on.
+    ///
+    /// Both are pinned HERE rather than left to the socket suites, which the
+    /// changed-files check lane does not run.
+    #[test]
+    fn an_absent_or_null_optional_wire_decimal_is_still_none() {
+        let modify_null =
+            r#"{"type":"ModifyOrder","client_order_id":"O-1","price":null,"quantity":"2"}"#;
+        let modify_absent = r#"{"type":"ModifyOrder","client_order_id":"O-1","quantity":"2"}"#;
+        for frame in [modify_null, modify_absent] {
+            let Ok(ClientMessage::ModifyOrder {
+                price, quantity, ..
+            }) = serde_json::from_str::<ClientMessage>(frame)
+            else {
+                panic!("an absent or null optional decimal must decode as None: {frame}");
+            };
+            assert_eq!(price, None, "{frame}");
+            assert_eq!(quantity, Some(Decimal::from(2)), "{frame}");
+        }
+
+        // The two order shapes that actually reach the venue without a price.
+        // The Market one OMITS the field, exactly as the serving suite's
+        // fixtures do; the StopMarket one spells it NULL, exactly as the
+        // adapter's `ClientMessage` serialization does.
+        for frame in [
+            r#"{"type":"SubmitOrder","client_order_id":"O-1","symbol":"BTCUSDT","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}"#,
+            r#"{"type":"SubmitOrder","client_order_id":"O-2","symbol":"BTCUSDT","side":"Sell","order_type":"StopMarket","quantity":"1","price":null,"trigger_price":"95.00","time_in_force":"Gtc"}"#,
+        ] {
+            let Ok(ClientMessage::SubmitOrder(order)) =
+                serde_json::from_str::<ClientMessage>(frame)
+            else {
+                panic!("a priceless submit must decode: {frame}");
+            };
+            assert_eq!(order.price, None, "{frame}");
+        }
+
+        // And `null` still round-trips as `null` rather than vanishing: the
+        // byte form the wire test pins is unchanged by the annotations.
+        let reserialized = serde_json::to_string(
+            &serde_json::from_str::<ClientMessage>(modify_null).expect("decode"),
+        )
+        .expect("re-serialize");
+        assert_eq!(reserialized, modify_null);
+    }
+
+    /// EVERY `Decimal` ON THE WIRE IS A JSON STRING, IN BOTH DIRECTIONS, AND A
+    /// NUMERIC SPELLING IS REFUSED RATHER THAN ROUNDED.
+    ///
+    /// `rust_decimal`'s DEFAULT `Deserialize` accepts a JSON number as well as
+    /// a string, and the number goes through `f64`. Measured before the fix,
+    /// against these same types: `{"price": 12345678901234567890.123}` decoded
+    /// to `12345678901234567000`, `0.1234567890123456789` to
+    /// `0.12345678901234568`, and - the asymmetry that shows the two grammars
+    /// are not even nested - `1e-30` decoded as a NUMBER to `Decimal::ZERO`
+    /// while the same text as a STRING was refused outright. A price or a
+    /// quantity whose value depends on how the peer spelled it is not a source
+    /// of truth, so the `with = "rust_decimal::serde::str"` annotations make
+    /// the string spelling the only one.
+    ///
+    /// THE LINE IS MONEY, NOT "Decimal everywhere", and the split is by what
+    /// the number MEANS rather than by which module it lives in. Prices,
+    /// quantities, balances and equity are STRING-ONLY wherever they decode;
+    /// operator-supplied fractions and thresholds stay tolerant.
+    ///
+    /// STRING-ONLY, and this table is only PART of that set: the frames here
+    /// (execution, account and market data), `risk::RiskState` and its nested
+    /// `Breach` (published on `GET /account`, pinned by
+    /// `a_published_risk_state_refuses_a_numeric_decimal`), and
+    /// `mogwai-server`'s `OpenAccountRequest.balances` (the `POST /accounts`
+    /// opening balances, pinned by
+    /// `an_opening_balance_must_be_spelled_as_a_string`).
+    ///
+    /// TOLERANT, deliberately, and the list is exhaustive as of this round:
+    /// `control::Divergence` (`POST /control/divergence`), `risk::RiskPolicy`
+    /// and `risk::AccountPolicy` around it, and `instruments::InstrumentSpec`.
+    /// The last three are also TOML config, where `multiplier = 2` is the
+    /// natural spelling, and all of them carry fractions and thresholds rather
+    /// than a booked quantity.
+    ///
+    /// NOTHING DETECTS A NEW `Decimal` FIELD THAT FORGETS THE ANNOTATION. The
+    /// table below is exhaustive by hand over this module's 35 serde `Decimal`
+    /// fields across ten struct shapes - `SubmitOrder` 5, `ModifyOrder` 3,
+    /// `OrderUpdated` 4, `OrderFilled` 4, `OrderStatusInfo` 4, `Balance` 3,
+    /// `Position` 4, `PostedMargin` 2, `TradeTick` 2, `QuoteTick` 4. (`Hit.px`
+    /// is excluded because that struct is not serde.) A new one owes its
+    /// annotation and a row here, or it silently reopens the hole.
+    #[test]
+    fn every_wire_decimal_refuses_a_numeric_spelling() {
+        // The two market-data frames, shared by the hot-path block below and by
+        // the `server` table, so the two cannot end up checking different
+        // frames.
+        const TRADE: &str = r#"{"type":"Trade","symbol":"BTCUSDT","price":"100.5","size":"2","aggressor":"Buyer","ts_event":1}"#;
+        const QUOTE: &str = r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99.5","ask_px":"100.5","bid_sz":"2","ask_sz":"3","ts_event":1}"#;
+
+        // FIRST, because the hot path has its own decoder and this is the
+        // only block that reaches it: `from_json_str` short-circuits the
+        // internally-tagged content buffer for Trade and Quote, so it is a
+        // second decode path over the same fields. Placed after the tables it
+        // could never fail first, which would make it unbite-checkable.
+        //
+        // EVERY decimal field of both frames, not a sample of them: the fields
+        // do share one `Deserialize`, but this block's whole claim is that the
+        // second path refuses what the first does, and a claim stated over
+        // "the same fields" has to be checked over all of them.
+        for (frame, fields) in [
+            (TRADE, ["price", "size"].as_slice()),
+            (QUOTE, ["bid_px", "ask_px", "bid_sz", "ask_sz"].as_slice()),
+        ] {
+            assert!(
+                ServerMessage::from_json_str(frame).is_ok(),
+                "the tag-probe decoder must still take the string spelling: {frame}"
+            );
+            for field in fields {
+                let numeric = unquote(frame, field);
+                assert!(
+                    ServerMessage::from_json_str(&numeric).is_err(),
+                    "the tag-probe decoder must refuse a numeric spelling too: {numeric}"
+                );
+            }
+        }
+
+        // (label, a fully valid frame, every Decimal field in it).
+        //
+        // THE SUBMIT SHAPE NEEDS TWO ROWS BECAUSE NO SINGLE ORDER TYPE CARRIES
+        // ALL FIVE OF ITS DECIMALS LEGALLY - `TrailingStopLimit` REFUSES
+        // `price`, whose value it derives from `limit_offset`. A one-row
+        // fixture spelling all five was a frame `validate_submit_order` would
+        // reject; decode-only tests never call the validator, so it passed
+        // while pinning a shape the venue does not serve. The loop below runs
+        // the validator over every decoded `SubmitOrder`, so this cannot
+        // silently happen again.
+        let client: &[(&str, &str, &[&str])] = &[
+            (
+                "SubmitOrder StopLimit",
+                r#"{"type":"SubmitOrder","client_order_id":"O-1","symbol":"BTCUSDT","side":"Buy","order_type":"StopLimit","quantity":"2","price":"100.5","trigger_price":"99.5","time_in_force":"Gtc"}"#,
+                &["quantity", "price", "trigger_price"],
+            ),
+            (
+                "SubmitOrder TrailingStopLimit",
+                r#"{"type":"SubmitOrder","client_order_id":"O-2","symbol":"BTCUSDT","side":"Buy","order_type":"TrailingStopLimit","quantity":"2","trigger_price":"99.5","trail_offset":"1.5","limit_offset":"0.5","time_in_force":"Gtc"}"#,
+                &["quantity", "trigger_price", "trail_offset", "limit_offset"],
+            ),
+            (
+                "ModifyOrder",
+                r#"{"type":"ModifyOrder","client_order_id":"O-1","price":"100.5","quantity":"2","trigger_price":"99.5"}"#,
+                &["price", "quantity", "trigger_price"],
+            ),
+        ];
+        let server: &[(&str, &str, &[&str])] = &[
+            (
+                "OrderUpdated",
+                r#"{"type":"OrderUpdated","client_order_id":"O-1","venue_order_id":"V-1","quantity":"2","price":"100.5","trigger_price":"99.5","leaves_qty":"1","ts_event":1}"#,
+                &["quantity", "price", "trigger_price", "leaves_qty"],
+            ),
+            (
+                "OrderFilled",
+                r#"{"type":"OrderFilled","client_order_id":"O-1","venue_order_id":"V-1","trade_id":"T-1","symbol":"BTCUSDT","side":"Buy","last_qty":"1","last_px":"100.5","leaves_qty":"0","commission":"0.02","commission_currency":"USDT","liquidity_side":"taker","ts_event":1}"#,
+                &["last_qty", "last_px", "leaves_qty", "commission"],
+            ),
+            (
+                "AccountState",
+                r#"{"type":"AccountState","account_id":"MOGWAI-001","balances":[{"currency":"USDT","total":"9900","free":"9800","locked":"100"}],"positions":[{"symbol":"BTCUSDT","quantity":"1","avg_px":"100.5","mark_px":"101.5","unrealized_pnl":"1"}],"margins":[{"symbol":"BTCUSDT","currency":"USDT","initial":"50","maintenance":"25"}],"ts_event":1}"#,
+                &[
+                    "total",
+                    "free",
+                    "locked",
+                    "quantity",
+                    "avg_px",
+                    "mark_px",
+                    "unrealized_pnl",
+                    "initial",
+                    "maintenance",
+                ],
+            ),
+            (
+                "OrderStatusSnapshot",
+                r#"{"type":"OrderStatusSnapshot","request_id":"Q-1","orders":[{"client_order_id":"O-1","venue_order_id":"V-1","symbol":"BTCUSDT","side":"Buy","order_type":"StopLimit","time_in_force":"Gtc","status":"Accepted","quantity":"2","filled_qty":"0.5","price":"100.5","trigger_price":"99.5","ts_accepted":1,"ts_last":2}],"ts_event":3}"#,
+                &["quantity", "filled_qty", "price", "trigger_price"],
+            ),
+            ("Trade", TRADE, &["price", "size"]),
+            ("Quote", QUOTE, &["bid_px", "ask_px", "bid_sz", "ask_sz"]),
+        ];
+
+        // Strip the quotes off ONE field's value, leaving the rest of the frame
+        // untouched, so a refusal can only be about that field's spelling.
+        //
+        // THE RENAME CASE - a field renamed out from under this table - is
+        // caught by the `find` panic below and by nothing else. An earlier
+        // draft added a trailing `assert_ne!(out, frame)` claiming to guard it;
+        // `out` is `frame` minus two quote characters and so ALWAYS differs, so
+        // that assertion could not fail and the guard it advertised did not
+        // exist.
+        fn unquote(frame: &str, field: &str) -> String {
+            let needle = format!("\"{field}\":\"");
+            let at = frame
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{field} is not spelled as a string in {frame}"));
+            let value_start = at + needle.len();
+            let value_end = value_start
+                + frame[value_start..]
+                    .find('"')
+                    .expect("the value's closing quote");
+            let mut out = String::with_capacity(frame.len());
+            out.push_str(&frame[..value_start - 1]);
+            out.push_str(&frame[value_start..value_end]);
+            out.push_str(&frame[value_end + 1..]);
+            out
+        }
+
+        for (label, frame, fields) in client {
+            let decoded = serde_json::from_str::<ClientMessage>(frame)
+                .unwrap_or_else(|e| panic!("{label}: the string spelling must still decode: {e}"));
+            // EVERY FIXTURE IS A FRAME THE VENUE WOULD ACTUALLY ADMIT. Decode
+            // tests skip validation, so without this a fixture can pin an
+            // illegal shape and a reader auditing the table for exhaustiveness
+            // will believe that shape is legal.
+            if let ClientMessage::SubmitOrder(order) = &decoded {
+                validate_submit_order(order).unwrap_or_else(|e| {
+                    panic!("{label}: the fixture must be a submit the venue admits: {e}")
+                });
+            }
+            assert!(!fields.is_empty(), "{label}: no fields listed");
+            for field in *fields {
+                let numeric = unquote(frame, field);
+                let decoded = serde_json::from_str::<ClientMessage>(&numeric);
+                assert!(
+                    decoded.is_err(),
+                    "{label}.{field}: a numeric spelling must be refused, got {decoded:?}"
+                );
+            }
+        }
+        for (label, frame, fields) in server {
+            assert!(
+                serde_json::from_str::<ServerMessage>(frame).is_ok(),
+                "{label}: the string spelling must still decode"
+            );
+            assert!(!fields.is_empty(), "{label}: no fields listed");
+            for field in *fields {
+                let numeric = unquote(frame, field);
+                let decoded = serde_json::from_str::<ServerMessage>(&numeric);
+                assert!(
+                    decoded.is_err(),
+                    "{label}.{field}: a numeric spelling must be refused, got {decoded:?}"
                 );
             }
         }

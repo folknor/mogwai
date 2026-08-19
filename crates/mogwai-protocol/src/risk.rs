@@ -239,39 +239,77 @@ impl AccountPolicy {
 /// so if these numbers are not on the wire nobody can tell a run that ended flat
 /// having spent 90 percent of its budget from one that never came close, and
 /// the two are indistinguishable from fills alone.
+///
+/// EVERY DECIMAL HERE IS STRING-SPELLED ON THE WIRE, and a JSON number is
+/// refused, for the same reason the execution and market-data frames in
+/// `messages` are: these are money quantities, and a bare number decodes
+/// through `f64`. This type is OUTPUT-ONLY in-tree - the venue builds it and
+/// publishes it on `GET /account`, nothing decodes it here - but it derives
+/// `Deserialize` for consumers, and a consumer's decoder is exactly where the
+/// tolerance would have bitten unobserved. It is a DELIBERATE inclusion, not
+/// an oversight: [`RiskPolicy`] beside it stays number-tolerant because a
+/// policy is also TOML config, while a published state is only ever wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskState {
     /// Equity at the last evaluation: balances plus unrealized.
+    #[serde(with = "rust_decimal::serde::str")]
     pub equity: Decimal,
     /// The high-water mark the trailing threshold has ratcheted on.
+    #[serde(with = "rust_decimal::serde::str")]
     pub peak_equity: Decimal,
     /// Equity at the current day's open, which the daily limit measures from.
+    #[serde(with = "rust_decimal::serde::str")]
     pub day_open_equity: Decimal,
     /// The trailing floor, if a trailing drawdown is set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub trailing_threshold: Option<Decimal>,
     /// How far equity may fall before the trailing floor is breached.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub trailing_remaining: Option<Decimal>,
     /// How much more may be lost today before the daily limit is breached.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub daily_remaining: Option<Decimal>,
     /// The static overall floor, if an overall drawdown is set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub overall_threshold: Option<Decimal>,
     /// How far equity may fall before the overall floor is breached.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub overall_remaining: Option<Decimal>,
     /// The position cap, if one is set. Published so the evaluator can see
     /// the size the run was allowed, which fills alone cannot reconstruct.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::decimal::str_option"
+    )]
     pub max_position: Option<Decimal>,
     /// Set once a rule has fired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breached: Option<Breach>,
 }
 
-/// A rule that fired, and what it did.
+/// A rule that fired, and what it did. Published inside [`RiskState`] and
+/// string-spelled on the same grounds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Breach {
     pub rule: BreachedRule,
@@ -279,7 +317,9 @@ pub struct Breach {
     /// Sim instant the rule fired.
     pub ts_event: u64,
     /// Equity at the moment it fired, and the floor it crossed.
+    #[serde(with = "rust_decimal::serde::str")]
     pub equity: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
     pub threshold: Decimal,
 }
 
@@ -424,6 +464,60 @@ mod tests {
     #[test]
     fn a_policy_naming_no_rule_is_unpoliced() {
         assert!(AccountPolicy::default().is_unpoliced());
+    }
+
+    /// `RiskState` IS ON THE WIRE - `GET /account` publishes it as
+    /// `AccountSnapshot.risk` - so it takes the same string-only decimal rule
+    /// the execution and market-data frames do, and this is the row that says
+    /// the inclusion was decided rather than forgotten.
+    ///
+    /// It is output-only in this workspace, which is exactly why the tolerance
+    /// needed pinning here: no in-tree decode would ever have exercised it, and
+    /// a consumer's would.
+    #[test]
+    fn a_published_risk_state_refuses_a_numeric_decimal() {
+        let string_spelled = r#"{"equity":"1000.5","peak_equity":"1200","day_open_equity":"1100","trailing_remaining":"50.25","breached":{"rule":"daily_loss_limit","action":"lock_until_reset","ts_event":7,"equity":"900","threshold":"950"}}"#;
+        let state: RiskState =
+            serde_json::from_str(string_spelled).expect("the string spelling must decode");
+        assert_eq!(state.equity, Decimal::new(10_005, 1));
+        assert_eq!(state.trailing_remaining, Some(Decimal::new(5025, 2)));
+        assert_eq!(
+            state.breached.as_ref().map(|breach| breach.threshold),
+            Some(Decimal::from(950))
+        );
+
+        // Every decimal in the frame, required and optional, on the state and
+        // on the nested breach. Each is unquoted in turn so a refusal can only
+        // be about that field.
+        for field in [
+            "equity",
+            "peak_equity",
+            "day_open_equity",
+            "trailing_remaining",
+            "threshold",
+        ] {
+            let needle = format!("\"{field}\":\"");
+            let at = string_spelled
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{field} is not spelled as a string"));
+            let value_start = at + needle.len();
+            let value_end = value_start
+                + string_spelled[value_start..]
+                    .find('"')
+                    .expect("the value's closing quote");
+            let mut numeric = String::with_capacity(string_spelled.len());
+            numeric.push_str(&string_spelled[..value_start - 1]);
+            numeric.push_str(&string_spelled[value_start..value_end]);
+            numeric.push_str(&string_spelled[value_end + 1..]);
+            assert!(
+                serde_json::from_str::<RiskState>(&numeric).is_err(),
+                "{field}: a numeric spelling must be refused"
+            );
+        }
+
+        // An absent optional is still absent, which is what the `default`s
+        // alongside the `with = ...` annotations buy.
+        assert_eq!(state.max_position, None);
     }
 
     /// A policy carrying exactly one rule, with the currency named so the

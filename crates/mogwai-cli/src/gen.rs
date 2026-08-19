@@ -398,7 +398,12 @@ fn write_trace(
 /// Multipliers: s=1e9, m=60e9, h=3600e9, d=86_400e9, w=604_800e9, mo=30d, y=365d.
 /// Total; rejects empty/zero/unknown-unit and saturating-checks overflow to an
 /// error rather than panicking.
-fn parse_duration(s: &str) -> anyhow::Result<u64> {
+/// `pub(crate)` for one reason: `main.rs`'s
+/// `the_in_house_gen_grammar_cannot_read_what_the_launcher_renders` holds this
+/// grammar against what `mogwai-protocol`'s launcher renders for `serve
+/// --duration`, and the two disagree. This is `gen`'s parser and `serve` must
+/// not be switched onto it - see that test.
+pub(crate) fn parse_duration(s: &str) -> anyhow::Result<u64> {
     const NS_PER_S: u64 = 1_000_000_000;
     const NS_PER_M: u64 = 60 * NS_PER_S;
     const NS_PER_H: u64 = 3_600 * NS_PER_S;
