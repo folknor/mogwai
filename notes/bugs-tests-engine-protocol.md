@@ -143,42 +143,48 @@ via the rate. If `apply_funding` took `qty.abs()`, a short would also pay fundin
 - direction inverted, no test red. The short side is the half where the sign
 convention is actually easy to get wrong.
 
-## C. The biggest structural hole: `launch.rs` never launches a venue that works
+## C. `launch.rs` - closed, with one refusal
 
-Every `launch()` test in `mogwai-protocol` exercises a FAILURE path: missing
-binary, `true` (no line), `echo` (malformed line), zero timeout, and
-`silent_venue()` (timeout). The parse tests call `parse_ready` directly. NOTHING
-IN THE CRATE EVER GETS PAST READINESS, so the entire second half of `run_venue` -
-lines roughly 689 to 751 - is untested here: the `OWNER_POLL` loop,
-`child.try_wait()`, the `VenueExit` record, the "reap is unconditional on the way
-out" fix and its long comment about a bounded run reaped with no `VenueExit`,
-`LaunchedVenue::shutdown()`'s return value, and the `teardown` failure detail. A
-code hunt earlier the same day found a vacuous `shutdown()` result and a skipped
-reap in exactly this region. Those are the two things a unit test would have
-caught and there is no unit test.
+Round 1 closed the structural hole and the ETXTBSY note (already fixed twice
+before the report was written, and now closed structurally). What remains open
+is one refusal.
 
-The fix is cheap and the file already contains the pattern: `silent_venue()`
-writes a 2-line `#!/bin/sh` into `target/` and chmods it. Generalize it into a
-`scripted_venue(readiness_line, then)` fixture that prints a valid `ReadyRecord`
-JSON line, flushes, and then either sleeps, exits 0, or exits nonzero. That
-unlocks, as pure unit tests: a clean bounded-run exit records
-`VenueExit { success: true, code: Some(0) }`; a crashed venue records the nonzero
-code; `shutdown()` on a venue that will not die reports rather than returning
-`Ok(())`; `exited()` is `None` only for a venue killed while healthy. The hunter
-would write that before anything else on this list.
+The round added a `write_venue_script` / `scripted_venue` fixture pair and
+SEVEN tests, six of them over the previously untested second half of
+`own_venue`:
 
-Two smaller launch notes:
+- `a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure` - the
+  boot path, and the counterexample under the refusal below.
+- `a_venue_that_ended_during_shutdown_still_records_its_exit` - the
+  unconditional reap, on the SHUTDOWN arm.
+- `a_crashed_venue_records_its_nonzero_code`
+- `a_signalled_venue_records_no_exit_code`
+- `a_venue_killed_while_healthy_records_no_exit`
+- `a_recorded_teardown_failure_is_reported_and_not_repeated`
+- `the_teardown_detail_is_read_after_the_owner_joins` - the ORDERING in
+  `terminate`, which the direct-fill test above it cannot reach.
 
-- `silent_venue()` writes to a FIXED SHARED PATH
-  (`crates/mogwai-protocol/../../target/mogwai-silent-venue.sh`) with no
-  uniquification. One test claims it today, so it is fine - but any second test
-  using the same helper concurrently under `--test-threads=8` gets a write racing
-  an `exec` (ETXTBSY). Uniquify by test name when you generalize it.
-- `read_ready`'s `NoRecord` path sleeps a fixed 50 ms to let the stderr drain
-  thread deliver. That is a fixed span on the success path of error construction,
-  in PRODUCTION code. It is the one place in either crate that waits on a
-  duration where it could wait on a condition (e.g. a drain-quiescent signal, or
-  draining to EOF since the child is already dead by then).
+REFUSED: replacing `read_ready`'s `NoRecord` 50 ms pause with a condition.
+
+The report's premise - "the child is already dead by then" - is FALSE, and it is
+now a test. `NoRecord` means end-of-file on the STDOUT pipe, i.e. every write end
+closed; a venue that closes its own stdout, or hands it to a grandchild that
+closes it, reaches that branch while still running.
+`a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure` builds
+exactly that venue (`exec 1>&-; exec sleep 60`) and pins that `launch` reports
+the boot failure inside 5 s rather than waiting the child's 60 s out - well
+under both the child's own life and the 300 s readiness bound, so neither of
+those is what ended the wait.
+So "drain stderr to EOF" is an UNBOUNDED wait on a live child, placed
+immediately after the launcher has decided to report a failure - the same defect
+shape the readiness reader's bound already exists to prevent, and it would hang
+`launch`, which waits on `boot_tx` without a deadline of its own.
+
+The other suggested condition, a drain-quiescent signal, still needs a bound (a
+drain fed by a live child need never go quiet, and quiescence is not delivery),
+so it swaps a fixed 50 ms for a bounded poll with the same worst case, more
+production machinery, and a weaker guarantee. The span costs 50 ms once per
+FAILED launch and nothing on any other path.
 
 ## D. Weaker signals worth a note
 
@@ -217,7 +223,6 @@ Two smaller launch notes:
 
 ## The hunter's own ordering
 
-C first (a scripted-venue fixture unlocks the whole untested half of the shipped
-launcher), then A1/A5/A3 (three cases where production comments assert a property
+C is done. Then A1/A5/A3 (three cases where production comments assert a property
 no test holds), then B1 (six unpinned wire-size constants that a reservation
 system depends on).

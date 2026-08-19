@@ -1532,6 +1532,105 @@ this pass was in production behaviour.
   a glance and a later round will notice. The line is shared state, not
   `cfg(test)` in a production body.
 
+## The engine/protocol document, round 1: `launch.rs`
+
+- THE ETXTBSY RACE IS NOW CLOSED STRUCTURALLY, AND THE RETRY IS A BACKSTOP. The
+  two halves are separate mechanisms and both are needed. CROSS-PROCESS: the
+  script path carries the pid, because the gate's dev and instrumented sweeps
+  run this crate's unit tests at once. INTRA-PROCESS: a module-level
+  `SPAWN_SERIALIZATION` mutex now makes "a fixture is open for writing" and "a
+  sibling test forks" MUTUALLY EXCLUSIVE, rather than retrying the overlap.
+  Every `launch` call in the module holds it for the duration of the call -
+  `Command::spawn` returns only after the child's exec is confirmed through
+  Rust's `CLOEXEC` report pipe, so the whole fork-to-exec span is covered.
+  - THE ARGUMENT RESTS ON `launch.rs` BEING THE ONLY `Command::new` IN
+    `mogwai-protocol`, verified by grep. A second spawner anywhere in the crate
+    reopens the window and owes the same lock. This is stated on the lock.
+  - THE BOUNDED RETRY STAYS, moved into `launch_serialized` so every script
+    fixture inherits it. It costs nothing while the lock holds, guards a failure
+    that has already been misdiagnosed twice, and cannot degrade silently: only
+    that one errno is retried and an exhausted budget still fails the caller's
+    own assertion, with the attempt count in the message.
+- `launch.rs`'s test module now has `write_venue_script` / `scripted_venue`,
+  and NOTHING MAY HAND-ROLL A SCRIPT FIXTURE THERE AGAIN - a second hand-rolled
+  write is exactly what re-arms the race. `scripted_venue(name, then)` prints
+  this module's own `record_json(ReadyRecord::VERSION)` and then runs `then`, so
+  a schema bump moves the fixture with the parser. The returned `VenueScript` is
+  a guard that unlinks on drop.
+- THE SECOND HALF OF `own_venue` HAD NO TEST AT ALL and now has SIX:
+  `a_venue_that_ended_during_shutdown_still_records_its_exit`,
+  `a_crashed_venue_records_its_nonzero_code`,
+  `a_signalled_venue_records_no_exit_code`,
+  `a_venue_killed_while_healthy_records_no_exit`,
+  `a_recorded_teardown_failure_is_reported_and_not_repeated` and
+  `the_teardown_detail_is_read_after_the_owner_joins`. With the boot-path
+  `a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure` the
+  round added seven. What each one bites, measured as text edits:
+  - `a_venue_that_ended_during_shutdown_still_records_its_exit` is THE ONLY test
+    of the unconditional reap, and THE COLD REVIEW CAUGHT IT AS A TWO-SIDED
+    WALL-CLOCK RACE in its first form, which slept `OWNER_POLL / 4`. SLIP LONG
+    and the POLL arm reaps, the assertion passes, AND THE TEST PASSES WITH THE
+    FIX REVERTED - reverting moves `if asked_to_stop { break; }` ahead of the
+    `try_wait` on the SHUTDOWN arm only. SLIP SHORT and the child has not
+    exited, so the test fails for a reason unrelated to the fix. A hand
+    bite-check on one machine cannot preserve either property.
+    - Both preconditions are now OBSERVABLES. `launch_with_poll` /
+      `launch_serialized_with_poll` / `launch_scripted_with_poll` name the
+      owner's poll interval, and this test uses an HOUR, so no poll can expire;
+      `LaunchedVenue::polls` counts poll-arm entries and the test asserts it is
+      ZERO, which is the "still in its first `recv_timeout`" claim the doc
+      comment used to merely assert. `await_child_end` then waits for the
+      kernel to agree the script is over before tearing down, using the pid the
+      fixture reports - `scripted_venue` prints `$$` as the record's `pid`
+      rather than the fixture's 42, and `$$` survives the fixtures' `exec`. An
+      unreaped child stays a ZOMBIE, so that is a stable state, not a window.
+    - Bite-checked by restoring the `if asked_to_stop { break; }` ahead of the
+      `try_wait`: 6 of 6 runs fail on the EXIT-RECORD assertion, dev and
+      release, with the poll assertion passing - so the evidence that the
+      shutdown arm ran held while the fix was absent, which is exactly what the
+      observable is for.
+    - It uses the private `terminate(&mut self)` because `shutdown` consumes
+      the venue and the record must be read AFTER the teardown.
+  - `a_venue_killed_while_healthy_records_no_exit` had the same defect shape in
+    the other direction and took the same cure: it waits for `polls` to reach
+    TWO instead of sleeping one and a half `OWNER_POLL`s. Two, not one, because
+    the counter is published at the TOP of the poll arm, so one proves only
+    that the arm was entered; a second entry proves the first ran its `try_wait`
+    and found the venue alive.
+  - `a_crashed_venue_records_its_nonzero_code` and
+    `a_signalled_venue_records_no_exit_code` bite the `VenueExit` construction
+    (`success: true` / `code.or(Some(0))` fails both, each on its own values).
+  - `a_recorded_teardown_failure_is_reported_and_not_repeated` is the vacuity
+    bite: making `shutdown` return `Ok(())` unconditionally fails it by name.
+    IT FILLS THE `teardown` SLOT DIRECTLY, from inside the module. Provoking a
+    genuine failed kill means reaping the child out from under the owner, which
+    leaves `Child::kill` signalling a pid the kernel may have recycled; a test
+    that can kill an unrelated process is not worth the coverage. WHAT STAYS
+    UNPINNED IS THE COUPLING - that the owning thread writes that slot when its
+    kill or reap fails. `a_venue_killed_while_healthy_records_no_exit` covers
+    the other direction, that a healthy teardown leaves the slot empty.
+  - `the_teardown_detail_is_read_after_the_owner_joins` closes the half the
+    direct-fill test looked like it bought and did not. `terminate`'s comment
+    calls the read's position AFTER the join load-bearing - a read before it
+    races the owner's write and reports a clean teardown of a venue that would
+    not die - and the direct-fill test builds `owner: None`, so THERE IS NO JOIN
+    for the read to be on the wrong side of. Moving the read above the join left
+    every other test in the module green. The new test gives the venue a
+    stand-in owner thread - a plain thread, since what is under test is
+    `terminate`'s order of operations and not the child - which blocks until the
+    shutdown sender drops, sleeps 100 ms, and only THEN records the failure,
+    the same shape as `own_venue` killing, waiting and then writing. Moving the
+    read above the join fails it 4 of 4 runs.
+- THE `NoRecord` 50 ms PAUSE IS A REFUSAL, NOT AN OVERSIGHT, and the report's
+  premise for changing it was measured false. `NoRecord` is EOF on the stdout
+  pipe, which a venue can produce while alive; the child is NOT dead by then.
+  `a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure` pins it
+  with `exec 1>&-; exec sleep 60`, bounding the report at 5 s - well under both
+  the child's own 60 s and the 300 s readiness bound, so neither of those is
+  what ended the wait. Draining to EOF there would hang `launch`
+  forever right after it decided to report a boot failure. Do not re-open
+  without answering that.
+
 ## Facts a later round would otherwise re-derive wrong
 
 - LIBTEST SPAWNS A THREAD PER TEST EVEN AT `--test-threads=1`, on any platform

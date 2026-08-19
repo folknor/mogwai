@@ -242,6 +242,14 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   measurement loop failed first, and a red test with the right name reads as
   proof for whichever assertion the author had in mind. A perturbation that
   proves nothing looks exactly like a test that cannot fail.
+- A TEST THAT NAMES WHICH BRANCH RAN NEEDS AN OBSERVABLE, NOT A SLEEP. A wait
+  of some fraction of a poll interval does not select an arm, it BETS on the
+  scheduler, and the losing bet is usually the silent one: the other arm does
+  equivalent work, the assertion passes, and the test stops testing the fix
+  without ever failing. Give the production code a counter or a state the test
+  can read, and where the interval itself is the race, make the interval a
+  parameter and pass one the test cannot lose to. The launcher's owner loop is
+  the worked example: `LaunchedVenue::polls` plus `launch_with_poll`.
 - THE PROFILE SPLIT BITES: `brokkr check` runs tests in dev, `brokkr test`
   in release. A test pinning `debug_assertions` behaviour must be gated
   `#[cfg(debug_assertions)]` or the release sweep fails it; a test whose bite

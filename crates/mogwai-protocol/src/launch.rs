@@ -52,6 +52,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
         mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
     },
     thread::JoinHandle,
@@ -296,6 +297,24 @@ pub struct LaunchedVenue {
     /// What went wrong bringing the venue down, written by the owning thread on
     /// its way out and read by [`LaunchedVenue::shutdown`] after the join.
     teardown: Arc<Mutex<Option<String>>>,
+    /// How many owner-poll windows expired WITHOUT a shutdown request, counted
+    /// by the owning thread.
+    ///
+    /// This exists so a test can tell WHICH ARM of the owner loop did the work
+    /// instead of inferring it from a fraction of [`OWNER_POLL`]. A test that
+    /// means "the reap happened on the shutdown arm" asserts this is zero; one
+    /// that means "the owner looked and the venue was still alive" waits for it
+    /// to reach one. Both claims used to be encoded as sleeps, which made them
+    /// wall-clock races that could stop testing anything and still pass.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "an observable kept for the tests of the owner loop's two arms; the owning \
+                      thread writes it on every build, and only the reader is test-only"
+        )
+    )]
+    polls: Arc<AtomicUsize>,
     /// Dropping the sender tells the owning thread to bring the venue down.
     shutdown: Option<SyncSender<()>>,
     owner: Option<JoinHandle<()>>,
@@ -347,6 +366,12 @@ impl LaunchedVenue {
         snapshot(&self.stderr)
     }
 
+    /// Completed owner-poll windows. See the field.
+    #[cfg(test)]
+    fn completed_polls(&self) -> usize {
+        self.polls.load(Ordering::Relaxed)
+    }
+
     /// Terminate the venue and wait for it.
     ///
     /// `Drop` does the same and ignores the outcome, which is right for an
@@ -379,7 +404,8 @@ impl LaunchedVenue {
         // race the write and report a clean teardown of a venue that would not
         // die. Taken rather than copied, so a second call - `Drop` after an
         // explicit `shutdown`, which is the ordinary path - does not report the
-        // same failure twice.
+        // same failure twice. The ordering is pinned by
+        // `the_teardown_detail_is_read_after_the_owner_joins`.
         let detail = self.teardown.lock().ok().and_then(|mut slot| slot.take());
         match detail {
             Some(detail) => Err(LaunchError::Teardown { detail }),
@@ -402,6 +428,16 @@ impl Drop for LaunchedVenue {
 /// arrive in time, stdout may close without one, the line may not parse, or its
 /// schema version may not be the one this build understands.
 pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
+    launch_with_poll(spec, OWNER_POLL)
+}
+
+/// [`launch`] with the owning thread's poll interval named.
+///
+/// The interval is a parameter ONLY so a test can pin which arm of the owner
+/// loop did the work: a test of the shutdown arm gives an interval no poll can
+/// expire within, which is a property of the run rather than a hope about the
+/// scheduler. Production has exactly one caller and it passes [`OWNER_POLL`].
+fn launch_with_poll(spec: LaunchSpec, owner_poll: Duration) -> Result<LaunchedVenue, LaunchError> {
     let binary = spec.binary();
     let argv = serve_argv(&spec);
     let timeout = spec.ready_timeout();
@@ -420,6 +456,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
     let exit = Arc::new(Mutex::new(None));
     let stderr = Arc::new(Mutex::new(VecDeque::new()));
     let teardown: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let polls = Arc::new(AtomicUsize::new(0));
     let (boot_tx, boot_rx) = sync_channel::<Result<ReadyRecord, LaunchError>>(1);
     let (shutdown_tx, shutdown_rx) = sync_channel::<()>(1);
 
@@ -430,6 +467,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
         let exit = Arc::clone(&exit);
         let stderr = Arc::clone(&stderr);
         let teardown = Arc::clone(&teardown);
+        let polls = Arc::clone(&polls);
         std::thread::Builder::new()
             .name("mogwai-venue".to_owned())
             .spawn(move || {
@@ -444,6 +482,8 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
                     &exit,
                     &stderr,
                     &teardown,
+                    owner_poll,
+                    &polls,
                 );
             })
             .map_err(|source| LaunchError::Spawn {
@@ -484,6 +524,7 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
                 exit,
                 stderr,
                 teardown,
+                polls,
                 shutdown: Some(shutdown_tx),
                 owner: Some(owner),
             })
@@ -575,6 +616,8 @@ fn own_venue(
     exit: &Arc<Mutex<Option<VenueExit>>>,
     stderr_ring: &Arc<Mutex<VecDeque<String>>>,
     teardown: &Arc<Mutex<Option<String>>>,
+    owner_poll: Duration,
+    polls: &Arc<AtomicUsize>,
 ) {
     let captures_stderr = !matches!(sink, StderrSink::Inherit);
     let mut command = Command::new(binary);
@@ -720,9 +763,16 @@ fn own_venue(
         // clean ending, which is the worst direction for a signal whose entire
         // job is telling a planned exit from a death.
         loop {
-            let asked_to_stop = match shutdown_rx.recv_timeout(OWNER_POLL) {
+            let asked_to_stop = match shutdown_rx.recv_timeout(owner_poll) {
                 Ok(()) | Err(RecvTimeoutError::Disconnected) => true,
-                Err(RecvTimeoutError::Timeout) => false,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Published BEFORE the `try_wait` below, so an observer that
+                    // sees a nonzero count knows the poll arm had already begun
+                    // its look. The count is the only evidence a test has of
+                    // which arm ran.
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    false
+                }
             };
             if let Ok(Some(status)) = child.try_wait() {
                 if let Ok(mut exit) = exit.lock() {
@@ -905,6 +955,93 @@ mod tests {
         assert_eq!(argv.last(), Some(&OsString::from("0s")));
     }
 
+    /// Linux's `ETXTBSY`. Spelled numerically rather than as
+    /// `ErrorKind::ExecutableFileBusy` so the retry does not depend on that
+    /// variant's stabilization.
+    const ETXTBSY: i32 = 26;
+
+    /// How many times a spawn refused with `ETXTBSY` is retried before the
+    /// launch outcome is taken at face value. The window it covers is another
+    /// process's fork-to-exec latency, so this budget is orders of magnitude
+    /// above it, and exhausting it still fails the caller's real assertion.
+    const ETXTBSY_ATTEMPTS: usize = 40;
+
+    /// SERIALIZES EVERY `fork` IN THIS TEST BINARY AGAINST EVERY WRITE OF A
+    /// SCRIPTED FIXTURE, which is what closes the intra-process half of the
+    /// `ETXTBSY` race STRUCTURALLY rather than by retrying it.
+    ///
+    /// The race is this. A fixture below writes a shell script and then execs
+    /// it. `execve` refuses with `ETXTBSY` while any process holds that inode
+    /// open for writing, and while this module's helper holds it open, a
+    /// SIBLING TEST THAT FORKS inherits the descriptor - Rust opens files
+    /// `O_CLOEXEC`, so the child drops it at ITS exec, but not before. A unique
+    /// path cannot touch that window, because the inherited copy is what the
+    /// kernel counts; pid-qualifying the name closes only the CROSS-PROCESS
+    /// half, where the gate's dev and instrumented sweeps run this crate's
+    /// tests at once.
+    ///
+    /// So the two events are made mutually exclusive instead. Every write of a
+    /// fixture takes this lock, and every `launch` in this module takes it for
+    /// the duration of the call - `launch` returns only after `Command::spawn`
+    /// has confirmed the child's exec through its `CLOEXEC` report pipe, so
+    /// holding it across the call covers the whole fork-to-exec span. THE
+    /// ARGUMENT DEPENDS ON `launch.rs` BEING THE ONLY `Command::new` IN THE
+    /// CRATE, which it is; a second spawner anywhere in `mogwai-protocol` owes
+    /// this lock too, or the window reopens.
+    ///
+    /// The retry below is kept as a backstop rather than as the mechanism. It
+    /// costs nothing when the lock holds, and the failure it guards is
+    /// intermittent, cross-sweep and expensive to diagnose - it has already
+    /// been diagnosed twice. It is not a silent degradation: `busy` is derived
+    /// from the error variant, no other error is retried, and an exhausted
+    /// budget still fails the caller's own assertion with the attempt count.
+    static SPAWN_SERIALIZATION: Mutex<()> = Mutex::new(());
+
+    fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
+        SPAWN_SERIALIZATION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Launch under [`SPAWN_SERIALIZATION`], retrying only `ETXTBSY`.
+    ///
+    /// Takes a closure rather than a `LaunchSpec` because the spec owns a boxed
+    /// stderr callback and cannot be cloned for a second attempt.
+    ///
+    /// Returns the attempt count, so a failure message can say whether the
+    /// budget was spent, and the LAST attempt's elapsed time, which is the only
+    /// one a wall-clock bound may be read off.
+    fn launch_serialized(
+        spec: impl FnMut() -> LaunchSpec,
+    ) -> (Result<LaunchedVenue, LaunchError>, usize, Duration) {
+        launch_serialized_with_poll(spec, OWNER_POLL)
+    }
+
+    /// [`launch_serialized`] with the owner's poll interval named, for the one
+    /// test that must pin WHICH ARM of the owner loop reaped the venue.
+    fn launch_serialized_with_poll(
+        mut spec: impl FnMut() -> LaunchSpec,
+        owner_poll: Duration,
+    ) -> (Result<LaunchedVenue, LaunchError>, usize, Duration) {
+        let mut attempts = 0;
+        loop {
+            let guard = spawn_lock();
+            let started = std::time::Instant::now();
+            let outcome = launch_with_poll(spec(), owner_poll);
+            let elapsed = started.elapsed();
+            drop(guard);
+            attempts += 1;
+            let busy = matches!(
+                &outcome,
+                Err(LaunchError::Spawn { source, .. }) if source.raw_os_error() == Some(ETXTBSY)
+            );
+            if !busy || attempts >= ETXTBSY_ATTEMPTS {
+                return (outcome, attempts, elapsed);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     /// A bound no venue can meet is refused before anything is spawned, rather
     /// than failing as a timeout that blames a venue booting correctly.
     #[test]
@@ -936,13 +1073,13 @@ mod tests {
 
     #[test]
     fn a_missing_binary_reports_the_binary_it_tried() {
-        let error = launch(LaunchSpec {
+        let (outcome, _, _) = launch_serialized(|| LaunchSpec {
             binary: Some(OsString::from("mogwai-no-such-binary-exists")),
             ready_timeout: Some(Duration::from_secs(5)),
             stderr: StderrSink::Discard,
             ..LaunchSpec::default()
-        })
-        .expect_err("a missing binary cannot launch");
+        });
+        let error = outcome.expect_err("a missing binary cannot launch");
         let message = error.to_string();
         assert!(
             message.contains("mogwai-no-such-binary-exists"),
@@ -955,13 +1092,13 @@ mod tests {
     /// venue that dies during startup.
     #[test]
     fn stdout_closing_with_no_line_is_a_boot_failure() {
-        let error = launch(LaunchSpec {
+        let (outcome, _, _) = launch_serialized(|| LaunchSpec {
             binary: Some(OsString::from("true")),
             ready_timeout: Some(Duration::from_secs(10)),
             stderr: StderrSink::Discard,
             ..LaunchSpec::default()
-        })
-        .expect_err("no readiness line is a boot failure");
+        });
+        let error = outcome.expect_err("no readiness line is a boot failure");
         assert!(matches!(error, LaunchError::NoRecord { .. }), "{error:?}");
         assert!(error.to_string().contains("without a readiness line"));
     }
@@ -969,13 +1106,13 @@ mod tests {
     /// `echo serve` prints its argv, which is not a record.
     #[test]
     fn a_line_that_is_not_a_record_is_refused() {
-        let error = launch(LaunchSpec {
+        let (outcome, _, _) = launch_serialized(|| LaunchSpec {
             binary: Some(OsString::from("echo")),
             ready_timeout: Some(Duration::from_secs(10)),
             stderr: StderrSink::Discard,
             ..LaunchSpec::default()
-        })
-        .expect_err("a non-record line is refused");
+        });
+        let error = outcome.expect_err("a non-record line is refused");
         assert!(matches!(error, LaunchError::Malformed { .. }), "{error:?}");
     }
 
@@ -1110,50 +1247,168 @@ mod tests {
         }
     }
 
-    /// A venue that never speaks: holds its inherited stdout open, writes
-    /// nothing, and ignores whatever argv it is handed.
+    /// An executable fixture venue, unlinked when the test that owns it ends.
     ///
-    /// Written here rather than committed because no stock binary has this
-    /// shape - `sleep` and `cat` both reject the `serve` argv the launcher
-    /// prepends and exit, which is a boot failure rather than the silence under
-    /// test - and because a committed fixture would carry an executable bit that
-    /// has to survive a checkout.
+    /// Written at test time rather than committed because no stock binary has
+    /// any of these shapes - `sleep` and `cat` both reject the `serve` argv the
+    /// launcher prepends and exit, which is a boot failure rather than the
+    /// behaviour under test - and because a committed fixture would carry an
+    /// executable bit that has to survive a checkout.
+    struct VenueScript {
+        path: PathBuf,
+    }
+
+    impl VenueScript {
+        fn binary(&self) -> OsString {
+            self.path.clone().into_os_string()
+        }
+    }
+
+    impl Drop for VenueScript {
+        /// The name is per-process AND per-fixture, so nothing collects these
+        /// between runs; unlink rather than accumulating one script per fixture
+        /// per test-binary pid.
+        fn drop(&mut self) {
+            drop(std::fs::remove_file(&self.path));
+        }
+    }
+
+    /// THE PATH IS PID-QUALIFIED, WHICH CLOSES THE CROSS-PROCESS `ETXTBSY` RACE
+    /// ONLY. The full gate runs several sweeps, and the dev and instrumented
+    /// ones both build and run this crate's unit tests, so two processes run
+    /// these tests at once; without the pid one would write a script while the
+    /// other execed it. Embedding only the fixture's name would have fixed
+    /// nothing, since both processes compute the same name - the pid is what
+    /// separates them, and the name is what separates two fixtures inside one
+    /// process.
     ///
-    /// THE PATH IS PID-QUALIFIED, WHICH CLOSES THE CROSS-PROCESS RACE ONLY. The
-    /// full gate runs several sweeps, and the dev and instrumented ones both
-    /// build and run this crate's unit tests, so two processes run this test at
-    /// once; without the pid one would write the script while the other execed
-    /// it, and Linux answers that exec with `ETXTBSY`. Embedding the test's NAME
-    /// would have fixed nothing, since both processes compute the same name.
-    ///
-    /// THAT FIX IS NOT SUFFICIENT, AND THE ETXTBSY RECURRED UNDER IT. There is a
-    /// SECOND, INTRA-PROCESS race that a unique path cannot touch: while this
-    /// helper holds the script open for writing, any other thread in this test
-    /// binary that forks - and `a_missing_binary_reports_the_binary_it_tried`,
-    /// `stdout_closing_with_no_line_is_a_boot_failure` and
-    /// `a_line_that_is_not_a_record_is_refused` all spawn children, in parallel
-    /// by default - inherits that write descriptor. Rust opens files `O_CLOEXEC`,
-    /// so the child drops it at ITS exec, but between the fork and that exec the
-    /// descriptor is open in a process we do not control, and an exec of the
-    /// script in that window is `ETXTBSY`. Closing our own handle earlier cannot
-    /// help: the inherited copy is what the kernel counts.
-    ///
-    /// So the caller RETRIES on `ETXTBSY` rather than pretending the window is
-    /// gone. The window is bounded by another process's fork-to-exec latency,
-    /// which is microseconds; the retry budget is orders of magnitude above it,
-    /// and a genuine wedge still fails the test because the retry only covers
-    /// that one errno.
-    fn silent_venue() -> PathBuf {
+    /// The INTRA-PROCESS half is closed by [`SPAWN_SERIALIZATION`], which this
+    /// takes for the write. See that lock for why a unique path cannot close
+    /// it on its own.
+    fn write_venue_script(name: &str, body: &str) -> VenueScript {
         use std::os::unix::fs::PermissionsExt;
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target")
-            .join(format!("mogwai-silent-venue-{}.sh", std::process::id()));
+            .join(format!("mogwai-venue-{name}-{}.sh", std::process::id()));
         std::fs::create_dir_all(path.parent().expect("target dir")).expect("create target dir");
-        std::fs::write(&path, "#!/bin/sh\nexec sleep 60\n").expect("write the silent venue");
+        let guard = spawn_lock();
+        std::fs::write(&path, body).expect("write the venue script");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("make the silent venue executable");
-        path
+            .expect("make the venue script executable");
+        drop(guard);
+        VenueScript { path }
+    }
+
+    /// A venue that never speaks: holds its inherited stdout open, writes
+    /// nothing, and ignores whatever argv it is handed.
+    fn silent_venue() -> VenueScript {
+        write_venue_script("silent", "#!/bin/sh\nexec sleep 60\n")
+    }
+
+    /// A venue that BOOTS: it prints one valid `ReadyRecord` line, flushes it by
+    /// virtue of `printf` writing it whole, and then does `then`.
+    ///
+    /// This is what lets a unit test reach the second half of `own_venue` - the
+    /// owner-poll loop, `try_wait`, the `VenueExit` record and the teardown
+    /// path. Every other launch fixture in this module fails BEFORE readiness,
+    /// so nothing here used to get past it.
+    ///
+    /// The readiness line is this module's own `record_json`, so a schema bump
+    /// moves the fixture with the parser rather than leaving a hand-written
+    /// record to rot. The record's `addr` is never connected to; only `launch`
+    /// reads it.
+    ///
+    /// THE `pid` FIELD IS THE SCRIPT'S OWN `$$`, not the fixture's 42, and that
+    /// is load-bearing: it is what lets a test WAIT FOR THE CHILD TO ACTUALLY
+    /// END rather than sleep and hope. `$$` survives the `exec` the fixtures use,
+    /// so it names the process the launcher is holding in every one of them.
+    fn scripted_venue(name: &str, then: &str) -> VenueScript {
+        let record = record_json(ReadyRecord::VERSION);
+        let (prefix, suffix) = record
+            .split_once("\"pid\":42")
+            .expect("the fixture record carries a literal pid the shell can replace");
+        write_venue_script(
+            name,
+            &format!("#!/bin/sh\nprintf '%s\\n' '{prefix}\"pid\":'$$'{suffix}'\n{then}\n"),
+        )
+    }
+
+    /// Wait until `pid` is no longer a live process from the kernel's point of
+    /// view - it has exited and is either a zombie awaiting its reap or already
+    /// gone.
+    ///
+    /// This is the OBSERVABLE that replaces "sleep a fraction of `OWNER_POLL`
+    /// and assume the child got there". A child the launcher has not reaped
+    /// stays a zombie, so the state is stable once reached rather than a window
+    /// that can be missed.
+    fn await_child_end(pid: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+            let ended = match &stat {
+                // Gone entirely: it exited and something reaped it.
+                Err(_) => true,
+                // The comm field can contain anything including spaces and
+                // parens, so the state letter is the first field after the LAST
+                // close paren.
+                Ok(stat) => stat
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                    .is_none_or(|state| state == "Z" || state == "X"),
+            };
+            if ended {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the scripted venue never ended"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn scripted_spec(script: &VenueScript) -> LaunchSpec {
+        LaunchSpec {
+            binary: Some(script.binary()),
+            ready_timeout: Some(Duration::from_secs(10)),
+            stderr: StderrSink::Discard,
+            ..LaunchSpec::default()
+        }
+    }
+
+    /// Launch a scripted venue, or fail naming the attempt count so an
+    /// exhausted `ETXTBSY` budget is distinguishable from any other refusal.
+    fn launch_scripted(script: &VenueScript) -> LaunchedVenue {
+        launch_scripted_with_poll(script, OWNER_POLL)
+    }
+
+    fn launch_scripted_with_poll(script: &VenueScript, owner_poll: Duration) -> LaunchedVenue {
+        let (outcome, attempts, _) =
+            launch_serialized_with_poll(|| scripted_spec(script), owner_poll);
+        match outcome {
+            Ok(venue) => venue,
+            Err(error) => {
+                panic!("a scripted venue must boot; after {attempts} attempt(s): {error}")
+            }
+        }
+    }
+
+    /// Poll the venue's own exit record to a deadline. The owner notices an exit
+    /// only every [`OWNER_POLL`], so an immediate read would be a race rather
+    /// than an observation.
+    fn await_exit(venue: &LaunchedVenue) -> VenueExit {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(exit) = venue.exited() {
+                return exit;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the venue's exit was never recorded"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// The bound is a WALL-CLOCK bound, not merely an eventual error.
@@ -1165,37 +1420,14 @@ mod tests {
     /// then never returned.
     #[test]
     fn the_ready_bound_returns_on_time_against_a_silent_venue() {
-        /// Linux's `ETXTBSY`. Spelled numerically rather than as
-        /// `ErrorKind::ExecutableFileBusy` so the retry does not depend on that
-        /// variant's stabilization.
-        const ETXTBSY: i32 = 26;
-
         let script = silent_venue();
-        let mut attempts = 0;
-        let (error, elapsed) = loop {
-            let started = std::time::Instant::now();
-            let error = launch(LaunchSpec {
-                binary: Some(script.clone().into_os_string()),
-                ready_timeout: Some(Duration::from_millis(400)),
-                stderr: StderrSink::Discard,
-                ..LaunchSpec::default()
-            })
-            .expect_err("a venue that never speaks must time out");
-            let elapsed = started.elapsed();
-            let busy = matches!(
-                &error,
-                LaunchError::Spawn { source, .. } if source.raw_os_error() == Some(ETXTBSY)
-            );
-            attempts += 1;
-            if !busy || attempts >= 40 {
-                break (error, elapsed);
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        };
-        // The name is per-process, so nothing collects it between runs; unlink
-        // it here rather than accumulating one script per test-binary pid.
-        drop(std::fs::remove_file(&script));
-
+        let (outcome, attempts, elapsed) = launch_serialized(|| LaunchSpec {
+            binary: Some(script.binary()),
+            ready_timeout: Some(Duration::from_millis(400)),
+            stderr: StderrSink::Discard,
+            ..LaunchSpec::default()
+        });
+        let error = outcome.expect_err("a venue that never speaks must time out");
         assert!(
             matches!(error, LaunchError::Timeout { .. }),
             "{error:?} after {attempts} attempt(s)"
@@ -1204,6 +1436,276 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "launch must return on its own bound, took {elapsed:?}"
         );
+    }
+
+    /// A venue that closes stdout without speaking is a boot failure EVEN
+    /// THOUGH IT IS STILL RUNNING, and the launcher reports it promptly rather
+    /// than waiting the child out.
+    ///
+    /// This is the counterexample that keeps the `NoRecord` path's fixed 50 ms
+    /// pause from being replaced by "drain stderr to EOF, the child is dead by
+    /// then". `NoRecord` means end-of-file on the STDOUT pipe, which is every
+    /// write end closed - a venue that closes its own stdout, or hands it to a
+    /// grandchild that closes it, reaches this branch while very much alive. An
+    /// unbounded drain here would hang `launch` forever immediately after it
+    /// had decided to report a boot failure, which is the defect the readiness
+    /// reader's bound already exists to prevent.
+    #[test]
+    fn a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure() {
+        let script = write_venue_script("mute", "#!/bin/sh\nexec 1>&-\nexec sleep 60\n");
+        let (outcome, attempts, elapsed) = launch_serialized(|| LaunchSpec {
+            binary: Some(script.binary()),
+            ready_timeout: Some(Duration::from_secs(300)),
+            stderr: StderrSink::Discard,
+            ..LaunchSpec::default()
+        });
+        let error = outcome.expect_err("a closed stdout with no line is a boot failure");
+        assert!(
+            matches!(error, LaunchError::NoRecord { .. }),
+            "{error:?} after {attempts} attempt(s)"
+        );
+        // Well under the child's own 60 s and under the 300 s readiness bound,
+        // so neither of those is what ended the wait.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the boot failure must be reported without waiting the venue out, took {elapsed:?}"
+        );
+    }
+
+    /// A venue that ends itself INSIDE THE POLL WINDOW the caller's shutdown
+    /// closes must still have its exit recorded.
+    ///
+    /// THIS IS THE UNCONDITIONAL-REAP FIX, AND IT IS THE ONLY TEST OF IT. The
+    /// `try_wait` used to run only on the poll arm, so a bounded run that
+    /// finished during the last window - the ORDINARY ending for a run with a
+    /// declared duration whose caller then tears down - was reaped with no
+    /// `VenueExit`, reporting `exited() == None`, which reads as a venue killed
+    /// while healthy. A clean completion and a death are then the same signal.
+    ///
+    /// NEITHER PRECONDITION IS A SLEEP, because both directions of wall-clock
+    /// slip used to be live and one of them made the test PASS WITH THE FIX
+    /// REVERTED. Reverting moves `if asked_to_stop { break; }` ahead of the
+    /// `try_wait` on the SHUTDOWN arm only; the POLL arm reaps either way. So a
+    /// test that slept a fraction of `OWNER_POLL` and let the poll arm win still
+    /// saw the exit recorded, and stopped testing the fix without failing. In
+    /// the other direction a child that had not yet exited by the sleep failed
+    /// the test for a reason unrelated to the fix.
+    ///
+    /// Both are replaced by observables:
+    ///
+    /// - The owner's poll interval is set to an hour, so NO POLL CAN EXPIRE
+    ///   during the test, and `completed_polls()` is asserted zero afterwards.
+    ///   That is the property the doc used to merely claim.
+    /// - `await_child_end` waits for the kernel to agree the script is over
+    ///   before the teardown, using the pid the fixture reports as its own. An
+    ///   unreaped child stays a zombie, so this is a stable state and not a
+    ///   window.
+    ///
+    /// `terminate` rather than `shutdown` because `shutdown` consumes the venue,
+    /// and the record has to be READ after the teardown that would have skipped
+    /// it.
+    #[test]
+    fn a_venue_that_ended_during_shutdown_still_records_its_exit() {
+        let script = scripted_venue("clean-exit", "exit 0");
+        let mut venue = launch_scripted_with_poll(&script, Duration::from_secs(3600));
+        await_child_end(venue.record().pid);
+        venue
+            .terminate()
+            .expect("an orderly teardown of a completed run");
+        assert_eq!(
+            venue.completed_polls(),
+            0,
+            "no poll window may expire, or the reap under test was the poll arm's"
+        );
+        assert_eq!(
+            venue.exited(),
+            Some(VenueExit {
+                success: true,
+                code: Some(0)
+            }),
+            "a run that completed inside the shutdown window must be recorded as a success"
+        );
+    }
+
+    /// A venue that dies on its own is recorded as the failure it was, with the
+    /// code it chose - which is what tells a crash from a completed run.
+    #[test]
+    fn a_crashed_venue_records_its_nonzero_code() {
+        let script = scripted_venue("crash", "exit 17");
+        let venue = launch_scripted(&script);
+        assert_eq!(
+            await_exit(&venue),
+            VenueExit {
+                success: false,
+                code: Some(17)
+            }
+        );
+    }
+
+    /// A venue ended by a SIGNAL has no exit code, and `code: None` is the only
+    /// thing that says so. Pinned separately because it is the one shape where
+    /// `success: false` carries no number, and a record that defaulted the code
+    /// to zero would be indistinguishable from a clean run on `code` alone.
+    #[test]
+    fn a_signalled_venue_records_no_exit_code() {
+        let script = scripted_venue("signalled", "kill -9 $$");
+        let venue = launch_scripted(&script);
+        assert_eq!(
+            await_exit(&venue),
+            VenueExit {
+                success: false,
+                code: None
+            }
+        );
+    }
+
+    /// `exited()` is `None` for a venue that was still serving when it was torn
+    /// down, and the shutdown of a healthy venue reports no failure.
+    ///
+    /// The wait is a POSITIVE PRECONDITION rather than padding: without it the
+    /// `None` would hold because the owner had not yet looked, which is a
+    /// different claim from "it looked and the venue was alive". It waits on the
+    /// owner's own poll counter rather than on a multiple of `OWNER_POLL`, so
+    /// the precondition is OBSERVED - a scheduler that runs the sleep short
+    /// cannot leave the assertion vacuously true.
+    #[test]
+    fn a_venue_killed_while_healthy_records_no_exit() {
+        let script = scripted_venue("healthy", "exec sleep 60");
+        let venue = launch_scripted(&script);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // TWO, not one: the counter is published at the TOP of the poll arm, so
+        // a count of one proves only that the arm was entered. A second entry
+        // proves the first one ran its `try_wait` to completion and found the
+        // venue alive.
+        while venue.completed_polls() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the owner never completed a poll window"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            venue.exited(),
+            None,
+            "a venue still serving has not ended on its own terms"
+        );
+        venue
+            .shutdown()
+            .expect("tearing down a healthy venue is not a failure");
+    }
+
+    /// A teardown failure recorded by the owning thread REACHES THE CALLER, and
+    /// reaches it once.
+    ///
+    /// This is why `shutdown` returns a `Result` at all. It used to report only
+    /// a panicked owner, so the "shut it down and report a failure to do so"
+    /// check every caller writes against it was vacuous: a failed kill and a
+    /// wedged child both returned `Ok(())`, and a venue still holding its port
+    /// was announced as an orderly shutdown. A caller that believes that may
+    /// launch its replacement into an address the old one still owns.
+    ///
+    /// The slot is filled DIRECTLY rather than by provoking a real failed kill.
+    /// Provoking one means reaping the child out from under the owner, which
+    /// leaves `Child::kill` signalling a pid the kernel may already have
+    /// recycled - a test that can kill an unrelated process is not worth the
+    /// coverage. What stays unpinned by this test is the COUPLING: that the
+    /// owning thread writes this slot when its kill or its reap fails. The
+    /// tests above cover the other direction, that a healthy teardown leaves it
+    /// empty, so a `shutdown` that always reported would fail there.
+    ///
+    /// It also cannot pin the ORDERING `terminate` calls load-bearing, because
+    /// it builds a venue with no owner at all and so never joins one. That is
+    /// `the_teardown_detail_is_read_after_the_owner_joins` below.
+    #[test]
+    fn a_recorded_teardown_failure_is_reported_and_not_repeated() {
+        let teardown = Arc::new(Mutex::new(Some(
+            "reaping the venue failed: ECHILD".to_owned(),
+        )));
+        let venue = LaunchedVenue {
+            record: parse_ready(&record_json(ReadyRecord::VERSION)).expect("fixture record"),
+            exit: Arc::new(Mutex::new(None)),
+            stderr: Arc::new(Mutex::new(VecDeque::new())),
+            teardown: Arc::clone(&teardown),
+            polls: Arc::new(AtomicUsize::new(0)),
+            shutdown: None,
+            owner: None,
+        };
+        let error = venue
+            .shutdown()
+            .expect_err("a venue that would not die must be reported, not swallowed");
+        let message = error.to_string();
+        assert!(matches!(error, LaunchError::Teardown { .. }), "{error:?}");
+        assert!(message.contains("ECHILD"), "{message}");
+        assert!(message.contains("holding its port"), "{message}");
+        // Taken, not copied: the `Drop` that follows an explicit `shutdown` is
+        // the ordinary path, and it must not report the same failure twice.
+        assert!(
+            teardown.lock().expect("teardown slot").is_none(),
+            "the detail must be taken out of the slot by the report that used it"
+        );
+
+        let already_reported = LaunchedVenue {
+            record: parse_ready(&record_json(ReadyRecord::VERSION)).expect("fixture record"),
+            exit: Arc::new(Mutex::new(None)),
+            stderr: Arc::new(Mutex::new(VecDeque::new())),
+            teardown,
+            polls: Arc::new(AtomicUsize::new(0)),
+            shutdown: None,
+            owner: None,
+        };
+        already_reported
+            .shutdown()
+            .expect("an emptied slot is an orderly teardown");
+    }
+
+    /// The teardown slot is read AFTER the owner is joined, which is the whole
+    /// reason the read sits where it does.
+    ///
+    /// The real owner writes that slot on its way out, so a read placed before
+    /// the join races the write and reports a CLEAN teardown for a venue that
+    /// would not die - the exact failure the `Result` was added to prevent, put
+    /// back by an innocuous-looking reordering. The direct-fill test above
+    /// cannot see it: it builds a venue with `owner: None`, so there is no join
+    /// for the read to be on the wrong side of.
+    ///
+    /// The stand-in owner is a plain thread rather than a real venue because
+    /// what is under test is `terminate`'s ORDER OF OPERATIONS, not the child.
+    /// It reproduces the shape that matters: it blocks until the shutdown sender
+    /// drops, then does its work, and only at the END records the failure - just
+    /// as `own_venue` kills, waits and then writes.
+    #[test]
+    fn the_teardown_detail_is_read_after_the_owner_joins() {
+        let teardown: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let (shutdown_tx, shutdown_rx) = sync_channel::<()>(1);
+        let owner = {
+            let slot = Arc::clone(&teardown);
+            std::thread::Builder::new()
+                .name("stand-in-owner".to_owned())
+                .spawn(move || {
+                    // Disconnected is the signal, as in `own_venue`.
+                    let _asked = shutdown_rx.recv();
+                    // Long enough that a read placed before the join loses the
+                    // race decisively rather than intermittently.
+                    std::thread::sleep(Duration::from_millis(100));
+                    *slot.lock().expect("teardown slot") =
+                        Some("reaping the venue failed: ECHILD".to_owned());
+                })
+                .expect("spawn the stand-in owner")
+        };
+        let venue = LaunchedVenue {
+            record: parse_ready(&record_json(ReadyRecord::VERSION)).expect("fixture record"),
+            exit: Arc::new(Mutex::new(None)),
+            stderr: Arc::new(Mutex::new(VecDeque::new())),
+            teardown,
+            polls: Arc::new(AtomicUsize::new(0)),
+            shutdown: Some(shutdown_tx),
+            owner: Some(owner),
+        };
+        let error = venue
+            .shutdown()
+            .expect_err("a failure written on the owner's way out must be reported");
+        assert!(matches!(error, LaunchError::Teardown { .. }), "{error:?}");
+        assert!(error.to_string().contains("ECHILD"), "{error}");
     }
 
     /// The timeout path needs a process that holds stdout open and stays silent,
