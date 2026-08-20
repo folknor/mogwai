@@ -238,6 +238,40 @@ pub enum ArrivalConfig {
     },
 }
 
+/// Ceiling on `LogOuCox`'s `sigma_y`, and the reason it exists.
+///
+/// The latent is `x = exp(y - sigma^2 / 2)`, which is unbounded BELOW - so a
+/// thin latent stretches `ArrivalKernel::next_parent`'s budget traversal over
+/// its 366-day limit one cell at a time. The knob was validated as finite and
+/// non-negative only, while every other family in this enum carries a two-sided
+/// range and every other latent has a floor: these were the ones that were
+/// missed, not a liberty granted.
+///
+/// WHAT MAKES IT DANGEROUS IS THAT IT SUCCEEDS. Unlike the terminal cliff, a
+/// thin latent keeps answering, permanently slower, draw after draw, so an
+/// operator sees a venue that works and is inexplicably slow rather than one
+/// that refuses and says why.
+///
+/// MEASURED 2026-08-20 by `examples/arrival_sigma_sweep`, 2000 to 4000 draws
+/// per point at the `LiquidityDrought` thinning ceiling, on the owner's host.
+/// The median draw is 50 to 70 ns at EVERY setting - the cost is entirely in
+/// the tail - so the mean and the max are the readings that matter:
+///
+/// | `sigma_y` | mean | max |
+/// |---|---|---|
+/// | 1.0 to 5.5 | 70 to 190 ns | under 70 us |
+/// | 6.0 | 1.7 us | 256 us |
+/// | 7.0 | 6.2 us | 1.31 ms |
+/// | 8.0 | 24 us | 10.6 ms |
+/// | 9.0 | 336 us | 40.7 ms |
+///
+/// SIX IS THE KNEE: the mean is flat at healthy-walk cost through 5.5 and
+/// departs by an order of magnitude at 6.0, and the max crosses a millisecond
+/// at 7.0. The ceiling admits the knee and excludes the whole millisecond
+/// region with a full point of margin, which is the line a bound can be
+/// defended on. Bounding tighter would refuse settings that cost microseconds.
+pub const MAX_LOG_OU_SIGMA_Y: f64 = 6.0;
+
 impl ArrivalConfig {
     pub fn is_valid(self) -> bool {
         match self {
@@ -266,7 +300,10 @@ impl ArrivalConfig {
                     && tau_s >= 1.0
             }
             Self::LogOuCox { sigma_y, tau_s } => {
-                sigma_y.is_finite() && sigma_y >= 0.0 && tau_s.is_finite() && tau_s >= 1.0
+                sigma_y.is_finite()
+                    && (0.0..=MAX_LOG_OU_SIGMA_Y).contains(&sigma_y)
+                    && tau_s.is_finite()
+                    && tau_s >= 1.0
             }
             Self::SelfExciting { phi, tau_s } => {
                 phi.is_finite() && phi > 0.0 && phi <= 0.98 && tau_s.is_finite() && tau_s >= 2.0
@@ -2230,6 +2267,44 @@ mod tests {
             assert_eq!(actual.parent_ts_ns, expected.parent_ts_ns);
             assert_eq!(actual.child_count, expected.child_count);
             assert_eq!(actual.latent_x.to_bits(), expected.latent_x_bits);
+        }
+    }
+
+    /// `sigma_y` IS BOUNDED ABOVE, and the bound is the one the constant names
+    /// rather than a second copy of the number written here.
+    ///
+    /// The knob's latent is unbounded BELOW, so a thin one stretches the budget
+    /// traversal a cell at a time and KEEPS SUCCEEDING - which is what makes it
+    /// worth refusing at admission rather than leaving to be noticed. Every
+    /// other family in this enum already carried a two-sided range.
+    #[test]
+    fn a_log_ou_sigma_past_the_measured_knee_is_refused() {
+        for sigma_y in [0.0, 1.0, 3.0, MAX_LOG_OU_SIGMA_Y] {
+            assert!(
+                ArrivalConfig::LogOuCox {
+                    sigma_y,
+                    tau_s: 60.0
+                }
+                .is_valid(),
+                "sigma_y {sigma_y} is inside the admitted range and must still configure"
+            );
+        }
+        for sigma_y in [
+            MAX_LOG_OU_SIGMA_Y + 0.001,
+            8.0,
+            12.0,
+            f64::INFINITY,
+            f64::NAN,
+            -f64::EPSILON,
+        ] {
+            assert!(
+                !ArrivalConfig::LogOuCox {
+                    sigma_y,
+                    tau_s: 60.0
+                }
+                .is_valid(),
+                "sigma_y {sigma_y} buys an unbounded parent draw and must be refused"
+            );
         }
     }
 

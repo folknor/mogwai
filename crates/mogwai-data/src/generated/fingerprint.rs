@@ -269,6 +269,10 @@ fn default_size_log_sigma() -> f64 {
     SIZE_LOG_SIGMA
 }
 
+/// Ceiling on `GeneratorScalars::mean_event_duration_s`. See the reasoning and
+/// the measured table at its check in `validate`.
+pub const MAX_MEAN_EVENT_DURATION_S: f64 = 1_000.0;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GeneratorScalars {
     #[serde(default)]
@@ -408,7 +412,24 @@ impl GeneratorScalars {
         if self.price_decimals > 28 || self.modal_tick.normalize().scale() > self.price_decimals {
             return Err(ScalarError::field("modal_tick"));
         }
-        if !strictly_positive_finite(self.mean_event_duration_s) {
+        // TWO-SIDED, and the ceiling is the half that was missing. This knob
+        // reaches `ArrivalKernel::next_parent`'s budget traversal through
+        // whatever arrival family is attached, and it was validated
+        // strictly-positive-finite only - so an operator override could buy an
+        // arbitrarily long parent draw and never be told.
+        //
+        // MEASURED 2026-08-20 by `examples/arrival_sigma_sweep`, 2000 draws per
+        // point against a fixed healthy `LogOuCox`. UNLIKE `sigma_y` THERE IS NO
+        // KNEE: per-draw cost is LINEAR in the duration, from 78 ns at the
+        // fingerprint-median 0.171 through 11.8 us at 100, 123 us at 1e3 and
+        // 1.18 ms at 1e4, reaching the terminal `NoOpenExposure` refusal at 1e6.
+        // So the ceiling is a statement about acceptable per-draw cost rather
+        // than a boundary the measurement picks out, and 1e3 is chosen as the
+        // last decade whose mean stays in microseconds - already some 6000 times
+        // the fitted median, and generous past any duration a market event has.
+        if !strictly_positive_finite(self.mean_event_duration_s)
+            || self.mean_event_duration_s > MAX_MEAN_EVENT_DURATION_S
+        {
             return Err(ScalarError::field("mean_event_duration_s"));
         }
         if !strictly_positive_finite(self.children_mean) {
@@ -751,4 +772,57 @@ pub enum GeneratedSourceError {
     Scalar(ScalarError),
     Session(SessionProfileError),
     Calendar(super::calendar::CalendarError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `mean_event_duration_s` IS BOUNDED ABOVE. It was validated
+    /// strictly-positive-finite only, so an operator override could buy an
+    /// arbitrarily long parent draw: the cost is LINEAR in this knob, and past
+    /// the ceiling it runs to milliseconds a draw and then to the terminal
+    /// refusal.
+    ///
+    /// The FITTED VALUE IS ASSERTED TO SURVIVE, and that half is not decoration:
+    /// a bound placed below what the committed fingerprint actually carries
+    /// would refuse the venue's own default scalars, and every other assertion
+    /// here would still pass.
+    #[test]
+    fn a_mean_event_duration_past_the_ceiling_is_refused() {
+        let fingerprint = Fingerprint::from_repo_json();
+        let fitted = GeneratorScalars::from_fingerprint_medians("BTCUSDT", &fingerprint);
+        assert!(
+            fitted.mean_event_duration_s <= MAX_MEAN_EVENT_DURATION_S,
+            "the ceiling sits below the committed fingerprint's own value of {}, so the venue \
+             would refuse its own defaults",
+            fitted.mean_event_duration_s
+        );
+        fitted
+            .validate()
+            .expect("the fitted scalars must remain valid");
+
+        for seconds in [MAX_MEAN_EVENT_DURATION_S, 1.0, 0.171] {
+            let mut scalars = fitted.clone();
+            scalars.mean_event_duration_s = seconds;
+            assert!(
+                scalars.validate().is_ok(),
+                "{seconds} is inside the admitted range and must still configure"
+            );
+        }
+        for seconds in [
+            MAX_MEAN_EVENT_DURATION_S + 1.0,
+            10_000.0,
+            1e6,
+            f64::INFINITY,
+        ] {
+            let mut scalars = fitted.clone();
+            scalars.mean_event_duration_s = seconds;
+            assert_eq!(
+                scalars.validate(),
+                Err(ScalarError::field("mean_event_duration_s")),
+                "{seconds} buys a parent draw measured in milliseconds and must be refused"
+            );
+        }
+    }
 }

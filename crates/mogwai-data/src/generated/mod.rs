@@ -41,8 +41,9 @@ mod tests;
 
 pub use arrival::{
     ARRIVAL_KERNEL_VERSION, ARRIVAL_X_CEILING, ArrivalConfig, ArrivalEnv, ArrivalKernel,
-    ArrivalRefusal, ArrivalState, CadenceParts, CadenceWalk, LogOuParams, ParentDraw,
-    PendingReopen, RuntimeModifiers, SelfExcitingParams, ShotNoiseParams, WallMmppParams,
+    ArrivalRefusal, ArrivalState, CadenceParts, CadenceWalk, LogOuParams, MAX_LOG_OU_SIGMA_Y,
+    ParentDraw, PendingReopen, RuntimeModifiers, SelfExcitingParams, ShotNoiseParams,
+    WallMmppParams,
 };
 pub use calendar::{CalendarError, SessionCalendar, WeeklyWindow};
 pub use checkpoint::CheckpointIndex;
@@ -54,8 +55,8 @@ pub(crate) use consts::MID_CEILING;
 pub use dynamics::SweepShape;
 pub use fingerprint::{
     AbsReturnAcf, AnchorRange, EmpiricalRanges, Fingerprint, GeneratedSourceError,
-    GeneratorScalars, GoldenTargets, MinMedianMax, ScalarDiagnostic, ScalarError, SessionProfile,
-    SessionProfileError, TickTraversal,
+    GeneratorScalars, GoldenTargets, MAX_MEAN_EVENT_DURATION_S, MinMedianMax, ScalarDiagnostic,
+    ScalarError, SessionProfile, SessionProfileError, TickTraversal,
 };
 pub use quote::{
     CalibrationProvenance, PublishedBook, QuotedWidth, TopOfBookSizes, TradeDisplacement,

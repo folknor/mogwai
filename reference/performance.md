@@ -62,6 +62,53 @@ decision, so they are filed rather than landed. The number to beat if the
 rewrite is ever revisited is 45 ns per parent on a healthy walk. The kernel is
 not slow; it is unbounded at one end of a parameter range nothing validates.
 
+### Placing the two bounds, 2026-08-20
+
+The owner ruled the bounds in, which left a number to choose. Three points -
+`sigma_y` 1, 8 and 12 - cannot place a ceiling, so the region between them was
+measured by `mogwai-data`'s `examples/arrival_sigma_sweep`, 2000 to 4000 draws
+per point at the `LiquidityDrought` thinning ceiling, release, on host `bygg`.
+Two runs at different draw counts agreed row for row. The example is committed
+because the question recurs whenever either knob is revisited.
+
+THE MEDIAN DRAW IS 50 TO 70 NS AT EVERY `sigma_y` SETTING. All of the cost is
+in the tail, so the mean and the max are the readings:
+
+| `sigma_y` | mean | max |
+|---|---|---|
+| 1.0 to 5.5 | 70 to 190 ns | under 70 us |
+| 6.0 | 1.7 us | 256 us |
+| 6.5 | 3.8 us | 369 us |
+| 7.0 | 6.2 us | 1.31 ms |
+| 7.5 | 25 us | 2.38 ms |
+| 8.0 | 24 us | 10.6 ms |
+| 9.0 | 336 us | 40.7 ms |
+
+SIX IS A KNEE and the ceiling is placed there: the mean is flat at healthy-walk
+cost through 5.5 and departs by an order of magnitude at 6.0, while the max
+crosses a millisecond at 7.0. The bound admits the knee and excludes the whole
+millisecond region with a point of margin.
+
+`mean_event_duration_s` HAS NO KNEE. Its cost is LINEAR in the knob, measured
+against a fixed healthy `LogOuCox`:
+
+| `mean_event_duration_s` | mean | max | outcome |
+|---|---|---|---|
+| 0.171, the fitted median | 78 ns | 590 ns | ok |
+| 10 | 1.2 us | 12.3 us | ok |
+| 100 | 11.8 us | 95 us | ok |
+| 1e3 | 123 us | 975 us | ok |
+| 1e4 | 1.18 ms | 13.1 ms | ok |
+| 1e5 | 12.0 ms | 88.4 ms | ok |
+| 1e6 | 122 ms | 638 ms | refuses `NoOpenExposure` |
+
+So its ceiling is a statement about acceptable per-draw cost rather than a
+boundary the data picks out, and 1e3 is chosen as the last decade whose mean
+stays in microseconds - some 6000 times the fitted median, and generous past any
+duration a market event has. Both bounds landed with the constants carrying
+their own tables, so the next reader does not have to find this section to know
+why the numbers are what they are.
+
 ## The `mogwai-data` test binary's wall, 2026-08-19
 
 TWO DIFFERENT LANES ARE MEASURED HERE AND THEY DO NOT PAIR. Read the command

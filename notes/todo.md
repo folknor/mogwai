@@ -599,9 +599,17 @@ group by any other route has no API for it, and none is owed until one is wanted
   ranges, so these two are the ones that were missed rather than a liberty
   granted; and nothing in the tree reaches these values, so the bound costs
   nobody anything today and turns a silently slow venue into a named refusal.
-  THE CEILING IS NOT YET CHOSEN and must not be picked by eye: `sigma_y` 8 is
-  already pathological and 12 unusable, which is three data points, so the
-  intermediate values are measured first and the number comes from that.
+  LANDED 2026-08-20 with both ceilings measured rather than eyeballed, by
+  `mogwai-data`'s committed `examples/arrival_sigma_sweep`. `sigma_y` is capped
+  at 6.0, which is a real KNEE: the median draw is 50 to 70 ns at every setting,
+  the mean is flat at healthy-walk cost through 5.5 and jumps an order of
+  magnitude at 6.0, and the max crosses a millisecond at 7.0.
+  `mean_event_duration_s` is capped at 1e3 and has NO knee - its cost is linear
+  in the knob - so that number is a statement about acceptable per-draw cost,
+  chosen as the last decade whose mean stays in microseconds. The full tables
+  are in `reference/performance.md`; each constant also carries its own.
+  NO TAPE VERSION BUMP: these are admission bounds, so they move no byte of any
+  tape a bounded config produces.
   Note the blast radius is small: no shipped
   preset declares an arrival family at all, so this is reachable only from an
   operator `generator.arrival` override and from the lab's screen. Filed
