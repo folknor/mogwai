@@ -1,64 +1,34 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The gate profile's skip list, held against the tests it actually matches -
-//! and, on the same scan, the one thing a running test may never do to the tree.
+//! Two things a running test may never do to the tree, scanned out of source.
 //!
-//! `brokkr.toml`'s gate profile turns on `include_ignored`, which pulls in two
-//! unrelated families: the socket-backed tests, which the gate WANTS, and a
-//! couple of dozen measurement instruments that outlive the per-test watchdog by
-//! design. The second family is excluded by a `skip` list, and skipping them is
-//! free ONLY because each one is `#[ignore]`d at the source - the coverage audit
-//! accepts a non-run pair that is ignored, because `include_ignored` is the sole
-//! reason it was in scope at all.
+//! Neither is decidable at runtime, which is why they are source scans rather
+//! than assertions. A test that rewrites a committed pin has already rewritten
+//! it by the time anything could notice, and the tree it rewrote is the tree the
+//! next run reads. A test that declines to assert because its input is missing
+//! reports the same green as one that checked.
 //!
-//! THAT IS AN INVARIANT WITH NO ENFORCER, and the file says so itself: the skip
-//! entries are libtest substrings, so a bare prefix like `parity3b_` matches
-//! every test that will ever share it, and "every test that shares it stays
-//! ignored" is "a property of files this file cannot see". It has already been
-//! violated once - `parity3a_` also caught
-//! `parity3a_cadence_feasible_verdict_matches_the_committed_cadence`, which is
-//! not ignored and needs nothing but a committed artifact, so the complete
-//! profile silently stopped running a real test. The coverage audit caught that
-//! one as an orphan, which is a downstream symptom in another tool's output; the
-//! statement worth making is the direct one, here, naming both the pattern and
-//! the test it swallowed.
+//! THIS FILE USED TO CARRY THREE MORE CHECKS, all of them about the build tool's
+//! skip and only filters, and all of them now redundant. A skip entry catching a
+//! live test is an ORPHANED PAIR in the coverage audit, resolved against
+//! libtest's own enumeration; a filter matching no test at all is a DEAD FILTER,
+//! reported with the config block that declared it. Both are the tool's job and
+//! it does them without reconstructing test names from source text - which this
+//! file did, with a hand-written parser that had already gone blind once, to
+//! macro-generated tests. A parser-backed scanner that fails open is worse than
+//! no scanner, because it reports green.
 //!
-//! WHAT THIS SCAN CAN AND CANNOT SEE. It reads test declarations out of the
-//! source text of `crates/*/src/**` and `crates/*/tests/**`, reconstructing the
-//! name libtest would report - the file's module path for a unit test, the
-//! enclosing inline `mod` chain, then the function. It also reads the tests a
-//! `macro_rules!` generator emits, because ten of the envelope fidelity gates
-//! are generated and a `fn`-only scan would have called their skip entry dead
-//! while a non-ignored one among them stayed invisible - see
-//! `test_generating_macros`. It does not read `examples/` or `benches/`. A
-//! pattern is checked against the reconstructed name exactly as libtest checks
-//! it: `contains`.
+//! The third was a self-check policing a lint exemption this file no longer
+//! needs, since nothing here reads the build tool's config any more.
 //!
-//! A PARSER-BACKED SCANNER THAT FAILS OPEN IS WORSE THAN NO SCANNER, because it
-//! reports green. Everywhere this one can lose track it REFUSES instead of
-//! guessing, and the three places it could are named where they happen:
-//!
-//! - Comment stripping is literal-aware and understands nested block comments,
-//!   so a `//` inside a string cannot eat a closing brace. That direction is the
-//!   dangerous one: losing a CLOSE leaves `depth` too high, the enclosing `mod`
-//!   is never popped, and every later test in the file gets a phantom prefix -
-//!   which turns a live skip entry into a false DEAD one, and, where the prefix
-//!   was all that stood above the match, a live violation into a false negative.
-//!   An unterminated block comment or string panics naming the file.
-//! - A test attribute that is not followed by a declaration this parser
-//!   recognizes is collected and reported, rather than silently dropped. That is
-//!   exactly how the first version failed - it could not see macro-generated
-//!   tests - and a count threshold would not have caught it.
-//! - A `macro_rules!` generator whose emitted tests are not UNIFORMLY ignored
-//!   cannot have one ignore status attributed to all of them, so it panics
-//!   rather than marking them all ignored. Marking them all ignored is the
-//!   failure that satisfies this file's own invariant for free.
+//! WHAT THE REMAINING SCANS READ is the source text of `crates/*/src/**` and
+//! `crates/*/tests/**`, plus examples and benches, stripped of comments in a
+//! literal-aware way so a `//` inside a string cannot eat a closing brace and
+//! shift every later span. An unterminated block comment or string panics naming
+//! the file rather than guessing.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 /// The crate's own manifest dir, walked up to the workspace root.
 fn repo_root() -> PathBuf {
@@ -68,28 +38,8 @@ fn repo_root() -> PathBuf {
     dir
 }
 
-/// One test declaration, named the way libtest names it.
-#[derive(Debug)]
-struct TestFn {
-    name: String,
-    ignored: bool,
-    file: PathBuf,
-    line: usize,
-}
-
-/// Everything the scan produced, including what it could NOT resolve.
-#[derive(Default)]
-struct Scan {
-    tests: Vec<TestFn>,
-    /// A `#[test]` attribute with no declaration this parser recognized. Any
-    /// entry here means the scan has gone partly blind, which is the failure
-    /// mode that must never be silent.
-    unresolved: Vec<String>,
-}
-
-/// Every `.rs` file under `crates/*/src` and `crates/*/tests`, with the module
-/// prefix its declarations inherit.
-fn source_files(root: &Path) -> Vec<(PathBuf, Vec<String>)> {
+/// Every `.rs` file under `crates/*/src` and `crates/*/tests`.
+fn source_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let crates = root.join("crates");
     let mut packages: Vec<PathBuf> = std::fs::read_dir(&crates)
@@ -100,21 +50,8 @@ fn source_files(root: &Path) -> Vec<(PathBuf, Vec<String>)> {
         .collect();
     packages.sort();
     for package in packages {
-        // `src/` carries unit tests, whose libtest name is prefixed by the
-        // file's module path.
-        walk(&package.join("src"), &package.join("src"), true, &mut files);
-        // `tests/` carries integration binaries. Only a TOP-LEVEL file is a
-        // binary, and there the binary is the root and the file contributes no
-        // prefix; a nested file is a MODULE of one, so `tests/foo/bar.rs`
-        // reports as `foo::bar::<test>`. Prefixing every nested file with
-        // nothing under-reconstructed those names and showed up as false dead
-        // entries.
-        walk(
-            &package.join("tests"),
-            &package.join("tests"),
-            true,
-            &mut files,
-        );
+        walk(&package.join("src"), &mut files);
+        walk(&package.join("tests"), &mut files);
     }
     files
 }
@@ -141,15 +78,13 @@ fn example_and_bench_files(root: &Path) -> Vec<PathBuf> {
     for package in packages {
         for kind in ["examples", "benches"] {
             let dir = package.join(kind);
-            let mut found = Vec::new();
-            walk(&dir, &dir, false, &mut found);
-            files.extend(found.into_iter().map(|(path, _)| path));
+            walk(&dir, &mut files);
         }
     }
     files
 }
 
-fn walk(dir: &Path, base: &Path, path_is_module: bool, out: &mut Vec<(PathBuf, Vec<String>)>) {
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -157,300 +92,13 @@ fn walk(dir: &Path, base: &Path, path_is_module: bool, out: &mut Vec<(PathBuf, V
     paths.sort();
     for path in paths {
         if path.is_dir() {
-            walk(&path, base, path_is_module, out);
+            walk(&path, out);
         } else if path.extension().is_some_and(|ext| ext == "rs") {
-            let prefix = if path_is_module {
-                module_prefix(&path, base)
-            } else {
-                Vec::new()
-            };
-            out.push((path, prefix));
+            out.push(path);
         }
     }
 }
 
-/// Every test declaration under `crates/`.
-///
-/// TWO PASSES, because a `macro_rules!` generator and its invocations need not
-/// share a file: the first pass collects every generator in the tree, the second
-/// scans with the whole set in hand. A single pass saw only generators declared
-/// beside their invocation, so a generator exported from a shared module was
-/// invisible to both the dead-entry check and the violation check. The cost is
-/// an over-approximation - a generator's name matched in a file that never
-/// imported it would invent a test - which is the safe direction for the
-/// violation check and merely keeps a dead entry looking live for the other.
-fn collect_tests(root: &Path) -> Scan {
-    let files = source_files(root);
-    let mut generators: BTreeMap<String, bool> = BTreeMap::new();
-    for (path, _) in &files {
-        let text = stripped_source(path);
-        for (name, ignored) in test_generating_macros(path, &text) {
-            generators.insert(name, ignored);
-        }
-    }
-
-    let mut scan = Scan::default();
-    for (path, prefix) in &files {
-        let text = stripped_source(path);
-        scan_file(path, &text, prefix, &generators, &mut scan);
-    }
-    scan
-}
-
-fn stripped_source(path: &Path) -> String {
-    let text = std::fs::read_to_string(path).expect("a scanned source file reads");
-    strip_comments(path, &text)
-}
-
-/// The module path a file contributes: `src/a/b.rs` is `a::b`, `src/a/mod.rs`
-/// is `a`, and `src/lib.rs` / `src/main.rs` contribute nothing.
-fn module_prefix(path: &Path, base: &Path) -> Vec<String> {
-    let relative = path.strip_prefix(base).expect("scanned under its own base");
-    let mut parts: Vec<String> = relative
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    let last = parts.pop().expect("a file has a name");
-    let stem = last.trim_end_matches(".rs");
-    if !matches!(stem, "mod" | "lib" | "main") {
-        parts.push(stem.to_string());
-    }
-    parts
-}
-
-/// Pulls test functions out of one file's COMMENT-STRIPPED text, tracking the
-/// inline `mod` nesting so the reconstructed name matches what libtest reports.
-fn scan_file(
-    path: &Path,
-    text: &str,
-    prefix: &[String],
-    generators: &BTreeMap<String, bool>,
-    out: &mut Scan,
-) {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut mods: Vec<(String, usize)> = Vec::new();
-    let mut depth = 0usize;
-    let mut attrs: Vec<String> = Vec::new();
-    // AN ATTRIBUTE MAY SPAN LINES. `#[ignore = "<a long reason>"]` wraps, and a
-    // line-at-a-time reader took the continuation for the declaration under the
-    // attribute - which the refusal above caught on the first run, in
-    // `parity12a_ii.rs`. Brackets are counted over a text whose string interiors
-    // are blanked, so a bracket inside the reason cannot unbalance the count.
-    let mut open_attr: Option<(String, isize)> = None;
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-
-        if let Some((mut text, mut balance)) = open_attr.take() {
-            text.push(' ');
-            text.push_str(trimmed);
-            balance += bracket_balance(trimmed);
-            if balance > 0 {
-                open_attr = Some((text, balance));
-            } else {
-                attrs.push(text);
-            }
-            continue;
-        }
-
-        if trimmed.starts_with("#[") || trimmed.starts_with("#![") {
-            let balance = bracket_balance(trimmed);
-            if balance > 0 {
-                open_attr = Some((trimmed.to_string(), balance));
-            } else {
-                attrs.push(trimmed.to_string());
-            }
-        } else if !trimmed.is_empty() {
-            let is_test = attrs.iter().any(|attr| {
-                attr.starts_with("#[test]")
-                    || attr.starts_with("#[tokio::test")
-                    || attr.starts_with("#[test_case")
-            });
-            match fn_name(trimmed) {
-                Some(name) if is_test => {
-                    let mut full = prefix.to_vec();
-                    full.extend(mods.iter().map(|(name, _)| name.clone()));
-                    full.push(name);
-                    out.tests.push(TestFn {
-                        name: full.join("::"),
-                        ignored: attrs.iter().any(|attr| attr.starts_with("#[ignore")),
-                        file: path.to_path_buf(),
-                        line: index + 1,
-                    });
-                }
-                // A TEST ATTRIBUTE WITH NO DECLARATION UNDER IT. Inside a
-                // `macro_rules!` body the name is a metavariable (`fn $name`),
-                // which is expected and handled by the generator pass; anything
-                // else means this parser has stopped recognizing a way of
-                // declaring a test, and it must say so rather than drop it.
-                None if is_test && !strip_qualifiers(trimmed).starts_with("fn $") => {
-                    out.unresolved.push(format!(
-                        "  {}:{} carries {:?} but the next declaration is {:?}, which this parser \
-                         does not recognize as a test",
-                        path.display(),
-                        index + 1,
-                        attrs.join(" "),
-                        trimmed
-                    ));
-                }
-                _ => {}
-            }
-            if let Some(name) = mod_name(trimmed) {
-                mods.push((name, depth));
-            }
-            for (macro_name, ignored) in generators {
-                let Some(generated) = macro_argument(&lines, index, macro_name) else {
-                    continue;
-                };
-                let mut full = prefix.to_vec();
-                full.extend(mods.iter().map(|(name, _)| name.clone()));
-                full.push(generated);
-                out.tests.push(TestFn {
-                    name: full.join("::"),
-                    ignored: *ignored,
-                    file: path.to_path_buf(),
-                    line: index + 1,
-                });
-            }
-            attrs.clear();
-        }
-
-        depth = (depth + count(line, '{')).saturating_sub(count(line, '}'));
-        while mods.last().is_some_and(|(_, at)| depth <= *at) {
-            mods.pop();
-        }
-    }
-}
-
-/// The `macro_rules!` macros in this file that EMIT tests, and whether what
-/// they emit is `#[ignore]`d.
-///
-/// A SCANNER THAT ONLY READS `fn` DECLARATIONS IS BLIND TO A WHOLE FAMILY, and
-/// the blindness is exactly as dangerous as the hole this file closes: ten of
-/// the envelope fidelity gates are generated by one `fidelity_gate!` macro, so
-/// a skip pattern naming them would have looked DEAD to a `fn`-only scan and a
-/// non-ignored one would have looked absent. The convention this recognizes is
-/// the one the tree uses - the generated test's name is the macro's first
-/// argument - and it is deliberately narrow: a macro whose body carries no
-/// `#[test]` is not a generator, and an invocation whose first argument is not
-/// a bare identifier yields nothing.
-///
-/// ONE IGNORE STATUS IS ATTRIBUTED TO EVERY TEST A GENERATOR EMITS, which is
-/// only sound while the body is UNIFORM. A macro carrying `#[ignore]` on one arm
-/// and not another, or taking the attribute per invocation, would otherwise mark
-/// all of its tests ignored - and "all ignored" is precisely the answer that
-/// satisfies this file's invariant without checking anything, so the hole this
-/// file exists to close would reappear one level down. The uniformity is
-/// therefore MEASURED, by counting `#[test]` against `#[ignore` in the body, and
-/// a body that mixes them PANICS. When that fires, the fix is to split the
-/// generator or to name the generated tests in the skip list in full, never to
-/// widen this.
-fn test_generating_macros(path: &Path, text: &str) -> Vec<(String, bool)> {
-    let mut found = Vec::new();
-    let mut rest = text;
-    while let Some(at) = rest.find("macro_rules!") {
-        let after = &rest[at + "macro_rules!".len()..];
-        let name: String = after
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        let body = after.find('{').map(|open| balanced(&after[open..]));
-        if let (false, Some(body)) = (name.is_empty(), body) {
-            let tests = body.matches("#[test]").count() + body.matches("#[tokio::test").count();
-            let ignores = body.matches("#[ignore").count();
-            if tests > 0 {
-                assert!(
-                    ignores == 0 || ignores >= tests,
-                    "the macro {name}! in {} emits {tests} test(s) but carries {ignores} \
-                     #[ignore] attribute(s), so no single ignore status describes what it \
-                     generates. This scan would have to mark them all ignored, which silently \
-                     satisfies the skip-list invariant for whichever of them is NOT ignored - the \
-                     exact hole this file exists to close. Split the generator, or drop the prefix \
-                     from the skip list and name the generated tests in full.",
-                    path.display()
-                );
-                // A per-invocation ignore attribute is the other way this goes
-                // wrong, and it is visible as a metavariable in the body.
-                assert!(
-                    !body.contains("#[ignore = $") && !body.contains("$ignore"),
-                    "the macro {name}! in {} takes its #[ignore] per invocation, so its generated \
-                     tests do not share one ignore status and this scan cannot attribute one",
-                    path.display()
-                );
-                found.push((name, ignores > 0));
-            }
-        }
-        rest = after;
-    }
-    found
-}
-
-/// The text from an opening brace through its matching close.
-fn balanced(from: &str) -> &str {
-    let mut depth = 0usize;
-    for (at, ch) in from.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &from[..=at];
-                }
-            }
-            _ => {}
-        }
-    }
-    from
-}
-
-/// The first identifier argument of `name!(...)` invoked at `index`, which may
-/// sit on a following line when rustfmt has wrapped the call.
-fn macro_argument(lines: &[&str], index: usize, name: &str) -> Option<String> {
-    let call = format!("{name}!(");
-    let at = lines[index].find(&call)?;
-    let mut tail = lines[index][at + call.len()..].trim_start().to_string();
-    let mut cursor = index;
-    while tail.is_empty() && cursor + 1 < lines.len() {
-        cursor += 1;
-        tail = lines[cursor].trim().to_string();
-    }
-    let ident: String = tail
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-    (!ident.is_empty()).then_some(ident)
-}
-
-/// How many `[` an attribute leaves unclosed on this line.
-fn bracket_balance(line: &str) -> isize {
-    isize::try_from(count(line, '[')).expect("a line has few brackets")
-        - isize::try_from(count(line, ']')).expect("a line has few brackets")
-}
-
-fn count(line: &str, ch: char) -> usize {
-    line.chars().filter(|c| *c == ch).count()
-}
-
-/// Blanks every comment in a file, preserving line structure, WITHOUT cutting
-/// inside a string or character literal.
-///
-/// A NAIVE `line.find("//")` IS WRONG IN THE DANGEROUS DIRECTION, which is why
-/// this exists. `assert!(ok, "see ws://host/x"); }` truncates at the `//` and
-/// takes the closing brace with it: `depth` then stays one too high, the
-/// enclosing `mod` is never popped, and every later test in the file is
-/// reconstructed under a prefix it does not have. That produces FALSE DEAD
-/// ENTRIES - a live skip pattern reported as matching nothing, so the check
-/// fails for a parser reason - and, where the phantom prefix was the only thing
-/// standing above a match, a FALSE NEGATIVE on the violation check. Block
-/// comments were not handled at all, so a commented-out `#[test] fn foo()`
-/// counted as a live test.
-///
-/// The literals recognized are the ones Rust has: `"..."` with backslash
-/// escapes, raw strings with any hash count, byte and byte-raw strings, and
-/// character literals - distinguished from a lifetime, which is not a literal
-/// and must not open one. Block comments NEST, as they do in Rust. An
-/// unterminated block comment or string is a file this parser cannot read, so it
-/// panics rather than returning a truncated view of it.
 fn strip_comments(path: &Path, text: &str) -> String {
     strip(path, text, true)
 }
@@ -637,235 +285,6 @@ fn is_char_literal(bytes: &[u8], at: usize) -> bool {
 }
 
 /// Strips the visibility and qualifier keywords that may precede `fn` or `mod`.
-fn strip_qualifiers(trimmed: &str) -> &str {
-    let mut rest = trimmed;
-    loop {
-        let stripped = [
-            "pub(crate) ",
-            "pub(super) ",
-            "pub ",
-            "async ",
-            "unsafe ",
-            "const ",
-        ]
-        .iter()
-        .find_map(|keyword| rest.strip_prefix(keyword));
-        match stripped {
-            Some(next) => rest = next.trim_start(),
-            None => return rest,
-        }
-    }
-}
-
-fn identifier_after(trimmed: &str, keyword: &str) -> Option<String> {
-    let rest = strip_qualifiers(trimmed).strip_prefix(keyword)?;
-    let name: String = rest
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-    (!name.is_empty()).then_some(name)
-}
-
-fn fn_name(trimmed: &str) -> Option<String> {
-    identifier_after(trimmed, "fn ")
-}
-
-fn mod_name(trimmed: &str) -> Option<String> {
-    let name = identifier_after(trimmed, "mod ")?;
-    // `mod foo;` is a declaration, not a scope: the file it names is scanned in
-    // its own right and would be double-counted if this pushed.
-    trimmed.contains('{').then_some(name)
-}
-
-/// The tool's config, as data. Never invoked - this reads a list out of it.
-fn gate_skip_patterns(config: &toml::Table) -> Vec<String> {
-    let gate = config
-        .get("test")
-        .and_then(|t| t.get("gate_profile"))
-        .and_then(toml::Value::as_str)
-        .expect("the config names a gate profile")
-        .to_string();
-    let profile = config
-        .get("test")
-        .and_then(|t| t.get("profiles"))
-        .and_then(|p| p.get(&gate))
-        .unwrap_or_else(|| panic!("the gate profile {gate} is declared"));
-    profile
-        .get("skip")
-        .and_then(toml::Value::as_array)
-        .expect("the gate profile carries a skip list")
-        .iter()
-        .map(|entry| {
-            // Package-qualified entries are tables; this workspace uses none,
-            // and one landing here silently unchecked is the same hole again.
-            let text = entry.as_str().unwrap_or_else(|| {
-                panic!("this check only models bare-substring skip entries, got {entry:?}")
-            });
-            // A DEGENERATE ENTRY MAKES EVERY CHECK BELOW VACUOUS. The empty
-            // string is a substring of every test name and of every `only`
-            // filter, so it would satisfy the release-sweep agreement for free
-            // while excluding the entire suite from the gate.
-            assert!(
-                text.len() >= 4,
-                "the skip entry {text:?} is too short to name anything deliberately; a substring \
-                 filter that broad excludes tests nobody chose and satisfies every check here \
-                 vacuously"
-            );
-            text.to_string()
-        })
-        .collect()
-}
-
-fn config_table(root: &Path) -> toml::Table {
-    let path = root.join("brokkr.toml");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()))
-        .parse()
-        .expect("the project config parses as TOML")
-}
-
-/// THE INVARIANT, enforced: a skip pattern may match only `#[ignore]`d tests.
-#[test]
-fn every_gate_skip_pattern_matches_only_ignored_tests() {
-    let root = repo_root();
-    let scan = collect_tests(&root);
-    // THE SCANNER REFUSES BEFORE IT REPORTS. A parser that has stopped
-    // recognizing a declaration form agrees with every skip list there is, and
-    // the count threshold below would not notice one file's worth going missing
-    // - which is how the first version of this shipped blind to macro-generated
-    // tests. Every test attribute must land on something.
-    assert!(
-        scan.unresolved.is_empty(),
-        "this scan found test attributes it could not attach to a declaration:\n{}\n\nUntil that \
-         is understood the scan is partly blind, and a blind scan reports the skip list green for \
-         free. Teach the parser the declaration form, do not relax this.",
-        scan.unresolved.join("\n")
-    );
-    let tests = scan.tests;
-    assert!(
-        tests.len() > 500,
-        "the scan found only {} test declarations, which is too few for this workspace - it is \
-         reading the wrong tree or its parser has stopped recognizing declarations, and a scan \
-         that sees nothing agrees with every skip list there is",
-        tests.len()
-    );
-
-    let mut violations = Vec::new();
-    let mut unmatched = Vec::new();
-    for pattern in gate_skip_patterns(&config_table(&root)) {
-        let matched: Vec<&TestFn> = tests
-            .iter()
-            .filter(|test| test.name.contains(&pattern))
-            .collect();
-        if matched.is_empty() {
-            unmatched.push(pattern.clone());
-            continue;
-        }
-        for test in matched.iter().filter(|test| !test.ignored) {
-            violations.push(format!(
-                "  skip pattern {pattern:?} matches {} ({}:{}), which is NOT #[ignore]d",
-                test.name,
-                test.file
-                    .strip_prefix(&root)
-                    .unwrap_or(&test.file)
-                    .display(),
-                test.line
-            ));
-        }
-    }
-
-    assert!(
-        violations.is_empty(),
-        "the gate profile's skip list silently stops real tests from running:\n{}\n\nA skip entry \
-         is free only while every test it matches is #[ignore]d at the source, because that is \
-         what lets the coverage audit accept the pair as justified. Either #[ignore] the test at \
-         its declaration with the reason, or replace the prefix with the full names it was meant \
-         to catch.",
-        violations.join("\n")
-    );
-
-    assert!(
-        unmatched.is_empty(),
-        "the gate profile's skip list names patterns that match no test at all: {unmatched:?}. A \
-         dead entry is not harmless - it is a name that drifted, so whatever it was excluding is \
-         being run again under a name nobody wrote down, or it will silently start catching an \
-         unrelated test that grows into it.",
-    );
-}
-
-/// The other invariant `brokkr.toml` states in prose and nothing checked: the
-/// release-profile `only` list and the gate's `skip` list have to agree.
-///
-/// They are two halves of one decision - a wall-clock contract is excluded from
-/// the debug gate BECAUSE it is evaluated in the release sweep - and they are
-/// written a hundred lines apart in different syntaxes. A test named in one and
-/// not the other either runs in a lane that cannot judge it or runs in no lane
-/// at all.
-///
-/// IT IS RESOLVED AGAINST THE TESTS, not against the two strings. Both lists are
-/// libtest substring filters, and comparing them as substrings is either slack
-/// or wrong: `skip.contains(filter)` is satisfied by ANY unrelated long skip
-/// entry, and the sound converse `filter.contains(skip)` refuses the config as
-/// it stands, where the `only` filter is the shorter of the two. Neither
-/// statement is the invariant. The invariant is that EVERY TEST THE RELEASE
-/// SWEEP RUNS IS SKIPPED BY THE GATE, and this file already reconstructs every
-/// test name, so it is checked directly - which also catches the case the
-/// substring form cannot see at all: a new test growing into the `only` filter
-/// without growing into any skip entry.
-#[test]
-fn every_release_only_filter_is_skipped_by_the_gate() {
-    let root = repo_root();
-    let config = config_table(&root);
-    let skips: BTreeSet<String> = gate_skip_patterns(&config).into_iter().collect();
-    let scan = collect_tests(&root);
-
-    let sweeps = config
-        .get("check")
-        .and_then(toml::Value::as_array)
-        .expect("the config declares check sweeps");
-    for sweep in sweeps {
-        if sweep.get("profile").and_then(toml::Value::as_str) != Some("release") {
-            continue;
-        }
-        let name = sweep
-            .get("name")
-            .and_then(toml::Value::as_str)
-            .unwrap_or("<unnamed>");
-        for filter in sweep
-            .get("only")
-            .and_then(toml::Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-        {
-            let filter = filter.as_str().expect("an `only` filter is a string");
-            let run: Vec<&TestFn> = scan
-                .tests
-                .iter()
-                .filter(|test| test.name.contains(filter))
-                .collect();
-            assert!(
-                !run.is_empty(),
-                "the release sweep {name:?} names {filter:?}, which matches no test in the tree - \
-                 so that lane evaluates nothing at all and the contract it was written for is \
-                 running in no lane"
-            );
-            let unskipped: Vec<&str> = run
-                .iter()
-                .filter(|test| !skips.iter().any(|skip| test.name.contains(skip)))
-                .map(|test| test.name.as_str())
-                .collect();
-            assert!(
-                unskipped.is_empty(),
-                "the release sweep {name:?} runs {filter:?}, which catches {unskipped:?} - and no \
-                 gate skip entry excludes those, so the debug gate is ALSO evaluating a \
-                 wall-clock contract it cannot validly judge. The two lists state one decision \
-                 and have to agree. Skip entries: {skips:?}"
-            );
-        }
-    }
-}
-
 /// THE COMPANION INVARIANT, and the one that is genuinely SILENT: no code the
 /// test binaries compile may write a committed fixture.
 ///
@@ -924,7 +343,7 @@ fn no_test_binary_writes_a_committed_fixture() {
     );
     // One path, not one file NAME - see the note in the missing-input gate.
     let this_file = root.join(file!());
-    for (path, _) in files {
+    for path in files {
         if path == this_file {
             continue;
         }
@@ -1087,116 +506,16 @@ fn fn_body_spans(code: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-/// THE PARSER'S OWN GATES. Everything above rests on the scan seeing the tree
-/// as libtest does, and the two ways it silently stopped doing that are pinned
-/// here as fixtures rather than left to be rediscovered on the tree.
+/// THE SCANNERS' OWN GATES, on synthetic samples rather than on the tree.
+///
+/// Both scans above are exempt from themselves, because a scanner has to name
+/// every construct it forbids and so its own source matches its own rule by
+/// construction. Neither can therefore be proven to BITE by running it over the
+/// repository. These fixtures are that proof, and each one is a shape that was
+/// wrong at some point rather than an invented case.
 mod parser {
-    use super::{
-        Scan, TestFn, fixture_write_offenders, scan_file, strip_comments,
-        strip_comments_keeping_literals,
-    };
-    use std::{collections::BTreeMap, path::Path};
-
-    fn scan(text: &str) -> Scan {
-        let path = Path::new("fixture.rs");
-        let stripped = strip_comments(path, text);
-        let mut out = Scan::default();
-        scan_file(path, &stripped, &[], &BTreeMap::new(), &mut out);
-        out
-    }
-
-    fn names(scan: &Scan) -> Vec<String> {
-        scan.tests
-            .iter()
-            .map(|test: &TestFn| test.name.clone())
-            .collect()
-    }
-
-    /// The dangerous direction of a naive `line.find("//")`: it takes the
-    /// closing brace with the comment, `depth` stays too high, the `mod` is
-    /// never popped, and every later test is reconstructed under a prefix it
-    /// does not have - a live skip pattern then looks DEAD.
-    #[test]
-    fn a_double_slash_inside_a_string_does_not_eat_the_brace_beside_it() {
-        let scan = scan(concat!(
-            "mod inner {\n",
-            "    #[test]\n",
-            "    fn first() { let _ = \"see ws://host/x\"; }\n",
-            "}\n",
-            "#[test]\n",
-            "fn second() {}\n",
-        ));
-        assert_eq!(
-            names(&scan),
-            vec!["inner::first".to_string(), "second".to_string()],
-            "`second` sits outside `inner`; a stripper that cut the string's `//` would lose the \
-             brace closing `first` and report it as `inner::second`"
-        );
-    }
-
-    /// A commented-out test is not a test, and a block comment is how one gets
-    /// commented out. The first parser did not handle `/* */` at all.
-    #[test]
-    fn a_block_commented_test_is_not_counted() {
-        let scan = scan(concat!(
-            "/*\n",
-            "#[test]\n",
-            "fn commented_out() {}\n",
-            "*/\n",
-            "#[test]\n",
-            "fn live() {}\n",
-        ));
-        assert_eq!(names(&scan), vec!["live".to_string()]);
-    }
-
-    /// The refusal that caught the real blind spot on its first run: a wrapped
-    /// `#[ignore = "..."]` whose continuation line was read as the declaration.
-    #[test]
-    fn a_wrapped_attribute_is_one_attribute() {
-        let scan = scan(concat!(
-            "#[test]\n",
-            "#[ignore = \"a reason long enough that rustfmt wraps it onto \\\n",
-            "     a second line entirely\"]\n",
-            "fn wrapped() {}\n",
-        ));
-        assert!(
-            scan.unresolved.is_empty(),
-            "a wrapped attribute must not be read as a declaration: {:?}",
-            scan.unresolved
-        );
-        assert_eq!(names(&scan), vec!["wrapped".to_string()]);
-        assert!(scan.tests[0].ignored, "the wrapped attribute is the ignore");
-    }
-
-    /// The refusal itself, which is the whole reason this scanner may be
-    /// trusted: an unrecognized declaration form is reported, never dropped.
-    #[test]
-    fn an_unrecognized_declaration_under_a_test_attribute_is_reported() {
-        let scan = scan("#[test]\nstruct NotAFunction;\n");
-        assert!(
-            names(&scan).is_empty() && scan.unresolved.len() == 1,
-            "expected one unresolved report, got {scan:?} tests {:?}",
-            names(&scan)
-        );
-    }
-
-    /// A brace inside a string message must not move the module depth either -
-    /// the same failure as the `//` one, reached through a different character.
-    #[test]
-    fn a_brace_inside_a_string_does_not_move_the_module_depth() {
-        let scan = scan(concat!(
-            "mod inner {\n",
-            "    #[test]\n",
-            "    fn first() { assert!(ok, \"a }} shaped message\"); }\n",
-            "}\n",
-            "#[test]\n",
-            "fn second() {}\n",
-        ));
-        assert_eq!(
-            names(&scan),
-            vec!["inner::first".to_string(), "second".to_string()]
-        );
-    }
+    use super::{fixture_write_offenders, strip_comments, strip_comments_keeping_literals};
+    use std::path::Path;
 
     fn offenders(text: &str) -> Vec<String> {
         let path = Path::new("fixture.rs");
@@ -1454,15 +773,11 @@ fn no_test_declines_to_assert_on_a_missing_input() {
     // THE EXEMPTION IS THIS FILE, not every file wearing its name. `file!()` is
     // workspace-relative, so joining it against the root names exactly one
     // path; matching on the bare file name would exempt any other
-    // `gate_skip_list.rs` anywhere under `crates/`, which is an exemption
-    // nobody wrote and nothing would report.
+    // `test_hygiene.rs` anywhere under `crates/`, which is an exemption nobody
+    // wrote and nothing would report.
     let this_file = root.join(file!());
     let mut offenders = Vec::new();
-    for path in files
-        .into_iter()
-        .map(|(path, _)| path)
-        .chain(example_and_bench_files(&root))
-    {
+    for path in files.into_iter().chain(example_and_bench_files(&root)) {
         if path == this_file {
             continue;
         }
@@ -1585,52 +900,4 @@ fn test_fn_body_spans(code: &str) -> Vec<(usize, usize)> {
     }
     out.dedup();
     out
-}
-
-impl std::fmt::Debug for Scan {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Scan")
-            .field("tests", &self.tests.len())
-            .field("unresolved", &self.unresolved)
-            .finish()
-    }
-}
-
-/// THE TEXTLINT EXEMPTION, BOUNDED. This file is the single named exclusion in
-/// the `no-brokkr-in-rust-source` rule, and the justification is a property of
-/// what it CONTAINS - it reads the project config as data and spawns nothing -
-/// not of where it sits. An exemption nothing re-checks is an exemption that
-/// decays: a subprocess landing here later is the exact deadlock the rule was
-/// written for, now unguarded, and the rule can no longer see it.
-///
-/// So the exemption checks itself. The file reads its own source and refuses any
-/// construct that could start a process. If this fails, the fix is to move the
-/// spawning code out of this file, never to widen the list below.
-#[test]
-fn the_excluded_file_spawns_no_subprocess() {
-    let root = repo_root();
-    let path = root.join(file!());
-    let source = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-        panic!(
-            "this test reads its own source at {}: {err}",
-            path.display()
-        )
-    });
-    // Stripped first, so the prose above - which necessarily discusses spawning
-    // - cannot trip a check that is about the CODE.
-    let code = strip_comments(&path, &source);
-    for construct in [
-        "process::Command",
-        "Command::new",
-        "std::process::",
-        "tokio::process",
-    ] {
-        assert!(
-            !code.contains(construct),
-            "this file names {construct:?}, and it is the single file excluded from the textlint \
-             rule that keeps the build tool out of Rust source. That exclusion is justified by \
-             this file spawning nothing - the deadlock the rule prevents needs a subprocess - so a \
-             spawn here is unguarded by construction. Move it to a file the rule still covers."
-        );
-    }
 }

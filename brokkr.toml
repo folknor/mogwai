@@ -371,25 +371,24 @@ certifies = "complete"
 # mentioning the build tool at all. Prose about it belongs in markdown, where
 # it cannot become an invocation.
 #
-# ONE EXCLUSION, and it is the exception that proves what the rule is about.
-# `gate_skip_list.rs` enforces the skip-list invariant declared ABOVE, at the
-# gate profile - that a skip pattern may match only `#[ignore]`d tests - which
-# it can only do by reading THIS FILE. It reads it as DATA, with `std::fs` and
-# a TOML parse, and spawns nothing; the deadlock the rule exists to prevent
-# needs a subprocess, and there is none. Excluding one named file rather than
-# relaxing the pattern keeps the rule absolute everywhere else.
+# NO EXCLUSIONS, as of 2026-08-20, and getting rid of the last one is why the
+# tool grew its dead-filter check. `gate_skip_list.rs` was excluded because it
+# enforced two invariants about the lists ABOVE - that a skip pattern may match
+# only `#[ignore]`d tests, and that no filter is dead - which it could only do
+# by reading THIS FILE. The exemption was sound on its own terms (it read the
+# config as DATA and spawned nothing, and a self-check kept it that way), but it
+# rested on a hand-written parser that reconstructed libtest names from source
+# text and had already gone blind once, to macro-generated tests.
 #
-# THE EXCLUSION IS A PROPERTY OF THAT FILE'S CONTENTS, NOT OF ITS PATH, and an
-# exemption nothing re-checks decays into the hole the rule was written for. So
-# the file checks itself: `the_excluded_file_spawns_no_subprocess` reads its own
-# source and refuses any process-spawning construct in it. Add one and that test
-# fails before the deadlock can happen, which is what makes the exemption
-# bounded rather than permanent.
+# Both invariants are the tool's now, resolved against libtest's own
+# enumeration: a skip catching a live test is an ORPHANED PAIR, and a filter
+# matching nothing is a DEAD FILTER naming the block that declared it. The file
+# kept only its two source-hygiene scans, which never mentioned the tool, and is
+# `test_hygiene.rs`. An exemption removed beats an exemption re-checked.
 [[textlint]]
 name = "no-brokkr-in-rust-source"
 pattern = 'brokkr'
 paths = ["crates/**/*.rs"]
-exclude = ["**/tests/gate_skip_list.rs"]
 message = "brokkr is local dev tooling and must never be named from shipped Rust; put the prose in markdown and run the gate outside the binary"
 
 # ---------------------------------------------------------------------------

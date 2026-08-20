@@ -2948,18 +2948,26 @@ than to police. Several entries above read as live hazards ONLY under the
 assumption this convention does not hold, the pending-arm shed cap and the
 unordered application of concurrent arms among them.
 
-## `reference/glossary.md` STATES A FALSE THING ABOUT LEDGERS
+## `reference/glossary.md` IS MISSING MOST OF THE ACCOUNT VOCABULARY
 
-Its `Ledger` entry says "the single `mogwai-engine` instance owned by the run"
-and that "every socket, whatever symbol it bound, acts on that one ledger".
-Neither half is true: `Run::passengers` maps an account id to a `Passenger`, and
-each `Passenger` owns its own `engine`, built per account by `template_engine`.
-`mogwai-cli`'s `two_accounts_on_one_venue_do_not_share_a_ledger` asserts the
-opposite of the entry. A leftover from before multi-account, and it sits in the
-one folder whose contents must be true. Found 2026-08-20 while looking for
-vocabulary; the glossary also carries no entry for venue, account, client,
-connection, session, passenger, seat, eviction, divergence or strategy, which is
-most of the vocabulary a reader needs to follow the entries in this file.
+It carries no entry for venue, account, client, connection, session, passenger,
+seat, eviction, divergence or strategy, nor for the two venue MODES recorded
+above - which is most of the vocabulary a reader needs to follow the entries in
+this file. The water-side terms (run, river, boat, boatyard, tape, warmup) are
+covered and good.
+
+Raised 2026-08-20 after an owner conversation ran aground twice on the missing
+words; the owner declined the additions at that time, so this is a standing gap
+rather than a queued task. Whoever next works that file is the one to close it.
+
+FIXED IN THE SAME PASS, and recorded because the fix is the argument for the
+rest: the `Ledger` entry claimed "the single `mogwai-engine` instance owned by
+the run", acted on by "every socket, whatever symbol it bound". Both halves were
+false - `Run::passengers` maps an account id to a `Passenger` owning its own
+engine, and `mogwai-cli`'s `two_accounts_on_one_venue_do_not_share_a_ledger` had
+been asserting the opposite of the entry. A leftover from before multi-account,
+sitting in the one folder whose contents must be true, and it made the whole
+account model read backwards.
 
 ## Notes / gotchas
 
