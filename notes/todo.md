@@ -522,12 +522,24 @@ group by any other route has no API for it, and none is owed until one is wanted
   a caller handing one over is supplying something no index construction could
   produce, since a mark is a median-with-outlier-rejection across venues and a
   settlement a TWAP of that. ORDER ENTRY REFUSES a non-positive price on any
-  instrument, which is where every venue puts it and what makes a zero fill
-  unreachable rather than handled. `position_unrealized_checked`'s zero answer
-  STAYS as a backstop under a now-unreachable case, rather than being the
-  policy. Refusing AT THE FILL was considered and rejected: by then the tape has
-  already produced the print, and aborting the serving path over it is the one
-  thing no venue does.
+  instrument, which is where every venue puts it - and that half was ALREADY
+  TRUE: `validate_submit_order` has refused a non-positive `price` and
+  `trigger_price` all along, so no change was owed there and the ruling only
+  confirmed it. `position_unrealized_checked`'s zero answer STAYS as a backstop
+  under a case the settle guard makes unreachable, rather than being the policy.
+  Refusing AT THE FILL was considered and rejected: by then the tape has already
+  produced the print, and aborting the serving path over it is the one thing no
+  venue does.
+  LANDED 2026-08-20. The guard DECLINES the mark and leaves the position where
+  it was, because settlement WRITES its price into both `avg_px` and `mark_px` -
+  so a booked zero does not produce one bad number, it leaves the position
+  unpriceable for the rest of the run. That durable half is what the test
+  asserts on; the credits-nothing assertion the old test carried ALONE PASSES
+  against the defect, since a poisoned position credits nothing either.
+  WHAT REMAINS REACHABLE is the fill path: a zero-price fill is still warned
+  about and booked by `warn_zero_px`, so a position can carry `mark_px == 0` if
+  the tape produces one. That is the case the backstop covers and the one the
+  ruling declined to refuse.
 
 - `projected_qty` TAKES A BARE QUANTITY, so an incoming order that is itself one
   leg of an `Oco` pair is counted ADDITIVELY against the exclusive group it

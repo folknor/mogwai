@@ -64,6 +64,11 @@ pub(crate) struct Warned {
     /// stored value is a boundary, not a true total, so the condition persists
     /// across every later snapshot - warn once per key, not once per event.
     pub(crate) saturated: HashSet<String>,
+    /// Inverse symbols a caller has offered a non-positive settlement price
+    /// for. The mark is refused rather than applied, and the condition is a
+    /// property of the caller rather than of one instant, so it would repeat on
+    /// every settlement instant of the run - warn once per symbol.
+    pub(crate) unpriceable_settlement: HashSet<Symbol>,
 }
 
 impl Engine {
@@ -649,6 +654,24 @@ impl Engine {
     fn warn_zero_px(&mut self, symbol: &str) {
         if self.warned.zero_px.insert(symbol.into()) {
             tracing::warn!(%symbol, "account fill booked with zero price");
+        }
+    }
+
+    /// An inverse position cannot be settled at a non-positive price, so the
+    /// mark is DECLINED and the position is left where it was. See
+    /// [`Engine::settle`] for why a price like that is a caller defect rather
+    /// than a market event.
+    pub(crate) fn warn_unpriceable_settlement(&mut self, symbol: &Symbol) {
+        if self
+            .warned
+            .unpriceable_settlement
+            .insert(Symbol::clone(symbol))
+        {
+            tracing::warn!(
+                %symbol,
+                "settlement declined: an inverse contract has no value at a non-positive price, \
+                 so the position keeps the mark it had"
+            );
         }
     }
 

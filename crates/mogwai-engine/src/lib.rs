@@ -1567,6 +1567,33 @@ impl Engine {
         }
     }
 
+    /// Realize every futures position in `marks` at the settlement price given.
+    ///
+    /// AN INVERSE INSTRUMENT REFUSES A NON-POSITIVE SETTLEMENT PRICE, and the
+    /// refusal is to leave the position marked where it was rather than to
+    /// settle it somewhere unpriceable. An inverse contract's value is
+    /// `multiplier * qty / price`, which has no value at zero, and settlement
+    /// WRITES the price it was given into both `avg_px` and `mark_px` - so a
+    /// zero here does not merely produce one bad number, it poisons the
+    /// position for the rest of the run, and every later reader answers on a
+    /// price that cannot be inverted.
+    ///
+    /// Ruled 2026-08-20 on what a venue can actually receive rather than on
+    /// arithmetic. A real settlement price is a TWAP of an index built by
+    /// median-with-outlier-rejection across several spot venues; a zero would
+    /// require every constituent to print zero across the whole window, and an
+    /// unavailable component is dropped and reweighted rather than fed in as a
+    /// zero. So a caller handing one over is supplying something no index
+    /// construction produces, which is a caller defect and not a market event.
+    ///
+    /// LINEAR CLASSES ARE LEFT ALONE deliberately: their value is
+    /// `multiplier * qty * price`, which is perfectly defined at zero and means
+    /// what it says. The rule is about invertibility, not about zero being
+    /// distasteful.
+    ///
+    /// `Engine::position_unrealized_checked` still answers zero for an
+    /// unpriceable position. That stays a BACKSTOP under a case this guard
+    /// makes unreachable from here, rather than the policy it was before.
     pub fn settle(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
         let mut settled = false;
         for (symbol, settle_px) in marks {
@@ -1574,6 +1601,10 @@ impl Engine {
                 continue;
             };
             if !def.class.is_future() {
+                continue;
+            }
+            if def.class.is_inverse() && *settle_px <= Decimal::ZERO {
+                self.warn_unpriceable_settlement(symbol);
                 continue;
             }
             for position in
@@ -11218,21 +11249,69 @@ mod tests {
         );
     }
 
-    /// `InstrumentDef::unrealized` answers `None` for an inverse at a zero
-    /// price because `1/0` has no value - which is a DIFFERENT answer from
-    /// "the arithmetic overflowed", and collapsing the two into one
+    /// `settle` DECLINES a non-positive price on an inverse instrument, and
+    /// declining means the position keeps the mark it had.
+    ///
+    /// Two distinct failures live here and the test asserts against both. The
+    /// first is arithmetic: `InstrumentDef::unrealized` answers `None` for an
+    /// inverse at zero because `1/0` has no value, which is a DIFFERENT answer
+    /// from "the arithmetic overflowed", and collapsing the two into one
     /// `unwrap_or(Decimal::MAX)` credited the whole Decimal range to the
-    /// balance. `settle` passes the caller's price straight through with no
-    /// zero guard, so this is reachable from the public settlement path.
+    /// balance.
+    ///
+    /// The second is durability, and it is the one the guard exists for.
+    /// Settlement WRITES its price into both `avg_px` and `mark_px`, so a
+    /// booked zero does not produce one bad number - it leaves the position
+    /// unpriceable for the rest of the run, and every later reader answers on a
+    /// price that cannot be inverted. A credits-nothing assertion alone passes
+    /// against that, because crediting nothing is exactly what a poisoned
+    /// position does.
     #[test]
-    fn settling_an_inverse_at_a_zero_price_credits_nothing() {
+    fn settling_an_inverse_at_a_non_positive_price_is_declined() {
+        for refused in [Decimal::ZERO, Decimal::from(-100)] {
+            let mut e = inverse_engine();
+            inverse_position(&mut e);
+            let before = e
+                .account
+                .positions
+                .get(&(Symbol::from("XBTUSD"), None))
+                .expect("the fixture rests a position")
+                .mark_px;
+            e.settle(&[(Symbol::from("XBTUSD"), refused)], 5);
+            assert_eq!(
+                *e.account.balances.get("XBT").expect("settlement balance"),
+                Decimal::ZERO,
+                "an undefined mark contributes nothing; saturating credited Decimal::MAX"
+            );
+            let after = e
+                .account
+                .positions
+                .get(&(Symbol::from("XBTUSD"), None))
+                .expect("a declined settlement retires nothing");
+            assert_eq!(
+                after.mark_px, before,
+                "the position was re-marked at {refused}, so it can never be priced again"
+            );
+            assert_ne!(
+                after.avg_px, refused,
+                "the position's VWAP was reset to {refused}, which is the durable half of the \
+                 damage rather than the credit"
+            );
+        }
+    }
+
+    /// The other side of the same rule, without which the decline above is
+    /// indistinguishable from a settlement path that refuses everything: a
+    /// POSITIVE price still settles, through the inverse arithmetic.
+    #[test]
+    fn settling_an_inverse_at_a_positive_price_still_books() {
         let mut e = inverse_engine();
         inverse_position(&mut e);
-        e.settle(&[(Symbol::from("XBTUSD"), Decimal::ZERO)], 5);
+        e.settle(&[(Symbol::from("XBTUSD"), Decimal::from(200))], 5);
         assert_eq!(
             *e.account.balances.get("XBT").expect("settlement balance"),
-            Decimal::ZERO,
-            "an undefined mark contributes nothing; saturating credited Decimal::MAX"
+            Decimal::from(5),
+            "100 * 10 * (1/100 - 1/200) is 5 settlement units"
         );
     }
 
