@@ -1,5 +1,13 @@
 # Bug hunt: mogwai-adapter
 
+CLOSED AND EXHAUSTED, 2026-08-20, and with it THE WHOLE ELEVEN-DOCUMENT ARC.
+Nothing here is open. Two rounds closed all seven findings plus the relayed
+broadarrow section, no refusals, and the close pass over
+`13319b2~1..HEAD` found one further defect (below). What still binds future
+work was folded into `AGENTS.md`'s standing-lessons section when the arc's
+carry-forward was deleted; this document is kept only for the reasoning behind
+what was fixed and for the "checked and found sound" inventory at the end.
+
 Reconnaissance report, 2026-08-18. One Opus hunter, read-only, scope
 `crates/mogwai-adapter`: the factories and their configs, the DataClient and
 ExecutionClient pair, the socket upgrade and reconnection path, order and
@@ -140,6 +148,36 @@ distinction was retracted, because the venue sends a `RunComplete` frame ahead
 of the close on the duration path too, so the adapter stops on the frame and
 `DurationComplete` is reachable only as the close-frame fallback. That last is
 a protocol imprecision on the venue's side and is filed in `notes/todo.md`.
+
+## The arc's close pass, 2026-08-20: the close reason did not fit its frame
+
+Eleven close passes, eleven defects in the unreviewed half. This one was in the
+close vocabulary the round had just built, one layer up from what it closed.
+
+- THE CLOSE REASON WAS TRIMMED TO THE WRONG CAP. All three `CloseSpec`
+  constructors ran their reason through `truncate_reason`, the 512-byte bound on
+  a reason travelling in a TEXT frame - and a close reason does not travel in
+  one. RFC 6455 caps a control frame's payload at 125 bytes, two of which are
+  the status code, so the real budget is 123. The venue's own eviction sentence
+  interpolates an account id bounded only by `MAX_ACCOUNT_ID_LEN` and reaches
+  157 bytes, passing the 512 check untouched. A cap that can never bind is the
+  arc's signature defect in its purest form: it reads as a bound and is not one.
+- WHAT IT COSTS IS EXACTLY WHAT THE ROUND'S OWN MODULE EXISTS TO PREVENT. A
+  conforming peer must fail the connection on an oversized control frame, so the
+  close carrying the discriminator either never leaves or arrives as a bare EOF
+  - and an evicted client that classifies nothing redials, evicting whatever
+  evicted it. The round made the prefix structural and then let the frame that
+  carries it be unsendable.
+- FIXED IN `mogwai_protocol::close`, beside `classify`, because the budget is a
+  property of the contract rather than of a call site: `MAX_REASON_BYTES` and
+  `fit_reason`, which trims the TAIL on a char boundary so a prefix-composed
+  reason classifies the same before and after. All three constructors use it.
+  Bite-checked at the venue's real sentence: with `truncate_reason` restored the
+  new test fires on its own assertion, naming 157 bytes.
+- Pinned by `admission::every_close_reason_fits_the_control_frame_that_carries_it`,
+  which builds the venue's own eviction sentence at a maximal account id and
+  re-classifies the trimmed result, and by three tests in `close.rs`. Durable in
+  `reference/architecture.md`, beside the close-vocabulary paragraph.
 
 ## What the hunter checked and found sound
 

@@ -1,5 +1,10 @@
 # Test hunt: mogwai-cli venue lifecycle and serving integration tests
 
+CLOSED AND EXHAUSTED, 2026-08-19: five rounds plus a close pass over the whole
+commit arc, no open findings. The first document of the eleven-document arc that
+closed 2026-08-20. Kept for its reasoning and its refusals; what binds future
+work is in `AGENTS.md`'s standing-lessons section.
+
 Reconnaissance report, 2026-08-18. One Opus hunter, read-only, scope
 `crates/mogwai-cli/tests/` - the seven in-scope binaries, the `common/` launcher
 harness and the seventeen `configs/` fixtures. The hunter also read

@@ -352,11 +352,31 @@ pub(crate) struct CloseSpec {
     pub(crate) reason: String,
 }
 
+/// THE CLOSE REASON IS TRIMMED TO ITS FRAME, NOT TO `MAX_REASON_LEN`.
+///
+/// Every constructor below used `truncate_reason`, the 512-byte cap that bounds
+/// a reason travelling inside a TEXT frame - and a close reason does not travel
+/// in one. RFC 6455 caps a control frame's payload at 125 bytes, two of which
+/// are the status code, so the real budget is
+/// `mogwai_protocol::close::MAX_REASON_BYTES`. A 512-byte cap on a 123-byte
+/// frame reads as a bound and is not one: the venue's own eviction reason
+/// reaches 157 bytes at `MAX_ACCOUNT_ID_LEN` and passed that check untouched.
+///
+/// What an oversized control frame costs is the whole point. A conforming peer
+/// must fail the connection on one, so the close either never leaves the venue
+/// or arrives as an abrupt EOF - and an evicted client that sees an EOF instead
+/// of a reasoned close classifies nothing, redials, and evicts whatever evicted
+/// it. The reason string is a protocol contract precisely so that cannot
+/// happen, so it has to fit the frame that carries it.
+fn close_reason(reason: String) -> String {
+    mogwai_protocol::close::fit_reason(reason)
+}
+
 impl CloseSpec {
     pub(crate) fn overload(reason: impl Into<String>) -> Self {
         Self {
             code: CLOSE_ADMISSION_OVERLOAD,
-            reason: truncate_reason(reason.into()),
+            reason: close_reason(reason.into()),
         }
     }
 
@@ -364,7 +384,7 @@ impl CloseSpec {
     pub(crate) fn venue_fault(reason: impl Into<String>) -> Self {
         Self {
             code: CLOSE_VENUE_FAULT,
-            reason: truncate_reason(reason.into()),
+            reason: close_reason(reason.into()),
         }
     }
 
@@ -378,8 +398,10 @@ impl CloseSpec {
     /// the prefix by hand would let the next one forget it, and a forgotten
     /// prefix is not a cosmetic defect - the adapter would classify the close as
     /// non-terminal and redial, evicting whatever evicted it, forever. Prefixing
-    /// before `truncate_reason` keeps the discriminator intact and spends the
-    /// cap on the detail, which is the half that may be dropped.
+    /// before the trim keeps the discriminator intact and spends the cap on the
+    /// detail, which is the half that may be dropped - and the cap BINDS here:
+    /// this reason reaches 157 bytes at `MAX_ACCOUNT_ID_LEN` against a
+    /// 123-byte close frame. See `close_reason`.
     ///
     /// `CLOSE_EVICTED` and NOT a venue fault: nothing failed. Telling the two
     /// apart matters to a consumer, because a fault is a reason to distrust the
@@ -387,7 +409,7 @@ impl CloseSpec {
     pub(crate) fn evicted(detail: impl std::fmt::Display) -> Self {
         Self {
             code: CLOSE_EVICTED,
-            reason: truncate_reason(format!(
+            reason: close_reason(format!(
                 "{}{detail}",
                 mogwai_protocol::close::EVICTED_PREFIX
             )),
@@ -879,6 +901,46 @@ mod tests {
             frame.payload.len() <= mogwai_protocol::ADMISSION_FRAME_MAX_BYTES,
             "the lane truncates, so the frame ceiling holds at every call site"
         );
+    }
+
+    /// Every close this venue can send must FIT ITS FRAME, at the worst input
+    /// each constructor can be handed.
+    ///
+    /// The eviction reason is the one that overflowed: `run.rs` interpolates an
+    /// account id bounded only by `MAX_ACCOUNT_ID_LEN`, and against a 123-byte
+    /// close frame that sentence reaches 157. The test builds the venue's own
+    /// sentence rather than an abstract long string, so it measures the reason
+    /// that actually goes on the wire, and it re-classifies the result so a
+    /// trim that ate the discriminator fails here rather than in a redial loop.
+    #[test]
+    fn every_close_reason_fits_the_control_frame_that_carries_it() {
+        let account_id = "A".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN);
+        let evicted = CloseSpec::evicted(format!(
+            "another connection claimed account {account_id}; a ledger is never \
+             read from two clients at once"
+        ));
+        assert!(
+            evicted.reason.len() <= mogwai_protocol::close::MAX_REASON_BYTES,
+            "an oversized control frame is failed by a conforming peer, so this \
+             close never arrives: {} bytes",
+            evicted.reason.len()
+        );
+        assert_eq!(
+            mogwai_protocol::close::classify(evicted.code, &evicted.reason),
+            Some(mogwai_protocol::close::Terminal::Evicted),
+            "the trim must keep the discriminator: {}",
+            evicted.reason
+        );
+
+        for spec in [
+            CloseSpec::overload("x".repeat(4096)),
+            CloseSpec::venue_fault("y".repeat(4096)),
+        ] {
+            assert!(
+                spec.reason.len() <= mogwai_protocol::close::MAX_REASON_BYTES,
+                "{spec:?} does not fit a close frame"
+            );
+        }
     }
 
     #[test]

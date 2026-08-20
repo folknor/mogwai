@@ -23,6 +23,45 @@
 /// WS 1000, "Normal Closure".
 pub const NORMAL: u16 = 1000;
 
+/// The most reason bytes a close frame can carry.
+///
+/// RFC 6455 caps a CONTROL frame's payload at 125 bytes and a close frame
+/// spends the first two of them on the status code, so 123 is the whole budget
+/// for the reason. This is NOT the same cap as `MAX_REASON_LEN`, which bounds a
+/// reason travelling inside a TEXT frame and is four times larger; a close
+/// reason trimmed only to that one is still four times too long for the frame
+/// it goes in.
+///
+/// AN OVER-LONG REASON IS NOT A COSMETIC DEFECT HERE, which is why the cap
+/// lives beside `classify` rather than at a call site. A conforming peer must
+/// fail the connection on an oversized control frame, so the close that carries
+/// the discriminator either never leaves or never arrives - and a client that
+/// sees an abrupt EOF instead of a reasoned close classifies nothing, which is
+/// exactly the eviction-redial loop this module exists to prevent. The venue's
+/// own eviction reason reaches 157 bytes at `MAX_ACCOUNT_ID_LEN`.
+pub const MAX_REASON_BYTES: usize = 123;
+
+/// Trim a close reason to `MAX_REASON_BYTES` on a char boundary.
+///
+/// TRIM THE TAIL, NEVER THE HEAD, and compose the reason before calling this:
+/// every discriminator this module reads is either a whole short constant or a
+/// PREFIX, so a reason built prefix-first survives the trim as the same
+/// terminal while the droppable detail is what gets spent. A caller that
+/// appended its discriminator would classify differently after a trim than
+/// before it.
+#[must_use]
+pub fn fit_reason(mut reason: String) -> String {
+    if reason.len() <= MAX_REASON_BYTES {
+        return reason;
+    }
+    let mut end = MAX_REASON_BYTES;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason.truncate(end);
+    reason
+}
+
 /// The venue's run finished - the whole run, for every passenger.
 pub const RUN_COMPLETE: &str = "run complete";
 
@@ -76,6 +115,40 @@ pub fn classify(code: u16, reason: &str) -> Option<Terminal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three reasons the venue writes are the ones that MUST survive
+    /// intact: a trimmed constant classifies as nothing, and nothing is
+    /// non-terminal. `EVICTED_PREFIX` needs room for a detail after it too,
+    /// which is what makes this an inequality rather than a bare fit check.
+    #[test]
+    fn every_venue_reason_fits_a_close_frame_with_room_to_spare() {
+        assert!(RUN_COMPLETE.len() < MAX_REASON_BYTES);
+        assert!(DURATION_COMPLETE.len() < MAX_REASON_BYTES);
+        assert!(EVICTED_PREFIX.len() < MAX_REASON_BYTES);
+        assert_eq!(fit_reason(RUN_COMPLETE.to_owned()), RUN_COMPLETE);
+        assert_eq!(fit_reason(DURATION_COMPLETE.to_owned()), DURATION_COMPLETE);
+    }
+
+    /// A trimmed reason must classify as whatever the untrimmed one did. The
+    /// prefix is at the head, so it does; this pins that the trim never eats
+    /// it, which is the whole reason `CloseSpec::evicted` composes before
+    /// trimming.
+    #[test]
+    fn a_trimmed_eviction_reason_still_classifies_as_an_eviction() {
+        let long = format!("{EVICTED_PREFIX}{}", "detail ".repeat(60));
+        assert!(long.len() > MAX_REASON_BYTES, "the fixture must overflow");
+        let fitted = fit_reason(long);
+        assert_eq!(fitted.len(), MAX_REASON_BYTES);
+        assert_eq!(classify(NORMAL, &fitted), Some(Terminal::Evicted));
+    }
+
+    /// A multi-byte character straddling the cut is dropped whole rather than
+    /// sliced into invalid UTF-8.
+    #[test]
+    fn the_trim_lands_on_a_char_boundary() {
+        let reason = format!("{}\u{1f600}", "y".repeat(MAX_REASON_BYTES - 1));
+        assert_eq!(fit_reason(reason).len(), MAX_REASON_BYTES - 1);
+    }
 
     #[test]
     fn an_unrecognized_normal_close_is_not_terminal() {

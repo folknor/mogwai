@@ -1,5 +1,11 @@
 # Bug hunt: mogwai-protocol
 
+CITATIONS BELOW TO `notes/bug-loop-carry-forward.md` ARE DEAD LINKS. That file
+held the eleven-document arc's round-by-round state and was DELETED when the arc
+closed on 2026-08-20, per `AGENTS.md`'s rule that a closed arc folds what still
+binds into `AGENTS.md` and deletes its carry-forward. The standing lessons are
+there; the deleted text resolves to git history.
+
 Reconnaissance report, 2026-08-18. One Opus hunter, read-only, scope
 `crates/mogwai-protocol`: the wire types, `control::Divergence`, and `launch`.
 

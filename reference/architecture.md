@@ -55,6 +55,16 @@ the venue writes and `close::classify` reads. A reason that module does not
 recognize is NOT terminal, which is the safe default in both directions: a
 needless redial is recoverable, and a run silently declared over is not.
 
+A close reason is therefore bounded by the FRAME rather than by the ordinary
+reason cap. RFC 6455 allows a control frame 125 payload bytes and the status
+code takes two of them, so `close::MAX_REASON_BYTES` is 123 - a quarter of the
+512 that bounds a reason inside a text frame. The eviction sentence interpolates
+an account id and reaches 157 bytes at `MAX_ACCOUNT_ID_LEN`, which a conforming
+peer fails the connection over: the close carrying the discriminator would never
+arrive, and a client that sees a bare EOF instead classifies nothing and redials
+into the loop. Every `CloseSpec` constructor trims to that budget, after
+composing its prefix, so the terminal survives and only the detail is spent.
+
 EVICTION IS THE LAST THING AN UPGRADE DOES. Every refusal `/ws` can make - an
 unresolvable shape, an account unfunded in the settlement currency, a
 non-finite speed, a boat that could not be placed, a second cadence on one

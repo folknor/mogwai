@@ -203,18 +203,20 @@ constraint on new or optimized code:
   1.98) and `target-cpu` SIMD are sanctioned wherever a serial recursion does
   not forbid reordering, with the re-bless and gate re-runs they imply.
 
-### Standing lessons from the 2026-08 bug-hunt loop
+### Standing lessons from the 2026-08 bug-hunt arcs
 
-The seven-document loop closed with zero open findings. What recurred enough to
-bind future work is kept here; its own round-by-round carry-forward document
-was retired once that distillation landed. A LIVE ARC KEEPS A LIVE ONE - the
-orchestration loop needs somewhere to put state no agent in it can see, since no
-agent observes any round but its own - so `notes/bug-loop-carry-forward.md`
-existing is the normal state during an arc, and it is deleted when that arc
-closes and whatever still binds has been folded in here. Two DEFECT FAMILIES
-accounted for most of the serious finds:
+Two arcs, both closed with zero open findings: a seven-document loop, then an
+ELEVEN-DOCUMENT ARC over `notes/bugs-*.md` - five test-suite reports, then six
+production-code ones - closed 2026-08-20. What recurred enough to bind future
+work is kept here; each arc's round-by-round carry-forward was deleted once its
+distillation landed. A LIVE ARC KEEPS A LIVE ONE - the orchestration loop needs
+somewhere to put state no agent in it can see, since no agent observes any round
+but its own - so `notes/bug-loop-carry-forward.md` existing is the normal state
+during an arc, and it is deleted when that arc closes and whatever still binds
+has been folded in here. THREE DEFECT FAMILIES account for most of the serious
+finds:
 
-- THE FRONTIER FAMILY, five instances. A watermark, cursor or frontier may
+- THE FRONTIER FAMILY, six instances. A watermark, cursor or frontier may
   only advance over work whose success the same expression checked. A lookup
   that legitimately returns nothing is exactly as dangerous as a panic, and
   the inverse failure - a fence with no recovery that wedges the watermark
@@ -222,7 +224,12 @@ accounted for most of the serious finds:
   the success of the work it covers as a defect on sight. The adapter's
   history pagination states the cursor form of the rule: a timestamp-only
   cursor may advance onto an instant only once every row at that instant has
-  been seen.
+  been seen; `ExecState::admit_account_snapshot` states the whole-work form,
+  where a snapshot that lost rows to a `filter_map` may not retire the
+  well-formed ones. The rule generalizes past cursors to WRITES: the adapter's
+  receipt book files a command before queueing its frame and retires it only in
+  the expression that saw `writer.send` return `Ok`, so what survives an abort
+  is exactly what the venue never saw.
 - THE GUARD-SCOPE FAMILY, three instances. A permit, lock or guard whose
   scope ends before the work it protects is the frontier defect in reverse,
   and it is visible by asking WHAT IS STILL RESIDENT when the guard drops. A
@@ -230,18 +237,86 @@ accounted for most of the serious finds:
   must be OWNED by the task doing the work, because the awaiting future can
   be dropped first (hyper drops handler futures on client disconnect; a
   running blocking task cannot be cancelled).
+- THE VACUOUS-GATE FAMILY, roughly forty-four instances across eleven
+  documents and by far the largest: A THING THAT READS AS GATED AND IS NOT.
+  Every instance is cheap to find once the shape is named, and invisible
+  otherwise, because both halves are green. The sub-shapes, which are the
+  reusable part:
+  - a guard that reports SUCCESS on the branch it was built to catch (a drain
+    stopped before another task could record the close it was watching for);
+  - `all()` / `any()` over a collection whose EMPTINESS is the failure mode -
+    `all` over an empty iterator is `true`, so the helper returned success
+    carrying nothing on exactly the race its doc described;
+  - a control that is itself vacuous: a scanner blind to half the syntax it
+    exists to scan (`#[test]` is not a substring of `#[tokio::test]`, so a
+    source gate read no async test in the workspace and reported zero
+    offenders), or a skip/only agreement checked by comparing two strings
+    rather than resolving both against the tests;
+  - a normalization applied to BOTH sides of an equality that exists to detect
+    that very difference;
+  - a two-sided contract PINNED ON ONE SIDE ONLY - the eviction close's test
+    hand-built the prefixed reason while the venue's own bytes were never held
+    against the classifier that reads them;
+  - a doc, comment or help text describing a gate WIDER OR NARROWER than the
+    gate - a comment promising a test runs a derivation it does not run, a
+    constructor's doc asserting an invariant the constructor does not enforce,
+    a helper whose comment states a set wider than its call sites (a runtime
+    guard installed at two of the six sites that owed it, under a comment
+    saying two);
+  - and a fix that trades one blind spot for another.
+  WHEN A COMMENT SAYS A FUNCTION GUARANTEES SOMETHING, either the function
+  guarantees it or the comment is a defect; there is no third reading, and the
+  cheap fix is almost always to MOVE THE GUARANTEE INTO THE FUNCTION.
+  Prose is the only artifact here with no compiler.
 
-Test and process rules the loop paid for, nine non-biting tests among them:
+Test and process rules the arcs paid for, a dozen non-biting tests among them:
 
 - BITE-CHECK EVERY NEW REGRESSION TEST: revert the production fix as a TEXT
   EDIT, observe the named failure, restore it as a text edit. Never restore
   with `git checkout -- <path>` - the tree routinely carries other uncommitted
-  work in the same file, and that command destroyed it twice. READ WHICH
-  ASSERTION FIRED, not merely that the test went red: four rail assertions
-  survived a bite-check in the tape round because an EARLIER guard inside the
-  measurement loop failed first, and a red test with the right name reads as
-  proof for whichever assertion the author had in mind. A perturbation that
-  proves nothing looks exactly like a test that cannot fail.
+  work in the same file, and that command destroyed it twice. The hazards, all
+  paid for at least once:
+  - READ WHICH ASSERTION FIRED, not merely that the test went red, and check it
+    can ONLY fire for the reason you mean. Four rail assertions survived a
+    bite-check because an EARLIER guard inside the measurement loop failed
+    first; a loop bounded by an assertion may never evaluate the property
+    asserted after it; and a substring two messages share is not a
+    discriminator.
+  - CONFIRM THE PERTURBED CODE CAN REACH THE ASSERTION. A close-frame test that
+    sent `Message::Close(None)` passed against its own defect in 0.02 s and
+    looked like a clean pass, because the old code did not match that arm
+    either. A test can be VACUOUS AGAINST ITS OWN DEFECT while naming it
+    correctly, and "red / green" cannot tell the difference.
+  - GUT THE CALLEE, NOT THE CALL SITE. Emptying a call site does not compile
+    under dead-code deny, so the perturbation goes in the callee, imports
+    included.
+  - DERIVE THE WITNESS FROM THE SYSTEM when the defect has MEASURE ZERO on the
+    obvious inputs, and beware a perturbation whose outcome is a coin flip - a
+    test resting on `HashMap` iteration order passed against its defect half
+    the time.
+  - AND WHERE A CLEAN REVERSION IS IMPOSSIBLE, OR THE TEST CANNOT BITE TODAY,
+    SAY SO IN THE RECORD. An honest "this cannot bite, and here is what does
+    gate it" is worth a great deal; a perturbation that proves nothing looks
+    exactly like a test that cannot fail.
+- DIAGNOSTIC RULES, from findings that were argued wrong before they were
+  measured right:
+  - A DIAGNOSIS THAT MUTATES IS NOT A DIAGNOSIS, and a fix that makes a
+    property true on one clock does not make it true on the OBSERVABLE.
+  - WHEN A FIX SPLITS A PREDICATE INTO TWO HALVES, every other reader of the
+    old half is a call site of the fix. When a rule is added to both sides FOR
+    A REASON, the next rule in the same commit inherits that reason. A rule's
+    blast radius is established AT THE CALL SITES, never by grepping.
+  - THE SITE THAT DECIDES A BEHAVIOUR MAY NOT MENTION THE THING IT DECIDES FOR,
+    so reach it through the behaviour rather than through a name you can grep.
+    Read the validator, not the path.
+  - CHECK THE CALLEE'S `unreachable!`s BEFORE REUSING IT FROM A NEW CALL SITE.
+    A panic path genuinely unreachable from one caller is a live hazard from
+    the next, and the compiler says nothing.
+  - RESOLVE A VERSION-HISTORY SENTENCE AGAINST `git show <ref>:<path>`, never
+    against memory - one such sentence shipped false, and the prose gate is
+    blind to historical phrasings by design. GREP THE NUMBER, NOT THE FILE: a
+    figure corrected in the documents a reviewer was looking at is not
+    corrected everywhere it was written.
 - A TEST THAT NAMES WHICH BRANCH RAN NEEDS AN OBSERVABLE, NOT A SLEEP. A wait
   of some fraction of a poll interval does not select an arm, it BETS on the
   scheduler, and the losing bet is usually the silent one: the other arm does
@@ -250,10 +325,28 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   can read, and where the interval itself is the race, make the interval a
   parameter and pass one the test cannot lose to. The launcher's owner loop is
   the worked example: `LaunchedVenue::polls` plus `launch_with_poll`.
-- THE PROFILE SPLIT BITES: `brokkr check` runs tests in dev, `brokkr test`
-  in release. A test pinning `debug_assertions` behaviour must be gated
-  `#[cfg(debug_assertions)]` or the release sweep fails it; a test whose bite
-  depends on optimization must be checked in release.
+- THE LANE AND PROFILE SPLITS BITE, and they are two splits, not one. `brokkr
+  check` runs tests in DEV and MULTI-THREADED; `brokkr test` runs them in
+  RELEASE at `--test-threads=1`. A test pinning `debug_assertions` behaviour
+  must be gated `#[cfg(debug_assertions)]` or the release sweep fails it; a
+  test whose bite depends on optimization must be checked in release; and a
+  green run in one lane is not evidence about the other, so bite-check in the
+  lane that is disputed.
+  LIBTEST SPAWNS A FRESH NAMED THREAD PER TEST UNCONDITIONALLY on any threaded
+  target - the name is how a panic is attributed to a test - so
+  `--test-threads` caps how many run AT ONCE and not whether a thread is made.
+  A `thread_local!` is therefore per-test-isolated in EVERY lane. Measured
+  twice, and a cold reviewer's contrary model (that the serial runner runs
+  tests inline on the main thread) was refuted by probe rather than by
+  argument. TREAT IT AS TRUE TODAY AND NOT AS A CONTRACT: it is an
+  implementation detail that has changed once, the failure if it changes back
+  is silent and wholesale, and nothing detects it - which is why the adapter's
+  `common::owns_a_fresh_exec_sink_on_every_lane` asserts the premise directly.
+  A PATH IS PER-PROCESS OR IT IS A SHARED RESOURCE: a test that wrote and then
+  exec'd a FIXED path aborted a parallel sweep with `ETXTBSY` when another
+  process ran the same test. And when comparing flake records, THE THREAD COUNT
+  IS PART OF THE RECORD; three green runs are not evidence about an
+  intermittent race.
 - RUN THE SOCKET SUITES AFTER ANY CHANGE TO THE SERVING PATH. `brokkr check` is
   blind to roughly thirty tests that bind loopback listeners, and a real
   regression shipped through that gap and stayed red across four commits -
@@ -303,6 +396,15 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   rule one side genuinely owns (the lab dwell's era clamp) stays a local test
   beside it, because a shared fixture that cannot express it must not imply it
   was checked.
+  WHERE THE TWO SIDES SHARE A CRATE GRAPH, A MODULE IS THE CHEAPER FORM OF THE
+  SAME DISCIPLINE. `mogwai_protocol::close` carries the WS close vocabulary -
+  the code, the reason constants and `classify` - and the venue WRITES its
+  reasons from those constants while the adapter READS them through `classify`,
+  so neither side holds a literal the other could drift from. The gate on such
+  a contract must run one side's REAL OUTPUT through the other side's reader: a
+  test that hand-builds the input it then classifies pins one side against
+  itself, which is exactly how a missing eviction prefix survived with both
+  halves green.
   NOTHING DETECTS A MISSING FIXTURE. The next cross-implementation gate is
   caught by this habit or not at all, which is the same shape as the open item
   on durable prose asserting a live fact.
@@ -324,10 +426,48 @@ Test and process rules the loop paid for, nine non-biting tests among them:
   A frozen-snapshot hash over all the constants is not this gate: the
   sanctioned way to move one re-blesses the hash in the same change.
 - A test on a `/ws` socket may never assert on THE NEXT frame: every socket
-  is attached to the live tape on upgrade, so drain to a deadline.
-- A consensus review gate converges to the verifier's utility function; a
-  clean cold review was followed by a serious find in a later pass four
-  times. A green review is evidence, not proof.
+  is attached to the live tape on upgrade, so drain to a deadline. AND A DRAIN
+  THAT DOES NOT RECORD HOW THE STREAM ENDED IS NOT A DRAIN: `while let
+  Ok(Some(Ok(m)))` folds a close, a stream end, a transport error and a
+  deadline into "the loop finished", and a truncated drain satisfies an
+  ABSENCE assertion for free.
+- PROCESS FACTS, which govern how much a green anything is worth:
+  - A CLOSE PASS OVER A WHOLE ARC IS NOT OPTIONAL, because the round shape -
+    fix pass, gate, cold review, then a fix-and-commit agent that closes the
+    review's findings AND commits - leaves THE SECOND HALF OF EVERY COMMIT
+    UNREVIEWED. Eleven documents, eleven close passes, and the defect was in
+    that half ELEVEN TIMES OUT OF ELEVEN. Point the close pass at the durable
+    prose the round touched and at THE CALL SITES OF WHATEVER THE ROUND'S LAST
+    FIX INSTALLED: that code is the least-examined in the arc and it is the
+    code closing a finding.
+  - A GREEN GATE PROVES NOTHING ABOUT A TEST THAT CANNOT FAIL, and a consensus
+    review gate converges to the verifier's utility function - a clean cold
+    review was followed by a serious find in a later pass five times. A green
+    review is evidence, not proof.
+  - MEASUREMENT OVERTURNS CONFIDENT ARGUMENT, in both directions and
+    repeatedly: cold reviewers were refuted by probes, and reports arrived
+    whose findings were already fixed in the tree they were written against.
+    Measure the disputed thing in the disputed lane before conceding or
+    dismissing.
+  - THE CARRY-FORWARD IS THE ARTIFACT MOST LIKELY TO BE SKIPPED, because the
+    agent that lands the code and the report is the last hand on both and no
+    agent in the loop reads the carry-forward back. A round whose lesson is
+    not written there did not happen as far as the next arc is concerned.
+  - `analysis/asia_jump_probe.py` IS THE OWNER'S UNTRACKED WORK IN PROGRESS.
+    Some twenty cold reviewers have now raised it unprompted and several
+    proposed deciding its fate; the standing answer is that it is out of scope
+    and stays untracked, and it is never swept into a commit. One thing from
+    that noise binds: its percentile convention does not match
+    `mogwai_lab::kernel::nearest_rank_list`, so a number out of that script
+    must never land in a durable document labelled "p95" and be compared
+    against a Rust-computed one - two implementations of one quantity, no
+    shared fixture, both sides green because neither is checked.
+  - `reference/INVENTORY.md` DOES NOT EXIST in this repository. The generic
+    orchestration workflow names it as a mandatory read; it is an
+    unsubstituted variable from another repo. Do not put it in a brief. The
+    real contracts are `AGENTS.md` and `CLAUDE.md`, then
+    `reference/architecture.md`, `clock.md`, `glossary.md`, `performance.md`
+    and `technical-implementation-spec.md`.
 
 ### Reading vs depending on nautilus_trader and broadarrow
 
