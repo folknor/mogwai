@@ -136,6 +136,22 @@ pub const TAPE_PROTOCOL_VERSION: u32 = 22;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TickFault {
     Arrival(ArrivalRefusal),
+    /// A fault the OPERATOR asked for, through the control plane's `FaultTape`
+    /// divergence, rather than one a source produced.
+    ///
+    /// IT EXISTS BECAUSE THE REAL ONES BECAME UNREACHABLE. Every other variant
+    /// here is an `ArrivalRefusal`, and the only config-reachable routes to one
+    /// were `LogOuCox`'s `sigma_y` and `mean_event_duration_s` - both now
+    /// bounded at admission, which is right on its own terms and closed the
+    /// last door a test had to a terminal venue fault. A venue that dies
+    /// mid-run is a thing a consumer's strategy must survive, so it belongs on
+    /// the divergence surface beside the blackouts and the dropped updates
+    /// rather than behind an out-of-range config value.
+    ///
+    /// Carries no detail on purpose: an injected fault has no clock instant and
+    /// no latent state to report, and inventing one would put a number in the
+    /// diagnostic that describes nothing.
+    Injected,
 }
 
 /// One replayable market-data event.

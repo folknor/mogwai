@@ -349,7 +349,10 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
         }
         control::Divergence::DuplicateNextFill
         | control::Divergence::DropNextAccountUpdate
-        | control::Divergence::ClearDivergences => Ok(()),
+        | control::Divergence::ClearDivergences
+        // Nothing to validate: it carries no field, and it is legal against any
+        // venue at any moment - a venue can always die.
+        | control::Divergence::FaultTape => Ok(()),
     }
 }
 

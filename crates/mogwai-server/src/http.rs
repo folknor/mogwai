@@ -835,6 +835,16 @@ fn health_fault(
             kind: "arrival.non_finite_state",
             clock_ns,
         },
+        // ZERO IS THE HONEST CLOCK, not a missing one. An injected fault is not
+        // dated by any source's cursor, and reporting the venue's current sim
+        // instant instead would read as the moment a tape gave out - which is
+        // exactly the thing that did not happen. The `kind` says where it came
+        // from, so a consumer never has to infer it from the instant.
+        mogwai_data::TickFault::Injected => HealthFault {
+            symbol,
+            kind: "injected",
+            clock_ns: 0,
+        },
     })
 }
 
@@ -1248,6 +1258,37 @@ pub(crate) async fn arm_divergence(
         // exhaustive too, so a variant classified server-owned there and
         // forwarded here would fail this crate's build rather than being
         // queued as a dead entry.
+        // TERMINAL, so it is handled before the engine-armed set and never
+        // recorded: there is no later ledger for a venue arm to replay onto, and
+        // no `ClearDivergences` that could reach it.
+        Divergence::FaultTape => {
+            // The account scope is REFUSED rather than ignored. A venue fault is
+            // the whole process going away, so naming one account reads as a
+            // request nothing here can honour, and silently widening it to the
+            // venue is how an operator ends up killing a run they meant to
+            // perturb one ledger of.
+            if request.account.is_some() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "FaultTape takes down the whole venue and cannot be scoped to one account"
+                        .to_string(),
+                );
+            }
+            if !run.fault_venue() {
+                // Not an error. The receiver is gone, which means the venue is
+                // already tearing down - the state the arm was asking for.
+                tracing::info!("FaultTape arrived while the venue was already ending");
+                return (
+                    StatusCode::ACCEPTED,
+                    "the venue was already tearing down when this arrived".to_string(),
+                );
+            }
+            tracing::warn!("FaultTape armed: the venue will report a fault and exit nonzero");
+            return (
+                StatusCode::ACCEPTED,
+                "the venue is faulting and will exit nonzero".to_string(),
+            );
+        }
         engine_div @ (Divergence::PartialFillNext { .. }
         | Divergence::RejectNextSubmit { .. }
         | Divergence::RejectNextCancel { .. }

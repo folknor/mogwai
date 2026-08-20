@@ -131,6 +131,29 @@ event a scenario author aimed it at. That one carve-out is the whole of the
 asymmetry - everywhere else the question is whether an order's state actually
 transitioned, not whether the transition was a fill.
 
+`FaultTape` kills the venue. The run reports a source fault, tears down, and
+the process exits NONZERO, with an ERROR line on stderr naming the operator as
+the cause. It is the one arm a consumer is least likely to have exercised: a
+strategy that survives a blackout, a duplicate fill and a dropped account update
+may still have no answer for the venue simply going away mid-run, which a real
+broker does and which no in-process backtest can produce.
+
+Three things follow from it being TERMINAL. It cannot be scoped to an account -
+a request naming one is refused with HTTP 400 rather than silently widened,
+because killing a whole run when a scenario meant to perturb one ledger is not a
+generous reading. Nothing clears it, since there is no venue left to clear it
+on. And it is never queued or replayed onto a later ledger, unlike the
+engine-armed set. Posting it is the last thing a scenario does.
+
+A second `FaultTape` arriving while the venue is already tearing down answers
+`202` and says so in the body, rather than failing: the state it asked for is
+the state the venue is in.
+
+It exists partly because the alternatives closed. A venue fault used to be
+reachable only by configuring an arrival family out of its usable range, and
+both knobs that allowed that are bounded at admission now - so without this arm
+the venue's fault-exit path would have no door at all.
+
 A planned run completion is not havoc: it emits `RunComplete` and closes
 normally. That announcement is exempt from both suppression windows - a venue
 that reached its declared duration says so even mid-blackout, because dropping

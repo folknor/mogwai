@@ -5519,6 +5519,7 @@ mod tests {
             Divergence::CancelOpenOrderSilently {
                 client_order_id: "O1".into(),
             },
+            Divergence::FaultTape,
         ]
     }
 
@@ -5553,7 +5554,8 @@ mod tests {
                 | Divergence::FlowSurge { .. }
                 | Divergence::FeeSurcharge { .. }
                 | Divergence::ClearDivergences
-                | Divergence::CancelOpenOrderSilently { .. } => false,
+                | Divergence::CancelOpenOrderSilently { .. }
+                | Divergence::FaultTape => false,
             };
 
             let mut e = Engine::new();

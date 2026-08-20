@@ -897,6 +897,22 @@ impl ParentSource for ParentWalk {
             // names the wrong cause. `advance_parent` now returns the fault.
             Self::Generator(source) => source.advance_parent().map_err(|fault| match fault {
                 TickFault::Arrival(refusal) => screen_refusal_from_arrival(refusal),
+                // UNREACHABLE HERE BY CONSTRUCTION rather than by assumption:
+                // an injected fault comes from the venue's control plane, and
+                // the screen drives a `GeneratedSource` directly with no venue
+                // and no control plane in the process. Named rather than
+                // wildcarded so a future fault variant a source CAN produce
+                // still breaks this build.
+                TickFault::Injected => ScreenRefusal {
+                    variant: "injected".to_string(),
+                    clock_ns: 0,
+                    detail: "an operator-injected venue fault reached the offline screen, which \
+                             drives a generator directly and has no control plane to inject one"
+                        .to_string(),
+                    family: None,
+                    canonical_params: None,
+                    seed: None,
+                },
             }),
             Self::Kernel(walk) => {
                 let stride = walk.child_stride_ns();

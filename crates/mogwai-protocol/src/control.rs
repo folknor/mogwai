@@ -124,4 +124,23 @@ pub enum Divergence {
     /// an id that is not currently resting is refused with a 4xx, so a
     /// scenario cannot silently arm a no-op.
     CancelOpenOrderSilently { client_order_id: ClientOrderId },
+    /// Fault the venue's tape terminally: the run reports a source fault on
+    /// `/health`, tears down, and the process exits NONZERO.
+    ///
+    /// THE VENUE DYING IS ITSELF A DIVERGENCE, and the one a consumer is least
+    /// likely to have exercised. A strategy that survives a blackout, a dropped
+    /// account update and a duplicate fill may still have no answer for the
+    /// venue simply going away mid-run - which a real broker does, and which no
+    /// in-process backtest can produce. It belongs here beside the others.
+    ///
+    /// UNLIKE EVERY OTHER ARM IT IS TERMINAL, so it consults no account scope
+    /// and nothing clears it: there is no venue left to clear it on. Posting it
+    /// is the last thing a scenario does.
+    ///
+    /// It also exists because the alternatives disappeared. A venue fault was
+    /// previously reachable only by configuring an arrival family out of its
+    /// usable range - `sigma_y` at 1e308 was the shipped fixture - and both
+    /// knobs that allowed it are now bounded at admission. A fault path with no
+    /// door is a fault path nothing can test.
+    FaultTape,
 }

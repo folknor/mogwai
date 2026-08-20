@@ -50,7 +50,13 @@ impl Engine {
             | Divergence::FlowSurge { .. }
             | Divergence::FeeSurcharge { .. }
             | Divergence::ClearDivergences
-            | Divergence::CancelOpenOrderSilently { .. } => None,
+            | Divergence::CancelOpenOrderSilently { .. }
+            // `FaultTape` is server-owned and TERMINAL. It acts on the run's
+            // fault channel at post time and takes the process down, so there is
+            // no trigger for the engine to wait on and no later ledger for it to
+            // be replayed onto - queueing it would leave a dead entry in a book
+            // that is about to stop existing.
+            | Divergence::FaultTape => None,
             queued @ (Divergence::PartialFillNext { .. }
             | Divergence::RejectNextSubmit { .. }
             | Divergence::RejectNextCancel { .. }

@@ -788,6 +788,14 @@ pub(crate) struct Run {
     /// sessions, and a holder that is not one makes `sessions_drained` a wait on
     /// something other than what it names.
     sessions_tx: watch::Sender<()>,
+    /// The venue's terminal-fault channel, kept here as well as inside the
+    /// boatyard so the CONTROL PLANE can reach it.
+    ///
+    /// A source that faults sends on its own clone; `FaultTape` sends on this
+    /// one. The receiving end is one thread in `serve`, which does not care
+    /// which clone a fault arrived on - so an injected fault and a generated one
+    /// take the same teardown, which is the whole point of injecting it.
+    fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
     /// Every live connection's outbound lanes, so venue-ORIGINATED output - a
     /// trigger fill nobody commanded - reaches the connection it belongs to.
     ///
@@ -851,7 +859,7 @@ impl Run {
             Arc::clone(&rivers),
             fanout_depth,
             zero_speed_stall_ms,
-            fault_tx,
+            fault_tx.clone(),
             started_ns,
         );
         let (complete_tx, _) = watch::channel(None);
@@ -883,6 +891,7 @@ impl Run {
             warmup_ns,
             complete_tx,
             sessions_tx,
+            fault_tx,
             lanes: Mutex::new(Vec::new()),
             order_owners: Mutex::new(std::collections::HashMap::new()),
         })
@@ -2003,6 +2012,29 @@ impl Run {
     /// at the 101. Taking it inside the spawned handler instead would leave a
     /// window in which the connection is upgraded and this count has not yet
     /// risen. See `sessions_tx`.
+    /// Fault the venue terminally, at the operator's request.
+    ///
+    /// Reports whether the fault was DELIVERED. A closed channel means the
+    /// receiving thread in `serve` is already gone, which is what a venue
+    /// tearing down for some other reason looks like from here - so a second
+    /// `FaultTape` arriving during teardown is a no-op rather than a panic, and
+    /// the caller can answer honestly instead of claiming to have killed a venue
+    /// that was already dying.
+    pub(crate) fn fault_venue(&self) -> bool {
+        // THE DIAGNOSTIC IS EMITTED HERE because an injected fault reaches the
+        // channel directly and never passes the tape worker, which is what logs
+        // a source fault. Without this line the two causes would share an exit
+        // code and nothing else: a run that died on command would look, in the
+        // log, exactly like one that died silently.
+        //
+        // Its own message rather than the worker's "tape source faulted". No
+        // tape source faulted - the operator asked - and a shared substring
+        // between the two would stop either being a discriminator for whichever
+        // one a reader is trying to confirm.
+        tracing::error!("venue faulted on operator request; exiting nonzero");
+        self.fault_tx.send(mogwai_data::TickFault::Injected).is_ok()
+    }
+
     pub(crate) fn session_guard(&self) -> watch::Receiver<()> {
         self.sessions_tx.subscribe()
     }

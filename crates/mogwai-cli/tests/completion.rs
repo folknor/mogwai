@@ -12,7 +12,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{Venue, accelerated_config, bounded_run_config, fast_config, http_get, spawn};
+use common::{
+    Venue, accelerated_config, bounded_run_config, fast_config, http_get, http_post_json, spawn,
+};
 use futures_util::StreamExt;
 use mogwai_protocol::{
     ServerMessage,
@@ -423,17 +425,20 @@ fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
     assert!(healthy_health.contains("\"fault\":null"));
     drop(healthy);
 
+    // THE FAULT IS INJECTED, not configured. It used to come from
+    // `tests/configs/arrival-fault.toml`, which set `sigma_y` to 1e308 so the
+    // stationary log-OU draw went non-finite and the source refused. Both knobs
+    // that allowed that - `sigma_y` and `mean_event_duration_s` - are bounded at
+    // admission now, so the config is refused before readiness and the venue
+    // never gets far enough to fault. Since `TickFault`'s only other variants
+    // are arrival refusals, that left the venue's fault-exit path with no door
+    // at all; `FaultTape` is the door, and it is a capability a consumer wants
+    // anyway.
     let diagnostics = Arc::new(Mutex::new(Vec::new()));
     let diagnostics_for_sink = Arc::clone(&diagnostics);
     let faulted = launch(LaunchSpec {
         binary: Some(common::venue_binary().into()),
-        config: Some(
-            format!(
-                "{}/tests/configs/arrival-fault.toml",
-                env!("CARGO_MANIFEST_DIR")
-            )
-            .into(),
-        ),
+        config: Some(common::fast_config().into()),
         stderr: StderrSink::Lines(Box::new(move |line| {
             diagnostics_for_sink
                 .lock()
@@ -442,7 +447,21 @@ fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
         })),
         ..LaunchSpec::default()
     })
-    .expect("fault venue reaches readiness");
+    .expect("the venue to be faulted reaches readiness");
+    // Healthy first, on THIS process. The null above was taken on a different
+    // launch, so without this the assertions below could not tell a venue that
+    // faulted on command from one that was born broken.
+    let (_, before) = http_get(&format!("http://{}", faulted.addr()), "/health");
+    assert!(
+        before.contains("\"fault\":null"),
+        "the venue is healthy before the arm: {before}"
+    );
+    let (status, body) = http_post_json(
+        &format!("http://{}", faulted.addr()),
+        "/control/divergence",
+        r#"{"type":"FaultTape"}"#,
+    );
+    assert_eq!(status, 202, "the venue accepted the fault arm: {body}");
     let deadline = common::wall_deadline(Duration::from_secs(10));
     let exit = loop {
         if let Some(exit) = faulted.exited() {
@@ -460,8 +479,11 @@ fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
             .lock()
             .expect("diagnostic lock")
             .iter()
-            .any(|line| line.contains("tape source faulted")),
-        "the terminal source fault emits the ERROR diagnostic"
+            .any(|line| line.contains("venue faulted on operator request")),
+        "a terminal fault emits its own ERROR diagnostic, naming the cause. The injected fault \
+         reaches the run's channel directly and never passes the tape worker that logs a SOURCE \
+         fault, so the two carry different messages on purpose - a shared substring would stop \
+         either one being a discriminator."
     );
 
     let mut bounded = spawn(&["--config", &fast_config(), "--duration", "2s"]);
