@@ -333,27 +333,24 @@ group by any other route has no API for it, and none is owed until one is wanted
   sites to the signature, which is worth doing and is a change across the
   admission boundary rather than a bug fix.
 
-- A REFUSED `/ws` UPGRADE CAN STILL MINT A LEDGER, and it is now the only
-  allocating read left. `ws_upgrade` calls `Run::passenger` on the
-  non-resetting path in order to take the seat before the eviction, and the
-  cadence refusal comes AFTER it, so a request refused with the 400 leaves a
-  fresh account behind. Round 3 closed the sibling case - `GET /account` no
-  longer mints, resolving through `peek_passenger` and previewing an unopened
-  ledger with `Run::unopened_ledger` - and deliberately did not touch this one,
-  because the ordering it stands on is the round-1 ruling that every refusal is
-  decided before the seat. Whether a refusal may allocate an account is the
-  question; `peek_passenger`'s doc states the limit in place.
-
 - `/control/divergence` ALLOCATES A PENDING ARM RECORD PER NAMED ACCOUNT that
   has not connected yet, capped at `MAX_PENDING_ACCOUNT_ARMS` (64) and shed from
   the oldest end. It does NOT mint a ledger - a draft of the round-2 fix did,
   and that locked the named client out of its own `POST /account` with a `409`
   while handing it default balances - so the control plane is no longer a second
   account-creating surface, and finding 8 of `notes/bugs-server.md` can be closed
-  without reference to it. What is left here is the shed: an operator who arms 65
-  distinct names before any of them connects loses the first one's arm silently.
-  The `202` says nothing about it. Whether the control plane should report a shed
-  pending record the way it reports a shed engine divergence is open.
+  without reference to it.
+  THE SHED IS NOT WORTH REPORTING, ruled 2026-08-20, and the reason is that the
+  cap counts arms OUTSTANDING rather than arms posted. A pending record is
+  consumed by `take_pending` the moment its account first exists - on both mint
+  paths, `Run::passenger` and `Run::open_account` - and havoc knobs are posted
+  ON CONNECT, so each record is drained almost immediately and the count does
+  not accumulate. Reaching 64 needs an operator to arm 65 distinct names that
+  NEVER connect, which is a typo at scale rather than a usage pattern.
+  The engine-arm path does report its shed in the ack body, and that asymmetry
+  is deliberate rather than an oversight: that queue fills from arms against
+  ledgers which already exist, so it can reach its cap in ordinary use, and a
+  silent eviction there once cost a QA run a full misdiagnosis.
 
 - A SOCKET'S `RunComplete` REPORTS SLIGHTLY LESS THAN THE DECLARED DURATION, and
   nothing on the wire lets a consumer tell that from a short run. Filed
@@ -491,6 +488,71 @@ group by any other route has no API for it, and none is owed until one is wanted
   round 1 because it is a rewrite of `run.rs` rather than a fix, and the two
   holes were live.
 
+- `deliver`'S "UNATTRIBUTED MEANS EVERYONE" IS A FALLTHROUGH, NOT A DECLARED
+  CLASS. `run::addressed_account` attributes `AccountState` by the frame's own
+  `account_id` and `addressed_order` scopes the order-owned frames, but
+  anything neither recognizes still reaches every lane - which is exactly how
+  `AccountState` broadcast every account's balances to every socket until
+  2026-08-18. The next ledger-owned frame type joins the broadcast set the same
+  silent way. The fix is an exhaustive match on frame class with no
+  fallthrough, so a new `ServerMessage` variant must be classified as
+  venue-wide or account-owned before it can be delivered at all. A related
+  consequence, refused as a defect in its own right: a foreign lane's byte
+  reservation is derived from the producing passenger's shape, and after the
+  attribution fix that lane never receives the shape-dependent
+  `account_state_max_bytes` summand - so the reservation is over-sized, which
+  is conservative in the only direction that matters and not worth a mechanism.
+
+- `reject_while_closed` JUDGES MARKETABILITY AGAINST THE STATED PRICE while the
+  engine judges it against the BAND-DRAWN trigger, so the two can disagree by
+  up to the fill band in either direction: an order the server admits as
+  non-marketable can be marketable to the engine (and fills off the stale print
+  the guard exists to refuse), and one the server refuses can be one the engine
+  would have rested. The engine's `draw_trigger` needs the order's `band_ticks`
+  and the run's `fill_seed`, neither of which the HTTP boundary holds, so
+  closing this properly means asking the engine the question rather than
+  re-deriving it - `Engine::worst_case_leaves` is the precedent for that shape.
+  Found 2026-08-19 while widening the guard to cover `MarketToLimit`; the
+  widening did not create the gap, it doubled the number of types standing on
+  it.
+
+- OWNER CALL: SHOULD AN ORDER-LIST RELEASE CARRY A MARKET READING? Today a
+  `MarketToLimit` submitted standalone takes the market, while the same type
+  released as an order-list child rests at its stated price as a limit -
+  `Engine::release_child` runs inside `apply_linkage_after_fill`, which holds
+  no `MarketReading` to price against, and `validate_order_link` refuses a
+  `Market` child precisely because "a released child rests". So resting is the
+  CONSISTENT behaviour, the carve-out is stated in `docs/oms-types.md`, and
+  nothing is broken. What is open is whether a release should carry a reading
+  at all - which would make a released `MarketToLimit` execute on arrival and
+  would reopen whether a `Market` child can be admitted too. Until that is
+  asked, the venue deliberately serves the type one way standalone and another
+  way as a child.
+
+- LEAD, NOT REPRODUCED AND NOT CLOSED: `sigterm_stops_the_venue_within_the_
+  shutdown_grace` in `crates/mogwai-cli/tests/lifecycle.rs` failed one full
+  `brokkr check --gate` run on 2026-08-19 and passed the identical tree's
+  second, with the tree's changes nowhere near the serving or shutdown path.
+  Hunted twice on the harness that DID fire the completion-path race (5 in 78
+  rounds): 20 rounds at 16 threads and 30 rounds at 32 threads, both under 64
+  busy processes, zero failures - so it sits well below the rate of anything
+  else the 2026-08 arc caught, and "not seen since" is not a closure. The
+  original failure message folded TWO opposite verdicts into one sentence
+  (`Venue::wait_for_exit` clamps its bound to the test's remaining wall
+  budget), so the wait may have been far shorter than the 10 s it reported;
+  the helper now reports how long it waited and which bound produced that, so
+  the next occurrence arrives as one verdict. Re-read it against that output
+  before theorising: host contention is the boring reading to rule out first.
+  If the clamp is not it, the two candidates are `spawn_blocking` work in
+  flight at signal time - the sweeper's tape walk and the boatyard's
+  `worker.join()` both run there, and a dropped tokio runtime WAITS for
+  blocking tasks that have started - and the boat worker's responsiveness to
+  its cancel flag. The completion-path session wait does not touch this path: a
+  signal deliberately does not wait for sessions. WHEN IT FIRES IT ABORTS THE
+  INSTRUMENTED SWEEP, and the gate then reports every `mogwai-data` test as
+  orphaned - the crashed-test wall `AGENTS.md` warns about; the tell is the
+  orphan count equalling the missing sweep's pass count.
+
 - ONE `/ws` REFUSAL STILL SITS AFTER THE EVICTION, and only one: the cadence
   check re-run on a ledger the seat MINTED OR RESET, which can lose to another
   upgrade racing the same account inside that window. The pre-seat check that
@@ -499,6 +561,15 @@ group by any other route has no API for it, and none is owed until one is wanted
   one transaction under the lane lock - which is the registry item above, not a
   local fix - so it is filed rather than papered over. It needs two upgrades on
   one account interleaved inside a few microseconds to fire.
+  IT ABSORBED A SECOND ENTRY on 2026-08-20, which asked whether a refused
+  upgrade may MINT a ledger and read as an open product decision. It was neither
+  open nor a decision: every refusal in `ws_upgrade` sits before
+  `Run::passenger`, and the two that follow it are cadence checks a
+  just-minted ledger cannot fail, because it holds no seat - which `ws.rs` says
+  at the site. So a mint and a refusal are mutually exclusive on every ordinary
+  path, and the race described here is the only way one can follow the other.
+  The deleted entry was true before the round-1 reordering put every refusal
+  ahead of the seat, and survived as prose after the code stopped matching it.
 
 - PRODUCT CALL: IS A ZERO PRICE LEGAL ON AN INVERSE INSTRUMENT? Raised by the
   `notes/bugs-engine.md` round-2 cold review and answered locally rather than
@@ -631,15 +702,43 @@ group by any other route has no API for it, and none is owed until one is wanted
   crate, where `GeneratedSource`'s equivalent failures go through `TickFault`.
   The moment a composed river is served, that panic is a serving-path abort.
   Giving the composer a `TickFault` closes both halves at once.
+- A WHITESPACE-PADDED CURRENCY CODE IS ACCEPTED AND MATCHES NO BALANCE.
+  `" USD "` passes both of `mogwai-protocol`'s validators - the risk-policy
+  `validate()` and `validate_divergence` agree on refusing BLANK (both trim
+  before the emptiness check, made consistent 2026-08-19), but neither
+  normalizes, so a code differing from its trimmed form is admitted as a lookup
+  key that will match no balance and freeze a policed account's equity at zero.
+  The stronger rule - refuse any code differing from its trimmed form - belongs
+  on both validators at once; two passes of the 2026-08 arc declined to smuggle
+  it in under adjacent findings. Carried from that arc.
+
+- THE ROLL CONFORMANCE FIXTURE'S PYTHON HALF IS MANUAL. It runs as
+  `python3 analysis/roll_estimator.py conformance` and NO LANE RUNS IT, so its
+  fixture-version guard only fires for a human who thinks to invoke it. The
+  dwell pair has automated tests on both sides; this pair does not. Not fixed
+  because a Rust test may not spawn Python. Carried from the 2026-08 test-hunt
+  arc.
+
+- NEITHER SHARED CONFORMANCE FIXTURE DETECTS A QUIETLY WIDENED `tolerance`, a
+  hole in the shared-fixture rule `AGENTS.md` states as binding (and now names
+  there). The fixture version is a SCHEMA version, and a tolerance edit weakens
+  both implementations at once, so the second implementation - whose whole
+  purpose is to catch a one-sided drift - is structurally blind to it. There is
+  no re-derivation to compare against, the way the arrival vectors have one.
+  Naming it is all the arc could do; a fix would need an independently derived
+  bound on the tolerance itself.
+
 - NOTHING ROUTES A NEW WALL-CLOCK BUDGET INTO THE `timing` SWEEP, and the
   workspace has already paid for this shape once. `brokkr.toml` states the
   standing policy for a latency assertion - `#[ignore]` at the source, an entry
   in the gate's `skip`, and a name in the `timing` sweep's `only`, because "a
   latency assertion in a dev lane does not produce a weaker result: it produces a
   meaningless one" - and `tape_lateness_under_acceleration` was deleted for
-  violating it. The enforcement that exists,
-  `every_release_only_filter_is_skipped_by_the_gate`, runs the check in ONE
-  DIRECTION: every test the `only` filter catches must be gate-skipped. The
+  violating it. The enforcement that exists is the build tool's own, and it runs
+  in ONE DIRECTION: a test the `only` filter catches which the gate does not skip
+  is an ORPHANED PAIR, and a filter matching nothing is a DEAD FILTER. (Both were
+  a Rust test until 2026-08-20, `every_release_only_filter_is_skipped_by_the_gate`,
+  deleted when the tool grew them.) The
   converse - every test carrying a wall-clock budget appears in some `only`
   filter - is not checkable from the outside, because "carries a budget" is not a
   syntactic property, and a plain `#[test]` asserting 50 ms in the parallel dev
@@ -677,6 +776,12 @@ group by any other route has no API for it, and none is owed until one is wanted
   refused WHOLE at the engine boundary rather than member by member at the
   server's. Same policy question, one more caller; nothing here is a reason to
   answer it differently.
+  LANDED 2026-08-20. `config.rs` calls `validate_wire_symbol` on the instrument's
+  own symbol, so one alphabet is read from one function on both sides. The test
+  asserts against that validator's OWN verdict rather than a second copy of the
+  alphabet spelled out beside it, and carries the negative half - without which
+  it would pass for a config path that refused every symbol. Bite-checked: with
+  the length-only check restored, `MNQ!` resolves to a full served profile.
 
 - THE LAUNCHER KILLS ONE PROCESS, NOT A PROCESS GROUP, so a venue with any
   descendant leaks a reader thread on the readiness-timeout path. Filed

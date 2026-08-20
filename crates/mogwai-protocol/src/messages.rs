@@ -1869,9 +1869,9 @@ mod tests {
     /// It did not until 2026-08-19: `validate_submit_order` carried a bare
     /// `symbol.len() > MAX_SYMBOL_LEN` check, so the EMPTY string and any byte
     /// outside the wire alphabet were admitted at the one client-inbound symbol
-    /// ingress this workspace has, while a round-4 audit recorded in
-    /// `notes/bugs-protocol.md` was asserting that all three ingresses
-    /// validated. The claim was wrong at exactly this call.
+    /// ingress this workspace has, while a 2026-08 audit's record asserted
+    /// that all three ingresses validated. The claim was wrong at exactly
+    /// this call.
     ///
     /// BOTH INGRESS SHAPES ARE COVERED, because `SubmitOrderGroup` carries up
     /// to `MAX_GROUP_ORDERS` symbols of its own and reaches this validator only

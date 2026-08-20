@@ -1037,6 +1037,24 @@ that binds a socket; the rest are the intake and measurement surface - `gen`,
 the authority on the current set. `mogwai-adapter` is
 the lone nautilus-dependent crate, unchanged by anything below.
 
+ONE BINARY IS A STANDING DECISION, not an accident of growth. A split into a
+venue binary and a lab binary was proposed and refused 2026-08-20, and a
+re-proposal has to answer three things. First, `arrival-control`'s B1 gate
+execs `gen` on `current_exe` so the binary generating the byte comparison IS
+the binary under test - the driver cannot disagree with itself about which
+build ran - and a split reintroduces exactly the build-identity ambiguity that
+design forecloses. Second, the size benefit is already banked: the METHOD
+lives in `mogwai-lab`, which stays linked into the venue binary regardless,
+because `gen` reaches into it and `main` calls `sidecar::init` before the argv
+parse; a split relocates thin driver layers while the intake method remains
+shipped. Third, the cost is on the order of two hundred path rewrites across
+one-shot brick drivers, relocated integration suites, a moved attestation
+roster, and a new build-identity mechanism to replace the one the split
+destroys. Two potential hard blockers were checked and are NOT part of the
+refusal: the crate direction admits a lab binary, and the `test-seam` cfg
+survives a move - the refusal rests on the three arguments, not on a build
+obstacle.
+
 `mogwai-lab` is the fifth non-adapter crate: the corpus-to-fingerprint method
 library the 2026-08 Python-to-Rust rewrite absorbed from `analysis/` (the
 rewrite program's phase records and per-script scope rulings are retired to

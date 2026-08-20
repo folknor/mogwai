@@ -897,6 +897,15 @@ mod tests {
         assert!((normalizer_drift(&old, &new, &profile).unwrap() - 1.0).abs() < 1e-12);
     }
 
+    /// This is NOT a two-copy gate owing a `*_conformance.json`, though it has
+    /// been graded as one. `hourly_zero_second_fraction` is the sole
+    /// implementation of the quantity; the test recomputes it from a DIFFERENT
+    /// FIELD of the committed artifact (production sums the per-hour
+    /// `zero_windows`, this sums `count_hist["0"]`), and two independent
+    /// producer fields agreeing is an external anchor, not a second copy of
+    /// one convention. A fixture would buy nothing the count histogram does
+    /// not already buy, because the histogram is not written by the code under
+    /// test.
     #[test]
     fn the_zero_fraction_matches_the_count_hist() {
         let artifact: Value =

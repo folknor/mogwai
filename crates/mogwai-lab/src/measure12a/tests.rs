@@ -650,6 +650,11 @@ fn the_ceil_n_over_2_median_backs_the_control_group_ranges() {
     }
 }
 
+/// An optimization-preserves-output gate, NOT a two-convention gate, though it
+/// has been graded as one: `close_reduced` drops blocks 3 and 4 to buy Stage A
+/// budget, and the property is that it changes nothing else. If the block-2
+/// definition moves, both sides moving together is CORRECT - that is the whole
+/// claim - so there is no drift for a shared conformance fixture to catch.
 #[test]
 fn close_reduced_agrees_with_close_on_block1_and_block2() {
     // Protocol 12b Stage A drops blocks 3 and 4 to buy budget. It may buy

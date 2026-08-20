@@ -860,6 +860,15 @@ fn own_venue(
     // A boot failure's explanation arrives on stderr, which is drained by
     // another thread; give it the moment it needs before the ring is copied
     // into the error, and re-snapshot rather than trusting an earlier copy.
+    // The obvious-looking replacement - a bounded join of the drain thread -
+    // was proposed and refused with measurement: `NoRecord` is EOF on the
+    // STDOUT pipe, and a venue that closes its own stdout (or hands it to a
+    // grandchild) reaches this branch ALIVE, so both the stderr drain and the
+    // stdout reader (now parked in its post-record `io::copy`) end only when
+    // the venue dies. A join here blocks against a live venue; the sleep is
+    // the only bounded way to give the ring a chance.
+    // `a_venue_that_closes_stdout_and_lives_is_still_a_prompt_boot_failure`
+    // pins the prompt-return half.
     let booted = match booted {
         Err(LaunchError::NoRecord { .. }) => {
             std::thread::sleep(Duration::from_millis(50));

@@ -698,9 +698,14 @@ pub(crate) async fn process_order_cmd(
 ///
 /// Marketability is judged against the STATED price, while the engine judges it
 /// against the band-drawn trigger. The two can disagree by up to the band, so
-/// this is an approximation in both directions; it is the pre-existing
-/// `Limit` behaviour and is not made worse by sharing it. See
-/// `notes/bugs-server.md` for the widened form of that gap.
+/// this is an approximation in both directions: an order admitted here as
+/// non-marketable can be marketable to the engine (and fill off the stale
+/// print this guard exists to refuse), and one refused here can be one the
+/// engine would have rested. The engine's `draw_trigger` needs the order's
+/// `band_ticks` and the run's `fill_seed`, neither of which this boundary
+/// holds, so closing the gap means asking the engine the question rather than
+/// re-deriving it. It is the pre-existing `Limit` behaviour and is not made
+/// worse by sharing it.
 fn reject_while_closed(
     calendar: &mogwai_data::SessionCalendar,
     ts: u64,

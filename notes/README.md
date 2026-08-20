@@ -119,18 +119,14 @@ investigations, the hardcoded-value inventory.
   was never on trial.
 - **`pair-test-preregistration.md`** - `pair_harness.py` loads its frozen JSON
   twin and is still the live judge for delivered pair data.
-- **The eleven `bugs-*.md` reports** - ALL CLOSED, the arc ended 2026-08-20.
-  Five test-suite hunts (`bugs-tests-lifecycle`, `-adapter`, `-tape`,
-  `-engine-protocol`, `-lab-cli`) then six production-code ones
-  (`bugs-protocol`, `bugs-data`, `bugs-engine`, `bugs-server`, `bugs-cli`,
-  `bugs-adapter`), each worked in rounds and closed by a pass over its own
-  commit arc. None drives anything now; each carries a header saying so. They
-  are kept for their REFUSALS and their "checked and found sound" inventories,
-  which is what a re-proposal costs least to check against - not as a record of
-  what was fixed, which is git history. What still binds future work was folded
-  into `AGENTS.md`'s standing-lessons section, and the arc's carry-forward file
-  was deleted in the same change, per the rule there. Deferred items went to
-  `todo.md`. Nothing durable cites any of the eleven, so they die cleanly.
+- **The eleven `bugs-*.md` reports** - CLOSED 2026-08-20 and DELETED
+  2026-08-20 after a document-by-document accounting: every refusal and
+  correction worth keeping now lives as a comment at its site or in
+  `reference/`, the standing lessons are in `AGENTS.md`, the still-open
+  residuals (lead 10's sigterm flake, the deliver fallthrough, the
+  `reject_while_closed` band gap, the `MarketToLimit` release owner call, the
+  two carried fixture items, the whitespace currency) are in `todo.md`, and
+  everything else - what was fixed, round by round - is git history.
 
 ## What blocks what, right now
 
@@ -175,8 +171,9 @@ Cheap to state, expensive to rediscover.
   hand-built fixture on one side proves only that that side is self-consistent
   - if the two conventions drift the gate compares different quantities and
   still passes, green on both halves. One shared fixture, run by both, is the
-  convention; `AGENTS.md` carries it and `analysis/dwell_conformance.json` and
-  `spread_conformance.json` are the two instances.
+  convention; `AGENTS.md` carries it and `analysis/dwell_conformance.json`,
+  `spread_conformance.json` and `segment_library_conformance.json` are the
+  three instances.
 - **Verifying a fix against the artifacts instead of the contract.** The
   rewrite's recurring failure shape: a closure that held on the committed
   corpus and failed one layer below where its gate looked. A bound established

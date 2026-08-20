@@ -407,7 +407,11 @@ Test and process rules the arcs paid for, a dozen non-biting tests among them:
   halves green.
   NOTHING DETECTS A MISSING FIXTURE. The next cross-implementation gate is
   caught by this habit or not at all, which is the same shape as the open item
-  on durable prose asserting a live fact.
+  on durable prose asserting a live fact. AND NO FIXTURE DETECTS ITS OWN
+  TOLERANCE QUIETLY WIDENING: the version is a schema version, a tolerance
+  edit weakens both implementations at once, and the second implementation is
+  structurally blind to it - review a tolerance change as a contract change,
+  because no gate will.
   AND THE FIXTURE IS NOT ALWAYS THE ANSWER. A two-copy gate whose copies are
   the SAME algorithm rather than two conventions for one quantity is closed by
   deleting a copy, not by anchoring both - `mogwai-lab`'s `summary` and
