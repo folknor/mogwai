@@ -1755,11 +1755,19 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
     // the sizing constants the admission reservation is built on are only upper
     // bounds if the configured strings are capped. Startup is the right place
     // to refuse: a connection can then never out-produce its own reservation.
-    if def.symbol.len() > mogwai_protocol::MAX_SYMBOL_LEN {
+    //
+    // THE SAME VALIDATOR THE WIRE USES, and that is the point rather than an
+    // implementation detail. A configured symbol is reached by clients through
+    // `/trades`, `/quotes` and order entry, and `validate_submit_order` holds
+    // those to the URL-safe alphabet - so a config checked only for LENGTH could
+    // name a symbol the venue serves and no client can trade or fetch, with both
+    // validators green and neither able to see the other's rule. Ruled
+    // 2026-08-20: one alphabet, read from one function, on both sides. It
+    // refuses nothing any shipped preset or test config does.
+    if let Err(why) = mogwai_protocol::validate_wire_symbol(&def.symbol) {
         anyhow::bail!(
-            "instrument {} symbol exceeds MAX_SYMBOL_LEN ({})",
-            def.symbol,
-            mogwai_protocol::MAX_SYMBOL_LEN
+            "instrument {} symbol is not a legal symbol: {why}",
+            def.symbol
         );
     }
     if def.price_increment <= Decimal::ZERO {
@@ -2261,6 +2269,47 @@ mod tests {
                 .def
                 .price_increment,
             Decimal::new(2, 2)
+        );
+    }
+
+    /// ONE ALPHABET, READ BY BOTH SIDES. A configured symbol is reached by
+    /// clients through `/trades`, `/quotes` and order entry, and the wire holds
+    /// those to the URL-safe alphabet. A config checked only for LENGTH could
+    /// therefore name a shape the venue serves and no client can trade, with
+    /// both validators green and neither able to see the other's rule.
+    ///
+    /// Asserted against `validate_wire_symbol`'s OWN verdict rather than
+    /// against a second copy of the alphabet spelled out here: a hand-built
+    /// case list on this side would pin config against itself, which is exactly
+    /// the drift the shared validator exists to prevent.
+    #[test]
+    fn a_configured_symbol_is_held_to_the_alphabet_the_wire_enforces() {
+        let cfg: Config = toml::from_str("").unwrap();
+        for illegal in ["MNQ!", "MNQ ", "MN/Q", "MNQ#1"] {
+            assert!(
+                mogwai_protocol::validate_wire_symbol(illegal).is_err(),
+                "the premise of this case is that the wire refuses {illegal}"
+            );
+            // Named rather than unwrapped: the Ok side is a whole
+            // `InstrumentProfile`, and `unwrap_err` would report this failure as
+            // several screens of scalars with the point buried in them.
+            let Err(error) = profile_for(&cfg, Some(illegal)) else {
+                panic!(
+                    "{illegal} resolved to a served shape, so the venue would serve a symbol no \
+                     client can trade or fetch"
+                );
+            };
+            let error = error.to_string();
+            assert!(
+                error.contains("not a legal symbol"),
+                "a symbol no client could trade was configured anyway: {error}"
+            );
+        }
+        // The negative half, without which the loop above passes for a config
+        // path that refuses every symbol it is given.
+        assert!(
+            profile_for(&cfg, Some("MNQ")).is_ok(),
+            "a legal symbol must still resolve"
         );
     }
 

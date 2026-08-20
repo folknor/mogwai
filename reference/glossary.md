@@ -18,9 +18,14 @@
 - **Tape**: what a boat publishes - the paced frame stream broadcast to that
   boat's passengers only. The boot river's warmup is materialized before
   readiness; a river reached later materializes on first read.
-- **Ledger**: the single `mogwai-engine` instance owned by the run. Order entry
-  is WebSocket-only - there is no HTTP order carrier - and every socket, whatever
-  symbol it bound, acts on that one ledger.
+- **Ledger**: one `mogwai-engine` instance, owned by one ACCOUNT and created on
+  first sight of that account id. A run holds as many as it has accounts and
+  they share nothing: positions, balances, order history and armed divergences
+  are all per ledger. Every socket a client opens under one account id acts on
+  that account's ledger, whatever symbol each bound, so a client trading two
+  instruments is trading one book. Order entry is WebSocket-only - there is no
+  HTTP order carrier. A ledger OUTLIVES the connection that named it, which is
+  what makes a reconnect a continuation.
 - **Boot symbol / boot river**: the shape the run boards a boat on before it
   writes its readiness line, and the river a request that names no symbol binds.
   It is the only river warmed eagerly and the only boat that never winds down;
