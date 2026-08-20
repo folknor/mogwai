@@ -106,19 +106,36 @@ had already covered. Every surviving order therefore resumes scanning from the
 returning boat's own clock. Nothing is owed for the span in between: nobody was
 reading the account, which is the same statement the freeze makes.
 
-THIS DOES NOT APPLY TO AN EVICTION, and the boundary is the freeze rather than
-the reconnection. Re-basing and retirement run only for a RETURNING account -
-one the venue found frozen - and a newcomer that claims a seated account is
-counted onto it before the incumbent is closed, so the account never freezes in
-that window and the newcomer resumes a LIVE ledger: no retirement, no re-base.
-That is deliberate. The book being taken over was never left behind by a
-departed boat, so its scan frontiers are the frontiers of a river something is
-still reading, and retiring off it would cancel resting orders and close
-positions the previous session had every reason to expect to survive its own
-reconnect. The alternative was worse than a rule: before the count existed the
-incumbent's teardown could win the race and freeze the account first, so
-whether the newcomer's book was retired depended on which task got there
-first.
+RETIREMENT DOES NOT APPLY TO AN EVICTION, and the boundary is the freeze rather
+than the reconnection. Retirement runs only for a RETURNING account - one the
+venue found frozen - and a newcomer that claims a seated account is counted onto
+it before the incumbent is closed, so the account never freezes in that window
+and the newcomer resumes a LIVE ledger. That is deliberate: retiring off it
+would cancel resting orders and close positions the previous session had every
+reason to expect to survive its own reconnect. The alternative was worse than a
+rule: before the count existed the incumbent's teardown could win the race and
+freeze the account first, so whether the newcomer's book was retired depended on
+which task got there first.
+
+RE-BASING IS NOT BOUNDED BY THE FREEZE, and this document previously said it
+was, on the reasoning that a book taken over by eviction carries "the frontiers
+of a river something is still reading". THAT IS FALSE WHEN THE CLAIMER BOARDS A
+DIFFERENT RIVER. The newcomer takes a different `BoatKey`, the incumbent's
+ticket drops, and the departed river's boat is torn down with its worker; a boat
+placed over that river again starts at the yard's origin, under the same key,
+because `BoatKey` carries no placement nonce. The surviving orders' frontiers
+then name a cursor that no longer exists, and every scan window they are judged
+on is empty until the new cursor has covered the whole of the first session
+again - silently, and indistinguishable from an order the tape has not reached.
+
+SO THE RULE IS STATED ON THE FRONTIER ITSELF rather than on the freeze. A
+frontier may TRAIL the cursor serving it and may never LEAD it: it is set either
+at an order's acceptance or by how far a sweep has walked, both sampled on the
+cursor in front of it. `resume` therefore re-bases exactly the leading frontiers
+on every bind, and leaves trailing ones alone - a trailing frontier names water
+this account is genuinely owed a scan over. Asking the state directly needs no
+new identity and closes the case whatever produced it; a placement nonce on the
+boat would instead repair the freeze proxy, and was not taken for that reason.
 
 WHAT THE ACCOUNT HELD OFF THE JOINED RIVER IS RETIRED at that moment - resting
 orders cancelled, positions closed at their last mark. A returning socket may

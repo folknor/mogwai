@@ -463,11 +463,25 @@ group by any other route has no API for it, and none is owed until one is wanted
   the frontier at the departed cursor's 5_000 against a binding cursor at 1_000.
   Bite-checked by forcing `returning` true, which fires that assertion and no
   other.
-  THE FIX IS A PLACEMENT NONCE on `Boat`, recorded alongside what the passenger
-  holds, so `resume` gates on cursor identity rather than on the freeze. It also
-  lets the stale-seat hazard `ws.rs` currently defends against by drop ordering
-  rest on identity instead. `reference/architecture.md` states the old framing
-  and is owed the correction.
+  CLOSED 2026-08-20, and NOT with the placement nonce this entry first proposed.
+  A nonce on `Boat` would let the freeze PROXY be repaired; asking the state
+  itself needs no new identity and closes the case whatever produced it. A
+  frontier may TRAIL the cursor serving it and may never LEAD it - it is set at
+  an order's acceptance or by how far a sweep walked, both sampled on the cursor
+  in front of it - so `Engine::rebase_future_scans` moves exactly the leading
+  ones and `resume` calls it on every bind. Trailing frontiers are left alone,
+  which is what keeps this from being the unconditional re-base under another
+  name: that span is water the account is owed a scan over.
+  The regression test is `mogwai-server`'s
+  `an_eviction_reconnect_rebases_a_frontier_from_the_departed_cursor`, with
+  `mogwai-engine`'s `only_a_frontier_that_leads_the_cursor_is_rebased` pinning
+  both halves of the predicate. `reference/architecture.md` carried the false
+  claim that an evicted book's frontiers belong to "a river something is still
+  reading" and has been corrected.
+  STILL OPEN, and unchanged by this: `BoatKey` carries no placement nonce, so
+  boat identity across lifetimes remains unrepresentable. `ws.rs`'s stale-seat
+  hazard is still held off by drop ordering rather than by identity, which is
+  the remaining consumer of a nonce if one is ever wanted.
 
 - THE ABANDONED-UPGRADE PATH HAS NO SOCKET-LEVEL TEST, and no client behaviour
   found so far reaches it. `Passenger::admitted` exists for the upgrade a client

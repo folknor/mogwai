@@ -1436,6 +1436,47 @@ impl Engine {
         }
     }
 
+    /// Re-base only the frontiers that sit in `now_ns`'s FUTURE, and report how
+    /// many there were.
+    ///
+    /// A FRONTIER AHEAD OF THE CURSOR IS NEVER LEGITIMATE. An order's frontier
+    /// is set to the instant it was accepted, or to how far a sweep has walked,
+    /// and both are sampled on the cursor that is serving it - so under ordinary
+    /// operation it trails `now_ns` and never leads it. When it leads, the
+    /// order's scan window is empty on every pass and it rests unfillable until
+    /// the cursor catches up, which is silent and looks exactly like an order
+    /// that has not been hit yet.
+    ///
+    /// THIS IS THE STATE ITSELF RATHER THAN A PROXY FOR IT, which is why it is
+    /// preferred over identifying the cursor. [`Self::rebase_scans`] is applied
+    /// when an account is found FROZEN, and freezing was always standing in for
+    /// "the cursor this book was marked on is gone". That proxy has a hole: a
+    /// newcomer claiming a seated account is counted on before the incumbent is
+    /// closed, deliberately, so the account never freezes - and if the newcomer
+    /// boards a DIFFERENT river, the departed one's boat is torn down with its
+    /// worker, and a boat placed over that river again starts at the yard's
+    /// origin. A placement nonce on the boat would let the proxy be repaired;
+    /// asking whether any frontier is in the future needs no new identity, and
+    /// closes the case whatever produced it.
+    ///
+    /// Nothing is owed for the span skipped, on the same reasoning as
+    /// `rebase_scans`: no pass watched that water on this account's behalf.
+    pub fn rebase_future_scans(&mut self, now_ns: u64) -> usize {
+        let mut rebased = 0;
+        for pos in 0..self.open.len() {
+            let order = &mut self.open[pos];
+            if order.scanned_ns <= now_ns {
+                continue;
+            }
+            order.scanned_ns = now_ns;
+            // A walk planned against the old frontier says nothing about the new
+            // one, exactly as after an amend.
+            order.revision = order.revision.saturating_add(1);
+            rebased += 1;
+        }
+        rebased
+    }
+
     /// One venue-originated reduce-only close at the mark, the shape both the
     /// margin breach and the risk breach use.
     fn close_at_mark(
@@ -6754,6 +6795,58 @@ mod tests {
             e.pending_scans()[0].from_ns,
             100,
             "the order resumes from the clock that is actually running"
+        );
+    }
+
+    /// `rebase_future_scans` MOVES ONLY WHAT LEADS THE CURSOR.
+    ///
+    /// BOTH HALVES ARE THE TEST. Rebasing a leading frontier is what closes the
+    /// eviction-reconnect stall; leaving a TRAILING one alone is what keeps this
+    /// from being `rebase_scans` under another name, applied on every bind. A
+    /// trailing frontier names water the cursor has already covered and that
+    /// this account is genuinely owed a scan over, so moving it forward would
+    /// silently skip a span an order should have been judged on.
+    #[test]
+    fn only_a_frontier_that_leads_the_cursor_is_rebased() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: default_instruments(),
+            balances: HashMap::from([("USDT".to_string(), Decimal::from(1_000_000))]),
+            fill_seed: 7,
+        });
+        let mut order = limit_order("REST", 1);
+        order.price = Some(Decimal::from(1));
+        e.process_with_market(
+            ClientMessage::SubmitOrder(order),
+            9_000,
+            Some(MarketReading {
+                last_px: Decimal::from(100),
+                ts_ns: 9_000,
+                band_ticks: 0,
+            }),
+        );
+        assert_eq!(e.pending_scans()[0].from_ns, 9_000);
+
+        assert_eq!(
+            e.rebase_future_scans(20_000),
+            0,
+            "a frontier trailing the cursor is ordinary and must be left alone"
+        );
+        assert_eq!(
+            e.pending_scans()[0].from_ns,
+            9_000,
+            "the span from 9000 to 20000 is water this account is owed a scan over"
+        );
+
+        assert_eq!(
+            e.rebase_future_scans(100),
+            1,
+            "a frontier ahead of the cursor is the eviction-reconnect stall and must be moved"
+        );
+        assert_eq!(
+            e.pending_scans()[0].from_ns,
+            100,
+            "the order scans from the clock that is actually running"
         );
     }
 

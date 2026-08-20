@@ -1798,6 +1798,24 @@ impl Run {
         let returning = passenger.is_frozen();
         passenger.attach();
         if !returning {
+            // NOT A FIRST BIND, NECESSARILY. An eviction-reconnect lands here
+            // too: the newcomer is counted onto the account before the incumbent
+            // is closed, so the account never goes unattended and `returning` is
+            // false even though a cursor may have been torn down underneath it.
+            // Step 3 is therefore owed on this path as well, and asked as the
+            // state itself rather than through the freeze - see
+            // `Engine::rebase_future_scans`.
+            let mut engine = passenger.engine.lock().await;
+            let rebased = engine.rebase_future_scans(now_ns);
+            if rebased > 0 {
+                tracing::debug!(
+                    account = passenger.account_id.as_str(),
+                    rebased,
+                    now_ns,
+                    "re-based scan frontiers that led the binding cursor; the book was marked on a \
+                     cursor that is gone"
+                );
+            }
             return Vec::new();
         }
         let mut engine = passenger.engine.lock().await;
@@ -2542,12 +2560,18 @@ mod tests {
     /// cursor's future, so it rests unscanned until the new cursor has covered
     /// the whole of the first session again.
     ///
+    /// CLOSED by asking the state itself rather than repairing the proxy: a
+    /// frontier that LEADS the binding cursor is never legitimate, whatever put
+    /// it there, so `resume` re-bases exactly those on every bind. The
+    /// alternative was a placement nonce on `Boat`, which would let the freeze
+    /// proxy be repaired but needs a new identity to carry.
+    ///
     /// Pinned here rather than on a socket because the symptom is a STALL whose
     /// length is the previous session's, and an absence assertion over a `/ws`
     /// drain would be satisfied for free by a truncated one. The frontier is
     /// the thing itself.
     #[tokio::test]
-    async fn an_eviction_reconnect_keeps_a_frontier_from_the_departed_cursor() {
+    async fn an_eviction_reconnect_rebases_a_frontier_from_the_departed_cursor() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("FRONTIER-001").unwrap();
         let symbol = Symbol::from("BTCUSDT");
@@ -2641,14 +2665,14 @@ mod tests {
         let engine = passenger.engine.lock().await;
         let frontier = engine.open_orders()[0].scanned_ns;
         assert_eq!(
-            frontier, accepted_ns,
-            "the frontier was not re-based, so it still names the departed cursor's clock"
+            frontier, resumed_ns,
+            "the frontier still names the departed cursor's clock, so every scan window this order \
+             is judged on is empty until the binding cursor has covered the whole first session \
+             again - silently, and looking exactly like an order nothing has hit yet"
         );
         assert!(
-            frontier > resumed_ns,
-            "and it sits in the BINDING cursor's future, so every scan window this order is judged \
-             on is empty until that cursor has covered the first session again: frontier \
-             {frontier} against a cursor at {resumed_ns}"
+            frontier <= resumed_ns,
+            "a frontier may trail the cursor serving it and must never lead it"
         );
         drop(newcomer_admission);
     }
