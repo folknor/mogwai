@@ -811,12 +811,15 @@ pub(crate) struct Run {
     /// to the passenger that owns it and to nobody else.
     ///
     /// Keyed by `VenueOrderId` because that is what every sweep-produced frame
-    /// and every query row carries; the value is the ACCOUNT ID that submitted
-    /// it. An order absent from this table - one the VENUE originated - is
-    /// delivered to EVERY lane and visible to every query, which is the old
-    /// behaviour and the conservative direction to fail in: a passenger seeing a
-    /// stray frame is the defect this closes, but a passenger MISSING its own
-    /// fill would be a worse one.
+    /// and every query row carries; the value is the ACCOUNT ID the order
+    /// belongs to. EVERY live order is claimed: the command dispatcher claims
+    /// a client's submissions at acceptance, and `claim_produced_orders`
+    /// claims venue-originated orders (liquidations) for the account whose
+    /// ledger produced them. An order absent from this table is therefore a
+    /// BUG in whoever built the batch, and the fallback - delivered to every
+    /// lane, visible to every query, with a warning naming the id - is the
+    /// conservative direction to fail in while that bug lives: a passenger
+    /// seeing a stray frame is a smaller wrong than one missing its own fill.
     ///
     /// BY ACCOUNT, NOT BY CONNECTION, and the difference is not cosmetic. A
     /// ledger belongs to an account, so two sockets presenting the same id are
@@ -1928,14 +1931,50 @@ impl Run {
 
     /// Claim every order a just-produced batch accepted for `owner`.
     ///
-    /// Only the command dispatcher calls this. A sweep-produced batch is never
-    /// claimed: an order appearing there was originated by the VENUE - a margin
-    /// liquidation - so there is no submitting connection to attribute it to,
-    /// and inventing one would address its frames to a lane that never asked.
+    /// Only the command dispatcher calls this; the sweep's half is
+    /// [`Run::claim_produced_orders`], which covers the orders the VENUE
+    /// originates.
     pub(crate) fn track_ownership(&self, events: &[mogwai_protocol::ServerMessage], owner: &str) {
         for event in events {
             if let mogwai_protocol::ServerMessage::OrderAccepted { venue_order_id, .. } = event {
                 self.claim_order(venue_order_id.clone(), owner);
+            }
+        }
+    }
+
+    /// Claim, for `owner`, every order-scoped frame in a batch that account's
+    /// own ledger just produced and that no connection has already claimed.
+    ///
+    /// This is what attributes a VENUE-ORIGINATED order - a risk or margin
+    /// liquidation the venue mints under the reserved id prefixes - to the
+    /// account whose ledger it acts on. Such an order has no submitting
+    /// connection, so before this existed its frames fell to the broadcast
+    /// fallback and every passenger saw them, which is the one hole the
+    /// invisibility property had. The account IS knowable, and it is knowable
+    /// HERE, at production time: every engine pass is per passenger, so a
+    /// frame in the pass's batch is about that passenger's book by
+    /// construction. Claiming at production keeps delivery a pure function of
+    /// the batch - the ambient passenger context is used where it is truthful
+    /// (booking) and never at delivery, which is the rule the `AccountState`
+    /// broadcast defect taught.
+    ///
+    /// `or_insert`, never overwrite: a client-submitted order in the same
+    /// batch is already claimed by the dispatcher, and its claim is the same
+    /// account's anyway. Claims retire with the account (`discard_account`),
+    /// exactly like a dispatcher's claims, so a frozen-and-resumed account
+    /// keeps attribution over its whole book.
+    pub(crate) fn claim_produced_orders(
+        &self,
+        events: &[mogwai_protocol::ServerMessage],
+        owner: &str,
+    ) {
+        let mut owners = self
+            .order_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for event in events {
+            if let Audience::Order(id) = audience(event) {
+                owners.entry(id.clone()).or_insert_with(|| owner.to_owned());
             }
         }
     }
@@ -1945,8 +1984,10 @@ impl Run {
     /// The engine answers `QueryOrders` and `QueryFills` from ONE book, because
     /// there is one ledger; scoping happens here, where the connection is known.
     /// A row for an unclaimed order stays, on the same rule the delivery filter
-    /// uses: better a stray row than a missing one, and a venue-originated
-    /// liquidation genuinely concerns whoever holds the position.
+    /// uses - better a stray row than a missing one - and, like that filter's
+    /// broadcast arm, it is a defensive fallback rather than a class of order:
+    /// venue-originated liquidations are claimed at production, so an unclaimed
+    /// row means a production site failed to claim.
     pub(crate) fn scope_query_rows(
         &self,
         events: &mut [mogwai_protocol::ServerMessage],

@@ -488,6 +488,43 @@ group by any other route has no API for it, and none is owed until one is wanted
   round 1 because it is a rewrite of `run.rs` rather than a fix, and the two
   holes were live.
 
+- RULED 2026-08-20: THE GLOSSARY'S END STATE IS UNIFORM USAGE, ONE PURPOSE PER
+  ENTRY, ACROSS THE ENTIRE CODEBASE. An entry that has to disambiguate is a
+  stopgap documenting a disease rather than curing it, and the standing case
+  is CLIENT, which today carries three senses: the counterparty process (our
+  prose), the adapter objects inside it (nautilus's `MogwaiDataClient` /
+  `MogwaiExecutionClient` vocabulary), and the submitter's id namespace (the
+  wire field `client_order_id`). The cure for everything we own is choosing a
+  distinct word for the process sense - "host" or "consumer" both already
+  have currency - and sweeping our prose and identifiers onto it, so "client"
+  recedes to the senses we cannot rename: nautilus's API vocabulary and
+  frozen wire field names, which stay quarantined behind their APIs and are
+  named as inherited in the glossary. When the sweep lands, the glossary's
+  Client entry collapses from a three-way disambiguation to one sentence, and
+  the same test applies to every future entry: if it needs "in one sense...
+  in another", the vocabulary owes a rename, not a longer entry.
+  TWO MORE STANDING CASES, agreed 2026-08-20 in the same review.
+  CONNECTION is a synonym cluster: the codebase says connection, socket, lane
+  and leg for one thing or its immediate neighbours - "socket" in most prose
+  and test names, `BoundLane`/`ExecLanes` for the venue-side delivery
+  apparatus a connection owns, "leg" for a connection's role in the adapter's
+  client pair. These are not one concept, so the cure is not collapse but
+  pinning: each word gets its one job and the prose is swept where
+  connection/socket are used interchangeably. The entry also owes a scope
+  sentence: an HTTP poll or a control-plane POST is not a connection in this
+  sense, and nothing says so.
+  SESSION is a three-way collision and the worst of the three cases: (1) the
+  client-identity token on `/ws?session=`, (2) the TRADING session - calendar,
+  session classes, Asia session - which is domain-standard vocabulary and not
+  ours to rename, and (3) a socket's served TENURE (`SocketSession`,
+  `session_guard`, the completion family's "this socket was a live session").
+  Since sense 2 is immovable, senses 1 and 3 owe the renames, and both are
+  ours - but sense 1 is a wire parameter, so its rename is a designed
+  consumer break and needs an owner decision on timing; sense 3 is internal
+  and free. Candidate directions recorded, not decided: the identity token is
+  "which process is this" (a tag or badge shape), the tenure is closer to
+  seating. Naming is the owner's gate.
+
 - `reject_while_closed` JUDGES MARKETABILITY AGAINST THE STATED PRICE while the
   engine judges it against the BAND-DRAWN trigger, so the two can disagree by
   up to the fill band in either direction: an order the server admits as
@@ -1406,7 +1443,27 @@ group by any other route has no API for it, and none is owed until one is wanted
   ceremony. `DEFAULT_ACCOUNT_ID = "MOGWAI-001"` and the `ISSUER-NUMBER`
   validation carry over; what dies is the assumption that the config's id is THE
   account rather than a default for the unnamed case.
-  AN ACCOUNT IS ON AT MOST ONE RIVER, ENFORCED BY EVICTION. Ruled 2026-08-16. A
+  AN ACCOUNT IS ON AT MOST ONE RIVER - SUPERSEDED, AND THE SUPERSESSION
+  ADJUDICATED 2026-08-20 (owner delegated, either way acceptable): MANY
+  RIVERS PER ACCOUNT IS THE MODEL, not an accident of the code. The grounds,
+  in force order: the exchange-completeness ruling decides it (no venue
+  restricts an account to one instrument, and prop-firm fidelity wants an
+  account-level drawdown spanning what the account trades); claim attribution
+  - the one real argument for the restriction - is the consumer's discipline
+  (one strategy, one account) and is already how the intended topology works,
+  so a venue gate would only duplicate it; and the venue cannot police the
+  restriction without breaking the supported default-account two-symbol
+  shape. One ledger, one cadence survives as the sole seat refusal. The
+  glossary's Seat entry states the adjudicated model. Noted first
+  2026-08-20 after this sentence misled a glossary entry: `Passenger::try_sit`
+  holds a MAP of seats and refuses only a second SPEED of a river already
+  ridden, `Run::resume` calls two sockets on two symbols under one account "a
+  supported shape", and eviction is by SESSION (a different client claiming
+  the id), not by river. One account trades many rivers on one ledger; only
+  the one-cadence rule survives of this paragraph, and its closing
+  consequence is superseded with it - a ledger DOES span rivers, so a
+  trailing drawdown is computed over the account's whole valuation, not one
+  instrument. Originally: ENFORCED BY EVICTION. Ruled 2026-08-16. A
   second socket presenting an id that is already seated KILLS THE INCUMBENT and
   then proceeds under the ledger-reset knob above - resuming the frozen account
   or starting it clean. This unifies reconnection and account-stealing into one
@@ -2568,6 +2625,27 @@ passes `[launch].config` through untouched on purpose. Until the flag exists the
 workaround is that every venue config must name its run's symbol, which means a
 config per symbol rather than a config per venue shape.
 
+RULED 2026-08-20 BY THE OWNER, superseding the retraction below with a
+position: IN SERVER MODE THERE IS NO REASON TO BOOT ANY RIVER OR SYMBOL AT
+ALL. A shared exchange has seen no request at boot, so an eagerly warmed river
+is a guess paid for in full warmup synthesis before readiness plus a
+permanent boat, and demand-driven materialization already serves every other
+river. Not yet designed or landed. THE VENUE CAN TELL THE MODES APART AT BOOT,
+corrected by the owner in the same sitting. The modes are defined by their
+entry points - server mode is `mogwai serve`, transient mode is
+`mogwai_protocol::launch::launch(spec)` - and the launch path always passes
+`--launcher-pid` (the PDEATHSIG arming) where an operator's command line does
+not, so the process knows at boot which entry point produced it. (The
+cannot-tell-them-apart fact elsewhere in this file is about CLIENTS, not
+about boot.) So the shape is: a transient venue keeps today's eager boot
+river, and a server-mode venue boots RIVERLESS, materializing every river on
+demand. Two consequences to decide with it: readiness stops
+implying any warm river in server mode, and a `/ws` bind naming no symbol on
+a riverless venue needs a decided answer (presumably the default preset
+materialized on demand).
+`reference/glossary.md`'s boot-river entries describe what IS and stay as
+they are until this lands.
+
 RETRACTED SAME DAY, and kept only for the narrow case it still covers. The above
 argues from a one-venue-per-run topology that is the FALLBACK rather than the
 main path - see the next section. On a shared exchange serving N symbols on
@@ -2987,28 +3065,7 @@ the two things that would help is blocked on the same nautilus gap as our
 `FeedLagged` item - an empty historical response carries no feed identity, so it
 cannot be attributed.
 
-## The two modes, and the vocabulary they are owed (owner, 2026-08-20)
-
-Stated by the owner and recorded here because nothing in the tree says it. Both
-entries are owed to `reference/glossary.md` when that file is next worked on.
-
-SERVER MODE is launched by `mogwai serve` on the command line and produces a
-long-lasting venue that accepts connections from as many accounts as the user
-wants. THE ACCOUNT ID IS THE DISCRIMINATOR: no account sees any other. Strategies
-launched under the same account share that account's ledger regardless of
-instrument. Every boot-time config - havoc knobs, budgets, speed - applies
-equally to every strategy run under that account. `mogwai serve` returns its
-connection parameters on stdout, and those go into the consumer's config
-explicitly.
-
-TRANSIENT MODE is launched by `ba live` on a config TOML carrying no connection
-parameters. It launches an ephemeral venue nobody else will ever connect to.
-
-WHY BOTH EXIST, and this is the whole of it: server mode is the path to running
-50-plus simulations at once under future performance work, where 50-plus
-separate venue processes would choke. Transient mode survives for UX convenience
-only. No other reason, and neither mode is a statement about isolation,
-determinism or test fidelity.
+## Havoc posting convention (owner, 2026-08-20)
 
 HAVOC KNOBS ARE PER-ACCOUNT, POSTED ON CONNECT, AND CONSTANT FOR THAT
 CONNECTION. That is how every consumer drives the venue. The venue does NOT
@@ -3019,27 +3076,6 @@ considered and declined: nobody does it, and the convention is cheaper to state
 than to police. Several entries above read as live hazards ONLY under the
 assumption this convention does not hold, the pending-arm shed cap and the
 unordered application of concurrent arms among them.
-
-## `reference/glossary.md` IS MISSING MOST OF THE ACCOUNT VOCABULARY
-
-It carries no entry for venue, account, client, connection, session, passenger,
-seat, eviction, divergence or strategy, nor for the two venue MODES recorded
-above - which is most of the vocabulary a reader needs to follow the entries in
-this file. The water-side terms (run, river, boat, boatyard, tape, warmup) are
-covered and good.
-
-Raised 2026-08-20 after an owner conversation ran aground twice on the missing
-words; the owner declined the additions at that time, so this is a standing gap
-rather than a queued task. Whoever next works that file is the one to close it.
-
-FIXED IN THE SAME PASS, and recorded because the fix is the argument for the
-rest: the `Ledger` entry claimed "the single `mogwai-engine` instance owned by
-the run", acted on by "every socket, whatever symbol it bound". Both halves were
-false - `Run::passengers` maps an account id to a `Passenger` owning its own
-engine, and `mogwai-cli`'s `two_accounts_on_one_venue_do_not_share_a_ledger` had
-been asserting the opposite of the entry. A leftover from before multi-account,
-sitting in the one folder whose contents must be true, and it made the whole
-account model read backwards.
 
 ## Notes / gotchas
 

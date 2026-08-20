@@ -150,8 +150,9 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let cancelled = engine.cancel_unreadable_orders(&readable, venue_now);
                 if !cancelled.is_empty() {
                     let shape = engine.book_shape();
-                    deliver(
+                    deliver_produced(
                         &sweep.run,
+                        passenger.account_id.as_str(),
                         &shape,
                         &cancelled,
                         cancelled.len(),
@@ -379,7 +380,15 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     let shape = engine.book_shape();
                     drop(engine);
                     if !events.is_empty() {
-                        deliver(&sweep.run, &shape, &events, emitted, originated, to_ns);
+                        deliver_produced(
+                            &sweep.run,
+                            passenger.account_id.as_str(),
+                            &shape,
+                            &events,
+                            emitted,
+                            originated,
+                            to_ns,
+                        );
                     }
                     // A TERMINATING breach on the venue's ONLY account ends the
                     // run: its one account is dead, so there is nothing left to
@@ -640,6 +649,27 @@ fn apply_engine_pass_on_clock(
 /// sizing per connection would mean walking the ownership table once per lane
 /// before knowing what to reserve, and a refusal costs the client only a
 /// requery.
+/// Claim and then deliver a batch one passenger's ledger just produced.
+///
+/// The claim is fused to the delivery so no production site can take one
+/// without the other: a venue-originated order in the batch (a liquidation
+/// the venue minted) has no submitting connection, and the only instant its
+/// account is knowable without ambient delivery context is here, where the
+/// batch is still attached to the passenger whose engine pass produced it.
+/// See [`Run::claim_produced_orders`] for the whole argument.
+fn deliver_produced(
+    run: &Arc<Run>,
+    producer: &str,
+    shape: &mogwai_protocol::sizing::BookShape,
+    events: &[ServerMessage],
+    emitted: usize,
+    originated: usize,
+    ts: u64,
+) {
+    run.claim_produced_orders(events, producer);
+    deliver(run, shape, events, emitted, originated, ts);
+}
+
 fn deliver(
     run: &Arc<Run>,
     shape: &mogwai_protocol::sizing::BookShape,
@@ -663,12 +693,24 @@ fn deliver(
         .map(|event| match crate::run::audience(event) {
             crate::run::Audience::Venue | crate::run::Audience::Unattributable => Route::Everyone,
             crate::run::Audience::Account(account) => Route::Account(account.as_str().to_owned()),
-            // An order the table does not know is venue-originated (a
-            // liquidation), so there is nobody to scope it to and it goes to
-            // everyone.
-            crate::run::Audience::Order(id) => {
-                run.order_owner(id).map_or(Route::Everyone, Route::Account)
-            }
+            // Every order-scoped frame reaching this point is claimed: the
+            // dispatcher claims client submissions at acceptance, and
+            // `deliver_produced` claims venue-originated orders for the
+            // ledger that produced them. A miss is therefore a BUG in whoever
+            // built the batch, not a class of order - reported, then routed
+            // to everyone, because a passenger missing its own fill is still
+            // the worse wrong while the bug lives.
+            crate::run::Audience::Order(id) => run.order_owner(id).map_or_else(
+                || {
+                    tracing::warn!(
+                        venue_order_id = %id,
+                        "an unclaimed order reached swept delivery; its frames were broadcast - \
+                         the production site failed to claim it"
+                    );
+                    Route::Everyone
+                },
+                Route::Account,
+            ),
             // A requester-scoped frame has no business in a swept batch: it
             // belongs to the connection that issued the request, which this
             // path cannot know, and broadcasting it would leak one client's
@@ -712,10 +754,14 @@ fn deliver(
             closed.push(bound.id);
         }
     }
-    // No ownership bookkeeping here, deliberately. A sweep-produced order is one
-    // the VENUE originated (a liquidation), so there is nobody to claim it for,
-    // and a claim is retired when its connection is released rather than when
-    // its order ends - a terminal order still has to be attributable, because
+    // No ownership bookkeeping here, deliberately - but the reason changed in
+    // 2026-08-20 and the old one is recorded so it is not re-derived: this
+    // function used to argue a sweep-produced order had "nobody to claim it
+    // for". It does - the account whose ledger produced it - and
+    // `deliver_produced` claims it BEFORE this function runs, because the only
+    // place the producer is knowable without ambient delivery context is at
+    // production. Delivery itself stays a pure function of the batch. Claims
+    // retire with the ACCOUNT, never on a terminal frame, because
     // `QueryOrders` reports terminal rows by design.
     // A lane whose receiver is gone is a connection that is already tearing
     // down; retiring it here means a wedged socket cannot make every later pass
@@ -915,6 +961,76 @@ mod tests {
         assert!(
             their_rx.held_rx.try_recv().is_err(),
             "a connection that submitted nothing must not learn about another's fill"
+        );
+    }
+
+    /// A venue-originated order's fill reaches only the account whose ledger
+    /// produced it - nobody submitted it, so nothing has claimed it before the
+    /// sweep delivers it.
+    ///
+    /// This was the one deliberate hole in the invisibility property: a
+    /// liquidation order the venue mints has no submitting connection, the
+    /// ownership table missed, and the fill broadcast to every lane. Ruled
+    /// closed 2026-08-20. `deliver_produced` is what the sweep's production
+    /// sites call, so this test drives the same fused claim-then-deliver path
+    /// and MUST NOT claim by hand - the absence of a hand claim is the case
+    /// under test, and reverting the claim inside `deliver_produced` makes the
+    /// stranger's assertion fail.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_venue_originated_fill_reaches_only_the_account_that_produced_it() {
+        let run = crate::run::test_run();
+        let (mine, mut my_rx) = ExecLanes::detached();
+        let (theirs, mut their_rx) = ExecLanes::detached();
+        run.bind_lanes(mine.clone(), "MOGWAI-001", None);
+        run.bind_lanes(theirs.clone(), "MOGWAI-002", None);
+
+        // The shape a risk flatten produces: a venue-minted id under the
+        // reserved prefix, never seen by any dispatcher.
+        let events = vec![ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+            client_order_id: "RISK-BTCUSDT-1".into(),
+            venue_order_id: "V-9".into(),
+            trade_id: "T-9".into(),
+            symbol: mogwai_protocol::Symbol::from("BTCUSDT"),
+            position_id: None,
+            side: Side::Sell,
+            last_qty: Decimal::ONE,
+            last_px: Decimal::from(100),
+            leaves_qty: Decimal::ZERO,
+            commission: Decimal::ZERO,
+            commission_currency: "USDT".into(),
+            liquidity_side: mogwai_protocol::LiquiditySide::Taker,
+            ts_event: 1,
+        })];
+        deliver_produced(
+            &run,
+            "MOGWAI-001",
+            &mogwai_protocol::sizing::BookShape {
+                balances: 1,
+                positions: 1,
+                margins: 1,
+                open_orders: 1,
+                closed_orders: 1,
+                recorded_fills: 1,
+            },
+            &events,
+            1,
+            1,
+            1,
+        );
+
+        assert!(
+            my_rx.held_rx.try_recv().is_ok(),
+            "the liquidated account must receive the fill that closed its position"
+        );
+        assert!(
+            their_rx.held_rx.try_recv().is_err(),
+            "a venue-originated fill must not reach an account it does not concern"
+        );
+        assert_eq!(
+            run.order_owner(&"V-9".into()).as_deref(),
+            Some("MOGWAI-001"),
+            "production must claim the venue-minted order, so later fills and query rows \
+             stay attributed to the account it acted on"
         );
     }
 
