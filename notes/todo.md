@@ -488,21 +488,6 @@ group by any other route has no API for it, and none is owed until one is wanted
   round 1 because it is a rewrite of `run.rs` rather than a fix, and the two
   holes were live.
 
-- `deliver`'S "UNATTRIBUTED MEANS EVERYONE" IS A FALLTHROUGH, NOT A DECLARED
-  CLASS. `run::addressed_account` attributes `AccountState` by the frame's own
-  `account_id` and `addressed_order` scopes the order-owned frames, but
-  anything neither recognizes still reaches every lane - which is exactly how
-  `AccountState` broadcast every account's balances to every socket until
-  2026-08-18. The next ledger-owned frame type joins the broadcast set the same
-  silent way. The fix is an exhaustive match on frame class with no
-  fallthrough, so a new `ServerMessage` variant must be classified as
-  venue-wide or account-owned before it can be delivered at all. A related
-  consequence, refused as a defect in its own right: a foreign lane's byte
-  reservation is derived from the producing passenger's shape, and after the
-  attribution fix that lane never receives the shape-dependent
-  `account_state_max_bytes` summand - so the reservation is over-sized, which
-  is conservative in the only direction that matters and not worth a mechanism.
-
 - `reject_while_closed` JUDGES MARKETABILITY AGAINST THE STATED PRICE while the
   engine judges it against the BAND-DRAWN trigger, so the two can disagree by
   up to the fill band in either direction: an order the server admits as

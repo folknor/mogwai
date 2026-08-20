@@ -631,8 +631,9 @@ fn apply_engine_pass_on_clock(
 /// Order attribution alone left `AccountState` unaddressed, so it fanned to
 /// every lane - and the sweep takes one engine pass per passenger, so an
 /// N-account venue sent each client N snapshots per pass, N-1 of them somebody
-/// else's balances and positions. See [`crate::run::addressed_account`] for what
-/// that costs a client that believes them.
+/// else's balances and positions. Attribution is now [`crate::run::audience`],
+/// an exhaustive classification with no catch-all, so the next ledger-owned
+/// frame variant is a compile error rather than a silent broadcast.
 ///
 /// The reservation is taken against the UNFILTERED batch size, so a connection
 /// reserves for frames it may not receive. Over-reserving is the safe direction:
@@ -649,28 +650,48 @@ fn deliver(
 ) {
     let subject = (!events.is_empty()).then_some(AdmissionSubject::Frame);
     let mut closed = Vec::new();
-    // Resolved once for the batch rather than once per lane: the lookup takes
-    // the run's ownership mutex, and a batch crossing N connections would
+    enum Route {
+        Everyone,
+        Account(String),
+        Drop,
+    }
+    // Resolved once for the batch rather than once per lane: the ownership
+    // lookup takes the run's mutex, and a batch crossing N connections would
     // otherwise take it N times for the same answers.
-    let owners: Vec<Option<String>> = events
+    let routes: Vec<Route> = events
         .iter()
-        .map(|event| {
-            // The frame's own account id first, because it is authoritative and
-            // needs no lookup; the submitting order's owner second, for the
-            // order-scoped frames that carry no account of their own.
-            crate::run::addressed_account(event)
-                .map(|account| account.as_str().to_owned())
-                .or_else(|| crate::run::addressed_order(event).and_then(|id| run.order_owner(id)))
+        .map(|event| match crate::run::audience(event) {
+            crate::run::Audience::Venue | crate::run::Audience::Unattributable => Route::Everyone,
+            crate::run::Audience::Account(account) => Route::Account(account.as_str().to_owned()),
+            // An order the table does not know is venue-originated (a
+            // liquidation), so there is nobody to scope it to and it goes to
+            // everyone.
+            crate::run::Audience::Order(id) => {
+                run.order_owner(id).map_or(Route::Everyone, Route::Account)
+            }
+            // A requester-scoped frame has no business in a swept batch: it
+            // belongs to the connection that issued the request, which this
+            // path cannot know, and broadcasting it would leak one client's
+            // orders, fills or refusals to every other. Dropped loudly - the
+            // defect is in whatever put it here, not in delivery.
+            crate::run::Audience::Requester => {
+                tracing::warn!(
+                    ?event,
+                    "a requester-scoped frame reached swept delivery and was dropped; \
+                     it must be delivered on the issuing lane instead"
+                );
+                Route::Drop
+            }
         })
         .collect();
     for bound in run.bound_lanes() {
         let mine: Vec<ServerMessage> = events
             .iter()
-            .zip(&owners)
-            .filter(|(_, owner)| {
-                owner
-                    .as_deref()
-                    .is_none_or(|owner| owner == bound.account_id)
+            .zip(&routes)
+            .filter(|(_, route)| match route {
+                Route::Everyone => true,
+                Route::Account(owner) => *owner == bound.account_id,
+                Route::Drop => false,
             })
             .map(|(event, _)| event.clone())
             .collect();

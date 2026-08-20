@@ -2110,56 +2110,76 @@ pub(crate) struct BoundLane {
     pub(crate) lanes: ExecLanes,
 }
 
-/// The account a frame is ABOUT when it says so ITSELF, rather than through an
-/// order the run has to look up. `None` means the frame carries no account
-/// identity and attribution falls to [`addressed_order`].
-///
-/// `AccountState` is the whole of it today, and it is not a curiosity: the sweep
-/// runs one engine pass PER PASSENGER, so an N-account venue produces N account
-/// snapshots per pass, each true of exactly one ledger. Attributing them by
-/// order ownership - which is what delivery did before this existed - finds no
-/// order, reads them as venue-wide, and hands every passenger every other
-/// passenger's balances and positions. A consumer has no way to tell: the
-/// snapshot names its account, but a client that was promised one ledger per run
-/// has no reason to check, and the known nautilus adapter deliberately does not.
-/// Sizing off a sibling's equity is the consequence, and it moves capital.
-///
-/// Attribution here is by the frame's OWN field rather than by which passenger
-/// the sweep was iterating, deliberately: delivery is a pure function of the
-/// batch, and a frame that cannot say who it belongs to must not be attributed
-/// by ambient context that a later refactor can silently change.
-pub(crate) fn addressed_account(
-    event: &mogwai_protocol::ServerMessage,
-) -> Option<&mogwai_protocol::AccountId> {
-    match event {
-        mogwai_protocol::ServerMessage::AccountState(state) => Some(&state.account_id),
-        _ => None,
-    }
+/// Who a swept frame is FOR. Every `ServerMessage` variant is classified here,
+/// exhaustively and deliberately: [`audience`] carries no catch-all, so a new
+/// variant does not compile until someone decides who it belongs to. That is
+/// the whole point. Delivery used to attribute by two chained lookups whose
+/// shared default was "unrecognized means everyone", and `AccountState` rode
+/// that default silently - the sweep runs one engine pass PER PASSENGER, so an
+/// N-account venue handed every client N snapshots per pass, N-1 of them
+/// somebody else's balances and positions. A consumer had no way to tell: the
+/// snapshot names its account, but a client promised one ledger per run has no
+/// reason to check, and the known nautilus adapter deliberately does not.
+/// Sizing off a sibling's equity was the consequence, and it moves capital.
+/// The next ledger-owned frame variant would have joined the broadcast set the
+/// same silent way; now it is a compile error instead.
+pub(crate) enum Audience<'a> {
+    /// Genuinely about the VENUE - a completion, a fault, a feed gap, market
+    /// data - and belongs to every connection.
+    Venue,
+    /// Owned by the account the frame itself names. Attribution by the frame's
+    /// OWN field rather than by which passenger the sweep was iterating,
+    /// deliberately: delivery is a pure function of the batch, and a frame that
+    /// can say who it belongs to must not be attributed by ambient context
+    /// that a later refactor can silently change.
+    Account(&'a mogwai_protocol::AccountId),
+    /// Owned by whoever submitted the named order; delivery resolves the owner
+    /// through the run's ownership table. An order the table does not know is
+    /// venue-originated (a liquidation) and goes to everyone.
+    Order(&'a mogwai_protocol::VenueOrderId),
+    /// Order-scoped, but the venue never recognized the order, so there is no
+    /// id to resolve an owner from: a submit rejection, or a modify/cancel
+    /// rejection naming an unknown id. Goes to everyone - right rather than
+    /// merely conservative, because the only connection that could care is the
+    /// one that asked, and it is in that set.
+    Unattributable,
+    /// Belongs to the connection that issued the request - a query reply, an
+    /// admission refusal, a protocol error - which the swept-delivery path
+    /// cannot know. These frames are delivered on the issuing lane at the
+    /// point of refusal or reply and MUST NOT enter a swept batch; delivery
+    /// drops one that does, loudly, because broadcasting it would leak one
+    /// client's orders, fills or refusals to every other.
+    Requester,
 }
 
-/// The order a frame is ABOUT, for account attribution. `None` means the
-/// frame is not order-scoped - a venue fault, a completion - and belongs to
-/// every connection unless [`addressed_account`] claims it for one.
-///
-/// The two `Option<VenueOrderId>` rejections are addressed only when the venue
-/// recognized the order: a rejection naming an id the venue never issued cannot
-/// be attributed, so it goes to everyone. That is right rather than merely
-/// conservative, because the only connection that could care is the one that
-/// asked, and it is in that set.
-pub(crate) fn addressed_order(
-    event: &mogwai_protocol::ServerMessage,
-) -> Option<&mogwai_protocol::VenueOrderId> {
+/// Classify one frame for swept delivery. Exhaustive over `ServerMessage` with
+/// no catch-all - see [`Audience`] for why, and keep it that way.
+pub(crate) fn audience(event: &mogwai_protocol::ServerMessage) -> Audience<'_> {
     use mogwai_protocol::ServerMessage as M;
     match event {
+        M::RunComplete { .. }
+        | M::Heartbeat { .. }
+        | M::FeedLagged { .. }
+        | M::HavocDiagnostic { .. }
+        | M::Trade(_)
+        | M::Quote(_) => Audience::Venue,
+        M::AccountState(state) => Audience::Account(&state.account_id),
         M::OrderAccepted { venue_order_id, .. }
         | M::OrderTriggered { venue_order_id, .. }
         | M::OrderCanceled { venue_order_id, .. }
         | M::OrderExpired { venue_order_id, .. }
-        | M::OrderUpdated { venue_order_id, .. } => Some(venue_order_id),
+        | M::OrderUpdated { venue_order_id, .. } => Audience::Order(venue_order_id),
         M::OrderModifyRejected { venue_order_id, .. }
-        | M::OrderCancelRejected { venue_order_id, .. } => venue_order_id.as_ref(),
-        M::OrderFilled(fill) => Some(&fill.venue_order_id),
-        _ => None,
+        | M::OrderCancelRejected { venue_order_id, .. } => match venue_order_id {
+            Some(id) => Audience::Order(id),
+            None => Audience::Unattributable,
+        },
+        M::OrderFilled(fill) => Audience::Order(&fill.venue_order_id),
+        M::OrderRejected { .. } => Audience::Unattributable,
+        M::AdmissionRejected { .. }
+        | M::OrderStatusSnapshot(_)
+        | M::FillSnapshot(_)
+        | M::ProtocolError { .. } => Audience::Requester,
     }
 }
 
@@ -2281,6 +2301,94 @@ mod tests {
             std::collections::HashMap::new(),
             std::sync::mpsc::channel().0,
         )
+    }
+
+    /// Pins [`audience`]'s verdicts on every discriminating case, so a
+    /// transposition fails by name. The COMPLETENESS half is the compiler's:
+    /// `audience` carries no catch-all, so a new `ServerMessage` variant does
+    /// not build until it is classified, and this test cannot and does not
+    /// try to hold that.
+    #[test]
+    fn every_swept_frame_class_is_attributed_deliberately() {
+        use mogwai_protocol::ServerMessage as M;
+        let order = |venue_order_id: &str| M::OrderAccepted {
+            client_order_id: "C-1".to_string(),
+            venue_order_id: venue_order_id.to_string(),
+            ts_event: 1,
+        };
+        let account = mogwai_protocol::AccountId::parse("ACCT-X").expect("legal id");
+
+        assert!(matches!(
+            audience(&M::RunComplete {
+                sim_now_ns: 1,
+                elapsed_ns: 1
+            }),
+            Audience::Venue
+        ));
+        assert!(matches!(
+            audience(&M::FeedLagged {
+                skipped: 1,
+                sim_now_ns: 1
+            }),
+            Audience::Venue
+        ));
+        assert!(matches!(
+            audience(&M::AccountState(mogwai_protocol::AccountState {
+                account_id: account.clone(),
+                balances: vec![],
+                positions: vec![],
+                margins: vec![],
+                ts_event: 1,
+            })),
+            Audience::Account(id) if id == &account
+        ));
+        assert!(matches!(
+            audience(&order("V-1")),
+            Audience::Order(id) if id.as_str() == "V-1"
+        ));
+        assert!(matches!(
+            audience(&M::OrderCancelRejected {
+                client_order_id: "C-1".to_string(),
+                venue_order_id: Some("V-2".to_string()),
+                reason: "illegal".to_string(),
+                ts_event: 1,
+            }),
+            Audience::Order(id) if id.as_str() == "V-2"
+        ));
+        assert!(matches!(
+            audience(&M::OrderCancelRejected {
+                client_order_id: "C-1".to_string(),
+                venue_order_id: None,
+                reason: "unknown order".to_string(),
+                ts_event: 1,
+            }),
+            Audience::Unattributable
+        ));
+        assert!(matches!(
+            audience(&M::OrderRejected {
+                client_order_id: "C-1".to_string(),
+                reason: "no".to_string(),
+                ts_event: 1,
+            }),
+            Audience::Unattributable
+        ));
+        assert!(matches!(
+            audience(&M::OrderStatusSnapshot(
+                mogwai_protocol::OrderStatusSnapshot {
+                    request_id: "R-1".to_string(),
+                    orders: vec![],
+                    ts_event: 1,
+                }
+            )),
+            Audience::Requester
+        ));
+        assert!(matches!(
+            audience(&M::ProtocolError {
+                reason: "bad frame".to_string(),
+                ts_event: 1,
+            }),
+            Audience::Requester
+        ));
     }
 
     /// The planned-completion shutdown waits on a LIVE SESSION and not merely
