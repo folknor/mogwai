@@ -2522,6 +2522,137 @@ mod tests {
             .expect("a new cadence on a river nobody is riding is not a conflict");
     }
 
+    /// AN EVICTION-RECONNECT CARRIES A SCAN FRONTIER OFF A CURSOR THAT IS GONE.
+    ///
+    /// `resume` re-bases every surviving order's frontier onto the binding
+    /// boat's clock, and it does so only for a RETURNING account - one it found
+    /// frozen. Eviction deliberately defeats that test: `ws_upgrade` counts the
+    /// newcomer onto the account BEFORE closing the incumbent, so the account
+    /// never goes unattended and `resume` sees `returning == false`.
+    ///
+    /// For the case that ordering was aimed at - a client reconnecting on the
+    /// same river - nothing is lost, because the newcomer boards the same boat
+    /// and the cursor never rewound. The gap is the CROSS-RIVER claim: the
+    /// newcomer boards a different `BoatKey`, the incumbent's ticket drops, and
+    /// the departed river's boat is torn down with its worker. A boat placed
+    /// over that river again starts at the yard's origin - `BoatKey` carries no
+    /// placement nonce, so it is the same key and `is_seated_on` still passes -
+    /// while the order's frontier sits wherever the FIRST cursor reached. The
+    /// sweeper then judges that order only on ticks after a bound in the new
+    /// cursor's future, so it rests unscanned until the new cursor has covered
+    /// the whole of the first session again.
+    ///
+    /// Pinned here rather than on a socket because the symptom is a STALL whose
+    /// length is the previous session's, and an absence assertion over a `/ws`
+    /// drain would be satisfied for free by a truncated one. The frontier is
+    /// the thing itself.
+    #[tokio::test]
+    async fn an_eviction_reconnect_keeps_a_frontier_from_the_departed_cursor() {
+        let run = run(1_000, 400, None);
+        let account = mogwai_protocol::AccountId::parse("FRONTIER-001").unwrap();
+        let symbol = Symbol::from("BTCUSDT");
+        let key = boat_key(&run, "BTCUSDT", 1.0);
+
+        let passenger = seat(&run, &account, Some("alpha"));
+        let incumbent_admission = run.admit(&passenger);
+        passenger
+            .try_sit(key.clone())
+            .expect("the incumbent boards");
+        let (lanes, _rx) = ExecLanes::detached();
+        let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
+        passenger.attach();
+
+        // A limit far below the tape, so it RESTS rather than filling: the
+        // frontier only exists on an order the sweeper still has to judge.
+        // Accepted at 5_000 on the incumbent's cursor, which is what puts the
+        // frontier there.
+        let accepted_ns = 5_000;
+        run.ensure_instrument(&passenger, "BTCUSDT")
+            .await
+            .expect("the boot river's own symbol resolves");
+        {
+            let mut engine = passenger.engine.lock().await;
+            let events = engine.process(
+                mogwai_protocol::ClientMessage::SubmitOrder(mogwai_protocol::SubmitOrder {
+                    client_order_id: "FRONTIER-ORDER".into(),
+                    symbol: Symbol::clone(&symbol),
+                    position_id: None,
+                    side: mogwai_protocol::Side::Buy,
+                    order_type: mogwai_protocol::OrderType::Limit,
+                    quantity: Decimal::ONE,
+                    price: Some(Decimal::ONE),
+                    trigger_price: None,
+                    trail_offset: None,
+                    limit_offset: None,
+                    reduce_only: false,
+                    post_only: false,
+                    time_in_force: mogwai_protocol::TimeInForce::Gtc,
+                    expire_time: None,
+                    link: None,
+                }),
+                accepted_ns,
+            );
+            // Asserted, not assumed: a refused order rests nothing, and every
+            // assertion below would then hold vacuously over an empty book.
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    mogwai_protocol::ServerMessage::OrderAccepted { .. }
+                )),
+                "the limit was not accepted, so this run says nothing about frontiers: {events:?}"
+            );
+            let open = engine.open_orders();
+            assert_eq!(open.len(), 1, "the limit did not rest: {open:?}");
+            assert_eq!(
+                open[0].scanned_ns, accepted_ns,
+                "an accepted order's frontier starts at its acceptance"
+            );
+        }
+
+        // The newcomer is counted on BEFORE the eviction, which is the ordering
+        // `ws_upgrade` takes and the reason the freeze never fires.
+        let newcomer_admission = run.admit(&passenger);
+        assert_eq!(
+            run.evict_account(account.as_str(), Some("beta")),
+            1,
+            "the incumbent is displaced by a claim under a different session"
+        );
+        // The incumbent's teardown: its lane goes, and its `SocketSession` drop
+        // vacates the seat on the river it was riding. That is the step that
+        // takes the last passenger off that boat.
+        run.release_lanes(incumbent);
+        passenger.unsit(&key);
+        drop(incumbent_admission);
+        assert!(
+            !passenger.is_frozen(),
+            "the newcomer was already counted on, so the account never went unattended - which is \
+             precisely what makes `resume` treat this as a first bind"
+        );
+
+        // The newcomer binds a river of its own, on a cursor at the origin.
+        let resumed_ns = 1_000;
+        let events = run.resume(&passenger, &symbol, resumed_ns).await;
+        assert!(
+            events.is_empty(),
+            "an unfrozen account is not retired, which is the behaviour under test rather than a \
+             surprise: {events:?}"
+        );
+
+        let engine = passenger.engine.lock().await;
+        let frontier = engine.open_orders()[0].scanned_ns;
+        assert_eq!(
+            frontier, accepted_ns,
+            "the frontier was not re-based, so it still names the departed cursor's clock"
+        );
+        assert!(
+            frontier > resumed_ns,
+            "and it sits in the BINDING cursor's future, so every scan window this order is judged \
+             on is empty until that cursor has covered the first session again: frontier \
+             {frontier} against a cursor at {resumed_ns}"
+        );
+        drop(newcomer_admission);
+    }
+
     /// A CLIENT IS NOT A SOCKET. The nautilus host that drives this venue holds
     /// two sockets on one ledger - data and execution - and both name the same
     /// account, so eviction keyed on the bare id made the host's second dial

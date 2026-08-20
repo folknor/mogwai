@@ -395,14 +395,22 @@ group by any other route has no API for it, and none is owed until one is wanted
   pinned by `mogwai-server`'s
   `the_deadline_wait_never_reports_done_before_the_sim_clock_arrives`.
 
-- `ClearDivergences` STILL DOES NOT DRAIN THE ENGINE'S ARMED QUEUE, so an
-  operator has no wire control that disarms a `PartialFillNext`. That is the
-  documented split - `Engine::clear_armed` is crate-local precisely so the wire
-  variant's contract is not widened by accident - and the round-2 venue-arm
-  record MIRRORS the omission rather than fixing it, so a ledger minted after a
-  clear holds exactly what a seated one holds. Whether the wire should get a
-  full reset is a product call nobody has taken; if it does, `ArmRecord::engine`
-  is cleared in the same change or the two halves diverge.
+- CLOSED 2026-08-20 BY OWNER RULING: `ClearDivergences` DOES NOT DRAIN THE
+  ENGINE'S ARMED QUEUE, AND STAYS THAT WAY. `Engine::clear_armed` remains
+  crate-local so the control plane's contract is not widened by accident, and
+  the venue-arm record MIRRORS the omission, so a ledger minted after a clear
+  holds exactly what a seated one holds. The grounds: havoc knobs are
+  per-account configuration POSTED ON CONNECT and constant for that connection,
+  so nothing is queued in the engine at the moment a clear could arrive and a
+  full reset and a partial one are the same operation in every real usage.
+  Widening it would let the control plane reach engine state it currently
+  cannot, and would put `ArmRecord::engine` under a sync obligation, in exchange
+  for a difference nobody observes.
+  THE ENTRY USED TO SAY "the wire variant", which reads as the client socket.
+  It is the CONTROL PLANE - `POST /control/divergence` - and the misreading is
+  most of why this looked like a consumer-facing defect. The convention and the
+  fact that the venue does NOT enforce it are stated at the route registration
+  in `mogwai-server`'s `serve.rs`.
 
 - ENGINE-ARM APPLICATION ORDER IS UNORDERED ACROSS CONCURRENT CONTROL REQUESTS.
   `Run::arm` records under the passenger map lock, but the engine half is applied
@@ -423,19 +431,43 @@ group by any other route has no API for it, and none is owed until one is wanted
   public accessor or a socket-level test that fills on a late-connecting
   account and reads the commission; neither was worth a public API in round 2.
 
-- OWNER CALL: SHOULD AN EVICTION-RECONNECT RETIRE THE BOOK IT TAKES OVER? The
-  `notes/bugs-server.md` round-1 fixes count a newcomer onto an account BEFORE
-  the incumbent is evicted, so the account never freezes in that window and
-  `resume` sees `returning == false`: an eviction-reconnect now gets no
-  `retire_off_river` and no `rebase_scans`, deterministically. That is right for
-  the case it was aimed at - a client's own reconnect, where retiring would
-  discard a live book - and it silently changes the STRANGER case, where a
-  claimer connecting on a different symbol inherits the previous session's
-  off-river position rather than having it retired. Before the fix the outcome
-  was a race, so no behaviour was lost; what is owed is a ruling on whether the
-  stranger case wants the retirement back, which would need eviction to be
-  distinguishable from reconnection at `resume` rather than inferred from the
-  freeze. Stated in `reference/architecture.md` as it stands.
+- AN EVICTION-RECONNECT CARRIES A SCAN FRONTIER OFF A CURSOR THAT IS GONE.
+  Restated 2026-08-20; the entry used to ask whether an eviction-reconnect
+  should RETIRE the book it takes over, and that question is withdrawn as
+  unanswerable. It needed the venue to tell a returning client from a stranger
+  presenting the same id, and it cannot: `has_client_on` and `evict_account`
+  compare a session only against the LIVE lanes, an eviction-reconnect happens
+  across a gap where the incumbent's lane is already gone, and a session id is
+  self-asserted with no auth behind it. `Run::evict_account`'s own doc says the
+  two are indistinguishable from the venue's side. Remembering the last session
+  on the passenger would read as a gate and be none.
+  WHAT IS ACTUALLY WRONG IS THE OTHER HALF, and it needs no identity to decide.
+  `resume` re-bases every surviving order's scan frontier onto the binding
+  boat's clock, and does so only for an account it found FROZEN - which was
+  always a proxy for "the cursor went away". The round-1 admission ordering
+  broke the proxy: the newcomer is counted on before the incumbent is closed,
+  deliberately, so `returning == false` on every eviction-reconnect.
+  Same-river reconnect is unharmed, because the newcomer boards the same boat
+  and nothing rewound. The CROSS-RIVER claim is the gap: the newcomer boards a
+  different `BoatKey`, the incumbent's ticket drops, that river's boat is torn
+  down with its worker, and a boat placed over that river again starts at the
+  yard's origin. `BoatKey` carries no placement nonce, so it is the same key and
+  `is_seated_on` still passes, while the order's frontier names wherever the
+  FIRST cursor reached - so the sweeper judges that order on windows that are
+  empty until the new cursor has covered the whole first session again.
+  Retirement is NOT part of this: `retire_off_river` retires what sits off the
+  bound river, and an order on it is untouched even when the retirement is
+  forced.
+  DEMONSTRATED, not argued, by `mogwai-server`'s
+  `an_eviction_reconnect_keeps_a_frontier_from_the_departed_cursor`, which pins
+  the frontier at the departed cursor's 5_000 against a binding cursor at 1_000.
+  Bite-checked by forcing `returning` true, which fires that assertion and no
+  other.
+  THE FIX IS A PLACEMENT NONCE on `Boat`, recorded alongside what the passenger
+  holds, so `resume` gates on cursor identity rather than on the freeze. It also
+  lets the stale-seat hazard `ws.rs` currently defends against by drop ordering
+  rest on identity instead. `reference/architecture.md` states the old framing
+  and is owed the correction.
 
 - THE ABANDONED-UPGRADE PATH HAS NO SOCKET-LEVEL TEST, and no client behaviour
   found so far reaches it. `Passenger::admitted` exists for the upgrade a client
@@ -484,9 +516,18 @@ group by any other route has no API for it, and none is owed until one is wanted
   which stops a zero settlement price crediting `Decimal::MAX` to the balance
   and is the conservative reading, but it is a choice: the alternative is
   REFUSING a zero price on an inverse instrument upstream, at `settle` and at
-  the fill, so an unpriceable position cannot exist at all. That is a statement
-  about what the venue permits rather than about arithmetic, so it wants an
-  owner ruling before either is called settled.
+  the fill, so an unpriceable position cannot exist at all.
+  RULED 2026-08-20, in three parts, on what real venues do rather than on
+  arithmetic. `settle` REFUSES a non-positive price on an `Inverse` instrument:
+  a caller handing one over is supplying something no index construction could
+  produce, since a mark is a median-with-outlier-rejection across venues and a
+  settlement a TWAP of that. ORDER ENTRY REFUSES a non-positive price on any
+  instrument, which is where every venue puts it and what makes a zero fill
+  unreachable rather than handled. `position_unrealized_checked`'s zero answer
+  STAYS as a backstop under a now-unreachable case, rather than being the
+  policy. Refusing AT THE FILL was considered and rejected: by then the tape has
+  already produced the print, and aborting the serving path over it is the one
+  thing no venue does.
 
 - `projected_qty` TAKES A BARE QUANTITY, so an incoming order that is itself one
   leg of an `Oco` pair is counted ADDITIVELY against the exclusive group it
@@ -539,8 +580,17 @@ group by any other route has no API for it, and none is owed until one is wanted
   ranges and every other family's latent has a floor; these two are the odd ones
   out. The fix is an ADMISSION bound in `ArrivalConfig::is_valid` and
   `GeneratorScalars::validate`, which moves no byte of any tape a bounded config
-  produces and needs no chart gate. NOT LANDED because refusing a config that
-  today works is a product decision. Note the blast radius is small: no shipped
+  produces and needs no chart gate. RULED 2026-08-20: BOUND THEM. The 3.6 ms
+  case is the dangerous one precisely because it does not fail - it succeeds,
+  permanently slower, on every draw, which is a cost an operator would never
+  diagnose; every other family in the same enum already carries two-sided
+  ranges, so these two are the ones that were missed rather than a liberty
+  granted; and nothing in the tree reaches these values, so the bound costs
+  nobody anything today and turns a silently slow venue into a named refusal.
+  THE CEILING IS NOT YET CHOSEN and must not be picked by eye: `sigma_y` 8 is
+  already pathological and 12 unusable, which is three data points, so the
+  intermediate values are measured first and the number comes from that.
+  Note the blast radius is small: no shipped
   preset declares an arrival family at all, so this is reachable only from an
   operator `generator.arrival` override and from the lab's screen. Filed
   2026-08-19 by the `bugs-data` round-3 fix pass; the measured table and the
@@ -565,16 +615,6 @@ group by any other route has no API for it, and none is owed until one is wanted
   crate, where `GeneratedSource`'s equivalent failures go through `TickFault`.
   The moment a composed river is served, that panic is a serving-path abort.
   Giving the composer a `TickFault` closes both halves at once.
-- COMPOSED PRICES CAN SIT ON A RAIL WITH NOBODY WATCHING. The composer now
-  clamps its running level to `[tick, MID_CEILING]` and counts the hits
-  (`SegmentSource::clamps`, printed as `composed_price_clamps=` by
-  `mogwai segments tape`), but nothing REFUSES a tape that spent most of its
-  length pinned - and past the first clamp the printed prices are the rail
-  rather than the integrated walk, which is a different tape than the one the
-  library describes. The counter is the observable; the policy question -
-  whether a long clamped run is a bad library, a bad `start_price`, or a
-  legitimate deep drawdown - is an owner call and has not been made. Filed
-  2026-08-19 alongside the clamp itself.
 - NOTHING ROUTES A NEW WALL-CLOCK BUDGET INTO THE `timing` SWEEP, and the
   workspace has already paid for this shape once. `brokkr.toml` states the
   standing policy for a latency assertion - `#[ignore]` at the source, an entry
@@ -607,13 +647,14 @@ group by any other route has no API for it, and none is owed until one is wanted
   served, and cannot be ordered. Nothing in this tree does that - every shipped
   preset and test config is inside the alphabet - so this is a latent
   inconsistency rather than a live defect.
-  IT IS AN OWNER-LEVEL QUESTION BECAUSE THE ANSWER IS A POLICY: the alphabet
-  exists so a symbol can be concatenated into a URL without percent encoding, and
-  `AGENTS.md` says the instrument set is OPEN and the venue does not gate on it.
-  Tightening config to the same alphabet makes one sentence true everywhere and
-  narrows what an operator may list; leaving it means the venue can serve a tape
-  under a symbol no client can trade or fetch over HTTP. Whichever way it goes,
-  the two validators should stop being able to disagree silently.
+  RULED 2026-08-20: TIGHTEN CONFIG TO THE SAME ALPHABET. The alphabet exists so
+  a symbol can be concatenated into a URL without percent encoding, and one rule
+  read by both validators is what stops them disagreeing silently. It refuses
+  nothing anyone does today - every shipped preset and test config is already
+  inside it - and it makes `AGENTS.md`'s open-instrument-set sentence true
+  everywhere rather than true on one side of a boundary. The alternative,
+  leaving the venue able to serve a tape under a symbol no client can trade or
+  fetch over HTTP, buys an operator freedom nobody has asked for.
   THE SURFACE WIDENED ON 2026-08-19 and the defect did not change: the engine's
   `on_submit_group` now CALLS `mogwai_protocol::validate_submit_group`, which
   reaches the same wire-symbol alphabet, so a group naming such a symbol is now
@@ -2839,6 +2880,52 @@ mechanism: a legitimately empty window still costs them a fatal halt, and one of
 the two things that would help is blocked on the same nautilus gap as our
 `FeedLagged` item - an empty historical response carries no feed identity, so it
 cannot be attributed.
+
+## The two modes, and the vocabulary they are owed (owner, 2026-08-20)
+
+Stated by the owner and recorded here because nothing in the tree says it. Both
+entries are owed to `reference/glossary.md` when that file is next worked on.
+
+SERVER MODE is launched by `mogwai serve` on the command line and produces a
+long-lasting venue that accepts connections from as many accounts as the user
+wants. THE ACCOUNT ID IS THE DISCRIMINATOR: no account sees any other. Strategies
+launched under the same account share that account's ledger regardless of
+instrument. Every boot-time config - havoc knobs, budgets, speed - applies
+equally to every strategy run under that account. `mogwai serve` returns its
+connection parameters on stdout, and those go into the consumer's config
+explicitly.
+
+TRANSIENT MODE is launched by `ba live` on a config TOML carrying no connection
+parameters. It launches an ephemeral venue nobody else will ever connect to.
+
+WHY BOTH EXIST, and this is the whole of it: server mode is the path to running
+50-plus simulations at once under future performance work, where 50-plus
+separate venue processes would choke. Transient mode survives for UX convenience
+only. No other reason, and neither mode is a statement about isolation,
+determinism or test fidelity.
+
+HAVOC KNOBS ARE PER-ACCOUNT, POSTED ON CONNECT, AND CONSTANT FOR THAT
+CONNECTION. That is how every consumer drives the venue. The venue does NOT
+enforce it - `POST /control/divergence` accepts an arm at any instant, including
+against an account mid-connection, and answers 202 - and the gap is stated at
+the route registration in `mogwai-server`'s `serve.rs`. Enforcement was
+considered and declined: nobody does it, and the convention is cheaper to state
+than to police. Several entries above read as live hazards ONLY under the
+assumption this convention does not hold, the pending-arm shed cap and the
+unordered application of concurrent arms among them.
+
+## `reference/glossary.md` STATES A FALSE THING ABOUT LEDGERS
+
+Its `Ledger` entry says "the single `mogwai-engine` instance owned by the run"
+and that "every socket, whatever symbol it bound, acts on that one ledger".
+Neither half is true: `Run::passengers` maps an account id to a `Passenger`, and
+each `Passenger` owns its own `engine`, built per account by `template_engine`.
+`mogwai-cli`'s `two_accounts_on_one_venue_do_not_share_a_ledger` asserts the
+opposite of the entry. A leftover from before multi-account, and it sits in the
+one folder whose contents must be true. Found 2026-08-20 while looking for
+vocabulary; the glossary also carries no entry for venue, account, client,
+connection, session, passenger, seat, eviction, divergence or strategy, which is
+most of the vocabulary a reader needs to follow the entries in this file.
 
 ## Notes / gotchas
 

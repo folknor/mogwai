@@ -340,6 +340,23 @@ async fn serve_async(
         .route("/clock", get(clock))
         .route("/ws", get(ws_upgrade))
         .route("/accounts", post(http::open_account))
+        // HAVOC IS PER-ACCOUNT CONFIGURATION, POSTED ON CONNECT, AND CONSTANT
+        // FOR THAT CONNECTION. An account's knobs arrive as it connects and do
+        // not change again while it is connected; no consumer arms a divergence
+        // against an account already trading, and no strategy ever sees its
+        // knobs move underneath it.
+        //
+        // THE VENUE DOES NOT ENFORCE THIS, and the gap is stated rather than
+        // implied: this route accepts an arm at any instant of a run, including
+        // against an account mid-connection, and answers 202 for it. The
+        // constraint is a convention held by the callers, so an operator who
+        // POSTs late gets live mutation and the venue will not say otherwise.
+        //
+        // Recorded here because the endpoint is where someone looks before
+        // arming something, and because several open items elsewhere - the
+        // pending-arm shed cap, the unordered application of concurrent arms -
+        // read as live hazards only under the assumption this convention does
+        // not hold.
         .route("/control/divergence", post(arm_divergence))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(BIND_ADDR).await?;
