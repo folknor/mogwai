@@ -1808,7 +1808,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.30.0",
- "toml",
  "tungstenite 0.30.0",
 ]
 

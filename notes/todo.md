@@ -324,24 +324,6 @@ group by any other route has no API for it, and none is owed until one is wanted
   guard is three lines and its consequence is a refusal rather than a wrong
   answer.
 
-- NOTHING GATES A TEST WRITING TO A RELATIVE `target/`. The `bugs-cli` round-1
-  fix pass closed three instances (two in `mogwai-cli`'s `arrival_control`
-  unit tests, one in `mogwai-lab`'s `the_control_walk_pair_replays_one_tape`)
-  and swept the two shadow directories they had accumulated in
-  `crates/mogwai-cli/target/` and `crates/mogwai-lab/target/`. A unit test's
-  working directory is its crate, so such a path is invisible to `git status`
-  (the root `.gitignore`'s bare `target` matches at any depth) and untouched by
-  `cargo clean` (cargo's target dir is at the workspace root). The helpers are
-  in place - `mogwai_lab::storage::unit_test_scratch` and
-  `mogwai_cli::test_paths::scratch_dir` - but nothing detects a fourth
-  instance, so it is found by looking or not at all. The
-  `no_test_declines_to_assert_on_a_missing_input` scanner beside
-  `no_test_binary_writes_a_committed_fixture` in
-  `crates/mogwai-cli/tests/gate_skip_list.rs` is where such a check would go;
-  the hard part is distinguishing a relative `target/` in a test from an
-  `--out` default a production function legitimately carries, which is why it
-  was not written blind.
-
 - `try_reserve_boundary_frames` TAKES A `usize` AND DOES `frames.max(1)`, which
   is an unreachable state made harmless rather than unrepresentable. Round 3 of
   `notes/bugs-server.md` refused it as a defect - every `refuse_all` call site

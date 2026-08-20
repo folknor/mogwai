@@ -59,16 +59,20 @@ features = ["hotpath-alloc"]
 # decision - a wall-clock contract excluded from the debug gate BECAUSE the
 # release sweep evaluates it - and they have to agree.
 #
-# THAT AGREEMENT IS CHECKED NOW, by
-# `every_release_only_filter_is_skipped_by_the_gate` in
-# `crates/mogwai-cli/tests/gate_skip_list.rs`, and it is resolved AGAINST THE
-# TESTS rather than by comparing the two strings. Comparing them as substrings
-# is either slack or wrong - `skip.contains(filter)` is satisfied by any
-# unrelated long skip entry, and the sound converse refuses the pair below,
-# where the `only` filter is deliberately the shorter of the two. What is
-# actually owed is that every test this filter catches is excluded by some skip
-# entry, which is what the check asserts. It also refuses an `only` filter that
-# matches no test, since that lane would then evaluate nothing.
+# WHAT ENFORCES THE AGREEMENT, and what does not. A Rust test used to hold the
+# two lists against each other by reconstructing every test name from source;
+# it was deleted on 2026-08-20 when the tool grew the checks it was standing in
+# for. What the tool now guarantees is the half that bites: a test this `only`
+# filter runs which the gate does NOT skip is an ORPHANED PAIR, because the gate
+# would then be evaluating a wall-clock contract in a debug lane, and a filter
+# matching no test at all is a DEAD FILTER. Both are resolved against libtest's
+# own enumeration.
+#
+# The remaining direction - that the two lists were WRITTEN from one decision -
+# is a claim about intent and nothing checks it. Comparing them as substrings
+# never could: `skip.contains(filter)` is satisfied by any unrelated long entry,
+# and the sound converse refuses the pair below, where the `only` filter is
+# deliberately the shorter of the two.
 [[check]]
 name = "timing"
 profile = "release"
@@ -167,13 +171,14 @@ include_ignored = true
 # a prefix is only safe while every test that shares it stays ignored, which
 # is a property of files this file cannot see.
 #
-# IT IS ENFORCED NOW, by `crates/mogwai-cli/tests/gate_skip_list.rs`. It reads
-# the list below, reconstructs every test name under `crates/*/src` and
-# `crates/*/tests` from the source text, and fails naming both the pattern and
-# the non-ignored test it swallowed - a direct statement, where the coverage
-# audit could only report the downstream orphan. It also refuses a DEAD entry,
-# one matching no test at all, because a name that drifted has stopped
-# excluding whatever it was written for.
+# IT IS ENFORCED BY THE TOOL ITSELF, in two places, and no longer by a Rust
+# test that reconstructed every name in the workspace from source text. A
+# pattern swallowing a live test leaves an ORPHANED PAIR; a pattern matching
+# nothing at all is a DEAD FILTER, named with the block that declared it and
+# judged over the union of the sweeps that block applies to. Both read libtest's
+# own enumeration, so neither can go blind to a declaration form the way the
+# hand-written scanner did - it could not see macro-generated tests for a while,
+# and a scanner that sees nothing agrees with every list there is.
 [test.profiles.gate]
 description = "Everything, including the socket-backed adapter tests"
 sweeps = ["workspace", "instrumented"]

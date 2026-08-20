@@ -13,7 +13,7 @@
 //!   read was guarded by an existence check with an early return, the test
 //!   asserted NOTHING on every run it ever made, while reporting green.
 //!   [`repo_root`] is what such a test joins against, and
-//!   `gate_skip_list.rs`'s `no_test_declines_to_assert_on_a_missing_input`
+//!   `test_hygiene.rs`'s `no_test_declines_to_assert_on_a_missing_input`
 //!   holds the class shut.
 //! - A test WRITING to a relative `target/` lands in
 //!   `crates/mogwai-cli/target/`, which the root `.gitignore` hides - its bare

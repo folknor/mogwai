@@ -256,7 +256,7 @@ fn a_claim_flanked_by_multi_byte_characters_is_quoted_rather_than_panicking() {
 
 /// The walk is exercised against a SCRATCH TREE, never against the repository:
 /// planting a symlink cycle in the tree the suite is being judged against is
-/// the defect `gate_skip_list::no_test_binary_writes_a_committed_fixture`
+/// the defect `test_hygiene::no_test_binary_writes_a_committed_fixture`
 /// forbids, and the walk takes a path precisely so it can be driven somewhere
 /// else. The name carries the pid, so two sweeps of this binary running at once
 /// cannot collide.
