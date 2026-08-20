@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::{
+    collections::VecDeque,
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
-use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{ClientMessage, ConnHavoc, ServerMessage, SimClock};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
@@ -353,6 +353,23 @@ pub(crate) type RunIdentityCheck = std::sync::Arc<
     dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
 >;
 
+/// Drives one client socket for the life of the client: dial, reattach,
+/// pump, disconnect, redial.
+///
+/// `on_undelivered` IS NOT OPTIONAL MACHINERY, and the reason is the whole of
+/// finding 5. `send_command` pushes onto an unbounded channel a separate writer
+/// task drains, so an `Ok` from it means ACCEPTED FOR WRITING and nothing more.
+/// When the socket drops, the writer is aborted with whatever it had not yet
+/// written, and a submit, cancel, modify or query in that window used to vanish
+/// with no error anywhere: the caller had already been told `Ok`, so nothing
+/// synthesized a terminal event and the order sat `Submitted` forever.
+///
+/// So every command that was accepted and NOT written is handed back through
+/// this callback, exactly once, in the order it was queued. This adapter
+/// deliberately does NOT replay them onto the next generation's socket:
+/// re-submitting orders across a reconnect is a policy call a venue adapter has
+/// no business making silently on a host's behalf. Telling the caller is not
+/// optional; deciding for it is.
 pub(crate) async fn run_ws_connection<
     Cmd,
     Serialize,
@@ -361,21 +378,78 @@ pub(crate) async fn run_ws_connection<
     HandlerFut,
     Disconnect,
     DisconnectFut,
+    OnUndelivered,
 >(
     config: WsConnectionConfig,
-    mut cmd_rx: Option<UnboundedReceiver<Cmd>>,
+    cmd_rx: Option<UnboundedReceiver<Cmd>>,
     serialize: Serialize,
     on_connect: OnConnect,
-    mut handler: Handler,
-    mut on_disconnect: Disconnect,
+    handler: Handler,
+    on_disconnect: Disconnect,
+    mut on_undelivered: OnUndelivered,
 ) where
     Cmd: Send + 'static,
-    Serialize: Fn(Cmd) -> ClientMessage + Send + Sync + 'static,
+    Serialize: Fn(&Cmd) -> ClientMessage + Send + Sync + 'static,
     OnConnect: Fn() -> Vec<Cmd> + Send + Sync + 'static,
     Handler: FnMut(ServerMessage) -> HandlerFut + Send + 'static,
     HandlerFut: Future<Output = ()> + Send,
     Disconnect: FnMut() -> DisconnectFut + Send + 'static,
     DisconnectFut: Future<Output = ()> + Send,
+    OnUndelivered: FnMut(Cmd) + Send + 'static,
+{
+    let mut cmd_rx = cmd_rx;
+    run_ws_connection_inner(
+        config,
+        &mut cmd_rx,
+        serialize,
+        on_connect,
+        handler,
+        on_disconnect,
+        &mut on_undelivered,
+    )
+    .await;
+    // THE LOOP'S OWN EXIT IS AN UNDELIVERY TOO. Whatever is still sitting in the
+    // command receiver when this returns - the run completed, the attempt cap
+    // tripped, the identity check refused - is never going to be written by
+    // anybody, because the receiver dies with this frame. Commands sent AFTER
+    // that point need no report here: the sender sees a closed channel and
+    // `dispatch_order` already synthesizes for that case. This drain covers the
+    // window between the last write and the receiver's death, which nothing
+    // else can see.
+    if let Some(rx) = cmd_rx.as_mut() {
+        rx.close();
+        while let Ok(cmd) = rx.try_recv() {
+            on_undelivered(cmd);
+        }
+    }
+}
+
+async fn run_ws_connection_inner<
+    Cmd,
+    Serialize,
+    OnConnect,
+    Handler,
+    HandlerFut,
+    Disconnect,
+    DisconnectFut,
+    OnUndelivered,
+>(
+    config: WsConnectionConfig,
+    cmd_rx: &mut Option<UnboundedReceiver<Cmd>>,
+    serialize: Serialize,
+    on_connect: OnConnect,
+    mut handler: Handler,
+    mut on_disconnect: Disconnect,
+    on_undelivered: &mut OnUndelivered,
+) where
+    Cmd: Send + 'static,
+    Serialize: Fn(&Cmd) -> ClientMessage + Send + Sync + 'static,
+    OnConnect: Fn() -> Vec<Cmd> + Send + Sync + 'static,
+    Handler: FnMut(ServerMessage) -> HandlerFut + Send + 'static,
+    HandlerFut: Future<Output = ()> + Send,
+    Disconnect: FnMut() -> DisconnectFut + Send + 'static,
+    DisconnectFut: Future<Output = ()> + Send,
+    OnUndelivered: FnMut(Cmd) + Send + 'static,
 {
     let WsConnectionConfig {
         ws_url,
@@ -393,10 +467,18 @@ pub(crate) async fn run_ws_connection<
     // seed reaches here; absent a seed we fall back to entropy.
     let mut rng = seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
     let mut attempt = 0u32;
-    // `RunComplete` is a planned terminal state, not a transport failure.  A
-    // clean 1000 close is its socket-level fallback for a reader that loses
-    // the final text frame while the server drains.
-    let mut run_complete = false;
+    // `RunComplete` is a planned terminal state, not a transport failure. A
+    // graceful close naming a terminal REASON is its socket-level fallback for
+    // a reader that loses the final text frame while the server drains.
+    //
+    // THE CODE IS NOT THE SIGNAL. This used to read any WS 1000 as completion,
+    // which permanently disabled reconnect on every graceful close there is -
+    // the venue's own eviction close is 1000, and so is a proxy retiring an
+    // idle socket. `mogwai_protocol::close::classify` reads the reason string
+    // the venue writes; anything it does not recognize falls through to the
+    // ordinary disconnect-and-redial path, which is the safe default because a
+    // needless redial is recoverable and a silently-ended run is not.
+    let mut terminal: Option<mogwai_protocol::close::Terminal> = None;
 
     loop {
         if policy.exhausted(attempt) {
@@ -469,12 +551,38 @@ pub(crate) async fn run_ws_connection<
         // exponential ladder toward the cap.
         connected.store(true, Ordering::Relaxed);
         let (mut writer, mut reader) = ws.split();
-        let (out_tx, mut out_rx) = unbounded_channel::<Message>();
+        let (out_tx, mut out_rx) = unbounded_channel::<(u64, Message)>();
+        // THE RECEIPT BOOK for commands accepted onto `out_tx` and not yet on
+        // the socket. An entry is created before the frame is queued and
+        // retired only by the SAME expression that observed `writer.send` come
+        // back `Ok` - the frontier rule, applied to a write rather than to a
+        // watermark. Whatever survives the writer's abort is exactly the set of
+        // commands the venue never saw, and it is reported below.
+        let unwritten: Arc<StdMutex<VecDeque<(u64, Cmd)>>> =
+            Arc::new(StdMutex::new(VecDeque::new()));
+        let mut next_seq: u64 = 0;
+        let writer_unwritten = Arc::clone(&unwritten);
         let writer_handle = AbortOnDrop::new(tokio::spawn(async move {
-            while let Some(msg) = out_rx.recv().await {
+            while let Some((seq, msg)) = out_rx.recv().await {
                 if writer.send(msg).await.is_err() {
                     break;
                 }
+                // NOTHING MAY AWAIT BETWEEN THE `Ok` ABOVE AND THIS RETIRE.
+                // The retire is what makes the receipt book mean "the venue
+                // never saw this"; an `await` inserted here would be a point
+                // where the task can be aborted with the frame on the wire and
+                // the receipt still standing, which reports a delivered command
+                // as undelivered. A future edit that needs work here must do it
+                // after the retire, not before.
+                lock_unwritten(&writer_unwritten).retain(|(queued, _)| *queued != seq);
+                // ONE SPURIOUS-REJECT WINDOW REMAINS AND IS UNAVOIDABLE: an
+                // abort landing INSIDE `send` after the bytes reached the wire
+                // but before it returns leaves the receipt in place, so the
+                // command is reported undelivered though the venue saw it. That
+                // is the safe direction - the caller is told less happened than
+                // did, never more - and the alternative (retiring before the
+                // send) loses commands silently. It is stated here because it
+                // is invisible at the reporting site.
             }
         }));
         let (in_tx, mut in_rx) = unbounded_channel();
@@ -501,11 +609,14 @@ pub(crate) async fn run_ws_connection<
         // fooled is already immune: `generate_position_status_reports` pulls
         // `GET /account` fresh on every call, so reconciliation reads venue
         // truth regardless of how stale the pushed row has become.
-        for cmd in on_connect() {
-            if send_command(&out_tx, &serialize, cmd).is_err() {
-                break;
-            }
-        }
+        send_reattach_commands(
+            on_connect(),
+            &out_tx,
+            &serialize,
+            &mut next_seq,
+            &unwritten,
+            on_undelivered,
+        );
 
         let mut heartbeat = (conn.heartbeat_interval_ms > 0).then(|| {
             // `interval` starts ready, so its first `tick()` resolves
@@ -524,16 +635,18 @@ pub(crate) async fn run_ws_connection<
         loop {
             let action = tokio::select! {
                 msg = in_rx.recv() => WsAction::Inbound(msg.flatten()),
-                cmd = recv_command(&mut cmd_rx), if !commands_closed => WsAction::Command(cmd),
+                cmd = recv_command(cmd_rx), if !commands_closed => WsAction::Command(cmd),
                 () = heartbeat_tick(&mut heartbeat), if heartbeat.is_some() => WsAction::Heartbeat,
                 () = idle_tick(&mut idle_sleep), if idle_sleep.is_some() => WsAction::Idle,
             };
 
             match action {
                 WsAction::Inbound(inbound) => {
-                    if matches!(&inbound, Some(Ok(Message::Close(Some(frame))) ) if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal)
+                    if let Some(Ok(Message::Close(Some(frame)))) = &inbound
+                        && let Some(kind) =
+                            mogwai_protocol::close::classify(frame.code.into(), &frame.reason)
                     {
-                        run_complete = true;
+                        terminal = Some(kind);
                         break;
                     }
                     if let Some(cause) = disconnect_cause(&inbound) {
@@ -558,10 +671,12 @@ pub(crate) async fn run_ws_connection<
                             // (D.5).
                             match ServerMessage::from_json_str(&text) {
                                 Ok(server_msg) => {
-                                    run_complete |=
-                                        matches!(server_msg, ServerMessage::RunComplete { .. });
+                                    if matches!(server_msg, ServerMessage::RunComplete { .. }) {
+                                        terminal =
+                                            Some(mogwai_protocol::close::Terminal::RunComplete);
+                                    }
                                     handler(server_msg).await;
-                                    if run_complete {
+                                    if terminal.is_some() {
                                         break;
                                     }
                                 }
@@ -577,10 +692,12 @@ pub(crate) async fn run_ws_connection<
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
                             match ServerMessage::from_json_slice(&bytes) {
                                 Ok(server_msg) => {
-                                    run_complete |=
-                                        matches!(server_msg, ServerMessage::RunComplete { .. });
+                                    if matches!(server_msg, ServerMessage::RunComplete { .. }) {
+                                        terminal =
+                                            Some(mogwai_protocol::close::Terminal::RunComplete);
+                                    }
                                     handler(server_msg).await;
-                                    if run_complete {
+                                    if terminal.is_some() {
                                         break;
                                     }
                                 }
@@ -591,7 +708,11 @@ pub(crate) async fn run_ws_connection<
                             }
                         }
                         Ok(Message::Ping(payload)) => {
-                            if out_tx.send(Message::Pong(payload)).is_err() {
+                            // Seq 0 on every non-command frame: pings and pongs
+                            // carry no caller to report an undelivery to, and 0
+                            // is never issued to a command, so a retire that
+                            // matched it could not remove a receipt.
+                            if out_tx.send((0, Message::Pong(payload))).is_err() {
                                 tracing::warn!(
                                     socket = label,
                                     "websocket writer is gone; dropping the connection to re-dial"
@@ -604,7 +725,10 @@ pub(crate) async fn run_ws_connection<
                     }
                 }
                 WsAction::Command(Some(cmd)) => {
-                    if send_command(&out_tx, &serialize, cmd).is_err() {
+                    next_seq += 1;
+                    if let Some(cmd) = send_command(&out_tx, &serialize, cmd, next_seq, &unwritten)
+                    {
+                        on_undelivered(cmd);
                         tracing::warn!(
                             socket = label,
                             "websocket writer is gone; dropping the connection to re-dial"
@@ -616,7 +740,7 @@ pub(crate) async fn run_ws_connection<
                     commands_closed = true;
                 }
                 WsAction::Heartbeat => {
-                    if out_tx.send(Message::Ping(Vec::new().into())).is_err() {
+                    if out_tx.send((0, Message::Ping(Vec::new().into()))).is_err() {
                         tracing::warn!(
                             socket = label,
                             "websocket writer is gone; dropping the connection to re-dial"
@@ -643,10 +767,64 @@ pub(crate) async fn run_ws_connection<
         // just aborted - so it is intentionally ignored.
         writer_handle.abort_and_join().await;
         reader_handle.abort_and_join().await;
+        // The writer is now observably dead, so the receipt book cannot move
+        // again and what it holds is final: every command accepted onto this
+        // socket and never written. Report each, oldest first, then drop the
+        // sender so nothing can file a receipt against a socket that is gone.
+        drop(out_tx);
+        let residue: Vec<Cmd> = lock_unwritten(&unwritten)
+            .drain(..)
+            .map(|(_, c)| c)
+            .collect();
+        if !residue.is_empty() {
+            tracing::warn!(
+                socket = label,
+                commands = residue.len(),
+                "the venue websocket dropped with commands still queued; reporting them \
+                 undelivered rather than replaying them onto the next connection"
+            );
+        }
+        for cmd in residue {
+            on_undelivered(cmd);
+        }
         on_disconnect().await;
         connected.store(false, Ordering::Relaxed);
-        if run_complete {
-            tracing::info!(socket = label, "venue run completed; reconnect disabled");
+        if let Some(kind) = terminal {
+            // Each of these is terminal, and saying WHICH matters to an
+            // operator reading the log: a completed run is the expected end of
+            // a session, while an eviction means another client claimed this
+            // account - a configuration problem, not a finish line.
+            //
+            // WHICH ARM RUNS IS NOT A CLEAN THREE-WAY SPLIT, and pretending it
+            // is would mislead whoever reads these lines. The venue sends a
+            // `RunComplete` TEXT frame ahead of its close on BOTH completion
+            // paths - a finished run and an elapsed passenger duration
+            // (`ws.rs`) - and the inbound-text arm above classifies on that
+            // frame and breaks without reading the close that follows. So an
+            // ordinary duration end logs RUN COMPLETED, and `DurationComplete`
+            // is reached only through the close-frame path, i.e. when the text
+            // frame was lost or never read - which is exactly the fallback that
+            // close reason exists to be. Eviction is the only one of the three
+            // with no text frame at all, so it is always exact.
+            match kind {
+                mogwai_protocol::close::Terminal::RunComplete => {
+                    tracing::info!(socket = label, "venue run completed; reconnect disabled");
+                }
+                mogwai_protocol::close::Terminal::DurationComplete => {
+                    tracing::info!(
+                        socket = label,
+                        "this connection's configured duration elapsed; reconnect disabled"
+                    );
+                }
+                mogwai_protocol::close::Terminal::Evicted => {
+                    tracing::warn!(
+                        socket = label,
+                        "another connection claimed this account and the venue evicted this \
+                         socket; reconnect disabled, because redialling would evict the claimant \
+                         in turn"
+                    );
+                }
+            }
             return;
         }
         // An established connection dropping (peer Close, read error, idle
@@ -684,7 +862,9 @@ async fn recv_command<Cmd>(rx: &mut Option<UnboundedReceiver<Cmd>>) -> Option<Cm
 /// line announcing the disconnect must say what actually happened on the
 /// socket.
 ///
-/// The close CODE is reported, never acted on. A venue fault closes the socket
+/// The close CODE is reported, never acted on HERE - the one close this loop
+/// acts on is classified upstream by `mogwai_protocol::close::classify`, from
+/// the close REASON, and never reaches this function. A venue fault closes the socket
 /// with WS 1011 after a `FeedLagged` frame naming it, and that is deliberately
 /// treated here as an ordinary disconnect: the adapter reconnects, resubscribes,
 /// and carries on with a hole in its history. Making a venue fault terminal end
@@ -710,19 +890,91 @@ fn disconnect_cause(
     }
 }
 
+/// Queues the reattach commands a fresh connection owes the venue, reporting
+/// EVERY one it could not queue - including the ones behind the failure.
+///
+/// TELLING THE CALLER IS NOT OPTIONAL, and that applies to the untried
+/// remainder too. This used to `break` after reporting the single command that
+/// hit a dead writer, dropping the rest of the vector on the floor: the caller
+/// heard about one loss and nothing about the ones after it, which is the same
+/// silent-loss shape the receipt book exists to close. The receipt book cannot
+/// cover these, because a command that was never queued never got a receipt
+/// filed for it, so the remainder is reported here or nowhere.
+///
+/// Stopping at the first failure is still right - the writer is gone and every
+/// later `send_command` would fail identically - so the loop stops TRYING and
+/// keeps REPORTING. `seq` is advanced by reference so the caller's numbering
+/// continues past whatever was queued here.
+fn send_reattach_commands<Cmd, Serialize, OnUndelivered>(
+    commands: Vec<Cmd>,
+    out_tx: &UnboundedSender<(u64, Message)>,
+    serialize: &Serialize,
+    seq: &mut u64,
+    unwritten: &Arc<StdMutex<VecDeque<(u64, Cmd)>>>,
+    on_undelivered: &mut OnUndelivered,
+) where
+    Serialize: Fn(&Cmd) -> ClientMessage,
+    OnUndelivered: FnMut(Cmd),
+{
+    let mut pending = commands.into_iter();
+    while let Some(cmd) = pending.next() {
+        *seq += 1;
+        if let Some(cmd) = send_command(out_tx, serialize, cmd, *seq, unwritten) {
+            on_undelivered(cmd);
+            for remaining in pending {
+                on_undelivered(remaining);
+            }
+            return;
+        }
+    }
+}
+
+/// Encodes `cmd` and queues it for the writer, recording a receipt in
+/// `unwritten` so a socket that dies before the frame is written can say WHICH
+/// commands it swallowed. See `run_ws_connection`'s `on_undelivered`.
+///
+/// Returns the command back on failure rather than dropping it: an encode
+/// failure and a dead writer channel are both undeliveries the caller owes a
+/// report on, and handing the value back is what lets it make one. A `None`
+/// return means the command is now the receipt book's problem.
 fn send_command<Cmd, Serialize>(
-    out_tx: &UnboundedSender<Message>,
+    out_tx: &UnboundedSender<(u64, Message)>,
     serialize: &Serialize,
     cmd: Cmd,
-) -> anyhow::Result<()>
+    seq: u64,
+    unwritten: &Arc<StdMutex<VecDeque<(u64, Cmd)>>>,
+) -> Option<Cmd>
 where
-    Serialize: Fn(Cmd) -> ClientMessage,
+    Serialize: Fn(&Cmd) -> ClientMessage,
 {
-    let msg = serialize(cmd);
-    let payload = serde_json::to_string(&msg).context("encode websocket command")?;
-    out_tx
-        .send(Message::Text(payload.into()))
-        .context("send websocket command")
+    let msg = serialize(&cmd);
+    let Ok(payload) = serde_json::to_string(&msg) else {
+        tracing::error!("dropping a websocket command that would not encode");
+        return Some(cmd);
+    };
+    // The receipt goes in BEFORE the queue, never after: the writer can retire
+    // a seq the instant the frame is queued, and a receipt filed afterwards
+    // would then outlive the write it was meant to cover and be reported as
+    // undelivered when the socket dies.
+    lock_unwritten(unwritten).push_back((seq, cmd));
+    if out_tx.send((seq, Message::Text(payload.into()))).is_err() {
+        let mut book = lock_unwritten(unwritten);
+        if let Some(at) = book.iter().position(|(queued, _)| *queued == seq) {
+            return book.remove(at).map(|(_, cmd)| cmd);
+        }
+    }
+    None
+}
+
+/// The receipt book's lock, recovered on poison. A panicked writer must not
+/// turn every later undelivery into a silent one, which is what propagating
+/// the poison would do.
+fn lock_unwritten<Cmd>(
+    unwritten: &Arc<StdMutex<VecDeque<(u64, Cmd)>>>,
+) -> std::sync::MutexGuard<'_, VecDeque<(u64, Cmd)>> {
+    unwritten
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn idle_sleep(timeout_ms: u64, sim: SimClock) -> Option<Pin<Box<Sleep>>> {
@@ -758,6 +1010,168 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+
+    fn a_cancel(id: &str) -> ClientMessage {
+        ClientMessage::CancelOrder {
+            client_order_id: id.to_string(),
+        }
+    }
+
+    /// `ClientMessage` is not `PartialEq`, and its wire form is the identity
+    /// that matters here anyway: these tests assert WHICH command came back.
+    fn ids_of(msgs: &[ClientMessage]) -> Vec<String> {
+        msgs.iter()
+            .map(|msg| match msg {
+                ClientMessage::CancelOrder { client_order_id } => client_order_id.clone(),
+                other => panic!("unexpected command {other:?}"),
+            })
+            .collect()
+    }
+
+    /// THE RECEIPT BOOK, at the level where its two halves are separable.
+    ///
+    /// `send_command` files a receipt before queueing the frame, and only the
+    /// expression that saw `writer.send` return `Ok` retires it - so a frame
+    /// still sitting in the writer's queue when the socket dies is still in the
+    /// book, which is exactly the set `run_ws_connection` reports undelivered.
+    /// Without the book there is nothing to report: the channel `send` returned
+    /// `Ok` and the command was consumed.
+    #[test]
+    fn a_queued_frame_leaves_a_receipt_until_the_writer_retires_it() {
+        let (out_tx, mut out_rx) = unbounded_channel::<(u64, Message)>();
+        let unwritten: Arc<StdMutex<VecDeque<(u64, ClientMessage)>>> =
+            Arc::new(StdMutex::new(VecDeque::new()));
+        let serialize = |cmd: &ClientMessage| cmd.clone();
+
+        assert!(
+            send_command(&out_tx, &serialize, a_cancel("A"), 1, &unwritten).is_none(),
+            "a live writer channel accepts the command"
+        );
+        assert!(
+            send_command(&out_tx, &serialize, a_cancel("B"), 2, &unwritten).is_none(),
+            "a live writer channel accepts the second command too"
+        );
+        assert_eq!(
+            lock_unwritten(&unwritten).len(),
+            2,
+            "both commands are queued and unwritten, so both hold receipts"
+        );
+
+        // The writer drains and writes only the first frame, then the socket
+        // dies - the abort case, without the abort.
+        let (seq, _) = out_rx.try_recv().expect("the first frame is queued");
+        lock_unwritten(&unwritten).retain(|(queued, _)| *queued != seq);
+
+        let residue: Vec<ClientMessage> = lock_unwritten(&unwritten)
+            .drain(..)
+            .map(|(_, cmd)| cmd)
+            .collect();
+        assert_eq!(
+            ids_of(&residue),
+            vec!["B".to_string()],
+            "only the command the writer never wrote is left to report"
+        );
+    }
+
+    /// A dead writer channel hands the command straight back, so the caller can
+    /// report it rather than believing it was queued.
+    #[test]
+    fn a_command_queued_onto_a_dead_writer_comes_straight_back() {
+        let (out_tx, out_rx) = unbounded_channel::<(u64, Message)>();
+        drop(out_rx);
+        let unwritten: Arc<StdMutex<VecDeque<(u64, ClientMessage)>>> =
+            Arc::new(StdMutex::new(VecDeque::new()));
+        let returned = send_command(
+            &out_tx,
+            &|cmd: &ClientMessage| cmd.clone(),
+            a_cancel("A"),
+            1,
+            &unwritten,
+        );
+        assert_eq!(
+            ids_of(&returned.into_iter().collect::<Vec<_>>()),
+            vec!["A".to_string()],
+            "a dead writer channel hands the command back rather than swallowing it"
+        );
+        assert!(
+            lock_unwritten(&unwritten).is_empty(),
+            "a command handed back is the caller's again, not the book's - reporting it \
+             from both places would double-reject the order"
+        );
+    }
+
+    /// THE COMMANDS BEHIND THE FAILURE ARE UNDELIVERIES TOO.
+    ///
+    /// A dead writer fails the FIRST reattach command, and the rest of the
+    /// vector is never even tried - so no receipt exists for any of them and
+    /// the caller hears about them here or never. Reporting only the one that
+    /// failed is the shape this test exists to forbid: it is indistinguishable,
+    /// from the caller's side, from the others having been delivered.
+    ///
+    /// Both shipped clients pass `Vec::new` today, so this is the only place
+    /// the contract is exercised at all.
+    #[test]
+    fn every_untried_reattach_command_is_reported_not_just_the_one_that_failed() {
+        let (out_tx, out_rx) = unbounded_channel::<(u64, Message)>();
+        drop(out_rx);
+        let unwritten: Arc<StdMutex<VecDeque<(u64, ClientMessage)>>> =
+            Arc::new(StdMutex::new(VecDeque::new()));
+        let mut reported: Vec<ClientMessage> = Vec::new();
+        let mut seq = 7;
+        send_reattach_commands(
+            vec![a_cancel("A"), a_cancel("B"), a_cancel("C")],
+            &out_tx,
+            &|cmd: &ClientMessage| cmd.clone(),
+            &mut seq,
+            &unwritten,
+            &mut |cmd| reported.push(cmd),
+        );
+        assert_eq!(
+            ids_of(&reported),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            "the untried remainder was dropped instead of reported"
+        );
+        assert!(
+            lock_unwritten(&unwritten).is_empty(),
+            "a command handed back is the caller's again, so no receipt may survive - \
+             reporting it twice would double-reject the order"
+        );
+        assert_eq!(
+            seq, 8,
+            "only the command that was actually attempted consumed a sequence number"
+        );
+    }
+
+    /// THE LOOP'S EXIT IS AN UNDELIVERY. Commands still sitting in the command
+    /// receiver when `run_ws_connection` returns die with the receiver, and
+    /// nothing else in this crate can see them: `send_command` never ran, so no
+    /// receipt exists, and the caller was told `Ok` when it enqueued.
+    ///
+    /// `reconnect_max_attempts = 0` is what makes this deterministic rather
+    /// than a race with the select loop - the loop returns at its top without
+    /// ever dialing, so every queued command is guaranteed unread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commands_queued_when_the_loop_gives_up_are_reported_undelivered() {
+        let (cmd_tx, cmd_rx) = unbounded_channel::<ClientMessage>();
+        cmd_tx.send(a_cancel("A")).expect("queue A");
+        cmd_tx.send(a_cancel("B")).expect("queue B");
+        let conn = ConnHavoc {
+            reconnect_max_attempts: Some(0),
+            ..Default::default()
+        };
+        // Port 0 is never dialed: the attempt cap is already spent at the loop
+        // top, so this test binds no socket at all.
+        let undelivered = run_lifecycle_recording(0, conn, cmd_rx).await;
+        let reported = undelivered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            ids_of(&reported),
+            vec!["A".to_string(), "B".to_string()],
+            "every queued command is reported once, oldest first"
+        );
+    }
 
     /// A venue that ANSWERS, correctly, and reports no run is version skew - not
     /// a transport failure, and not a mismatch.
@@ -1002,6 +1416,18 @@ mod tests {
     /// Drives `run_ws_connection` with inert callbacks against a loopback stub.
     async fn run_lifecycle(port: u16, conn: ConnHavoc) {
         let (_cmd_tx, cmd_rx) = unbounded_channel::<ClientMessage>();
+        drop(run_lifecycle_recording(port, conn, cmd_rx).await);
+    }
+
+    /// As `run_lifecycle`, but drives a caller-supplied command receiver and
+    /// returns every command reported UNDELIVERED, in report order.
+    async fn run_lifecycle_recording(
+        port: u16,
+        conn: ConnHavoc,
+        cmd_rx: UnboundedReceiver<ClientMessage>,
+    ) -> Arc<StdMutex<Vec<ClientMessage>>> {
+        let undelivered = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::clone(&undelivered);
         run_ws_connection(
             WsConnectionConfig {
                 ws_url: format!("ws://127.0.0.1:{port}/ws"),
@@ -1013,12 +1439,18 @@ mod tests {
                 identity: None,
             },
             Some(cmd_rx),
-            |cmd: ClientMessage| cmd,
+            |cmd: &ClientMessage| cmd.clone(),
             Vec::new,
             |_msg: ServerMessage| async {},
             || async {},
+            move |cmd: ClientMessage| {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(cmd);
+            },
         )
         .await;
+        undelivered
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1113,6 +1545,108 @@ mod tests {
         .await
         .expect("completion stops lifecycle without reconnecting");
         server.await.expect("completion stub exits");
+    }
+
+    /// A graceful close whose reason this protocol does not define is a
+    /// transport event, not a finish line: the loop must redial.
+    ///
+    /// This is the defect directly. The old arm read `CloseCode::Normal` alone,
+    /// so ANY 1000 - a proxy retiring an idle socket, a venue restart, and the
+    /// venue's own eviction close, which is deliberately 1000 - permanently
+    /// disabled reconnect with an INFO line claiming the run had completed.
+    /// The stub sends a REASONED 1000 whose reason this protocol does not
+    /// define - a proxy's idle close is the everyday shape - and the attempt
+    /// cap is what makes the test terminate: three dials means the loop kept
+    /// redialling, one means it treated the close as terminal.
+    ///
+    /// The reason must be present. `ws.close(None)` sends `Close(None)`, which
+    /// the OLD code did not match either (it required `Close(Some(frame))`), so
+    /// a stub closing with `None` passes against the defect and proves nothing.
+    /// A first draft of this test did exactly that and was caught by its own
+    /// bite-check.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+    async fn an_unreasoned_normal_close_is_redialled_not_read_as_completion() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub listener");
+        let port = listener.local_addr().expect("stub addr").port();
+        let dials = Arc::new(AtomicUsize::new(0));
+        let server_dials = Arc::clone(&dials);
+        let server = tokio::spawn(async move {
+            loop {
+                let mut ws = accept_ws(&listener).await;
+                server_dials.fetch_add(1, Ordering::Relaxed);
+                drop(
+                    ws.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                        reason: "idle connection retired".into(),
+                    }))
+                    .await,
+                );
+            }
+        });
+        let conn = ConnHavoc {
+            reconnect_delay_initial_ms: 10,
+            reconnect_delay_max_ms: 20,
+            reconnect_backoff_factor: 1.0,
+            reconnect_max_attempts: Some(3),
+            ..Default::default()
+        };
+        tokio::time::timeout(Duration::from_secs(5), run_lifecycle(port, conn))
+            .await
+            .expect("the attempt cap must trip");
+        assert_eq!(
+            dials.load(Ordering::Relaxed),
+            3,
+            "an unreasoned 1000 close must redial to the cap; reading the CODE as \
+             completion returns after the first close instead"
+        );
+        server.abort();
+    }
+
+    /// The reason string is what makes a 1000 terminal, and the venue writes
+    /// exactly `mogwai_protocol::close::RUN_COMPLETE`. This is the other half
+    /// of the test above: the same close code, one recognized reason, and the
+    /// loop stops without redialling.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+    async fn a_normal_close_reasoned_run_complete_stops_the_loop() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub listener");
+        let port = listener.local_addr().expect("stub addr").port();
+        let dials = Arc::new(AtomicUsize::new(0));
+        let server_dials = Arc::clone(&dials);
+        let server = tokio::spawn(async move {
+            loop {
+                let mut ws = accept_ws(&listener).await;
+                server_dials.fetch_add(1, Ordering::Relaxed);
+                drop(
+                    ws.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                        reason: mogwai_protocol::close::RUN_COMPLETE.into(),
+                    }))
+                    .await,
+                );
+            }
+        });
+        let conn = ConnHavoc {
+            reconnect_delay_initial_ms: 10,
+            reconnect_delay_max_ms: 20,
+            reconnect_backoff_factor: 1.0,
+            reconnect_max_attempts: Some(3),
+            ..Default::default()
+        };
+        tokio::time::timeout(Duration::from_secs(5), run_lifecycle(port, conn))
+            .await
+            .expect("a reasoned completion close ends the loop");
+        assert_eq!(
+            dials.load(Ordering::Relaxed),
+            1,
+            "the reasoned completion close is terminal: no redial follows it"
+        );
+        server.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]

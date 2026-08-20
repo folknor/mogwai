@@ -23,6 +23,7 @@ mod ready;
 pub mod seeds;
 pub mod sizing;
 
+pub mod close;
 pub mod control;
 /// Launching a venue and learning its endpoint - the launcher half of the
 /// readiness handshake, shipped so consumers do not re-derive it from prose.

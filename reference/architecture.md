@@ -43,6 +43,18 @@ book. `reset_account_on_reconnect` hands it a clean ledger instead, and the
 readiness record reports which way the venue is set so a launcher never has to
 infer it.
 
+THE CLOSE CODE DOES NOT CARRY THE MEANING; THE REASON DOES. `1000` is the
+ordinary code for any graceful close, and this venue sends it for THREE
+different things - a completed run, a passenger whose configured duration
+elapsed, and the eviction above - while a proxy or a load balancer sends it for
+reasons of its own. A client that read the code alone would have to treat all
+four alike, and the adapter did: it read every `1000` as run completion and
+permanently disabled its reconnect. The reason strings are therefore a protocol
+contract rather than log text, and they live in `mogwai_protocol::close`, which
+the venue writes and `close::classify` reads. A reason that module does not
+recognize is NOT terminal, which is the safe default in both directions: a
+needless redial is recoverable, and a run silently declared over is not.
+
 EVICTION IS THE LAST THING AN UPGRADE DOES. Every refusal `/ws` can make - an
 unresolvable shape, an account unfunded in the settlement currency, a
 non-finite speed, a boat that could not be placed, a second cadence on one

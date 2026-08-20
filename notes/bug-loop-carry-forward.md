@@ -5278,3 +5278,195 @@ the relayed broadarrow section belong to round 2.
   TIMING sweep with "zero tests ran". Investigating the lane question did not
   explain it, and it is not a property of the adapter code - it is `-p` scoping
   a filter whose test lives in another package. The unscoped gate is unaffected.
+
+## The adapter-crate document, round 2: the close reason, and the receipt book
+
+THE LAST ROUND OF THE LAST DOCUMENT. Findings 4, 5, 6 and 7 of
+`notes/bugs-adapter.md` plus the relayed broadarrow section - all real, none
+refused, and the document is EXHAUSTED. Nothing here touches tape generation,
+so no `TAPE_PROTOCOL_VERSION` bump is owed.
+
+- A CLOSE CODE IS NOT A SEMANTIC, AND THE SERVER SETTLED IT. Finding 6 was
+  filed half-confident because "does the server ever close 1000 for a
+  non-completion reason" was another hunter's scope - and that hunter's
+  document was closed, so this round read the server instead of leaving it.
+  `mogwai-server`'s `admission::CLOSE_EVICTED` IS LITERALLY `1000`, chosen
+  precisely so a consumer's reconnect ladder would not fire, and `ws.rs` sends
+  1000 on run completion AND on a passenger duration elapsing. Three meanings on
+  two bytes, plus every proxy that closes an idle socket. GENERAL SHAPE WORTH
+  CARRYING: when a finding turns on another component's behaviour and that
+  component's document is closed, READ IT - the half-confidence is usually one
+  grep away from a ruling, and this one took four minutes.
+- THE FIX IS A SHARED MODULE, NOT A STRING SNIFF. `mogwai_protocol::close`
+  carries `NORMAL`, the three reason constants (`EVICTED_PREFIX` is a prefix
+  because the eviction reason names the account), and `classify`. The venue
+  writes its reasons FROM those constants and the adapter reads them THROUGH
+  `classify`, so the two sides cannot drift the way a hand-copied literal on
+  each side would - the same discipline as the `analysis/` conformance fixtures,
+  at a scale where a module is the cheaper form. An unrecognized reason is NOT
+  terminal, which is the safe default in both directions: a needless redial is
+  recoverable, a run silently declared over is not.
+- A CLOSE-FRAME TEST THAT SENDS `ws.close(None)` PROVES NOTHING, and this
+  round's first draft did exactly that. `Message::Close(None)` carries no frame,
+  and the OLD code's `matches!(..., Close(Some(frame)))` required one too - so
+  the test passed against the defect at 3 dials in 0.02 s and looked perfect.
+  Caught only by the bite-check. CARRY IT: when perturbing to bite, check that
+  the perturbed code can actually REACH the assertion; a test exercising an arm
+  neither version changed is vacuous in the most convincing possible way. The
+  test now sends a reasoned 1000 and bites at 1 dial against 3.
+- FINDING 5'S SHAPE IS A RECEIPT BOOK, AND ITS RETIRE IS THE FRONTIER RULE
+  APPLIED TO A WRITE. `send_command` files `(seq, Cmd)` BEFORE queueing the
+  frame, and only the expression that observed `writer.send(..)` return `Ok`
+  retires that seq; whatever survives `writer_handle.abort_and_join()` is
+  exactly the set the venue never saw, and it is reported through
+  `on_undelivered`. Filing the receipt AFTER the queue would be the classic
+  inversion - the writer can retire a seq the instant the frame is queued, so a
+  late receipt outlives the write it covers and is reported as undelivered.
+- THE LOOP'S OWN RETURN IS AN UNDELIVERY TOO, and it is a SECOND hole one layer
+  up that the receipt book alone does not cover: commands still sitting in
+  `cmd_rx` when `run_ws_connection` returns die with the receiver, never having
+  reached `send_command`, so no receipt exists. Closed by wrapping the loop in
+  `run_ws_connection_inner` and draining the receiver at the single exit -
+  cheaper than patching six `return` sites. Commands sent AFTER the return need
+  nothing: the receiver is gone, the sender fails, and `dispatch_order` already
+  synthesizes for that case (AE9).
+- REPORTING IS NOT REPLAYING, and the split is a design ruling. The adapter does
+  NOT re-queue undelivered orders onto the next generation: re-submitting across
+  a reconnect is the host's policy call. Telling the caller is not optional, so
+  order commands take the same synthesized reject as any other transport
+  failure, and an undelivered QUERY retires its pending waiter - which drops the
+  oneshot sender and fails `await_reply` fast instead of parking for the full
+  timeout. `reject_for` has an `unreachable!` for queries, so routing them
+  through `synthesize_transport_reject` would have PANICKED the reader task;
+  `report_undelivered_command` splits them out. Check the callee's unreachables
+  before reusing it from a new call site.
+- FINDING 4 WAS DELETED, NOT PRESERVED, and the ruling is worth stating because
+  `AGENTS.md`'s intake rule cuts the other way for reusable machinery. A resume
+  cursor's QUESTION genuinely cannot recur while subscription is local-only:
+  this client passes `Vec::new` as its reattach hook and the venue pushes the
+  run's one tape unbidden, so there is no `Subscribe` frame for a cursor to ride
+  on. `SubState.start_ts`, `advance_sub_start_ts`, `start_ts_param` and the
+  plumbing are gone; the site now says there is no cursor and that reintroducing
+  one means reintroducing a READER in the same change. That also deletes a mutex
+  acquisition per delivered trade on the hot data path, and the frontier tail
+  (the watermark advanced before `convert::trade_tick` could drop the tick).
+- A FINDING CAN BE CLOSED AS DOCUMENTATION WHEN THE CODE IS RIGHT.
+  `ExecState::prune` genuinely cannot bound a mirror full of OPEN orders, and
+  making it able to would mean forgetting live reconciliation truth - strictly
+  worse than the memory. So the AE6 comment claiming the map is bounded was
+  CORRECTED, and a WARN on each doubling past the cap makes the growth visible
+  to an operator. The honest close of "this claim is false" is sometimes
+  retracting the claim, not making it true.
+- EXTRACT TO BITE. Two finding-7 items were only testable once the decision was
+  pulled out of a function needing a live emitter and a socket:
+  `admit_account_snapshot` (the watermark advances only over a WHOLE snapshot)
+  and `group_id_of` (any leg's link, not leg 0's). Both bite. The alternative
+  was an assertion restating the rule in the test body, which is the vacuous
+  shape this arc keeps catching - the first draft of the `group_id_of` test WAS
+  that, and was rewritten.
+- `peek_group` REPLACES `take_group`: the lookup no longer consumes, so a
+  DUPLICATED `AdmissionRejected` - which `duplicate_prob` exists to produce - is
+  absorbed by `handle_exec_message`'s terminal-state guard instead of taking the
+  "cannot attribute" ERROR path, a log line indistinguishable from a real
+  attribution failure. The ring was already bounded by `REMEMBERED_GROUPS`, so
+  the removal was an early free rather than the bound. And `stop()` now clears
+  the ring, because it is TRANSPORT state: the mirror's orders and account
+  watermark deliberately survive a stop, but a group row exists only to answer a
+  refusal from the socket that just died.
+- THE RELAYED BROADARROW ITEMS WERE VERIFIED, NOT ASSUMED, on the standing
+  suspicion that a relayed item marked fixed goes stale. Both hold:
+  `docs/havoc.md` splits the raw-protocol client from the nautilus one and names
+  the ERROR log as the nautilus channel, which is exactly what `data.rs`'s
+  `FeedLagged` arm does at length; `process_session_id`'s comment derives the id
+  from the `OnceLock`'s first-call instant and says explicitly that this is not
+  the process start.
+- Numbers: full unscoped gate green at 1333 plus 466, 1853 pairs, 1796 run, 57
+  ignored, 0 orphaned, 54.8 s. Both socket suites green in dev. The scoped
+  package check still fails its TIMING sweep with "zero tests ran" - unchanged
+  from round 1, not a property of this code, and the unscoped gate is
+  unaffected.
+- FILED, NOT FIXED: the two near-duplicate history paginators (the drift risk is
+  real, the unification is a refactor) and the `await_account_registered` /
+  `wait_connected` busy-wait shims. Both in `notes/todo.md`. The paginator
+  difference is now STATED at the quote site so nobody closes it by making the
+  two lines identical, which is the wrong unification.
+
+### Round 2's close pass: what the cold review caught, and what it cost
+
+The cold review called the receipt-book design sound and then found three
+instances of THE ARC'S SIGNATURE DEFECT in the round's own work - a thing that
+reads as gated and is not. Instances 42, 43 and 44.
+
+- A DOC COMMENT RAN INTO ITS NEIGHBOUR AND DOCUMENTED THE WRONG FUNCTION. The
+  `peek_group` rationale - why the lookup stops consuming, and the
+  duplicate-refusal argument that is the whole reason for the change - was
+  written without a `fn` under it, so it merged with the block below and became
+  part of `admit_account_snapshot`'s doc, leaving `peek_group` with none. A
+  pure editing accident, invisible to every gate in the workspace, and it
+  buried the single most valuable paragraph the round produced. THE SECOND HALF
+  OF EVERY COMMIT IN THIS ARC IS UNREVIEWED, eleven documents running: prose is
+  the only artifact here with no compiler.
+- A CONSTRUCTOR'S DOC ASSERTED AN INVARIANT THE CONSTRUCTOR DID NOT ENFORCE.
+  `CLOSE_EVICTED`'s comment said "`CloseSpec::evicted` prefixes
+  `EVICTED_PREFIX`". It did not - the prefix was pasted in by hand at the single
+  call site in `run.rs`, and the constructor just truncated whatever it was
+  handed. So the comment was false AND the protocol contract was unenforced:
+  the SECOND call site forgets the prefix, the adapter classifies the close as
+  non-terminal, and it redials into the eviction loop the whole module exists
+  to prevent. Fixed structurally rather than in prose - the constructor now
+  takes the DETAIL and prepends the prefix itself, and prefixes before
+  truncating so the cap is spent on the half that may be dropped. GENERAL FORM:
+  when a comment says a function guarantees something, either the function
+  guarantees it or the comment is a defect; there is no third reading, and the
+  cheap fix is almost always to move the guarantee into the function.
+- AND NOTHING GATED IT END TO END, which is why the first two survived the fix
+  pass. `close.rs`'s own test HAND-BUILT the prefixed reason and `serving.rs`
+  asserted `reason.contains("claimed account")` - true with or without the
+  prefix - so the venue's real bytes were never held against the classifier
+  that reads them. Both halves green, contract pinned on one side only, exactly
+  the shape `AGENTS.md` names for cross-implementation gates. The eviction test
+  now asserts `starts_with(EVICTED_PREFIX)` and
+  `classify(code, reason) == Some(Terminal::Evicted)` on the frame the venue
+  actually sent. Bite-checked by deleting the prefix from the constructor: the
+  `contains` assertion passed and the new one fired, which is the finding
+  demonstrated rather than argued.
+
+Two lessons from this round that should survive the fold into `AGENTS.md`:
+
+- A BITE-CHECK MUST CONFIRM THE PERTURBED CODE CAN REACH THE ASSERTION. The
+  round's first close-frame test closed with `ws.close(None)`, sending
+  `Message::Close(None)` - which the OLD code did not match either - so it
+  passed against the defect in 0.02 s and looked like a clean pass. A test can
+  be vacuous against its own defect while naming that defect correctly, and
+  reading only "it went red / it went green" cannot tell the difference.
+  Perturb, then check WHICH assertion moved and that the perturbation reaches
+  it.
+- CHECK THE CALLEE'S `unreachable!`s BEFORE REUSING IT FROM A NEW CALL SITE.
+  Routing undelivered QUERIES through `reject_for` would have hit its
+  query-shaped `unreachable!` and panicked the reader task - a new caller
+  violating a precondition the old caller happened to satisfy. A panic path
+  that is genuinely unreachable from one call site is a live hazard from the
+  next, and the compiler says nothing.
+
+Also closed in the same pass, from the review's smaller observations: the
+reattach loop reported ONE undelivered command and dropped the untried
+remainder of the vector unreported - the "telling the caller is not optional"
+contract's one remaining hole, latent because both clients pass `Vec::new`.
+Extracted as `send_reattach_commands` so it could be bitten, and it bites. The
+spurious-reject window inside `writer.send` (an abort after the bytes are on
+the wire but before it returns) is unavoidable and fails in the safe direction,
+so it is now STATED at the site, along with the load-bearing constraint that no
+`await` may be inserted between the `Ok` and the retire. And the advertised
+three-way terminal log distinction is only two-way in practice - the venue
+sends `RunComplete` ahead of the close on the duration path too - so the
+advertisement was retracted at all three sites and the protocol question filed
+in `notes/todo.md`.
+
+One review claim was WRONG and was not acted on: it read `AGENTS.md` as saying
+"next takes 21". It says 23, the constant is 22, and the prose gate is green.
+No `TAPE_PROTOCOL_VERSION` bump is owed - nothing in this round touches tape
+generation.
+
+THE ARC IS OVER. Eleven documents, all findings closed. `AGENTS.md` says a
+closed arc folds what still binds into it and DELETES this file; that fold is
+the next session's job, and this entry is written to be lifted from.

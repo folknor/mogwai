@@ -929,6 +929,16 @@ impl ExecutionClient for MogwaiExecutionClient {
             pending.orders.clear();
             pending.fills.clear();
         }
+        // THE GROUP RING IS TRANSPORT STATE, NOT MIRROR STATE, so it dies with
+        // the transport. `reset()` cleared it only incidentally, by replacing
+        // the whole `ExecState`; a plain stop-and-connect left it standing, and
+        // a list id repeating across generations - nautilus ids are per-strategy
+        // and a restarted strategy reuses them - would then attribute the NEW
+        // generation's group refusal to the OLD generation's legs, rejecting
+        // orders that were never refused. The mirror's orders and account
+        // watermark deliberately survive a stop; these do not, because their
+        // whole purpose is to answer a refusal from the socket that just died.
+        lock_recover(&self.state, "exec state").groups.clear();
         self.core.set_stopped();
         self.core.set_disconnected();
         Ok(())
@@ -1066,6 +1076,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         let ws_url = self.config.ws_url();
         let (cmd_tx, cmd_rx) = unbounded_channel::<ExecWsCommand>();
         self.ws_cmd = Some(cmd_tx);
+        let undelivered_ctx = self.exec_context();
 
         let connected = Arc::clone(&self.connected);
         let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
@@ -1142,6 +1153,22 @@ impl ExecutionClient for MogwaiExecutionClient {
                         flush_havoc_into_pump(&mut filter, sim, &disconnect_deliver);
                     }
                 },
+                // A COMMAND THE SOCKET SWALLOWED IS A TRANSPORT FAILURE, and it
+                // is reported through exactly the path that already handles the
+                // channel-closed case: the same synthesized reject, from the
+                // same context. Before this existed, a submit queued in the
+                // millisecond before a socket drop reached nautilus as
+                // `Submitted` and then never received another event - the wedge
+                // AE9 closed for the channel-closed case, still open for the
+                // writer-aborted one.
+                //
+                // The context is CLONED here rather than resolved per call:
+                // this closure lives in the reader task and `&self` is not
+                // available there. Every field is an `Arc` or a `Copy` handle
+                // onto the same shared state `dispatch_order` uses, so a reject
+                // synthesized from it lands in the same mirror and on the same
+                // emitter.
+                move |cmd: ExecWsCommand| report_undelivered_command(&cmd, &undelivered_ctx),
             )
             .await;
         });
@@ -1289,11 +1316,11 @@ impl ExecutionClient for MogwaiExecutionClient {
         // can be turned back into one `OrderRejected` per leg. Without it a
         // refused bracket would leave every leg of it waiting on an answer the
         // venue has already given.
-        if let Some(list_id) = orders
-            .first()
-            .and_then(|order| order.link.as_ref())
-            .map(|link| link.order_list_id.clone())
-        {
+        if let Some(list_id) = group_id_of(
+            orders
+                .iter()
+                .map(|order| order.link.as_ref().map(|link| link.order_list_id.as_str())),
+        ) {
             lock_recover(&self.state, "exec state").remember_group(list_id, members);
         }
         self.dispatch_order(&ExecWsCommand::SubmitGroup(orders))
@@ -1710,37 +1737,46 @@ enum ExecWsCommand {
     },
 }
 
-fn exec_command_to_client_message(cmd: ExecWsCommand) -> ClientMessage {
+/// Takes the command BY REFERENCE and clones what the wire message needs,
+/// because the lifecycle keeps the original until it has observed the frame
+/// reach the socket - that is what lets it report the command back if the
+/// socket dies first. The clone is one order's worth of `String`s and
+/// `Decimal`s, on the order-entry path rather than the tick path.
+fn exec_command_to_client_message(cmd: &ExecWsCommand) -> ClientMessage {
     match cmd {
-        ExecWsCommand::Submit(order) => ClientMessage::SubmitOrder(order),
-        ExecWsCommand::SubmitGroup(orders) => ClientMessage::SubmitOrderGroup { orders },
-        ExecWsCommand::Cancel { client_order_id } => ClientMessage::CancelOrder { client_order_id },
+        ExecWsCommand::Submit(order) => ClientMessage::SubmitOrder(order.clone()),
+        ExecWsCommand::SubmitGroup(orders) => ClientMessage::SubmitOrderGroup {
+            orders: orders.clone(),
+        },
+        ExecWsCommand::Cancel { client_order_id } => ClientMessage::CancelOrder {
+            client_order_id: client_order_id.clone(),
+        },
         ExecWsCommand::Modify {
             client_order_id,
             price,
             quantity,
             trigger_price,
         } => ClientMessage::ModifyOrder {
-            client_order_id,
-            price,
-            quantity,
-            trigger_price,
+            client_order_id: client_order_id.clone(),
+            price: *price,
+            quantity: *quantity,
+            trigger_price: *trigger_price,
         },
         ExecWsCommand::QueryOrders {
             request_id,
             client_order_id,
             open_only,
         } => ClientMessage::QueryOrders {
-            request_id,
-            client_order_id,
-            open_only,
+            request_id: request_id.clone(),
+            client_order_id: client_order_id.clone(),
+            open_only: *open_only,
         },
         ExecWsCommand::QueryFills {
             request_id,
             client_order_id,
         } => ClientMessage::QueryFills {
-            request_id,
-            client_order_id,
+            request_id: request_id.clone(),
+            client_order_id: client_order_id.clone(),
         },
     }
 }
@@ -1813,6 +1849,57 @@ fn mark_retryable(reason: &str, retryable: bool) -> String {
         format!("{RETRYABLE_REJECT_PREFIX}{reason}")
     } else {
         reason.to_owned()
+    }
+}
+
+/// The `order_list_id` a dispatched group is remembered under: ANY leg's link,
+/// not leg 0's.
+///
+/// A nautilus order list need not link every member, so a list whose first leg
+/// carries no link but whose later legs do is a perfectly ordinary shape. This
+/// used to read `orders.first()` alone, which left such a list unremembered -
+/// and an `AdmissionSubject::SubmitGroup` refusal for it then attributed to no
+/// leg at all, so every member sat waiting on an answer the venue had already
+/// given. A group is admitted or refused WHOLE and its members share one list
+/// id, so the first link that exists is the group's id whichever leg carries it.
+fn group_id_of<'a>(links: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    links.into_iter().flatten().next().map(ToOwned::to_owned)
+}
+
+/// Reports a command the websocket ACCEPTED and never wrote - see
+/// `lifecycle::run_ws_connection`'s `on_undelivered`.
+///
+/// An `Ok` from the command channel means queued, not sent, so a socket that
+/// dies with frames still in the writer's queue swallows them: the order side
+/// wedges in `Submitted`/`PendingUpdate` with no terminal event, and a query's
+/// caller waits out its whole timeout for a reply nobody will ever send.
+///
+/// Order commands take the same synthesized reject as any other transport
+/// failure. Queries CANNOT: `reject_for` has no shape for them, and the right
+/// report is to retire the waiter, which drops its oneshot sender and makes
+/// `await_reply` fail fast with "venue query abandoned" instead of parking for
+/// the full request timeout. Retiring a slot that is already gone is a no-op,
+/// which is what makes this safe to call for a query whose reply raced in.
+fn report_undelivered_command(cmd: &ExecWsCommand, ctx: &ExecContext) {
+    let err = anyhow::anyhow!(
+        "the venue websocket closed before this command was written; it never reached the venue"
+    );
+    match cmd {
+        ExecWsCommand::QueryOrders { request_id, .. } => {
+            drop(
+                lock_recover(&ctx.pending, "pending queries")
+                    .orders
+                    .remove(request_id),
+            );
+        }
+        ExecWsCommand::QueryFills { request_id, .. } => {
+            drop(
+                lock_recover(&ctx.pending, "pending queries")
+                    .fills
+                    .remove(request_id),
+            );
+        }
+        _ => synthesize_transport_reject(cmd, &err, ctx),
     }
 }
 
@@ -1957,6 +2044,10 @@ struct ExecState {
     /// one row per bracket it ever sent. Losing an old row costs a refusal's
     /// legibility and nothing else - the ERROR still names the list.
     groups: std::collections::VecDeque<(String, Vec<ClientOrderId>)>,
+    /// Map size at which the unbounded-growth WARN next fires - see `prune`.
+    /// Doubles each time it fires, so a genuinely large book says so once per
+    /// doubling instead of once per insert.
+    growth_warned_at: usize,
 }
 
 /// How many dispatched order groups are remembered for refusal attribution.
@@ -1973,9 +2064,60 @@ impl ExecState {
         }
     }
 
-    fn take_group(&mut self, order_list_id: &str) -> Option<Vec<ClientOrderId>> {
-        let index = self.groups.iter().position(|(id, _)| id == order_list_id)?;
-        self.groups.remove(index).map(|(_, members)| members)
+    /// Decides an arriving account snapshot against the staleness watermark and
+    /// moves the watermark. Returns whether the snapshot should be forwarded.
+    ///
+    /// Nautilus applies account states in ARRIVAL order with no staleness guard
+    /// of its own, so an older snapshot delivered late by reorder or duplicate
+    /// havoc would overwrite newer balances and stay wrong until the next
+    /// fill-driven one, which may never come. Anything below the watermark is
+    /// therefore refused; equal-ts duplicates pass and re-apply idempotently.
+    ///
+    /// THE WATERMARK ADVANCES ONLY OVER A SNAPSHOT THAT ARRIVED WHOLE - the
+    /// frontier rule, that a cursor may not advance over work whose success the
+    /// same expression did not check. `handle_account_state` builds its balances
+    /// and margins with `filter_map`s that DROP a row they cannot represent (an
+    /// unknown currency, an amount that will not fit `Money`, a `locked + free
+    /// != total` that `AccountBalance` refuses), each a warning rather than a
+    /// failure. Advancing unconditionally meant a snapshot that lost half its
+    /// balances still retired every earlier one, and a well-formed snapshot
+    /// arriving late was then refused as stale while the account row kept the
+    /// degraded state.
+    fn admit_account_snapshot(&mut self, ts_event: UnixNanos, whole: bool) -> bool {
+        if ts_event < self.account_ts_last {
+            tracing::warn!(
+                ts_event = ts_event.as_u64(),
+                last_applied = self.account_ts_last.as_u64(),
+                "dropping stale account snapshot: older than the last applied one"
+            );
+            return false;
+        }
+        if whole {
+            self.account_ts_last = ts_event;
+        }
+        true
+    }
+
+    /// The group's legs, LEFT IN PLACE.
+    ///
+    /// This used to remove the entry, which made a DUPLICATED refusal
+    /// unattributable - and duplicates are not hypothetical here,
+    /// `duplicate_prob` exists to produce them. The first copy consumed the row
+    /// and rejected every leg; the second found nothing and took the "cannot
+    /// attribute" ERROR path, which reads exactly like a real attribution
+    /// failure.
+    ///
+    /// Leaving the row costs nothing: the ring is already bounded by
+    /// `REMEMBERED_GROUPS` and a re-submitted list id is replaced by
+    /// `remember_group`, so removal was an early free rather than the bound.
+    /// The duplicate rejection it now permits is absorbed by the terminal-state
+    /// guard in `handle_exec_message` - an order already `Rejected` does not
+    /// move - which is where a duplicate belongs, rather than in an error log.
+    fn peek_group(&self, order_list_id: &str) -> Option<Vec<ClientOrderId>> {
+        self.groups
+            .iter()
+            .find(|(id, _)| id == order_list_id)
+            .map(|(_, members)| members.clone())
     }
 }
 
@@ -1988,13 +2130,45 @@ impl ExecState {
 const MAX_TERMINAL_ORDERS: usize = 10_000;
 
 impl ExecState {
-    /// Bounds the mirror's memory: an unpruned `orders` map (terminal records
-    /// and permanently-Submitted strays live forever) otherwise grows
-    /// linearly over a long forward run. Prunes the oldest terminal orders
-    /// past the cap; open orders are always retained. Called after each
-    /// mirror mutation that can grow the map (a submit insert), and does real
-    /// work only when the cap is exceeded.
+    /// Prunes the oldest TERMINAL order records past `MAX_TERMINAL_ORDERS`.
+    /// Called after each mirror mutation that can grow the map (a submit
+    /// insert), and does real work only when the cap is exceeded.
+    ///
+    /// THIS DOES NOT BOUND THE MAP, and the AE6 note that said it did was
+    /// wrong. Open orders are never pruned, because they are live
+    /// reconciliation truth and an adapter that forgot one would report a
+    /// standing order as unknown - a strictly worse failure than memory. So a
+    /// run that accumulates open (or permanently-`Submitted`) records grows
+    /// linearly no matter what this function does, and the only honest
+    /// response is to say so where an operator can see it. That is the WARN
+    /// below, raised on each doubling past the cap rather than per insert.
+    ///
+    /// The main source of permanent `Submitted` strays was a command the
+    /// socket swallowed without a terminal event, which
+    /// `lifecycle::run_ws_connection`'s undelivered report now closes: those
+    /// records reach `Rejected` and become prunable. What remains is genuinely
+    /// open orders, which is a strategy's business and not a leak.
     fn prune(&mut self) {
+        if self.orders.len() > self.growth_warned_at.max(MAX_TERMINAL_ORDERS) {
+            self.growth_warned_at = self.orders.len().saturating_mul(2);
+            let open = self
+                .orders
+                .values()
+                .filter(|record| !record.status.is_closed())
+                .count();
+            tracing::warn!(
+                orders = self.orders.len(),
+                open,
+                cap = MAX_TERMINAL_ORDERS,
+                "the execution mirror holds more orders than the terminal-record cap and most \
+                 cannot be pruned; open records are live reconciliation truth and are never \
+                 dropped, so this map grows with the number of orders left open"
+            );
+        }
+        self.prune_terminal();
+    }
+
+    fn prune_terminal(&mut self) {
         // Cheap length gate before the O(n) terminal scan: the terminal count
         // cannot exceed the cap unless the whole map does, so this keeps prune
         // O(1) on the hot submit/fill paths until the mirror genuinely grows
@@ -2600,7 +2774,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 // leg: nautilus has no order-list-scoped rejection event, so a
                 // leg that got no answer would sit in the strategy's book
                 // forever waiting on one.
-                let members = lock_recover(&ctx.state, "exec state").take_group(&order_list_id);
+                let members = lock_recover(&ctx.state, "exec state").peek_group(&order_list_id);
                 match members {
                     Some(members) if !members.is_empty() => {
                         for client_order_id in members {
@@ -2927,7 +3101,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
     // argument in full, including what would have to change first if a socket
     // ever carried several ledgers.
     let ts_event = UnixNanos::from(state.ts_event);
-    let balances = state
+    let balances: Vec<AccountBalance> = state
         .balances
         .iter()
         .filter_map(|balance| {
@@ -2986,7 +3160,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
         })
         .collect();
     let instruments = lock_recover(&ctx.instruments, "instrument definitions");
-    let margins = state
+    let margins: Vec<MarginBalance> = state
         .margins
         .iter()
         .filter_map(|margin| {
@@ -3019,15 +3193,24 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
         // fill-driven snapshot, which may be never. Skip any snapshot below the
         // applied watermark. Equal-ts duplicates pass; they re-apply
         // idempotently.
-        if ts_event < mirror.account_ts_last {
-            tracing::warn!(
-                ts_event = ts_event.as_u64(),
-                last_applied = mirror.account_ts_last.as_u64(),
-                "dropping stale account snapshot: older than the last applied one"
-            );
+        // A degraded snapshot is still forwarded - a partial account view beats
+        // none, and it is what the venue said - but it does not claim the
+        // ground a whole one would. See `admit_account_snapshot`.
+        let whole = balances.len() == state.balances.len() && margins.len() == state.margins.len();
+        if !mirror.admit_account_snapshot(ts_event, whole) {
             return;
         }
-        mirror.account_ts_last = ts_event;
+        if !whole {
+            tracing::warn!(
+                ts_event = ts_event.as_u64(),
+                balances_kept = balances.len(),
+                balances_sent = state.balances.len(),
+                margins_kept = margins.len(),
+                margins_sent = state.margins.len(),
+                "forwarding a degraded account snapshot without advancing the staleness \
+                 watermark, so a well-formed snapshot for an earlier instant can still supersede it"
+            );
+        }
     }
     ctx.emitter.send_account_state(NautilusAccountState::new(
         ctx.account_id,
@@ -3147,6 +3330,85 @@ mod tests {
         let business = mark_retryable("insufficient balance", false);
         assert_eq!(business, "insufficient balance");
         assert!(!business.starts_with(RETRYABLE_REJECT_PREFIX));
+    }
+
+    /// A DEGRADED account snapshot must not retire the well-formed ones.
+    ///
+    /// The frontier rule: the watermark may only advance over a snapshot every
+    /// row of which survived conversion. Advancing unconditionally meant a
+    /// snapshot that dropped rows (unknown currency, `locked + free != total`)
+    /// still claimed its instant, and the well-formed snapshot that reorder
+    /// havoc delivered a moment later for an EARLIER instant was then refused
+    /// as stale - leaving the account row degraded until a newer fill produced
+    /// another, which may never come.
+    #[test]
+    fn a_degraded_account_snapshot_does_not_advance_the_staleness_watermark() {
+        let mut state = ExecState::default();
+        assert!(state.admit_account_snapshot(UnixNanos::from(10), true));
+        assert!(
+            state.admit_account_snapshot(UnixNanos::from(20), false),
+            "a degraded snapshot is still forwarded - a partial view beats none"
+        );
+        assert!(
+            state.admit_account_snapshot(UnixNanos::from(15), true),
+            "and the well-formed snapshot for an earlier instant is still admitted, \
+             because the degraded one at 20 never claimed that ground"
+        );
+        assert!(
+            !state.admit_account_snapshot(UnixNanos::from(14), true),
+            "the whole snapshot at 15 DID claim it, so anything older is stale - \
+             without this the test would pass against a watermark that never moves"
+        );
+    }
+
+    /// A DUPLICATED group refusal must still name the legs.
+    ///
+    /// `duplicate_prob` and `DuplicateNextFill` exist to deliver the same frame
+    /// twice, so a second `AdmissionRejected` for one list is an expected
+    /// arrival, not a corruption. The lookup used to REMOVE the row, which made
+    /// the second copy unattributable and sent it down the "cannot attribute"
+    /// ERROR path - a log line that reads exactly like a real attribution
+    /// failure, on a duplicate that was working as designed.
+    #[test]
+    fn a_group_refusal_can_be_attributed_twice() {
+        let mut state = ExecState::default();
+        state.remember_group(
+            "L-1".to_string(),
+            vec![ClientOrderId::from("O-1"), ClientOrderId::from("O-2")],
+        );
+        let first = state.peek_group("L-1").expect("the group is remembered");
+        let second = state
+            .peek_group("L-1")
+            .expect("a duplicated refusal finds it too");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert!(
+            state.peek_group("L-2").is_none(),
+            "and a list this client never sent is still unattributable"
+        );
+    }
+
+    /// A group is remembered by ANY leg's link, not leg 0's.
+    ///
+    /// A nautilus order list need not link every member, so a list whose first
+    /// leg is unlinked is ordinary. Keying attribution off `orders.first()`
+    /// left that list unremembered, and a refusal for it then rejected NO leg -
+    /// it fell through to the "cannot attribute" ERROR. The selection lives in
+    /// `group_id_of` precisely so it can be bitten here; the submit path around
+    /// it needs a live emitter and a socket.
+    #[test]
+    fn the_group_id_is_taken_from_whichever_leg_carries_the_link() {
+        let unlinked_first = [None, Some("L-9".to_string()), Some("L-9".to_string())];
+        assert_eq!(
+            group_id_of(unlinked_first.iter().map(Option::as_deref)),
+            Some("L-9".to_string()),
+            "an unlinked first leg must not hide the group's id"
+        );
+        assert_eq!(
+            group_id_of([None, None]),
+            None,
+            "and a list with no link at all is genuinely not a group"
+        );
     }
 
     #[test]

@@ -59,132 +59,87 @@ round learned that the removed text would otherwise have carried:
   is the one assertion that distinguishes "refused for the right reason" from
   "failed for any reason", and no other site emits that string.
 
-## 4. The subscription resume cursor is entirely dead state, and its documentation asserts a contract nothing keeps (medium, structural)
+Round 2 closed findings 4, 5, 6 and 7 and verified the relayed broadarrow
+section. All were real; none was refused. What the round learned that the
+removed text would otherwise have carried:
 
-`SubState.start_ts` is written in three places (`subscribe_symbol` seeding,
-`advance_sub_start_ts` on every delivered trade) and READ IN ZERO. The hunter
-grepped the whole crate: no reader.
+- FINDING 6 IS SETTLED BY READING THE SERVER, not left half-confident. The
+  venue closes WS 1000 for THREE things - `admission::CLOSE_EVICTED` is
+  literally `1000`, and `ws.rs` sends 1000 on run completion and on a
+  passenger's duration elapsing - so the adapter's "any 1000 is completion"
+  was wrong on two of the three and on every proxy close besides. The fix is
+  `mogwai_protocol::close`, a shared module the venue writes its reason
+  strings from and `classify` reads: recognized reasons are terminal (and say
+  WHICH in the log), everything else redials. The eviction reason is now
+  prefixed so it is matchable rather than sniffed.
+- THE FIRST SHAPE OF THAT REGRESSION TEST WAS VACUOUS AGAINST ITS OWN DEFECT,
+  caught by its bite-check. The stub closed with `ws.close(None)`, which sends
+  `Message::Close(None)` - and the OLD code required `Close(Some(frame))` too,
+  so the test passed against the defect. A close-frame test must send a
+  REASONED close or it is testing the `None` arm nobody changed.
+- FINDING 5'S FIX IS A RECEIPT BOOK, and its retire is the frontier rule
+  applied to a write: a receipt is filed before the frame is queued and retired
+  only by the expression that saw `writer.send` return `Ok`. What survives the
+  writer's abort is exactly what the venue never saw. The loop's own RETURN is
+  an undelivery too, and covers the residue in the command receiver that no
+  receipt can see. Commands sent after the return need nothing: the receiver is
+  dropped, so `dispatch_order` already synthesizes.
+- AND THE FIX WAS DELIBERATELY NOT A REPLAY. The report preferred reporting
+  over re-queueing and the round agrees: replaying orders across a reconnect is
+  the host's policy call. The host-facing half is `docs/adapter-lifecycle.md`.
+- FINDING 4 DELETED RATHER THAN PRESERVED. `SubState.start_ts` is gone with
+  `advance_sub_start_ts`, `start_ts_param` and the plumbing, and the two false
+  prose claims with them; the site now says there is no resume cursor and that
+  reintroducing one means reintroducing a reader in the same change. The
+  frontier tail went with it.
+- FINDING 7, all six items. The account watermark now advances only over a
+  snapshot every row of which survived conversion (extracted as
+  `admit_account_snapshot` so it could be bitten); group attribution reads ANY
+  leg's link via `group_id_of`; `peek_group` no longer consumes, so a duplicated
+  refusal is absorbed by the terminal-state guard instead of an ERROR that reads
+  like a real attribution failure; `stop()` clears the group ring, which is
+  transport state. THE PRUNE ITEM WAS CLOSED AS DOCUMENTATION AND A WARN, not a
+  bound: open orders are live reconciliation truth and an adapter that forgot
+  one is strictly worse than one that uses memory, so the AE6 claim was
+  corrected rather than made true. The paginator drift was closed by stating at
+  the quote site WHY that one line must not be made identical to the trade
+  path's; the unification and the two busy-wait shims are filed in
+  `notes/todo.md`.
+- THE RELAYED BROADARROW ITEMS ARE GENUINELY FIXED, verified against the code
+  rather than assumed: `docs/havoc.md` splits the raw-protocol client from the
+  nautilus one and names the ERROR log as the nautilus channel, which is what
+  `data.rs`'s `FeedLagged` arm does; `process_session_id`'s comment now derives
+  the id from the `OnceLock`'s first-call instant and says so explicitly.
+- No tape-generation path is touched, so no `TAPE_PROTOCOL_VERSION` bump is
+  owed.
 
-The surrounding prose is confidently wrong about live behaviour:
+The close pass found three defects in the round's own work, all of the arc's
+signature shape - a thing that reads as gated and is not - and closed them:
 
-- data.rs:1381 - "On the WS path a reconnect re-issues `Subscribe { start_ts }`".
-  It does not: `connect()` passes `Vec::new` as the `on_connect` reattach hook
-  and `None` as the command receiver (data.rs:467-473), and the crate's own
-  comment three lines below says "a reattach has no subscribe frames to replay".
-- data.rs:205 - "The seeded `start_ts` survives as the resume cursor the
-  historical request paths read." No historical request path reads it;
-  `request_trades`, `request_bars` and `request_quotes` take their `start` from
-  `request.start` only.
+- The `peek_group` doc block had never been separated from the one below it, so
+  the round's central rationale documented `admit_account_snapshot` and
+  `peek_group` had no doc at all. Split and reattached.
+- `CLOSE_EVICTED`'s comment claimed `CloseSpec::evicted` prefixes
+  `close::EVICTED_PREFIX`; it did not, the prefix was composed by hand at the
+  single `run.rs` call site. The constructor now takes the DETAIL and prepends
+  the prefix itself, before truncation, so the wire contract is structural and
+  a second call site cannot forget it - a forgotten prefix reads as
+  non-terminal to the adapter and redials straight into the eviction loop.
+- Nothing gated that end to end: `close.rs`'s test hand-built the prefixed
+  string and `serving.rs` asserted only `contains("claimed account")`, which
+  passes either way. The eviction test now runs the venue's own close frame
+  through `close::classify` and asserts `Terminal::Evicted`. Bite-checked by
+  deleting the prefix - the old assertion passed, the new one fired.
 
-So `advance_sub_start_ts` runs a mutex acquisition per delivered trade on the
-hot data path to maintain a value nobody consumes, and AD7's fix-comment
-documents a hazard that can no longer exist. Given the local-only subscription
-model, the hunter would delete `start_ts`, `advance_sub_start_ts`,
-`start_ts_param` and the `start_ts` plumbing through `subscribe_symbol` and
-`subscribe_quotes_inner` outright rather than preserve it. If a resume cursor is
-genuinely wanted for a future reattach, it should be reintroduced with a reader
-in the same change.
-
-Note also (minor, and moot once the above is deleted): `advance_sub_start_ts` is
-called at data.rs:1388 BEFORE `convert::trade_tick` may fail and drop the tick -
-a watermark advancing over work whose success the same expression did not check,
-the frontier family verbatim.
-
-## 5. A command accepted by `send_command` is not a command that reached the venue (medium)
-
-lifecycle.rs. `send_command` pushes onto the unbounded `out_tx` and returns
-`Ok`; a separate writer task drains it into the socket. On disconnect the inner
-loop breaks and `writer_handle.abort_and_join()` kills the writer with whatever
-is still queued. Anything in flight - a submit, a cancel, a modify, a
-`QueryOrders` - is dropped with no error and no synthesized reject.
-
-`dispatch_order` only synthesizes a reject when `tx.send(cmd)` on the CHANNEL
-fails, i.e. when `ws_cmd` is gone. It cannot see this case. An order submitted
-in the millisecond before a socket drop reaches nautilus as `Submitted`, never
-reaches the venue, and never gets a terminal event - the same wedge AE9 fixed
-for the channel-closed case, still open for the writer-aborted case. Same for
-`VenueQuery`: the waiter is registered, the send "succeeds", and the requester
-waits out its full timeout.
-
-This one is inherent to the enqueue-then-forget writer split. The honest fixes
-are either to have the writer own the pending frames and re-queue unsent ones
-onto the next generation's `out_tx` (the reattach hook is the natural place), or
-to drain `out_rx` on teardown and report each undelivered command back to the
-client so it can synthesize the reject. The hunter would take the second -
-replaying orders across a reconnect is a policy call the adapter shouldn't make
-silently, but TELLING the caller is not optional.
-
-## 6. `Close(Normal)` is read as run completion and permanently disables reconnect (medium, half-confident)
-
-lifecycle.rs:534-538: any close frame with code 1000 sets `run_complete = true`
-and returns from `run_ws_connection` for good. `RunComplete` the MESSAGE is the
-real terminal signal; the 1000 close is documented as "its socket-level fallback
-for a reader that loses the final text frame while the server drains". But 1000
-is also the ordinary, correct code for any graceful close - a venue restarting,
-a proxy closing an idle socket, and (per `config.rs`'s own eviction discussion)
-the venue evicting a socket. Any of those kills the client's transport
-permanently with an INFO line reading "venue run completed". The hunter is not
-certain the server ever closes 1000 for a non-completion reason - that is
-another hunter's scope - but the adapter is trusting a two-byte code to carry a
-semantic the protocol has a dedicated message for. A close reason string, or
-requiring the `RunComplete` message, would remove the ambiguity.
-
-## 7. Smaller things
-
-- Account watermark advances over a snapshot that produced nothing.
-  `handle_account_state` (exec.rs:2911-2929) sets `mirror.account_ts_last =
-  ts_event` unconditionally, after the balance and margin loops may have dropped
-  every row (unknown currency, `locked + free != total`). A subsequent OLDER but
-  well-formed snapshot is then refused as stale, and the account row keeps the
-  degraded state. Frontier family again, mild version.
-- Group attribution is keyed off leg 0 only. `submit_order_list`
-  (exec.rs:1195-1200) reads `orders.first().and_then(|o| o.link...)`. A list
-  whose first leg carries no link but whose later legs do is never remembered,
-  so an `AdmissionSubject::SubmitGroup` refusal degrades to the
-  `tracing::error!` "cannot attribute" path and no leg gets a rejection. Also
-  `take_group` REMOVES the entry, so a duplicated `AdmissionRejected` (which
-  `duplicate_prob` deliberately produces) hits the same unattributable path.
-- `stop()` does not clear `ExecState.groups`. `reset()` does (via
-  `ExecState::default()`), `stop()` does not. Stale group rows survive a stop
-  and connect cycle and can be attributed to a refusal from the NEXT generation
-  if a list id repeats.
-- `ExecState::prune` cannot bound a mirror full of open orders. The
-  `orders.len() <= MAX_TERMINAL_ORDERS` gate returns early, and the
-  terminal-only prune means a run that accumulates more than 10k open or
-  permanently-`Submitted` records grows without bound. The AE6 comment claims
-  the map is bounded; it is bounded only in the terminal-heavy case. Finding 5
-  above is one way `Submitted` strays get created.
-- `fetch_quotes_windowed` returns `truncated: false` when a short page arrives,
-  but `fetch_trades_windowed` returns `stop(&out)`. Not a bug today (the quote
-  path has no stop closure), but the two paginators are near-duplicates that
-  have already drifted in their truncation semantics. They should be one generic
-  function over `ts_of` - `final_ts_group_start` is already extracted; the loop
-  is not.
-- `await_account_registered` polls the cache on a 10 ms sleep for up to 5 s
-  inside `connect()`, and `wait_connected` does the same for the socket flag.
-  Both are busy-wait shims around state that could carry a notifier. Minor, but
-  it is roughly 500 wakeups on a slow boot and it is the kind of thing that
-  makes `connect()` latency unpredictable under a scaled sim clock (neither is
-  sim-scaled, unlike everything else in the lifecycle).
-
-## Relayed from broadarrow, 2026-08-18 - both FIXED, both documentation
-
-Not this hunter's findings. broadarrow filed them in its own `notes/todo.md`
-after consuming the "be an exchange" landing, and both are cases of durable
-prose stating something the code does not do.
-
-- `docs/havoc.md` told a client wanting to tell a quiet feed from a lossy one to
-  read `FeedLagged` and its skipped count. A nautilus host cannot, and this
-  crate's own data-message arm says so at length: `DataEvent` carries no gap
-  variant, the client reaches the host as a `dyn DataClient`, and the ERROR log
-  line is the only channel the signal has. So the two sites disagreed and the
-  adapter was the one telling the truth. The doc now splits the raw-protocol
-  client from the nautilus one and names the log as the nautilus channel.
-- `process_session_id`'s doc comment derived the id from "the process's start
-  instant"; the `OnceLock` captures the wall clock at first call, which is the
-  first client this process builds. The collision argument is unaffected - a
-  reused pid still arrives with a later instant - so this was prose only, but the
-  argument should rest on what the code does.
+Three smaller observations closed with it: the reattach loop now reports the
+untried REMAINDER of `on_connect()` rather than only the command that failed
+(extracted as `send_reattach_commands`, bite-checked); the unavoidable
+spurious-reject window inside `writer.send` and the no-`await`-before-the-retire
+constraint are stated at the site; and the advertised three-way terminal log
+distinction was retracted, because the venue sends a `RunComplete` frame ahead
+of the close on the duration path too, so the adapter stops on the frame and
+`DurationComplete` is reachable only as the close-frame fallback. That last is
+a protocol imprecision on the venue's side and is filed in `notes/todo.md`.
 
 ## What the hunter checked and found sound
 

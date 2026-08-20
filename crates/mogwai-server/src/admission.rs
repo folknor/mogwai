@@ -90,7 +90,15 @@ pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
 /// `1000` (normal closure) rather than a fault code: nothing failed, and the
 /// distinction is what stops a consumer's reconnect ladder from firing. A client
 /// that redialled on this would evict whatever evicted it, forever.
-pub(crate) const CLOSE_EVICTED: u16 = 1000;
+///
+/// THE CODE ALONE CANNOT SAY THAT, because the venue also closes 1000 on run
+/// completion and on a passenger duration elapsing, and a proxy closes 1000 for
+/// reasons of its own. The REASON string carries the meaning, and it is a
+/// protocol contract: `CloseSpec::evicted` is the only constructor for this
+/// code and it prepends `mogwai_protocol::close::EVICTED_PREFIX` itself, so a
+/// client can tell the three apart and no call site can forget to say which one
+/// this is. See that module.
+pub(crate) const CLOSE_EVICTED: u16 = mogwai_protocol::close::NORMAL;
 
 /// How long the overload close may take to reach a peer before the connection
 /// is torn down anyway. WALL time, not sim time: this is a transport deadline.
@@ -360,16 +368,29 @@ impl CloseSpec {
         }
     }
 
-    /// A newer connection claimed this account, so this one is done.
+    /// A newer connection claimed this account, so this one is done. The caller
+    /// passes the DETAIL - which account, and why one client at a time - and
+    /// this constructor prepends `mogwai_protocol::close::EVICTED_PREFIX`.
+    ///
+    /// The prefix lives HERE rather than at the call site because it is the wire
+    /// contract, not a phrasing: `close::classify` reads it to distinguish this
+    /// close from the other two 1000s the venue sends. A call site that composed
+    /// the prefix by hand would let the next one forget it, and a forgotten
+    /// prefix is not a cosmetic defect - the adapter would classify the close as
+    /// non-terminal and redial, evicting whatever evicted it, forever. Prefixing
+    /// before `truncate_reason` keeps the discriminator intact and spends the
+    /// cap on the detail, which is the half that may be dropped.
     ///
     /// `CLOSE_EVICTED` and NOT a venue fault: nothing failed. Telling the two
     /// apart matters to a consumer, because a fault is a reason to distrust the
-    /// venue and an eviction is a reason to stop reconnecting - a client that
-    /// redialled here would evict whatever evicted it, forever.
-    pub(crate) fn evicted(reason: impl Into<String>) -> Self {
+    /// venue and an eviction is a reason to stop reconnecting.
+    pub(crate) fn evicted(detail: impl std::fmt::Display) -> Self {
         Self {
             code: CLOSE_EVICTED,
-            reason: truncate_reason(reason.into()),
+            reason: truncate_reason(format!(
+                "{}{detail}",
+                mogwai_protocol::close::EVICTED_PREFIX
+            )),
         }
     }
 }

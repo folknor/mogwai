@@ -1191,6 +1191,23 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
         frame.reason.contains("claimed account"),
         "the close says why: {frame:?}"
     );
+    // The half of the contract the reason TEXT cannot state. WS 1000 is also
+    // what a completed run and an elapsed duration close with, so a client can
+    // only tell an eviction apart by the protocol prefix - and this is the only
+    // place the venue's real bytes meet the classifier that reads them. An
+    // assertion on the prose alone passes whether or not the prefix is there,
+    // which would leave the whole contract pinned on the client's side.
+    assert!(
+        frame
+            .reason
+            .starts_with(mogwai_protocol::close::EVICTED_PREFIX),
+        "the close is not machine-classifiable as an eviction: {frame:?}"
+    );
+    assert_eq!(
+        mogwai_protocol::close::classify(u16::from(frame.code), &frame.reason),
+        Some(mogwai_protocol::close::Terminal::Evicted),
+        "the venue's own close frame does not classify as an eviction: {frame:?}"
+    );
 
     let snapshot = resumed.unwrap_or_else(|why| panic!("{why}"));
     assert!(

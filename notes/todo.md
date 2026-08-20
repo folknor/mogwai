@@ -222,6 +222,47 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 ## Open issues
 
+- THE VENUE ANNOUNCES `RunComplete` TO A PASSENGER WHOSE OWN DURATION ENDED,
+  which is why the adapter's duration-complete log line is unreachable on the
+  ordinary path. In `crates/mogwai-server/src/ws.rs` the passenger-duration arm
+  sends a `RunComplete` frame and only THEN closes with
+  `close::DURATION_COMPLETE`, exactly as the whole-run arm does - so a client
+  classifying on the text frame calls a duration end a run completion and never
+  reads the close. The run is NOT over for the other passengers, so the frame
+  overstates what happened; the close behind it is the only accurate statement.
+  Both readings stop the client, so nothing is broken today, and the
+  imprecision is now documented at all three sites
+  (`mogwai_protocol::close::DURATION_COMPLETE`, the adapter's terminal-log
+  match, `docs/adapter-lifecycle.md`) rather than left as an advertised
+  distinction that does not happen. The real fix is a distinct
+  per-passenger completion frame, or dropping the frame on that arm and letting
+  the close carry it - both are protocol changes with consumers to consider, so
+  they were not made inside a bug-fix round. Nothing detects this regressing
+  further, because the two arms are correct in isolation.
+- THE TWO HISTORY PAGINATORS ARE NEAR-DUPLICATES AND HAVE ALREADY DRIFTED ONCE.
+  `fetch_trades_windowed` and `fetch_quotes_windowed` in
+  `crates/mogwai-adapter/src/client/data.rs` share a page loop, a
+  `MAX_TRADES_PER_REQUEST` ceiling and `final_ts_group_start`'s timestamp-cursor
+  rule, and differ in exactly one line: the short-page return, which the trade
+  path routes through its stop closure and the quote path returns `false` from.
+  That difference is CORRECT today (the quote path has no early-stop) and it is
+  now stated at the quote site so nobody unifies it by making the two lines
+  identical. The unification worth doing is a generic loop over a `ts_of`
+  accessor plus an optional stop closure, which `final_ts_group_start` is
+  already shaped for; it was left out of the 2026-08-18 adapter round as a
+  refactor rather than a fix, and it stays a live risk because nothing detects
+  the two drifting again.
+- `await_account_registered` AND `wait_connected` ARE BUSY-WAIT SHIMS INSIDE
+  `connect()`. Both poll on a 10 ms sleep for up to 5 s -
+  `await_account_registered` against the nautilus cache, `wait_connected`
+  against the socket's `AtomicBool` - which is roughly 500 wakeups on a slow
+  boot and makes `connect()` latency unpredictable. Neither is sim-scaled,
+  unlike every other sleep in the lifecycle, so under an accelerated clock they
+  are the only wall-time waits in the boot path. Both want a notifier: the
+  connected flag is the adapter's own and could carry a `tokio::sync::Notify`
+  beside it, and the cache poll wants nautilus to signal registration. Minor,
+  and no failure is attributed to it - filed so it is not rediscovered as a
+  finding.
 - CROSS-REPO: NAUTILUS'S `ExecutionEventEmitter` CANNOT SHARE ITS SENDER, so
   this adapter can only refuse rather than heal. The emitter derives `Clone`
   and owns `sender: Option<UnboundedSender<ExecutionEvent>>` BY VALUE, and the

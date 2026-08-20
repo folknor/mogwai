@@ -857,8 +857,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
         drop(
             out_tx
                 .send(Outbound::Close(CloseSpec {
-                    code: 1000,
-                    reason: "run complete".into(),
+                    code: mogwai_protocol::close::NORMAL,
+                    reason: mogwai_protocol::close::RUN_COMPLETE.into(),
                 }))
                 .await,
         );
@@ -878,7 +878,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                     if completed.is_some() {
                         let (sim_now_ns, elapsed_ns) = completion_on_boat_clock(boat_sim);
                         drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&ServerMessage::RunComplete { sim_now_ns, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
-                        drop(out_tx.send(Outbound::Close(CloseSpec { code: 1000, reason: "run complete".into() })).await);
+                        drop(out_tx.send(Outbound::Close(CloseSpec { code: mogwai_protocol::close::NORMAL, reason: mogwai_protocol::close::RUN_COMPLETE.into() })).await);
                     }
                     break;
                 }
@@ -886,7 +886,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                     let elapsed_ns = session.duration_ms.unwrap_or(0).saturating_mul(1_000_000);
                     let now = sim_now_ns(boat_sim);
                     drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&ServerMessage::RunComplete { sim_now_ns: now, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
-                    drop(out_tx.send(Outbound::Close(CloseSpec { code: 1000, reason: "passenger duration complete".into() })).await);
+                    drop(out_tx.send(Outbound::Close(CloseSpec { code: mogwai_protocol::close::NORMAL, reason: mogwai_protocol::close::DURATION_COMPLETE.into() })).await);
                     break;
                 }
                 message = stream.next() => match message {

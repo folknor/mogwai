@@ -1864,8 +1864,8 @@ impl Run {
                 bound
                     .lanes
                     .send_close(crate::admission::CloseSpec::evicted(format!(
-                        "another connection claimed account {account_id}; a ledger is never read \
-                     from two clients at once"
+                        "another connection claimed account {account_id}; a ledger is never \
+                     read from two clients at once"
                     ))),
             );
         }

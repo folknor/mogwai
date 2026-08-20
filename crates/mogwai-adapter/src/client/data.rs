@@ -35,7 +35,7 @@ use nautilus_common::{
         },
     },
 };
-use nautilus_core::{Params, UnixNanos};
+use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType, Data, bar::get_bar_interval_ns},
     enums::BarAggregation,
@@ -137,12 +137,7 @@ impl MogwaiDataClient {
         self.connected = Arc::new(AtomicBool::new(false));
     }
 
-    fn subscribe_symbol(
-        &self,
-        symbol: Symbol,
-        kind: SubKind,
-        start_ts: Option<u64>,
-    ) -> anyhow::Result<()> {
+    fn subscribe_symbol(&self, symbol: Symbol, kind: SubKind) -> anyhow::Result<()> {
         // The subscription symbol is derived from the nautilus `instrument_id`,
         // while `config.symbol` is what the socket named on its upgrade - two
         // sources of truth for one fact. Unreconciled, a host subscribing ES on
@@ -174,50 +169,36 @@ impl MogwaiDataClient {
                 .subs
                 .lock()
                 .map_err(|_| anyhow::anyhow!("subscription mutex poisoned"))?;
-            let state = subs.entry(symbol).or_default();
-            // The 0->1 transition. It no longer emits anything - there is no
-            // wire subscribe - but it is still what seeds the shared resume
-            // cursor, and only the FIRST subscriber may.
-            let first = state.total() == 0;
-            state.increment(kind);
-            // `start_ts` is this symbol's single shared resume cursor, advanced
-            // forward-only by `advance_sub_start_ts` on every delivered tick so a
-            // reconnect resumes after the last delivered tick instead of replaying.
-            // Only the FIRST subscriber (the 0->1 transition, `emit`) seeds it. The
-            // old `min(existing, new)` on a later subscriber pulled the cursor
-            // BACKWARD to an earlier requested start (AD7); since a live second
-            // subscribe never actually sends a Subscribe on the WS path (that fires
-            // only on 0->1) and the poll path ignores the update, the earlier start
-            // was never delivered as backfill - it only corrupted the resume cursor,
-            // so the NEXT reconnect replayed an already-delivered window. A later
-            // subscriber must not move the shared cursor at all: not backward (the
-            // replay), and not forward either (that would skip data the first
-            // subscriber still wants). The shared feed already serves every
-            // subscriber from the cursor forward.
-            if first {
-                state.start_ts = start_ts;
-            }
+            subs.entry(symbol).or_default().increment(kind);
         }
 
         // Nothing is sent to the venue. The subscription is satisfied entirely
         // by this local table: the WS reader forwards an arriving tick when the
         // matching kind's count is non-zero, and the venue pushes the run's one
-        // tape whether or not anybody asked. The seeded `start_ts` survives as
-        // the resume cursor the historical request paths read.
+        // tape whether or not anybody asked.
+        //
+        // THERE IS NO RESUME CURSOR, and a `start_ts` request parameter is
+        // therefore not honoured on the subscribe path at all. There used to be
+        // one - a per-symbol `SubState.start_ts` seeded here and advanced on
+        // every delivered trade - written in three places and read in none,
+        // because the reattach hook this client passes to `run_ws_connection`
+        // is `Vec::new` and the historical request paths take their start from
+        // `request.start`. Reintroducing a cursor means reintroducing a READER
+        // in the same change; until then, maintaining one would be a mutex
+        // acquisition per tick on the hot path for a value nobody consumes.
         Ok(())
     }
 
     fn subscribe_quotes_inner(
         &self,
         symbol: &str,
-        start_ts: Option<u64>,
         after_enable: impl FnOnce(),
     ) -> anyhow::Result<()> {
         let _delivery = self
             .quote_delivery
             .lock()
             .map_err(|_| anyhow::anyhow!("quote delivery mutex poisoned"))?;
-        self.subscribe_symbol(symbol.into(), SubKind::Quotes, start_ts)?;
+        self.subscribe_symbol(symbol.into(), SubKind::Quotes)?;
         let cached = self
             .subs
             .lock()
@@ -465,7 +446,7 @@ impl DataClient for MogwaiDataClient {
                     identity,
                 },
                 None::<tokio::sync::mpsc::UnboundedReceiver<std::convert::Infallible>>,
-                |never| match never {},
+                |never: &std::convert::Infallible| match *never {},
                 // The venue pushes the one run's tape unbidden, so a reattach
                 // has no subscribe frames to replay: subscription state is
                 // satisfied locally in this client and never reaches the wire.
@@ -486,6 +467,10 @@ impl DataClient for MogwaiDataClient {
                         flush_havoc_into_pump(&mut filter, sim, &disconnect_deliver);
                     }
                 },
+                // The data socket sends no commands at all - its command
+                // receiver is `Infallible` - so nothing can go undelivered on
+                // it. The callback is unreachable rather than merely unused.
+                |never: std::convert::Infallible| match never {},
             )
             .await;
         });
@@ -595,12 +580,12 @@ impl DataClient for MogwaiDataClient {
 
     fn subscribe_quotes(&mut self, cmd: SubscribeQuotes) -> anyhow::Result<()> {
         let symbol = symbol_from_instrument(cmd.instrument_id);
-        self.subscribe_quotes_inner(&symbol, start_ts_param(&cmd.params), || {})
+        self.subscribe_quotes_inner(&symbol, || {})
     }
 
     fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
         let symbol = symbol_from_instrument(cmd.instrument_id);
-        self.subscribe_symbol(symbol, SubKind::Trades, start_ts_param(&cmd.params))
+        self.subscribe_symbol(symbol, SubKind::Trades)
     }
 
     fn subscribe_bars(&mut self, cmd: SubscribeBars) -> anyhow::Result<()> {
@@ -634,8 +619,7 @@ impl DataClient for MogwaiDataClient {
         // for that bar type finds `refs > 0`, so it matches, and it spends a
         // symbol-count decrement belonging to a DIFFERENT bar type's live
         // subscription - which, at zero, darkens the surviving feed.
-        if let Err(err) = self.subscribe_symbol(symbol, SubKind::Bars, start_ts_param(&cmd.params))
-        {
+        if let Err(err) = self.subscribe_symbol(symbol, SubKind::Bars) {
             let mut bars = lock_recover(&self.bars, "bar");
             if let Some(state) = bars.get_mut(&cmd.bar_type) {
                 state.refs = state.refs.saturating_sub(1);
@@ -1185,7 +1169,6 @@ struct SubState {
     trades: usize,
     quotes: usize,
     bars: usize,
-    start_ts: Option<u64>,
     cached_quote: Option<mogwai_protocol::QuoteTick>,
 }
 
@@ -1400,15 +1383,6 @@ fn emit_trade(
         warn_missing_instrument_once(missing_instrument_warnings, &trade.symbol);
         return;
     };
-    // Advance this subscription's resume cursor to just past the delivered tick.
-    // On the WS path a reconnect re-issues `Subscribe { start_ts }`; pinning
-    // start_ts at the original subscription instant made the server replay the
-    // whole history on every reconnect (the connection-lifecycle havoc surface
-    // floods duplicate ticks). Advancing to `ts_event + 1` (exclusive of the
-    // delivered ts) mirrors the polling path's PollCursor so a reconnect resumes
-    // instead of replaying. The first subscribe still uses the originally
-    // requested instant because this only moves the cursor forward.
-    advance_sub_start_ts(subs, &trade.symbol, trade.ts_event);
     let state = sub_state(subs, &trade.symbol);
     let id = match convert::instrument_id(&def) {
         Ok(id) => id,
@@ -1571,19 +1545,6 @@ fn acc_to_bar(
         UnixNanos::from(acc.close_ts),
         now_unix_nanos(sim),
     ))
-}
-
-/// Advances a subscription's `start_ts` resume cursor to just past `ts_event`
-/// (exclusive) so a WS reconnect resumes after the last delivered tick rather
-/// than replaying from the original subscription instant. Only ever moves the
-/// cursor forward; same-ns ticks already delivered before the reconnect are not
-/// re-requested. Saturates at `u64::MAX` to never wrap.
-fn advance_sub_start_ts(subs: &Arc<Mutex<HashMap<Symbol, SubState>>>, symbol: &str, ts_event: u64) {
-    let next = ts_event.saturating_add(1);
-    let mut subs = lock_recover(subs, "subscription");
-    if let Some(state) = subs.get_mut(symbol) {
-        state.start_ts = Some(state.start_ts.map_or(next, |existing| existing.max(next)));
-    }
 }
 
 fn sub_state(
@@ -1819,6 +1780,14 @@ async fn fetch_quotes_windowed(
         let full = page.len() == page_limit;
         if !full {
             out.extend(page);
+            // `false`, NOT the trade path's `stop(&out)`, and the difference is
+            // deliberate rather than drift: a short page means the venue has no
+            // more rows in the window, so nothing was truncated. The trade path
+            // consults its stop closure here because it can also be asked to
+            // stop EARLY - once enough bars are spanned - and stopping early
+            // genuinely does truncate. There is no such closure on this path.
+            // These two loops are near-duplicates and this line is the one
+            // place they must not be made identical.
             return Ok((out, false));
         }
         // Same invariant as the trade path: only advance onto a timestamp
@@ -1873,12 +1842,6 @@ fn trade_query_params(
     // per request.
     Ok(params)
 }
-fn start_ts_param(params: &Option<Params>) -> Option<u64> {
-    params
-        .as_ref()
-        .and_then(|params| params.get_u64("start_ts"))
-}
-
 #[cfg(test)]
 mod quote_cache_tests {
     use super::*;
@@ -1910,7 +1873,7 @@ mod quote_cache_tests {
     fn subscribe_refuses_an_instrument_outside_the_bound_symbol() {
         let client = client_bound_to(Some("MNQ"));
         let error = client
-            .subscribe_symbol(Arc::from("MES"), SubKind::Trades, None)
+            .subscribe_symbol(Arc::from("MES"), SubKind::Trades)
             .expect_err("subscription must match the socket river");
         assert!(error.to_string().contains("bound to (MNQ)"), "{error}");
     }
@@ -1919,7 +1882,7 @@ mod quote_cache_tests {
     fn subscribe_without_a_config_symbol_keeps_the_server_default_behavior() {
         let client = client_bound_to(None);
         client
-            .subscribe_symbol(Arc::from("MES"), SubKind::Trades, None)
+            .subscribe_symbol(Arc::from("MES"), SubKind::Trades)
             .expect("an absent binding applies no client-side check");
     }
 
@@ -2004,7 +1967,7 @@ mod quote_cache_tests {
             let release_worker = Arc::clone(&release);
             let subscriber = scope.spawn(|| {
                 client
-                    .subscribe_quotes_inner("BTCUSDT", None, move || {
+                    .subscribe_quotes_inner("BTCUSDT", move || {
                         subscribed_worker.wait();
                         release_worker.wait();
                     })
