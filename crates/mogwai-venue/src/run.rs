@@ -146,9 +146,9 @@ pub(crate) struct Passenger {
     /// indistinguishable from a live one the moment any account boarded that
     /// river at that speed again.
     seated_on: Mutex<HashMap<crate::boatyard::BoatKey, usize>>,
-    /// HOW MANY SOCKETS HAVE BEEN ADMITTED TO THIS ACCOUNT AND HAVE NOT YET
-    /// FINISHED TEARING DOWN, counted from the instant the upgrade is decided
-    /// rather than from the instant a lane is bound.
+    /// HOW MANY SOCKETS ARE ATTACHED TO THIS ACCOUNT AND HAVE NOT YET FINISHED
+    /// TEARING DOWN, counted from the instant the upgrade is decided rather
+    /// than from the instant a lane is bound.
     ///
     /// The lane table alone cannot answer "is anybody reading this account",
     /// and the gap is not theoretical. An eviction retires the incumbent's lane
@@ -159,10 +159,10 @@ pub(crate) struct Passenger {
     /// as it did, never fire at all and leave the ledger un-frozen, un-swept-out
     /// and un-collectable for the life of the process.
     ///
-    /// Raised by `Run::admit` before the upgrade completes and lowered by
+    /// Raised by `Run::attach` before the upgrade completes and lowered by
     /// `SocketSession`'s `Drop`, which runs on the abandoned-upgrade path too.
-    /// So it counts ADMISSIONS, and every admission has exactly one departure.
-    admitted: AtomicUsize,
+    /// So it counts ATTACHES, and every attach has exactly one departure.
+    attachments: AtomicUsize,
     /// TRANSPORT havoc, per account rather than per venue.
     ///
     /// These corrupt what one connection RECEIVES rather than what the
@@ -293,14 +293,15 @@ impl Passenger {
             .contains_key(key)
     }
 
-    /// How many admitted sockets are still on this account. See `admitted`.
-    fn admissions(&self) -> usize {
-        self.admitted.load(Ordering::Acquire)
+    /// How many sockets are still attached to this account. See the field of
+    /// the same name.
+    fn attachments(&self) -> usize {
+        self.attachments.load(Ordering::Acquire)
     }
 
     /// Count one socket in, before its upgrade completes.
-    fn admit(&self) {
-        self.admitted.fetch_add(1, Ordering::AcqRel);
+    fn attach(&self) {
+        self.attachments.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Count one socket out. Called from `SocketSession`'s `Drop`, so it runs
@@ -317,15 +318,15 @@ impl Passenger {
         // `debug_assert` deliberately: the workspace runs its tests in both
         // profiles, and a hard assert here would turn an unbalanced departure
         // into a release-mode abort of the serving path.
-        let mut live = self.admitted.load(Ordering::Acquire);
+        let mut live = self.attachments.load(Ordering::Acquire);
         debug_assert!(
             live > 0,
-            "an admission departed twice on account {account}: every admission has exactly one \
+            "an attach departed twice on account {account}: every attach has exactly one \
              departure",
             account = self.account_id.as_str()
         );
         while live > 0 {
-            match self.admitted.compare_exchange_weak(
+            match self.attachments.compare_exchange_weak(
                 live,
                 live - 1,
                 Ordering::AcqRel,
@@ -337,7 +338,10 @@ impl Passenger {
         }
     }
 
-    fn attach(&self) {
+    /// Clear the freeze stamp: something is reading this account again. Not
+    /// the attach refcount, which `attach` and `depart` carry - this is the
+    /// stamp `frozen_for` measures, and `resume` is what clears it.
+    fn clear_freeze(&self) {
         *self
             .frozen_since
             .lock()
@@ -687,26 +691,26 @@ struct LedgerTemplate {
 /// never reaches `handle_socket`, and an account left counted-in forever is
 /// never frozen, never TTL-collected and swept while holding no seat.
 ///
-/// MINTED ONLY BY `Run::admit`, which raises the count and constructs this in
+/// MINTED ONLY BY `Run::attach`, which raises the count and constructs this in
 /// one expression. `Run::depart` is private to this module, so there is no way
 /// to raise the count without owning the guard that lowers it, and no way to
 /// lower it twice.
-pub(crate) struct Admission {
+pub(crate) struct Attach {
     run: Arc<Run>,
     passenger: Arc<Passenger>,
 }
 
 /// The account only: the run behind it holds every ledger on the venue, which
 /// is not something a diagnostic should splice into a log line.
-impl std::fmt::Debug for Admission {
+impl std::fmt::Debug for Attach {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Admission")
+        f.debug_struct("Attach")
             .field("account_id", &self.passenger.account_id.as_str())
             .finish_non_exhaustive()
     }
 }
 
-impl Drop for Admission {
+impl Drop for Attach {
     fn drop(&mut self) {
         self.run.depart(&self.passenger);
     }
@@ -985,7 +989,7 @@ impl Run {
             // nobody ever connects to immortal.
             frozen_since: Mutex::new(Some(std::time::Instant::now())),
             seated_on: Mutex::new(HashMap::new()),
-            admitted: AtomicUsize::new(0),
+            attachments: AtomicUsize::new(0),
             dark: HavocWindow::new(),
             stall: HavocWindow::new(),
             delay_ms: AtomicU64::new(0),
@@ -1320,7 +1324,7 @@ impl Run {
     ///
     /// UNATTENDED IS THE SAME TWO-PART QUESTION `freeze_if_unattended` ASKS,
     /// and it is asked here for the same reason: the freeze stamp alone is a
-    /// statement about the past, and a socket that has been ADMITTED onto a
+    /// statement about the past, and a socket that has ATTACHED to a
     /// long-frozen account has not cleared it yet.
     ///
     /// Returns the ids collected, so the caller can say which.
@@ -1331,18 +1335,19 @@ impl Run {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|(_, passenger)| {
-                // ADMISSION IS THE SECOND HALF OF "NOBODY IS READING THIS", and
+                // AN ATTACH IS THE SECOND HALF OF "NOBODY IS READING THIS", and
                 // asking only the freeze clock left the two predicates able to
                 // disagree. `freeze_if_unattended` refuses to freeze an account
-                // an admitted socket is still on; this asked a STALE freeze
+                // an attached socket is still on; this asked a STALE freeze
                 // stamp, which a returning socket does not clear until its
                 // handler reaches `resume` - so a consumer reclaiming a
                 // long-frozen ledger could have it collected out from under it
-                // between the admission and the attach, and would silently be
+                // between the attach and the clearing of the freeze, and would
+                // silently be
                 // handed a fresh one instead of the book it came back for. The
                 // window is the whole upgrade, which is the 101, a task spawn
                 // and an instrument registration wide.
-                passenger.admissions() == 0
+                passenger.attachments() == 0
                     && passenger
                         .frozen_for()
                         .is_some_and(|unattended| unattended >= ttl)
@@ -1486,7 +1491,7 @@ impl Run {
             // just because no socket ever reached it.
             frozen_since: Mutex::new(Some(std::time::Instant::now())),
             seated_on: Mutex::new(HashMap::new()),
-            admitted: AtomicUsize::new(0),
+            attachments: AtomicUsize::new(0),
             dark: HavocWindow::new(),
             stall: HavocWindow::new(),
             delay_ms: AtomicU64::new(0),
@@ -1711,7 +1716,7 @@ impl Run {
         }
     }
 
-    /// Count one socket in, from the instant `/ws` decides to admit it, and
+    /// Count one socket in, from the instant `/ws` decides to attach it, and
     /// hand back the GUARD that counts it out again.
     ///
     /// THE COUNT IS ONLY REACHABLE THROUGH THE GUARD, which is the whole reason
@@ -1724,15 +1729,15 @@ impl Run {
     /// makes that window unrepresentable: there is no way to raise the count
     /// without simultaneously owning the thing that lowers it.
     ///
-    /// Taken under the LANE LOCK, which is what serializes an admission against
+    /// Taken under the LANE LOCK, which is what serializes an attach against
     /// a departing socket's freeze decision: the two questions
     /// `freeze_if_unattended` asks are answered against one state of the venue
     /// rather than two.
-    pub(crate) fn admit(self: &Arc<Self>, passenger: &Arc<Passenger>) -> Admission {
+    pub(crate) fn attach(self: &Arc<Self>, passenger: &Arc<Passenger>) -> Attach {
         let lanes = self.locked_lanes();
-        passenger.admit();
+        passenger.attach();
         drop(lanes);
-        Admission {
+        Attach {
             run: Arc::clone(self),
             passenger: Arc::clone(passenger),
         }
@@ -1741,9 +1746,9 @@ impl Run {
     /// Freeze `passenger` if nothing is reading it any more.
     ///
     /// TWO CONDITIONS, AND BOTH ARE LOAD-BEARING. No lane is bound to the
-    /// account, AND no admitted socket is still on its way to binding one. The
+    /// account, AND no attached socket is still on its way to binding one. The
     /// lane table alone says "attached" one instant too long for an evicted
-    /// socket and one instant too short for an admitted one, so a freeze
+    /// socket and one instant too short for an attached one, so a freeze
     /// decided on it alone either fires on a live account or - the defect this
     /// closes - never fires at all: an eviction retires the incumbent's lane
     /// eagerly, so the incumbent's own teardown found no lane, resolved no
@@ -1759,17 +1764,17 @@ impl Run {
     fn freeze_if_unattended(&self, passenger: &Passenger) {
         let lanes = self.locked_lanes();
         let account = passenger.account_id.as_str();
-        if passenger.admissions() > 0 || lanes.iter().any(|bound| bound.account_id == account) {
+        if passenger.attachments() > 0 || lanes.iter().any(|bound| bound.account_id == account) {
             return;
         }
         passenger.freeze();
         drop(lanes);
     }
 
-    /// One socket has finished with `passenger`: give up its admission and
+    /// One socket has finished with `passenger`: give up its attach and
     /// freeze the account if it was the last thing reading it.
     ///
-    /// Private, and reached only by dropping an `Admission`: see `admit`.
+    /// Private, and reached only by dropping an `Attach`: see `attach`.
     fn depart(&self, passenger: &Passenger) {
         passenger.depart();
         self.freeze_if_unattended(passenger);
@@ -1810,7 +1815,7 @@ impl Run {
         now_ns: u64,
     ) -> Vec<mogwai_protocol::VenueMessage> {
         let returning = passenger.is_frozen();
-        passenger.attach();
+        passenger.clear_freeze();
         if !returning {
             // NOT A FIRST BIND, NECESSARILY. An eviction-reconnect lands here
             // too: the newcomer is counted onto the account before the incumbent
@@ -2550,7 +2555,7 @@ mod tests {
 
         let (first, _first_rx) = crate::admission::ExecLanes::detached();
         let first_id = run.bind_lanes(first, account.as_str(), None);
-        passenger.attach();
+        passenger.clear_freeze();
         assert!(!passenger.is_frozen());
 
         // A SECOND connection on the same account: retiring the first must not
@@ -2580,17 +2585,17 @@ mod tests {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("FREEZE-002").unwrap();
         let passenger = run.passenger(&account);
-        let incumbent_admission = run.admit(&passenger);
+        let incumbent_attach = run.attach(&passenger);
         let (lanes, _rx) = crate::admission::ExecLanes::detached();
         let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        passenger.attach();
+        passenger.clear_freeze();
 
         // A stranger claims the account and then never binds anything - the
         // refused upgrade, and the upgrade abandoned after the 101 - so the
         // incumbent's own teardown is the last thing that touches the account.
         assert_eq!(run.evict_account(account.as_str(), Some("beta")), 1);
         run.release_lanes(incumbent);
-        drop(incumbent_admission);
+        drop(incumbent_attach);
 
         assert!(
             passenger.is_frozen(),
@@ -2604,32 +2609,32 @@ mod tests {
     }
 
     /// The other half of the same rule: an account is not frozen out from under
-    /// a socket that has been ADMITTED and has not bound its lane yet. That
+    /// a socket that has ATTACHED and has not bound its lane yet. That
     /// window is real - it spans the 101 and everything `handle_socket` does
     /// before `bind_lanes` - and freezing inside it would leave a live
     /// connection trading a ledger the sweeper skips.
     #[test]
-    fn an_admitted_socket_holds_the_account_open_before_it_binds_a_lane() {
+    fn an_attached_socket_holds_the_account_open_before_it_binds_a_lane() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("FREEZE-003").unwrap();
         let passenger = run.passenger(&account);
-        let incumbent_admission = run.admit(&passenger);
+        let incumbent_attach = run.attach(&passenger);
         let (lanes, _rx) = crate::admission::ExecLanes::detached();
         let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        passenger.attach();
+        passenger.clear_freeze();
 
         // The newcomer is counted on before the upgrade completes, exactly as
         // `/ws` does it.
-        let newcomer_admission = run.admit(&passenger);
+        let newcomer_attach = run.attach(&passenger);
         assert_eq!(run.evict_account(account.as_str(), Some("beta")), 1);
         run.release_lanes(incumbent);
-        drop(incumbent_admission);
+        drop(incumbent_attach);
         assert!(
             !passenger.is_frozen(),
             "the newcomer is on its way in, so the account is still being read"
         );
 
-        drop(newcomer_admission);
+        drop(newcomer_attach);
         assert!(
             passenger.is_frozen(),
             "and when that newcomer goes without ever binding, the account freezes"
@@ -2761,13 +2766,13 @@ mod tests {
         let key = boat_key(&run, "BTCUSDT", 1.0);
 
         let passenger = claim_account(&run, &account, Some("alpha"));
-        let incumbent_admission = run.admit(&passenger);
+        let incumbent_attach = run.attach(&passenger);
         passenger
             .try_sit(key.clone())
             .expect("the incumbent boards");
         let (lanes, _rx) = ExecLanes::detached();
         let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        passenger.attach();
+        passenger.clear_freeze();
 
         // A limit far below the tape, so it RESTS rather than filling: the
         // frontier only exists on an order the sweeper still has to judge.
@@ -2818,7 +2823,7 @@ mod tests {
 
         // The newcomer is counted on BEFORE the eviction, which is the ordering
         // `ws_upgrade` takes and the reason the freeze never fires.
-        let newcomer_admission = run.admit(&passenger);
+        let newcomer_attach = run.attach(&passenger);
         assert_eq!(
             run.evict_account(account.as_str(), Some("beta")),
             1,
@@ -2829,7 +2834,7 @@ mod tests {
         // takes the last passenger off that boat.
         run.release_lanes(incumbent);
         passenger.unsit(&key);
-        drop(incumbent_admission);
+        drop(incumbent_attach);
         assert!(
             !passenger.is_frozen(),
             "the newcomer was already counted on, so the account never went unattended - which is \
@@ -2857,7 +2862,7 @@ mod tests {
             frontier <= resumed_ns,
             "a frontier may trail the cursor serving it and must never lead it"
         );
-        drop(newcomer_admission);
+        drop(newcomer_attach);
     }
 
     /// A CONSUMER IS NOT A SOCKET. The nautilus host that drives this venue holds
@@ -3172,7 +3177,7 @@ mod tests {
         let held_passenger = run.passenger(&held);
         let (lanes, _rx) = crate::admission::ExecLanes::detached();
         run.bind_lanes(lanes, held.as_str(), None);
-        held_passenger.attach();
+        held_passenger.clear_freeze();
 
         // A TTL nothing has outlived yet spares even the unattended account,
         // which is what makes the collection about the SPAN rather than about
@@ -3214,9 +3219,9 @@ mod tests {
     /// alone therefore discarded the account inside that window, and the consumer
     /// that came back for its book was silently minted a fresh one. Both
     /// assertions are here because the second alone passes against the broken
-    /// shape: what proves the fix is the account surviving WHILE admitted.
+    /// shape: what proves the fix is the account surviving WHILE attached.
     #[test]
-    fn an_admitted_socket_spares_the_account_it_is_reclaiming() {
+    fn an_attached_socket_spares_the_account_it_is_reclaiming() {
         let run = run(1_000, 400, None);
         let returning = mogwai_protocol::AccountId::parse("BACK-001").unwrap();
         let passenger = run.passenger(&returning);
@@ -3225,7 +3230,7 @@ mod tests {
             "an account nobody has connected to is unattended, and this test is about that state"
         );
 
-        let admission = run.admit(&passenger);
+        let attach = run.attach(&passenger);
         assert!(
             run.collect_expired_accounts(std::time::Duration::ZERO)
                 .is_empty(),
@@ -3233,7 +3238,7 @@ mod tests {
              arrives"
         );
 
-        drop(admission);
+        drop(attach);
         assert_eq!(
             run.collect_expired_accounts(std::time::Duration::ZERO),
             vec!["BACK-001".to_string()],

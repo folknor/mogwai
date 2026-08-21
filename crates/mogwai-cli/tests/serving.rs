@@ -1676,7 +1676,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
 }
 
 /// A SOCKET GOING AWAY FREES ITS ACCOUNT ALL THE WAY TO COLLECTION, and the
-/// thing that frees it is the ADMISSION being given up rather than the lane
+/// thing that frees it is the ATTACH being given up rather than the lane
 /// being released.
 ///
 /// A socket is counted onto its account before the 101 and off it when its
@@ -1684,8 +1684,8 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
 /// is reading an account: an eviction retires the incumbent's lane immediately,
 /// and a newcomer binds its own only once its handler runs. The consequence
 /// that matters here is one of ORDER. `handle_socket` releases its lane while
-/// still holding its admission, so the lane release finds the account still
-/// counted-in and declines to freeze; the freeze is owed by the admission's own
+/// still holding its attach, so the lane release finds the account still
+/// counted-in and declines to freeze; the freeze is owed by the attach's own
 /// departure a moment later. An account that never freezes is never
 /// TTL-collected and is still swept while holding no seat.
 ///
@@ -1703,13 +1703,13 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
 /// back to collectable is a freeze this teardown performed.
 ///
 /// WHAT IT STILL DOES NOT REACH, stated because a bite-check went looking. The
-/// case the admission count was ADDED for is the upgrade abandoned before
+/// case the attach count was ADDED for is the upgrade abandoned before
 /// `handle_socket` ever runs - no lane bound, no lane released - and no consumer
 /// behaviour reaches it from outside: writing the request and resetting the
 /// connection at once still loses to the venue, which has read the request,
 /// written the 101 and started the handler by the time the reset lands.
 /// Sixteen such attempts all landed on the handled path. That branch is pinned
-/// by `run.rs`'s unit tests, which drop an `Admission` directly; pinning it
+/// by `run.rs`'s unit tests, which drop an `Attach` directly; pinning it
 /// from a socket needs a scheduling lever the venue does not expose.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]

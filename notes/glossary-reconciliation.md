@@ -778,6 +778,131 @@ account the venue holds was claimed by a connection, and every `/ws` connection
 boards a boat, so the account genuinely does hold a seat - the adjective is the
 glossary's own sense and the entry stands.
 
+**Round 6, the `admission` family, 2026-08-21.** A classification, and the
+second round whose ruling leaves the word on one of its senses. The three jobs
+the word was doing in `mogwai-venue`, two of them observable by one consumer in
+one run:
+
+- The per-connection OUTBOUND byte and frame budget KEEPS the word. It is the
+  only one of the three the protocol crate already publishes on the wire -
+  `AdmissionRejected`, `AdmissionSubject`, `retryable` - and two operator config
+  keys, `admission_lane_frames` and `exec_held_budget_bytes`, are stated over
+  it. `admission.rs` is untouched by the round, which is the shape a correct
+  classification produces.
+- The INBOUND concurrency gate on `/trades` and `/quotes` becomes slots.
+  `admit_history` is `acquire_history_slot`, `MAX_CONCURRENT_HISTORY_REQUESTS`
+  is `MAX_CONCURRENT_HISTORY_SLOTS`, `HISTORY_ADMISSION_WAIT` is
+  `HISTORY_SLOT_WAIT`, and `AppState`'s `history_requests` / `history_queue`
+  are `history_slots` / `history_slot_waiters`. All crate-private: no route, no
+  status code, no refusal body and no config key moves, so there is no operator
+  or consumer break to document or pin.
+- The ATTACH refcount on an account becomes attach, which the module already
+  spoke for that concept in three places. `Run::admit` is `Run::attach`,
+  `Admission` is `Attach`, `Passenger::admitted` / `admissions()` / `admit()`
+  are `attachments` / `attachments()` / `attach()`, and `SocketSession::admission`
+  is `attach`. The passenger method that HELD the name `attach` - it clears the
+  freeze stamp and has nothing to do with the refcount - is `clear_freeze`, and
+  it now carries a doc saying which of the two it is.
+
+The point of the split is that `Run::admit` read as capacity and meant its
+opposite: it does not decide whether a socket may in, it records that one is
+already coming, and a reader who learned the wire sense first was actively
+misled rather than merely confused. `Attach` also states the guard's job in its
+own name, which is what the type is for - the count is reachable only by owning
+the thing that lowers it.
+
+Three glossary entries landed with it, because the word defined none of the
+three: **Admission** under The wire, **History slot** beside it, and **Attach**
+under The accounts next to Connection. No tape byte and no wire byte moves, so
+no `TAPE_PROTOCOL_VERSION` bump is owed. The gated check reports 1340 workspace
+and 468 instrumented tests, unchanged.
+
+What the fix-and-commit pass found in the half no cold reviewer reads, which is
+the three recurring failures again, all three of them:
+
+- THE SWEEP STOPPED AT THE VENUE CRATE. `mogwai-cli`'s `serving.rs` carried the
+  moved sense four times in one doc comment on
+  `a_departing_socket_freezes_its_account_into_collection` - "the ADMISSION
+  being given up rather than the lane", "still holding its admission", "the
+  admission count was ADDED for", "drop an `Admission` directly" - which is the
+  socket-level statement of exactly the rule the round renamed, and it named a
+  type that no longer exists. `notes/todo.md` carried four more.
+- EMPHASIS WAS HALF-SWEPT IN BOTH DIRECTIONS, eleven sites. The pass lowercased
+  capitals it had no mandate to move while their contrast partners stayed
+  capitalised: `freeze_if_unattended`'s "TWO CONDITIONS, AND BOTH ARE
+  LOAD-BEARING" kept its lead and lost the AND that joined the two conditions;
+  `Run::attach`'s "THE COUNT IS ONLY REACHABLE THROUGH THE GUARD" kept its
+  shout while the sentence above it lost GUARD; `reference/performance.md` kept
+  "properties of what is RESIDENT" and lost the AMENDED and the WAITS in the
+  same paragraph; `reference/architecture.md` lost "ITS LAST CONNECTION" IS
+  COUNTED FROM two lines under a paragraph that still shouts THE CONSEQUENCE TO
+  STATE IN ANY CLAIM. Restored where the emphasis carried the meaning.
+- SENTENCES THAT CAME OUT FALSE OR UNGRAMMATICAL around a correct substitution.
+  `collect_expired_accounts` produced "refuses to freeze an account a socket
+  attach is still held"; `attachments()`'s doc said "See `attachments`" and
+  pointed at itself; `HistoryPage`'s docs kept "readmit", the retired sense's
+  verb, twice.
+
+And three defects the round exposed rather than caused, all in the sense that
+kept the word or in the gate it renamed, fixed here because the split has failed
+at the site it was protecting if that sense is incoherent:
+
+- `MAX_CONCURRENT_HISTORY_SLOTS`'s doc still said a fifth request is REFUSED
+  rather than queued. The 2026-08-18 amendment made it WAIT, and
+  `HISTORY_SLOT_WAIT` four lines below said so - two docs on one mechanism
+  disagreeing, with both halves green.
+- `AppState::history_slot_waiters` and `MAX_QUEUED_HISTORY_REQUESTS` both said
+  the semaphore counts callers "in the building at all - synthesizing or
+  waiting". `acquire_history_slot` drops the queue permit the instant a slot is
+  won, so it has never counted synthesis. The rename made the FIELD NAME assert
+  the true thing while its own doc asserted the false one, which is how the
+  disagreement became visible.
+- `ADMISSION_PROMISE_TICKETS`'s doc was two clauses spliced together - "would
+  leave zero capacity for any actual refusal would leave a connection whose
+  priority lane is completely empty unable to state why it is closing". The
+  wire-subscribe removal cut the middle of a sentence out and left both ends.
+  Reconstructed from `d7b5f98`, which is the commit that wrote it whole.
+
+RAISED AND NOT ACTED ON, recorded so a later round does not re-file them:
+
+- **`admission` has a FOURTH sense this round did not rule on**, and it is the
+  largest by site count: `mogwai-engine`'s acceptance of an order or a linked
+  group onto the book - "atomic admission", `docs/order-lists.md`,
+  `reference/architecture.md`, roughly sixty sites. It is the industry reading
+  of the word and it is not a capacity statement, so it is plausibly inherited
+  rather than a collision. The new glossary entry was drafted claiming the word
+  "belongs only to that outbound backpressure surface", which that sense makes
+  false; the entry now names the engine sense explicitly instead of asserting an
+  exclusivity nobody ruled.
+- **`admission.rs` carries the false eviction sentence round 4 corrected** -
+  "an account is on at most one river at a time and is never shared", on
+  `CLOSE_EVICTED`. That is the callsign family and the correction round 4 made
+  in `reference/architecture.md` and round 5 made in three more files; this is
+  the fourth copy. Grep the sentence, not the file.
+- **`notes/todo.md` still says `client`** at the abandoned-upgrade item. Round 3's
+  family.
+- **`mogwai-cli`'s `completion.rs` says config knobs are "bounded at admission"**,
+  a fifth generic-English use meaning validated at load. Unruled.
+
+**THE BACKPRESSURE SPREAD, reported and deliberately not redesigned.** The pass
+was asked to report the several spellings of "the venue is full" rather than to
+unify them, and nothing about them moved in this round - no status code, no
+refusal body, no `retryable`. There are three carriers and only one is
+machine-readable:
+
+| carrier | what it says | retry hint |
+|---|---|---|
+| `AdmissionRejected` on the priority lane | outbound budget or the global command semaphore is full, with an `AdmissionSubject` naming what was refused | `retryable: bool`, a typed field the adapter keys on |
+| WS close 1013 `CLOSE_ADMISSION_OVERLOAD` | the connection's admission path is saturated and the venue is ending it | the code's own "Try Again Later" and nothing else; the connection is gone |
+| HTTP `503` from `acquire_history_slot` | "history request capacity exhausted", for both the fail-fast waiter refusal and the expired slot wait | none - a plain-text body, no `Retry-After`, and the two very different conditions share one string |
+
+The item for a later round: the HTTP half is the weak one. A consumer cannot
+tell "the queue was already full" from "you waited thirty seconds and lost",
+and nautilus's historical response types carry no error channel at all, so the
+503 reaches a host as an empty window - the same defect the 2026-08-18 wait was
+added to avoid. Whether the fix is two distinct bodies, a `Retry-After`, or
+something the adapter can type is a design question this arc has no ruling on.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
@@ -816,6 +941,11 @@ These belong to no single scope, so nothing else holds them.
 - `session` as a name for the socket identity, on the wire and everywhere else.
   It survives only for the trading day, which is the operator surface's
   overwhelming majority usage and is not ours to rename.
+- `admission` as a name for the history concurrency gate or for a connection's
+  claim on an account. It survives for the per-connection outbound execution
+  budget, which the wire publishes, and - unruled, and not to be swept as
+  though it were retired - for `mogwai-engine`'s acceptance of an order onto
+  the book.
 
 ### Left as inherited
 
@@ -832,6 +962,35 @@ Recorded per scope in the scope reports until the merge collects them.
   connection's own deadline elapsing.
 - `passenger`: the glossary says one per account, and several sites count
   connections.
+
+## What the rename rounds keep getting wrong
+
+Six rounds in, three failures recur often enough to belong in every brief. Round
+6 produced all three at once, which is the first time one round has.
+
+**The sweep stops at one crate.** A rename pass finds the family in the crate
+that owns it and leaves live siblings in the others. Twice now a false sentence
+corrected in one crate survived verbatim in two more, because the round that
+fixed it grepped the file rather than the sentence. Grep the sentence across the
+workspace, not the identifier inside the crate.
+
+**The word moves and the sentence is never re-read.** The characteristic damage
+is not a wrong identifier, which the compiler catches, but a sentence that came
+out false, vacuous or ungrammatical around a correct substitution - a doc
+promising that a minted ledger is identical to a minted one, an article left
+disagreeing with its noun. The check at every site is "does the new word make
+this sentence true", never "is this the ruled sense".
+
+**Emphasis gets half-swept.** Where a sentence carried a contrast in capitals,
+a pass will lowercase one half and leave the other, destroying the distinction
+the sentence existed to draw. Whatever the house style for emphasis, both halves
+move together or neither does.
+
+The evidence for all three is that the cold review found something in two rounds
+of six and the fix-and-commit stage found something in six of six. That is not
+a criticism of the cold review, which catches what a reader without the arc's
+priors sees. It is that a rename arc's defects live in prose, and prose defects
+compile, pass and read fluently.
 
 ## Standing rules
 

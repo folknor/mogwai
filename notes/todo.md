@@ -423,7 +423,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   WHAT IS ACTUALLY WRONG IS THE OTHER HALF, and it needs no identity to decide.
   `resume` re-bases every surviving order's scan frontier onto the binding
   boat's clock, and does so only for an account it found FROZEN - which was
-  always a proxy for "the cursor went away". The round-1 admission ordering
+  always a proxy for "the cursor went away". The round-1 attach ordering
   broke the proxy: the newcomer is counted on before the incumbent is closed,
   deliberately, so `returning == false` on every eviction-reconnect.
   Same-river reconnect is unharmed, because the newcomer boards the same boat
@@ -463,10 +463,10 @@ group by any other route has no API for it, and none is owed until one is wanted
   the remaining consumer of a nonce if one is ever wanted.
 
 - THE ABANDONED-UPGRADE PATH HAS NO SOCKET-LEVEL TEST, and no client behaviour
-  found so far reaches it. `Passenger::admitted` exists for the upgrade a client
-  walks away from before `handle_socket` runs - no lane bound, no lane released
-  - and that branch is pinned only by `run.rs` unit tests that drop an
-  `Admission` directly. Sixteen connections writing a well-formed upgrade
+  found so far reaches it. `Passenger::attachments` exists for the upgrade a
+  client walks away from before `handle_socket` runs - no lane bound, no lane
+  released - and that branch is pinned only by `run.rs` unit tests that drop an
+  `Attach` directly. Sixteen connections writing a well-formed upgrade
   request and then resetting with `SO_LINGER` at zero all landed on the handled
   path instead: on loopback the venue has read the request, written the 101 and
   started the handler before the reset arrives. The race is inside hyper's
@@ -476,11 +476,11 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 - THE CONNECTION LIFECYCLE IS STILL FOUR MUTABLE STRUCTURES rather than one
   derived registry. `Run::lanes`, `Passenger::frozen_since`,
-  `Passenger::seated_on` and now `Passenger::admitted` each carry part of the
+  `Passenger::seated_on` and now `Passenger::attachments` each carry part of the
   answer to "is anybody reading this account", with the consistency rules in
   prose. The `notes/bugs-server.md` round-1 fixes closed the two live holes -
   eviction now happens after every refusal, and the freeze is decided by one
-  predicate over the lane table and the admission count - but they closed them
+  predicate over the lane table and the attach count - but they closed them
   by adding a fourth structure, not by removing the possibility. NOTHING
   DETECTS the next lifecycle path that updates three of the four. The hunter's
   proposal stands: one registry keyed by account holding the live connections,

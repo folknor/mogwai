@@ -85,7 +85,7 @@ exists to exercise a consumer's live path rather than to simulate an account
 nobody is trading. THE CONSEQUENCE TO STATE IN ANY CLAIM is that a run spanning
 a disconnect has a gap in its risk history.
 
-"ITS LAST CONNECTION" IS COUNTED FROM ADMISSION, not from the outbound lane a
+"ITS LAST CONNECTION" IS COUNTED FROM THE ATTACH, not from the outbound lane a
 socket binds after its upgrade completes. The lane table alone cannot answer
 whether anybody is reading an account: an eviction retires the incumbent's lane
 immediately, while the newcomer binds its own only once its handler runs - and
@@ -95,11 +95,11 @@ session is dropped, if it never bound one, which is what covers the abandoned
 upgrade. The two are deliberately not the same instant: the writer's close
 frame outlives the lane, and holding the account counted-in for that grace would
 keep it in the sweep after nothing is reading it. The freeze fires when neither
-a lane nor an admission is left. Without that count the evicted incumbent's
-teardown found no
-lane, resolved no account and simply returned, leaving the ledger attached with
-zero connections: never TTL-collected, and still swept while holding no seat,
-which cancelled the very resting orders the freeze exists to preserve.
+a lane nor an attach is left. Without that count the evicted incumbent's
+teardown found no lane, resolved no account and simply returned, leaving the
+ledger attached with zero connections: never TTL-collected, and still swept
+while holding no seat, which cancelled the very resting orders the freeze
+exists to preserve.
 
 RESUMING RE-BASES THE BOOK, because a returning boat is not the one that left. A
 cursor is placed at its river's origin, so a frozen order's scan frontier - the

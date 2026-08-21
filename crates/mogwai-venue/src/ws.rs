@@ -123,7 +123,7 @@ pub(crate) struct SocketSession {
     /// instant it has released its lane, rather than at the end of its own
     /// teardown - the boat ticket above must outlive the writer's close frame,
     /// and the account must not be swept for that long.
-    pub(crate) admission: Option<crate::run::Admission>,
+    pub(crate) attach: Option<crate::run::Attach>,
     /// THIS SESSION'S CLAIM ON THE PROCESS, taken in `ws_upgrade` BEFORE the
     /// 101 is returned and dropped with the session, after the writer has
     /// flushed its close.
@@ -160,7 +160,7 @@ pub(crate) struct SocketSession {
 /// `Drop` rather than a call at the end of `handle_socket`: the session is
 /// also dropped when an upgrade is abandoned before the handler ever runs.
 ///
-/// The `Admission` it carries rides along for the same reason and is the half
+/// The `Attach` it carries rides along for the same reason and is the half
 /// the abandoned upgrade makes necessary: a socket is counted onto its account
 /// before the 101, so an upgrade that never reaches `handle_socket` still ends
 /// with nothing reading the account - and the departure then freezes it, which
@@ -318,12 +318,12 @@ pub(crate) async fn ws_upgrade(
     // TAKEN here rather than merely tested, so nothing can slip between the
     // test and the claim - and this is the last fallible step, so a seat taken
     // here is never abandoned.
-    let mut prepared_existing: Option<(Arc<crate::run::Passenger>, crate::run::Admission)> = None;
+    let mut prepared_existing: Option<(Arc<crate::run::Passenger>, crate::run::Attach)> = None;
     if !resetting {
         // The passenger `claim_account` is about to return, resolved before the eviction so
         // this socket can be COUNTED ON to the account before the incumbent is
         // closed. Without that the incumbent's teardown could win the race to
-        // an account with no lane and no admission, freeze it, and make the
+        // an account with no lane and no attach, freeze it, and make the
         // newcomer's `resume` retire a book it had no business retiring - which
         // would be a nondeterministic behaviour change, not a refusal. The
         // resetting branch needs none of this: the ledger it produces is a
@@ -345,8 +345,8 @@ pub(crate) async fn ws_upgrade(
         // abandoned upgrade or a cancelled future between here and the 101 then
         // lowers it on the way out instead of stranding the account
         // permanently counted-in.
-        let admission = state.run.admit(&existing);
-        prepared_existing = Some((existing, admission));
+        let attach = state.run.attach(&existing);
+        prepared_existing = Some((existing, attach));
     }
     // EVICTION HAPPENS HERE, with every refusal already decided. `resetting`
     // was evaluated once, above, and is handed to `claim_account` rather than
@@ -356,15 +356,15 @@ pub(crate) async fn ws_upgrade(
     let passenger = state
         .run
         .claim_account(&account_id, claimed, callsign, resetting);
-    let admission = match prepared_existing {
+    let attach = match prepared_existing {
         // The ordinary non-resetting path: the ledger checked above is the one
-        // the claim returned, so its seat and its admission carry straight into
+        // the claim returned, so its seat and its attach carry straight into
         // the session.
-        Some((existing, admission)) if Arc::ptr_eq(&existing, &passenger) => Some(admission),
+        Some((existing, attach)) if Arc::ptr_eq(&existing, &passenger) => Some(attach),
         // The ledger MOVED OUT FROM UNDER THE CHECK. `resetting` is false here,
         // so `claim_account` did not reopen the account itself: only another upgrade
         // racing this same account inside this window can have replaced the map
-        // entry. The admission is given up right here - dropping the guard
+        // entry. The attach is given up right here - dropping the guard
         // departs the account it was taken on, so nothing is stranded counted-in
         // - and the SEAT taken on `existing` is left behind deliberately, since
         // `existing` is no longer reachable through the passenger map and dies
@@ -372,12 +372,12 @@ pub(crate) async fn ws_upgrade(
         // harmless because the ledger holding it is unreachable, not because
         // anything releases it.
         //
-        // The resetting path arrives here too, having checked and admitted
+        // The resetting path arrives here too, having checked and attached
         // nothing yet, and takes the same branch below.
         _ => None,
     };
-    let admission = match admission {
-        Some(admission) => admission,
+    let attach = match attach {
+        Some(attach) => attach,
         None => {
             // A ledger this call minted or reset holds no seat, so this cannot
             // refuse for the cadence rule. It can still lose to another upgrade
@@ -402,7 +402,7 @@ pub(crate) async fn ws_upgrade(
             // completes and off it when its session drops, which is what keeps
             // the account attached across the gap before `bind_lanes` and what
             // freezes it if this upgrade is abandoned and never binds anything.
-            state.run.admit(&passenger)
+            state.run.attach(&passenger)
         }
     };
     // The ledger-side install, on the passenger the claim actually returned.
@@ -413,7 +413,7 @@ pub(crate) async fn ws_upgrade(
         duration_ms: query.duration_ms,
         passenger,
         presented_identity: query.callsign.clone(),
-        admission: Some(admission),
+        attach: Some(attach),
         // Before the 101, not inside the spawned handler. See the field.
         alive: state.run.session_guard(),
     };
@@ -936,7 +936,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
     // for the writer's grace would keep it in the sweep for that long. The
     // session still carries the guard, so an abandoned upgrade that never got
     // here is covered by the drop.
-    drop(session.admission.take());
+    drop(session.attach.take());
     feed.abort();
     pump.abort();
     dispatcher.abort();

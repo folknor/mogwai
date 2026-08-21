@@ -44,9 +44,9 @@ pub(crate) const ADMISSION_LANE_FRAMES: usize = 64;
 
 /// Outstanding PROMISES of a future priority frame - one per live replay, held
 /// for the replay's whole life. Accounted separately from queue depth: drawn
-/// from the same 64-slot pool, 64 healthy replays would leave zero capacity for
-/// any actual refusal would leave a connection whose priority lane is
-/// completely empty unable to state why it is closing.
+/// from the same 64-slot pool, 64 healthy replays would leave zero capacity
+/// for any actual refusal, and a connection whose priority lane is completely
+/// empty cannot state why it is closing.
 ///
 /// One connection owns one unconditional replay, for the one river named on
 /// its upgrade, hence exactly one future refusal promise. Deliberately no

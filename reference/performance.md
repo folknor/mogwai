@@ -368,25 +368,25 @@ stderr counter is the measurement record for this landing. The depth itself is
 the ring is allocated PER BOAT - a run serving several rivers at once pays it
 once per placed boat.
 
-## History admission gate, 2026-08-15
+## History slot gate, 2026-08-15
 
-The venue now admits at most four concurrent whole-page history syntheses,
+The venue now runs at most four concurrent whole-page history syntheses,
 bounding worst-case response construction and preventing history from filling
 Tokio's blocking pool ahead of command market readings. The release-mode
-`history_admission_overhead` instrument ran one million uncontended
-acquire/drop pairs five times on host `bygg`: 23, 23, 23, 22 and 22 ns per
-admission. This measures the added gate itself, not endpoint latency; history
-synthesis and JSON response construction dominate it.
+`history_slot_overhead` instrument ran one million uncontended acquire/drop
+pairs five times on host `bygg`: 23, 23, 23, 22 and 22 ns per acquire. This
+measures the added gate itself, not endpoint latency; history synthesis and
+JSON response construction dominate it.
 
 The bound the gate multiplies is MEASURED, by the release-mode
 `worst_case_history_page_bytes` instrument, at a full `MAX_HISTORY_LIMIT` page
 of MNQ-shaped ticks: `/quotes` is 4.40 MB of `QuoteTick` vector and 5.90 MB of
 serialized JSON, `/trades` 3.20 MB and 5.05 MB. The vector and its bytes are
-resident together while serde runs, so an admitted quote page peaks near 10.3
-MB and four of them near 41 MB. That is the whole ceiling only because the
-admission permit is carried by the response body rather than by the handler:
-axum serializes a returned `Json` value after the handler future resolves, so
-a handler-scoped permit would readmit four more requests while four
+resident together while serde runs, so a quote page holding a slot peaks near
+10.3 MB and four of them near 41 MB. That is the whole ceiling only because the
+history slot is carried by the response body rather than by the handler: axum
+serializes a returned `Json` value after the handler future resolves, so a
+handler-scoped slot would free capacity for four more syntheses while four
 multi-megabyte responses were still being built. History serializes on its own
 blocking task and hands the finished bytes and the permit to `HistoryPage`
 together.
@@ -394,7 +394,7 @@ together.
 AMENDED 2026-08-18: the gate WAITS instead of refusing. The measurements above
 stand unchanged - the concurrency, the per-page bytes and the ~41 MB ceiling are
 all properties of what is RESIDENT, and a caller waiting for a slot holds no
-page - but a fifth request now blocks for up to `HISTORY_ADMISSION_WAIT` rather
+page - but a fifth request now blocks for up to `HISTORY_SLOT_WAIT` rather
 than taking a `503`. The reason is consumer-side and not a performance one: a
 refusal reaches a nautilus host as an EMPTY window, because its historical
 response types carry no error channel, so a refused warmup was indistinguishable

@@ -186,6 +186,11 @@ so.
   ownership of orders and money is per account. The word covers WebSockets
   only: an HTTP history poll or a control-plane POST is a wire interaction
   but not a connection, holds no lane and no seat, and survives nothing.
+- **Attach**: one live connection's claim to be reading an account, acquired
+  before its WebSocket upgrade completes and released after its lane is gone.
+  The account freezes only when it has neither a bound lane nor an attach, so
+  an abandoned or racing upgrade cannot leave it swept while unattended. This
+  is a refcount of readers, not a capacity gate.
 - **Callsign**: the self-asserted identity carried on the upgrade as
   `/ws?callsign=`. It is announced by the party itself, conventionally honoured,
   and nothing stands behind it - which is what the word is for. It is also the
@@ -258,8 +263,25 @@ so.
 
 ## The wire
 
+- **Admission**: the per-connection outbound execution budget. The held lane
+  accounts for produced bytes and the priority lane preserves refusal truth;
+  a command whose worst-case output cannot be reserved never reaches the
+  engine and receives `AdmissionRejected`, including its machine-readable
+  retry hint. This is the venue's only backpressure sense of the word:
+  inbound history capacity is a History slot, and a connection's claim on an
+  account is an Attach. `mogwai-engine` uses "admission" for a separate thing,
+  an order or linked group being accepted onto the book, which is the industry
+  reading and is not a capacity statement.
+- **History slot**: one of the run-wide permits bounding whole-page synthesis
+  and serialization for `/trades` and `/quotes`. A request first takes a
+  bounded waiter place, then waits up to the slot deadline; exhaustion is an
+  HTTP `503` with a plain-text body and no retry hint. A slot rides the
+  blocking synthesis and the response body, so it is held for exactly as long
+  as that page remains resident. It is inbound request capacity, not a
+  connection's outbound admission budget.
 - **ReadyRecord**: one versioned JSON line describing the venue, its only
-  stdout output. It names no symbol; attach identity is `addr` plus `run_seed`.
+  stdout output. It names no symbol; what identifies the venue a consumer
+  connects to is `addr` plus `run_seed`.
 - **RunComplete**: the terminal WebSocket announcement for a planned duration
   completion, followed by a normal close. A socket may carry its own
   `duration_ms`, measured in simulated milliseconds on its boat's clock from

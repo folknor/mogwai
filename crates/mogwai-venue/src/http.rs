@@ -734,11 +734,14 @@ pub(crate) struct AppState {
     /// delay. The per-connection lane bounds one consumer; this bounds the run.
     pub(crate) pending_commands: Arc<tokio::sync::Semaphore>,
     /// Slots for history syntheses IN FLIGHT, which is what bounds resident
-    /// page memory. A caller over the cap WAITS for one; see `admit_history`.
-    pub(crate) history_requests: Arc<tokio::sync::Semaphore>,
-    /// Callers in the building at all - synthesizing or waiting. This is the
-    /// fail-fast half, and the only one that still refuses on contention.
-    pub(crate) history_queue: Arc<tokio::sync::Semaphore>,
+    /// page memory. A caller over the cap WAITS for one; see
+    /// `acquire_history_slot`.
+    pub(crate) history_slots: Arc<tokio::sync::Semaphore>,
+    /// Callers QUEUED for one of those slots and holding no page yet. The
+    /// waiter permit is given up the instant a slot is won, so this counts
+    /// waiting and never synthesis. This is the fail-fast half, and the only
+    /// one that still refuses on contention.
+    pub(crate) history_slot_waiters: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Serialize)]
@@ -1751,7 +1754,8 @@ pub(crate) async fn trades(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let history_slot = admit_history(&state.history_requests, &state.history_queue).await?;
+    let history_slot =
+        acquire_history_slot(&state.history_slots, &state.history_slot_waiters).await?;
     // No `regime` parameter: the market regime is boot config for the whole run
     // now, so history and the live tape are the same realization by
     // construction rather than by a consumer remembering to ask for the same one.
@@ -1807,10 +1811,10 @@ pub(crate) async fn trades(
     // runtime's worker pool.
     //
     // Serialization runs on the SAME blocking task as the synthesis, and the
-    // admission permit RIDES that task rather than staying a handler local:
-    // hyper drops this handler future the moment the connection drops, but a
-    // running blocking task cannot be cancelled, so a permit left out here
-    // would be released while the synthesis it admitted was still resident -
+    // history slot RIDES that task rather than staying a handler local: hyper
+    // drops this handler future the moment the connection drops, but a running
+    // blocking task cannot be cancelled, so a slot left out here would be
+    // released while the synthesis it covers was still resident -
     // the exact scope-ends-before-the-work defect `HistoryPage` closes on the
     // response side. The closure hands the slot back with the bytes; on the
     // error and panic paths it drops inside the task, after the work ends.
@@ -1850,7 +1854,8 @@ pub(crate) async fn quotes(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let history_slot = admit_history(&state.history_requests, &state.history_queue).await?;
+    let history_slot =
+        acquire_history_slot(&state.history_slots, &state.history_slot_waiters).await?;
     let limit = normalize_limit(query.limit);
     let rivers = Arc::clone(&state.rivers);
     let data_origin = source::TAPE_ORIGIN_NS;
@@ -1904,9 +1909,10 @@ pub(crate) async fn quotes(
 }
 
 /// How many `/trades` or `/quotes` syntheses may be in flight at once. A fifth
-/// request is REFUSED rather than queued, so history can neither fill Tokio's
-/// blocking pool ahead of order-entry market readings nor accumulate response
-/// buffers without a ceiling.
+/// request WAITS for a slot rather than starting one - see
+/// [`HISTORY_SLOT_WAIT`] - so history can neither fill Tokio's blocking pool
+/// ahead of order-entry market readings nor accumulate response buffers
+/// without a ceiling.
 ///
 /// The memory bound this buys is MEASURED rather than asserted, by
 /// `worst_case_history_page_bytes` and recorded in `reference/performance.md`:
@@ -1915,14 +1921,14 @@ pub(crate) async fn quotes(
 /// `/trades` is narrower at 3.20 MB plus 5.05 MB. The number is a bound only
 /// because the permit outlives BOTH halves, which is what `HistoryPage` is
 /// for.
-pub(crate) const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 4;
+pub(crate) const MAX_CONCURRENT_HISTORY_SLOTS: usize = 4;
 
-/// A serialized history page that owns its admission permit.
+/// A serialized history page that owns its history slot.
 ///
 /// The permit cannot simply be a handler local. Axum serializes a returned
 /// `Json` value AFTER the handler future resolves, so a permit dropped at the
 /// end of the handler is released while multi-megabyte responses are still
-/// being built - four completed syntheses would readmit four more while their
+/// being built - four completed syntheses would free four slots while their
 /// bytes were still resident, and the ceiling above would bound nothing. So
 /// serialization happens on the synthesis's own blocking task and the permit
 /// travels with the finished bytes: it is released when hyper drops this body,
@@ -1931,9 +1937,9 @@ pub(crate) const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 4;
 /// The permit's OTHER end is guarded too: it is moved INTO the blocking
 /// closure, not merely awaited past, because a dropped connection drops the
 /// handler future while the blocking task keeps running to completion. A
-/// permit held by the dropped future would readmit a new synthesis while the
-/// orphaned one was still resident; one held by the closure returns only when
-/// the work it admitted actually ends.
+/// permit held by the dropped future would free its slot for a new synthesis
+/// while the orphaned one was still resident; one held by the closure returns
+/// only when the work it covers actually ends.
 struct HistoryPage {
     _slot: tokio::sync::OwnedSemaphorePermit,
     body: Option<axum::body::Bytes>,
@@ -2005,10 +2011,9 @@ fn history_page(
 /// Generous on purpose. A full page synthesis is the dominant cost, so the wait
 /// has to cover several of them ahead in the queue; sizing it to one would
 /// reintroduce the refusal for exactly the paging this exists to absorb.
-pub(crate) const HISTORY_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const HISTORY_SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How many history requests may be in the building at once - being synthesized
-/// OR waiting for a slot.
+/// How many history requests may be QUEUED for a slot at once.
 ///
 /// The wait above needs its own bound or it is not a bound at all: an unbounded
 /// queue turns a saturated venue into one that accepts everything and answers
@@ -2019,18 +2024,18 @@ pub(crate) const HISTORY_ADMISSION_WAIT: std::time::Duration = std::time::Durati
 /// that could exhaust the listener.
 pub(crate) const MAX_QUEUED_HISTORY_REQUESTS: usize = 128;
 
-/// The one admission decision both history endpoints make, so the cap and its
+/// The one slot decision both history endpoints make, so the cap and its
 /// refusal cannot drift apart between `/trades` and `/quotes`.
 ///
 /// TWO GATES, and they answer different questions. `queue` is fail-fast and asks
 /// whether the venue is genuinely overloaded; `gate` is a bounded WAIT and asks
-/// only whether a slot is free yet. See [`HISTORY_ADMISSION_WAIT`] for why the
+/// only whether a slot is free yet. See [`HISTORY_SLOT_WAIT`] for why the
 /// second is a wait rather than a refusal.
 ///
-/// The queue permit is dropped as soon as a slot is won: it counts callers in
-/// the building, and a caller holding a slot has stopped queueing. The returned
+/// The queue permit is dropped as soon as a slot is won: it counts callers
+/// still QUEUEING, and a caller holding a slot has stopped. The returned
 /// permit is the SLOT, which travels with the finished bytes.
-async fn admit_history(
+async fn acquire_history_slot(
     gate: &Arc<tokio::sync::Semaphore>,
     queue: &Arc<tokio::sync::Semaphore>,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, String)> {
@@ -2040,7 +2045,7 @@ async fn admit_history(
             "history request capacity exhausted".to_owned(),
         )
     })?;
-    let slot = tokio::time::timeout(HISTORY_ADMISSION_WAIT, Arc::clone(gate).acquire_owned())
+    let slot = tokio::time::timeout(HISTORY_SLOT_WAIT, Arc::clone(gate).acquire_owned())
         .await
         .map_err(|_| {
             (
@@ -2199,12 +2204,12 @@ mod health_fault_tests {
 }
 
 #[cfg(test)]
-mod history_admission_tests {
+mod history_slot_tests {
     use super::*;
 
     fn gates() -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
         (
-            Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HISTORY_REQUESTS)),
+            Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HISTORY_SLOTS)),
             Arc::new(tokio::sync::Semaphore::new(MAX_QUEUED_HISTORY_REQUESTS)),
         )
     }
@@ -2217,17 +2222,17 @@ mod history_admission_tests {
     /// printed nothing. The cap bounds RESIDENT pages, and a waiter holds no
     /// page, so waiting costs the bound nothing.
     ///
-    /// Drives the endpoints' own admission decision rather than a semaphore of
-    /// its own: `admit_history` is what both handlers call. Disclosed residual -
-    /// this pins the decision, not that a handler still makes it; the handlers
-    /// call it on their first line, and no in-crate test can build an
+    /// Drives the endpoints' own slot decision rather than a semaphore of its
+    /// own: `acquire_history_slot` is what both handlers call. Disclosed
+    /// residual - this pins the decision, not that a handler still makes it;
+    /// the handlers call it on their first line, and no in-crate test can build an
     /// `AppState` cheaply enough to prove the call site.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_history_request_over_the_cap_waits_for_a_slot_rather_than_being_refused() {
-        assert_eq!(MAX_CONCURRENT_HISTORY_REQUESTS, 4);
+        assert_eq!(MAX_CONCURRENT_HISTORY_SLOTS, 4);
         let (gate, queue) = gates();
         let held = futures_util::future::join_all(
-            (0..MAX_CONCURRENT_HISTORY_REQUESTS).map(|_| admit_history(&gate, &queue)),
+            (0..MAX_CONCURRENT_HISTORY_SLOTS).map(|_| acquire_history_slot(&gate, &queue)),
         )
         .await
         .into_iter()
@@ -2236,7 +2241,7 @@ mod history_admission_tests {
 
         // The fifth is still waiting after a span that would have covered any
         // number of immediate refusals.
-        let mut fifth = Box::pin(admit_history(&gate, &queue));
+        let mut fifth = Box::pin(acquire_history_slot(&gate, &queue));
         assert!(
             tokio::time::timeout(std::time::Duration::from_secs(5), &mut fifth)
                 .await
@@ -2257,14 +2262,14 @@ mod history_admission_tests {
     async fn a_wait_that_outlives_its_deadline_is_still_refused() {
         let (gate, queue) = gates();
         let _held = futures_util::future::join_all(
-            (0..MAX_CONCURRENT_HISTORY_REQUESTS).map(|_| admit_history(&gate, &queue)),
+            (0..MAX_CONCURRENT_HISTORY_SLOTS).map(|_| acquire_history_slot(&gate, &queue)),
         )
         .await
         .into_iter()
         .map(|slot| slot.expect("slot"))
         .collect::<Vec<_>>();
 
-        let (status, reason) = admit_history(&gate, &queue)
+        let (status, reason) = acquire_history_slot(&gate, &queue)
             .await
             .expect_err("the deadline expires");
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -2289,10 +2294,10 @@ mod history_admission_tests {
 
         let refused = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            admit_history(&gate, &queue),
+            acquire_history_slot(&gate, &queue),
         )
         .await
-        .expect("the queue refusal does not wait out the admission deadline");
+        .expect("the queue refusal does not wait out the slot deadline");
         assert_eq!(
             refused.expect_err("refused").0,
             StatusCode::SERVICE_UNAVAILABLE
@@ -2410,8 +2415,8 @@ mod history_admission_tests {
         );
     }
 
-    /// The worst-case resident cost of one admitted page, which is what
-    /// `MAX_CONCURRENT_HISTORY_REQUESTS` multiplies. `/quotes` is the wider
+    /// The worst-case resident cost of one page holding a slot, which is what
+    /// `MAX_CONCURRENT_HISTORY_SLOTS` multiplies. `/quotes` is the wider
     /// endpoint: four decimals against the trade's two.
     #[test]
     #[ignore = "measurement instrument"]
@@ -2447,16 +2452,16 @@ mod history_admission_tests {
 
     #[test]
     #[ignore = "measurement instrument"]
-    fn history_admission_overhead() {
+    fn history_slot_overhead() {
         const ITERATIONS: usize = 1_000_000;
-        let gate = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HISTORY_REQUESTS));
+        let gate = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HISTORY_SLOTS));
         let started = std::time::Instant::now();
         for _ in 0..ITERATIONS {
             drop(Arc::clone(&gate).try_acquire_owned().expect("slot"));
         }
         let elapsed = started.elapsed();
         eprintln!(
-            "iterations={ITERATIONS} elapsed_ns={} ns_per_admission={}",
+            "iterations={ITERATIONS} elapsed_ns={} ns_per_acquire={}",
             elapsed.as_nanos(),
             elapsed.as_nanos() / ITERATIONS as u128
         );

@@ -314,10 +314,10 @@ async fn serve_async(
         cfg: cfg.clone(),
         rivers: Arc::clone(&rivers),
         pending_commands: Arc::new(tokio::sync::Semaphore::new(cfg.global_pending_command_acts)),
-        history_requests: Arc::new(tokio::sync::Semaphore::new(
-            http::MAX_CONCURRENT_HISTORY_REQUESTS,
+        history_slots: Arc::new(tokio::sync::Semaphore::new(
+            http::MAX_CONCURRENT_HISTORY_SLOTS,
         )),
-        history_queue: Arc::new(tokio::sync::Semaphore::new(
+        history_slot_waiters: Arc::new(tokio::sync::Semaphore::new(
             http::MAX_QUEUED_HISTORY_REQUESTS,
         )),
     };
