@@ -123,7 +123,7 @@ so.
 - **Posted margin**: the collateral the account currently has committed on one
   instrument - maintenance for the open position, initial for the resting
   non-reduce-only orders. Account state the venue is authoritative for, as
-  distinct from the instrument's margin parameter, which stays server-side.
+  distinct from the instrument's margin parameter, which stays venue-side.
 - **Variation margin**: the daily settlement transfer. At the settlement
   instant the accumulated difference between the settlement price and the
   position's VWAP moves in actual cash, and the VWAP resets to that price.

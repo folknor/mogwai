@@ -360,7 +360,7 @@ fn a_checkpoint_that_consumed_the_last_print_still_answers_for_it() {
 
     // k = 1 puts a checkpoint on every tick, so the strict partition lands
     // exactly on the trade and the residual is guaranteed to be empty. The
-    // server's K of 8192 hits the same shape whenever a checkpoint or a
+    // venue's K of 8192 hits the same shape whenever a checkpoint or a
     // `FlowSurge` control boundary happens to land there.
     let origin = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
     let mut index = CheckpointIndex::new(origin, 1, 10_000_000);
@@ -410,7 +410,7 @@ fn last_trade_through(source: &mut GeneratedSource, target: u64) -> Option<Decim
 /// arm would answer from a different tape - so when the boundary snapshot
 /// itself consumed the last print before a target, NO resumable snapshot can
 /// re-emit it. The snapshot's own state still carries that print, and
-/// `last_trade_price` is how the server's lookup recovers it instead of
+/// `last_trade_price` is how the venue's lookup recovers it instead of
 /// refusing forever: a permanent refusal at a settlement instant would freeze
 /// the sweep's settlement frontier for the rest of the run.
 #[test]
@@ -524,7 +524,7 @@ const DURATION_ACF_ABS_TOL: f64 = 0.14;
 // bound would be meaningless.
 // MEAN_GAP_REL_TOL is the only two-sided band here. It guards the tape's
 // declared cadence, which every tick-count budget outside this crate prices
-// (history seek caps, checkpoint spacing, the server's backfill horizon), and
+// (history seek caps, checkpoint spacing, the venue's backfill horizon), and
 // it is what keeps ARRIVAL_MEAN_CAL honest.
 const DWELL_P999_SLACK: f64 = 2.0;
 const EMPTY_HOUR_FRAC_SLACK: f64 = 0.01;
@@ -1033,7 +1033,7 @@ fn checkpoint_index_coarsens_to_bound_memory_and_stays_byte_identical() {
 
 // The runaway backstop: a target far beyond what `max_extend` permits in one
 // call leaves the lead short rather than spinning the never-ending walk. This
-// is what keeps a bogus or far-future `start` (which the server does not
+// is what keeps a bogus or far-future `start` (which the venue does not
 // refuse - only `start < data_origin` is) from hanging the shared index under
 // its mutex.
 #[test]

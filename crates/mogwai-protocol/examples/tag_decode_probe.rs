@@ -3,11 +3,11 @@
 //!
 //! Three arms over the SAME representative `Trade` frame:
 //!
-//! - the fully general `ServerMessage` decoder, which buffers the whole object
+//! - the fully general `VenueMessage` decoder, which buffers the whole object
 //!   into `serde::__private::de::Content` to find the tag and then replays it;
 //! - the identical payload fields as a plain untagged struct, which is the
 //!   idealized single-parse floor rather than something the wire could use;
-//! - `ServerMessage::from_json_str`, the landed decoder: probe the tag, then
+//! - `VenueMessage::from_json_str`, the landed decoder: probe the tag, then
 //!   stream the payload.
 //!
 //! Allocations are counted by a wrapping global allocator rather than by the
@@ -19,7 +19,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use mogwai_protocol::{AggressorSide, ServerMessage, Symbol};
+use mogwai_protocol::{AggressorSide, Symbol, VenueMessage};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -85,7 +85,7 @@ fn main() {
     ALLOCS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..n {
-        std::hint::black_box(serde_json::from_str::<ServerMessage>(tagged).unwrap());
+        std::hint::black_box(serde_json::from_str::<VenueMessage>(tagged).unwrap());
     }
     report("internally tagged", start.elapsed(), n);
 
@@ -106,7 +106,7 @@ fn main() {
     ALLOCS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..n {
-        std::hint::black_box(ServerMessage::from_json_str(tagged).unwrap());
+        std::hint::black_box(VenueMessage::from_json_str(tagged).unwrap());
     }
     report("tag probe plus direct payload", start.elapsed(), n);
 
@@ -117,7 +117,7 @@ fn main() {
     ALLOCS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..n {
-        std::hint::black_box(ServerMessage::from_json_str(&escaped).unwrap());
+        std::hint::black_box(VenueMessage::from_json_str(&escaped).unwrap());
     }
     report("tag probe, escaped tag", start.elapsed(), n);
 }

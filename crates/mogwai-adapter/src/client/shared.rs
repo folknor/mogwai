@@ -19,8 +19,8 @@ use std::{
 
 use anyhow::{Context, ensure};
 use mogwai_protocol::{
-    ClientHavoc, ConnHavoc, HavocLatency, HavocSpec, InstrumentDef, ServerClock, ServerMessage,
-    SimClock, Symbol,
+    ClientHavoc, ConnHavoc, HavocLatency, HavocSpec, InstrumentDef, SimClock, Symbol, VenueClock,
+    VenueMessage,
 };
 use nautilus_common::messages::DataEvent;
 use nautilus_core::UnixNanos;
@@ -38,7 +38,7 @@ use crate::{
 
 /// One message queued for timed delivery through the latency pump: the wall
 /// deadline it must not be released before, and the message to hand to the sink.
-pub(crate) type HavocDelivery = (Instant, ServerMessage);
+pub(crate) type HavocDelivery = (Instant, VenueMessage);
 
 /// Wall deadline for a per-message havoc delay, anchored at NOW. Call it the
 /// moment the message arrives (i.e. right after `filter.apply`); a zero delay
@@ -65,7 +65,7 @@ async fn sleep_until_wall(deadline: Instant) {
 /// message, which only happens during teardown.
 pub(crate) fn enqueue_havoc(
     filter: &mut HavocFilter,
-    msg: ServerMessage,
+    msg: VenueMessage,
     sim: SimClock,
     deliver_tx: &UnboundedSender<HavocDelivery>,
 ) {
@@ -99,19 +99,19 @@ pub(crate) fn flush_havoc_into_pump(
 /// the old inline `sleep_havoc_delay` that realized the delay as inter-message
 /// SPACING - a ~33 msg/s ceiling that head-of-line-blocked pings/commands and
 /// grew the inbound queue without bound under any burst (AD4). It mirrors the
-/// deadline discipline of the mogwai server's own `spawn_exec_pump`.
+/// deadline discipline of the mogwai venue's own `spawn_exec_pump`.
 ///
 /// Ordering is preserved by construction (a single task over an ordered
 /// channel, and arrival-anchored deadlines are monotone for equal delays). The
 /// pump ends when every `deliver_tx` is dropped (its receiver closes); `stop()`
 /// also aborts it via task tracking, discarding any still-in-flight delayed
-/// messages exactly as the server's pump does on disconnect.
+/// messages exactly as the venue's pump does on disconnect.
 pub(crate) fn spawn_latency_pump<F, Fut>(
     mut deliver_rx: UnboundedReceiver<HavocDelivery>,
     mut sink: F,
 ) -> JoinHandle<()>
 where
-    F: FnMut(ServerMessage) -> Fut + Send + 'static,
+    F: FnMut(VenueMessage) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send,
 {
     tokio::spawn(async move {
@@ -160,7 +160,7 @@ pub(crate) fn instrument_def(
 /// Warns exactly once per symbol that a streamed frame arrived with no seeded
 /// `InstrumentDef`, so the symbol's data is being black-holed. The instruments
 /// map is seeded once at connect; a symbol subscribed but absent from that seed
-/// (a server config change or a later-added instrument) otherwise streams into
+/// (a venue config change or a later-added instrument) otherwise streams into
 /// nothing with zero diagnostics. The drain (`emit_trade`, the quote arm) has
 /// no HTTP handle to re-seed, so it can only surface the miss - the poll path,
 /// which does have async/HTTP context, self-heals via `ensure_instrument`. The
@@ -189,7 +189,7 @@ pub(crate) fn warn_missing_instrument_once(
         tracing::warn!(
             %symbol,
             "no instrument def for a streamed symbol; its data is black-holed \
-             until the instrument is seeded (server config change or later-added \
+             until the instrument is seeded (venue config change or later-added \
              instrument)"
         );
     }
@@ -311,7 +311,7 @@ pub(crate) struct HavocFilter {
     duplicate_prob: f64,
     reorder_prob: f64,
     rng: StdRng,
-    held: Option<ServerMessage>,
+    held: Option<VenueMessage>,
 }
 
 impl HavocFilter {
@@ -328,7 +328,7 @@ impl HavocFilter {
         }
     }
 
-    fn apply(&mut self, msg: ServerMessage) -> Vec<(ServerMessage, Duration)> {
+    fn apply(&mut self, msg: VenueMessage) -> Vec<(VenueMessage, Duration)> {
         let mut candidates = Vec::new();
         if let Some(held) = self.held.take() {
             candidates.push(msg);
@@ -342,17 +342,14 @@ impl HavocFilter {
         self.emit_candidates(candidates)
     }
 
-    fn flush(&mut self) -> Vec<(ServerMessage, Duration)> {
+    fn flush(&mut self) -> Vec<(VenueMessage, Duration)> {
         let Some(held) = self.held.take() else {
             return Vec::new();
         };
         self.emit_candidates(vec![held])
     }
 
-    fn emit_candidates(
-        &mut self,
-        candidates: Vec<ServerMessage>,
-    ) -> Vec<(ServerMessage, Duration)> {
+    fn emit_candidates(&mut self, candidates: Vec<VenueMessage>) -> Vec<(VenueMessage, Duration)> {
         let mut out = Vec::new();
         for msg in candidates {
             if self.draw(self.drop_prob) {
@@ -367,7 +364,7 @@ impl HavocFilter {
         out
     }
 
-    pub(crate) fn delay_for(&self, msg: &ServerMessage) -> Duration {
+    pub(crate) fn delay_for(&self, msg: &VenueMessage) -> Duration {
         let category = msg.category();
         let baseline = mogwai_protocol::BASELINE_LATENCY.delay_for(category);
         let armed = self
@@ -420,10 +417,10 @@ const CLOCK_FETCH_MAX_ATTEMPTS: u32 = 3;
 pub(crate) async fn fetch_clock_or_identity(
     http: &HttpClient,
     http_base: &str,
-) -> (ServerClock, bool) {
+) -> (VenueClock, bool) {
     // Retry before committing to identity (AD16): the identity fallback silently
     // puts EVERY ts_init, havoc sleep, quota interval, backoff and timeout on the
-    // wrong axis for the life of the connection if the server actually runs at
+    // wrong axis for the life of the connection if the venue actually runs at
     // speed != 1, and nothing re-fetches the clock later. A couple of quick
     // retries ride out a transient fetch blip; only a persistent failure falls
     // back, and then loudly.
@@ -453,16 +450,16 @@ pub(crate) async fn fetch_clock_or_identity(
         err = ?last_err,
         attempts = CLOCK_FETCH_MAX_ATTEMPTS,
         "clock fetch failed after retries; falling back to the identity mogwai \
-         clock - if the server runs at speed != 1, every ts_init, havoc sleep, \
+         clock - if the venue runs at speed != 1, every ts_init, havoc sleep, \
          quota interval, backoff and timeout will be scaled on the wrong axis for \
          the life of this connection"
     );
     // The boolean preserves whether the floor is known. Zero is a valid floor
     // and must never double as the fallback sentinel.
     (
-        ServerClock {
+        VenueClock {
             sim: SimClock::identity(),
-            server_now_ns: 0,
+            venue_now_ns: 0,
             data_origin_ns: 0,
             warmup_ns: 0,
             // A synthesized fallback is not a boat's answer either.
@@ -560,7 +557,7 @@ pub(crate) fn run_identity_check(
 pub(crate) fn duration_to_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
-/// Resolves the effective row limit sent to the server's bounded `/trades`
+/// Resolves the effective row limit sent to the venue's bounded `/trades`
 /// scan. A missing limit defaults to the ceiling, and any requested limit is
 /// clamped to it so neither the response body nor the materialized nautilus
 /// response `Vec` can grow unbounded over a multi-GB dump.
@@ -597,14 +594,14 @@ pub(crate) fn date_to_unix_nanos(date: Option<jiff::Timestamp>) -> Option<UnixNa
 }
 /// Refuse an off-tape warmup BEFORE spending a round trip on it. A `start`
 /// below the published `data_origin` can never be served (the tape begins at the
-/// origin), so the round trip can only end in a server `400` - or, against a
+/// origin), so the round trip can only end in a venue `400` - or, against a
 /// venue that does not refuse, an empty `200` the warmup cannot tell from "no
 /// trades happened". Failing here, naming both the requested start and the
 /// floor, turns that into a loud, surfaced error at the request boundary
 /// instead of a silent doomed fetch.
 ///
 /// `data_origin == 0` is the "floor unknown" sentinel (the `/clock` fetch failed
-/// and the client fell back to identity): the check is skipped so the server's
+/// and the client fell back to identity): the check is skipped so the venue's
 /// own refusal stays authoritative. A `None` start means "from origin" and is
 /// always on-tape.
 pub(crate) fn ensure_on_tape(
@@ -625,7 +622,7 @@ pub(crate) fn ensure_on_tape(
 pub(crate) fn now_unix_nanos(sim: SimClock) -> UnixNanos {
     // Thin typed wrapper over the shared wall read plus the fetched simulated
     // clock. The underlying reader keeps the saturating contract; the affine
-    // map then places adapter-side `ts_init` on the same axis as the server.
+    // map then places adapter-side `ts_init` on the same axis as the venue.
     UnixNanos::from(sim.sim_ns(mogwai_protocol::now_unix_nanos()))
 }
 pub(crate) async fn wait_connected(
@@ -782,14 +779,14 @@ mod tests {
         // a single window while preserving order.
         let sim = SimClock::identity();
         let mut filter = HavocFilter::from_client(&ClientHavoc::default());
-        let per_msg = filter.delay_for(&ServerMessage::Heartbeat { ts_event: 0 });
+        let per_msg = filter.delay_for(&VenueMessage::Heartbeat { ts_event: 0 });
         assert!(
             !per_msg.is_zero(),
             "baseline latency must be nonzero for this test"
         );
 
         let (deliver_tx, deliver_rx) = tokio::sync::mpsc::unbounded_channel::<HavocDelivery>();
-        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<VenueMessage>();
         let pump = spawn_latency_pump(deliver_rx, move |msg| {
             let out_tx = out_tx.clone();
             async move {
@@ -802,7 +799,7 @@ mod tests {
         for i in 0..N {
             enqueue_havoc(
                 &mut filter,
-                ServerMessage::Heartbeat { ts_event: i },
+                VenueMessage::Heartbeat { ts_event: i },
                 sim,
                 &deliver_tx,
             );
@@ -811,7 +808,7 @@ mod tests {
 
         for expected in 0..N {
             let got = out_rx.recv().await.expect("every message is delivered");
-            let ServerMessage::Heartbeat { ts_event } = got else {
+            let VenueMessage::Heartbeat { ts_event } = got else {
                 panic!("unexpected message on the pump output");
             };
             assert_eq!(ts_event, expected, "the pump preserves arrival order");

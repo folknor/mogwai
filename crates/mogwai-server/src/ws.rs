@@ -14,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ClientMessage, CommandClass, ServerMessage, truncate_reason};
+use mogwai_protocol::{ClientMessage, CommandClass, VenueMessage, truncate_reason};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::{
@@ -413,7 +413,7 @@ pub(crate) async fn ws_upgrade(
         .on_upgrade(move |socket| handle_socket(socket, state, session))
 }
 
-fn send_admission(lanes: &ExecLanes, msg: ServerMessage) -> Result<(), CloseSpec> {
+fn send_admission(lanes: &ExecLanes, msg: VenueMessage) -> Result<(), CloseSpec> {
     let Some(ticket) = lanes.reserve_admission() else {
         return Err(CloseSpec::overload(
             "priority admission lane saturated: the peer is not reading",
@@ -761,7 +761,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                             if let Some(slot) = fault_lanes.reserve_admission() {
                                 drop(fault_lanes.emit_admission(
                                     slot,
-                                    ServerMessage::FeedLagged {
+                                    VenueMessage::FeedLagged {
                                         skipped,
                                         sim_now_ns: sim_now_ns(boat_sim),
                                     },
@@ -783,11 +783,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
             }
         })
     };
-    // Server-originated liveness. Survives `StallData` (it is not market data)
+    // Venue-originated liveness. Survives `StallData` (it is not market data)
     // but not `GoDark` (which gates the writer wholesale), which is exactly the
     // distinction it exists to make observable: a stalled feed and a dead venue
     // must not look the same to a client.
-    let heartbeat = (state.cfg.server_heartbeat_ms > 0).then(|| {
+    let heartbeat = (state.cfg.venue_heartbeat_ms > 0).then(|| {
         let out_tx = out_tx.clone();
         let beat_state = state.clone();
         // FLOORED IN WALL TIME, for the same reason `MIN_SWEEP_WALL` exists on
@@ -805,14 +805,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
         // budgets, and one name shared between them would make a change to
         // either silently move the other.
         let period = boat_sim
-            .wall_duration(sim_duration_from_millis(beat_state.cfg.server_heartbeat_ms))
+            .wall_duration(sim_duration_from_millis(beat_state.cfg.venue_heartbeat_ms))
             .max(MIN_HEARTBEAT_WALL);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(period).await;
                 let frame = OutboundFrame {
                     payload: Arc::from(
-                        serde_json::to_string(&ServerMessage::Heartbeat {
+                        serde_json::to_string(&VenueMessage::Heartbeat {
                             ts_event: sim_now_ns(boat_sim),
                         })
                         .expect("Heartbeat serializes"),
@@ -842,7 +842,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
             out_tx
                 .send(Outbound::Frame(OutboundFrame {
                     payload: Arc::from(
-                        serde_json::to_string(&ServerMessage::RunComplete {
+                        serde_json::to_string(&VenueMessage::RunComplete {
                             sim_now_ns,
                             elapsed_ns,
                         })
@@ -877,7 +877,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                     let completed = if changed.is_ok() { *completion.borrow_and_update() } else { None };
                     if completed.is_some() {
                         let (sim_now_ns, elapsed_ns) = completion_on_boat_clock(boat_sim);
-                        drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&ServerMessage::RunComplete { sim_now_ns, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
+                        drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&VenueMessage::RunComplete { sim_now_ns, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
                         drop(out_tx.send(Outbound::Close(CloseSpec { code: mogwai_protocol::close::NORMAL, reason: mogwai_protocol::close::RUN_COMPLETE.into() })).await);
                     }
                     break;
@@ -885,7 +885,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                 () = async { if let Some(timer) = duration.as_mut().as_pin_mut() { timer.await } }, if duration.is_some() => {
                     let elapsed_ns = session.duration_ms.unwrap_or(0).saturating_mul(1_000_000);
                     let now = sim_now_ns(boat_sim);
-                    drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&ServerMessage::RunComplete { sim_now_ns: now, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
+                    drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&VenueMessage::RunComplete { sim_now_ns: now, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
                     drop(out_tx.send(Outbound::Close(CloseSpec { code: mogwai_protocol::close::NORMAL, reason: mogwai_protocol::close::DURATION_COMPLETE.into() })).await);
                     break;
                 }
@@ -899,7 +899,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                                 .ok()
                                 .map(|global_slot| QueuedCommand { cmd: command, global_slot });
                             if queued.is_none_or(|queued| command_tx.try_send(queued).is_err()) {
-                                drop(send_admission(&lanes, ServerMessage::AdmissionRejected {
+                                drop(send_admission(&lanes, VenueMessage::AdmissionRejected {
                                     subject,
                                     reason: "venue command capacity exhausted".into(),
                                     retryable: true,
@@ -907,10 +907,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                                 }));
                             }
                         }
-                        Err(err) => { drop(send_admission(&lanes, ServerMessage::ProtocolError { reason: truncate_reason(format!("invalid client frame: {err}")), ts_event: sim_now_ns(boat_sim) })); }
+                        Err(err) => { drop(send_admission(&lanes, VenueMessage::ProtocolError { reason: truncate_reason(format!("invalid client frame: {err}")), ts_event: sim_now_ns(boat_sim) })); }
                     },
                     Some(Ok(Message::Binary(_))) => {
-                        drop(send_admission(&lanes, ServerMessage::ProtocolError {
+                        drop(send_admission(&lanes, VenueMessage::ProtocolError {
                             reason: "binary client frames are unsupported; send JSON text".into(),
                             ts_event: sim_now_ns(boat_sim),
                         }));

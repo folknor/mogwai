@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Tick storage + replay. A [`TickSource`] yields ticks in time order and the
-//! server fans them out to subscribers as market data; a [`Permutation`] can
+//! venue fans them out to subscribers as market data; a [`Permutation`] can
 //! transform them in flight (e.g. tick-rule aggressor inference).
 //!
 //! Two source lineages implement [`TickSource`], and they are not
-//! interchangeable - the running server only ever uses the first:
+//! interchangeable - the running venue only ever uses the first:
 //!
-//! - [`GeneratedSource`] - the synthetic generator the RUNNING server uses. It
+//! - [`GeneratedSource`] - the synthetic generator the RUNNING venue uses. It
 //!   synthesizes ticks from a committed fingerprint fitted offline to Kraken
 //!   trade history; it opens no file, is a pure path-dependent walk (same seed
 //!   plus tape anchor yields the same stream byte for byte), and is effectively
@@ -29,7 +29,7 @@
 //! the venue's fill band - one asks whether a print went through a drawn
 //! trigger, the other reads the trailing realized volatility that sized the band
 //! the trigger was drawn from. They live here, next to the sources they drain,
-//! so the server and the benchmarks call the same shipped code rather than two
+//! so the venue and the benchmarks call the same shipped code rather than two
 //! copies of it.
 
 mod bars;
@@ -95,7 +95,7 @@ pub use trigger::{
 /// evidence for that claim.
 ///
 /// 17 gives every river its own tape root keyed by the requested symbol label.
-/// Every server-generated tape moves, including a single-symbol run. Offline
+/// Every venue-generated tape moves, including a single-symbol run. Offline
 /// `mogwai-lab` and `mogwai-cli` generation does not move because those paths
 /// pass literal or command-line seeds directly to `GeneratedSource`; none uses
 /// `RunSeeds`. The arrival-mechanism reservation remains 15.
@@ -206,7 +206,7 @@ pub trait TickSource {
     /// here. This default has no way to bound the walk without an API change
     /// that would ripple to every implementer, so callers driving an
     /// effectively-infinite source must wrap it with their own bound (the
-    /// server's checkpointed seek does this) rather than call `seek_to`
+    /// venue's checkpointed seek does this) rather than call `seek_to`
     /// directly against an untrusted target.
     fn seek_to(&mut self, start_ts: u64) -> Option<TickEvent> {
         loop {

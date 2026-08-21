@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The `mogwai` command: the clap dispatcher over the venue server and the
+//! The `mogwai` command: the clap dispatcher over the venue venue and the
 //! offline generator/measurement subcommands.
 //!
 //! `serve` is the only subcommand that runs a venue, and it does no work here -

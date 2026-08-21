@@ -82,7 +82,7 @@ impl RegimeState {
                 // the halt would sit armed forever, silently inert.
                 // `validate_market_regime` rejects `at_ts == 0` for exactly
                 // that failure mode, but any other already-elapsed instant
-                // reproduces it one layer down, so treat it the way the server
+                // reproduces it one layer down, so treat it the way the venue
                 // treats out-of-band divergences: consume it at construction
                 // (fail closed) and say so, rather than fabricate a halt at
                 // whatever tick the anchor happens to make first. No RNG is

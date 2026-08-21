@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use mogwai_protocol::{
     ClientOrderId, Contingency, Hit, LiquiditySide, MAX_LINKED_ORDERS, OrderFilled, OrderType,
-    ServerMessage, Side, SubmitOrder, TimeInForce, VenueOrderId, WireOrderStatus,
+    Side, SubmitOrder, TimeInForce, VenueMessage, VenueOrderId, WireOrderStatus,
     control::Divergence, touches_trigger, trades_through,
 };
 use rand::{RngExt, SeedableRng};
@@ -24,7 +24,7 @@ impl Engine {
         order: SubmitOrder,
         ts: u64,
         reading: Option<MarketReading>,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         self.on_submit_from(order, ts, reading, true, &[])
     }
 
@@ -83,7 +83,7 @@ impl Engine {
     /// no batch and reports nothing.
     fn push_account_snapshot(
         &mut self,
-        out: &mut Vec<ServerMessage>,
+        out: &mut Vec<VenueMessage>,
         ts: u64,
         apply_divergences: bool,
     ) {
@@ -98,7 +98,7 @@ impl Engine {
         {
             return;
         }
-        out.push(ServerMessage::AccountState(self.snapshot(ts)));
+        out.push(VenueMessage::AccountState(self.snapshot(ts)));
     }
 
     /// Submit a LINKED GROUP: every member admitted, or none of them.
@@ -162,14 +162,14 @@ impl Engine {
         orders: &[SubmitOrder],
         ts: u64,
         reading: Option<MarketReading>,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         let ids: Vec<ClientOrderId> = orders
             .iter()
             .map(|order| order.client_order_id.clone())
             .collect();
         let reject_all = |reason: &str, blame: Option<&str>| {
             ids.iter()
-                .map(|id| ServerMessage::OrderRejected {
+                .map(|id| VenueMessage::OrderRejected {
                     client_order_id: id.clone(),
                     reason: mogwai_protocol::truncate_reason(match blame {
                         Some(blamed) if blamed != id => format!(
@@ -217,7 +217,7 @@ impl Engine {
             // Which one it is decides whether this is a warning or a defect,
             // and nothing else in the system can tell them apart afterwards.
             if let Some(reason) = events.iter().find_map(|event| match event {
-                ServerMessage::OrderRejected {
+                VenueMessage::OrderRejected {
                     client_order_id,
                     reason,
                     ..
@@ -229,7 +229,7 @@ impl Engine {
             let member_filled: Decimal = events
                 .iter()
                 .filter_map(|event| match event {
-                    ServerMessage::OrderFilled(fill)
+                    VenueMessage::OrderFilled(fill)
                         if fill.client_order_id == order.client_order_id =>
                     {
                         Some(fill.last_qty)
@@ -394,9 +394,9 @@ impl Engine {
         reading: Option<MarketReading>,
         apply_divergences: bool,
         group: &[SubmitOrder],
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         if let Some(reason) = self.hedging_refusal(&order) {
-            return vec![ServerMessage::OrderRejected {
+            return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
                 ts_event: ts,
@@ -413,14 +413,14 @@ impl Engine {
         // reference that pass one had already passed, breaking the group open
         // with its earlier members accepted.
         if let Err(reason) = self.validate_submit(&order, ts, apply_divergences, group) {
-            return vec![ServerMessage::OrderRejected {
+            return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
                 ts_event: ts,
             }];
         }
         if let Err(reason) = self.derive_trailing_limit(&mut order) {
-            return vec![ServerMessage::OrderRejected {
+            return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
                 ts_event: ts,
@@ -438,7 +438,7 @@ impl Engine {
             && let Some(Divergence::RejectNextSubmit { reason }) =
                 self.take_armed(|d| matches!(d, Divergence::RejectNextSubmit { .. }))
         {
-            return vec![ServerMessage::OrderRejected {
+            return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 // `validate_divergence` refuses an over-length reason at every
                 // WIRE arming path, but `Engine::arm` is a public in-process
@@ -489,12 +489,12 @@ impl Engine {
             // `DropNextAccountUpdate` to hide and spending the arm here would
             // burn it on an order that cannot fill until its parent does.
             let out = vec![
-                ServerMessage::OrderAccepted {
+                VenueMessage::OrderAccepted {
                     client_order_id: order.client_order_id.clone(),
                     venue_order_id: venue_order_id.clone(),
                     ts_event: ts,
                 },
-                ServerMessage::AccountState(self.snapshot(ts)),
+                VenueMessage::AccountState(self.snapshot(ts)),
             ];
             let leaves_qty = order.quantity;
             self.rest_open(OpenOrder {
@@ -571,7 +571,7 @@ impl Engine {
                 apply_divergences,
             )
         {
-            return vec![ServerMessage::OrderRejected {
+            return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
                 ts_event: ts,
@@ -615,7 +615,7 @@ impl Engine {
                 scanned_ns: ts,
                 revision: 0,
             };
-            let mut out = vec![ServerMessage::OrderAccepted {
+            let mut out = vec![VenueMessage::OrderAccepted {
                 client_order_id: record.submit.client_order_id.clone(),
                 venue_order_id,
                 ts_event: ts,
@@ -641,7 +641,7 @@ impl Engine {
         }
 
         if order.post_only && marketable {
-            return vec![ServerMessage::OrderRejected {
+            return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason: "post-only order would take liquidity".into(),
                 ts_event: ts,
@@ -668,7 +668,7 @@ impl Engine {
                 // Short of its trigger is still now-or-never, so the rejection
                 // follows immediately.
                 let _ = self.plan_fill(&order, order.quantity, apply_divergences);
-                return vec![ServerMessage::OrderRejected {
+                return vec![VenueMessage::OrderRejected {
                     client_order_id: order.client_order_id,
                     reason: "fill-or-kill could not fill at its trigger".into(),
                     ts_event: ts,
@@ -677,7 +677,7 @@ impl Engine {
             let venue_order_id = self.next_venue_order_id();
             self.seen_client_order_ids
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
-            let mut out = vec![ServerMessage::OrderAccepted {
+            let mut out = vec![VenueMessage::OrderAccepted {
                 client_order_id: order.client_order_id.clone(),
                 venue_order_id: venue_order_id.clone(),
                 ts_event: ts,
@@ -705,7 +705,7 @@ impl Engine {
                 // reached.
                 TimeInForce::Gtc | TimeInForce::Day | TimeInForce::Gtd => self.rest_open(record),
                 TimeInForce::Ioc => {
-                    out.push(ServerMessage::OrderCanceled {
+                    out.push(VenueMessage::OrderCanceled {
                         client_order_id: record.submit.client_order_id.clone(),
                         venue_order_id: record.venue_order_id.clone(),
                         ts_event: ts,
@@ -723,7 +723,7 @@ impl Engine {
             // moves no ledger - but it would do so INCIDENTALLY, and a future
             // event in this batch that did move one must not silently start
             // spending the arm on an order that has never traded.
-            out.push(ServerMessage::AccountState(self.snapshot(ts)));
+            out.push(VenueMessage::AccountState(self.snapshot(ts)));
             return out;
         }
 
@@ -753,7 +753,7 @@ impl Engine {
                 apply_divergences,
             )
         {
-            return vec![ServerMessage::OrderRejected {
+            return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason,
                 ts_event: ts,
@@ -761,7 +761,7 @@ impl Engine {
         }
 
         if order.time_in_force == TimeInForce::Fok && leaves_qty > Decimal::ZERO {
-            return vec![ServerMessage::OrderRejected {
+            return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 reason: "fill-or-kill could not fully fill".into(),
                 ts_event: ts,
@@ -778,7 +778,7 @@ impl Engine {
         self.seen_client_order_ids
             .insert(order.client_order_id.clone(), venue_order_id.clone());
 
-        let mut out = vec![ServerMessage::OrderAccepted {
+        let mut out = vec![VenueMessage::OrderAccepted {
             client_order_id: order.client_order_id.clone(),
             venue_order_id: venue_order_id.clone(),
             ts_event: ts,
@@ -798,7 +798,7 @@ impl Engine {
                 scanned_ns: ts,
                 revision: 0,
             };
-            out.push(ServerMessage::OrderCanceled {
+            out.push(VenueMessage::OrderCanceled {
                 client_order_id: record.submit.client_order_id.clone(),
                 venue_order_id,
                 ts_event: ts,
@@ -881,7 +881,7 @@ impl Engine {
             revision: 0,
         };
         if leaves_qty > Decimal::ZERO && cap.is_some_and(|cap| cap < planned_qty) {
-            out.push(ServerMessage::OrderCanceled {
+            out.push(VenueMessage::OrderCanceled {
                 client_order_id: record.submit.client_order_id.clone(),
                 venue_order_id: record.venue_order_id.clone(),
                 ts_event: ts,
@@ -911,7 +911,7 @@ impl Engine {
                     self.rest_open(record);
                 }
                 TimeInForce::Ioc => {
-                    out.push(ServerMessage::OrderCanceled {
+                    out.push(VenueMessage::OrderCanceled {
                         client_order_id: record.submit.client_order_id.clone(),
                         venue_order_id: record.venue_order_id.clone(),
                         ts_event: ts,
@@ -943,7 +943,7 @@ impl Engine {
                 .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
                 .is_some();
         if !drop_update {
-            out.push(ServerMessage::AccountState(self.snapshot(ts)));
+            out.push(VenueMessage::AccountState(self.snapshot(ts)));
         }
         out
     }
@@ -968,7 +968,7 @@ impl Engine {
     ///
     /// Runs on the IDENTITY clock; the sweeper calls `apply_scans_on_clock`
     /// with the swept boat's.
-    pub fn apply_scans(&mut self, results: &[ScanResult], ts: u64) -> (Vec<ServerMessage>, usize) {
+    pub fn apply_scans(&mut self, results: &[ScanResult], ts: u64) -> (Vec<VenueMessage>, usize) {
         self.apply_scans_on_clock(results, ts, mogwai_protocol::SimClock::identity())
     }
 
@@ -993,7 +993,7 @@ impl Engine {
         now_ns: u64,
         closed_symbol: Option<&str>,
         ts: u64,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         let expired: Vec<String> = self
             .open
             .iter()
@@ -1030,7 +1030,7 @@ impl Engine {
                 time_in_force = ?order.submit.time_in_force,
                 "resting order expired",
             );
-            out.push(ServerMessage::OrderExpired {
+            out.push(VenueMessage::OrderExpired {
                 client_order_id: order.submit.client_order_id.clone(),
                 venue_order_id: order.venue_order_id.clone(),
                 ts_event: ts,
@@ -1175,7 +1175,7 @@ impl Engine {
         results: &[ScanResult],
         ts: u64,
         sim: mogwai_protocol::SimClock,
-    ) -> (Vec<ServerMessage>, usize) {
+    ) -> (Vec<VenueMessage>, usize) {
         self.event_sim = sim;
         if cfg!(debug_assertions) {
             self.reconcile_order_locked();
@@ -1225,7 +1225,7 @@ impl Engine {
             if cap == Some(Decimal::ZERO) {
                 let order = self.open[pos].clone();
                 let reaped = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
-                out.push(ServerMessage::OrderCanceled {
+                out.push(VenueMessage::OrderCanceled {
                     client_order_id: submit.client_order_id,
                     venue_order_id,
                     ts_event: ts,
@@ -1253,7 +1253,7 @@ impl Engine {
                 tracing::warn!(client_order_id = %submit.client_order_id, %reason, "resting order canceled at funds check");
                 let order = self.open[pos].clone();
                 let reaped = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
-                out.push(ServerMessage::OrderCanceled {
+                out.push(VenueMessage::OrderCanceled {
                     client_order_id: submit.client_order_id,
                     venue_order_id,
                     ts_event: ts,
@@ -1301,7 +1301,7 @@ impl Engine {
             if new_leaves > Decimal::ZERO && cap.is_some_and(|cap| cap < planned_qty) {
                 let order = self.open[pos].clone();
                 let reaped = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
-                out.push(ServerMessage::OrderCanceled {
+                out.push(VenueMessage::OrderCanceled {
                     client_order_id: order.submit.client_order_id,
                     venue_order_id: order.venue_order_id,
                     ts_event: ts,
@@ -1429,7 +1429,7 @@ impl Engine {
         order: &SubmitOrder,
         last_qty: Decimal,
         ts: u64,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         let mut out = Vec::new();
         for child in self.held_children_of(&order.client_order_id) {
             self.release_child(&child, ts);
@@ -1452,7 +1452,7 @@ impl Engine {
                         sibling = %canceled.submit.client_order_id,
                         "one-cancels-the-other: sibling reaped at the fill",
                     );
-                    out.push(ServerMessage::OrderCanceled {
+                    out.push(VenueMessage::OrderCanceled {
                         client_order_id: canceled.submit.client_order_id.clone(),
                         venue_order_id: canceled.venue_order_id.clone(),
                         ts_event: ts,
@@ -1471,7 +1471,7 @@ impl Engine {
                     let new_leaves = before.leaves_qty.saturating_sub(last_qty);
                     if new_leaves <= Decimal::ZERO {
                         let reaped = self.close_out(pos, &before, WireOrderStatus::Canceled, ts);
-                        out.push(ServerMessage::OrderCanceled {
+                        out.push(VenueMessage::OrderCanceled {
                             client_order_id: before.submit.client_order_id.clone(),
                             venue_order_id: before.venue_order_id.clone(),
                             ts_event: ts,
@@ -1488,7 +1488,7 @@ impl Engine {
                         // invalidates any walk planned against the old size for
                         // the same reason a client's amend does.
                         sibling.revision = sibling.revision.saturating_add(1);
-                        ServerMessage::OrderUpdated {
+                        VenueMessage::OrderUpdated {
                             client_order_id: sibling.submit.client_order_id.clone(),
                             venue_order_id: sibling.venue_order_id.clone(),
                             quantity: new_total,
@@ -1621,7 +1621,7 @@ impl Engine {
         record: &OpenOrder,
         status: WireOrderStatus,
         ts: u64,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         self.take_open(pos);
         self.close_unrested(record, status, ts)
     }
@@ -1636,7 +1636,7 @@ impl Engine {
         record: &OpenOrder,
         status: WireOrderStatus,
         ts: u64,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         self.record_closed(record, status, ts);
         // Asked AFTER `record_closed`, so the store answers for an order that
         // is no longer on the book. A parent that filled at all can still
@@ -1660,7 +1660,7 @@ impl Engine {
         &mut self,
         parents: Vec<ClientOrderId>,
         ts: u64,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         let mut out = Vec::new();
         let mut worklist = parents;
         while let Some(parent) = worklist.pop() {
@@ -1675,7 +1675,7 @@ impl Engine {
                     %child,
                     "order-list child cancelled: its parent went terminal without filling",
                 );
-                out.push(ServerMessage::OrderCanceled {
+                out.push(VenueMessage::OrderCanceled {
                     client_order_id: canceled.submit.client_order_id.clone(),
                     venue_order_id: canceled.venue_order_id.clone(),
                     ts_event: ts,
@@ -1731,7 +1731,7 @@ impl Engine {
     /// it, so one sweep pass takes one snapshot (which is what
     /// `sizing::swept_fill_max_bytes` bounds) and `DropNextAccountUpdate` is
     /// consumed exactly once per batch.
-    fn on_trigger(&mut self, pos: usize, hit: Hit, ts: u64, frontier: u64) -> Vec<ServerMessage> {
+    fn on_trigger(&mut self, pos: usize, hit: Hit, ts: u64, frontier: u64) -> Vec<VenueMessage> {
         let mut order = self.open[pos].clone();
         order.ts_triggered = Some(ts);
         order.ts_last = ts;
@@ -1741,7 +1741,7 @@ impl Engine {
         // safe.
         let submit = order.submit.clone();
         let mut filled_qty = Decimal::ZERO;
-        let mut out = vec![ServerMessage::OrderTriggered {
+        let mut out = vec![VenueMessage::OrderTriggered {
             client_order_id: order.submit.client_order_id.clone(),
             venue_order_id: order.venue_order_id.clone(),
             ts_event: ts,
@@ -1753,7 +1753,7 @@ impl Engine {
         if cap == Some(Decimal::ZERO) {
             let reaped = self.close_out(pos, &order, WireOrderStatus::Canceled, ts);
             tracing::warn!(client_order_id = %order.submit.client_order_id, "reduce-only order canceled at trigger: nothing left to reduce");
-            out.push(ServerMessage::OrderCanceled {
+            out.push(VenueMessage::OrderCanceled {
                 client_order_id: order.submit.client_order_id,
                 venue_order_id: order.venue_order_id,
                 ts_event: ts,
@@ -1821,7 +1821,7 @@ impl Engine {
                     // cap, and `Inert` reaches no further fill decision, so it
                     // would sit open forever. Close it in the same batch.
                     let reaped = self.close_unrested(&order, WireOrderStatus::Canceled, ts);
-                    out.push(ServerMessage::OrderCanceled {
+                    out.push(VenueMessage::OrderCanceled {
                         client_order_id: order.submit.client_order_id.clone(),
                         venue_order_id: order.venue_order_id.clone(),
                         ts_event: ts,
@@ -1886,7 +1886,7 @@ impl Engine {
                 if order.submit.post_only {
                     self.take_open(pos);
                     let reaped = self.close_unrested(&order, WireOrderStatus::Rejected, ts);
-                    out.push(ServerMessage::OrderRejected {
+                    out.push(VenueMessage::OrderRejected {
                         client_order_id: order.submit.client_order_id,
                         reason: "post-only order would take liquidity".into(),
                         ts_event: ts,
@@ -1929,7 +1929,7 @@ impl Engine {
                     out.extend(self.close_unrested(&order, WireOrderStatus::Filled, ts));
                 } else if cap.is_some_and(|cap| cap < planned) {
                     let reaped = self.close_unrested(&order, WireOrderStatus::Canceled, ts);
-                    out.push(ServerMessage::OrderCanceled {
+                    out.push(VenueMessage::OrderCanceled {
                         client_order_id: order.submit.client_order_id.clone(),
                         venue_order_id: order.venue_order_id.clone(),
                         ts_event: ts,
@@ -1992,10 +1992,10 @@ impl Engine {
         order: &OpenOrder,
         reason: &str,
         ts: u64,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         tracing::warn!(client_order_id = %order.submit.client_order_id, %reason, "triggered order canceled at funds check");
         let reaped = self.close_out(pos, order, WireOrderStatus::Canceled, ts);
-        let mut out = vec![ServerMessage::OrderCanceled {
+        let mut out = vec![VenueMessage::OrderCanceled {
             client_order_id: order.submit.client_order_id.clone(),
             venue_order_id: order.venue_order_id.clone(),
             ts_event: ts,
@@ -2055,7 +2055,7 @@ impl Engine {
         liquidity_side: LiquiditySide,
         ts: u64,
         apply_divergences: bool,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         // `FeeSurcharge` is a client-armed divergence, so a venue-originated
         // order (liquidation) does not pay it. The window is read purely from
         // `ts`; booking a later fill must not erase its answer for an earlier
@@ -2098,9 +2098,9 @@ impl Engine {
                 .is_some();
         let mut out = Vec::new();
         if duplicate {
-            out.push(ServerMessage::OrderFilled(fill.clone()));
+            out.push(VenueMessage::OrderFilled(fill.clone()));
         }
-        out.push(ServerMessage::OrderFilled(fill));
+        out.push(VenueMessage::OrderFilled(fill));
         out
     }
 
@@ -2674,7 +2674,7 @@ impl Engine {
         client_order_id: ClientOrderId,
         ts: u64,
         apply_divergences: bool,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         // Divergence: refuse a cancel the venue COULD have honoured, leaving the
         // order resting. Checked before the book is touched, so the refusal
         // really does leave everything where it was - the whole point is that
@@ -2693,7 +2693,7 @@ impl Engine {
             && let Some(Divergence::RejectNextCancel { reason }) =
                 self.take_armed(|d| matches!(d, Divergence::RejectNextCancel { .. }))
         {
-            return vec![ServerMessage::OrderCancelRejected {
+            return vec![VenueMessage::OrderCancelRejected {
                 client_order_id,
                 venue_order_id: Some(resting),
                 reason: mogwai_protocol::truncate_reason(reason),
@@ -2707,7 +2707,7 @@ impl Engine {
             // the run holding a promise nothing can keep. `close_out` owns that
             // rule for every terminal path, this one included.
             let reaped = self.close_out(pos, &o, WireOrderStatus::Canceled, ts);
-            let mut out = vec![ServerMessage::OrderCanceled {
+            let mut out = vec![VenueMessage::OrderCanceled {
                 client_order_id: client_order_id.clone(),
                 venue_order_id: o.venue_order_id,
                 ts_event: ts,
@@ -2731,7 +2731,7 @@ impl Engine {
                     .take_armed(|d| matches!(d, Divergence::DropNextAccountUpdate))
                     .is_none()
             {
-                out.push(ServerMessage::AccountState(self.snapshot(ts)));
+                out.push(VenueMessage::AccountState(self.snapshot(ts)));
             }
             out
         } else {
@@ -2746,7 +2746,7 @@ impl Engine {
             // id goes out with venue_order_id absent.
             let (reason, venue_order_id) =
                 terminal_or_unknown_reject(&self.seen_client_order_ids, &client_order_id);
-            vec![ServerMessage::OrderCancelRejected {
+            vec![VenueMessage::OrderCancelRejected {
                 reason,
                 client_order_id,
                 venue_order_id,
@@ -2763,11 +2763,11 @@ impl Engine {
         trigger_price: Option<Decimal>,
         ts: u64,
         reading: Option<MarketReading>,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         let Some(pos) = self.open.position(&client_order_id) else {
             let (reason, venue_order_id) =
                 terminal_or_unknown_reject(&self.seen_client_order_ids, &client_order_id);
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 reason,
                 client_order_id,
                 venue_order_id,
@@ -2777,7 +2777,7 @@ impl Engine {
 
         let venue_order_id = self.open[pos].venue_order_id.clone();
         if price.is_none() && quantity.is_none() && trigger_price.is_none() {
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: "empty modify (no price or quantity)".into(),
@@ -2799,7 +2799,7 @@ impl Engine {
             // refusing it is the conservative answer while the child holds
             // nothing, and the reason now says which of the two it is.
             let held = conditional && matches!(self.open[pos].resting, Resting::Held);
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: if held {
@@ -2823,7 +2823,7 @@ impl Engine {
                 OrderType::Market | OrderType::StopMarket
             )
         {
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: if self.open[pos].submit.order_type == OrderType::StopMarket {
@@ -2840,7 +2840,7 @@ impl Engine {
         let filled = order.submit.quantity - order.leaves_qty;
 
         if quantity.is_some() && new_total <= Decimal::ZERO {
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: "modify to non-positive quantity".into(),
@@ -2853,7 +2853,7 @@ impl Engine {
         // modify - so equality is rejected too, and the reason says "at or
         // below" to match what the condition actually fires on.
         if quantity.is_some() && new_total <= filled {
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: "modify to at or below already-filled quantity".into(),
@@ -2864,7 +2864,7 @@ impl Engine {
         if let Some(new_price) = price
             && new_price <= Decimal::ZERO
         {
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: "modify to non-positive price".into(),
@@ -2876,7 +2876,7 @@ impl Engine {
         // fresh submit would have rejected outright (and that off-grid state
         // then goes out on the wire via `OrderUpdated`).
         let Some(instrument) = self.instruments.get(&order.submit.symbol) else {
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: "unknown instrument".into(),
@@ -2888,7 +2888,7 @@ impl Engine {
             && (new_trigger <= Decimal::ZERO
                 || !on_increment(new_trigger, instrument.price_increment))
         {
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: "trigger price violates price increment".into(),
@@ -2897,7 +2897,7 @@ impl Engine {
         }
 
         if !on_increment(new_total, instrument.size_increment) {
-            return vec![ServerMessage::OrderModifyRejected {
+            return vec![VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: Some(venue_order_id),
                 reason: "quantity violates size increment".into(),
@@ -2922,7 +2922,7 @@ impl Engine {
             if reading
                 .is_some_and(|value| trades_through(order.submit.side, trigger, value.last_px))
             {
-                return vec![ServerMessage::OrderModifyRejected {
+                return vec![VenueMessage::OrderModifyRejected {
                     client_order_id,
                     venue_order_id: Some(venue_order_id),
                     reason: "post-only order would take liquidity".into(),
@@ -2944,7 +2944,7 @@ impl Engine {
         };
         if let Some(effective_price) = effective_price {
             if !on_increment(effective_price, instrument.price_increment) {
-                return vec![ServerMessage::OrderModifyRejected {
+                return vec![VenueMessage::OrderModifyRejected {
                     client_order_id,
                     venue_order_id: Some(venue_order_id),
                     reason: "price violates price increment".into(),
@@ -2958,7 +2958,7 @@ impl Engine {
             // so an unbounded notional here panics immediately rather than in
             // some later, harder-to-trace fill.
             if new_total.checked_mul(effective_price).is_none() {
-                return vec![ServerMessage::OrderModifyRejected {
+                return vec![VenueMessage::OrderModifyRejected {
                     client_order_id,
                     venue_order_id: Some(venue_order_id),
                     reason: "order notional exceeds maximum representable value".into(),
@@ -2994,7 +2994,7 @@ impl Engine {
                     let settlement = instrument.class.settlement_currency();
                     let proceeds = new_leaves.saturating_mul(effective_price);
                     if self.free_balance(settlement).saturating_add(proceeds) < commission {
-                        return vec![ServerMessage::OrderModifyRejected {
+                        return vec![VenueMessage::OrderModifyRejected {
                             client_order_id,
                             venue_order_id: Some(venue_order_id),
                             reason: format!("insufficient {settlement} balance"),
@@ -3016,7 +3016,7 @@ impl Engine {
                 // name a MISCONFIGURED instrument rather than a funding
                 // shortfall, and `order_reservation` answers `None` for both.
                 if instrument.class.is_future() && !self.margin.contains_key(&order.submit.symbol) {
-                    return vec![ServerMessage::OrderModifyRejected {
+                    return vec![VenueMessage::OrderModifyRejected {
                         client_order_id,
                         venue_order_id: Some(venue_order_id),
                         reason: "cash-settled futures require the margin ledger".into(),
@@ -3035,7 +3035,7 @@ impl Engine {
                     && order.submit.side == Side::Sell
                     && instrument.class.base_currency().is_none()
                 {
-                    return vec![ServerMessage::OrderModifyRejected {
+                    return vec![VenueMessage::OrderModifyRejected {
                         client_order_id,
                         venue_order_id: Some(venue_order_id),
                         reason: "a sell of this instrument reserves its base asset, which it \
@@ -3142,7 +3142,7 @@ impl Engine {
                         },
                     );
                     if self.free_balance(currency).saturating_add(held) < required {
-                        return vec![ServerMessage::OrderModifyRejected {
+                        return vec![VenueMessage::OrderModifyRejected {
                             client_order_id,
                             venue_order_id: Some(venue_order_id),
                             reason: format!("insufficient {currency} balance"),
@@ -3167,7 +3167,7 @@ impl Engine {
                 // because the price the market has to trade through has not
                 // moved.
                 //
-                // The re-draw takes a FRESH band when the server supplies one.
+                // The re-draw takes a FRESH band when the venue supplies one.
                 // An amend arrives over the same path that reads the tape on
                 // every limit submit, so a reading is available and cheap next
                 // to the amend itself; an order repriced hours after acceptance
@@ -3234,7 +3234,7 @@ impl Engine {
         // question, not a bug fix - the cold review that proposed it had not
         // seen the test.
         vec![
-            ServerMessage::OrderUpdated {
+            VenueMessage::OrderUpdated {
                 client_order_id,
                 venue_order_id,
                 quantity,
@@ -3243,7 +3243,7 @@ impl Engine {
                 leaves_qty,
                 ts_event: ts,
             },
-            ServerMessage::AccountState(self.snapshot(ts)),
+            VenueMessage::AccountState(self.snapshot(ts)),
         ]
     }
 }
@@ -3383,7 +3383,7 @@ fn risk_px(order: &SubmitOrder) -> Decimal {
 /// no-fill transition that FREES a reservation - a cap-zero reduce-only cancel,
 /// a post-only trigger rejection, a trigger-time funds cancel - owes one just
 /// as a fill does.
-/// EXHAUSTIVE OVER `ServerMessage` deliberately: the predicate claims to answer
+/// EXHAUSTIVE OVER `VenueMessage` deliberately: the predicate claims to answer
 /// "did anything move the ledger", and a `matches!` over a hand-written list
 /// answers "is it one of the ones I thought of". A variant added later must be
 /// classified here rather than inherit `false` silently - which is how
@@ -3391,33 +3391,33 @@ fn risk_px(order: &SubmitOrder) -> Decimal {
 /// moves the hold, and an expiry releases one; neither is reachable today
 /// without an accompanying fill or cancel at either call site, so closing the
 /// gap changes no behaviour now and cannot open one later.
-pub(crate) fn account_changed(out: &[ServerMessage]) -> bool {
+pub(crate) fn account_changed(out: &[VenueMessage]) -> bool {
     out.iter().any(|event| match event {
-        ServerMessage::OrderFilled(_)
-        | ServerMessage::OrderCanceled { .. }
-        | ServerMessage::OrderRejected { .. }
-        | ServerMessage::OrderUpdated { .. }
-        | ServerMessage::OrderExpired { .. } => true,
+        VenueMessage::OrderFilled(_)
+        | VenueMessage::OrderCanceled { .. }
+        | VenueMessage::OrderRejected { .. }
+        | VenueMessage::OrderUpdated { .. }
+        | VenueMessage::OrderExpired { .. } => true,
         // Accepted, triggered and the modify/cancel REFUSALS move nothing: the
         // order is answerable but no balance has changed hands. `AccountState`
         // itself is the snapshot, not a reason to take one.
-        ServerMessage::OrderAccepted { .. }
-        | ServerMessage::OrderTriggered { .. }
-        | ServerMessage::OrderModifyRejected { .. }
-        | ServerMessage::OrderCancelRejected { .. }
-        | ServerMessage::AccountState(_)
+        VenueMessage::OrderAccepted { .. }
+        | VenueMessage::OrderTriggered { .. }
+        | VenueMessage::OrderModifyRejected { .. }
+        | VenueMessage::OrderCancelRejected { .. }
+        | VenueMessage::AccountState(_)
         // Not order lifecycle at all: replies, tape frames and transport
         // notices, none of which an engine batch books a balance through.
-        | ServerMessage::RunComplete { .. }
-        | ServerMessage::AdmissionRejected { .. }
-        | ServerMessage::OrderStatusSnapshot(_)
-        | ServerMessage::FillSnapshot(_)
-        | ServerMessage::Trade(_)
-        | ServerMessage::Quote(_)
-        | ServerMessage::Heartbeat { .. }
-        | ServerMessage::FeedLagged { .. }
-        | ServerMessage::HavocDiagnostic { .. }
-        | ServerMessage::ProtocolError { .. } => false,
+        | VenueMessage::RunComplete { .. }
+        | VenueMessage::AdmissionRejected { .. }
+        | VenueMessage::OrderStatusSnapshot(_)
+        | VenueMessage::FillSnapshot(_)
+        | VenueMessage::Trade(_)
+        | VenueMessage::Quote(_)
+        | VenueMessage::Heartbeat { .. }
+        | VenueMessage::FeedLagged { .. }
+        | VenueMessage::HavocDiagnostic { .. }
+        | VenueMessage::ProtocolError { .. } => false,
     })
 }
 

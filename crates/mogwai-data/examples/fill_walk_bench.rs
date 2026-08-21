@@ -29,11 +29,11 @@ const SPAN_NS: u64 = 1_000_000_000;
 /// changes a measured number: this budget bounds a walk over `SPAN_NS`, one
 /// simulated second, which does not approach the cap at either value.
 const BUDGET: usize = 1_434_000_000;
-/// Mirrors the server's checkpoint spacing (`source::CHECKPOINT_K`), so the
+/// Mirrors the venue's checkpoint spacing (`source::CHECKPOINT_K`), so the
 /// positioning benchmark restores from the same grid and pays the same residual
 /// drain the sweeper does.
 const CHECKPOINT_K: usize = 8_192;
-/// This BENCH's own walk length. It has no server counterpart: the server's
+/// This BENCH's own walk length. It has no venue counterpart: the venue's
 /// per-request seek budget (`MAX_HISTORY_SEEK_TICKS`) died with the lazy
 /// history path, because a declared warmup is materialized eagerly and a
 /// request below the floor is refused by name rather than served short. What
@@ -64,7 +64,7 @@ fn scans(count: usize) -> Vec<TriggerScan> {
 
 /// The field-identical stand-in for `mogwai_engine::PendingScan`, which this
 /// crate cannot name and must not start depending on. The mapping benchmark
-/// prices the allocation and the per-field copy the server wrapper pays each
+/// prices the allocation and the per-field copy the venue wrapper pays each
 /// pass, and nothing else.
 type ScanTuple = (Side, Decimal, u64);
 
@@ -130,7 +130,7 @@ fn benches(c: &mut Criterion) {
     ));
     let target = POSITION_TARGET_NS;
     // Prime the index so the timed region measures a steady-state restore rather
-    // than the one-off from-origin extension, which is what the server pays after
+    // than the one-off from-origin extension, which is what the venue pays after
     // its first pass on a symbol.
     let _ = index.lock().expect("index").source_at_or_before(target);
     c.bench_function("source_positioning", |b| {

@@ -45,7 +45,7 @@ which paces delivery against wall time but never decides which tick is
 served - a boat placed some way into a run is therefore permanently behind the
 venue clock, which is what `/clock?symbol=` exists to report. `speed = 0.0` is
 unpaced delivery, not a stopped clock - the underlying sim time still advances
-at wall rate. `server_heartbeat_ms` sets the server-originated liveness
+at wall rate. `venue_heartbeat_ms` sets the venue-originated liveness
 cadence; zero disables it.
 
 The heartbeat period is SIMULATED, so `speed` divides it: 1000 ms at speed 100

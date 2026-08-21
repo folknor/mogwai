@@ -4,7 +4,7 @@
 //! Run configuration: the `mogwai.toml` schema, instrument-profile
 //! construction/validation, and the sim-clock derivation that reads it. Split
 //! out of `main.rs` because these are the load-time knobs the rest of the
-//! server (the HTTP routes, the websocket replay) only ever reads back
+//! venue (the HTTP routes, the websocket replay) only ever reads back
 //! through `AppState`/`SimClock`, never mutates.
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -149,10 +149,11 @@ pub struct Config {
     /// drains). `1.0` is the default and paces to real wall-clock gaps; otherwise
     /// inter-tick wall delay = (tick gap) / speed.
     pub(crate) speed: f64,
-    /// Optional server-originated heartbeat cadence in milliseconds. `0`
+    /// Optional venue-originated heartbeat cadence in milliseconds. `0`
     /// disables it. When enabled, each websocket session receives liveness
-    /// frames that survive `StallData` but not `GoDark`.
-    pub(crate) server_heartbeat_ms: u64,
+    /// frames that survive `StallData` but not `GoDark`. Formerly
+    /// `server_heartbeat_ms`; the old key is no longer accepted.
+    pub(crate) venue_heartbeat_ms: u64,
     /// Uniform servable simulated-history span, in nanoseconds.
     /// `data_origin = run_start_ns - warmup_ns` is the earliest instant the
     /// tape can serve. The boot river is materialized before readiness; every
@@ -268,13 +269,13 @@ impl Default for Config {
             fill_sweep_interval_ms: 100,
             seed: None,
             // Honest-by-default: wall-clock pace the generator's inter-arrival
-            // gaps so a no-config server serves a realistic live feed, matching
+            // gaps so a no-config venue serves a realistic live feed, matching
             // the committed mogwai.toml. 0.0 remains available as an explicit
             // firehose for fast local iteration. Until the coherent simulated
             // clock lands this is the 1x baseline; afterwards it is the 1x point
             // of the acceleration axis.
             speed: 1.0,
-            server_heartbeat_ms: 0,
+            venue_heartbeat_ms: 0,
             // 24h: one day of warmup tape behind sim-now. A wrong horizon is made
             // loud (off-tape requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
@@ -421,7 +422,7 @@ pub(crate) fn validate_balances(cfg: &Config) -> anyhow::Result<()> {
 /// operator would otherwise discover only as a venue that answers nothing, so
 /// they fail STARTUP instead.
 ///
-/// The floor binds operator config, not the type: the server's own tests
+/// The floor binds operator config, not the type: the venue's own tests
 /// construct `Config` directly with budgets deliberately below it, which is how
 /// a refused reservation and a saturated priority lane are reached over a real
 /// socket at all.
@@ -1463,7 +1464,7 @@ pub fn profile_for_symbol(symbol: &str) -> anyhow::Result<source::InstrumentProf
 }
 
 /// The validated profile a symbol resolves to under this config. This is the
-/// seam slice 2 needs: when the symbol arrives per request, the server calls it
+/// seam slice 2 needs: when the symbol arrives per request, the venue calls it
 /// with the requested symbol and nothing else changes.
 pub fn profile_for(
     cfg: &Config,
@@ -1822,7 +1823,7 @@ pub(crate) fn session_error_message(symbol: &str, err: mogwai_data::SessionProfi
     }
 }
 
-/// Nanoseconds since the Unix epoch - the server's clock, fed into the engine.
+/// Nanoseconds since the Unix epoch - the venue's clock, fed into the engine.
 ///
 /// Thin local alias over [`mogwai_protocol::now_unix_nanos`], the shared
 /// saturating clock reader the adapter also uses: a backward clock step
@@ -1980,6 +1981,21 @@ mod tests {
         let err = toml::from_str::<Config>("sim_epoch_ns = 1")
             .expect_err("removed clock key must be refused");
         assert!(err.to_string().contains("sim_epoch_ns"), "{err}");
+    }
+
+    /// The heartbeat knob was `server_heartbeat_ms` until the venue ruling
+    /// retired `server` as a name for the process. `deny_unknown_fields` is
+    /// what makes the break loud for an operator carrying an old file, and
+    /// this pins that: a silently ignored key would run the venue with
+    /// heartbeats off while the file says they are on.
+    #[test]
+    fn a_config_naming_the_retired_heartbeat_key_is_refused() {
+        let err = toml::from_str::<Config>("server_heartbeat_ms = 1000")
+            .expect_err("the retired heartbeat key must be refused");
+        assert!(err.to_string().contains("server_heartbeat_ms"), "{err}");
+        let cfg: Config =
+            toml::from_str("venue_heartbeat_ms = 1000").expect("the current key parses");
+        assert_eq!(cfg.venue_heartbeat_ms, 1000);
     }
 
     /// An unfunded quote currency means every buy in that shape rejects for

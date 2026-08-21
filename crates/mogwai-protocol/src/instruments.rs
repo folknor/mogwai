@@ -405,7 +405,7 @@ impl InstrumentDef {
 /// The canonical default instrument set the venue seeds when none is supplied.
 ///
 /// Today this is the single BTCUSDT instrument. The engine seeds from this
-/// function, and the server derives its default generator grid from the same
+/// function, and the venue derives its default generator grid from the same
 /// definition, so order validation and generated prices agree on tick size and
 /// precision. The field values are price precision 2, size precision 8, with
 /// `1e-2` / `1e-8` increments.

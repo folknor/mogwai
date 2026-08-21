@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use mogwai_protocol::{
-    ClientMessage, CommandClass, ServerMessage,
+    ClientMessage, CommandClass, VenueMessage,
     sizing::{BOUNDARY_REFUSAL_BYTES, BookShape, worst_case_output_bytes},
     truncate_reason,
 };
@@ -430,7 +430,7 @@ pub(crate) struct HeldFrame {
 
 /// The session's outbound execution machinery: one value threaded through the
 /// read loop, the replay spawns and the pump, replacing the bare
-/// `mpsc::Sender<(Instant, ServerMessage)>` that both stalled the reader and
+/// `mpsc::Sender<(Instant, VenueMessage)>` that both stalled the reader and
 /// hid the two lanes behind one channel. Every method is non-blocking.
 #[derive(Clone)]
 pub(crate) struct ExecLanes {
@@ -580,33 +580,27 @@ impl ExecLanes {
     /// frames. The reason is truncated here rather than at each of the dozen
     /// call sites, which is what actually makes `ADMISSION_FRAME_MAX_BYTES`
     /// hold for every one of them.
-    pub(crate) fn emit_admission(
-        &self,
-        slot: Ticket,
-        msg: ServerMessage,
-    ) -> Result<(), LaneClosed> {
+    pub(crate) fn emit_admission(&self, slot: Ticket, msg: VenueMessage) -> Result<(), LaneClosed> {
         let msg = match msg {
-            ServerMessage::ProtocolError { reason, ts_event } => ServerMessage::ProtocolError {
+            VenueMessage::ProtocolError { reason, ts_event } => VenueMessage::ProtocolError {
                 reason: truncate_reason(reason),
                 ts_event,
             },
-            ServerMessage::AdmissionRejected {
+            VenueMessage::AdmissionRejected {
                 subject,
                 reason,
                 retryable,
                 ts_event,
-            } => ServerMessage::AdmissionRejected {
+            } => VenueMessage::AdmissionRejected {
                 subject,
                 reason: truncate_reason(reason),
                 retryable,
                 ts_event,
             },
-            ServerMessage::HavocDiagnostic { reason, sim_now_ns } => {
-                ServerMessage::HavocDiagnostic {
-                    reason: truncate_reason(reason),
-                    sim_now_ns,
-                }
-            }
+            VenueMessage::HavocDiagnostic { reason, sim_now_ns } => VenueMessage::HavocDiagnostic {
+                reason: truncate_reason(reason),
+                sim_now_ns,
+            },
             other => other,
         };
         // Unreachable by construction (every field is a String, a number or a
@@ -643,7 +637,7 @@ impl ExecLanes {
         mut reservation: Reservation,
         arrived: Instant,
         class: Option<CommandClass>,
-        events: Vec<ServerMessage>,
+        events: Vec<VenueMessage>,
     ) -> Result<(), LaneClosed> {
         for event in events {
             // Same construction argument as `emit_admission`: unreachable, so
@@ -706,10 +700,10 @@ impl ExecLanes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mogwai_protocol::{AdmissionSubject, ServerMessage};
+    use mogwai_protocol::{AdmissionSubject, VenueMessage};
 
-    fn refusal() -> ServerMessage {
-        ServerMessage::AdmissionRejected {
+    fn refusal() -> VenueMessage {
+        VenueMessage::AdmissionRejected {
             subject: AdmissionSubject::Frame,
             reason: "bad frame".into(),
             retryable: true,
@@ -749,8 +743,8 @@ mod tests {
     fn submit_produced_charges_every_frame_and_returns_the_remainder() {
         let (lanes, mut rx) = ExecLanes::detached();
         let events = vec![
-            ServerMessage::Heartbeat { ts_event: 1 },
-            ServerMessage::Heartbeat { ts_event: 2 },
+            VenueMessage::Heartbeat { ts_event: 1 },
+            VenueMessage::Heartbeat { ts_event: 2 },
         ];
         let expected: usize = events
             .iter()
@@ -888,7 +882,7 @@ mod tests {
         lanes
             .emit_admission(
                 ticket,
-                ServerMessage::ProtocolError {
+                VenueMessage::ProtocolError {
                     reason: "x".repeat(1024 * 1024),
                     ts_event: 1,
                 },

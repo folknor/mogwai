@@ -3,7 +3,7 @@
 //!
 //! Four arms over the same representative `Trade` frame:
 //!
-//! - the landed `ServerMessage::from_json_str`, for scale;
+//! - the landed `VenueMessage::from_json_str`, for scale;
 //! - the payload as a plain struct with today's `Symbol = Arc<str>`;
 //! - the same payload with a 32-byte inline `Copy` symbol, which is the
 //!   proposal;
@@ -38,7 +38,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use mogwai_protocol::{AggressorSide, MAX_SYMBOL_LEN, ServerMessage, Symbol};
+use mogwai_protocol::{AggressorSide, MAX_SYMBOL_LEN, Symbol, VenueMessage};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 
@@ -179,9 +179,9 @@ fn main() {
     ALLOCS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..n {
-        std::hint::black_box(ServerMessage::from_json_str(tagged).unwrap());
+        std::hint::black_box(VenueMessage::from_json_str(tagged).unwrap());
     }
-    report("landed ServerMessage::from_json_str", start.elapsed(), n);
+    report("landed VenueMessage::from_json_str", start.elapsed(), n);
 
     ALLOCS.store(0, Ordering::Relaxed);
     let start = Instant::now();

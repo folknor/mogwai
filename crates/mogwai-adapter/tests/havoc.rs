@@ -4,13 +4,13 @@
 //! Ignored havoc tests for the mogwai adapter.
 //!
 //! These bind a real TCP listener and exercise behavior that unit tests cannot
-//! reach: server-side divergence shipping, client-side inbound corruption,
+//! reach: venue-side divergence shipping, client-side inbound corruption,
 //! connection-lifecycle havoc, and the end-to-end divergence surfaces the suite
 //! claims (partial fills, duplicate fills, dropped account updates, blackouts).
 //! They share the stub harness in `tests/common`.
 //!
 //! Run a focused case in a socket-capable environment with e.g.
-//! `test -p mogwai-adapter ships_server_havoc --debug` in the focused runner.
+//! `test -p mogwai-adapter ships_venue_havoc --debug` in the focused runner.
 
 mod common;
 
@@ -332,15 +332,15 @@ async fn submit_stop_exec_client(
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn ships_server_havoc() {
+async fn ships_venue_havoc() {
     let state = Arc::new(StubState::default());
     let base_url = bound_stub(Arc::clone(&state)).await;
     // Engine-side single-shots only: this spec rides HTTP transport profiles
-    // below, and validate() now refuses a server temporal window (GoDark,
+    // below, and validate() now refuses a venue temporal window (GoDark,
     // DelayAcks, StallData under polling) the chosen carrier cannot deliver.
     let havoc = HavocSpec {
         client: ClientHavoc::default(),
-        server: vec![
+        venue: vec![
             Divergence::RejectNextSubmit {
                 reason: "nope".into(),
             },
@@ -1065,13 +1065,13 @@ async fn conn_heartbeat_pings_when_enabled() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn conn_handles_inbound_server_ping() {
+async fn conn_handles_inbound_venue_ping() {
     // The stub sends an unsolicited WS Ping after the subscribe. The client's
     // reader must answer it with a Pong (lifecycle Ping -> Pong path); the stub
     // counts the Pong. This proves the inbound control-frame reply path that the
     // heartbeat test (client-initiated Ping) never reaches.
     let state = Arc::new(StubState::default());
-    state.ws_server_pings.store(1, Ordering::Relaxed);
+    state.ws_venue_pings.store(1, Ordering::Relaxed);
     // Keep the socket lively with one trade so the reader loop runs.
     state
         .ws_trades
@@ -1084,7 +1084,7 @@ async fn conn_handles_inbound_server_ping() {
     let pongs = wait_for_at_least(&state.ws_pongs, 1, Duration::from_secs(2)).await;
     assert!(
         pongs >= 1,
-        "client did not Pong the server's inbound Ping (pongs={pongs})"
+        "client did not Pong the venue's inbound Ping (pongs={pongs})"
     );
 }
 
@@ -1426,7 +1426,7 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
 /// `OrderTriggered` is a new wire variant, and the one thing that decides
 /// whether the ack-holding arms (`DelayAcks` on the venue's writer, the
 /// latency filter on this end) touch it at all is
-/// `ServerMessage::category` - both ends consult that one classifier, which is
+/// `VenueMessage::category` - both ends consult that one classifier, which is
 /// exactly why a misfiled variant would be invisible in a single-ended test. A
 /// trigger filed as `Data` would slip past every execution hold while the fill
 /// behind it was held, delivering the two out of order to a strategy.

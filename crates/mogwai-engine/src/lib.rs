@@ -6,7 +6,7 @@
 //! facade) drive this engine and serialize whatever it emits.
 //!
 //! The engine is intentionally synchronous and side-effect free: `process` takes
-//! a [`ClientMessage`] and returns the [`ServerMessage`]s to send. The server
+//! a [`ClientMessage`] and returns the [`VenueMessage`]s to send. The venue
 //! owns sockets, timers and the clock; the engine owns order and account state.
 //! Fills are synthetic - mogwai never matches against a book or a market - so
 //! the fill an order gets is whatever the armed divergences dictate, defaulting
@@ -22,8 +22,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use mogwai_protocol::{
     AccountId, AccountState, ClientMessage, ClientOrderId, FillSnapshot, Hit, InstrumentDef,
-    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, ScanKind,
-    ServerMessage, Side, SimClock, SubmitOrder, Symbol, TimeInForce, VenueOrderId, WireOrderStatus,
+    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, ScanKind, Side,
+    SimClock, SubmitOrder, Symbol, TimeInForce, VenueMessage, VenueOrderId, WireOrderStatus,
     control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
@@ -164,7 +164,7 @@ pub struct EngineConfig {
 }
 
 /// The band a liquidation close is judged against when nobody has told the
-/// engine the run's own cap. Matches the server's `fill_band_max_ticks`
+/// engine the run's own cap. Matches the venue's `fill_band_max_ticks`
 /// default, so an engine built standalone behaves like a default venue.
 pub const DEFAULT_LIQUIDATION_BAND_TICKS: u32 = 200;
 
@@ -318,7 +318,7 @@ pub enum BreachAction {
 }
 
 pub struct MarkOutcome {
-    pub events: Vec<ServerMessage>,
+    pub events: Vec<VenueMessage>,
     pub originated_orders: usize,
 }
 
@@ -349,7 +349,7 @@ pub struct MarketReading {
     /// Instant of that canonical last print.
     pub ts_ns: u64,
     /// Band half width in TICKS, already scaled by trailing realized volatility
-    /// and clamped by the server. The engine multiplies it by the instrument's
+    /// and clamped by the venue. The engine multiplies it by the instrument's
     /// price increment, because the instrument table lives here.
     pub band_ticks: u32,
 }
@@ -367,7 +367,7 @@ impl EngineConfig {
 }
 
 /// One resting order the caller must walk the tape for, and the trigger price
-/// that decides it. The engine hands these out; the server walks the tape and
+/// that decides it. The engine hands these out; the venue walks the tape and
 /// hands back `ScanResult`s. This is the whole seam - the engine never sees a
 /// tick.
 #[derive(Debug, Clone)]
@@ -589,7 +589,7 @@ impl Engine {
     }
 
     /// The band a venue-originated liquidation close is judged against, in
-    /// ticks. The server sets it from `fill_band_max_ticks`; an engine built
+    /// ticks. The venue sets it from `fill_band_max_ticks`; an engine built
     /// without one keeps [`DEFAULT_LIQUIDATION_BAND_TICKS`].
     pub fn set_liquidation_band_ticks(&mut self, band_ticks: u32) {
         self.liquidation_band_ticks = band_ticks;
@@ -928,7 +928,7 @@ impl Engine {
         let mut events = Vec::new();
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if moved || originated_orders > 0 {
-            events.retain(|event| !matches!(event, ServerMessage::AccountState(_)));
+            events.retain(|event| !matches!(event, VenueMessage::AccountState(_)));
             // VENUE MAINTENANCE, so this consults no `DropNextAccountUpdate`
             // and calls `push_account_snapshot` not at all - one of the three
             // sites that helper's doc names. A re-mark is not a client command
@@ -936,7 +936,7 @@ impl Engine {
             // client aimed at its own next fill would burn it on the venue's
             // act. `apply_margin_breaches` is entered with
             // `apply_divergences` false throughout for the same reason.
-            events.push(ServerMessage::AccountState(self.snapshot(ts)));
+            events.push(VenueMessage::AccountState(self.snapshot(ts)));
         }
         MarkOutcome {
             events,
@@ -1086,7 +1086,7 @@ impl Engine {
         &mut self,
         marks: &[(Symbol, Decimal)],
         ts: u64,
-        events: &mut Vec<ServerMessage>,
+        events: &mut Vec<VenueMessage>,
     ) -> usize {
         let mut liquidate = Vec::new();
         let symbols: Vec<_> = self.margin.keys().cloned().collect();
@@ -1319,7 +1319,7 @@ impl Engine {
     ///
     /// Closed AT THE LAST MARK, which is the best price that exists: the river
     /// it traded on has no cursor, so there is no fresher one to be had.
-    pub fn retire_off_river(&mut self, symbol: &str, ts: u64) -> Vec<ServerMessage> {
+    pub fn retire_off_river(&mut self, symbol: &str, ts: u64) -> Vec<VenueMessage> {
         let mut events = Vec::new();
         let stranded: Vec<String> = self
             .open
@@ -1393,7 +1393,7 @@ impl Engine {
     /// it. The two rules are the same statement from opposite sides - an order
     /// nobody is reading either belongs to an account that will come back for
     /// it, or it should not be resting.
-    pub fn cancel_unreadable_orders(&mut self, readable: &[Symbol], ts: u64) -> Vec<ServerMessage> {
+    pub fn cancel_unreadable_orders(&mut self, readable: &[Symbol], ts: u64) -> Vec<VenueMessage> {
         let stranded: Vec<String> = self
             .open
             .iter()
@@ -1486,7 +1486,7 @@ impl Engine {
         qty: Decimal,
         mark: Decimal,
         ts: u64,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         self.liquidation_seq = self.liquidation_seq.saturating_add(1);
         let order = SubmitOrder {
             client_order_id: format!("{LIQUIDATION_ID_PREFIX}{}-{}", symbol, self.liquidation_seq),
@@ -1600,7 +1600,7 @@ impl Engine {
         if paid {
             // VENUE MAINTENANCE, the funding exchange: reports unconditionally
             // and consults no arm, on the same ruling as `on_mark` above.
-            events.push(ServerMessage::AccountState(self.snapshot(ts)));
+            events.push(VenueMessage::AccountState(self.snapshot(ts)));
         }
         MarkOutcome {
             events,
@@ -1676,10 +1676,10 @@ impl Engine {
         let mut events = Vec::new();
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if settled || originated_orders > 0 {
-            events.retain(|event| !matches!(event, ServerMessage::AccountState(_)));
+            events.retain(|event| !matches!(event, VenueMessage::AccountState(_)));
             // VENUE MAINTENANCE, settlement: reports unconditionally and
             // consults no arm, on the same ruling as `on_mark` above.
-            events.push(ServerMessage::AccountState(self.snapshot(ts)));
+            events.push(VenueMessage::AccountState(self.snapshot(ts)));
         }
         MarkOutcome {
             events,
@@ -1789,7 +1789,7 @@ impl Engine {
         defs
     }
 
-    /// Monotonic id source; the server stamps real timestamps.
+    /// Monotonic id source; the venue stamps real timestamps.
     fn next_venue_order_id(&mut self) -> String {
         self.venue_order_seq = self.venue_order_seq.saturating_add(1);
         format!("V-{}", self.venue_order_seq)
@@ -1802,13 +1802,13 @@ impl Engine {
 
     /// Process one client message, emitting the resulting execution events.
     ///
-    /// `ts` is supplied by the caller (the server's clock) so the engine stays
+    /// `ts` is supplied by the caller (the venue's clock) so the engine stays
     /// free of wall-clock access and remains deterministic in tests.
-    pub fn process(&mut self, msg: ClientMessage, ts: u64) -> Vec<ServerMessage> {
+    pub fn process(&mut self, msg: ClientMessage, ts: u64) -> Vec<VenueMessage> {
         self.process_with_market(msg, ts, None)
     }
 
-    /// As `process`, with the tape reading the server took at `ts`.
+    /// As `process`, with the tape reading the venue took at `ts`.
     ///
     /// A submit needs it to size its band and to judge marketability; a PRICE
     /// amend needs it so a re-draw adopts the current regime rather than the one
@@ -1820,14 +1820,14 @@ impl Engine {
     ///
     /// Runs on the IDENTITY clock, which makes it a tests-and-benches
     /// convenience rather than a serving path: an armed fee surcharge is then
-    /// judged with simulated time equal to wall time. The server calls
+    /// judged with simulated time equal to wall time. The venue calls
     /// `process_with_market_on_clock` with the commanding socket's boat clock.
     pub fn process_with_market(
         &mut self,
         msg: ClientMessage,
         ts: u64,
         reading: Option<MarketReading>,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         self.process_with_market_on_clock(msg, ts, reading, SimClock::identity())
     }
 
@@ -1840,7 +1840,7 @@ impl Engine {
         ts: u64,
         reading: Option<MarketReading>,
         sim: SimClock,
-    ) -> Vec<ServerMessage> {
+    ) -> Vec<VenueMessage> {
         self.event_sim = sim;
         if cfg!(debug_assertions) {
             self.reconcile_order_locked();
@@ -1863,13 +1863,13 @@ impl Engine {
                 request_id,
                 client_order_id,
                 open_only,
-            } => vec![ServerMessage::OrderStatusSnapshot(
+            } => vec![VenueMessage::OrderStatusSnapshot(
                 self.order_status_snapshot(request_id, client_order_id.as_deref(), open_only, ts),
             )],
             ClientMessage::QueryFills {
                 request_id,
                 client_order_id,
-            } => vec![ServerMessage::FillSnapshot(self.fill_snapshot(
+            } => vec![VenueMessage::FillSnapshot(self.fill_snapshot(
                 request_id,
                 client_order_id.as_deref(),
                 ts,
@@ -1954,7 +1954,7 @@ impl Engine {
     /// Answer a `QueryOrders` truthfully from the book: the currently-open
     /// orders plus the retained terminal records. This is the reconciliation
     /// witness, so its content is NEVER touched by divergences - havoc may
-    /// only delay or drop the reply's delivery (the server's writer windows),
+    /// only delay or drop the reply's delivery (the venue's writer windows),
     /// per the honest-content contract on `ClientMessage::QueryOrders`.
     ///
     /// A targeted query (`client_order_id: Some`) ignores `open_only`: asking
@@ -2448,8 +2448,8 @@ mod tests {
         assert!(matches!(
             out.as_slice(),
             [
-                ServerMessage::OrderAccepted { .. },
-                ServerMessage::AccountState(_)
+                VenueMessage::OrderAccepted { .. },
+                VenueMessage::AccountState(_)
             ]
         ));
         let scan = e.pending_scans().remove(0);
@@ -2470,11 +2470,11 @@ mod tests {
         assert_eq!(emitted, 1);
         assert!(matches!(
             out.first(),
-            Some(ServerMessage::OrderTriggered { .. })
+            Some(VenueMessage::OrderTriggered { .. })
         ));
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
     }
 
@@ -2513,7 +2513,7 @@ mod tests {
         let (out, _) = e.apply_scans(&results, 11);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "the trigger fills half: {out:?}"
         );
         assert_eq!(e.open[0].leaves_qty, Decimal::ONE, "and rests the rest");
@@ -2545,7 +2545,7 @@ mod tests {
         );
         assert!(matches!(
             out.get(1),
-            Some(ServerMessage::OrderTriggered { .. })
+            Some(VenueMessage::OrderTriggered { .. })
         ));
     }
 
@@ -2578,7 +2578,7 @@ mod tests {
         );
         assert!(matches!(
             out.as_slice(),
-            [ServerMessage::OrderTriggered { .. }]
+            [VenueMessage::OrderTriggered { .. }]
         ));
         assert!(matches!(e.open[0].resting, Resting::Limit { .. }));
     }
@@ -2621,7 +2621,7 @@ mod tests {
     }
 
     /// Sweep one pending scan of `e` with a print at `px`, applied at `ts`.
-    fn sweep(e: &mut Engine, px: i64, ts: u64) -> Vec<ServerMessage> {
+    fn sweep(e: &mut Engine, px: i64, ts: u64) -> Vec<VenueMessage> {
         let scan = e.pending_scans().remove(0);
         let (out, _) = e.apply_scans(
             &[ScanResult {
@@ -2639,10 +2639,10 @@ mod tests {
         out
     }
 
-    fn filled(out: &[ServerMessage]) -> &OrderFilled {
+    fn filled(out: &[VenueMessage]) -> &OrderFilled {
         out.iter()
             .find_map(|event| match event {
-                ServerMessage::OrderFilled(fill) => Some(fill),
+                VenueMessage::OrderFilled(fill) => Some(fill),
                 _ => None,
             })
             .expect("expected a fill")
@@ -2697,8 +2697,8 @@ mod tests {
             12,
             Some(reading(50)),
         );
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
-        assert!(matches!(out[1], ServerMessage::OrderTriggered { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], VenueMessage::OrderTriggered { .. }));
         let fill = filled(&out);
         assert!(
             fill.last_px >= Decimal::from(99),
@@ -2909,7 +2909,7 @@ mod tests {
             let out = engine.process(ClientMessage::SubmitOrder(submit), 10);
             if legal {
                 assert!(
-                    matches!(out[0], ServerMessage::OrderAccepted { .. }),
+                    matches!(out[0], VenueMessage::OrderAccepted { .. }),
                     "an order the wire admitted must not be rejected by the engine: {ty:?}"
                 );
             } else {
@@ -3004,13 +3004,13 @@ mod tests {
         // IOC cancels its remainder. The type wanted to rest it; the time in
         // force wins, and the client is told so with an explicit cancel.
         let (engine, out) = armed("mtl-ioc", TimeInForce::Ioc);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         assert!(matches!(
             &out[1],
-            ServerMessage::OrderFilled(fill)
+            VenueMessage::OrderFilled(fill)
                 if fill.last_qty == Decimal::ONE && fill.leaves_qty == Decimal::ONE
         ));
-        assert!(matches!(out[2], ServerMessage::OrderCanceled { .. }));
+        assert!(matches!(out[2], VenueMessage::OrderCanceled { .. }));
         assert!(engine.open.is_empty(), "an IOC remainder does not rest");
         assert_eq!(engine.closed["mtl-ioc"].status, WireOrderStatus::Canceled);
 
@@ -3022,7 +3022,7 @@ mod tests {
         let fill = out
             .iter()
             .find_map(|event| match event {
-                ServerMessage::OrderFilled(fill) => Some(fill),
+                VenueMessage::OrderFilled(fill) => Some(fill),
                 _ => None,
             })
             .expect("the market-to-limit takes the touch");
@@ -3059,7 +3059,7 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "a market-to-limit does not trade through its own limit: {out:?}"
         );
         assert_eq!(engine.open.len(), 1);
@@ -3082,10 +3082,10 @@ mod tests {
         let mut stop = stop_order("post-stop", Side::Buy, OrderType::StopLimit, 99, Some(100));
         stop.post_only = true;
         let out = e.process_with_market(ClientMessage::SubmitOrder(stop), 10, Some(reading(0)));
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
-        assert!(matches!(out[1], ServerMessage::OrderTriggered { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], VenueMessage::OrderTriggered { .. }));
         assert!(
-            matches!(&out[2], ServerMessage::OrderRejected { reason, .. } if reason == "post-only order would take liquidity")
+            matches!(&out[2], VenueMessage::OrderRejected { reason, .. } if reason == "post-only order would take liquidity")
         );
         assert!(e.open.is_empty(), "the rejected order leaves the book");
         assert_eq!(
@@ -3093,7 +3093,7 @@ mod tests {
             WireOrderStatus::Rejected,
             "a rejection after acceptance is a closed row a query can report"
         );
-        assert!(matches!(out[3], ServerMessage::AccountState(_)));
+        assert!(matches!(out[3], VenueMessage::AccountState(_)));
     }
 
     #[test]
@@ -3104,7 +3104,7 @@ mod tests {
         resting.post_only = true;
         let accepted =
             e.process_with_market(ClientMessage::SubmitOrder(resting), 10, Some(reading(0)));
-        assert!(matches!(accepted[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(accepted[0], VenueMessage::OrderAccepted { .. }));
 
         let out = e.process_with_market(
             ClientMessage::ModifyOrder {
@@ -3118,7 +3118,7 @@ mod tests {
         );
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderModifyRejected { reason, .. }
+            VenueMessage::OrderModifyRejected { reason, .. }
                 if reason == "post-only order would take liquidity"
         ));
         assert_eq!(e.open_orders()[0].submit.price, Some(Decimal::from(90)));
@@ -3134,7 +3134,7 @@ mod tests {
         let mut stop = stop_order("protect", Side::Sell, OrderType::StopMarket, 90, None);
         stop.reduce_only = true;
         let out = e.process(ClientMessage::SubmitOrder(stop), 10);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let state = account(&out, out.len() - 1);
         assert_eq!(balance(state, "USDT").locked, Decimal::ZERO);
         assert_eq!(balance(state, "USDT").free, Decimal::from(1_000));
@@ -3147,18 +3147,18 @@ mod tests {
         stop.reduce_only = true;
         e.process(ClientMessage::SubmitOrder(stop), 10);
         let out = sweep(&mut e, 90, 11);
-        assert!(matches!(out[0], ServerMessage::OrderTriggered { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderTriggered { .. }));
         assert!(
-            matches!(out[1], ServerMessage::OrderCanceled { .. }),
+            matches!(out[1], VenueMessage::OrderCanceled { .. }),
             "a cap of zero cancels rather than opening a fresh short"
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "nothing may fill against a position that is already gone"
         );
         assert_eq!(e.closed["flat"].status, WireOrderStatus::Canceled);
-        assert!(matches!(out[2], ServerMessage::AccountState(_)));
+        assert!(matches!(out[2], VenueMessage::AccountState(_)));
     }
 
     #[test]
@@ -3180,7 +3180,7 @@ mod tests {
         );
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. }))
+                .any(|event| matches!(event, VenueMessage::OrderCanceled { .. }))
         );
         assert!(e.open.is_empty(), "no Inert remainder is left behind");
         assert_eq!(e.closed["clamped"].status, WireOrderStatus::Canceled);
@@ -3248,7 +3248,7 @@ mod tests {
         assert_eq!(emitted, 1, "a trigger-only pass still reserves its frame");
         assert!(matches!(
             out.as_slice(),
-            [ServerMessage::OrderTriggered { .. }]
+            [VenueMessage::OrderTriggered { .. }]
         ));
         assert_eq!(
             e.open[0].scanned_ns, 11,
@@ -3276,7 +3276,7 @@ mod tests {
             10,
             Some(reading(0)),
         );
-        assert!(matches!(out[1], ServerMessage::OrderTriggered { .. }));
+        assert!(matches!(out[1], VenueMessage::OrderTriggered { .. }));
         assert_eq!(
             filled(&out).last_px,
             Decimal::from(100),
@@ -3299,7 +3299,7 @@ mod tests {
         });
         let out = sweep(&mut e, 95, 11);
         assert!(
-            matches!(out.as_slice(), [ServerMessage::OrderTriggered { .. }]),
+            matches!(out.as_slice(), [VenueMessage::OrderTriggered { .. }]),
             "the gap triggered it and nothing filled"
         );
         let out = sweep(&mut e, 90, 12);
@@ -3397,7 +3397,7 @@ mod tests {
             20,
         );
         assert!(
-            matches!(&out[0], ServerMessage::OrderUpdated { trigger_price, .. } if *trigger_price == Some(Decimal::from(80))),
+            matches!(&out[0], VenueMessage::OrderUpdated { trigger_price, .. } if *trigger_price == Some(Decimal::from(80))),
             "the ack has to carry the new trigger or the amend is unverifiable"
         );
         assert_eq!(e.open[0].scanned_ns, 20, "the trigger window restarts");
@@ -3430,7 +3430,7 @@ mod tests {
             12,
         );
         assert!(
-            matches!(&out[0], ServerMessage::OrderModifyRejected { reason, .. } if reason == "order has already triggered"),
+            matches!(&out[0], VenueMessage::OrderModifyRejected { reason, .. } if reason == "order has already triggered"),
             "got {out:?}"
         );
 
@@ -3447,7 +3447,7 @@ mod tests {
             11,
         );
         assert!(
-            matches!(&out[0], ServerMessage::OrderModifyRejected { reason, .. } if reason == "order carries no trigger to amend"),
+            matches!(&out[0], VenueMessage::OrderModifyRejected { reason, .. } if reason == "order carries no trigger to amend"),
             "got {out:?}"
         );
     }
@@ -3512,7 +3512,7 @@ mod tests {
             20,
         );
         assert!(
-            matches!(&out[0], ServerMessage::OrderModifyRejected { reason, .. } if reason == "StopMarket order must not carry a price")
+            matches!(&out[0], VenueMessage::OrderModifyRejected { reason, .. } if reason == "StopMarket order must not carry a price")
         );
         assert_eq!(e.open[0].submit.price, None);
     }
@@ -3547,8 +3547,8 @@ mod tests {
         assert_eq!(row.ts_triggered, Some(12), "the trigger instant survives");
     }
 
-    fn account(out: &[ServerMessage], index: usize) -> &AccountState {
-        let ServerMessage::AccountState(state) = &out[index] else {
+    fn account(out: &[VenueMessage], index: usize) -> &AccountState {
+        let VenueMessage::AccountState(state) = &out[index] else {
             panic!("expected account state")
         };
         state
@@ -3670,7 +3670,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "{events:?}"
         );
     }
@@ -3694,7 +3694,7 @@ mod tests {
             )
             .into_iter()
             .find_map(|event| match event {
-                ServerMessage::OrderFilled(fill) => Some(fill),
+                VenueMessage::OrderFilled(fill) => Some(fill),
                 _ => None,
             })
             .expect("future fills")
@@ -3799,7 +3799,7 @@ mod tests {
             assert!(
                 events
                     .iter()
-                    .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                    .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
                 "{events:?}"
             );
         }
@@ -3863,7 +3863,7 @@ mod tests {
             3,
         );
         assert!(
-            !matches!(events.first(), Some(ServerMessage::OrderRejected { reason, .. }) if reason.contains("margin breach")),
+            !matches!(events.first(), Some(VenueMessage::OrderRejected { reason, .. }) if reason.contains("margin breach")),
             "{events:?}"
         );
     }
@@ -3881,7 +3881,7 @@ mod tests {
         // funds outcome, and every neighbouring funds rejection carries its
         // unit; one that does not leaves the reader guessing which leg is
         // short in a multi-currency account.
-        let Some(ServerMessage::OrderRejected { reason, .. }) = rejected.first() else {
+        let Some(VenueMessage::OrderRejected { reason, .. }) = rejected.first() else {
             panic!("{rejected:?}");
         };
         assert_eq!(
@@ -3902,7 +3902,7 @@ mod tests {
         assert!(
             reduced
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "{reduced:?}"
         );
     }
@@ -3916,7 +3916,7 @@ mod tests {
             .events
             .iter()
             .find_map(|event| match event {
-                ServerMessage::OrderFilled(fill) if fill.client_order_id.starts_with("LQ-") => {
+                VenueMessage::OrderFilled(fill) if fill.client_order_id.starts_with("LQ-") => {
                     Some(fill)
                 }
                 _ => None,
@@ -3949,14 +3949,14 @@ mod tests {
             outcome
                 .events
                 .iter()
-                .filter(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .filter(|event| matches!(event, VenueMessage::OrderFilled(_)))
                 .count(),
             1,
             "the venue fill is neither rejected nor duplicated"
         );
         assert!(matches!(
             outcome.events.last(),
-            Some(ServerMessage::AccountState(_))
+            Some(VenueMessage::AccountState(_))
         ));
         engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 3);
 
@@ -3981,14 +3981,14 @@ mod tests {
         assert_eq!(
             filled
                 .iter()
-                .filter(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .filter(|event| matches!(event, VenueMessage::OrderFilled(_)))
                 .count(),
             2
         );
         assert!(
             !filled
                 .iter()
-                .any(|event| matches!(event, ServerMessage::AccountState(_)))
+                .any(|event| matches!(event, VenueMessage::AccountState(_)))
         );
     }
 
@@ -4020,7 +4020,7 @@ mod tests {
             .events
             .iter()
             .find_map(|event| match event {
-                ServerMessage::OrderFilled(fill) => Some(fill),
+                VenueMessage::OrderFilled(fill) => Some(fill),
                 _ => None,
             })
             .expect("the liquidation fills rather than failing its funds check");
@@ -4040,7 +4040,7 @@ mod tests {
     #[test]
     fn a_spot_symbol_carrying_a_margin_policy_still_reserves_notional() {
         // `held_for` and `locked_balances` derive from one `order_reservation`,
-        // so a margin policy attached to a SPOT symbol - which server config
+        // so a margin policy attached to a SPOT symbol - which venue config
         // refuses at boot, but the public `set_margin_policy` cannot - changes
         // neither the account's hold nor the add-back the funds check makes
         // against it. Reading the margin map first would hand the fill check a
@@ -4060,7 +4060,7 @@ mod tests {
         resting.order_type = OrderType::Limit;
         let out =
             engine.process_with_market(ClientMessage::SubmitOrder(resting), 1, Some(reading(0)));
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         assert_eq!(
             balance(&engine.account_snapshot(2), "USDT").locked,
             Decimal::from(50)
@@ -4072,7 +4072,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
     }
 
@@ -4097,7 +4097,7 @@ mod tests {
         resting.order_type = OrderType::Limit;
         let out =
             engine.process_with_market(ClientMessage::SubmitOrder(resting), 1, Some(reading(0)));
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
 
         // 2 @ 50 is 100 of notional plus 2 of commission. Free is 51 and the
         // order's own hold is 50, so 101 covers the notional but not the fee.
@@ -4110,7 +4110,7 @@ mod tests {
             },
             2,
         );
-        let [ServerMessage::OrderModifyRejected { reason, .. }] = &out[..] else {
+        let [VenueMessage::OrderModifyRejected { reason, .. }] = &out[..] else {
             panic!("expected one modify reject, got {out:?}")
         };
         assert_eq!(reason, "insufficient USDT balance");
@@ -4395,7 +4395,7 @@ mod tests {
                 band_ticks: 0,
             }),
         );
-        assert!(events.iter().any(|event| matches!(event, ServerMessage::OrderFilled(fill) if fill.position_id.as_deref() == Some("BOOK-7"))));
+        assert!(events.iter().any(|event| matches!(event, VenueMessage::OrderFilled(fill) if fill.position_id.as_deref() == Some("BOOK-7"))));
     }
 
     /// An unfunded engine rooted at one fill seed. The seed picks the trigger
@@ -4445,7 +4445,7 @@ mod tests {
         let mut e = Engine::new();
         let out = e.process(ClientMessage::SubmitOrder(order("legacy", 1)), 7);
         assert!(
-            matches!(out.as_slice(), [ServerMessage::OrderAccepted { .. }, ServerMessage::OrderFilled(fill), ServerMessage::AccountState(_)] if fill.last_px == Decimal::from(100))
+            matches!(out.as_slice(), [VenueMessage::OrderAccepted { .. }, VenueMessage::OrderFilled(fill), VenueMessage::AccountState(_)] if fill.last_px == Decimal::from(100))
         );
         assert!(e.pending_scans().is_empty());
     }
@@ -4457,8 +4457,8 @@ mod tests {
         assert!(matches!(
             out.as_slice(),
             [
-                ServerMessage::OrderAccepted { .. },
-                ServerMessage::AccountState(_)
+                VenueMessage::OrderAccepted { .. },
+                VenueMessage::AccountState(_)
             ]
         ));
         assert_eq!(e.open.len(), 1);
@@ -4479,9 +4479,9 @@ mod tests {
         assert!(matches!(
             out.as_slice(),
             [
-                ServerMessage::OrderAccepted { .. },
-                ServerMessage::OrderFilled(_),
-                ServerMessage::AccountState(_)
+                VenueMessage::OrderAccepted { .. },
+                VenueMessage::OrderFilled(_),
+                VenueMessage::AccountState(_)
             ]
         ));
         assert!(e.pending_scans().is_empty());
@@ -4494,7 +4494,7 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "a limit whose trigger the reading has not reached must rest"
         );
         let scan = e.pending_scans().remove(0);
@@ -4523,7 +4523,7 @@ mod tests {
         assert!(
             !at_touch
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
     }
 
@@ -4581,7 +4581,7 @@ mod tests {
     }
 
     #[test]
-    fn a_price_amend_adopts_a_fresh_band_when_the_server_supplies_one() {
+    fn a_price_amend_adopts_a_fresh_band_when_the_venue_supplies_one() {
         let mut e = banded(3);
         e.process_with_market(
             ClientMessage::SubmitOrder(limit_order("regime", 2)),
@@ -4627,7 +4627,7 @@ mod tests {
         // price, never the triggering trade's - the trigger decides WHEN.
         assert!(matches!(
             out.as_slice(),
-            [ServerMessage::OrderFilled(fill), ServerMessage::AccountState(_)]
+            [VenueMessage::OrderFilled(fill), VenueMessage::AccountState(_)]
                 if fill.last_px == Decimal::from(100) && fill.leaves_qty == Decimal::ZERO
         ));
         assert!(e.open.is_empty());
@@ -4653,7 +4653,7 @@ mod tests {
         assert_eq!(emitted, 1);
         assert!(matches!(
             out.first(),
-            Some(ServerMessage::OrderFilled(fill))
+            Some(VenueMessage::OrderFilled(fill))
                 if fill.last_qty == Decimal::ONE && fill.leaves_qty == Decimal::ONE
         ));
         assert_eq!(e.open[0].band_draw, 1);
@@ -4678,7 +4678,7 @@ mod tests {
         let (out, _) = e.apply_scans(&[result(&scan, true, 30)], 30);
         assert!(matches!(
             out.first(),
-            Some(ServerMessage::OrderFilled(fill))
+            Some(VenueMessage::OrderFilled(fill))
                 if fill.last_qty == Decimal::from(2) && fill.leaves_qty == Decimal::ZERO
         ));
     }
@@ -4698,7 +4698,7 @@ mod tests {
         let (out, _) = e.apply_scans(&[result(&scan, true, 20)], 20);
         assert!(matches!(
             out.first(),
-            Some(ServerMessage::OrderFilled(fill)) if fill.last_qty == Decimal::ONE
+            Some(VenueMessage::OrderFilled(fill)) if fill.last_qty == Decimal::ONE
         ));
         assert!(e.armed.is_empty());
     }
@@ -4714,7 +4714,7 @@ mod tests {
         assert_eq!(emitted, 1);
         assert_eq!(
             out.iter()
-                .filter(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .filter(|event| matches!(event, VenueMessage::OrderFilled(_)))
                 .count(),
             2
         );
@@ -4729,10 +4729,10 @@ mod tests {
         let out = e.process_with_market(ClientMessage::SubmitOrder(fok), 1, Some(reading(0)));
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
 
-        // A MARKET order arrives price-stamped by the server; it is marketable
+        // A MARKET order arrives price-stamped by the venue; it is marketable
         // by definition and never rests on the honest path.
         let market = order_with("mkt", Side::Buy, "BTCUSDT", 1, None);
         let market = SubmitOrder {
@@ -4742,7 +4742,7 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(market), 2);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
         assert!(e.pending_scans().is_empty());
     }
@@ -4750,7 +4750,7 @@ mod tests {
     #[test]
     fn a_market_remainder_left_resting_by_havoc_is_never_scanned() {
         // A MARKET order never draws a trigger, but an armed partial can leave one
-        // RESTING with a server-stamped price. Handing that remainder to the
+        // RESTING with a venue-stamped price. Handing that remainder to the
         // tape walk would hold it until the market traded through a price the
         // venue itself synthesized.
         let mut e = banded(1);
@@ -4774,11 +4774,11 @@ mod tests {
         let accepted = e.process(ClientMessage::SubmitOrder(limit_order("drop", 1)), 10);
         assert!(matches!(
             accepted.last(),
-            Some(ServerMessage::AccountState(_))
+            Some(VenueMessage::AccountState(_))
         ));
         let scan = e.pending_scans().remove(0);
         let (out, _) = e.apply_scans(&[result(&scan, true, 20)], 20);
-        assert!(matches!(out.as_slice(), [ServerMessage::OrderFilled(_)]));
+        assert!(matches!(out.as_slice(), [VenueMessage::OrderFilled(_)]));
     }
 
     #[test]
@@ -4805,7 +4805,7 @@ mod tests {
         let accepted = e.process_with_market(ClientMessage::SubmitOrder(fok), 2, Some(reading(0)));
         assert!(matches!(
             accepted.first(),
-            Some(ServerMessage::OrderAccepted { .. })
+            Some(VenueMessage::OrderAccepted { .. })
         ));
     }
 
@@ -4818,9 +4818,9 @@ mod tests {
         assert!(matches!(
             out.as_slice(),
             [
-                ServerMessage::OrderAccepted { .. },
-                ServerMessage::OrderCanceled { .. },
-                ServerMessage::AccountState(_)
+                VenueMessage::OrderAccepted { .. },
+                VenueMessage::OrderCanceled { .. },
+                VenueMessage::AccountState(_)
             ]
         ));
         let mut hit = limit_order("ioc-hit", 1);
@@ -4828,7 +4828,7 @@ mod tests {
         let out = e.process_with_market(ClientMessage::SubmitOrder(hit), 2, Some(reading(0)));
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
         assert!(e.pending_scans().is_empty());
 
@@ -4840,7 +4840,7 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(fok), 3);
         assert!(matches!(
             out.as_slice(),
-            [ServerMessage::OrderRejected { reason, .. }]
+            [VenueMessage::OrderRejected { reason, .. }]
                 if reason == "fill-or-kill could not fill at its trigger"
         ));
         assert!(e.pending_scans().is_empty());
@@ -4873,11 +4873,11 @@ mod tests {
         // Spend-then-overspend: a 5 @ 100 buy leaves 500 free, so a second
         // 6 @ 100 buy is refused while a 5 @ 100 one still clears.
         let out = e.process(ClientMessage::SubmitOrder(order("B2", 5)), 3);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let out = e.process(ClientMessage::SubmitOrder(order("B3", 6)), 4);
         assert_eq!(reject_reason(&out), "insufficient USDT balance");
         let out = e.process(ClientMessage::SubmitOrder(order("B4", 5)), 5);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
 
         // The acquired base is spendable: selling it back clears.
         let out = e.process(
@@ -4890,7 +4890,7 @@ mod tests {
             )),
             6,
         );
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
     }
 
     #[test]
@@ -4940,7 +4940,7 @@ mod tests {
             },
             4,
         );
-        let [ServerMessage::OrderModifyRejected { reason, .. }] = &out[..] else {
+        let [VenueMessage::OrderModifyRejected { reason, .. }] = &out[..] else {
             panic!("expected one modify reject, got {out:?}")
         };
         assert_eq!(reason, "insufficient USDT balance");
@@ -4953,9 +4953,9 @@ mod tests {
             },
             5,
         );
-        assert!(matches!(out[0], ServerMessage::OrderCanceled { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderCanceled { .. }));
         let out = e.process(ClientMessage::SubmitOrder(order("B1", 7)), 6);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
     }
 
     // The reconciliation is a `cfg!(debug_assertions)` check, so this pins it
@@ -5084,41 +5084,41 @@ mod tests {
         // path, which enforcement would make unreachable.
         let mut e = Engine::new();
         let out = e.process(ClientMessage::SubmitOrder(order("U1", 5)), 1);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let state = account(&out, out.len() - 1);
         assert_eq!(balance(state, "USDT").total, Decimal::from(-500));
     }
 
-    fn fill(out: &[ServerMessage], index: usize) -> &OrderFilled {
-        let ServerMessage::OrderFilled(fill) = &out[index] else {
+    fn fill(out: &[VenueMessage], index: usize) -> &OrderFilled {
+        let VenueMessage::OrderFilled(fill) = &out[index] else {
             panic!("expected fill")
         };
         fill
     }
 
-    fn updated(out: &[ServerMessage], index: usize) -> &ServerMessage {
-        let ServerMessage::OrderUpdated { .. } = &out[index] else {
+    fn updated(out: &[VenueMessage], index: usize) -> &VenueMessage {
+        let VenueMessage::OrderUpdated { .. } = &out[index] else {
             panic!("expected order updated")
         };
         &out[index]
     }
 
-    fn reject_reason(out: &[ServerMessage]) -> &str {
-        let [ServerMessage::OrderRejected { reason, .. }] = out else {
+    fn reject_reason(out: &[VenueMessage]) -> &str {
+        let [VenueMessage::OrderRejected { reason, .. }] = out else {
             panic!("expected one order reject")
         };
         reason
     }
 
-    fn cancel_reject_reason(out: &[ServerMessage]) -> &str {
-        let [ServerMessage::OrderCancelRejected { reason, .. }] = out else {
+    fn cancel_reject_reason(out: &[VenueMessage]) -> &str {
+        let [VenueMessage::OrderCancelRejected { reason, .. }] = out else {
             panic!("expected one order cancel reject")
         };
         reason
     }
 
-    fn accepted_venue_id(out: &[ServerMessage]) -> VenueOrderId {
-        let ServerMessage::OrderAccepted { venue_order_id, .. } = &out[0] else {
+    fn accepted_venue_id(out: &[VenueMessage]) -> VenueOrderId {
+        let VenueMessage::OrderAccepted { venue_order_id, .. } = &out[0] else {
             panic!("expected accept first")
         };
         venue_order_id.clone()
@@ -5145,12 +5145,12 @@ mod tests {
         let mut e = Engine::new();
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(out.len(), 3);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
-        let ServerMessage::OrderFilled(f) = &out[1] else {
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
+        let VenueMessage::OrderFilled(f) = &out[1] else {
             panic!("expected fill")
         };
         assert_eq!(f.leaves_qty, Decimal::ZERO);
-        assert!(matches!(out[2], ServerMessage::AccountState(_)));
+        assert!(matches!(out[2], VenueMessage::AccountState(_)));
         assert!(e.open_orders().is_empty());
     }
 
@@ -5286,7 +5286,7 @@ mod tests {
         let mut e = Engine::new();
 
         let first = e.process(ClientMessage::SubmitOrder(order("DUP", 1)), 1);
-        assert!(matches!(first[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(first[0], VenueMessage::OrderAccepted { .. }));
 
         let duplicate = e.process(ClientMessage::SubmitOrder(order("DUP", 1)), 2);
         assert_eq!(reject_reason(&duplicate), "duplicate client_order_id");
@@ -5301,12 +5301,12 @@ mod tests {
         });
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(out.len(), 3);
-        let ServerMessage::OrderFilled(f) = &out[1] else {
+        let VenueMessage::OrderFilled(f) = &out[1] else {
             panic!("expected fill")
         };
         assert_eq!(f.last_qty, Decimal::from(3));
         assert_eq!(f.leaves_qty, Decimal::from(7));
-        assert!(matches!(out[2], ServerMessage::AccountState(_)));
+        assert!(matches!(out[2], VenueMessage::AccountState(_)));
         assert_eq!(e.open_orders().len(), 1);
     }
 
@@ -5323,11 +5323,11 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(order), 1);
 
         assert_eq!(out.len(), 4);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let f = fill(&out, 1);
         assert_eq!(f.last_qty, Decimal::from(4));
         assert_eq!(f.leaves_qty, Decimal::from(6));
-        assert!(matches!(out[2], ServerMessage::OrderCanceled { .. }));
+        assert!(matches!(out[2], VenueMessage::OrderCanceled { .. }));
         let state = account(&out, 3);
         assert_eq!(balance(state, "BTC").total, Decimal::from(4));
         assert_eq!(balance(state, "USDT").locked, Decimal::ZERO);
@@ -5360,7 +5360,7 @@ mod tests {
         });
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0], ServerMessage::OrderRejected { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderRejected { .. }));
     }
 
     #[test]
@@ -5371,7 +5371,7 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 4);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let first = fill(&out, 1);
         let second = fill(&out, 2);
         assert_eq!(first.trade_id, second.trade_id);
@@ -5391,8 +5391,8 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 2);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
-        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], VenueMessage::OrderFilled(_)));
         let state = e.account_snapshot(2);
         assert_eq!(balance(&state, "BTC").total, Decimal::from(10));
     }
@@ -5406,9 +5406,9 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 3);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
-        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
-        assert!(matches!(out[2], ServerMessage::OrderFilled(_)));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], VenueMessage::OrderFilled(_)));
+        assert!(matches!(out[2], VenueMessage::OrderFilled(_)));
     }
 
     #[test]
@@ -5421,12 +5421,12 @@ mod tests {
 
         let rejected = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(rejected.len(), 1);
-        assert!(matches!(rejected[0], ServerMessage::OrderRejected { .. }));
+        assert!(matches!(rejected[0], VenueMessage::OrderRejected { .. }));
 
         let filled = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 2);
         assert_eq!(filled.len(), 2);
-        assert!(matches!(filled[0], ServerMessage::OrderAccepted { .. }));
-        assert!(matches!(filled[1], ServerMessage::OrderFilled(_)));
+        assert!(matches!(filled[0], VenueMessage::OrderAccepted { .. }));
+        assert!(matches!(filled[1], VenueMessage::OrderFilled(_)));
     }
 
     #[test]
@@ -5455,7 +5455,7 @@ mod tests {
         );
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+                .any(|event| matches!(event, VenueMessage::AccountState(_))),
             "nothing filled, so the resting acceptance still owes its snapshot"
         );
         // Still armed; the cancel that frees the hold is what spends it.
@@ -5468,7 +5468,7 @@ mod tests {
         assert!(
             !canceled
                 .iter()
-                .any(|event| matches!(event, ServerMessage::AccountState(_)))
+                .any(|event| matches!(event, VenueMessage::AccountState(_)))
         );
         assert!(e.armed.is_empty());
     }
@@ -5526,19 +5526,19 @@ mod tests {
     /// The classification `Engine::arm` performs, per variant, read off the
     /// QUEUE rather than inferred from an event count.
     ///
-    /// The production comment beside that match claims listing the server-owned
+    /// The production comment beside that match claims listing the venue-owned
     /// variants explicitly "stops a future enum variant from falling through
     /// into engine behaviour by accident" - a claim about variants that do not
     /// exist yet, which only the compiler can hold, and it does: both arms of
     /// that match are enumerated, so a new variant breaks the build there and
     /// in the expectation below. What THIS test adds is the half the compiler
-    /// cannot see - that today's eight server-owned variants really do leave the
+    /// cannot see - that today's eight venue-owned variants really do leave the
     /// queue empty (a dead entry nothing consumes, forever) and today's five
     /// engine-side ones really are stored.
     #[test]
     fn arm_classifies_every_divergence_variant() {
         for divergence in every_divergence_variant() {
-            // Exhaustive on purpose. Deliberately NOT `!is_server_owned`: a
+            // Exhaustive on purpose. Deliberately NOT `!is_venue_owned`: a
             // single list would let a new variant be classified once and read
             // twice, which is the accident the production match is guarding.
             let queued = match divergence {
@@ -5572,7 +5572,7 @@ mod tests {
             } else {
                 assert!(
                     e.armed.is_empty(),
-                    "a server-owned divergence has no engine trigger, so queueing it \
+                    "a venue-owned divergence has no engine trigger, so queueing it \
                      leaves a dead entry `take_armed` can never consume: {divergence:?}"
                 );
             }
@@ -5601,8 +5601,8 @@ mod tests {
         // Length FIRST: a regression emitting fewer events would otherwise
         // panic on an index rather than naming the count it produced.
         assert_eq!(out.len(), 4);
-        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
-        assert!(matches!(out[2], ServerMessage::OrderFilled(_)));
+        assert!(matches!(out[1], VenueMessage::OrderFilled(_)));
+        assert!(matches!(out[2], VenueMessage::OrderFilled(_)));
     }
 
     #[test]
@@ -5613,9 +5613,9 @@ mod tests {
         let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 3);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
-        assert!(matches!(out[1], ServerMessage::OrderFilled(_)));
-        assert!(matches!(out[2], ServerMessage::AccountState(_)));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], VenueMessage::OrderFilled(_)));
+        assert!(matches!(out[2], VenueMessage::AccountState(_)));
     }
 
     #[test]
@@ -5638,7 +5638,7 @@ mod tests {
             4,
             "duplicate fill should still fire behind the parked partial"
         );
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let first = fill(&out, 1);
         let second = fill(&out, 2);
         assert_eq!(
@@ -5647,7 +5647,7 @@ mod tests {
             "O1 fills fully, untouched by the O2 partial"
         );
         assert_eq!(first.trade_id, second.trade_id);
-        assert!(matches!(out[3], ServerMessage::AccountState(_)));
+        assert!(matches!(out[3], VenueMessage::AccountState(_)));
 
         // The O2-targeted partial is still armed and now applies to O2.
         let out = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 2);
@@ -5781,8 +5781,8 @@ mod tests {
         let gtc = order_decimal("GTC", Side::Buy, "BTCUSDT", lot, Some(px));
         let out = e.process(ClientMessage::SubmitOrder(gtc), 1);
         assert_eq!(out.len(), 2, "accept + account state only, no fill event");
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
-        assert!(matches!(out[1], ServerMessage::AccountState(_)));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
+        assert!(matches!(out[1], VenueMessage::AccountState(_)));
         assert_eq!(e.open_orders().len(), 1);
         assert_eq!(e.open_orders()[0].leaves_qty, lot);
         let state = account(&out, 1);
@@ -5861,8 +5861,8 @@ mod tests {
     }
 
     #[test]
-    fn arm_of_a_server_owned_variant_sheds_nothing() {
-        // The server-owned and immediate variants never enter the queue, so
+    fn arm_of_a_venue_owned_variant_sheds_nothing() {
+        // The venue-owned and immediate variants never enter the queue, so
         // they can neither displace an entry nor report one - the ack for them
         // must stay a bare accept.
         let mut e = Engine::new();
@@ -5930,7 +5930,7 @@ mod tests {
             ClientMessage::SubmitOrder(order_decimal("O1", Side::Buy, "BTCUSDT", qty, Some(px))),
             1,
         );
-        assert!(matches!(first[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(first[0], VenueMessage::OrderAccepted { .. }));
 
         let out = e.process(
             ClientMessage::SubmitOrder(order_decimal("O2", Side::Buy, "BTCUSDT", qty, Some(px))),
@@ -5938,7 +5938,7 @@ mod tests {
         );
 
         assert_eq!(out.len(), 3);
-        assert!(matches!(out[0], ServerMessage::OrderAccepted { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let state = account(&out, 2);
         // The quote spend (-7e28 then -7e28 again) clips at the lower
         // Decimal boundary instead of panicking the `-=`.
@@ -6070,7 +6070,7 @@ mod tests {
             2,
         );
         assert_eq!(out.len(), 2);
-        assert!(matches!(out[0], ServerMessage::OrderCanceled { .. }));
+        assert!(matches!(out[0], VenueMessage::OrderCanceled { .. }));
         let state = account(&out, 1);
 
         let usdt = balance(state, "USDT");
@@ -6330,12 +6330,12 @@ mod tests {
         );
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderTriggered { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderTriggered { .. })),
             "the trigger fires: {out:?}"
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "it must not fill through its own limit into the gap: {out:?}"
         );
         let order = e
@@ -6521,7 +6521,7 @@ mod tests {
         order
     }
 
-    fn trade(engine: &mut Engine, order: SubmitOrder, ts: u64) -> Vec<ServerMessage> {
+    fn trade(engine: &mut Engine, order: SubmitOrder, ts: u64) -> Vec<VenueMessage> {
         engine.process_with_market(
             ClientMessage::SubmitOrder(order),
             ts,
@@ -6544,13 +6544,13 @@ mod tests {
         assert!(
             bought
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "the buy fills: {bought:?}"
         );
         let sold = trade(&mut e, share_order("SELL", Side::Sell, 50), 2);
         assert!(
             sold.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "and the shares can be sold again: {sold:?}"
         );
         assert_eq!(
@@ -6583,7 +6583,7 @@ mod tests {
         let out = trade(&mut e, share_order("SHORT", Side::Sell, 20), 1);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "a short inside the borrow fills: {out:?}"
         );
         let refused = trade(&mut e, share_order("MORE", Side::Sell, 5), 2);
@@ -6629,7 +6629,7 @@ mod tests {
         let out = trade(&mut margin, share_order("BUY", Side::Buy, 150), 1);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "the same account on margin posts 7,500 and borrows the rest: {out:?}"
         );
         let state = margin.snapshot(2);
@@ -6663,7 +6663,7 @@ mod tests {
         assert!(
             round
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "a whole number of lots is served: {round:?}"
         );
     }
@@ -6760,7 +6760,7 @@ mod tests {
         let out = e.cancel_unreadable_orders(&[], 6);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderCanceled { client_order_id, .. } if client_order_id == "REST")),
+                .any(|event| matches!(event, VenueMessage::OrderCanceled { client_order_id, .. } if client_order_id == "REST")),
             "the client is told rather than left with an order nothing can decide: {out:?}"
         );
         assert!(e.open.is_empty());
@@ -6877,7 +6877,7 @@ mod tests {
         let out = e.retire_off_river("MNQ", 5);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderCanceled { .. })),
             "the stranded order goes: {out:?}"
         );
         assert!(e.open.is_empty());
@@ -6933,11 +6933,11 @@ mod tests {
         }
     }
 
-    fn canceled_ids(events: &[ServerMessage]) -> Vec<&str> {
+    fn canceled_ids(events: &[VenueMessage]) -> Vec<&str> {
         events
             .iter()
             .filter_map(|event| match event {
-                ServerMessage::OrderCanceled {
+                VenueMessage::OrderCanceled {
                     client_order_id, ..
                 } => Some(client_order_id.as_str()),
                 _ => None,
@@ -6971,7 +6971,7 @@ mod tests {
 
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(fill) if fill.client_order_id == "TP")),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(fill) if fill.client_order_id == "TP")),
             "the take-profit filled: {out:?}"
         );
         assert_eq!(
@@ -7006,7 +7006,7 @@ mod tests {
         let fills: Vec<&str> = out
             .iter()
             .filter_map(|event| match event {
-                ServerMessage::OrderFilled(fill) => Some(fill.client_order_id.as_str()),
+                VenueMessage::OrderFilled(fill) => Some(fill.client_order_id.as_str()),
                 _ => None,
             })
             .collect();
@@ -7049,7 +7049,7 @@ mod tests {
         let out = e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(fill) if fill.client_order_id == "ENTRY")),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(fill) if fill.client_order_id == "ENTRY")),
             "a buy limit at 300 against a market at 200 fills on arrival: {out:?}"
         );
 
@@ -7111,7 +7111,7 @@ mod tests {
         let filled: Decimal = out
             .iter()
             .filter_map(|event| match event {
-                ServerMessage::OrderFilled(fill) => Some(fill.last_qty),
+                VenueMessage::OrderFilled(fill) => Some(fill.last_qty),
                 _ => None,
             })
             .sum();
@@ -7171,7 +7171,7 @@ mod tests {
         let filled: Decimal = out
             .iter()
             .filter_map(|event| match event {
-                ServerMessage::OrderFilled(fill) => Some(fill.last_qty),
+                VenueMessage::OrderFilled(fill) => Some(fill.last_qty),
                 _ => None,
             })
             .sum();
@@ -7230,12 +7230,12 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderAccepted { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderAccepted { .. })),
             "the group is refused whole, with no member admitted first: {out:?}"
         );
         assert_eq!(
             out.iter()
-                .filter(|event| matches!(event, ServerMessage::OrderRejected { .. }))
+                .filter(|event| matches!(event, VenueMessage::OrderRejected { .. }))
                 .count(),
             2,
             "one rejection per member: {out:?}"
@@ -7296,14 +7296,14 @@ mod tests {
         assert!(
             out.iter().any(|event| matches!(
                 event,
-                ServerMessage::OrderFilled(fill) if fill.client_order_id == "FIRST"
+                VenueMessage::OrderFilled(fill) if fill.client_order_id == "FIRST"
             )),
             "the first member filled and spent the balance: {out:?}"
         );
         assert!(
             out.iter().any(|event| matches!(
                 event,
-                ServerMessage::OrderRejected { client_order_id, .. } if client_order_id == "SECOND"
+                VenueMessage::OrderRejected { client_order_id, .. } if client_order_id == "SECOND"
             )),
             "and the second could no longer be funded: {out:?}"
         );
@@ -7344,14 +7344,14 @@ mod tests {
         );
         assert_eq!(
             out.iter()
-                .filter(|event| matches!(event, ServerMessage::OrderAccepted { .. }))
+                .filter(|event| matches!(event, VenueMessage::OrderAccepted { .. }))
                 .count(),
             2,
             "both legs were admitted despite the child preceding its parent: {out:?}"
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "and nothing was rejected for an unknown parent: {out:?}"
         );
     }
@@ -7395,7 +7395,7 @@ mod tests {
         let rejected: Vec<(&str, &str)> = out
             .iter()
             .filter_map(|event| match event {
-                ServerMessage::OrderRejected {
+                VenueMessage::OrderRejected {
                     client_order_id,
                     reason,
                     ..
@@ -7416,7 +7416,7 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderAccepted { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderAccepted { .. })),
             "and nothing was accepted first: {out:?}"
         );
         assert!(e.open.is_empty(), "nothing rests");
@@ -7465,12 +7465,12 @@ mod tests {
         assert!(
             out.iter().any(|event| matches!(
                 event,
-                ServerMessage::OrderCanceled { client_order_id, .. } if client_order_id == "STOP"
+                VenueMessage::OrderCanceled { client_order_id, .. } if client_order_id == "STOP"
             )),
             "the closing pass reaped the sibling: {out:?}"
         );
         assert!(
-            matches!(out.last(), Some(ServerMessage::AccountState(_))),
+            matches!(out.last(), Some(VenueMessage::AccountState(_))),
             "and reported the ledger it moved: {out:?}"
         );
 
@@ -7485,12 +7485,12 @@ mod tests {
         assert!(
             out.iter().any(|event| matches!(
                 event,
-                ServerMessage::OrderCanceled { client_order_id, .. } if client_order_id == "STOP"
+                VenueMessage::OrderCanceled { client_order_id, .. } if client_order_id == "STOP"
             )),
             "the same closing pass ran: {out:?}"
         );
         assert!(
-            !matches!(out.last(), Some(ServerMessage::AccountState(_))),
+            !matches!(out.last(), Some(VenueMessage::AccountState(_))),
             "and its snapshot was dropped: {out:?}"
         );
     }
@@ -7549,7 +7549,7 @@ mod tests {
             let reasons: Vec<&str> = out
                 .iter()
                 .filter_map(|event| match event {
-                    ServerMessage::OrderRejected { reason, .. } => Some(reason.as_str()),
+                    VenueMessage::OrderRejected { reason, .. } => Some(reason.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -7564,7 +7564,7 @@ mod tests {
             );
             assert!(
                 !out.iter()
-                    .any(|event| matches!(event, ServerMessage::OrderAccepted { .. })),
+                    .any(|event| matches!(event, VenueMessage::OrderAccepted { .. })),
                 "{name}: and nothing was accepted first: {out:?}"
             );
             assert!(e.open.is_empty(), "{name}: nothing rests");
@@ -7609,7 +7609,7 @@ mod tests {
         );
         assert_eq!(
             out.iter()
-                .filter(|event| matches!(event, ServerMessage::OrderAccepted { .. }))
+                .filter(|event| matches!(event, VenueMessage::OrderAccepted { .. }))
                 .count(),
             2,
             "both legs were admitted: {out:?}"
@@ -7650,7 +7650,7 @@ mod tests {
         let out = e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderAccepted { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderAccepted { .. })),
             "a held child is accepted, not refused: {out:?}"
         );
         assert_eq!(
@@ -7745,7 +7745,7 @@ mod tests {
         let canceled: Vec<&str> = out
             .iter()
             .filter_map(|event| match event {
-                ServerMessage::OrderCanceled {
+                VenueMessage::OrderCanceled {
                     client_order_id, ..
                 } => Some(client_order_id.as_str()),
                 _ => None,
@@ -7805,7 +7805,7 @@ mod tests {
         );
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderUpdated { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderUpdated { .. })),
             "the amend itself is honoured: {out:?}"
         );
 
@@ -7920,14 +7920,14 @@ mod tests {
         assert!(
             out.iter().any(|event| matches!(
                 event,
-                ServerMessage::OrderFilled(fill) if fill.client_order_id == "ENTRY"
+                VenueMessage::OrderFilled(fill) if fill.client_order_id == "ENTRY"
             )),
             "the parent filled on arrival, so the release actually ran: {out:?}"
         );
         assert!(
             !out.iter().any(|event| matches!(
                 event,
-                ServerMessage::OrderFilled(fill) if fill.client_order_id == "EXIT"
+                VenueMessage::OrderFilled(fill) if fill.client_order_id == "EXIT"
             )),
             "and the released child took nothing, marketable though it is: {out:?}"
         );
@@ -8017,7 +8017,7 @@ mod tests {
 
         assert!(
             out.iter().any(
-                |event| matches!(event, ServerMessage::OrderUpdated { client_order_id, quantity, .. }
+                |event| matches!(event, VenueMessage::OrderUpdated { client_order_id, quantity, .. }
                     if client_order_id == "SL" && *quantity == Decimal::from(3))
             ),
             "the sibling shrinks by the one unit that filled: {out:?}"
@@ -8183,7 +8183,7 @@ mod tests {
         let out = e.expire_orders(500, None, 500);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderExpired { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderExpired { .. })),
             "the order expires at its instant: {out:?}"
         );
         // EXPIRED, never Canceled: nobody pulled this order, its stated
@@ -8191,7 +8191,7 @@ mod tests {
         // differently.
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderCanceled { .. })),
             "expiry must not also report a cancel: {out:?}"
         );
         assert!(e.open.is_empty());
@@ -8238,7 +8238,7 @@ mod tests {
         let out = e.expire_orders(1_000, Some("BTCUSDT"), 1_000);
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderExpired { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderExpired { .. })),
             "its own session closing expires it: {out:?}"
         );
         // A session close ends the order's stated lifetime; it is not the
@@ -8246,7 +8246,7 @@ mod tests {
         // different facts.
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderCanceled { .. })),
             "a session close must not report a cancel: {out:?}"
         );
     }
@@ -8412,7 +8412,7 @@ mod tests {
             );
             assert!(
                 out.iter()
-                    .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                    .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
                 "the short must actually be on the book, or this funds nothing: {out:?}"
             );
             e.mark(&[("BTCUSDT.P".into(), Decimal::from(mark))], 2);
@@ -8548,12 +8548,12 @@ mod tests {
             }),
         );
         assert!(
-            matches!(out.first(), Some(ServerMessage::OrderAccepted { .. })),
+            matches!(out.first(), Some(VenueMessage::OrderAccepted { .. })),
             "the limit must rest, got {out:?}"
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "a marketable rest would not pin the working book: {out:?}"
         );
     }
@@ -8767,7 +8767,7 @@ mod tests {
         assert_eq!(cancel_reject_reason(&out), "venue said no");
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderCanceled { .. })),
             "a refused cancel must not also cancel the order"
         );
 
@@ -8780,7 +8780,7 @@ mod tests {
         );
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderCanceled { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderCanceled { .. })),
             "the order should have survived the refused cancel and be cancellable now"
         );
     }
@@ -8808,7 +8808,7 @@ mod tests {
         assert!(
             !out.events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderCancelRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderCancelRejected { .. })),
             "the venue's own cancel is not refused by an arm aimed at the client: {:?}",
             out.events
         );
@@ -8915,7 +8915,7 @@ mod tests {
         );
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderCancelRejected {
+            VenueMessage::OrderCancelRejected {
                 venue_order_id: Some(id),
                 reason,
                 ..
@@ -8930,7 +8930,7 @@ mod tests {
         );
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderCancelRejected {
+            VenueMessage::OrderCancelRejected {
                 venue_order_id: None,
                 reason,
                 ..
@@ -8954,7 +8954,7 @@ mod tests {
         );
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderModifyRejected { reason, .. }
+            VenueMessage::OrderModifyRejected { reason, .. }
                 if reason == "order already terminal (filled or canceled)"
         ));
     }
@@ -8979,7 +8979,7 @@ mod tests {
         );
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderModifyRejected {
+            VenueMessage::OrderModifyRejected {
                 venue_order_id: Some(id),
                 reason,
                 ..
@@ -9004,7 +9004,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderModifyRejected {
+            VenueMessage::OrderModifyRejected {
                 client_order_id,
                 venue_order_id: None,
                 reason,
@@ -9040,7 +9040,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(matches!(
             updated(&out, 0),
-            ServerMessage::OrderUpdated {
+            VenueMessage::OrderUpdated {
                 price: Some(price),
                 leaves_qty,
                 ..
@@ -9072,7 +9072,7 @@ mod tests {
         );
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderModifyRejected { reason, .. }
+            VenueMessage::OrderModifyRejected { reason, .. }
                 if reason == "Market order must not carry a price amend"
         ));
         assert!(matches!(e.open[0].resting, Resting::Inert));
@@ -9101,7 +9101,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(matches!(
             updated(&out, 0),
-            ServerMessage::OrderUpdated {
+            VenueMessage::OrderUpdated {
                 quantity,
                 leaves_qty,
                 ..
@@ -9138,7 +9138,7 @@ mod tests {
             assert_eq!(out.len(), 1);
             assert!(matches!(
                 &out[0],
-                ServerMessage::OrderModifyRejected {
+                VenueMessage::OrderModifyRejected {
                     venue_order_id: Some(_),
                     reason,
                     ..
@@ -9171,7 +9171,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderModifyRejected {
+            VenueMessage::OrderModifyRejected {
                 venue_order_id: Some(_),
                 reason,
                 ..
@@ -9207,7 +9207,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderModifyRejected {
+            VenueMessage::OrderModifyRejected {
                 venue_order_id: Some(_),
                 reason,
                 ..
@@ -9239,7 +9239,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(matches!(
             &out[0],
-            ServerMessage::OrderModifyRejected {
+            VenueMessage::OrderModifyRejected {
                 venue_order_id: Some(_),
                 reason,
                 ..
@@ -9273,13 +9273,13 @@ mod tests {
             2,
         );
         assert_eq!(modified.len(), 2);
-        assert!(matches!(modified[0], ServerMessage::OrderUpdated { .. }));
-        assert!(matches!(modified[1], ServerMessage::AccountState(_)));
+        assert!(matches!(modified[0], VenueMessage::OrderUpdated { .. }));
+        assert!(matches!(modified[1], VenueMessage::AccountState(_)));
 
         let filled = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 3);
         assert_eq!(filled.len(), 2);
-        assert!(matches!(filled[0], ServerMessage::OrderAccepted { .. }));
-        assert!(matches!(filled[1], ServerMessage::OrderFilled(_)));
+        assert!(matches!(filled[0], VenueMessage::OrderAccepted { .. }));
+        assert!(matches!(filled[1], VenueMessage::OrderFilled(_)));
     }
 
     #[test]
@@ -9324,7 +9324,7 @@ mod tests {
             },
             9,
         );
-        let [ServerMessage::OrderStatusSnapshot(snap)] = &out[..] else {
+        let [VenueMessage::OrderStatusSnapshot(snap)] = &out[..] else {
             panic!("expected one snapshot, got {out:?}")
         };
         assert_eq!(snap.request_id, "Q1");
@@ -9404,7 +9404,7 @@ mod tests {
         // The wire carried the fill twice (the injected lie)...
         assert_eq!(
             out.iter()
-                .filter(|m| matches!(m, ServerMessage::OrderFilled(_)))
+                .filter(|m| matches!(m, VenueMessage::OrderFilled(_)))
                 .count(),
             2
         );
@@ -9418,7 +9418,7 @@ mod tests {
             },
             9,
         );
-        let [ServerMessage::FillSnapshot(snap)] = &out[..] else {
+        let [VenueMessage::FillSnapshot(snap)] = &out[..] else {
             panic!("expected one fill snapshot, got {out:?}")
         };
         assert_eq!(snap.request_id, "Q1");
@@ -9858,7 +9858,7 @@ mod tests {
         assert_eq!(
             output
                 .iter()
-                .filter(|event| !matches!(event, ServerMessage::AccountState(_)))
+                .filter(|event| !matches!(event, VenueMessage::AccountState(_)))
                 .count(),
             5,
             "the shape this bound is derived from: {output:?}"
@@ -9958,7 +9958,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| !matches!(event, ServerMessage::AccountState(_)))
+                .filter(|event| !matches!(event, VenueMessage::AccountState(_)))
                 .count(),
             4,
             "the shape this bound is derived from: {events:?}"
@@ -10032,7 +10032,7 @@ mod tests {
         assert!(
             filled
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
     }
 
@@ -10089,8 +10089,8 @@ mod tests {
             Some(reading(0)),
         );
         assert!(matches!(
-            out.iter().find(|event| matches!(event, ServerMessage::OrderFilled(_))),
-            Some(ServerMessage::OrderFilled(fill)) if fill.leaves_qty == Decimal::ONE
+            out.iter().find(|event| matches!(event, VenueMessage::OrderFilled(_))),
+            Some(VenueMessage::OrderFilled(fill)) if fill.leaves_qty == Decimal::ONE
         ));
         assert_eq!(e.open[0].band_draw, 1);
         assert_eq!(e.open[0].leaves_qty, Decimal::ONE);
@@ -10121,8 +10121,8 @@ mod tests {
         assert!(e.armed.is_empty(), "the rejected FOK left its arm standing");
         let resubmit = e.process_with_market(ClientMessage::SubmitOrder(fok), 2, Some(reading(0)));
         assert!(matches!(
-            resubmit.iter().find(|event| matches!(event, ServerMessage::OrderFilled(_))),
-            Some(ServerMessage::OrderFilled(fill)) if fill.last_qty == Decimal::from(2)
+            resubmit.iter().find(|event| matches!(event, VenueMessage::OrderFilled(_))),
+            Some(VenueMessage::OrderFilled(fill)) if fill.last_qty == Decimal::from(2)
         ));
     }
 
@@ -10142,7 +10142,7 @@ mod tests {
             !first
                 .iter()
                 .chain(second.iter())
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_))),
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
             "two crossing limits on one account must both rest"
         );
         assert_eq!(e.open.len(), 2);
@@ -10205,11 +10205,11 @@ mod tests {
             2,
             Some(reading),
         );
-        let price = |events: &[ServerMessage]| {
+        let price = |events: &[VenueMessage]| {
             events
                 .iter()
                 .find_map(|event| match event {
-                    ServerMessage::OrderFilled(fill) => Some(fill.last_px),
+                    VenueMessage::OrderFilled(fill) => Some(fill.last_px),
                     _ => None,
                 })
                 .unwrap()
@@ -10287,7 +10287,7 @@ mod tests {
     fn a_market_order_with_no_reading_fills_at_its_stated_price_and_warns() {
         let mut e = banded(42);
         let out = e.process(ClientMessage::SubmitOrder(order("market-fallback", 1)), 1);
-        assert!(out.iter().any(|event| matches!(event, ServerMessage::OrderFilled(fill) if fill.last_px == Decimal::from(100))));
+        assert!(out.iter().any(|event| matches!(event, VenueMessage::OrderFilled(fill) if fill.last_px == Decimal::from(100))));
     }
 
     #[test]
@@ -10309,7 +10309,7 @@ mod tests {
         });
         let out = e.process_with_market(ClientMessage::SubmitOrder(candidate), 1, Some(reading));
         assert!(
-            matches!(out.as_slice(), [ServerMessage::OrderRejected { reason, .. }] if reason.contains("insufficient USDT"))
+            matches!(out.as_slice(), [VenueMessage::OrderRejected { reason, .. }] if reason.contains("insufficient USDT"))
         );
     }
 
@@ -10386,11 +10386,11 @@ mod tests {
         e.venue_order_seq = u64::MAX;
         let first = e.process(ClientMessage::SubmitOrder(order("ID-1", 1)), 1);
         let accepted = first.iter().find_map(|event| match event {
-            ServerMessage::OrderAccepted { venue_order_id, .. } => Some(venue_order_id),
+            VenueMessage::OrderAccepted { venue_order_id, .. } => Some(venue_order_id),
             _ => None,
         });
         let filled = first.iter().find_map(|event| match event {
-            ServerMessage::OrderFilled(fill) => Some(fill),
+            VenueMessage::OrderFilled(fill) => Some(fill),
             _ => None,
         });
         assert_eq!(accepted.map(String::as_str), Some("V-18446744073709551615"));
@@ -10402,7 +10402,7 @@ mod tests {
         let fill = events
             .iter()
             .find_map(|event| match event {
-                ServerMessage::OrderFilled(fill) => Some(fill),
+                VenueMessage::OrderFilled(fill) => Some(fill),
                 _ => None,
             })
             .expect("hedging submit fills");
@@ -10423,7 +10423,7 @@ mod tests {
     /// that it cannot become live.
     #[test]
     fn a_ledger_moving_event_is_one_the_snapshot_gate_can_see() {
-        let updated = ServerMessage::OrderUpdated {
+        let updated = VenueMessage::OrderUpdated {
             client_order_id: "U".into(),
             venue_order_id: "V-1".into(),
             quantity: Decimal::ONE,
@@ -10432,12 +10432,12 @@ mod tests {
             leaves_qty: Decimal::ONE,
             ts_event: 1,
         };
-        let expired = ServerMessage::OrderExpired {
+        let expired = VenueMessage::OrderExpired {
             client_order_id: "E".into(),
             venue_order_id: "V-2".into(),
             ts_event: 1,
         };
-        let accepted = ServerMessage::OrderAccepted {
+        let accepted = VenueMessage::OrderAccepted {
             client_order_id: "A".into(),
             venue_order_id: "V-3".into(),
             ts_event: 1,
@@ -10489,7 +10489,7 @@ mod tests {
         let out = Engine::new().process(ClientMessage::SubmitOrder(order("RISKY-MNQ-1", 1)), 1);
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "an id outside the reserved prefixes is ordinary: {out:?}"
         );
     }
@@ -10507,7 +10507,7 @@ mod tests {
         );
         assert!(matches!(
             canceled.as_slice(),
-            [ServerMessage::OrderCanceled { .. }]
+            [VenueMessage::OrderCanceled { .. }]
         ));
         assert!(e.armed.is_empty());
     }
@@ -10576,7 +10576,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
         assert_eq!(e.open[0].band_draw, 0);
         assert_eq!(e.open[0].leaves_qty, lot);
@@ -10612,7 +10612,7 @@ mod tests {
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
         assert_eq!(e.open[0].scanned_ns, 4);
         assert_eq!(e.open[0].leaves_qty, lot);
@@ -10644,7 +10644,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
         assert_eq!(e.open[0].scanned_ns, 9);
         assert_eq!(e.open[0].band_draw, 1);
@@ -10661,7 +10661,7 @@ mod tests {
         assert!(
             accepted
                 .iter()
-                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+                .any(|event| matches!(event, VenueMessage::AccountState(_))),
             "a resting acceptance still owes its snapshot"
         );
         // Still armed, and the later cancel is what spends it.
@@ -10674,7 +10674,7 @@ mod tests {
         assert!(
             !canceled
                 .iter()
-                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+                .any(|event| matches!(event, VenueMessage::AccountState(_))),
             "the cancel that frees the hold is where the arm lands"
         );
         assert!(e.armed.is_empty());
@@ -10707,13 +10707,13 @@ mod tests {
         assert!(
             expired
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderExpired { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderExpired { .. })),
             "the order expired: {expired:?}"
         );
         assert!(
             expired
                 .iter()
-                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+                .any(|event| matches!(event, VenueMessage::AccountState(_))),
             "and reported the hold it freed: {expired:?}"
         );
 
@@ -10724,13 +10724,13 @@ mod tests {
         assert!(
             expired
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderExpired { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderExpired { .. })),
             "the same expiry ran: {expired:?}"
         );
         assert!(
             !expired
                 .iter()
-                .any(|event| matches!(event, ServerMessage::AccountState(_))),
+                .any(|event| matches!(event, VenueMessage::AccountState(_))),
             "but the arm hid the update it freed: {expired:?}"
         );
         assert!(armed.armed.is_empty(), "and the arm was spent, not left");
@@ -10777,7 +10777,7 @@ mod tests {
             assert!(
                 matches!(
                     submit(id, quantity, price)[0],
-                    ServerMessage::OrderAccepted { .. }
+                    VenueMessage::OrderAccepted { .. }
                 ),
                 "{id} sits on the seeded grid"
             );
@@ -10787,8 +10787,8 @@ mod tests {
         // The refusal is read from the event rather than through
         // `reject_reason`, whose panic on an ACCEPTED order would name the
         // helper's shape instead of the grid this test is about.
-        let refusal = |out: &[ServerMessage], what: &str| match out {
-            [ServerMessage::OrderRejected { reason, .. }] => reason.clone(),
+        let refusal = |out: &[VenueMessage], what: &str| match out {
+            [VenueMessage::OrderRejected { reason, .. }] => reason.clone(),
             other => panic!("the seeded {what} increment must refuse a tenth of itself: {other:?}"),
         };
         assert_eq!(
@@ -11015,7 +11015,7 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "{out:?}"
         );
         let locked = e
@@ -11045,7 +11045,7 @@ mod tests {
     /// flips with the balance can only be the funds comparison.
     #[test]
     fn a_quantity_only_amend_of_a_leveraged_future_is_checked_against_its_price() {
-        let amend = |cash: i64| -> Vec<ServerMessage> {
+        let amend = |cash: i64| -> Vec<VenueMessage> {
             let mut e = leveraged_futures(cash);
             let mut resting = mnq_order("A1", Side::Buy, 1, 21_000);
             resting.order_type = OrderType::Limit;
@@ -11077,7 +11077,7 @@ mod tests {
         assert!(
             !funded
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderModifyRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderModifyRejected { .. })),
             "the same amend on an account that can afford it must be admitted, or the \
              refusal below is not the funds check: {funded:?}"
         );
@@ -11098,7 +11098,7 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "{out:?}"
         );
         // Ten contracts would need 42,000 against an account holding 5,000.
@@ -11119,7 +11119,7 @@ mod tests {
         let reason = out
             .iter()
             .find_map(|event| match event {
-                ServerMessage::OrderModifyRejected { reason, .. } => Some(reason.clone()),
+                VenueMessage::OrderModifyRejected { reason, .. } => Some(reason.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the amend must be refused: {out:?}"));
@@ -11140,7 +11140,7 @@ mod tests {
         let out = trade(&mut e, first, 2);
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "selling what the account holds is not a short: {out:?}"
         );
         let mut second = order_with("S2", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
@@ -11149,7 +11149,7 @@ mod tests {
         let reason = out
             .iter()
             .find_map(|event| match event {
-                ServerMessage::OrderRejected { reason, .. } => Some(reason.clone()),
+                VenueMessage::OrderRejected { reason, .. } => Some(reason.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the second sell must be refused: {out:?}"));
@@ -11190,7 +11190,7 @@ mod tests {
             let out = trade(&mut e, leg, 2 + index as u64);
             assert!(
                 !out.iter()
-                    .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                    .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
                 "exit leg {id} must be admitted: {out:?}"
             );
         }
@@ -11218,7 +11218,7 @@ mod tests {
         let out = trade(&mut e, parent, 1);
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "{out:?}"
         );
         let mut child = order_with("C", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
@@ -11230,7 +11230,7 @@ mod tests {
         let out = trade(&mut e, child, 2);
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "a held child sells nothing yet, so it is not a short: {out:?}"
         );
         assert_eq!(
@@ -11282,7 +11282,7 @@ mod tests {
         let rejected: Vec<(&str, &str)> = out
             .iter()
             .filter_map(|event| match event {
-                ServerMessage::OrderRejected {
+                VenueMessage::OrderRejected {
                     client_order_id,
                     reason,
                     ..
@@ -11339,7 +11339,7 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "an Oco exit pair is one short's worth, not two: {out:?}"
         );
     }
@@ -11459,7 +11459,7 @@ mod tests {
         let out = trade(&mut e, child, 2);
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "{out:?}"
         );
         // Held, and therefore holding nothing: growing it to a quantity whose
@@ -11481,7 +11481,7 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderModifyRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderModifyRejected { .. })),
             "a held child holds nothing, so nothing about it can be underfunded: {out:?}"
         );
     }
@@ -11514,12 +11514,12 @@ mod tests {
         );
         assert!(
             !out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderModifyRejected { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderModifyRejected { .. })),
             "amending an equity sell is not a futures margin question: {out:?}"
         );
         assert!(
             out.iter()
-                .any(|event| matches!(event, ServerMessage::OrderUpdated { .. })),
+                .any(|event| matches!(event, VenueMessage::OrderUpdated { .. })),
             "{out:?}"
         );
     }

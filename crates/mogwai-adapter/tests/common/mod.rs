@@ -93,7 +93,7 @@ use std::{
 
 use mogwai_adapter::{MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient};
 use mogwai_protocol::{
-    ClientMessage, FillSnapshot, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, ServerMessage,
+    ClientMessage, FillSnapshot, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, VenueMessage,
     WireOrderStatus,
 };
 use nautilus_common::{
@@ -167,7 +167,7 @@ pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
 /// saving. `data_origin_ns` of zero is a KNOWN floor rather than an unknown
 /// one, and no request start can precede it, so the off-tape guard admits
 /// exactly what it admitted before.
-pub const IDENTITY_CLOCK_JSON: &str = r#"{"sim":{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0},"server_now_ns":0,"data_origin_ns":0,"warmup_ns":0}"#;
+pub const IDENTITY_CLOCK_JSON: &str = r#"{"sim":{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0},"venue_now_ns":0,"data_origin_ns":0,"warmup_ns":0}"#;
 
 /// Test scenario state shared between the stub and the test body. A test mutates
 /// the relevant fields before connecting, then reads the counters/recorded
@@ -177,13 +177,13 @@ pub const IDENTITY_CLOCK_JSON: &str = r#"{"sim":{"sim_epoch_ns":0,"wall_anchor_n
 /// and it is written down because getting it wrong is how the dead block in
 /// `serve_exec_message`'s doc comment survived. Splitting this struct by
 /// transport would have put `ws_trades`, `dark_ms`, `close_after_trades`,
-/// `ws_server_pings`, `ws_exec_frames` and `ws_modify_frames` in ONE bucket
+/// `ws_venue_pings`, `ws_exec_frames` and `ws_modify_frames` in ONE bucket
 /// together - which is precisely the confusion that produced the defect, so
 /// that split localizes nothing. The ownership is:
 ///
 /// - DATA LEG, all of it served before the read loop in `serve_ws`:
 ///   `ws_trades`, `push_gate`, `dark_ms`, `close_after_trades`,
-///   `ws_server_pings`, `ws_first_frame_at`.
+///   `ws_venue_pings`, `ws_first_frame_at`.
 /// - EXEC LEG, all of it served inside `serve_exec_message`: `ws_exec_frames`,
 ///   `ws_modify_frames`, `venue_orders`, `venue_fills`, `order_queries`,
 ///   `fill_queries`, `ws_first_exec_frame_at`.
@@ -232,11 +232,11 @@ pub struct StubState {
     pub ws_handshakes: AtomicUsize,
     /// WS `Ping` frames received from the client (heartbeat probes).
     pub ws_pings: AtomicUsize,
-    /// `Pong` frames the client returned in reply to a server `Ping`.
+    /// `Pong` frames the client returned in reply to a venue `Ping`.
     pub ws_pongs: AtomicUsize,
-    /// `ServerMessage` JSON the stub `Ping`s the client with, after subscribe,
+    /// `VenueMessage` JSON the stub `Ping`s the client with, after subscribe,
     /// to exercise the inbound `Ping` -> client `Pong` reply path.
-    pub ws_server_pings: AtomicUsize,
+    pub ws_venue_pings: AtomicUsize,
     /// JSON body of each HTTP `GET /trades` response. Defaults to `[]`.
     pub trades_body: Mutex<Option<String>>,
     /// Optional successive `/trades` bodies for pagination tests.
@@ -286,7 +286,7 @@ pub struct StubState {
     /// from how long the connect took.
     pub clock_hits: AtomicUsize,
     /// When true, `GET /account` returns an empty account snapshot. Defaults to
-    /// false so older-server compatibility remains the default stub behavior.
+    /// false so older-venue compatibility remains the default stub behavior.
     pub serve_account: AtomicBool,
     /// Body served for `GET /account` when `serve_account` is set.
     pub account_body: Mutex<Option<String>>,
@@ -796,7 +796,7 @@ pub async fn respond_json(stream: &mut TcpStream, status: &str, body: &str) {
     drop(stream.flush().await);
 }
 
-/// Completes a tungstenite server handshake against an already-read request
+/// Completes a tungstenite venue handshake against an already-read request
 /// head, then pushes the state-driven frames. Data clients send `Subscribe` and
 /// receive `ws_trades`; exec clients send `SubmitOrder` and receive
 /// `ws_exec_frames`. Matching is on a parsed `ClientMessage`, not a substring.
@@ -893,7 +893,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
             .get_or_insert_with(Instant::now);
         drop(ws.send(Message::Text(trade.into())).await);
     }
-    if state.ws_server_pings.load(Ordering::Relaxed) > 0 {
+    if state.ws_venue_pings.load(Ordering::Relaxed) > 0 {
         drop(ws.send(Message::Ping(Vec::new().into())).await);
     }
     if close_after && !is_replay {
@@ -933,7 +933,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
 /// `client/exec.rs`). So every `Message::Text` a stub socket receives is exec
 /// traffic by construction, and keeping the reply logic inline invited the
 /// defect that was actually found here: the `ModifyOrder` arm had grown a copy
-/// of the DATA leg's `close_after_trades` / `dark_ms` / server-ping / close
+/// of the DATA leg's `close_after_trades` / `dark_ms` / venue-ping / close
 /// tail, written as though the read loop were the data path.
 ///
 /// That block was unreachable three ways over and is deleted. Two of them are
@@ -941,10 +941,10 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
 /// is safe: `close_after_trades` returns from `serve_ws` before the read loop
 /// is ever entered, so its guard here could not run under any fixture; and no
 /// data client sends a `ClientMessage`, so no socket that has `dark_ms` or
-/// `ws_server_pings` armed for the data path reaches this code by any route a
+/// `ws_venue_pings` armed for the data path reaches this code by any route a
 /// client can take. The `served_once` guard the block held was structurally
 /// unreachable HERE and moved to the data leg above, where the behaviour its
-/// field documents actually lives; the `dark_ms`, server-ping and close tails
+/// field documents actually lives; the `dark_ms`, venue-ping and close tails
 /// were duplicates of code already running there and are simply gone.
 ///
 /// The stub CANNOT dispatch the two legs at the upgrade, and that is a fact
@@ -1015,7 +1015,7 @@ pub fn position_json(quantity: &str, avg_px: &str) -> String {
 }
 
 /// Answers a venue-truth query using rows seeded into the shared stub.
-pub fn venue_query_reply(message: &ClientMessage, state: &StubState) -> Option<ServerMessage> {
+pub fn venue_query_reply(message: &ClientMessage, state: &StubState) -> Option<VenueMessage> {
     match message {
         ClientMessage::QueryOrders {
             request_id,
@@ -1036,7 +1036,7 @@ pub fn venue_query_reply(message: &ClientMessage, state: &StubState) -> Option<S
                 })
                 .cloned()
                 .collect();
-            Some(ServerMessage::OrderStatusSnapshot(OrderStatusSnapshot {
+            Some(VenueMessage::OrderStatusSnapshot(OrderStatusSnapshot {
                 request_id: request_id.clone(),
                 orders,
                 ts_event: VENUE_SNAPSHOT_TS_EVENT,
@@ -1059,7 +1059,7 @@ pub fn venue_query_reply(message: &ClientMessage, state: &StubState) -> Option<S
                 })
                 .cloned()
                 .collect();
-            Some(ServerMessage::FillSnapshot(FillSnapshot {
+            Some(VenueMessage::FillSnapshot(FillSnapshot {
                 request_id: request_id.clone(),
                 fills,
                 ts_event: VENUE_SNAPSHOT_TS_EVENT,

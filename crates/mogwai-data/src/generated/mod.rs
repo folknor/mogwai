@@ -15,7 +15,7 @@
 //!   price process the walk composes each tick.
 //! - `numeric` - small numeric helpers (range checks, saturating decimal
 //!   conversion, round-lot snapping).
-//! - `source` - `GeneratedSource` itself, the `TickSource` the running server
+//! - `source` - `GeneratedSource` itself, the `TickSource` the running venue
 //!   drives.
 //! - `checkpoint` - `CheckpointIndex`, the O(K) seek accelerator over a
 //!   `GeneratedSource` realization.

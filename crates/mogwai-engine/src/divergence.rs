@@ -17,18 +17,18 @@ impl Engine {
     /// was silently discarded is an ack that lies about what it did, and a
     /// scenario then spends its debugging budget on "why did my armed partial
     /// never fire" instead of "my queue overflowed". `None` means nothing was
-    /// displaced (including for the server-owned variants this drops outright,
+    /// displaced (including for the venue-owned variants this drops outright,
     /// which never enter the queue at all).
     pub fn arm(&mut self, d: Divergence) -> Option<Divergence> {
         match d {
-            // Server-owned temporal/control divergences have no engine-side
+            // Venue-owned temporal/control divergences have no engine-side
             // trigger, so `take_armed` would never consume them. Dropping them
             // here keeps them from accumulating as dead entries in the armed
             // queue.
             // `CancelOpenOrderSilently` is immediate-action, not armed: the
-            // server routes it to `cancel_open_order_silently` at post time.
+            // venue routes it to `cancel_open_order_silently` at post time.
             // Reaching `arm` with it would leak a dead queue entry, so it is
-            // dropped alongside the server-owned temporal variants.
+            // dropped alongside the venue-owned temporal variants.
             // `FlowSurge` is named here for the same reason and one more: it is
             // the first arm that reaches into GENERATOR state (a sim-time window
             // on the tape source), so it has no engine-side trigger at all.
@@ -36,8 +36,8 @@ impl Engine {
             // BOTH SIDES OF THIS MATCH ARE ENUMERATED, and that is the whole
             // mechanism behind the paragraph above: with no `_` arm the crate
             // does not BUILD until a new `Divergence` variant is deliberately
-            // classified as server-owned or engine-armed. A catch-all would let
-            // a new server-owned variant fall through into the queue as a dead
+            // classified as venue-owned or engine-armed. A catch-all would let
+            // a new venue-owned variant fall through into the queue as a dead
             // entry that nothing consumes, and no test can hold a claim about
             // variants that do not exist yet.
             // `arm_classifies_every_divergence_variant` in `lib.rs` states which
@@ -51,7 +51,7 @@ impl Engine {
             | Divergence::FeeSurcharge { .. }
             | Divergence::ClearDivergences
             | Divergence::CancelOpenOrderSilently { .. }
-            // `FaultTape` is server-owned and TERMINAL. It acts on the run's
+            // `FaultTape` is venue-owned and TERMINAL. It acts on the run's
             // fault channel at post time and takes the process down, so there is
             // no trigger for the engine to wait on and no later ledger for it to
             // be replayed onto - queueing it would leave a dead entry in a book
@@ -96,11 +96,11 @@ impl Engine {
     /// to guarantee a clean slate.
     ///
     /// Deliberately distinct from the wire `control::Divergence::ClearDivergences`,
-    /// which clears ONLY the server-owned temporal windows (`DelayAcks`,
+    /// which clears ONLY the venue-owned temporal windows (`DelayAcks`,
     /// `GoDark`, `StallData`) and by documented contract leaves the engine-side
     /// single-shots alone. Widening that wire variant to also flush the engine
     /// queue would change its contract; this crate-local method flushes without
-    /// touching the wire, so a future server that wants a full reset on
+    /// touching the wire, so a future venue that wants a full reset on
     /// `ClearDivergences` can call this alongside its atomics rather than
     /// overloading the variant.
     pub fn clear_armed(&mut self) {

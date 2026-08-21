@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The mogwai venue server: config loading, instrument profiles, the tape
+//! The mogwai venue venue: config loading, instrument profiles, the tape
 //! source seam, the HTTP/WS surface and the one foreground `serve` run.
 //!
 //! A library, not a binary. The `mogwai` command lives in `mogwai-cli`, which

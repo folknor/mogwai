@@ -3,7 +3,7 @@
 A fake broker/exchange that plugs into a
 [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) trading
 system to exercise the *live* trading path. It synthesizes market data from a
-committed fingerprint fitted offline to Kraken trade history (the running server
+committed fingerprint fitted offline to Kraken trade history (the running venue
 opens no CSV) and injects the messy, realistic execution divergences - partial
 fills, rejects, ack delays, duplicate fills, dropped account updates, venue
 blackouts, silent data stalls - that an in-process backtest sandbox structurally

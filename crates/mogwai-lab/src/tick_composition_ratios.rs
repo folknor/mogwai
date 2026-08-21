@@ -256,7 +256,7 @@ impl PresetCalendars {
     }
 
     /// DERIVES the split by asking each preset whether it has a calendar,
-    /// through the server's own loader.
+    /// through the venue's own loader.
     ///
     /// This is the replacement for the Python's hardcoded tuples, and the
     /// reason is the open instrument set: a sixth preset added to a hardcoded

@@ -5,7 +5,6 @@ __pycache__
 mogwai.log
 # Default `mogwai serve --pid-file` target; the daemon PID lock, not source.
 mogwai.pid
-scripts/server.log
 # `scripts/probe_warmup_window.py --log-file` target; runtime output.
 scripts/probe-warmup.log
 # `analysis/plot_tape.py` scratch: dumped tapes and the HTML charts built from

@@ -44,7 +44,7 @@ sequence for what this binds.
 
 A Cargo workspace, seven crates under `crates/`:
 
-- `mogwai-protocol` - the wire types (`ClientMessage`, `ServerMessage`) plus
+- `mogwai-protocol` - the wire types (`ClientMessage`, `VenueMessage`) plus
   `control::Divergence`. The single source of truth both ends serialize against;
   it never imports nautilus. Also carries `launch`, the SHIPPED launcher: it
   lives here rather than in `mogwai-adapter` because this workspace's own test
@@ -533,7 +533,7 @@ Use `brokkr` (not `cargo`) for check/test. By default output is filtered to chan
   - `--raw` - bypass output filtering, print everything cargo emits.
   - `--debug` - build and run the test in dev profile instead of release. Use this for subprocess-lifecycle / IPC / boot-path tests where release-LTO compile time (3-4 min for the full workspace) dominates wall time and the optimization level doesn't change the behavior under test. `BROKKR_TEST_BIN_DIR` points at `<target>/debug` accordingly.
   - Example: `brokkr test -p mogwai-data memory_source_replays_in_time_order` or `brokkr test -p mogwai-data parses_integer_and_fractional_timestamps -N 5`.
-- `brokkr run [NAME] [ARGS]...` - runs a bin or example by TARGET NAME, discovered from cargo metadata across the whole workspace. This server is `brokkr run mogwai -- serve` (`mogwai` is the bin target, not the package). A bare `brokkr run` lists what is runnable, or runs `[bin] default` if set. Arguments after `--` are forwarded raw to the program; brokkr's own `--debug`/`--release` go before the name. Use instead of `cargo run` for the same reason as `brokkr check`/`brokkr test`.
+- `brokkr run [NAME] [ARGS]...` - runs a bin or example by TARGET NAME, discovered from cargo metadata across the whole workspace. This venue is `brokkr run mogwai -- serve` (`mogwai` is the bin target, not the package). A bare `brokkr run` lists what is runnable, or runs `[bin] default` if set. Arguments after `--` are forwarded raw to the program; brokkr's own `--debug`/`--release` go before the name. Use instead of `cargo run` for the same reason as `brokkr check`/`brokkr test`.
 
 ## Benchmarking
 

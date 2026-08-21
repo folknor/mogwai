@@ -404,7 +404,7 @@ impl GeneratorScalars {
         // real tick (modal_tick 1e-7 with price_decimals 1 collapses every
         // price onto a 0.1 grid). The on-grid invariant still holds against the
         // COARSER grid, so no test or runtime check catches it - only this does.
-        // The server enforces the same relationship on its instrument defs via
+        // The venue enforces the same relationship on its instrument defs via
         // `on_increment`; this is the generator-layer twin.
         // rust_decimal carries at most 28 fractional digits. Zero is a valid
         // whole-number grid (YM/MYM are the motivating examples); values above
@@ -631,7 +631,7 @@ impl GeneratorScalars {
     /// Corpus comparisons are intentionally advisory. Operators may choose an
     /// instrument outside Kraken's observed envelope; shipped presets must
     /// accept every diagnostic explicitly in provenance, with stale
-    /// acceptances rejected by the server's preset-validation test.
+    /// acceptances rejected by the venue's preset-validation test.
     #[must_use]
     pub fn empirical_diagnostics(
         &self,

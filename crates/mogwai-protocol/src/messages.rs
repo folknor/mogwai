@@ -179,7 +179,7 @@ pub const MAX_SYMBOL_LEN: usize = 32;
 /// Validate a CLIENT-INBOUND symbol, wherever one arrives.
 ///
 /// The alphabet was chosen for the URL ingresses - it needs no percent encoding,
-/// and is shared by the adapter constructing the URL and the server validating
+/// and is shared by the adapter constructing the URL and the venue validating
 /// its decoded value - but the rule is no longer scoped to them. As of
 /// 2026-08-19 [`validate_submit_order`] calls this too, so order entry and the
 /// `/trades`, `/quotes` and `source` query strings judge a symbol by ONE rule.
@@ -230,7 +230,7 @@ pub fn validate_session_id(session: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Maximum byte length of a server-generated `reason` string. Constructors
+/// Maximum byte length of a venue-generated `reason` string. Constructors
 /// truncate to this on a char boundary rather than rejecting: a reason is
 /// diagnostic prose, and a truncated diagnostic is still truthful about what
 /// happened, whereas a refused frame would not be.
@@ -267,7 +267,7 @@ pub const MAX_CURRENCY_LEN: usize = 16;
 pub const JSON_ESCAPE_FACTOR: usize = 6;
 
 /// Upper bound on the serialized bytes of any `EventKind::Admission` frame -
-/// `AdmissionRejected` and `ProtocolError`, since both ride the server's
+/// `AdmissionRejected` and `ProtocolError`, since both ride the venue's
 /// priority lane. `AdmissionRejected` is the widest: one capped client id, one
 /// capped reason and its fixed envelope. This bound is
 /// what makes the priority lane's FRAME count a memory bound, so every
@@ -298,7 +298,7 @@ pub const ADMISSION_FRAME_MAX_BYTES: usize = 4096;
 /// only make the bound safer.
 pub const ADMISSION_ENVELOPE_BYTES: usize = 256;
 
-/// Truncate a server-generated reason to `MAX_REASON_LEN` bytes on a char
+/// Truncate a venue-generated reason to `MAX_REASON_LEN` bytes on a char
 /// boundary, appending nothing (the truncation is visible as an abrupt end).
 #[must_use]
 pub fn truncate_reason(mut reason: String) -> String {
@@ -562,7 +562,7 @@ impl TimeInForce {
     }
 }
 
-/// Client → server order-entry messages. Market data is streamed immediately
+/// Client → venue order-entry messages. Market data is streamed immediately
 /// when the websocket is upgraded; there is no subscription command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -639,7 +639,7 @@ pub enum ClientMessage {
     /// client may or may not have received. This is the second, independent
     /// witness Nautilus' reconciliation (startup mass-status and the
     /// continuous open-order poll) consumes: after a havoc scenario cancels a
-    /// resting order server-side and drops the lifecycle event, this query
+    /// resting order venue-side and drops the lifecycle event, this query
     /// still reports the truth.
     ///
     /// Honest-content invariant: the reply's CONTENT is always a truthful
@@ -727,7 +727,7 @@ pub enum WireOrderStatus {
     PartiallyFilled,
     /// Terminal: fully filled.
     Filled,
-    /// Terminal: canceled (client cancel, IOC remainder, or a server-side
+    /// Terminal: canceled (client cancel, IOC remainder, or a venue-side
     /// havoc cancel).
     Canceled,
     /// Terminal: the order's own time in force ended it - a `Gtd` reaching its
@@ -776,7 +776,7 @@ pub struct OrderStatusInfo {
     /// Quantity filled so far.
     #[serde(with = "rust_decimal::serde::str")]
     pub filled_qty: Decimal,
-    /// Current order price. Always present in practice (the server stamps
+    /// Current order price. Always present in practice (the venue stamps
     /// Market orders before the engine sees them), optional on the wire to
     /// mirror `SubmitOrder`.
     #[serde(default, with = "crate::decimal::str_option")]
@@ -1068,7 +1068,7 @@ pub enum Contingency {
 /// one ("submit price required") - is a deliberate two-phase split, not a
 /// drift. This gate validates the PRE-stamp wire, exactly what the adapter puts
 /// on the socket: a nautilus MARKET order legitimately carries no price there.
-/// The server then STAMPS a synthetic execution price onto every Market order
+/// The venue then STAMPS a synthetic execution price onto every Market order
 /// (on both the WS and HTTP carriers, failing loudly if synthesis fails) before
 /// the engine ever sees it, so by the time `validate_submit` runs the order
 /// always carries a price and a still-priceless one is a genuine post-stamp
@@ -1270,7 +1270,7 @@ fn validate_order_link(order: &SubmitOrder, link: &OrderLink) -> Result<(), &'st
 /// translatable: the adapter turns a refused submit into nautilus
 /// `OrderRejected` but a refused cancel into `OrderCancelRejected` - flipping a
 /// live order to Rejected because its CANCEL was refused would be an invalid
-/// transition (see `ServerMessage::OrderCancelRejected`).
+/// transition (see `VenueMessage::OrderCancelRejected`).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind")]
 pub enum AdmissionSubject {
@@ -1409,14 +1409,14 @@ pub fn validate_modify_order(
     Ok(())
 }
 
-/// Server → client messages (execution events + market data).
+/// Venue → client messages (execution events + market data).
 ///
 /// These map onto nautilus `OrderEventAny` variants on the adapter side. The
 /// divergences mogwai is built to emit (partials via `leaves_qty`, rejects,
 /// duplicates, delays, drops) are expressed entirely through this stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum ServerMessage {
+pub enum VenueMessage {
     /// The declared simulated run duration elapsed. This is sent immediately
     /// before the venue closes normally, making a planned exit distinguishable
     /// from a failed connection.
@@ -1431,10 +1431,10 @@ pub enum ServerMessage {
     /// command (a refused cancel is not a rejected order).
     ///
     /// Admission truth, not engine output: it classifies `EventKind::Admission`,
-    /// rides the server's priority lane, and is deliberately NOT held by a
+    /// rides the venue's priority lane, and is deliberately NOT held by a
     /// `DelayAcks` window - the knob that holds engine output does not reach
     /// something the engine never produced. See `docs/havoc.md`.
-    /// `reason` is server-generated and truncated to `MAX_REASON_LEN`, which
+    /// `reason` is venue-generated and truncated to `MAX_REASON_LEN`, which
     /// with the identifier caps is what bounds this frame by
     /// `ADMISSION_FRAME_MAX_BYTES`.
     /// The venue could not admit a command or a frame, and said so instead of
@@ -1568,7 +1568,7 @@ pub enum ServerMessage {
     AccountState(AccountState),
     Trade(TradeTick),
     Quote(QuoteTick),
-    /// Server-originated liveness signal. Carries the server wall clock
+    /// Venue-originated liveness signal. Carries the venue wall clock
     /// unix-ns so the frame is non-empty and timestamp-comparable, but no
     /// market or execution payload. Clients may ignore it; its job is to keep
     /// the socket frame-active through a `StallData` window.
@@ -1576,7 +1576,7 @@ pub enum ServerMessage {
         ts_event: u64,
     },
     /// The bounded tape fanout overwrote frames for this connection. This is a
-    /// venue fault, not a client refusal; the server closes with WS 1011 after
+    /// venue fault, not a client refusal; the venue closes with WS 1011 after
     /// delivering it.
     FeedLagged {
         skipped: u64,
@@ -1588,7 +1588,7 @@ pub enum ServerMessage {
         reason: String,
         sim_now_ns: u64,
     },
-    /// A whole frame the server could not decode or attribute: a
+    /// A whole frame the venue could not decode or attribute: a
     /// frame that is not a `ClientMessage` (bad JSON, unknown `type`, or a
     /// known `type` missing required fields), or a request on a carrier that
     /// does not support it. Emitted in
@@ -1601,9 +1601,9 @@ pub enum ServerMessage {
     /// Classifies `EventKind::Admission`, not `Exec`: it reports what the
     /// venue's REQUEST HANDLING refused, which is never something the matching
     /// engine produced, so `DelayAcks` (a hold on engine output) does not reach
-    /// it and it rides the server's priority lane ahead of held traffic.
+    /// it and it rides the venue's priority lane ahead of held traffic.
     ///
-    /// `reason` is server-generated prose and MUST be routed through
+    /// `reason` is venue-generated prose and MUST be routed through
     /// `truncate_reason` at every construction site: serde's decode-error text
     /// echoes client-controlled field names, and without the truncation
     /// `ADMISSION_FRAME_MAX_BYTES` - hence the priority lane's frame count as a
@@ -1624,7 +1624,7 @@ pub enum ServerMessage {
 /// the fully general enum decoder accepts. Refusing it would narrow what this
 /// crate decodes relative to what it documents, on the one type both ends
 /// serialize against. `#[serde(borrow)]` keeps the zero-copy path for the
-/// canonical unescaped spelling the server emits and falls back to an owned
+/// canonical unescaped spelling the venue emits and falls back to an owned
 /// `String` only for an escaped one.
 #[derive(Deserialize)]
 struct TagProbe<'a> {
@@ -1632,14 +1632,14 @@ struct TagProbe<'a> {
     kind: std::borrow::Cow<'a, str>,
 }
 
-impl ServerMessage {
-    /// Decode a server frame without serde's internally-tagged content buffer
+impl VenueMessage {
+    /// Decode a venue frame without serde's internally-tagged content buffer
     /// on the market-data hot path. The small tag probe borrows from `json`,
     /// then the selected payload struct streams directly from the same bytes.
     /// Cold execution and control variants retain serde's fully general
     /// order-independent decoder.
     ///
-    /// Accepts exactly what `serde_json::from_str::<ServerMessage>` accepts;
+    /// Accepts exactly what `serde_json::from_str::<VenueMessage>` accepts;
     /// see [`TagProbe`] for the escape case that makes that non-obvious.
     pub fn from_json_str(json: &str) -> serde_json::Result<Self> {
         match serde_json::from_str::<TagProbe<'_>>(json)?.kind.as_ref() {
@@ -1661,7 +1661,7 @@ impl ServerMessage {
     /// The single source of truth for how each wire variant is classified into
     /// the exec / fill / data buckets that both ends key their havoc off.
     ///
-    /// The server's outbound delay path (`DelayAcks`) delays every execution
+    /// The venue's outbound delay path (`DelayAcks`) delays every execution
     /// event ([`EventKind::is_execution`], i.e. `Exec` and `Fill` only -
     /// `Admission` is transport truth and is exempt, as is `Data`), and the
     /// adapter's inbound latency knob buckets each variant with the full
@@ -1675,43 +1675,43 @@ impl ServerMessage {
     #[must_use]
     pub fn category(&self) -> EventKind {
         match self {
-            ServerMessage::OrderFilled(_) => EventKind::Fill,
+            VenueMessage::OrderFilled(_) => EventKind::Fill,
             // Heartbeat is a liveness signal, not execution traffic: `DelayAcks`
             // must not perturb its cadence. It also must survive `StallData`,
             // so writer gates use `is_market_data()` rather than this category.
-            ServerMessage::Trade(_) | ServerMessage::Quote(_) | ServerMessage::Heartbeat { .. } => {
+            VenueMessage::Trade(_) | VenueMessage::Quote(_) | VenueMessage::Heartbeat { .. } => {
                 EventKind::Data
             }
             // The query replies are execution-channel traffic: `DelayAcks`
             // holds them and `GoDark` drops them (delivery is havoc-able),
             // while their content stays a truthful book read - the invariant
             // documented on `ClientMessage::QueryOrders`.
-            ServerMessage::AccountState(_)
-            | ServerMessage::OrderStatusSnapshot(_)
-            | ServerMessage::FillSnapshot(_)
-            | ServerMessage::OrderAccepted { .. }
-            | ServerMessage::OrderTriggered { .. }
-            | ServerMessage::OrderRejected { .. }
-            | ServerMessage::OrderCanceled { .. }
-            | ServerMessage::OrderExpired { .. }
-            | ServerMessage::OrderUpdated { .. }
-            | ServerMessage::OrderModifyRejected { .. }
-            | ServerMessage::OrderCancelRejected { .. } => EventKind::Exec,
-            ServerMessage::AdmissionRejected { .. }
-            | ServerMessage::ProtocolError { .. }
-            | ServerMessage::FeedLagged { .. }
-            | ServerMessage::HavocDiagnostic { .. }
-            | ServerMessage::RunComplete { .. } => EventKind::Admission,
+            VenueMessage::AccountState(_)
+            | VenueMessage::OrderStatusSnapshot(_)
+            | VenueMessage::FillSnapshot(_)
+            | VenueMessage::OrderAccepted { .. }
+            | VenueMessage::OrderTriggered { .. }
+            | VenueMessage::OrderRejected { .. }
+            | VenueMessage::OrderCanceled { .. }
+            | VenueMessage::OrderExpired { .. }
+            | VenueMessage::OrderUpdated { .. }
+            | VenueMessage::OrderModifyRejected { .. }
+            | VenueMessage::OrderCancelRejected { .. } => EventKind::Exec,
+            VenueMessage::AdmissionRejected { .. }
+            | VenueMessage::ProtocolError { .. }
+            | VenueMessage::FeedLagged { .. }
+            | VenueMessage::HavocDiagnostic { .. }
+            | VenueMessage::RunComplete { .. } => EventKind::Admission,
         }
     }
 
     /// Whether this frame is market channel data, the payload a
     /// per-subscription data watchdog keys off. This is deliberately narrower
-    /// than `category() == Data`: the server heartbeat rides the data latency
+    /// than `category() == Data`: the venue heartbeat rides the data latency
     /// bucket but is a liveness signal, not channel data.
     #[must_use]
     pub fn is_market_data(&self) -> bool {
-        matches!(self, ServerMessage::Trade(_) | ServerMessage::Quote(_))
+        matches!(self, VenueMessage::Trade(_) | VenueMessage::Quote(_))
     }
 }
 
@@ -1833,7 +1833,7 @@ mod tests {
 
     /// The one alphabet both ends judge a URL-carried symbol by. Written here
     /// rather than only at the two call sites because a drift in this function
-    /// is a client that builds a URL the server then refuses.
+    /// is a client that builds a URL the venue then refuses.
     #[test]
     fn wire_symbols_are_the_url_safe_alphabet() {
         for legal in [
@@ -1994,7 +1994,7 @@ mod tests {
     /// The two echo guards, which bound what a refusal frame may carry back.
     /// Both are one-liners and both are exercised only INDIRECTLY today -
     /// `validate_client_order_id` through `validate_submit_order`, and
-    /// `validate_request_id` through the server's query path - so neither had a
+    /// `validate_request_id` through the venue's query path - so neither had a
     /// case at its own boundary.
     #[test]
     fn the_echo_id_guards_admit_exactly_their_cap() {
@@ -2230,7 +2230,7 @@ mod tests {
     #[test]
     fn every_wire_decimal_refuses_a_numeric_spelling() {
         // The two market-data frames, shared by the hot-path block below and by
-        // the `server` table, so the two cannot end up checking different
+        // the `venue` table, so the two cannot end up checking different
         // frames.
         const TRADE: &str = r#"{"type":"Trade","symbol":"BTCUSDT","price":"100.5","size":"2","aggressor":"Buyer","ts_event":1}"#;
         const QUOTE: &str = r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99.5","ask_px":"100.5","bid_sz":"2","ask_sz":"3","ts_event":1}"#;
@@ -2250,13 +2250,13 @@ mod tests {
             (QUOTE, ["bid_px", "ask_px", "bid_sz", "ask_sz"].as_slice()),
         ] {
             assert!(
-                ServerMessage::from_json_str(frame).is_ok(),
+                VenueMessage::from_json_str(frame).is_ok(),
                 "the tag-probe decoder must still take the string spelling: {frame}"
             );
             for field in fields {
                 let numeric = unquote(frame, field);
                 assert!(
-                    ServerMessage::from_json_str(&numeric).is_err(),
+                    VenueMessage::from_json_str(&numeric).is_err(),
                     "the tag-probe decoder must refuse a numeric spelling too: {numeric}"
                 );
             }
@@ -2289,7 +2289,7 @@ mod tests {
                 &["price", "quantity", "trigger_price"],
             ),
         ];
-        let server: &[(&str, &str, &[&str])] = &[
+        let venue: &[(&str, &str, &[&str])] = &[
             (
                 "OrderUpdated",
                 r#"{"type":"OrderUpdated","client_order_id":"O-1","venue_order_id":"V-1","quantity":"2","price":"100.5","trigger_price":"99.5","leaves_qty":"1","ts_event":1}"#,
@@ -2372,15 +2372,15 @@ mod tests {
                 );
             }
         }
-        for (label, frame, fields) in server {
+        for (label, frame, fields) in venue {
             assert!(
-                serde_json::from_str::<ServerMessage>(frame).is_ok(),
+                serde_json::from_str::<VenueMessage>(frame).is_ok(),
                 "{label}: the string spelling must still decode"
             );
             assert!(!fields.is_empty(), "{label}: no fields listed");
             for field in *fields {
                 let numeric = unquote(frame, field);
-                let decoded = serde_json::from_str::<ServerMessage>(&numeric);
+                let decoded = serde_json::from_str::<VenueMessage>(&numeric);
                 assert!(
                     decoded.is_err(),
                     "{label}.{field}: a numeric spelling must be refused, got {decoded:?}"
@@ -2397,7 +2397,7 @@ mod tests {
     /// field rename from passing here and failing in the launcher or the
     /// adapter instead.
     #[test]
-    fn client_and_server_messages_round_trip() {
+    fn client_and_venue_messages_round_trip() {
         let client_frames = [
             (
                 ClientMessage::CancelOrder {
@@ -2450,9 +2450,9 @@ mod tests {
             "Unsubscribe was retired with the subscription model"
         );
 
-        let server_frames = [
+        let venue_frames = [
             (
-                ServerMessage::Quote(QuoteTick {
+                VenueMessage::Quote(QuoteTick {
                     symbol: "BTCUSDT".into(),
                     bid_px: Decimal::from(99),
                     ask_px: Decimal::from(100),
@@ -2466,7 +2466,7 @@ mod tests {
                 // The other half of the tag-probe fast path. Both hot variants
                 // belong in this table, because it is the only thing proving
                 // the direct payload decoders produce byte-identical frames.
-                ServerMessage::Trade(TradeTick {
+                VenueMessage::Trade(TradeTick {
                     symbol: "BTCUSDT".into(),
                     price: Decimal::from(99),
                     size: Decimal::from(2),
@@ -2476,7 +2476,7 @@ mod tests {
                 r#"{"type":"Trade","symbol":"BTCUSDT","price":"99","size":"2","aggressor":"Buyer","ts_event":11}"#,
             ),
             (
-                ServerMessage::RunComplete {
+                VenueMessage::RunComplete {
                     sim_now_ns: 123,
                     elapsed_ns: 45,
                 },
@@ -2485,7 +2485,7 @@ mod tests {
             (
                 // Formerly SubscriptionIssue::FeedLagged. There is no
                 // subscription to attribute it to, so it is a top-level frame.
-                ServerMessage::FeedLagged {
+                VenueMessage::FeedLagged {
                     skipped: 7,
                     sim_now_ns: 8,
                 },
@@ -2493,30 +2493,30 @@ mod tests {
             ),
             (
                 // Formerly SubscriptionIssue::ReopenGapUnfireable.
-                ServerMessage::HavocDiagnostic {
+                VenueMessage::HavocDiagnostic {
                     reason: "reopen gap at or before the tape origin".into(),
                     sim_now_ns: 9,
                 },
                 r#"{"type":"HavocDiagnostic","reason":"reopen gap at or before the tape origin","sim_now_ns":9}"#,
             ),
             (
-                ServerMessage::Heartbeat { ts_event: 1 },
+                VenueMessage::Heartbeat { ts_event: 1 },
                 r#"{"type":"Heartbeat","ts_event":1}"#,
             ),
             (
-                ServerMessage::ProtocolError {
+                VenueMessage::ProtocolError {
                     reason: "invalid client frame".into(),
                     ts_event: 2,
                 },
                 r#"{"type":"ProtocolError","reason":"invalid client frame","ts_event":2}"#,
             ),
         ];
-        for (frame, expected) in server_frames {
+        for (frame, expected) in venue_frames {
             let json = serde_json::to_string(&frame).expect("serialize");
             assert_eq!(json, expected);
-            let decoded = ServerMessage::from_json_str(&json).expect("decode");
+            let decoded = VenueMessage::from_json_str(&json).expect("decode");
             assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
-            let decoded = ServerMessage::from_json_slice(json.as_bytes()).expect("decode bytes");
+            let decoded = VenueMessage::from_json_slice(json.as_bytes()).expect("decode bytes");
             assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
         }
     }
@@ -2561,15 +2561,15 @@ mod tests {
             let wire = escape_tag(canonical, tag);
             let wire = wire.as_str();
             // The general decoder is the reference: it accepts these today.
-            let reference = serde_json::from_str::<ServerMessage>(wire).expect("general decode");
+            let reference = serde_json::from_str::<VenueMessage>(wire).expect("general decode");
             assert_eq!(
                 serde_json::to_string(&reference).expect("re-serialize"),
                 canonical
             );
 
             for decoded in [
-                ServerMessage::from_json_str(wire).expect("escaped tag, str"),
-                ServerMessage::from_json_slice(wire.as_bytes()).expect("escaped tag, slice"),
+                VenueMessage::from_json_str(wire).expect("escaped tag, str"),
+                VenueMessage::from_json_slice(wire.as_bytes()).expect("escaped tag, slice"),
             ] {
                 assert_eq!(
                     serde_json::to_string(&decoded).expect("re-serialize"),
@@ -2584,10 +2584,10 @@ mod tests {
             r#"{"symbol":"BTCUSDT"}"#,
             r#"{"type":"Trade","symbol":"BTCUSDT"}"#,
         ] {
-            assert!(serde_json::from_str::<ServerMessage>(bad).is_err(), "{bad}");
-            assert!(ServerMessage::from_json_str(bad).is_err(), "{bad}");
+            assert!(serde_json::from_str::<VenueMessage>(bad).is_err(), "{bad}");
+            assert!(VenueMessage::from_json_str(bad).is_err(), "{bad}");
             assert!(
-                ServerMessage::from_json_slice(bad.as_bytes()).is_err(),
+                VenueMessage::from_json_slice(bad.as_bytes()).is_err(),
                 "{bad}"
             );
         }
@@ -2640,7 +2640,7 @@ mod tests {
         ];
         let mut widest_len = 0usize;
         for subject in subjects {
-            let frame = ServerMessage::AdmissionRejected {
+            let frame = VenueMessage::AdmissionRejected {
                 subject,
                 reason: worst_reason.clone(),
                 retryable: true,
@@ -2654,7 +2654,7 @@ mod tests {
             widest_len = widest_len.max(len);
         }
 
-        let error = ServerMessage::ProtocolError {
+        let error = VenueMessage::ProtocolError {
             reason: worst_reason,
             ts_event: u64::MAX,
         };
@@ -2686,7 +2686,7 @@ mod tests {
 
     #[test]
     fn admission_subject_serialization_bounds_raw_client_ids() {
-        let frame = ServerMessage::AdmissionRejected {
+        let frame = VenueMessage::AdmissionRejected {
             subject: AdmissionSubject::Submit {
                 client_order_id: "x".repeat(MAX_CLIENT_ID_LEN + 10_000),
             },
@@ -2696,8 +2696,8 @@ mod tests {
         };
         let json = serde_json::to_string(&frame).expect("serialize");
         assert!(json.len() <= ADMISSION_FRAME_MAX_BYTES);
-        let decoded: ServerMessage = serde_json::from_str(&json).expect("decode");
-        let ServerMessage::AdmissionRejected {
+        let decoded: VenueMessage = serde_json::from_str(&json).expect("decode");
+        let VenueMessage::AdmissionRejected {
             subject: AdmissionSubject::Submit { client_order_id },
             ..
         } = decoded

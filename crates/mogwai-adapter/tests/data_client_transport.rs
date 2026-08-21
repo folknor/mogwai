@@ -771,7 +771,7 @@ async fn a_subscribe_for_an_instrument_absent_from_the_seeded_set_is_accepted() 
 /// THE POST-BIND RESEED, and the frame that depends on it.
 ///
 /// A client bound to a label nobody configured cannot have its def in the
-/// connect-time seed: BINDING is what registers the symbol server-side, so only
+/// connect-time seed: BINDING is what registers the symbol venue-side, so only
 /// a read AFTER the socket is up can carry it. Without that reseed
 /// `handle_market_message` finds no def and drops every frame for the symbol,
 /// silently - which is what this test bites on: delete the reseed and the trade
@@ -950,7 +950,7 @@ async fn off_tape_window_still_answers_the_request() {
     // Publish a real clock envelope: without one the client cannot decode a
     // floor, falls back to "unknown" (0), and the off-tape guard never fires.
     *state.clock_body.lock().expect("clock body mutex") = Some(format!(
-        r#"{{"sim":{{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0}},"server_now_ns":{},"data_origin_ns":{ORIGIN},"warmup_ns":86400000000000}}"#,
+        r#"{{"sim":{{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0}},"venue_now_ns":{},"data_origin_ns":{ORIGIN},"warmup_ns":86400000000000}}"#,
         ORIGIN + 86_400_000_000_000
     ));
     // Rows the venue WOULD serve if it were asked. See the note above: without
@@ -1066,7 +1066,7 @@ async fn the_harness_reads_a_request_head_split_across_segments() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
-    let server = tokio::spawn(async move {
+    let venue = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept");
         common::read_request(&mut stream).await
     });
@@ -1095,7 +1095,7 @@ async fn the_harness_reads_a_request_head_split_across_segments() {
     // regression could express that as a BLOCK rather than a `None`. Without a
     // bound of its own the test would hang to the libtest watchdog and report
     // nothing attributable.
-    let (read_head, body) = tokio::time::timeout(Duration::from_secs(5), server)
+    let (read_head, body) = tokio::time::timeout(Duration::from_secs(5), venue)
         .await
         .expect("the request reader must finish rather than block on a segmented head")
         .expect("reader task")

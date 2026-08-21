@@ -88,7 +88,7 @@ pub enum Divergence {
     /// not buffered. Post `ClearDivergences` to lift the window early.
     ///
     /// Unlike `GoDark`, this keeps the socket healthy while only channel
-    /// data is withheld, especially when paired with the server
+    /// data is withheld, especially when paired with the venue
     /// `Heartbeat`.
     StallData { ms: u64 },
     /// Temporarily accelerate parent arrivals and enlarge their sweeps.
@@ -99,7 +99,7 @@ pub enum Divergence {
     },
     /// Temporarily multiply the configured maker/taker charge in sim time.
     FeeSurcharge { mult: Decimal, window_ms: u64 },
-    /// Clear the server-owned temporal windows: cancel any armed
+    /// Clear the venue-owned temporal windows: cancel any armed
     /// `DelayAcks`, any armed `GoDark`, any armed `StallData`, and every
     /// `CommandLatency` field.
     ///
@@ -113,7 +113,7 @@ pub enum Divergence {
     /// at dequeue. Clearing governs commands the venue has not started acting on
     /// yet; it is not a time machine.
     ClearDivergences,
-    /// Cancel a RESTING order server-side, immediately, emitting NO lifecycle
+    /// Cancel a RESTING order venue-side, immediately, emitting NO lifecycle
     /// event - the out-of-band cancel with a lost `OrderCanceled` that the
     /// consumer's reconciliation poll exists to catch. Unlike the armed
     /// single-shot divergences this is not queued for a trigger: it acts on

@@ -11,7 +11,7 @@
 //! work and makes the paired outputs describe the same traversal by
 //! construction rather than by two runs that merely ought to agree.
 //!
-//! This lives in the server rather than as a `mogwai-data` example because the
+//! This lives in the venue rather than as a `mogwai-data` example because the
 //! numbers are only worth anything if each preset is measured through the
 //! profile the venue would actually boot: preset inheritance, size grid, session
 //! profile and calendar. That resolution is `config::profile_from_preset`, and

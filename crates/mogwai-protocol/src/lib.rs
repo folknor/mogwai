@@ -30,7 +30,7 @@ pub mod control;
 pub mod launch;
 pub mod risk;
 
-pub use clock::{ServerClock, SimClock, now_unix_nanos, validate_sim_clock};
+pub use clock::{SimClock, VenueClock, now_unix_nanos, validate_sim_clock};
 pub use decimal::{decimal_from_f64, decimal_to_f64};
 pub use havoc::{
     BASELINE_LATENCY, ClientHavoc, ConnHavoc, EventKind, HavocLatency, HavocSpec,
@@ -47,7 +47,7 @@ pub use messages::{
     MAX_CLIENT_MESSAGE_BYTES, MAX_CURRENCY_LEN, MAX_GROUP_ORDERS, MAX_LINKED_ORDERS,
     MAX_REASON_LEN, MAX_SESSION_LEN, MAX_SYMBOL_LEN, OrderFilled, OrderLink, OrderStatusInfo,
     OrderStatusSnapshot, OrderType, POST_ONLY_REFUSAL, Position, PostedMargin, QueryKind,
-    QuoteTick, ScanKind, ServerMessage, Side, SubmitOrder, TimeInForce, TradeTick, WireOrderStatus,
+    QuoteTick, ScanKind, Side, SubmitOrder, TimeInForce, TradeTick, VenueMessage, WireOrderStatus,
     touches_toward, touches_trigger, trades_through, truncate_client_id, truncate_reason,
     validate_client_order_id, validate_modify_order, validate_request_id, validate_session_id,
     validate_submit_group, validate_submit_order, validate_wire_symbol,
@@ -76,10 +76,10 @@ pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_HISTORY_LIMIT: usize = 1_000;
 
 /// Maximum number of trades a single `/trades` history page returns - the
-/// ceiling an EXPLICIT caller may ask for. The server enforces it (it clamps
+/// ceiling an EXPLICIT caller may ask for. The venue enforces it (it clamps
 /// every request to it) and the adapter, which always states a limit, asks for
 /// exactly this; sourcing both from here keeps the two in lockstep, so the
-/// adapter never advertises a ceiling larger than the server will honor.
+/// adapter never advertises a ceiling larger than the venue will honor.
 ///
 /// Sized against a loopback venue: ~1000 simulated seconds per page, ~7 MB of
 /// JSON, synthesized well inside `DEFAULT_REQUEST_TIMEOUT_SECS`. It is NOT
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn run_complete_round_trips() {
-        let message = ServerMessage::RunComplete {
+        let message = VenueMessage::RunComplete {
             sim_now_ns: 123,
             elapsed_ns: 45,
         };
@@ -111,7 +111,7 @@ mod tests {
             json,
             r#"{"type":"RunComplete","sim_now_ns":123,"elapsed_ns":45}"#
         );
-        let decoded: ServerMessage = serde_json::from_str(&json).expect("decode RunComplete");
+        let decoded: VenueMessage = serde_json::from_str(&json).expect("decode RunComplete");
         assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
     }
 }

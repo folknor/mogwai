@@ -1806,7 +1806,7 @@ impl Run {
         passenger: &Passenger,
         symbol: &mogwai_protocol::Symbol,
         now_ns: u64,
-    ) -> Vec<mogwai_protocol::ServerMessage> {
+    ) -> Vec<mogwai_protocol::VenueMessage> {
         let returning = passenger.is_frozen();
         passenger.attach();
         if !returning {
@@ -1934,9 +1934,9 @@ impl Run {
     /// Only the command dispatcher calls this; the sweep's half is
     /// [`Run::claim_produced_orders`], which covers the orders the VENUE
     /// originates.
-    pub(crate) fn track_ownership(&self, events: &[mogwai_protocol::ServerMessage], owner: &str) {
+    pub(crate) fn track_ownership(&self, events: &[mogwai_protocol::VenueMessage], owner: &str) {
         for event in events {
-            if let mogwai_protocol::ServerMessage::OrderAccepted { venue_order_id, .. } = event {
+            if let mogwai_protocol::VenueMessage::OrderAccepted { venue_order_id, .. } = event {
                 self.claim_order(venue_order_id.clone(), owner);
             }
         }
@@ -1965,7 +1965,7 @@ impl Run {
     /// keeps attribution over its whole book.
     pub(crate) fn claim_produced_orders(
         &self,
-        events: &[mogwai_protocol::ServerMessage],
+        events: &[mogwai_protocol::VenueMessage],
         owner: &str,
     ) {
         let mut owners = self
@@ -1990,10 +1990,10 @@ impl Run {
     /// row means a production site failed to claim.
     pub(crate) fn scope_query_rows(
         &self,
-        events: &mut [mogwai_protocol::ServerMessage],
+        events: &mut [mogwai_protocol::VenueMessage],
         owner: &str,
     ) {
-        use mogwai_protocol::ServerMessage as M;
+        use mogwai_protocol::VenueMessage as M;
         let mine = |venue_order_id: &mogwai_protocol::VenueOrderId| {
             self.order_owner(venue_order_id)
                 .is_none_or(|found| found == owner)
@@ -2151,7 +2151,7 @@ pub(crate) struct BoundLane {
     pub(crate) lanes: ExecLanes,
 }
 
-/// Who a swept frame is FOR. Every `ServerMessage` variant is classified here,
+/// Who a swept frame is FOR. Every `VenueMessage` variant is classified here,
 /// exhaustively and deliberately: [`audience`] carries no catch-all, so a new
 /// variant does not compile until someone decides who it belongs to. That is
 /// the whole point. Delivery used to attribute by two chained lookups whose
@@ -2193,10 +2193,10 @@ pub(crate) enum Audience<'a> {
     Requester,
 }
 
-/// Classify one frame for swept delivery. Exhaustive over `ServerMessage` with
+/// Classify one frame for swept delivery. Exhaustive over `VenueMessage` with
 /// no catch-all - see [`Audience`] for why, and keep it that way.
-pub(crate) fn audience(event: &mogwai_protocol::ServerMessage) -> Audience<'_> {
-    use mogwai_protocol::ServerMessage as M;
+pub(crate) fn audience(event: &mogwai_protocol::VenueMessage) -> Audience<'_> {
+    use mogwai_protocol::VenueMessage as M;
     match event {
         M::RunComplete { .. }
         | M::Heartbeat { .. }
@@ -2346,12 +2346,12 @@ mod tests {
 
     /// Pins [`audience`]'s verdicts on every discriminating case, so a
     /// transposition fails by name. The COMPLETENESS half is the compiler's:
-    /// `audience` carries no catch-all, so a new `ServerMessage` variant does
+    /// `audience` carries no catch-all, so a new `VenueMessage` variant does
     /// not build until it is classified, and this test cannot and does not
     /// try to hold that.
     #[test]
     fn every_swept_frame_class_is_attributed_deliberately() {
-        use mogwai_protocol::ServerMessage as M;
+        use mogwai_protocol::VenueMessage as M;
         let order = |venue_order_id: &str| M::OrderAccepted {
             client_order_id: "C-1".to_string(),
             venue_order_id: venue_order_id.to_string(),
@@ -2517,7 +2517,7 @@ mod tests {
             ts_accepted: 1,
             ts_last: 1,
         };
-        let mut events = vec![mogwai_protocol::ServerMessage::OrderStatusSnapshot(
+        let mut events = vec![mogwai_protocol::VenueMessage::OrderStatusSnapshot(
             mogwai_protocol::OrderStatusSnapshot {
                 request_id: "R-1".into(),
                 orders: vec![row("V-mine"), row("V-theirs")],
@@ -2526,7 +2526,7 @@ mod tests {
         )];
         run.scope_query_rows(&mut events, "MOGWAI-001");
 
-        let mogwai_protocol::ServerMessage::OrderStatusSnapshot(snapshot) = &events[0] else {
+        let mogwai_protocol::VenueMessage::OrderStatusSnapshot(snapshot) = &events[0] else {
             panic!("the snapshot survives scoping");
         };
         assert_eq!(snapshot.orders.len(), 1, "one account, one order");
@@ -2802,7 +2802,7 @@ mod tests {
             assert!(
                 events.iter().any(|event| matches!(
                     event,
-                    mogwai_protocol::ServerMessage::OrderAccepted { .. }
+                    mogwai_protocol::VenueMessage::OrderAccepted { .. }
                 )),
                 "the limit was not accepted, so this run says nothing about frontiers: {events:?}"
             );

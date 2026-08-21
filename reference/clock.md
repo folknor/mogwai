@@ -31,7 +31,7 @@ paces delivery to `sim.wall_ns(ts)`.
 THE CONSEQUENCE, stated because it has already been reasoned about backwards
 twice: on a `speed = 0.0` venue the TWO AXES COME APART. Delivery is unpaced, so
 the tape's `ts_event` runs as far ahead as the generator can carry it, while
-`server_now_ns` walks at wall rate from the boat's origin. Nothing on such a
+`venue_now_ns` walks at wall rate from the boat's origin. Nothing on such a
 venue supports the reading "sim time is roughly wall time since boot", and a
 condition that anchors a `/clock` target on a TAPE STAMP is satisfied the instant
 it is asked. Neither is the reverse true - the clock does not race the wall; it
@@ -86,7 +86,7 @@ another whole duration, which is why nothing does.
 `data_origin_ns` is its earliest servable instant, always `TAPE_ORIGIN_NS`.
 `/clock` reports both the clock and the current simulated time. It takes an
 optional `?symbol=`, and answers for that river's boat: a boat carries its own
-clock, anchored at ITS placement, and `server_now_ns` is then the sim instant of
+clock, anchored at ITS placement, and `venue_now_ns` is then the sim instant of
 the last tick that boat published rather than the affine map read at the wall.
 With no symbol, or for a river carrying no boat, the venue clock answers
 instead and `boat_clock` is `false`, so a caller cannot mistake the fallback for

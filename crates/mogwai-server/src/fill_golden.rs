@@ -182,7 +182,7 @@ use std::path::PathBuf;
 use mogwai_data::TickEvent;
 use mogwai_engine::{Engine, EngineConfig, ScanResult};
 use mogwai_protocol::{
-    AccountId, ClientMessage, OrderType, RunSeeds, ServerMessage, Side, SubmitOrder, TimeInForce,
+    AccountId, ClientMessage, OrderType, RunSeeds, Side, SubmitOrder, TimeInForce, VenueMessage,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -401,12 +401,12 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
 }
 
 fn record_fills(
-    events: &[ServerMessage],
+    events: &[VenueMessage],
     meta: &HashMap<String, OrderMeta>,
     samples: &mut HashMap<u32, Vec<(u64, u64, Side)>>,
 ) {
     for event in events {
-        let ServerMessage::OrderFilled(fill) = event else {
+        let VenueMessage::OrderFilled(fill) = event else {
             continue;
         };
         let order = meta

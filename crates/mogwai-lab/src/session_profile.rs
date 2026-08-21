@@ -74,7 +74,7 @@ pub struct Calendar {
 }
 
 impl Calendar {
-    /// The MNQ preset's calendar, through the server's own preset loader -
+    /// The MNQ preset's calendar, through the venue's own preset loader -
     /// the Python re-parsed `presets/mnq.toml` with `tomllib` to reach the
     /// same table.
     pub fn from_preset(name: &str) -> LabResult<Self> {

@@ -6,7 +6,7 @@ speed = 1.0
 # be built from a bare word.
 account_id = "MOGWAI-001"
 # seed = 42 # Absent means a fresh seed is drawn and reported at launch.
-server_heartbeat_ms = 0
+venue_heartbeat_ms = 0
 # Sim-time duration of this run. 0 runs indefinitely, until the launcher kills
 # the process. Non-zero: the venue serves exactly this much sim time, announces
 # RunComplete, and exits 0. `--duration` overrides it.

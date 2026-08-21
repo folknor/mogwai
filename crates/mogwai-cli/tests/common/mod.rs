@@ -9,7 +9,7 @@
 //!
 //! That is deliberate and is the reason the launcher lives in `mogwai-protocol`
 //! rather than in `mogwai-adapter`: the venue's own gates cannot depend on the
-//! adapter (it would pull nautilus into the server's test graph, and the adapter
+//! adapter (it would pull nautilus into the venue's test graph, and the adapter
 //! is the client of the thing under test), so a launcher shipped from there
 //! would leave mogwai re-deriving the contract by hand forever. Here, a change
 //! to the handshake breaks these tests immediately instead of breaking a

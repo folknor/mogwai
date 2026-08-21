@@ -269,7 +269,7 @@ pub fn parse_duration(s: &str) -> LabResult<i64> {
 }
 
 /// One in-process `gen --type summary` walk: resolve the scratch profile
-/// through the server's own `Config::load` (the SAME path the Python's
+/// through the venue's own `Config::load` (the SAME path the Python's
 /// `--config` walks took), build the generator at `start - warmup`, and fold
 /// the tick stream through `summary::summarize`.
 pub fn run_summary_walk(

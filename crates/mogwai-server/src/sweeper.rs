@@ -24,7 +24,7 @@ use std::{
 };
 
 use mogwai_engine::{PendingScan, ScanResult};
-use mogwai_protocol::{AdmissionSubject, ServerMessage};
+use mogwai_protocol::{AdmissionSubject, VenueMessage};
 
 use crate::{admission::ExecLanes, config::sim_now_ns, fills, run::Run, source::Rivers};
 
@@ -528,7 +528,7 @@ fn apply_engine_pass(
     settlement_marks: Vec<(mogwai_protocol::Symbol, u64, rust_decimal::Decimal)>,
     marks: &[(mogwai_protocol::Symbol, rust_decimal::Decimal)],
     to_ns: u64,
-) -> (Vec<ServerMessage>, usize, usize) {
+) -> (Vec<VenueMessage>, usize, usize) {
     apply_engine_pass_on_clock(
         engine,
         results,
@@ -568,7 +568,7 @@ fn apply_engine_pass_on_clock(
     to_ns: u64,
     session_closed: Option<&str>,
     sim: mogwai_protocol::SimClock,
-) -> (Vec<ServerMessage>, usize, usize) {
+) -> (Vec<VenueMessage>, usize, usize) {
     let (mut events, emitted) = engine.apply_scans_on_clock(results, to_ns, sim);
     let mut originated = 0;
     for (symbol, instant, px) in settlement_marks {
@@ -600,11 +600,11 @@ fn apply_engine_pass_on_clock(
     // where a settlement snapshotted and the mark did not move.
     let last_state = events
         .iter()
-        .rposition(|event| matches!(event, ServerMessage::AccountState(_)));
+        .rposition(|event| matches!(event, VenueMessage::AccountState(_)));
     if let Some(last_state) = last_state {
         let mut index = 0;
         events.retain(|event| {
-            let keep = !matches!(event, ServerMessage::AccountState(_)) || index == last_state;
+            let keep = !matches!(event, VenueMessage::AccountState(_)) || index == last_state;
             index += 1;
             keep
         });
@@ -613,7 +613,7 @@ fn apply_engine_pass_on_clock(
         // without producing an order event, so it is the one transition that
         // owes a snapshot nothing else in the pass would have taken. A client
         // watching its buying power is watching exactly this.
-        events.push(ServerMessage::AccountState(engine.account_snapshot(to_ns)));
+        events.push(VenueMessage::AccountState(engine.account_snapshot(to_ns)));
     }
     (events, emitted, originated)
 }
@@ -661,7 +661,7 @@ fn deliver_produced(
     run: &Arc<Run>,
     producer: &str,
     shape: &mogwai_protocol::sizing::BookShape,
-    events: &[ServerMessage],
+    events: &[VenueMessage],
     emitted: usize,
     originated: usize,
     ts: u64,
@@ -673,7 +673,7 @@ fn deliver_produced(
 fn deliver(
     run: &Arc<Run>,
     shape: &mogwai_protocol::sizing::BookShape,
-    events: &[ServerMessage],
+    events: &[VenueMessage],
     emitted: usize,
     originated: usize,
     ts: u64,
@@ -727,7 +727,7 @@ fn deliver(
         })
         .collect();
     for bound in run.bound_lanes() {
-        let mine: Vec<ServerMessage> = events
+        let mine: Vec<VenueMessage> = events
             .iter()
             .zip(&routes)
             .filter(|(_, route)| match route {
@@ -800,7 +800,7 @@ fn deliver(
 fn enforce_policy(
     passenger: &crate::run::Passenger,
     engine: &mut mogwai_engine::Engine,
-    events: &mut Vec<ServerMessage>,
+    events: &mut Vec<VenueMessage>,
     symbol: &mogwai_protocol::Symbol,
     span: Option<crate::extremes::PriceSpan>,
     to_ns: u64,
@@ -886,7 +886,7 @@ fn refuse(
     };
     lane.emit_admission(
         slot,
-        ServerMessage::AdmissionRejected {
+        VenueMessage::AdmissionRejected {
             subject,
             reason: "execution output admission budget exhausted".into(),
             retryable: true,
@@ -923,7 +923,7 @@ mod tests {
 
         // A PARTIAL fill, so the batch does not also retire the claim it is
         // being attributed by; the assertion is about delivery, not cleanup.
-        let events = vec![ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+        let events = vec![VenueMessage::OrderFilled(mogwai_protocol::OrderFilled {
             client_order_id: "C-1".into(),
             venue_order_id: order,
             trade_id: "T-1".into(),
@@ -986,7 +986,7 @@ mod tests {
 
         // The shape a risk flatten produces: a venue-minted id under the
         // reserved prefix, never seen by any dispatcher.
-        let events = vec![ServerMessage::OrderFilled(mogwai_protocol::OrderFilled {
+        let events = vec![VenueMessage::OrderFilled(mogwai_protocol::OrderFilled {
             client_order_id: "RISK-BTCUSDT-1".into(),
             venue_order_id: "V-9".into(),
             trade_id: "T-9".into(),
@@ -1051,7 +1051,7 @@ mod tests {
         run.bind_lanes(mine.clone(), "MOGWAI-001", None);
         run.bind_lanes(theirs.clone(), "MOGWAI-002", None);
 
-        let events = vec![ServerMessage::AccountState(mogwai_protocol::AccountState {
+        let events = vec![VenueMessage::AccountState(mogwai_protocol::AccountState {
             account_id: AccountId::parse("MOGWAI-002").expect("a legal account label"),
             balances: vec![mogwai_protocol::Balance {
                 currency: "USDT".into(),
@@ -1484,7 +1484,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::AccountState(_)))
+                .any(|event| matches!(event, VenueMessage::AccountState(_)))
         );
     }
 
@@ -1501,7 +1501,7 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, ServerMessage::AccountState(_)))
+                .filter(|event| matches!(event, VenueMessage::AccountState(_)))
                 .count(),
             1
         );
@@ -1524,7 +1524,7 @@ mod tests {
             .iter()
             .rev()
             .find_map(|event| match event {
-                ServerMessage::AccountState(state) => Some(state),
+                VenueMessage::AccountState(state) => Some(state),
                 _ => None,
             })
             .unwrap();
@@ -1569,7 +1569,7 @@ mod tests {
         assert!(
             !closed_events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
         // SURVIVES, which is the half the fill assertion below cannot see: a
         // closure that cancelled the order would also produce no fill here.
@@ -1599,7 +1599,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, ServerMessage::OrderFilled(_)))
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
     }
 

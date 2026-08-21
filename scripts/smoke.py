@@ -416,7 +416,7 @@ def mode_default(venue: Venue) -> str:
         #
         # DRAINED, not asserted on the NEXT frame. This used to require the very
         # first market frame to be the BBO snapshot and flaked on it twice in one
-        # day. Snapshot-first is NOT a wire contract and the server never claimed
+        # day. Snapshot-first is NOT a wire contract and the venue never claimed
         # it was: `Tape::subscribe_with_snapshot` returns an OPTION, and a boat
         # that has not yet published a quote has no BBO to hand over, so a socket
         # binding in the instant between the tape's first trade and its first
@@ -559,10 +559,10 @@ def mode_heartbeat(venue: Venue) -> str:
                 break
             if frame.get("type") == "Heartbeat":
                 beats += 1
-        assert beats >= 2, f"expected server heartbeats, saw {beats}"
+        assert beats >= 2, f"expected venue heartbeats, saw {beats}"
     finally:
         ws.close()
-    return f"{beats} server heartbeats on an otherwise idle socket"
+    return f"{beats} venue heartbeats on an otherwise idle socket"
 
 
 def mode_accelerated(venue: Venue) -> str:
@@ -650,7 +650,7 @@ def mode_command_latency(venue: Venue) -> str:
 def mode_band(venue: Venue) -> str:
     # A resting limit the market has to come to: it fills only once a trade
     # prints strictly through its price.
-    sim_now = int(venue.http("/clock")["server_now_ns"])
+    sim_now = int(venue.http("/clock")["venue_now_ns"])
     anchor = venue.http(
         f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
     )
@@ -733,7 +733,7 @@ def mode_band_swept(venue: Venue) -> str:
     try:
         for attempt in range(3):
             client_order_id = f"BAND-SWEPT-{attempt}"
-            sim_now = int(venue.http("/clock")["server_now_ns"])
+            sim_now = int(venue.http("/clock")["venue_now_ns"])
             anchor = venue.http(
                 f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
             )
@@ -838,7 +838,7 @@ def mode_stop(venue: Venue) -> str:
     and over a window a hundred times longer than the one the offset was
     measured from, staying inside that band is not something a path does.
     """
-    sim_now = int(venue.http("/clock")["server_now_ns"])
+    sim_now = int(venue.http("/clock")["venue_now_ns"])
     recent = venue.http(
         f"/trades?symbol={venue.symbol}&start={sim_now - 30_000_000_000}&end={sim_now}&limit=10000"
     )
@@ -869,7 +869,7 @@ def mode_stop(venue: Venue) -> str:
                 "could not establish the position the protective stop reduces"
             )
 
-            sim_now = int(venue.http("/clock")["server_now_ns"])
+            sim_now = int(venue.http("/clock")["venue_now_ns"])
             anchor = venue.http(
                 f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
             )

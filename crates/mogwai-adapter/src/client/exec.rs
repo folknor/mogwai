@@ -21,7 +21,7 @@ use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_protocol::{
     ClientMessage, FillSnapshot, HavocSpec, InstrumentDef, OrderStatusInfo, OrderStatusSnapshot,
-    ServerMessage, SimClock, Symbol,
+    SimClock, Symbol, VenueMessage,
 };
 use nautilus_common::{
     clients::ExecutionClient,
@@ -71,7 +71,7 @@ use crate::{
 const ACCOUNT_REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const ACCOUNT_REGISTRATION_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// Distinguishes a 404 (older server without GET /account, the only
+/// Distinguishes a 404 (older venue without GET /account, the only
 /// warn-and-continue case) from every other pull failure (decode, 5xx, timeout,
 /// transport), which must fail connect() rather than silently recreate the
 /// first-fill `account not found in cache` this fix exists to eliminate.
@@ -165,14 +165,14 @@ fn note_account_label(state: &mogwai_protocol::AccountState, configured: Account
         );
     }
 }
-async fn ship_server_havoc(
+async fn ship_venue_havoc(
     http: &HttpClient,
     http_base: &str,
     spec: &HavocSpec,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
     let url = join_url(http_base, "control/divergence");
-    for divergence in &spec.server {
+    for divergence in &spec.venue {
         let body = serde_json::to_vec(divergence).context("encode divergence")?;
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
@@ -1030,7 +1030,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             // Same scaled timeout as dispatch_order: the configured
             // conn.request_timeout_secs, not the default (AD25).
             let timeout_secs = request_timeout_secs(&self.config.havoc, sim);
-            ship_server_havoc(&self.http, &http_base_url, havoc, timeout_secs).await?;
+            ship_venue_havoc(&self.http, &http_base_url, havoc, timeout_secs).await?;
         }
         // Seed the bridge's account row before any order is worked. Pull the
         // venue's current snapshot and forward it through the same exec dispatch
@@ -1059,19 +1059,19 @@ impl ExecutionClient for MogwaiExecutionClient {
         // deliberately; see the reattach comment in lifecycle.rs for why
         // auto-healing it would undo an armed divergence.
         //
-        // Failure policy: a 404 means a server predating GET /account; warn and
+        // Failure policy: a 404 means a venue predating GET /account; warn and
         // fall back to the legacy reactive path (the account seeds off the first
-        // fill, as before this fix). Any OTHER failure against a server that does
+        // fill, as before this fix). Any OTHER failure against a venue that does
         // publish the route is fatal - warn-and-continue there would silently
         // recreate the exact first-fill cache-miss this fix exists to eliminate.
         match fetch_account(&self.http, &self.http_quota, &http_base_url).await {
             Ok(state) => {
                 note_account_label(&state, self.config.account_id);
-                handle_exec_message(ServerMessage::AccountState(state), &self.exec_context());
+                handle_exec_message(VenueMessage::AccountState(state), &self.exec_context());
                 self.await_account_registered().await?;
             }
             Err(FetchAccountError::NotFound) => {
-                tracing::warn!("server predates GET /account; account will seed on first fill");
+                tracing::warn!("venue predates GET /account; account will seed on first fill");
             }
             Err(err) => {
                 return Err(anyhow::Error::new(err).context("initial account snapshot"));
@@ -1144,12 +1144,12 @@ impl ExecutionClient for MogwaiExecutionClient {
                 Some(cmd_rx),
                 exec_command_to_client_message,
                 Vec::new,
-                move |server_msg| {
+                move |venue_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
                     let handler_deliver = handler_deliver.clone();
                     async move {
                         let mut filter = handler_filter.lock().await;
-                        enqueue_havoc(&mut filter, server_msg, sim, &handler_deliver);
+                        enqueue_havoc(&mut filter, venue_msg, sim, &handler_deliver);
                     }
                 },
                 move || {
@@ -1191,7 +1191,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             return Err(err);
         }
         // The post-bind reseed. Binding is what REGISTERS an unconfigured symbol
-        // server-side, so the pre-dial seed above cannot have carried its def;
+        // venue-side, so the pre-dial seed above cannot have carried its def;
         // only a read after the socket is up can. The pre-dial seed and the
         // account snapshot keep their order deliberately - the snapshot resolves
         // against configured defs and must stay ahead of the socket.
@@ -1398,7 +1398,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// The mirror is populated by the same lifecycle stream havoc corrupts,
     /// so a report built from it can only repeat the client's (possibly
     /// stale) belief - in the exact fault class reconciliation exists to
-    /// catch (a server-side cancel whose event was dropped), a mirror-based
+    /// catch (a venue-side cancel whose event was dropped), a mirror-based
     /// report confidently confirms the stale open order. Querying the venue
     /// over the wire makes this generator a second, independent witness: the
     /// reply content is always a truthful engine book read (honest-content
@@ -1525,7 +1525,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// A failed pull propagates rather than falling back to any client-side
     /// belief: an error makes reconciliation fail loudly, whereas a silent
     /// fallback would reintroduce the stale confirmation this exists to remove.
-    /// The ONE exception is a 404, which `connect` already treats as a server
+    /// The ONE exception is a 404, which `connect` already treats as a venue
     /// predating the route and continues past - failing here would turn that
     /// documented legacy path into a hard failure of the whole mass status,
     /// taking the order and fill reports down with it.
@@ -1538,8 +1538,8 @@ impl ExecutionClient for MogwaiExecutionClient {
                 Ok(state) => state,
                 Err(FetchAccountError::NotFound) => {
                     tracing::warn!(
-                        "server predates GET /account; reporting no positions rather than failing \
-                     the whole mass status - position reconciliation is blind against this server"
+                        "venue predates GET /account; reporting no positions rather than failing \
+                     the whole mass status - position reconciliation is blind against this venue"
                     );
                     return Ok(Vec::new());
                 }
@@ -1789,24 +1789,24 @@ fn exec_command_to_client_message(cmd: &ExecWsCommand) -> ClientMessage {
 }
 
 /// Maps a transport-level failure (the HTTP POST for the command never got a
-/// venue reply) onto the `ServerMessage` shape `handle_exec_message` already
+/// venue reply) onto the `VenueMessage` shape `handle_exec_message` already
 /// knows how to turn into a nautilus event. Only valid for `Submit`/`Modify`:
 /// a failed `Cancel` is not a full order rejection (the order is still live,
 /// or its fate is simply unknown) and is handled by `emit_cancel_rejected`
 /// before the call site ever reaches this function - see the comment at the
 /// `dispatch_order` call site.
-fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> ServerMessage {
+fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> VenueMessage {
     let reason = err.to_string();
     let ts_event = now_unix_nanos(sim).as_u64();
     match cmd {
-        ExecWsCommand::Submit(order) => ServerMessage::OrderRejected {
+        ExecWsCommand::Submit(order) => VenueMessage::OrderRejected {
             client_order_id: order.client_order_id.clone(),
             reason,
             ts_event,
         },
         ExecWsCommand::Modify {
             client_order_id, ..
-        } => ServerMessage::OrderModifyRejected {
+        } => VenueMessage::OrderModifyRejected {
             client_order_id: client_order_id.clone(),
             venue_order_id: None,
             reason,
@@ -1940,7 +1940,7 @@ fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &E
         let ts_event = now_unix_nanos(ctx.sim).as_u64();
         for order in orders {
             handle_exec_message(
-                ServerMessage::OrderRejected {
+                VenueMessage::OrderRejected {
                     client_order_id: order.client_order_id.clone(),
                     reason: err.to_string(),
                     ts_event,
@@ -1958,7 +1958,7 @@ fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &E
 ///
 /// - a `Cancel` that failed at TRANSPORT (the HTTP POST never reached the
 ///   venue): `ts_event` is sim-now and `wire_venue_order_id` is `None`, and
-/// - a venue-originated `ServerMessage::OrderCancelRejected` (the engine could
+/// - a venue-originated `VenueMessage::OrderCancelRejected` (the engine could
 ///   not honor the cancel): `ts_event` is the venue's stamp and the wire may
 ///   name the venue id.
 ///
@@ -2222,9 +2222,9 @@ struct OrderRecord {
     seen_trades: std::collections::HashSet<TradeId>,
 }
 
-fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
+fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
     match msg {
-        ServerMessage::OrderTriggered { client_order_id, venue_order_id, ts_event } => {
+        VenueMessage::OrderTriggered { client_order_id, venue_order_id, ts_event } => {
             let Some(client_order_id) = wire_client_order_id(&client_order_id) else { return; };
             let Some(venue_order_id) = wire_venue_order_id(&venue_order_id) else { return; };
             let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
@@ -2238,7 +2238,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 false, Some(venue_order_id), Some(ctx.account_id));
             ctx.emitter.send_order_event(OrderEventAny::Triggered(event));
         }
-        ServerMessage::OrderAccepted {
+        VenueMessage::OrderAccepted {
             client_order_id,
             venue_order_id,
             ts_event,
@@ -2306,7 +2306,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             );
             ctx.emitter.send_order_event(OrderEventAny::Accepted(event));
         }
-        ServerMessage::OrderRejected {
+        VenueMessage::OrderRejected {
             client_order_id,
             reason,
             ts_event,
@@ -2360,7 +2360,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             );
             ctx.emitter.send_order_event(OrderEventAny::Rejected(event));
         }
-        ServerMessage::OrderCanceled {
+        VenueMessage::OrderCanceled {
             client_order_id,
             venue_order_id,
             ts_event,
@@ -2425,7 +2425,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
         // forward-only `ts_last`, the A.11 unknown-order warning - is the same
         // rule for the same reasons; only the status and the emitted event
         // differ.
-        ServerMessage::OrderExpired {
+        VenueMessage::OrderExpired {
             client_order_id,
             venue_order_id,
             ts_event,
@@ -2475,7 +2475,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             );
             ctx.emitter.send_order_event(OrderEventAny::Expired(event));
         }
-        ServerMessage::OrderUpdated {
+        VenueMessage::OrderUpdated {
             client_order_id,
             venue_order_id,
             quantity,
@@ -2611,7 +2611,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             );
             ctx.emitter.send_order_event(OrderEventAny::Updated(event));
         }
-        ServerMessage::OrderModifyRejected {
+        VenueMessage::OrderModifyRejected {
             client_order_id,
             venue_order_id,
             reason,
@@ -2663,7 +2663,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             ctx.emitter
                 .send_order_event(OrderEventAny::ModifyRejected(event));
         }
-        ServerMessage::OrderCancelRejected {
+        VenueMessage::OrderCancelRejected {
             client_order_id,
             venue_order_id,
             reason,
@@ -2685,13 +2685,13 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 ctx,
             );
         }
-        ServerMessage::OrderFilled(fill) => handle_order_filled(&fill, ctx),
+        VenueMessage::OrderFilled(fill) => handle_order_filled(&fill, ctx),
         // Venue-truth query replies: resolve the waiter registered under the
         // echoed correlation id. A reply with no waiter is a straggler whose
         // requester already timed out (client havoc delayed it past the
         // request timeout) or a duplicate - log it and move on; the content
         // was truthful either way, only the delivery was havoc'd.
-        ServerMessage::OrderStatusSnapshot(snapshot) => {
+        VenueMessage::OrderStatusSnapshot(snapshot) => {
             let waiter = lock_recover(&ctx.pending, "pending queries")
                 .orders
                 .remove(&snapshot.request_id);
@@ -2710,7 +2710,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 ),
             }
         }
-        ServerMessage::FillSnapshot(snapshot) => {
+        VenueMessage::FillSnapshot(snapshot) => {
             let waiter = lock_recover(&ctx.pending, "pending queries")
                 .fills
                 .remove(&snapshot.request_id);
@@ -2729,18 +2729,18 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                 ),
             }
         }
-        ServerMessage::AccountState(state) => handle_account_state(&state, ctx),
-        ServerMessage::Heartbeat { .. } => {
-            tracing::trace!("ignoring server heartbeat on execution path");
+        VenueMessage::AccountState(state) => handle_account_state(&state, ctx),
+        VenueMessage::Heartbeat { .. } => {
+            tracing::trace!("ignoring venue heartbeat on execution path");
         }
-        ServerMessage::ProtocolError { reason, .. } => {
+        VenueMessage::ProtocolError { reason, .. } => {
             // Untargeted (no client_order_id to attribute it to, unlike
             // OrderRejected), so there is no nautilus order event to raise -
             // just make the venue-side decode failure visible in the adapter's
             // own logs.
             tracing::warn!(%reason, "venue reported a protocol error");
         }
-        ServerMessage::AdmissionRejected {
+        VenueMessage::AdmissionRejected {
             subject,
             reason,
             retryable,
@@ -2766,7 +2766,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             match subject {
             mogwai_protocol::AdmissionSubject::Submit { client_order_id } => {
                 handle_exec_message(
-                    ServerMessage::OrderRejected {
+                    VenueMessage::OrderRejected {
                         client_order_id,
                         reason,
                         ts_event,
@@ -2786,7 +2786,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
                     Some(members) if !members.is_empty() => {
                         for client_order_id in members {
                             handle_exec_message(
-                                ServerMessage::OrderRejected {
+                                VenueMessage::OrderRejected {
                                     client_order_id: client_order_id.to_string(),
                                     reason: reason.clone(),
                                     ts_event,
@@ -2808,7 +2808,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             }
             mogwai_protocol::AdmissionSubject::Cancel { client_order_id } => {
                 handle_exec_message(
-                    ServerMessage::OrderCancelRejected {
+                    VenueMessage::OrderCancelRejected {
                         client_order_id,
                         venue_order_id: None,
                         reason,
@@ -2819,7 +2819,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             }
             mogwai_protocol::AdmissionSubject::Modify { client_order_id } => {
                 handle_exec_message(
-                    ServerMessage::OrderModifyRejected {
+                    VenueMessage::OrderModifyRejected {
                         client_order_id,
                         venue_order_id: None,
                         reason,
@@ -2874,7 +2874,7 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             }
             }
         }
-        ServerMessage::FeedLagged {
+        VenueMessage::FeedLagged {
             skipped,
             sim_now_ns,
         } => {
@@ -2899,13 +2899,13 @@ fn handle_exec_message(msg: ServerMessage, ctx: &ExecContext) {
             );
         }
         // Market data is handled by the data client.
-        ServerMessage::Trade(_)
-        | ServerMessage::Quote(_)
-        | ServerMessage::HavocDiagnostic { .. }
+        VenueMessage::Trade(_)
+        | VenueMessage::Quote(_)
+        | VenueMessage::HavocDiagnostic { .. }
         // A clean venue completion is a transport concern.  The reader owns
         // reconnect policy; the execution event translator has no event to
         // publish for it.
-        | ServerMessage::RunComplete { .. } => {}
+        | VenueMessage::RunComplete { .. } => {}
     }
 }
 
@@ -2942,7 +2942,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     };
     // Nautilus caps a `TradeId` at 36 non-empty ASCII chars and the panicking
     // constructors (`TradeId::new`, the `From` impls) assert past that. The
-    // engine's ids are short, but this is a wire value: a server bug or havoc
+    // engine's ids are short, but this is a wire value: a venue bug or havoc
     // corruption sending an over-long/empty/non-ASCII id must drop the fill
     // with a warning rather than panic the unsupervised exec task (the same
     // discipline convert.rs applies to the data-side synthetic trade ids).
@@ -3232,12 +3232,12 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
     ));
 }
 
-/// Converts a server-sent `client_order_id` string into a nautilus
+/// Converts a venue-sent `client_order_id` string into a nautilus
 /// `ClientOrderId`, dropping the event with a warning instead of panicking.
 /// `ClientOrderId::from` routes through the panicking `new`, which nautilus's
 /// `check_valid_string_ascii` rejects on an empty, whitespace-only, or
 /// non-ASCII string (there is no length cap, unlike `TradeId`). These are wire
-/// values, so a server bug or havoc corruption sending a malformed id must not
+/// values, so a venue bug or havoc corruption sending a malformed id must not
 /// panic the unsupervised exec task - the same drop-and-warn discipline the
 /// fill's `trade_id` already gets.
 fn wire_client_order_id(raw: &str) -> Option<ClientOrderId> {
@@ -3252,7 +3252,7 @@ fn wire_client_order_id(raw: &str) -> Option<ClientOrderId> {
         .ok()
 }
 
-/// Converts a server-sent `venue_order_id` string into a nautilus
+/// Converts a venue-sent `venue_order_id` string into a nautilus
 /// `VenueOrderId`, dropping it with a warning instead of panicking. Same
 /// rationale as `wire_client_order_id`: `VenueOrderId::from` panics on empty,
 /// whitespace-only, or non-ASCII wire strings.

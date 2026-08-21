@@ -9,4 +9,4 @@
 # the client's timeout. Speed is the knob that answers that now, so this
 # compresses the same fitted process rather than capping it.
 speed = 60.0
-server_heartbeat_ms = 0
+venue_heartbeat_ms = 0

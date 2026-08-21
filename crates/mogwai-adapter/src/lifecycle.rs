@@ -13,7 +13,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ClientMessage, ConnHavoc, ServerMessage, SimClock};
+use mogwai_protocol::{ClientMessage, ConnHavoc, SimClock, VenueMessage};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tokio::{
     sync::{
@@ -174,7 +174,7 @@ async fn backoff_or_exhausted(
 ///     what the clock fetch returns; `connect()` builds the quota FROM that
 ///     result. Metering it is a chicken-and-egg: there is no quota to wait on
 ///     yet.
-///   - `ship_server_havoc` - a bounded, one-shot control-plane POST loop that
+///   - `ship_venue_havoc` - a bounded, one-shot control-plane POST loop that
 ///     arms divergences at connect, not part of the steady request stream.
 ///
 /// Both exemptions are connect-time and bounded, so neither contributes to the
@@ -391,7 +391,7 @@ pub(crate) async fn run_ws_connection<
     Cmd: Send + 'static,
     Serialize: Fn(&Cmd) -> ClientMessage + Send + Sync + 'static,
     OnConnect: Fn() -> Vec<Cmd> + Send + Sync + 'static,
-    Handler: FnMut(ServerMessage) -> HandlerFut + Send + 'static,
+    Handler: FnMut(VenueMessage) -> HandlerFut + Send + 'static,
     HandlerFut: Future<Output = ()> + Send,
     Disconnect: FnMut() -> DisconnectFut + Send + 'static,
     DisconnectFut: Future<Output = ()> + Send,
@@ -445,7 +445,7 @@ async fn run_ws_connection_inner<
     Cmd: Send + 'static,
     Serialize: Fn(&Cmd) -> ClientMessage + Send + Sync + 'static,
     OnConnect: Fn() -> Vec<Cmd> + Send + Sync + 'static,
-    Handler: FnMut(ServerMessage) -> HandlerFut + Send + 'static,
+    Handler: FnMut(VenueMessage) -> HandlerFut + Send + 'static,
     HandlerFut: Future<Output = ()> + Send,
     Disconnect: FnMut() -> DisconnectFut + Send + 'static,
     DisconnectFut: Future<Output = ()> + Send,
@@ -469,7 +469,7 @@ async fn run_ws_connection_inner<
     let mut attempt = 0u32;
     // `RunComplete` is a planned terminal state, not a transport failure. A
     // graceful close naming a terminal REASON is its socket-level fallback for
-    // a reader that loses the final text frame while the server drains.
+    // a reader that loses the final text frame while the venue drains.
     //
     // THE CODE IS NOT THE SIGNAL. This used to read any WS 1000 as completion,
     // which permanently disabled reconnect on every graceful close there is -
@@ -669,20 +669,20 @@ async fn run_ws_connection_inner<
                             // while the idle clock was just reset, so the
                             // connection looks healthy while data silently drops
                             // (D.5).
-                            match ServerMessage::from_json_str(&text) {
-                                Ok(server_msg) => {
-                                    if matches!(server_msg, ServerMessage::RunComplete { .. }) {
+                            match VenueMessage::from_json_str(&text) {
+                                Ok(venue_msg) => {
+                                    if matches!(venue_msg, VenueMessage::RunComplete { .. }) {
                                         terminal =
                                             Some(mogwai_protocol::close::Terminal::RunComplete);
                                     }
-                                    handler(server_msg).await;
+                                    handler(venue_msg).await;
                                     if terminal.is_some() {
                                         break;
                                     }
                                 }
                                 Err(error) => tracing::warn!(
                                     %error,
-                                    "dropping unparseable text server frame"
+                                    "dropping unparseable text venue frame"
                                 ),
                             }
                         }
@@ -690,20 +690,20 @@ async fn run_ws_connection_inner<
                             // Connection proven; same as the Text arm above.
                             attempt = 0;
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
-                            match ServerMessage::from_json_slice(&bytes) {
-                                Ok(server_msg) => {
-                                    if matches!(server_msg, ServerMessage::RunComplete { .. }) {
+                            match VenueMessage::from_json_slice(&bytes) {
+                                Ok(venue_msg) => {
+                                    if matches!(venue_msg, VenueMessage::RunComplete { .. }) {
                                         terminal =
                                             Some(mogwai_protocol::close::Terminal::RunComplete);
                                     }
-                                    handler(server_msg).await;
+                                    handler(venue_msg).await;
                                     if terminal.is_some() {
                                         break;
                                     }
                                 }
                                 Err(error) => tracing::warn!(
                                     %error,
-                                    "dropping unparseable binary server frame"
+                                    "dropping unparseable binary venue frame"
                                 ),
                             }
                         }
@@ -1403,14 +1403,14 @@ mod tests {
         );
     }
 
-    /// Completes one server-side WS handshake on `listener`.
+    /// Completes one venue-side WS handshake on `listener`.
     async fn accept_ws(
         listener: &tokio::net::TcpListener,
     ) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
         let (stream, _) = listener.accept().await.expect("accept ws dial");
         tokio_tungstenite::accept_async(stream)
             .await
-            .expect("server ws handshake")
+            .expect("venue ws handshake")
     }
 
     /// Drives `run_ws_connection` with inert callbacks against a loopback stub.
@@ -1441,7 +1441,7 @@ mod tests {
             Some(cmd_rx),
             |cmd: &ClientMessage| cmd.clone(),
             Vec::new,
-            |_msg: ServerMessage| async {},
+            |_msg: VenueMessage| async {},
             || async {},
             move |cmd: ClientMessage| {
                 sink.lock()
@@ -1468,11 +1468,11 @@ mod tests {
             .expect("bind stub listener");
         let port = listener.local_addr().expect("stub addr").port();
         let dials = Arc::new(AtomicUsize::new(0));
-        let server_dials = Arc::clone(&dials);
-        let server = tokio::spawn(async move {
+        let venue_dials = Arc::clone(&dials);
+        let venue = tokio::spawn(async move {
             loop {
                 let mut ws = accept_ws(&listener).await;
-                server_dials.fetch_add(1, Ordering::Relaxed);
+                venue_dials.fetch_add(1, Ordering::Relaxed);
                 drop(ws.close(None).await);
             }
         });
@@ -1515,7 +1515,7 @@ mod tests {
              to ~700ms, and skipping the sleeps altogether leaves it near zero \
              (elapsed {elapsed:?})"
         );
-        server.abort();
+        venue.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1525,9 +1525,9 @@ mod tests {
             .await
             .expect("bind stub listener");
         let port = listener.local_addr().expect("stub addr").port();
-        let server = tokio::spawn(async move {
+        let venue = tokio::spawn(async move {
             let mut ws = accept_ws(&listener).await;
-            let frame = serde_json::to_string(&ServerMessage::RunComplete {
+            let frame = serde_json::to_string(&VenueMessage::RunComplete {
                 sim_now_ns: 30,
                 elapsed_ns: 30,
             })
@@ -1544,7 +1544,7 @@ mod tests {
         )
         .await
         .expect("completion stops lifecycle without reconnecting");
-        server.await.expect("completion stub exits");
+        venue.await.expect("completion stub exits");
     }
 
     /// A graceful close whose reason this protocol does not define is a
@@ -1572,11 +1572,11 @@ mod tests {
             .expect("bind stub listener");
         let port = listener.local_addr().expect("stub addr").port();
         let dials = Arc::new(AtomicUsize::new(0));
-        let server_dials = Arc::clone(&dials);
-        let server = tokio::spawn(async move {
+        let venue_dials = Arc::clone(&dials);
+        let venue = tokio::spawn(async move {
             loop {
                 let mut ws = accept_ws(&listener).await;
-                server_dials.fetch_add(1, Ordering::Relaxed);
+                venue_dials.fetch_add(1, Ordering::Relaxed);
                 drop(
                     ws.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
                         code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
@@ -1602,7 +1602,7 @@ mod tests {
             "an unreasoned 1000 close must redial to the cap; reading the CODE as \
              completion returns after the first close instead"
         );
-        server.abort();
+        venue.abort();
     }
 
     /// The reason string is what makes a 1000 terminal, and the venue writes
@@ -1617,11 +1617,11 @@ mod tests {
             .expect("bind stub listener");
         let port = listener.local_addr().expect("stub addr").port();
         let dials = Arc::new(AtomicUsize::new(0));
-        let server_dials = Arc::clone(&dials);
-        let server = tokio::spawn(async move {
+        let venue_dials = Arc::clone(&dials);
+        let venue = tokio::spawn(async move {
             loop {
                 let mut ws = accept_ws(&listener).await;
-                server_dials.fetch_add(1, Ordering::Relaxed);
+                venue_dials.fetch_add(1, Ordering::Relaxed);
                 drop(
                     ws.close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
                         code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
@@ -1646,7 +1646,7 @@ mod tests {
             1,
             "the reasoned completion close is terminal: no redial follows it"
         );
-        server.abort();
+        venue.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1663,11 +1663,11 @@ mod tests {
             .expect("bind stub listener");
         let port = listener.local_addr().expect("stub addr").port();
         let dials = Arc::new(AtomicUsize::new(0));
-        let server_dials = Arc::clone(&dials);
-        let server = tokio::spawn(async move {
+        let venue_dials = Arc::clone(&dials);
+        let venue = tokio::spawn(async move {
             loop {
                 let mut ws = accept_ws(&listener).await;
-                server_dials.fetch_add(1, Ordering::Relaxed);
+                venue_dials.fetch_add(1, Ordering::Relaxed);
                 let frame = r#"{"type":"Heartbeat","ts_event":1}"#;
                 drop(ws.send(Message::Text(frame.into())).await);
                 drop(ws.close(None).await);
@@ -1697,6 +1697,6 @@ mod tests {
             "a two-attempt cap must not exhaust across proven connections"
         );
         run.abort();
-        server.abort();
+        venue.abort();
     }
 }

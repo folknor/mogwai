@@ -27,7 +27,7 @@ use super::source::GeneratedSource;
 /// spacing, so the index's memory is bounded by `MAX_CHECKPOINTS` generator
 /// clones regardless of how long an accelerated session runs - closing the
 /// unbounded per-`k`-ticks growth. 4096 keeps coarsening rare (the first only
-/// after `4096 * k` ticks, ~34M ticks at the server's K of 8192) so the
+/// after `4096 * k` ticks, ~34M ticks at the venue's K of 8192) so the
 /// residual drain stays at the base `k` for any realistic run, while capping
 /// worst-case mutable-state memory. Immutable generator scalars and the session
 /// calendar are shared by the lead and every snapshot.
@@ -59,7 +59,7 @@ pub struct CheckpointIndex {
     /// Snapshot spacing in ticks.
     k: usize,
     /// Runaway backstop: the most ticks `extend_toward` will walk the lead in a
-    /// single call. The server refuses a `start` below `data_origin`, but
+    /// single call. The venue refuses a `start` below `data_origin`, but
     /// nothing rejects an absurd `start` *above* the live frontier (a bogus or
     /// far-future window), and `GeneratedSource::next_tick` never ends - so an
     /// uncapped `extend_toward` would spin the path-dependent walk indefinitely

@@ -11,9 +11,9 @@
 //!
 //! So the REASON string is the discriminator, and it is a protocol contract
 //! rather than a log line: the venue writes these exact strings and a client
-//! classifies against them. `ServerMessage::RunComplete` remains the primary
+//! classifies against them. `VenueMessage::RunComplete` remains the primary
 //! completion signal; the close is its socket-level fallback for a reader that
-//! loses the final text frame while the server drains.
+//! loses the final text frame while the venue drains.
 //!
 //! A reason this module does not recognize is NOT terminal. That is the safe
 //! default in both directions: an unrecognized graceful close is a transport

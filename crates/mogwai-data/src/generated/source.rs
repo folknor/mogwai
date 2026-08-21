@@ -4,7 +4,7 @@
 //! The core path-dependent walk: [`GeneratedSource`] composes the arrival
 //! duration clock, the GARCH latent mid, the bounce/drift price process and
 //! the optional regime overlay into the [`crate::TickSource`] the running
-//! server drives. Same seed plus tape anchor yields the same stream byte for
+//! venue drives. Same seed plus tape anchor yields the same stream byte for
 //! byte - see `clean_regime_is_byte_identical` in the test module for the
 //! pinned golden sequence that must be re-blessed with any intentional walk
 //! mechanism change.

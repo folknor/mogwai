@@ -61,7 +61,7 @@ shape the resolved configuration makes invalid, and an exhausted river cap.
 Each is a 400 naming its reason.
 
 `GET /clock` takes an optional `?symbol=`. Naming a SEATED river answers on its
-boat's clock: `server_now_ns` is the last instant that boat published, and
+boat's clock: `venue_now_ns` is the last instant that boat published, and
 `boat_clock` is true. Naming a boatless river, or omitting the parameter,
 answers on the venue clock with `boat_clock` false. `data_origin_ns` and `warmup_ns` are venue facts either
 way, identical for every river.

@@ -23,7 +23,7 @@ build = "build.rs"
 mogwai-data.workspace = true
 mogwai-protocol.workspace = true
 # Phase 3b only: `summary`/`fit` walk against an `InstrumentProfile`, which
-# the server defines and resolves through `Config::load` - the same path
+# `mogwai-server` defines and resolves through `Config::load` - the same path
 # `mnq_fit.py`'s scratch-config walks took.
 mogwai-server.workspace = true
 

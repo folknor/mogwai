@@ -32,7 +32,7 @@ armed latency need several sockets.
 `DelayAcks`, `CommandLatency`, `GoDark`, `StallData`, partial fills, rejects,
 duplicate fills, and blackouts keep their existing fidelity meanings. `GoDark`
 suppresses a connection's output wholesale; `StallData` suppresses market data
-only, so a server heartbeat still arrives and a stalled feed stays
+only, so a venue heartbeat still arrives and a stalled feed stays
 distinguishable from a dead venue.
 
 TRANSPORT HAVOC RESHAPES BARS RATHER THAN DROPPING THEM, and that is deliberate.

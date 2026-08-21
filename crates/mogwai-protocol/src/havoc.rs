@@ -8,13 +8,14 @@ use crate::control;
 
 /// One config object that arms mogwai's havoc surfaces.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct HavocSpec {
     /// Transport-level corruption the adapter applies to its own inbound stream.
     #[serde(default)]
     pub client: ClientHavoc,
     /// Execution divergences the adapter relays to mogwai-server on connect.
     #[serde(default)]
-    pub server: Vec<control::Divergence>,
+    pub venue: Vec<control::Divergence>,
     /// Generator-level market regime applied before market-data ticks exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<MarketRegime>,
@@ -143,7 +144,7 @@ pub fn validate_conn_havoc(conn: &ConnHavoc) -> Result<(), &'static str> {
 
 /// Market-regime havoc: perturbs the generator before ticks are produced.
 ///
-/// This is distinct from server divergences and client-side transport havoc,
+/// This is distinct from venue divergences and client-side transport havoc,
 /// which corrupt events after production. It is carried per subscription on
 /// `Subscribe` and per request on `GET /trades`; it never travels the
 /// `/control/divergence` control plane.
@@ -431,7 +432,7 @@ impl HavocLatency {
             // is an adapter-side consumer knob, not a venue contract, and a
             // refusal is exec-adjacent from the consumer's point of view.
             // Giving it its own configured field would be a knob nobody asked
-            // for. This is unrelated to the server-side `DelayAcks` hold, which
+            // for. This is unrelated to the venue-side `DelayAcks` hold, which
             // admission traffic is exempt from.
             EventKind::Exec | EventKind::Admission => self.exec_event_nanos,
             EventKind::Fill => self.fill_nanos,
@@ -490,9 +491,9 @@ impl EventKind {
     /// Whether this category is an account/execution event rather than market
     /// data. `Exec` and `Fill` are both order-lifecycle (execution) traffic;
     /// `Data` is market data and `Admission` is neither - it is transport truth
-    /// about a request the venue would not serve. The server's outbound delay
+    /// about a request the venue would not serve. The venue's outbound delay
     /// path keys off this split, while the adapter's latency bucketing uses the
-    /// full `EventKind` - both consult [`ServerMessage::category`] so the two
+    /// full `EventKind` - both consult [`VenueMessage::category`] so the two
     /// ends can never disagree about which side of the seam a variant sits on
     /// (the split-brain that classified `AccountState` as data on one end and
     /// execution on the other).
@@ -509,7 +510,7 @@ impl EventKind {
             EventKind::Data | EventKind::Admission => false,
         }
     }
-    /// Whether this kind rides the priority lane on the server and bypasses the
+    /// Whether this kind rides the priority lane on the venue and bypasses the
     /// execution delay pump. Exhaustive for the same reason as
     /// [`Self::is_execution`].
     #[must_use]
@@ -668,7 +669,7 @@ mod tests {
                 reorder_prob: 0.3,
                 seed: Some(42),
             },
-            server: vec![
+            venue: vec![
                 control::Divergence::PartialFillNext {
                     client_order_id: "O-1".into(),
                     fraction: Decimal::new(5, 1),
@@ -713,7 +714,7 @@ mod tests {
         // connection lifecycle, so an omitted key decodes to this object.
         assert_eq!(
             json,
-            r#"{"client":{"latency":null,"drop_prob":0.0,"duplicate_prob":0.0,"reorder_prob":0.0,"seed":null},"server":[],"conn":{"idle_timeout_ms":0,"heartbeat_interval_ms":0,"reconnect_delay_initial_ms":1000,"reconnect_delay_max_ms":10000,"reconnect_backoff_factor":2.0,"reconnect_jitter_ms":0,"reconnect_max_attempts":null,"max_requests_per_second":null,"request_timeout_secs":0}}"#
+            r#"{"client":{"latency":null,"drop_prob":0.0,"duplicate_prob":0.0,"reorder_prob":0.0,"seed":null},"venue":[],"conn":{"idle_timeout_ms":0,"heartbeat_interval_ms":0,"reconnect_delay_initial_ms":1000,"reconnect_delay_max_ms":10000,"reconnect_backoff_factor":2.0,"reconnect_jitter_ms":0,"reconnect_max_attempts":null,"max_requests_per_second":null,"request_timeout_secs":0}}"#
         );
     }
 
@@ -721,15 +722,19 @@ mod tests {
     fn havoc_spec_defaults_from_empty_object() {
         let decoded: HavocSpec = serde_json::from_str("{}").unwrap();
         assert_eq!(decoded.client, ClientHavoc::default());
-        assert!(decoded.server.is_empty());
+        assert!(decoded.venue.is_empty());
         assert_eq!(decoded.data, None);
         assert_eq!(decoded.conn, ConnHavoc::default());
 
-        let decoded: HavocSpec = serde_json::from_str(r#"{"server":[]}"#).unwrap();
+        let decoded: HavocSpec = serde_json::from_str(r#"{"venue":[]}"#).unwrap();
         assert_eq!(decoded.client, ClientHavoc::default());
-        assert!(decoded.server.is_empty());
+        assert!(decoded.venue.is_empty());
         assert_eq!(decoded.data, None);
         assert_eq!(decoded.conn, ConnHavoc::default());
+
+        let retired = serde_json::from_str::<HavocSpec>(r#"{"server":[]}"#)
+            .expect_err("the retired server field must not be silently ignored");
+        assert!(retired.to_string().contains("unknown field `server`"));
     }
 
     #[test]
@@ -897,7 +902,7 @@ mod tests {
                 EventKind::Data => (false, false, 3),
                 // Admission is neither execution nor data: it is transport
                 // truth, and being outside `is_execution` is exactly what
-                // exempts it from the server's `DelayAcks` hold.
+                // exempts it from the venue's `DelayAcks` hold.
                 EventKind::Admission => (false, true, 1),
             };
             assert_eq!(
@@ -937,7 +942,7 @@ mod tests {
             );
         }
 
-        // Server-owned delay/dark windows are bounded, while `0` remains valid
+        // Venue-owned delay/dark windows are bounded, while `0` remains valid
         // as the disarm value.
         for div in [
             control::Divergence::DelayAcks {

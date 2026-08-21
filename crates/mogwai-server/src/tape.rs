@@ -97,10 +97,10 @@ impl Tape {
                 let is_quote = matches!(tick, mogwai_data::TickEvent::Quote(_));
                 let event = match tick {
                     mogwai_data::TickEvent::Trade(trade) => {
-                        mogwai_protocol::ServerMessage::Trade(trade)
+                        mogwai_protocol::VenueMessage::Trade(trade)
                     }
                     mogwai_data::TickEvent::Quote(quote) => {
-                        mogwai_protocol::ServerMessage::Quote(quote)
+                        mogwai_protocol::VenueMessage::Quote(quote)
                     }
                 };
                 let Ok(payload) = serde_json::to_string(&event) else {

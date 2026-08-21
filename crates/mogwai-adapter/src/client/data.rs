@@ -3,7 +3,7 @@
 
 //! `MogwaiDataClient`: the `DataClient` half of the adapter. Owns the
 //! subscription table, the poll/WS transport choice, the live bar
-//! aggregator, and the request handlers that page the server's bounded
+//! aggregator, and the request handlers that page the venue's bounded
 //! `/trades` scan. Plumbing shared with the execution half (the havoc
 //! dispatch pipeline, the instrument cache, clock/url glue) lives in
 //! `super::shared`.
@@ -20,7 +20,7 @@ use std::{
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_data::{BarAcc, fold_trade};
-use mogwai_protocol::{InstrumentDef, ServerMessage, SimClock, Symbol, TradeTick};
+use mogwai_protocol::{InstrumentDef, SimClock, Symbol, TradeTick, VenueMessage};
 use nautilus_common::{
     clients::DataClient,
     live::{get_data_event_sender, get_runtime},
@@ -143,8 +143,8 @@ impl MogwaiDataClient {
         // sources of truth for one fact. Unreconciled, a host subscribing ES on
         // a socket bound to MNQ would receive MNQ ticks relabelled ES by
         // nautilus, silently, with no frame and no log. So they must agree
-        // case-exactly, matching the server's own comparison. An absent
-        // `config.symbol` takes the server default and applies no check, which
+        // case-exactly, matching the venue's own comparison. An absent
+        // `config.symbol` takes the venue default and applies no check, which
         // is the pre-carrier behaviour unchanged.
         if let Some(bound) = self.config.symbol.as_deref() {
             ensure!(
@@ -345,10 +345,10 @@ impl DataClient for MogwaiDataClient {
         abort_tasks(&self.task_handles);
         self.retire_connected_flag();
         let http_base_url = self.config.http_base_url();
-        let (server, floor_known) = fetch_clock_or_identity(&self.http, &http_base_url).await;
-        let sim = server.sim;
+        let (venue, floor_known) = fetch_clock_or_identity(&self.http, &http_base_url).await;
+        let sim = venue.sim;
         self.sim = sim;
-        self.data_origin_ns = floor_known.then_some(server.data_origin_ns);
+        self.data_origin_ns = floor_known.then_some(venue.data_origin_ns);
         let conn = conn_havoc(&self.config.havoc);
         self.http_quota = HttpQuota::from_conn(&conn, sim);
         seed_instruments(
@@ -363,7 +363,7 @@ impl DataClient for MogwaiDataClient {
         // start flowing (see `emit_seeded_instruments`). `sink` is still owned
         // here; both transport branches move/clone it afterwards.
         emit_seeded_instruments(&sink, &self.instruments, sim);
-        // Server-side divergences are execution-owned. The data client accepts
+        // Venue-side divergences are execution-owned. The data client accepts
         // the same config object but only applies its client-side transport half.
         let client_havoc = client_havoc(&self.config.havoc);
 
@@ -451,12 +451,12 @@ impl DataClient for MogwaiDataClient {
                 // has no subscribe frames to replay: subscription state is
                 // satisfied locally in this client and never reaches the wire.
                 Vec::new,
-                move |server_msg| {
+                move |venue_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
                     let handler_deliver = handler_deliver.clone();
                     async move {
                         let mut filter = handler_filter.lock().await;
-                        enqueue_havoc(&mut filter, server_msg, sim, &handler_deliver);
+                        enqueue_havoc(&mut filter, venue_msg, sim, &handler_deliver);
                     }
                 },
                 move || {
@@ -487,7 +487,7 @@ impl DataClient for MogwaiDataClient {
             return Err(err);
         }
         // The post-bind reseed. Binding is what REGISTERS an unconfigured symbol
-        // server-side, so the pre-dial seed cannot have carried its def; only a
+        // venue-side, so the pre-dial seed cannot have carried its def; only a
         // read after the socket is up can. `cache_instruments` overwrites by key
         // and re-emitting an unchanged def is idempotent at the nautilus cache,
         // so this costs one HTTP round trip and changes nothing for a run whose
@@ -786,10 +786,10 @@ impl DataClient for MogwaiDataClient {
                     Ok(result) => result,
                     Err(err) => {
                         // Surface the failure instead of the old silent `if let Ok`
-                        // drop: a server 400 (an off-tape window, or a symbol the
+                        // drop: a venue 400 (an off-tape window, or a symbol the
                         // run does not serve) or any fetch error must be visible,
                         // not mistaken for "no trades in the window".
-                        tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed (the server may have refused an off-tape window); answering with an empty trade response so the request resolves");
+                        tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed (the venue may have refused an off-tape window); answering with an empty trade response so the request resolves");
                         break 'trades Vec::new();
                     }
                 };
@@ -995,7 +995,7 @@ impl DataClient for MogwaiDataClient {
                 {
                     Ok(result) => result,
                     Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed (the server may have refused an off-tape window); answering with an empty bar response so the request resolves");
+                        tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed (the venue may have refused an off-tape window); answering with an empty bar response so the request resolves");
                         break 'bars Vec::new();
                     }
                 };
@@ -1202,7 +1202,7 @@ struct BarSubState {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_market_message(
-    msg: ServerMessage,
+    msg: VenueMessage,
     sink: &UnboundedSender<DataEvent>,
     instruments: &Arc<Mutex<HashMap<Symbol, InstrumentDef>>>,
     missing_instrument_warnings: &Arc<Mutex<std::collections::HashSet<String>>>,
@@ -1212,7 +1212,7 @@ async fn handle_market_message(
     sim: SimClock,
 ) {
     match msg {
-        ServerMessage::Trade(trade) => {
+        VenueMessage::Trade(trade) => {
             emit_trade(
                 &trade,
                 sink,
@@ -1223,7 +1223,7 @@ async fn handle_market_message(
                 sim,
             );
         }
-        ServerMessage::Quote(quote) => {
+        VenueMessage::Quote(quote) => {
             handle_quote_message(
                 &quote,
                 sink,
@@ -1234,10 +1234,10 @@ async fn handle_market_message(
                 sim,
             );
         }
-        ServerMessage::Heartbeat { .. } => {
-            tracing::trace!("ignoring server heartbeat on data path");
+        VenueMessage::Heartbeat { .. } => {
+            tracing::trace!("ignoring venue heartbeat on data path");
         }
-        ServerMessage::ProtocolError { reason, .. } => {
+        VenueMessage::ProtocolError { reason, .. } => {
             // ProtocolError is now narrowed to WHOLE-FRAME faults the venue
             // could not attribute to any entry (a Subscribe refused at the
             // validation boundary, an unsupported carrier). Per-entry subscribe
@@ -1255,7 +1255,7 @@ async fn handle_market_message(
                 "venue reported a protocol error on the data path; the reason is the venue's own diagnosis"
             );
         }
-        ServerMessage::FeedLagged {
+        VenueMessage::FeedLagged {
             skipped,
             sim_now_ns,
         } => {
@@ -1282,7 +1282,7 @@ async fn handle_market_message(
                 "venue dropped market-data frames for this client; the feed has a visible gap and downstream aggregation is wrong for the missing span"
             );
         }
-        ServerMessage::RunComplete {
+        VenueMessage::RunComplete {
             sim_now_ns,
             elapsed_ns,
         } => {
@@ -1585,7 +1585,7 @@ struct TradeFetch<'a> {
 /// this be raised; until then the vector is what the bound is about.
 const MAX_TRADES_PER_REQUEST: usize = 1_000_000;
 /// Loop-safety backstop only. The real bound is `MAX_TRADES_PER_REQUEST`; this
-/// exists so a server that kept answering full pages without advancing the
+/// exists so a venue that kept answering full pages without advancing the
 /// cursor cannot spin forever.
 const MAX_TRADE_PAGES: usize = 64;
 async fn fetch_trades(
@@ -1879,7 +1879,7 @@ mod quote_cache_tests {
     }
 
     #[test]
-    fn subscribe_without_a_config_symbol_keeps_the_server_default_behavior() {
+    fn subscribe_without_a_config_symbol_keeps_the_venue_default_behavior() {
         let client = client_bound_to(None);
         client
             .subscribe_symbol(Arc::from("MES"), SubKind::Trades)

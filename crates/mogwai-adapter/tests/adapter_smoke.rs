@@ -100,7 +100,7 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
 ///
 /// THREE THINGS, and each is separately losable. The parameter is PRESENT on
 /// both upgrades; the two values are EQUAL, which is the anti-eviction property
-/// itself; and the value is wire-legal by the server's own rule, because the
+/// itself; and the value is wire-legal by the venue's own rule, because the
 /// URL is built by concatenation and a session needing percent-encoding would
 /// fail as an unreadable 400 from inside the reconnect loop.
 #[tokio::test(flavor = "current_thread")]
@@ -167,7 +167,7 @@ async fn both_legs_disclose_one_process_session_on_the_upgrade() {
         "the two legs of one process are ONE client of one ledger; differing \
          sessions make the venue evict one with the other: {sessions:?}"
     );
-    // Wire-legal by the SERVER's rule, not by a local charset guess, so the two
+    // Wire-legal by the venue's rule, not by a local charset guess, so the two
     // ends cannot drift on what a URL may carry.
     mogwai_protocol::validate_session_id(first).unwrap_or_else(|reason| {
         panic!("the minted session {first:?} is not wire-legal: {reason}")

@@ -481,6 +481,41 @@ fully trust until it reconciles, and nautilus has no typed channel to carry that
 - so the adapter's error-level logging stays the mitigation, and the upstream
 half recorded in `notes/todo.md` stays owed.
 
+### Rounds landed
+
+**Round 1, the `server` family, 2026-08-21.** `ServerMessage` to `VenueMessage`,
+`ServerClock` to `VenueClock`, the wire field `server_now_ns` to `venue_now_ns`,
+the config key `server_heartbeat_ms` to `venue_heartbeat_ms`, the operator-typed
+`HavocSpec.server` to `HavocSpec.venue`, plus the prose, doc comments, log lines
+and refusal text that carried the word. What the close pass found in the half no
+cold reviewer reads:
+
+- Two sites where the sweep put `venue` on a sentence whose subject was the
+  `mogwai-server` CRATE rather than the running process - `mogwai-lab`'s
+  manifest comment on its `mogwai-server` dependency, and the crate-graph
+  paragraph in `reference/architecture.md`. Both now name the crate. That is
+  the round's characteristic failure and it will recur in the crate-rename
+  round with the polarity reversed.
+- `.gitignore` carried `scripts/server.log`, which the sweep renamed to
+  `scripts/venue.log`. Nothing has ever written either path - `smoke.py` drains
+  the child's stderr into memory - so the rename turned a dead entry into a
+  false claim. The entry is deleted. Three neighbours in that file are dead the
+  same way and belong to no term family: `mogwai.log` and `mogwai.pid` name
+  `mogwai serve --log-file` and `--pid-file`, which do not exist, and
+  `scripts/probe-warmup.log` names a script that is gone.
+- The retired config key is refused rather than ignored, because `Config`
+  carries `deny_unknown_fields` - now pinned by a test beside the one for the
+  removed `sim_epoch_ns`, since the doc comment claims the guarantee and prose
+  has no compiler. The rename pass had already added `deny_unknown_fields` to
+  `HavocSpec` with the matching test, which is what makes the JSON break loud
+  too.
+
+`VenueMessage` is `#[serde(tag = "type")]` over variant names, so the type
+rename moves no byte on the wire; the only consumer-visible breaks are
+`venue_now_ns` and `HavocSpec.venue`. No tape byte moves, so no
+`TAPE_PROTOCOL_VERSION` bump is owed. `client` did not move: the workspace's
+occurrence count is identical before and after.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.

@@ -12,7 +12,7 @@
 //!
 //! This is the one module in `mogwai-lab` that depends on `mogwai-server`:
 //! an `InstrumentProfile` is the walk's instrument, and the fit resolves one
-//! through the server's own `Config::load` path exactly as the Python's
+//! through the venue's own `Config::load` path exactly as the Python's
 //! scratch-config walks did.
 
 use mogwai_data::{TickEvent, TickSource};

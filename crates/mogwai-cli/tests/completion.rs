@@ -17,7 +17,7 @@ use common::{
 };
 use futures_util::StreamExt;
 use mogwai_protocol::{
-    ServerMessage,
+    VenueMessage,
     launch::{LaunchSpec, StderrSink, launch},
 };
 use std::sync::{Arc, Mutex};
@@ -303,7 +303,7 @@ async fn drain_to_completion(socket: &mut WsSocket, timeout: Duration) -> Watche
             // for throughput rather than convenience. The one caller still on an
             // UNPACED `speed = 0.0` venue - the sigterm gate - takes over a
             // million frames on one socket in two seconds, measured, and
-            // `serde_json::from_str::<ServerMessage>` on every one of them makes
+            // `serde_json::from_str::<VenueMessage>` on every one of them makes
             // the DRAIN the bottleneck: a frame the test is waiting for is
             // queued behind the whole backlog and the test spends its wall
             // budget parsing tape it does not care about, then reports the
@@ -315,10 +315,10 @@ async fn drain_to_completion(socket: &mut WsSocket, timeout: Duration) -> Watche
             Message::Text(text) => {
                 content_frames += 1;
                 if text.contains("RunComplete")
-                    && let Ok(ServerMessage::RunComplete {
+                    && let Ok(VenueMessage::RunComplete {
                         sim_now_ns,
                         elapsed_ns,
-                    }) = serde_json::from_str::<ServerMessage>(&text)
+                    }) = serde_json::from_str::<VenueMessage>(&text)
                 {
                     announcement = Some((sim_now_ns, elapsed_ns));
                 }

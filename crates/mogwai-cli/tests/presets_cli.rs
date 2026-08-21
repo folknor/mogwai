@@ -4,7 +4,7 @@
 //! CLI-level coverage for `mogwai presets`, the LISTING in particular.
 //!
 //! The bare listing shipped as a hardcoded `println!("MNQ\nMES\nBTCUSDT")` in
-//! the dispatcher, beside a named lookup that already went through the server's
+//! the dispatcher, beside a named lookup that already went through the venue's
 //! preset table. Nothing tied the two together, so adding or retiring a preset
 //! moved the table while the listing kept printing the old set - and the same
 //! stale count had already propagated into the README and two durable documents

@@ -35,7 +35,7 @@ const DEFAULT_PAIRS: [&str; 8] = [
 const MAX_WORKERS: usize = 6;
 
 /// `characterize.py`'s `DATA_DIR` default. Offline-analysis input only, never
-/// a server runtime knob.
+/// a venue runtime knob.
 const DEFAULT_DATA_DIR: &str = "/home/folk/Kraken";
 
 /// Where `build_fingerprint` looks for the reports. These are gitignored

@@ -909,7 +909,7 @@ instrumented tests.
   `mogwai_data::scan_triggers` over a one-second span of the fitted BTCUSDT
   tape, at three scan counts. The scans are far from market, so no walk exits
   early on a satisfied scan.
-- `scan_mapping_50` - the `PendingScan` to `TriggerScan` mapping the server
+- `scan_mapping_50` - the `PendingScan` to `TriggerScan` mapping the venue
   wrapper builds once per symbol per pass, allocation included.
 - `source_positioning` - the sweeper's fixed per-pass cost: a checkpoint restore
   out of a long-lived index taken under a lock, then the residual drain through
@@ -1021,7 +1021,7 @@ reunite the two crates.
 
 ### What `source_positioning` does NOT include
 
-It is built from `mogwai-data` and so omits one ingredient of the server's
+It is built from `mogwai-data` and so omits one ingredient of the venue's
 `build_history_source`: the `InstrumentProfiles` lookup, a constant-time table
 read outside any loop. Positioning now refuses a target that the checkpoint
 extension cap did not reach, before constructing the merge and entering its
@@ -1070,7 +1070,7 @@ with a per-POSITION margin row, which under-reported the work and, worse,
 under-reserved the admission budget for a hedged book; the row is now
 aggregated per symbol over positions AND resting orders, which is what the
 current numbers price. These numbers do
-not hide the dominant server cost: a cache miss still pays the previously
+not hide the dominant venue cost: a cache miss still pays the previously
 measured 13.86 ms tape walk per symbol. That landing's memo was a single
 run-level entry shared between the command path and the sweeper, so a
 multi-symbol pass could evict itself; 2026-08-16 moved the memo ONTO THE BOAT,
@@ -1502,7 +1502,7 @@ through its own wrapping global allocator. Run it with
 
 | arm | ns / frame | allocations / frame |
 |---|---:|---:|
-| landed `ServerMessage::from_json_str` | 239, 220, 219 | 2 |
+| landed `VenueMessage::from_json_str` | 239, 220, 219 | 2 |
 | payload struct, `Symbol = Arc<str>` (today) | 110, 115, 109 | 2 |
 | payload struct, inline 32-byte `Copy` symbol | 103, 111, 103 | 0 |
 | `mogwai_adapter::convert::trade_id`, ONE trade | 162, 154, 153 | 5 |
@@ -1528,7 +1528,7 @@ one can recur in the next probe someone writes here:
 
 THE FOURTH ROW IS WHY THE CHANGE WAS REFUSED, and it is the row to reach for
 whenever a per-frame decode saving is proposed. The adapter's socket reader is
-the only decoder of `ServerMessage` that exists - `from_json_str` and
+the only decoder of `VenueMessage` that exists - `from_json_str` and
 `from_json_slice` have one call site each, both in `lifecycle.rs`'s read loop -
 and the first thing it does with a decoded trade is `convert::trade_id`, which
 `format!`s all five fields and costs ~155 ns and five allocations on its own,
@@ -1541,9 +1541,9 @@ ARC SHARING IS ALSO NOT WASTED, it is just not earned at DECODE: it pays inside
 the process afterwards, which is where `GeneratedSource` and `TickRuleAggressor`
 share one allocation (see the section above).
 
-THAT `ServerMessage` INVENTORY IS EXACTLY AS NARROW AS IT READS. Symbols also
+THAT `VenueMessage` INVENTORY IS EXACTLY AS NARROW AS IT READS. Symbols also
 reach the adapter through five UNTAGGED HTTP decodes that are not
-`ServerMessage` at all and validate nothing - `client/shared.rs` (instruments),
+`VenueMessage` at all and validate nothing - `client/shared.rs` (instruments),
 two in `client/data.rs` (trades and quotes), `client/exec.rs` and `clock.rs`.
 They are the same deliberate posture `convert::instrument_id` takes below, not
 an oversight, but a claim about "the decoders" has to name them.

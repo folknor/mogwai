@@ -537,7 +537,7 @@ impl Engine {
     /// either side (and needs a margin policy to post anything at all); a spot
     /// buy reserves quote notional, a spot sell reserves base quantity. The
     /// instrument CLASS is consulted before the margin map, so a margin policy
-    /// configured against a spot symbol - which server config rejects at boot,
+    /// configured against a spot symbol - which venue config rejects at boot,
     /// but the public `set_margin_policy` cannot - moves neither number.
     pub(crate) fn order_reservation(
         &self,

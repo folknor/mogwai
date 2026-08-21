@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Saturating UNIX-nanoseconds clock reader: the single source of truth for
-/// "now" on the wire's `ts_event` axis, shared by the server (its `now_ns`) and
+/// "now" on the wire's `ts_event` axis, shared by the venue (its `now_ns`) and
 /// the adapter (its `now_unix_nanos`, which wraps the result in `UnixNanos`).
 ///
 /// A backward clock step (NTP correction, leap second) yields an `Err` from
@@ -21,7 +21,7 @@ pub fn now_unix_nanos() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
-/// Affine wall-to-simulated time map shared by the server, adapter, and the
+/// Affine wall-to-simulated time map shared by the venue, adapter, and the
 /// nautilus clock injected into the host's live node.
 ///
 /// The scaling step (`offset as f64 * speed` / `offset as f64 / speed` in
@@ -103,22 +103,22 @@ impl SimClock {
 }
 
 /// The `/clock` payload: the affine `SimClock` plus the tape boundary the
-/// server derived at boot. `SimClock` stays the pure wall-to-sim map; this
+/// venue derived at boot. `SimClock` stays the pure wall-to-sim map; this
 /// richer envelope publishes where the synthetic tape begins so a client can
 /// guard its own warmup window instead of issuing a doomed off-tape fetch.
 ///
-/// `server_now_ns` is `sim.sim_ns(wall)` sampled when the request is served, so
+/// `venue_now_ns` is `sim.sim_ns(wall)` sampled when the request is served, so
 /// a client gets sim-now and the tape floor from one round trip without having
 /// to read its own (possibly skewed) wall clock. `data_origin_ns` is the
 /// earliest `ts_event` any source can serve (`run_start_ns - warmup_ns`); a
 /// request for a `start` below it is refused. The span is echoed so the client
 /// can report the floor in its own terms.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ServerClock {
+pub struct VenueClock {
     /// The affine wall-to-sim map the adapter feeds to the nautilus node.
     pub sim: SimClock,
     /// `sim.sim_ns(wall)` at the instant the `/clock` request was served.
-    pub server_now_ns: u64,
+    pub venue_now_ns: u64,
     /// Earliest `ts_event` the tape can serve; a `start` below it is off-tape.
     pub data_origin_ns: u64,
     /// Uniform servable history span before `run_start_ns`, in nanoseconds.
@@ -287,13 +287,13 @@ mod tests {
     /// text - so the two move together or the rename is caught here first.
     #[test]
     fn clock_snapshot_round_trips() {
-        let clock = ServerClock {
+        let clock = VenueClock {
             sim: SimClock {
                 sim_epoch_ns: 1_900_000_000_000_000_000,
                 wall_anchor_ns: 1_782_000_000_000_000_000,
                 speed: 120.0,
             },
-            server_now_ns: 1_900_000_799_000_000_000,
+            venue_now_ns: 1_900_000_799_000_000_000,
             data_origin_ns: 1_899_913_600_000_000_000,
             warmup_ns: 86_400_000_000_000,
             boat_clock: true,
@@ -302,10 +302,10 @@ mod tests {
         let json = serde_json::to_string(&clock).unwrap();
         assert_eq!(
             json,
-            r#"{"sim":{"sim_epoch_ns":1900000000000000000,"wall_anchor_ns":1782000000000000000,"speed":120.0},"server_now_ns":1900000799000000000,"data_origin_ns":1899913600000000000,"warmup_ns":86400000000000,"boat_clock":true}"#,
+            r#"{"sim":{"sim_epoch_ns":1900000000000000000,"wall_anchor_ns":1782000000000000000,"speed":120.0},"venue_now_ns":1900000799000000000,"data_origin_ns":1899913600000000000,"warmup_ns":86400000000000,"boat_clock":true}"#,
             "the /clock snapshot's byte form is a wire contract"
         );
-        let decoded: ServerClock = serde_json::from_str(&json).unwrap();
+        let decoded: VenueClock = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, clock);
     }
 

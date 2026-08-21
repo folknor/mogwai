@@ -61,12 +61,12 @@ pub struct MogwaiDataClientConfig {
     /// and execution named different ledgers would arm divergences on one and
     /// read frames from the other.
     pub account_id: AccountId,
-    /// Base URL of the running mogwai-server.
+    /// Base URL of the running mogwai venue.
     ///
     /// Later data handlers derive the `/ws` market-data path from this value.
     /// The skeleton stores and validates the URL without opening a transport.
     pub base_url: String,
-    /// River named on the websocket upgrade. `None` takes the server's boot
+    /// River named on the websocket upgrade. `None` takes the venue's boot
     /// symbol for compatibility with clients predating the carrier.
     #[serde(default)]
     pub symbol: Option<String>,
@@ -189,7 +189,7 @@ impl MogwaiDataClientConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the mogwai-server URL is empty or is not a
+    /// Returns an error if the mogwai venue URL is empty or is not a
     /// `ws://`/`wss://` URL with a host (D.4), or if any armed havoc knob is
     /// out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -210,7 +210,7 @@ impl MogwaiDataClientConfig {
     ///
     /// The symbol, account and session are appended raw and need no percent
     /// encoding: `validate` refuses every byte outside their wire alphabets
-    /// first. An absent symbol takes the server's boot river.
+    /// first. An absent symbol takes the venue's boot river.
     #[must_use]
     pub fn ws_url(&self) -> String {
         ws_url(
@@ -245,9 +245,9 @@ impl ClientConfig for MogwaiDataClientConfig {
 pub struct MogwaiExecClientConfig {
     pub trader_id: TraderId,
     pub account_id: AccountId,
-    /// Base URL of the running mogwai-server.
+    /// Base URL of the running mogwai venue.
     pub base_url: String,
-    /// River named on the websocket upgrade. `None` takes the server default.
+    /// River named on the websocket upgrade. `None` takes the venue default.
     #[serde(default)]
     pub symbol: Option<String>,
     /// Account type reported to nautilus.
@@ -378,7 +378,7 @@ impl MogwaiExecClientConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the mogwai-server URL is empty or is not a
+    /// Returns an error if the mogwai venue URL is empty or is not a
     /// `ws://`/`wss://` URL with a host (D.4), or if any armed havoc knob is
     /// out of range.
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -444,7 +444,7 @@ fn ws_url(
     url
 }
 
-/// Refuse a session id the `/ws` URL cannot carry, by the rule the server
+/// Refuse a session id the `/ws` URL cannot carry, by the rule the venue
 /// judges the decoded value with, so the two ends cannot drift.
 fn validate_session(session: Option<&str>) -> anyhow::Result<()> {
     if let Some(session) = session
@@ -462,7 +462,7 @@ fn validate_session(session: Option<&str>) -> anyhow::Result<()> {
 /// The URL is built by CONCATENATION, so an illegal symbol must fail at config
 /// validation rather than as an unreadable `400` from inside the reconnect
 /// loop. The rule is `mogwai_protocol::validate_wire_symbol`, the one the
-/// server judges the decoded value by, so the two ends cannot drift.
+/// venue judges the decoded value by, so the two ends cannot drift.
 fn validate_symbol(symbol: Option<&str>) -> anyhow::Result<()> {
     if let Some(symbol) = symbol
         && let Err(reason) = mogwai_protocol::validate_wire_symbol(symbol)
@@ -548,7 +548,7 @@ fn http_base_url(base_url: &str) -> String {
 
 /// Runs the full havoc validation both adapter configs share: the client-side
 /// probabilities, the connection-lifecycle knobs, the optional market regime,
-/// and every armed server `Divergence`. Single-sourcing this here keeps the
+/// and every armed venue `Divergence`. Single-sourcing this here keeps the
 /// two configs from drifting and means an out-of-range knob (an unbounded
 /// `PartialFillNext.fraction`, a degenerate regime, a zeroed rate limit) is
 /// rejected at config time rather than detonating later on the live path.
@@ -556,7 +556,7 @@ fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
     if let Some(havoc) = havoc {
         validate_client_havoc(&havoc.client).map_err(anyhow::Error::msg)?;
         validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
-        for divergence in &havoc.server {
+        for divergence in &havoc.venue {
             validate_divergence(divergence).map_err(anyhow::Error::msg)?;
         }
     }

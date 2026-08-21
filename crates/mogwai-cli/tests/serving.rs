@@ -42,7 +42,7 @@ use common::{
     paced_config, perpetual_config, spawn, tiny_fanout_config, two_symbols_config,
 };
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{LiquiditySide, ServerMessage, TradeTick};
+use mogwai_protocol::{LiquiditySide, TradeTick, VenueMessage};
 use tokio_tungstenite::tungstenite::Message;
 
 /// A config whose boot river is named ONLY by `[instrument] preset`, with no
@@ -198,11 +198,11 @@ async fn history_is_bounded_by_the_rivers_own_boat_not_the_venue_clock() {
             .expect("place the second river late");
 
     let (_, boat) = http_get(&venue.http_base(), "/clock?symbol=MNQ");
-    let boat: mogwai_protocol::ServerClock = serde_json::from_str(&boat).unwrap();
+    let boat: mogwai_protocol::VenueClock = serde_json::from_str(&boat).unwrap();
     let (_, venue_clock) = http_get(&venue.http_base(), "/clock");
-    let venue_clock: mogwai_protocol::ServerClock = serde_json::from_str(&venue_clock).unwrap();
+    let venue_clock: mogwai_protocol::VenueClock = serde_json::from_str(&venue_clock).unwrap();
     assert!(
-        venue_clock.server_now_ns > boat.server_now_ns,
+        venue_clock.venue_now_ns > boat.venue_now_ns,
         "the test must construct a late boat"
     );
 
@@ -211,9 +211,9 @@ async fn history_is_bounded_by_the_rivers_own_boat_not_the_venue_clock() {
     // old rows and never reach either ceiling. Anchored one nanosecond above
     // the boat but far below the venue clock, the two ceilings give different
     // answers and only one of them can be right.
-    let start = boat.server_now_ns.saturating_add(1);
+    let start = boat.venue_now_ns.saturating_add(1);
     assert!(
-        start < venue_clock.server_now_ns,
+        start < venue_clock.venue_now_ns,
         "the anchor must sit between the two ceilings"
     );
     let (status, body) = http_get(
@@ -277,8 +277,8 @@ async fn an_order_for_another_symbol_is_refused_on_a_bound_socket() {
         let Message::Text(text) = message else {
             continue;
         };
-        match serde_json::from_str::<ServerMessage>(&text) {
-            Ok(ServerMessage::OrderRejected {
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::OrderRejected {
                 client_order_id,
                 reason,
                 ..
@@ -286,10 +286,10 @@ async fn an_order_for_another_symbol_is_refused_on_a_bound_socket() {
                 assert!(reason.contains("does not match the symbol this connection is bound to"));
                 return;
             }
-            Ok(ServerMessage::AdmissionRejected { .. }) => {
+            Ok(VenueMessage::AdmissionRejected { .. }) => {
                 panic!("a symbol mismatch was mislabeled as capacity")
             }
-            Ok(ServerMessage::OrderAccepted {
+            Ok(VenueMessage::OrderAccepted {
                 client_order_id, ..
             }) if client_order_id == "WRONG-RIVER" => {
                 panic!("the mismatched order reached the engine")
@@ -327,7 +327,7 @@ async fn a_symbol_no_preset_covers_is_served_under_the_default_bundle() {
     let deadline = common::deadline(common::TEST_WALL_BUDGET);
     while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
         if let Message::Text(text) = message
-            && let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text)
+            && let Ok(VenueMessage::Trade(trade)) = serde_json::from_str(&text)
         {
             assert_eq!(trade.symbol.as_ref(), "FOOBAR");
             return;
@@ -353,8 +353,8 @@ async fn binary_client_frames_receive_a_protocol_error() {
     let deadline = common::deadline(Duration::from_secs(10));
     while let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await {
         if let Message::Text(text) = message
-            && let Ok(ServerMessage::ProtocolError { reason, .. }) =
-                serde_json::from_str::<ServerMessage>(&text)
+            && let Ok(VenueMessage::ProtocolError { reason, .. }) =
+                serde_json::from_str::<VenueMessage>(&text)
         {
             assert!(reason.contains("binary client frames are unsupported"));
             return;
@@ -386,7 +386,7 @@ fn the_tape_origin_is_fixed_and_independent_of_launch_time() {
         assert_eq!(venue.record.run_start_ns, venue.record.warmup_ns);
         let (status, body) = http_get(&venue.http_base(), "/clock");
         assert_eq!(status, 200);
-        let clock: mogwai_protocol::ServerClock = serde_json::from_str(&body).unwrap();
+        let clock: mogwai_protocol::VenueClock = serde_json::from_str(&body).unwrap();
         assert_eq!(clock.data_origin_ns, 0);
     }
     assert_eq!(first.record.run_start_ns, second.record.run_start_ns);
@@ -547,7 +547,7 @@ async fn a_connection_receives_the_tape_without_asking() {
             .expect("the socket stays open")
             .expect("a well-formed frame");
         if let Message::Text(text) = message
-            && let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text)
+            && let Ok(VenueMessage::Trade(trade)) = serde_json::from_str(&text)
         {
             assert_eq!(trade.symbol.as_ref(), venue.symbol);
             return;
@@ -579,7 +579,7 @@ async fn a_venue_without_warmup_still_publishes_its_tape() {
             .expect("the socket stays open")
             .expect("a well-formed frame");
         if let Message::Text(text) = message
-            && let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text)
+            && let Ok(VenueMessage::Trade(trade)) = serde_json::from_str(&text)
         {
             assert_eq!(trade.symbol.as_ref(), venue.symbol);
             assert_eq!(venue.record.warmup_ns, 0, "the fixture declares no warmup");
@@ -638,8 +638,8 @@ async fn a_slow_connection_is_dropped_with_feed_lagged() {
         let ending = match tokio::time::timeout_at(deadline, socket.next()).await {
             Ok(Some(Ok(message))) => match message {
                 Message::Text(text) => {
-                    if let Ok(ServerMessage::FeedLagged { skipped, .. }) =
-                        serde_json::from_str::<ServerMessage>(&text)
+                    if let Ok(VenueMessage::FeedLagged { skipped, .. }) =
+                        serde_json::from_str::<VenueMessage>(&text)
                     {
                         lagged = Some(skipped);
                     }
@@ -734,8 +734,8 @@ async fn two_connections_share_one_ledger() {
             .expect("the socket stays open")
             .expect("a well-formed frame");
         if let Message::Text(text) = message
-            && let Ok(ServerMessage::OrderStatusSnapshot(snapshot)) =
-                serde_json::from_str::<ServerMessage>(&text)
+            && let Ok(VenueMessage::OrderStatusSnapshot(snapshot)) =
+                serde_json::from_str::<VenueMessage>(&text)
         {
             assert_eq!(snapshot.request_id, "Q-1");
             assert!(
@@ -808,8 +808,8 @@ async fn two_accounts_on_one_venue_do_not_share_a_ledger() {
             .expect("the socket stays open")
             .expect("a well-formed frame");
         if let Message::Text(text) = message
-            && let Ok(ServerMessage::OrderStatusSnapshot(snapshot)) =
-                serde_json::from_str::<ServerMessage>(&text)
+            && let Ok(VenueMessage::OrderStatusSnapshot(snapshot)) =
+                serde_json::from_str::<VenueMessage>(&text)
         {
             assert_eq!(snapshot.request_id, "Q-2");
             assert!(
@@ -1033,8 +1033,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
             .expect("the venue CLOSED the policed account's socket before the buy filled")
             .expect("a well-formed frame");
         if let Message::Text(text) = message
-            && let Ok(ServerMessage::OrderFilled(fill)) =
-                serde_json::from_str::<ServerMessage>(&text)
+            && let Ok(VenueMessage::OrderFilled(fill)) = serde_json::from_str::<VenueMessage>(&text)
             && fill.client_order_id == "SPOT-1"
         {
             break;
@@ -1170,8 +1169,8 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
                 })?
                 .map_err(|err| format!("the resumed socket failed in transport: {err}"))?;
             if let Message::Text(text) = message
-                && let Ok(ServerMessage::OrderStatusSnapshot(snapshot)) =
-                    serde_json::from_str::<ServerMessage>(&text)
+                && let Ok(VenueMessage::OrderStatusSnapshot(snapshot)) =
+                    serde_json::from_str::<VenueMessage>(&text)
                 && snapshot.request_id == "Q-3"
             {
                 return Ok::<_, String>(snapshot);
@@ -1330,21 +1329,21 @@ async fn an_oversized_submit_is_refused_by_the_position_cap() {
         let Message::Text(text) = message else {
             continue;
         };
-        match serde_json::from_str::<ServerMessage>(&text) {
-            Ok(ServerMessage::OrderRejected { reason, .. }) => {
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::OrderRejected { reason, .. }) => {
                 assert!(
                     reason.contains("may not carry more than 10"),
                     "the refusal names the cap: {reason}"
                 );
                 return;
             }
-            Ok(ServerMessage::OrderAccepted { .. }) => {
+            Ok(VenueMessage::OrderAccepted { .. }) => {
                 panic!("an oversized submit must not be accepted")
             }
-            Ok(ServerMessage::AdmissionRejected {
+            Ok(VenueMessage::AdmissionRejected {
                 subject, reason, ..
             }) => panic!("the venue refused admission for {subject:?}: {reason}"),
-            Ok(ServerMessage::ProtocolError { reason, .. }) => {
+            Ok(VenueMessage::ProtocolError { reason, .. }) => {
                 panic!("the venue read the submit as malformed: {reason}")
             }
             _ => {}
@@ -1871,7 +1870,7 @@ async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
     );
     // USDT as a LITERAL, not resolved through the same config code the venue
     // runs: this is the settlement currency of the default boot river, and a
-    // derived expectation would compare the server's answer to itself.
+    // derived expectation would compare the venue's answer to itself.
     //
     // THE WHOLE PHRASE, not `contains("USDT")`. The boot river here is the
     // default preset BTCUSDT, and "USDT" is a substring of "BTCUSDT" - so a bare
@@ -1925,8 +1924,7 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
             .expect("the venue CLOSED the perpetual socket before the position opened")
             .expect("a well-formed frame");
         if let Message::Text(text) = message
-            && let Ok(ServerMessage::OrderFilled(fill)) =
-                serde_json::from_str::<ServerMessage>(&text)
+            && let Ok(VenueMessage::OrderFilled(fill)) = serde_json::from_str::<VenueMessage>(&text)
             && fill.client_order_id == "PERP-1"
         {
             break;
@@ -1963,7 +1961,7 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
     // `speed = 0.0`, where the two axes come apart in a way that defeats the
     // obvious poll: the boat's CLOCK is still built wall-rated (a zero speed is
     // replaced by 1.0 when the `SimClock` is constructed), while DELIVERY is
-    // unpaced, so the tape's `ts_event` runs far ahead of `server_now_ns`.
+    // unpaced, so the tape's `ts_event` runs far ahead of `venue_now_ns`.
     // Anchoring a clock target on a tape stamp therefore satisfies it at once
     // and the test fails on an unmoved balance, which is what was measured.
     // Nothing the venue serves
@@ -2053,7 +2051,7 @@ async fn an_armed_divergence_reaches_every_connection() {
             .expect("open")
             .expect("frame");
         if matches!(message, Message::Text(ref text)
-            if matches!(serde_json::from_str(text), Ok(ServerMessage::Trade(_))))
+            if matches!(serde_json::from_str(text), Ok(VenueMessage::Trade(_))))
         {
             break;
         }
@@ -2086,13 +2084,13 @@ async fn an_armed_divergence_reaches_every_connection() {
         &venue.http_base(),
         &format!("/clock?symbol={}", venue.symbol),
     );
-    let arm_clock: mogwai_protocol::ServerClock =
+    let arm_clock: mogwai_protocol::VenueClock =
         serde_json::from_str(&arm_clock_body).expect("arm clock");
     assert!(
         arm_clock.boat_clock,
         "the ceiling must be the boat's own instant, not the venue clock: {arm_clock_body}"
     );
-    let armed_at = arm_clock.server_now_ns;
+    let armed_at = arm_clock.venue_now_ns;
 
     // Within the window no market data may arrive on this socket.
     //
@@ -2105,9 +2103,9 @@ async fn an_armed_divergence_reaches_every_connection() {
     while let Ok(Some(Ok(message))) = tokio::time::timeout_at(quiet_until, data_socket.next()).await
     {
         if let Message::Text(text) = message {
-            let event_ts = match serde_json::from_str::<ServerMessage>(&text) {
-                Ok(ServerMessage::Trade(trade)) => Some(trade.ts_event),
-                Ok(ServerMessage::Quote(quote)) => Some(quote.ts_event),
+            let event_ts = match serde_json::from_str::<VenueMessage>(&text) {
+                Ok(VenueMessage::Trade(trade)) => Some(trade.ts_event),
+                Ok(VenueMessage::Quote(quote)) => Some(quote.ts_event),
                 _ => None,
             };
             assert!(
@@ -2141,7 +2139,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
 
     let (_, clock_body) = http_get(&venue.http_base(), "/clock");
     let clock: serde_json::Value = serde_json::from_str(&clock_body).expect("clock");
-    let sim_now = clock["server_now_ns"].as_u64().expect("sim now");
+    let sim_now = clock["venue_now_ns"].as_u64().expect("sim now");
     let (_, trades_body) = http_get(
         &venue.http_base(),
         &format!(
@@ -2172,9 +2170,9 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
         let Message::Text(text) = message else {
             continue;
         };
-        match serde_json::from_str::<ServerMessage>(&text) {
-            Ok(ServerMessage::OrderAccepted { ts_event, .. }) => accepted_ts = Some(ts_event),
-            Ok(ServerMessage::OrderFilled(fill)) => {
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::OrderAccepted { ts_event, .. }) => accepted_ts = Some(ts_event),
+            Ok(VenueMessage::OrderFilled(fill)) => {
                 assert_eq!(fill.client_order_id, "BAND-1");
                 // The LIQUIDITY SIDE, not the timestamp, is what names the case.
                 // A swept fill is a Maker fill; a limit that was already
@@ -2201,20 +2199,20 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
                 );
                 return;
             }
-            Ok(ServerMessage::OrderRejected { reason, .. }) => {
+            Ok(VenueMessage::OrderRejected { reason, .. }) => {
                 panic!("the banded limit was rejected: {reason}")
             }
             // Named rather than swallowed by a wildcard: each of these three
             // says the venue never got a chance to do what the test is asking
             // about, and under a wildcard the test would instead die on the
             // 60-second deadline blaming the sweep.
-            Ok(ServerMessage::AdmissionRejected {
+            Ok(VenueMessage::AdmissionRejected {
                 subject, reason, ..
             }) => panic!("the venue refused admission for {subject:?}: {reason}"),
-            Ok(ServerMessage::ProtocolError { reason, .. }) => {
+            Ok(VenueMessage::ProtocolError { reason, .. }) => {
                 panic!("the venue read the submit as malformed: {reason}")
             }
-            Ok(ServerMessage::FeedLagged { skipped, .. }) => {
+            Ok(VenueMessage::FeedLagged { skipped, .. }) => {
                 panic!("this socket dropped {skipped} frames, so the fill may never arrive")
             }
             _ => {}
@@ -2295,7 +2293,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
                 &venue.http_base(),
                 &format!("/clock?symbol={}", venue.symbol),
             );
-            let before: mogwai_protocol::ServerClock =
+            let before: mogwai_protocol::VenueClock =
                 serde_json::from_str(&before_body).expect("the pre-submit clock");
             assert!(
                 before.boat_clock,
@@ -2321,16 +2319,16 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
                 let Message::Text(text) = message else {
                     continue;
                 };
-                match serde_json::from_str::<ServerMessage>(&text) {
-                    Ok(ServerMessage::OrderAccepted {
+                match serde_json::from_str::<VenueMessage>(&text) {
+                    Ok(VenueMessage::OrderAccepted {
                         client_order_id,
                         ts_event,
                         ..
                     }) if client_order_id == id => accepted_ts = Some(ts_event),
-                    Ok(ServerMessage::OrderFilled(fill)) if fill.client_order_id == id => {
+                    Ok(VenueMessage::OrderFilled(fill)) if fill.client_order_id == id => {
                         break fill;
                     }
-                    Ok(ServerMessage::OrderRejected { reason, .. }) => {
+                    Ok(VenueMessage::OrderRejected { reason, .. }) => {
                         panic!("{id} was rejected: {reason}")
                     }
                     _ => {}
@@ -2377,7 +2375,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
             let trades = trade_window(
                 &venue.http_base(),
                 &venue.symbol,
-                before.server_now_ns.saturating_sub(60_000_000_000),
+                before.venue_now_ns.saturating_sub(60_000_000_000),
                 reading_ts,
             );
             let last = trades
@@ -2494,9 +2492,9 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
             let Message::Text(text) = message else {
                 continue;
             };
-            if let Ok(ServerMessage::OrderAccepted {
+            if let Ok(VenueMessage::OrderAccepted {
                 client_order_id, ..
-            }) = serde_json::from_str::<ServerMessage>(&text)
+            }) = serde_json::from_str::<VenueMessage>(&text)
                 && client_order_id == "TAPE-99"
             {
                 return Ok::<_, String>(());
@@ -2524,7 +2522,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
 /// or advanced the generator past them, the two reads of the same fixed window
 /// would differ. They must not.
 ///
-/// It lives at the SERVER layer rather than in `mogwai-engine`, where the spec's
+/// It lives at the venue layer rather than in `mogwai-engine`, where the spec's
 /// gate list names it: the engine holds no tape and no generator, so the
 /// property it asserts is only expressible where the walk and the source
 /// actually are. Its twin above is the same assertion for plain limits.
@@ -2590,16 +2588,16 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
             let Message::Text(text) = message else {
                 continue;
             };
-            match serde_json::from_str::<ServerMessage>(&text) {
-                Ok(ServerMessage::OrderRejected {
+            match serde_json::from_str::<VenueMessage>(&text) {
+                Ok(VenueMessage::OrderRejected {
                     client_order_id,
                     reason,
                     ..
                 }) => panic!("{client_order_id} was rejected: {reason}"),
-                Ok(ServerMessage::OrderTriggered {
+                Ok(VenueMessage::OrderTriggered {
                     client_order_id, ..
                 }) => panic!("{client_order_id} triggered: a trigger of 1 is unreachable"),
-                Ok(ServerMessage::OrderAccepted {
+                Ok(VenueMessage::OrderAccepted {
                     client_order_id, ..
                 }) if client_order_id == "STOP-99" => return Ok::<_, String>(()),
                 _ => {}
@@ -2854,12 +2852,12 @@ async fn await_acceptance(socket: &mut WsSocket, client_order_id: &str) {
         let Message::Text(text) = message else {
             continue;
         };
-        match serde_json::from_str::<ServerMessage>(&text) {
-            Ok(ServerMessage::OrderAccepted {
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::OrderAccepted {
                 client_order_id: accepted,
                 ..
             }) if accepted == client_order_id => return,
-            Ok(ServerMessage::OrderRejected {
+            Ok(VenueMessage::OrderRejected {
                 client_order_id: rejected,
                 reason,
                 ..
@@ -2961,9 +2959,9 @@ fn a_paged_tape_window_equals_the_same_window_read_in_one_query() {
     // seated, and this is only a window bound rather than a claim about who
     // published what.
     let (_, clock_body) = http_get(&venue.http_base(), "/clock");
-    let clock: mogwai_protocol::ServerClock =
+    let clock: mogwai_protocol::VenueClock =
         serde_json::from_str(&clock_body).expect("the venue clock");
-    let end = clock.server_now_ns;
+    let end = clock.venue_now_ns;
     let start = venue.record.data_origin_ns;
 
     let (status, body) = http_get(
@@ -3014,15 +3012,15 @@ fn a_paged_tape_window_equals_the_same_window_read_in_one_query() {
     }
 }
 
-/// The named boat's own `server_now_ns`, so a test can wait on the venue's clock
+/// The named boat's own `venue_now_ns`, so a test can wait on the venue's clock
 /// instead of on the host's.
 fn venue_sim_now(base: &str, clock_path: &str) -> u64 {
     let (status, body) = http_get(base, clock_path);
     assert_eq!(status, 200, "the boat's clock answers: {body}");
-    let clock: mogwai_protocol::ServerClock =
+    let clock: mogwai_protocol::VenueClock =
         serde_json::from_str(&body).expect("the clock answer parses");
     assert!(clock.boat_clock, "the boot river carries a boat: {body}");
-    clock.server_now_ns
+    clock.venue_now_ns
 }
 
 /// One blocking `POST /control/divergence`, returning the status code.
@@ -3086,17 +3084,17 @@ async fn websocket_commands_cannot_overtake_each_other() {
         let Message::Text(text) = message else {
             continue;
         };
-        match serde_json::from_str::<ServerMessage>(&text) {
-            Ok(ServerMessage::OrderAccepted {
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::OrderAccepted {
                 client_order_id, ..
             }) if client_order_id == "ORDERED-1" => accepted = true,
-            Ok(ServerMessage::OrderCanceled {
+            Ok(VenueMessage::OrderCanceled {
                 client_order_id, ..
             }) if client_order_id == "ORDERED-1" => {
                 assert!(accepted, "cancel completed before its submit");
                 break;
             }
-            Ok(ServerMessage::OrderCancelRejected {
+            Ok(VenueMessage::OrderCancelRejected {
                 client_order_id,
                 reason,
                 ..
@@ -3174,13 +3172,13 @@ async fn websocket_command_work_is_bounded_without_an_act_delay() {
         match tokio::time::timeout_at(deadline, stream.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
                 answers += 1;
-                match serde_json::from_str::<ServerMessage>(&text) {
-                    Ok(ServerMessage::AdmissionRejected { reason, .. })
+                match serde_json::from_str::<VenueMessage>(&text) {
+                    Ok(VenueMessage::AdmissionRejected { reason, .. })
                         if reason == "venue command capacity exhausted" =>
                     {
                         break Ok(());
                     }
-                    Ok(ServerMessage::AdmissionRejected { reason, .. }) => {
+                    Ok(VenueMessage::AdmissionRejected { reason, .. }) => {
                         break Err(format!("a different bound refused first: {reason}"));
                     }
                     _ => {}
@@ -3365,7 +3363,7 @@ fn a_generator_arm_on_an_unboated_river_is_accepted() {
     // placed on this river will anchor its own `sim_epoch_ns` at. That is an
     // EXACT number this test already holds: the launcher's readiness record
     // reports it as `run_start_ns`. Bracketing it against
-    // `[data_origin_ns, server_now_ns]` instead, which is what this did, is far
+    // `[data_origin_ns, venue_now_ns]` instead, which is what this did, is far
     // looser than the claim - `run.started_ns` is `data_origin + warmup`, so a
     // regression arming at the raw data origin, or anywhere in the warmup span,
     // sat inside the bracket and passed.
@@ -3734,12 +3732,12 @@ fn clock_answers_per_boat_when_a_symbol_is_named() {
         &format!("/clock?symbol={}", venue.symbol),
     );
     assert_eq!(status, 200, "the boot river answers: {boated}");
-    let boated: mogwai_protocol::ServerClock = serde_json::from_str(&boated).unwrap();
+    let boated: mogwai_protocol::VenueClock = serde_json::from_str(&boated).unwrap();
     assert!(boated.boat_clock, "the boot river carries a boat");
 
     let (status, unboated) = http_get(&venue.http_base(), "/clock?symbol=MNQ");
     assert_eq!(status, 200, "an unboated river still answers: {unboated}");
-    let unboated: mogwai_protocol::ServerClock = serde_json::from_str(&unboated).unwrap();
+    let unboated: mogwai_protocol::VenueClock = serde_json::from_str(&unboated).unwrap();
     assert!(
         !unboated.boat_clock,
         "the venue-clock fallback is labelled as such"
@@ -3747,7 +3745,7 @@ fn clock_answers_per_boat_when_a_symbol_is_named() {
 
     let (status, unnamed) = http_get(&venue.http_base(), "/clock");
     assert_eq!(status, 200, "an unnamed clock still answers: {unnamed}");
-    let unnamed: mogwai_protocol::ServerClock = serde_json::from_str(&unnamed).unwrap();
+    let unnamed: mogwai_protocol::VenueClock = serde_json::from_str(&unnamed).unwrap();
     assert!(!unnamed.boat_clock, "no symbol names no boat");
 }
 
@@ -3791,9 +3789,9 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
         loop {
             let ended = match staying_reads.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    match serde_json::from_str::<ServerMessage>(&text) {
-                        Ok(ServerMessage::Trade(_) | ServerMessage::Quote(_)) => prints += 1,
-                        Ok(ServerMessage::OrderStatusSnapshot(snapshot))
+                    match serde_json::from_str::<VenueMessage>(&text) {
+                        Ok(VenueMessage::Trade(_) | VenueMessage::Quote(_)) => prints += 1,
+                        Ok(VenueMessage::OrderStatusSnapshot(snapshot))
                             if snapshot.request_id == "AFTER-EXIT" =>
                         {
                             answered += 1;
@@ -3849,7 +3847,7 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
     // than theoretical. Comparing tape stamps against the venue's clock fails
     // for a different reason: `fast.toml` is `speed = 0.0`, where delivery is
     // UNPACED while the boat clock is still built wall-rated, so `ts_event` runs
-    // far ahead of `server_now_ns` and says nothing about when a frame was
+    // far ahead of `venue_now_ns` and says nothing about when a frame was
     // served.
     staying_writer
         .send(Message::Text(

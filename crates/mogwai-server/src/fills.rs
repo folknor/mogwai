@@ -214,7 +214,7 @@ fn history_or_warn(
 ///
 /// The walk itself is `mogwai_data::scan_triggers`; this function is the
 /// composition - it builds the source, converts the engine's `PendingScan` to
-/// the tape-shaped `TriggerScan` the walk takes, and applies the server's
+/// the tape-shaped `TriggerScan` the walk takes, and applies the venue's
 /// drain budget. The conversion is one allocation per symbol per pass and is
 /// deliberate: `mogwai-data` does not depend on `mogwai-engine` (the dependency
 /// runs the other way, through this crate) and the engine's scan additionally

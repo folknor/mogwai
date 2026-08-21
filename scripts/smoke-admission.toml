@@ -10,5 +10,5 @@
 # a smoke step. Shrinking the budget changes how soon the venue refuses, not
 # what it does when it refuses, so the branch under test is the shipped one.
 speed = 1.0
-server_heartbeat_ms = 0
+venue_heartbeat_ms = 0
 exec_held_budget_bytes = 32768

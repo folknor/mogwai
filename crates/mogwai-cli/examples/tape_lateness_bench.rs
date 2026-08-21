@@ -13,7 +13,7 @@
 //! regression visible without pretending a threshold is portable.
 //!
 //! It measures the SHIPPED venue through the SHIPPED launcher, not an in-process
-//! server, because pacing is a property of the serving path as it is deployed -
+//! venue, because pacing is a property of the serving path as it is deployed -
 //! process boundary, socket and all.
 //!
 //! Argv: `[config] [sample_seconds]`. The default config is the accelerated
@@ -33,7 +33,7 @@ use std::{ffi::OsString, time::Duration};
 
 use futures_util::StreamExt;
 use mogwai_protocol::{
-    ServerMessage,
+    VenueMessage,
     launch::{LaunchSpec, StderrSink, launch},
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -87,7 +87,7 @@ async fn main() {
     .expect("the venue launches and reports ready");
 
     let http_base = venue.http_base();
-    let clock: mogwai_protocol::ServerClock = {
+    let clock: mogwai_protocol::VenueClock = {
         let body = http_get(&http_base, "/clock");
         serde_json::from_str(&body).expect("the venue clock parses")
     };
@@ -120,7 +120,7 @@ async fn main() {
             // to stop counting: ending the loop on one would silently truncate
             // the sample and understate the WORK SIZE.
             Ok(Some(Ok(Message::Text(text)))) => {
-                if let Ok(ServerMessage::Trade(trade)) = serde_json::from_str(&text) {
+                if let Ok(VenueMessage::Trade(trade)) = serde_json::from_str(&text) {
                     // When this tick was DUE on the wall, per the clock the venue
                     // reported at boot. Lateness is how far past that it actually
                     // arrived here, so it folds in the venue's pacing sleep, the

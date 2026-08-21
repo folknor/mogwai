@@ -3,7 +3,7 @@
 
 //! Worst-case SERIALIZED-byte bounds on what one `ClientMessage` can make the
 //! engine produce. It lives in the protocol crate because it is a statement
-//! about the wire format: the server reserves against it before it lets the
+//! about the wire format: the venue reserves against it before it lets the
 //! engine mutate, and the engine's own test suite checks the claim.
 //!
 //! A finite test matrix samples an upper bound, it cannot prove one, so every
@@ -20,7 +20,7 @@
 //!
 //! THE UPWARD ROUNDING HAS A CEILING ON THE PER-STRUCT BOUNDS, AND IT IS
 //! ENFORCED. Over-reservation is not free - a row constant is multiplied by a
-//! row count the server does not control and charged before the engine is
+//! row count the venue does not control and charged before the engine is
 //! allowed to mutate - so this module's tests bracket each of those from BOTH
 //! sides against the maximal fixture that DEFINES it: `bound >= actual` and
 //! `bound < 2 * actual`, through the `brackets` helper, which carries the
@@ -78,7 +78,7 @@ const ESC: usize = JSON_ESCAPE_FACTOR;
 /// The fixed addend covers ~190 bytes
 /// of key names, quotes, colons, commas and braces, four `Decimal`s at their
 /// widest serialized form (~33 bytes each, 132), a u64 at 20, a `Side`
-/// spelling at 5, and the server-generated `trade_id` and its key (~35) - about
+/// spelling at 5, and the venue-generated `trade_id` and its key (~35) - about
 /// 390, rounded to 576. Charged separately: four id-shaped strings, one symbol
 /// and one currency.
 const ORDER_FILLED_MAX_BYTES: usize =
@@ -299,8 +299,8 @@ mod tests {
     use super::*;
     use crate::{
         AccountId, AccountState, Balance, ClientMessage, FillSnapshot, LiquiditySide, OrderFilled,
-        OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, PostedMargin, ServerMessage,
-        Side, TimeInForce, WireOrderStatus,
+        OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, PostedMargin, Side, TimeInForce,
+        VenueMessage, WireOrderStatus,
     };
     use rust_decimal::Decimal;
 
@@ -455,7 +455,7 @@ mod tests {
 
     /// The row half of the module's claim, RUN rather than argued, on the model
     /// of `order_event_bound_covers_both_maximal_lifecycle_frames`. Each of
-    /// these five constants is multiplied by a row count the server has no
+    /// these five constants is multiplied by a row count the venue has no
     /// control over, so a derivation that drifted from its struct
     /// under-reserves by that count - and until this test existed, halving any
     /// of them left both crates green.
@@ -501,12 +501,12 @@ mod tests {
     /// and it is inside the constant.
     #[test]
     fn the_snapshot_envelope_bound_covers_an_empty_reply_of_either_kind() {
-        let orders = ServerMessage::OrderStatusSnapshot(OrderStatusSnapshot {
+        let orders = VenueMessage::OrderStatusSnapshot(OrderStatusSnapshot {
             request_id: worst(MAX_CLIENT_ID_LEN),
             orders: Vec::new(),
             ts_event: u64::MAX,
         });
-        let fills = ServerMessage::FillSnapshot(FillSnapshot {
+        let fills = VenueMessage::FillSnapshot(FillSnapshot {
             request_id: worst(MAX_CLIENT_ID_LEN),
             fills: Vec::new(),
             ts_event: u64::MAX,
@@ -526,15 +526,15 @@ mod tests {
     /// is what catches the array commas the per-row bounds above do not charge
     /// for.
     ///
-    /// BOTH FIXTURES ARE MEASURED AS `ServerMessage::AccountState`, never as a
-    /// bare `AccountState`. `ServerMessage` is `#[serde(tag = "type")]`, so the
-    /// frame the server reserves for carries about 21 further bytes of tag that
+    /// BOTH FIXTURES ARE MEASURED AS `VenueMessage::AccountState`, never as a
+    /// bare `AccountState`. `VenueMessage` is `#[serde(tag = "type")]`, so the
+    /// frame the venue reserves for carries about 21 further bytes of tag that
     /// a bare struct does not - and this term's fixed addend is tight enough
     /// now that under-measuring by 21 would hide a halving of it.
     #[test]
     fn account_state_bound_covers_an_empty_and_a_maximal_snapshot() {
         let account_id = AccountId::parse(&"Z".repeat(MAX_ACCOUNT_ID_LEN)).unwrap();
-        let empty = ServerMessage::AccountState(AccountState {
+        let empty = VenueMessage::AccountState(AccountState {
             account_id: account_id.clone(),
             balances: Vec::new(),
             positions: Vec::new(),
@@ -546,7 +546,7 @@ mod tests {
         brackets("empty account snapshot", bound, bytes);
 
         const ROWS: usize = 7;
-        let full = ServerMessage::AccountState(AccountState {
+        let full = VenueMessage::AccountState(AccountState {
             account_id,
             balances: vec![maximal_balance(); ROWS],
             positions: vec![maximal_position(); ROWS],
@@ -564,7 +564,7 @@ mod tests {
         brackets("maximal account snapshot", bound, bytes);
     }
 
-    /// The two query replies against the bound the server actually reserves
+    /// The two query replies against the bound the venue actually reserves
     /// with - envelope plus rows, at the row counts the `BookShape` states.
     /// This is the composition `every_row_bound_covers_its_maximal_row` and the
     /// envelope test each hold one half of.
@@ -583,7 +583,7 @@ mod tests {
             client_order_id: None,
             open_only: false,
         };
-        let reply = ServerMessage::OrderStatusSnapshot(OrderStatusSnapshot {
+        let reply = VenueMessage::OrderStatusSnapshot(OrderStatusSnapshot {
             request_id: worst(MAX_CLIENT_ID_LEN),
             orders: vec![maximal_status_row(); ROWS],
             ts_event: u64::MAX,
@@ -596,7 +596,7 @@ mod tests {
             request_id: worst(MAX_CLIENT_ID_LEN),
             client_order_id: None,
         };
-        let reply = ServerMessage::FillSnapshot(FillSnapshot {
+        let reply = VenueMessage::FillSnapshot(FillSnapshot {
             request_id: worst(MAX_CLIENT_ID_LEN),
             fills: vec![maximal_fill(); ROWS],
             ts_event: u64::MAX,
@@ -675,13 +675,13 @@ mod tests {
     fn order_event_bound_covers_both_maximal_lifecycle_frames() {
         use crate::{
             LiquiditySide, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN, MAX_SYMBOL_LEN,
-            OrderFilled, ServerMessage, Side,
+            OrderFilled, Side, VenueMessage,
         };
         use rust_decimal::Decimal;
 
         let worst = |len: usize| char::from(1).to_string().repeat(len);
 
-        let filled = ServerMessage::OrderFilled(OrderFilled {
+        let filled = VenueMessage::OrderFilled(OrderFilled {
             client_order_id: worst(MAX_CLIENT_ID_LEN),
             venue_order_id: worst(MAX_CLIENT_ID_LEN),
             trade_id: worst(MAX_CLIENT_ID_LEN),
@@ -696,7 +696,7 @@ mod tests {
             liquidity_side: LiquiditySide::Maker,
             ts_event: u64::MAX,
         });
-        let rejected = ServerMessage::OrderRejected {
+        let rejected = VenueMessage::OrderRejected {
             client_order_id: worst(MAX_CLIENT_ID_LEN),
             reason: worst(MAX_REASON_LEN),
             ts_event: u64::MAX,

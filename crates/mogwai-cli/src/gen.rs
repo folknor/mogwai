@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `mogwai gen` - runs the synthetic generator OFFLINE (no server, no sockets,
+//! `mogwai gen` - runs the synthetic generator OFFLINE (no venue, no sockets,
 //! no adapter) and writes its output as CSV, either raw trades or aggregated
 //! OHLCV bars, so the generated tape can be charted and inspected. Reuses the
-//! server's own generation plumbing (`InstrumentProfiles`, `fingerprint()`,
+//! venue's own generation plumbing (`InstrumentProfiles`, `fingerprint()`,
 //! `GeneratedSource`) and the shared bar-aggregation core
 //! (`mogwai_data::{BarAcc, fold_trade}`), so the PROCESS is the shipped one.
 //! The realization is not: a run draws or configures its own seed, so this CLI
@@ -78,7 +78,7 @@ pub(crate) struct GenArgs {
     #[arg(long, default_value = "BTCUSDT")]
     symbol: String,
     /// Resolve the instrument from an operator config TOML instead of a
-    /// symbol, through the server's REAL `Config::load` and profile
+    /// symbol, through the venue's REAL `Config::load` and profile
     /// construction - the same path a served config takes - so a scratch
     /// profile with candidate scalars is expressible without touching
     /// committed presets. The file must carry `[instrument]` defaults or a
@@ -101,7 +101,7 @@ pub(crate) struct GenArgs {
     #[arg(long)]
     trace_until: Option<u64>,
     /// Walk seed. Defaults to `DEFAULT_GEN_SEED`, the realism gate's seed. The
-    /// running server draws or configures its own run seed instead, so this
+    /// running venue draws or configures its own run seed instead, so this
     /// offline walk matches a served one only when given that run's tape seed.
     #[arg(long)]
     seed: Option<u64>,
@@ -118,8 +118,8 @@ pub(crate) struct GenArgs {
     #[arg(long)]
     regime: Option<String>,
     /// Read a full HavocSpec from this JSON file and apply its `data` market
-    /// regime. The whole spec is validated (a file the server would reject is
-    /// rejected here), but the client, conn, and server surfaces do not affect an
+    /// regime. The whole spec is validated (a file the venue would reject is
+    /// rejected here), but the client, conn, and venue surfaces do not affect an
     /// offline tape dump and are noted on stderr. Mutually exclusive with
     /// --regime.
     #[arg(long, value_name = "PATH", conflicts_with = "regime")]
@@ -480,8 +480,8 @@ fn resolve_havoc_regime(text: &str) -> anyhow::Result<Option<MarketRegime>> {
     validate_client_havoc(&spec.client)
         .map_err(|e| anyhow::anyhow!("invalid client havoc: {e}"))?;
     validate_conn_havoc(&spec.conn).map_err(|e| anyhow::anyhow!("invalid conn havoc: {e}"))?;
-    for div in &spec.server {
-        validate_divergence(div).map_err(|e| anyhow::anyhow!("invalid server divergence: {e}"))?;
+    for div in &spec.venue {
+        validate_divergence(div).map_err(|e| anyhow::anyhow!("invalid venue divergence: {e}"))?;
     }
     if let Some(regime) = &spec.data {
         validate_market_regime(regime).map_err(|e| anyhow::anyhow!("invalid regime: {e}"))?;
@@ -489,7 +489,7 @@ fn resolve_havoc_regime(text: &str) -> anyhow::Result<Option<MarketRegime>> {
     if havoc_has_offline_inapplicable_surfaces(&spec) {
         eprintln!(
             "note: --havoc applies only the data (market regime) surface offline; \
-             the client, conn, and server surfaces are ignored"
+             the client, conn, and venue surfaces are ignored"
         );
     }
     Ok(spec.data)
@@ -499,7 +499,7 @@ fn resolve_havoc_regime(text: &str) -> anyhow::Result<Option<MarketRegime>> {
 fn havoc_has_offline_inapplicable_surfaces(spec: &HavocSpec) -> bool {
     spec.client != ClientHavoc::default()
         || spec.conn != ConnHavoc::default()
-        || !spec.server.is_empty()
+        || !spec.venue.is_empty()
 }
 
 /// Resolve profile + seed + start-price override + regime and build the walk
@@ -539,7 +539,7 @@ fn build_source(
 }
 
 /// The instrument to generate: `--config` resolves an operator config through
-/// the server's real loading path; otherwise `--symbol` resolves a built-in
+/// the venue's real loading path; otherwise `--symbol` resolves a built-in
 /// venue symbol first, then an embedded preset of that name.
 fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
     if let Some(path) = &args.config {
@@ -1269,13 +1269,13 @@ mod tests {
         };
         assert!(havoc_has_offline_inapplicable_surfaces(&client_armed));
 
-        let server_armed = HavocSpec {
-            server: vec![
+        let venue_armed = HavocSpec {
+            venue: vec![
                 serde_json::from_str(r#"{"type":"DuplicateNextFill"}"#).expect("divergence"),
             ],
             ..Default::default()
         };
-        assert!(havoc_has_offline_inapplicable_surfaces(&server_armed));
+        assert!(havoc_has_offline_inapplicable_surfaces(&venue_armed));
 
         let conn_armed = HavocSpec {
             conn: ConnHavoc {

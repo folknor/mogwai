@@ -16,7 +16,7 @@
 //! Depends on `mogwai-data`/`mogwai-protocol` READ-ONLY for the generated
 //! measurement side, and on `mogwai-server` for exactly one thing: the
 //! `InstrumentProfile` a fit walk runs against, resolved through the
-//! server's own `Config::load` the way `mnq_fit.py`'s scratch configs were.
+//! venue's own `Config::load` the way `mnq_fit.py`'s scratch configs were.
 //! It never depends on `mogwai-engine`.
 //!
 //! THE PYTHON REFERENCE HAS RETIRED. `analysis/mnq_fit.py` and the seven other

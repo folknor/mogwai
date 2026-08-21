@@ -357,7 +357,7 @@ a 24/7 symbol rests like a Gtc - the honest answer, since inventing midnight UTC
 would expire orders at a time that market has never heard of.
 
 AN EXPIRY IS NOT A CANCEL, and the wire says so: expiry ends an order with
-`ServerMessage::OrderExpired` and a terminal `Expired` status, never
+`VenueMessage::OrderExpired` and a terminal `Expired` status, never
 `OrderCanceled`. A cancel is an actor's decision - a client's, or the venue's
 under havoc or a risk breach - while an expiry is the clock reaching a lifetime
 the client itself stated at submit. A host reconciling the two acts on them
@@ -782,7 +782,7 @@ placement, and it does not run past six hours, so it is evidence about the
 crypto generator's core draw rather than a blanket identity. That is consistent
 with each bump's own scope: 13 is a fill-band key and 14 a calendar crossing,
 neither of which the crypto preset's generation reaches, and 17's per-symbol
-tape root keys the SERVER's rivers while leaving offline generation seeds
+tape root keys the venue's rivers while leaving offline generation seeds
 untouched. The
 version constant is a process identity that advances whenever a change COULD
 move a tape; it is not a claim that every tape moved.
@@ -953,7 +953,7 @@ behind the venue clock by construction, so a client stamping its `end` from
 would fail every honest warmup fetch. A client that needs to know where the
 tail actually is reads `/clock?symbol=`.
 
-The protocol crate owns every JSON type shared by server and adapter. The
+The protocol crate owns every JSON type shared by venue and adapter. The
 adapter uses WebSocket streaming only for market data and execution; `/trades`
 and `/quotes` remain request endpoints, which is how history and warmup are
 fetched. Each adapter client names its river with an optional `symbol` in its
@@ -1071,7 +1071,8 @@ Python's `--config` scratch walks did), but `mogwai-server` depends on none of
 it - there is no cycle, and `mogwai-lab` stays out of the tape-generation path
 `TAPE_PROTOCOL_VERSION` scopes, the same reason `measure12a.rs` was
 consumer-only inside `mogwai-server` before the rewrite moved it. `mogwai-cli`
-depends on `mogwai-lab` for the pieces that need no server preset resolution
+depends on `mogwai-lab` for the pieces that need no `mogwai-server` preset
+resolution
 (preflight, cache, most of measure/fit/synth) and calls straight into
 `mogwai-server` for the generated side of measurement.
 

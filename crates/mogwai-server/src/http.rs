@@ -19,8 +19,8 @@ use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
     AccountState, AdmissionSubject, ClientMessage, CommandClass, DEFAULT_HISTORY_LIMIT,
-    InstrumentDef, MAX_HISTORY_LIMIT, OrderType, QuoteTick, ServerClock, ServerMessage, SimClock,
-    TradeTick, control::Divergence, trades_through, truncate_client_id, truncate_reason,
+    InstrumentDef, MAX_HISTORY_LIMIT, OrderType, QuoteTick, SimClock, TradeTick, VenueClock,
+    VenueMessage, control::Divergence, trades_through, truncate_client_id, truncate_reason,
     validate_client_order_id, validate_divergence, validate_modify_order, validate_request_id,
     validate_submit_order,
 };
@@ -87,24 +87,24 @@ fn arm_target(account: Option<&str>) -> Result<Option<&str>, String> {
 pub(crate) enum OrderOutcome {
     /// The engine processed the command and produced these events.
     Produced {
-        events: Vec<ServerMessage>,
+        events: Vec<VenueMessage>,
         reservation: Reservation,
     },
     /// The protocol boundary refused it before the engine ever saw it. These
     /// are engine-free frames and are charged like any other output.
     Refused {
-        events: Vec<ServerMessage>,
+        events: Vec<VenueMessage>,
         reservation: Reservation,
     },
     /// Admission refused: outbound capacity could not cover the worst case, so
     /// the engine was never asked. Carries the frame for the PRIORITY lane.
-    NotAdmitted(ServerMessage),
+    NotAdmitted(VenueMessage),
     /// A malformed request with no order-shaped frame to answer it (a query
     /// whose `request_id` is over-length names no order), so the answer is the
     /// untargeted diagnostic. Also a priority-lane frame, but deliberately NOT
     /// an `AdmissionRejected`: conflating malformed with over-capacity would
     /// make an admission refusal unreadable as a load signal.
-    Diagnostic(ServerMessage),
+    Diagnostic(VenueMessage),
 }
 
 /// Name what a refusal refused, so the consumer can translate it per command -
@@ -218,7 +218,7 @@ pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
 /// and owes every member its own rejection. Every other command answers with
 /// exactly one, which is what `boundary_frame_count` states and what the
 /// reservation is sized from.
-fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<ServerMessage> {
+fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<VenueMessage> {
     let note = |id: &str| {
         if id.len() > mogwai_protocol::MAX_CLIENT_ID_LEN {
             format!(
@@ -232,21 +232,21 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<ServerMes
     match cmd {
         ClientMessage::ModifyOrder {
             client_order_id, ..
-        } => vec![ServerMessage::OrderModifyRejected {
+        } => vec![VenueMessage::OrderModifyRejected {
             client_order_id: truncate_client_id(client_order_id.clone()),
             venue_order_id: None,
             reason: note(client_order_id),
             ts_event: ts,
         }],
         ClientMessage::CancelOrder { client_order_id } => {
-            vec![ServerMessage::OrderCancelRejected {
+            vec![VenueMessage::OrderCancelRejected {
                 client_order_id: truncate_client_id(client_order_id.clone()),
                 venue_order_id: None,
                 reason: note(client_order_id),
                 ts_event: ts,
             }]
         }
-        ClientMessage::SubmitOrder(order) => vec![ServerMessage::OrderRejected {
+        ClientMessage::SubmitOrder(order) => vec![VenueMessage::OrderRejected {
             client_order_id: truncate_client_id(order.client_order_id.clone()),
             reason: note(&order.client_order_id),
             ts_event: ts,
@@ -258,7 +258,7 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<ServerMes
         // through to the untargeted diagnostic like a malformed query.
         ClientMessage::SubmitOrderGroup { orders } if !orders.is_empty() => orders
             .iter()
-            .map(|order| ServerMessage::OrderRejected {
+            .map(|order| VenueMessage::OrderRejected {
                 client_order_id: truncate_client_id(order.client_order_id.clone()),
                 reason: note(&order.client_order_id),
                 ts_event: ts,
@@ -266,7 +266,7 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<ServerMes
             .collect(),
         // Queries have no order-shaped rejection frame; the caller answers
         // these with the untargeted diagnostic instead.
-        _ => vec![ServerMessage::ProtocolError {
+        _ => vec![VenueMessage::ProtocolError {
             reason: reason.to_string(),
             ts_event: ts,
         }],
@@ -296,16 +296,11 @@ fn submitted_orders(cmd: &ClientMessage) -> &[mogwai_protocol::SubmitOrder] {
 /// guards rather than inside the engine. Each frame names the member it is
 /// addressed to, and a group's frames say which member was actually at fault so
 /// a client is not left guessing which leg to fix.
-fn refuse_submitted(
-    cmd: &ClientMessage,
-    blamed: &str,
-    reason: &str,
-    ts: u64,
-) -> Vec<ServerMessage> {
+fn refuse_submitted(cmd: &ClientMessage, blamed: &str, reason: &str, ts: u64) -> Vec<VenueMessage> {
     let orders = submitted_orders(cmd);
     orders
         .iter()
-        .map(|order| ServerMessage::OrderRejected {
+        .map(|order| VenueMessage::OrderRejected {
             client_order_id: order.client_order_id.clone(),
             reason: truncate_reason(if orders.len() > 1 && order.client_order_id != blamed {
                 format!("order group rejected whole: {blamed} was refused because {reason}")
@@ -331,7 +326,7 @@ fn refuse_all(
     ts: u64,
 ) -> OrderOutcome {
     let Some(reservation) = lanes.try_reserve_boundary_frames(submitted_orders(cmd).len()) else {
-        return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+        return OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
             subject: admission_subject(cmd),
             reason: "execution output admission budget exhausted".into(),
             retryable: true,
@@ -382,17 +377,15 @@ fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Op
     let reason = boundary_error(order_cmd)?;
     let Some(reservation) = lanes.try_reserve_boundary_frames(boundary_frame_count(order_cmd))
     else {
-        return Some(OrderOutcome::NotAdmitted(
-            ServerMessage::AdmissionRejected {
-                subject: admission_subject(order_cmd),
-                reason: "execution output admission budget exhausted".into(),
-                retryable: true,
-                ts_event: ts,
-            },
-        ));
+        return Some(OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
+            subject: admission_subject(order_cmd),
+            reason: "execution output admission budget exhausted".into(),
+            retryable: true,
+            ts_event: ts,
+        }));
     };
     let mut events = boundary_refusal(order_cmd, reason, ts);
-    if events.len() == 1 && matches!(events[0], ServerMessage::ProtocolError { .. }) {
+    if events.len() == 1 && matches!(events[0], VenueMessage::ProtocolError { .. }) {
         // The reservation is not needed after all: nothing goes on the
         // held lane, so drop it and give the bytes straight back.
         drop(reservation);
@@ -664,7 +657,7 @@ pub(crate) async fn process_order_cmd(
     let Some(reservation) = lanes.reserve(&order_cmd, &shape) else {
         // The engine has NOT been asked to process anything, so nothing
         // mutated: the refusal is the whole effect of this command.
-        return OrderOutcome::NotAdmitted(ServerMessage::AdmissionRejected {
+        return OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
             subject: admission_subject(&order_cmd),
             reason: "execution output admission budget exhausted".into(),
             retryable: true,
@@ -930,7 +923,7 @@ pub(crate) struct RiverNow {
     /// The clock that instant lives on - the boat's when boated, the venue's
     /// otherwise. `/clock` renders this whole value.
     pub(crate) sim: SimClock,
-    /// True when `sim` is a boat's. Renders as `ServerClock::boat_clock`.
+    /// True when `sim` is a boat's. Renders as `VenueClock::boat_clock`.
     pub(crate) from_boat: bool,
 }
 
@@ -974,13 +967,13 @@ pub(crate) async fn arm_divergence(
     tracing::info!(?div, "arming divergence");
     // Validate at the arming boundary so an out-of-range knob (e.g. a
     // `PartialFillNext.fraction` outside `(0, 1]`) is rejected before it is
-    // stored into server state or armed on the engine, rather than surfacing
+    // stored into venue state or armed on the engine, rather than surfacing
     // as a degenerate fill downstream.
     match div {
         Divergence::DelayAcks { ms } => {
             run.arm(target, VenueArm::DelayAcks { ms }).await;
         }
-        // STORE-not-merge, like every other server-owned window: one arm
+        // STORE-not-merge, like every other venue-owned window: one arm
         // REPLACES all six values, so an omitted field is armed as zero rather
         // than left standing from an earlier arm.
         Divergence::CommandLatency {
@@ -1192,10 +1185,10 @@ pub(crate) async fn arm_divergence(
                 tracing::warn!(%client_order_id, reason, "refusing silent cancel");
                 return (StatusCode::NOT_FOUND, reason);
             }
-            tracing::info!(%client_order_id, "silently canceled resting order server-side");
+            tracing::info!(%client_order_id, "silently canceled resting order venue-side");
         }
         Divergence::ClearDivergences => {
-            // Lift both server-owned temporal windows. `None` is the cleared
+            // Lift both venue-owned temporal windows. `None` is the cleared
             // state and is closed on every reader clock. There is no backlog
             // to replay because gated frames are dropped.
             // The generator half is decided BEFORE anything is lifted: a
@@ -1243,11 +1236,11 @@ pub(crate) async fn arm_divergence(
                 state.rivers.clear_flow_surge(&symbol);
             }
         }
-        // Server-ownership contract (pins B.4 / E.11): the EIGHT variants the
+        // Venue-ownership contract (pins B.4 / E.11): the EIGHT variants the
         // arms above intercept - `DelayAcks`, `CommandLatency`, `GoDark`,
         // `StallData`, `FlowSurge`, `FeeSurcharge`, `ClearDivergences` and
-        // `CancelOpenOrderSilently` - are server-owned controls with no
-        // synchronous engine-side trigger. The server owns them and must NEVER
+        // `CancelOpenOrderSilently` - are venue-owned controls with no
+        // synchronous engine-side trigger. The venue owns them and must NEVER
         // forward them to `engine.arm()`, which would drop them on the floor.
         //
         // THIS ARM IS ENUMERATED RATHER THAN A CATCH-ALL, and that is the whole
@@ -1260,7 +1253,7 @@ pub(crate) async fn arm_divergence(
         //
         // The five names below are the same engine-armed set `Engine::arm`
         // enumerates in `mogwai-engine/src/divergence.rs`; that match is
-        // exhaustive too, so a variant classified server-owned there and
+        // exhaustive too, so a variant classified venue-owned there and
         // forwarded here would fail this crate's build rather than being
         // queued as a dead entry.
         // TERMINAL, so it is handled before the engine-armed set and never
@@ -1369,7 +1362,7 @@ pub(crate) struct AccountSnapshot {
     risk: mogwai_protocol::risk::RiskState,
 }
 
-/// Which axis a timestamp lives on. The sibling of `ServerClock::boat_clock`,
+/// Which axis a timestamp lives on. The sibling of `VenueClock::boat_clock`,
 /// and the reason a venue stamp is honest rather than a look-ahead in disguise.
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -1614,17 +1607,17 @@ pub(crate) struct ClockQuery {
 pub(crate) async fn clock(
     Query(query): Query<ClockQuery>,
     State(state): State<AppState>,
-) -> Json<ServerClock> {
+) -> Json<VenueClock> {
     // Publish the tape boundary alongside the affine map so a client can guard
     // its own warmup against `data_origin_ns` rather than issuing a doomed
-    // off-tape fetch. `server_now_ns` is sampled here so the client gets sim-now
+    // off-tape fetch. `venue_now_ns` is sampled here so the client gets sim-now
     // and the floor from one round trip, without reading its own (skewable) wall
     // clock. `data_origin_ns` is the fixed floor; the horizon is echoed so
     // the client can report the floor in its own terms.
     //
     // `?symbol=` answers for that river's lead boat when more than one
     // cadence is seated; `?speed=` names one.
-    // For a boat, `server_now_ns` is the sim instant of the last tick it
+    // For a boat, `venue_now_ns` is the sim instant of the last tick it
     // PUBLISHED rather than the affine map evaluated at the wall: a boat placed
     // mid-run is deliberately behind its own clock's projection, and a client
     // pacing against a projection the feed has not reached would ask for water
@@ -1634,9 +1627,9 @@ pub(crate) async fn clock(
     } else {
         RiverNow::venue(state.venue_sim())
     };
-    Json(ServerClock {
+    Json(VenueClock {
         sim: now.sim,
-        server_now_ns: now.ns,
+        venue_now_ns: now.ns,
         data_origin_ns: state.run.data_origin_ns(),
         warmup_ns: state.run.warmup_ns,
         boat_clock: now.from_boat,
@@ -2109,7 +2102,7 @@ const MAX_ECHOED_SYMBOL: usize = 64;
 /// below impossible to write without spawning a tape.
 ///
 /// The charset rule is stated on the DECODED value, which is the whole of it
-/// server-side: `axum::extract::Query` percent-decodes before serde sees the
+/// venue-side: `axum::extract::Query` percent-decodes before serde sees the
 /// field, so `?symbol=%4DNQ` arrives as `MNQ` and passes, exactly as it should.
 /// The needs-no-encoding framing belongs to the client-side caller of
 /// `validate_wire_symbol`, which builds a URL by concatenation.
@@ -2858,7 +2851,7 @@ mod calendar_tests {
         let ids: Vec<&str> = frames
             .iter()
             .filter_map(|frame| match frame {
-                mogwai_protocol::ServerMessage::OrderRejected {
+                mogwai_protocol::VenueMessage::OrderRejected {
                     client_order_id, ..
                 } => Some(client_order_id.as_str()),
                 _ => None,
