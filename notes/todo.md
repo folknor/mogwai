@@ -188,7 +188,7 @@ WHAT BROADARROW OWES: `POST /accounts` at run-prep preflight, so each worker
 opens its own ledger with its own balances before the node is built. Nothing here
 blocks it.
 
-**ATOMIC GROUP ADMISSION.** `ClientMessage::SubmitOrderGroup` landed, which is
+**ATOMIC GROUP ADMISSION.** `Command::SubmitOrderGroup` landed, which is
 the ask's preferred option 1 rather than the deferred-activation fallback. The
 two smaller asks landed with it: `apply_linkage_after_fill`'s silent skip past an
 absent sibling is now a `debug` line naming the hazard, and a linked bare
@@ -414,7 +414,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   Restated 2026-08-20; the entry used to ask whether an eviction-reconnect
   should RETIRE the book it takes over, and that question is withdrawn as
   unanswerable. It needed the venue to tell a returning client from a stranger
-  presenting the same id, and it cannot: `has_client_on` and `evict_account`
+  presenting the same id, and it cannot: `has_matching_identity_on` and `evict_account`
   compare a session only against the LIVE lanes, an eviction-reconnect happens
   across a gap where the incumbent's lane is already gone, and a session id is
   self-asserted with no auth behind it. `Run::evict_account`'s own doc says the
@@ -503,6 +503,10 @@ group by any other route has no API for it, and none is owed until one is wanted
   Client entry collapses from a three-way disambiguation to one sentence, and
   the same test applies to every future entry: if it needs "in one sense...
   in another", the vocabulary owes a rename, not a longer entry.
+  THE CLIENT CASE LANDED 2026-08-21 as round 3 of the arc, and the sense count
+  turned out to be eight rather than three, which is why it was executed as a
+  classification and not as a substitution. The record is
+  `notes/glossary-reconciliation.md`.
   TWO MORE STANDING CASES, agreed 2026-08-20 in the same review.
   CONNECTION is a synonym cluster: the codebase says connection, socket, lane
   and leg for one thing or its immediate neighbours - "socket" in most prose

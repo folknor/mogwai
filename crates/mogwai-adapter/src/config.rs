@@ -4,7 +4,9 @@
 use std::any::Any;
 
 use anyhow::ensure;
-use mogwai_protocol::{HavocSpec, validate_client_havoc, validate_conn_havoc, validate_divergence};
+use mogwai_protocol::{
+    HavocSpec, validate_conn_havoc, validate_divergence, validate_inbound_havoc,
+};
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
     enums::{AccountType, OmsType},
@@ -18,19 +20,18 @@ use serde::{Deserialize, Serialize};
 /// told about accounts serves exactly the ledger it always did.
 pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 
-/// This PROCESS's client identity, presented on `/ws?session=` by every client
-/// this adapter builds.
+/// This process's presented identity, carried on `/ws?session=` by every
+/// adapter object built in the process.
 ///
-/// The venue seats one client per ledger and evicts a second one, because from
-/// its side a socket presenting an already-seated account is indistinguishable
-/// from that client reconnecting. A nautilus host holds TWO sockets on one
-/// ledger by construction - the data client and the execution client - so
+/// The venue compares only the presented identity when an already-seated
+/// account is claimed. A nautilus host holds two sockets on one ledger by
+/// construction - the data client and the execution client - so
 /// without a shared identity the second dial would evict the first and the host
 /// would disconnect itself before it ever traded.
 ///
-/// PER PROCESS is the right granularity, and it is the whole design. One worker
-/// process is one client: its two legs share this value, and so does every
-/// redial either of them makes, so neither can evict the other. A RESTARTED
+/// Per process is the right granularity here. One worker's two legs share this
+/// value, and so does every redial either of them makes, so neither can evict
+/// the other. A restarted
 /// worker gets a fresh one, which is exactly when eviction is wanted - the
 /// venue's frozen ledger is being reclaimed by a genuinely new process, and the
 /// stale sockets of the dead one must go.
@@ -73,8 +74,8 @@ pub struct MogwaiDataClientConfig {
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
-    /// The CLIENT identity presented on `/ws?session=`, so this process's
-    /// several sockets on one ledger are not read as several clients. Defaults
+    /// The identity presented on `/ws?session=`, so this process's several
+    /// sockets on one ledger can coexist. Defaults
     /// to [`process_session_id`] and should stay there; see it for why. `None`
     /// sends no session and takes the venue's always-evict reading, which is
     /// what a host wants only if it holds exactly one socket per ledger.
@@ -174,10 +175,10 @@ impl MogwaiDataClientConfig {
         self
     }
 
-    /// Override the client identity presented on `/ws?session=`. The default is
+    /// Override the identity presented on `/ws?session=`. The default is
     /// this process's, which is what a host wants; set it only to make two
-    /// clients in ONE process deliberately distinct clients of one ledger -
-    /// which is a request to have them evict each other - or to `None` to take
+    /// adapter objects in one process deliberately present distinct identities,
+    /// which makes their connections evict each other, or to `None` to take
     /// the venue's always-evict reading.
     #[must_use]
     pub fn with_session(mut self, session: Option<String>) -> Self {
@@ -261,8 +262,8 @@ pub struct MogwaiExecClientConfig {
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
-    /// The CLIENT identity presented on `/ws?session=`. See
-    /// [`MogwaiDataClientConfig::session`]; both legs must carry the SAME one,
+    /// The identity presented on `/ws?session=`. See
+    /// [`MogwaiDataClientConfig::session`]; both legs must carry the same one,
     /// which is what stops them evicting each other off their shared ledger.
     #[serde(default = "default_session")]
     pub session: Option<String>,
@@ -342,7 +343,7 @@ impl MogwaiExecClientConfig {
         self
     }
 
-    /// Override the client identity presented on `/ws?session=`. See
+    /// Override the identity presented on `/ws?session=`. See
     /// [`MogwaiDataClientConfig::with_session`]; the two legs of one host must
     /// agree, so overriding one means overriding both.
     #[must_use]
@@ -546,7 +547,7 @@ fn http_base_url(base_url: &str) -> String {
     }
 }
 
-/// Runs the full havoc validation both adapter configs share: the client-side
+/// Runs the full havoc validation both adapter configs share: the inbound
 /// probabilities, the connection-lifecycle knobs, the optional market regime,
 /// and every armed venue `Divergence`. Single-sourcing this here keeps the
 /// two configs from drifting and means an out-of-range knob (an unbounded
@@ -554,7 +555,7 @@ fn http_base_url(base_url: &str) -> String {
 /// rejected at config time rather than detonating later on the live path.
 fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
     if let Some(havoc) = havoc {
-        validate_client_havoc(&havoc.client).map_err(anyhow::Error::msg)?;
+        validate_inbound_havoc(&havoc.inbound).map_err(anyhow::Error::msg)?;
         validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
         for divergence in &havoc.venue {
             validate_divergence(divergence).map_err(anyhow::Error::msg)?;
@@ -643,7 +644,7 @@ mod tests {
         assert_eq!(exec.ws_url(), "ws://127.0.0.1:1/ws?account=CLAUDETTE-07");
     }
 
-    /// The two legs of one host present ONE client identity, which is what
+    /// The two legs of one host present one identity, which is what
     /// stops the venue reading the second dial as a stranger claiming the
     /// ledger and evicting the first.
     #[test]

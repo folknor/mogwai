@@ -338,7 +338,7 @@ async fn a_symbol_no_preset_covers_is_served_under_the_default_bundle() {
 
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn binary_client_frames_receive_a_protocol_error() {
+async fn binary_command_frames_receive_a_protocol_error() {
     let venue = spawn(&["--config", &fast_config()]);
     let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
@@ -356,7 +356,7 @@ async fn binary_client_frames_receive_a_protocol_error() {
             && let Ok(VenueMessage::ProtocolError { reason, .. }) =
                 serde_json::from_str::<VenueMessage>(&text)
         {
-            assert!(reason.contains("binary client frames are unsupported"));
+            assert!(reason.contains("binary command frames are unsupported"));
             return;
         }
     }
@@ -530,7 +530,7 @@ fn the_full_warmup_span_is_servable_at_readiness() {
 }
 
 /// L5: a connection is attached to the run's one tape on upgrade. Nothing is
-/// sent by the client, and there is no subscribe frame left to send.
+/// sent by the consumer, and there is no subscribe frame left to send.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_connection_receives_the_tape_without_asking() {
@@ -608,7 +608,7 @@ async fn a_slow_connection_is_dropped_with_feed_lagged() {
     // just enough for the venue to tell it what it missed.
     // The slow reading is only needed to INDUCE the lag: a handful of 50 ms
     // stalls against an unpaced raw-fill tape overruns an 8-frame ring many
-    // times over. After that the client drains flat out, because the report it
+    // times over. After that the consumer drains flat out, because the report it
     // is waiting for sits BEHIND every frame the venue queued in the socket
     // before it noticed - and at ~8.5 raw fills per parent event that is far
     // more frames than a one-per-50-ms reader gets through inside the deadline.
@@ -676,7 +676,7 @@ async fn a_slow_connection_is_dropped_with_feed_lagged() {
     assert_eq!(
         close_code,
         Some(1011),
-        "losing promised market data is a VENUE fault, not a client refusal"
+        "losing promised market data is a VENUE fault, not a consumer refusal"
     );
 }
 
@@ -825,14 +825,14 @@ async fn two_accounts_on_one_venue_do_not_share_a_ledger() {
     }
 }
 
-/// A client names its own opening balance, and that is the ledger it trades.
+/// A consumer names its own opening balance, and that is the ledger it trades.
 ///
 /// The venue's `[balances]` is what an UNNAMED account gets; it stops being the
 /// balance of the one ledger. Two experiments sized differently are the case
 /// this exists for, and they have to be runnable on one venue.
 #[test]
 #[ignore = "binds a loopback listener"]
-fn an_account_opens_on_the_balance_its_client_named() {
+fn an_account_opens_on_the_balance_its_consumer_named() {
     let venue = spawn(&["--config", &fast_config()]);
     let (status, body) = http_post_json(
         &venue.http_base(),
@@ -847,7 +847,7 @@ fn an_account_opens_on_the_balance_its_client_named() {
     assert_eq!(named["account_id"], "WYRD-100");
     assert!(
         body.contains("250000"),
-        "the client's opening balance is the ledger's: {body}"
+        "the consumer's opening balance is the ledger's: {body}"
     );
 
     // The default account is untouched by it, which is what makes the two
@@ -861,13 +861,13 @@ fn an_account_opens_on_the_balance_its_client_named() {
     );
     assert_ne!(
         default["balances"], named["balances"],
-        "a client-named balance leaked into the default account: {body}"
+        "a consumer-named balance leaked into the default account: {body}"
     );
 }
 
 /// Re-opening a live account is refused rather than resetting it. An account
 /// outlives its connections, so the request is ambiguous between a fresh
-/// experiment and a reconnecting client re-sending its config - and the second
+/// experiment and a reconnecting consumer re-sending its config - and the second
 /// reading would silently wipe a position book.
 #[test]
 #[ignore = "binds a loopback listener"]
@@ -1088,7 +1088,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
 /// Both halves matter together. Eviction is what keeps an account on one river
 /// with one reader: two sockets on one id would be one ledger written from two
 /// places. Resuming is what makes a reconnect a continuation - the venue cannot
-/// tell a returning client from a stranger presenting the id, so handing the
+/// tell a returning consumer from a stranger presenting the id, so handing the
 /// ledger over is the only behaviour that lets a killed worker come back to its
 /// own position.
 #[tokio::test]
@@ -1191,11 +1191,11 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
         "the close says why: {frame:?}"
     );
     // The half of the contract the reason TEXT cannot state. WS 1000 is also
-    // what a completed run and an elapsed duration close with, so a client can
+    // what a completed run and an elapsed duration close with, so a consumer can
     // only tell an eviction apart by the protocol prefix - and this is the only
     // place the venue's real bytes meet the classifier that reads them. An
     // assertion on the prose alone passes whether or not the prefix is there,
-    // which would leave the whole contract pinned on the client's side.
+    // which would leave the whole contract pinned on the consumer's side.
     assert!(
         frame
             .reason
@@ -1218,7 +1218,7 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
     );
 }
 
-/// A client asks for a policy BY NAME rather than restating it, and a name
+/// A consumer asks for a policy BY NAME rather than restating it, and a name
 /// nobody has is an error rather than a silent fall to unpoliced.
 ///
 /// The second half is the one that matters: a run that believes it is enforced
@@ -1563,10 +1563,10 @@ async fn a_second_speed_on_the_same_account_is_refused() {
 /// A REFUSED upgrade does not evict the incumbent it was refused instead of
 /// replacing.
 ///
-/// `/ws` used to seat - which closes every socket of the incumbent client and,
+/// `/ws` used to seat - which closes every socket of the incumbent session and,
 /// under the reset knob, discards its ledger - and only then run its five
 /// refusals, so `?account=X&speed=NaN` was a one-request, unauthenticated way
-/// to disconnect a live client while never connecting at all.
+/// to disconnect a live consumer while never connecting at all.
 ///
 /// TWO PHASES, AND THE SECOND IS THE POINT. The refusal path and the admission
 /// path differ in exactly one character of the query string, so the incumbent
@@ -1643,7 +1643,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
                 Ok(Some(Ok(Message::Text(_)))) => break,
                 Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => panic!(
                     "the venue ended the incumbent's socket on an upgrade it REFUSED, so a 400 \
-                     disconnects a live client"
+                     disconnects a live consumer"
                 ),
                 Ok(Some(Ok(_))) => {}
             }
@@ -1703,7 +1703,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
 ///
 /// WHAT IT STILL DOES NOT REACH, stated because a bite-check went looking. The
 /// case the admission count was ADDED for is the upgrade abandoned before
-/// `handle_socket` ever runs - no lane bound, no lane released - and no client
+/// `handle_socket` ever runs - no lane bound, no lane released - and no consumer
 /// behaviour reaches it from outside: writing the request and resetting the
 /// connection at once still loses to the venue, which has read the request,
 /// written the 101 and started the handler by the time the reset lands.
@@ -1791,7 +1791,7 @@ async fn a_seat_is_released_when_its_socket_goes_even_though_the_account_stays()
     drop(leaving);
 
     // Poll: the close is asynchronous, and the seat is released as the
-    // session unwinds rather than as the client's socket drops.
+    // session unwinds rather than as the consumer's socket drops.
     let deadline = common::deadline(Duration::from_secs(10));
     loop {
         let reconnect = tokio_tungstenite::connect_async(format!(
@@ -1819,7 +1819,7 @@ async fn a_seat_is_released_when_its_socket_goes_even_though_the_account_stays()
 /// naming the currency.
 ///
 /// The venue's `[balances]` is only what an unnamed account opens with, so a
-/// client that named its own funding cannot be checked at boot - the venue has
+/// consumer that named its own funding cannot be checked at boot - the venue has
 /// no way to know then what it will say. It is still knowable with no order at
 /// all, though, so it stays a configuration error rather than becoming a
 /// fill-time funds rejection: collapsing the two would make a typo look like a
@@ -1983,9 +1983,9 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
 ///
 /// This is the shape the default account exists to serve, and the eviction
 /// landing broke it: both sockets resolve to the default, so keying eviction on
-/// the account alone made the second close the first - a client evicting itself
+/// the account alone made the second close the first - a consumer evicting itself
 /// by opening a second socket. Naming an id is a statement about identity and
-/// eviction is the answer to it; naming none is the client saying it has no
+/// eviction is the answer to it; naming none is the consumer saying it has no
 /// opinion.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
@@ -2012,7 +2012,7 @@ async fn two_sockets_naming_no_account_both_stay_open() {
     }
 }
 
-/// An unpoliced account is enforced against nothing, which is what every client
+/// An unpoliced account is enforced against nothing, which is what every consumer
 /// had before policies existed and what the default account still gets.
 #[test]
 #[ignore = "binds a loopback listener"]
@@ -2508,11 +2508,11 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
     assert_eq!(status, 200);
     assert_eq!(
         before, after,
-        "client order flow advanced or altered the clean tape"
+        "consumer order flow advanced or altered the clean tape"
     );
 }
 
-/// The tape-purity property, extended to conditionals: no client conditional
+/// The tape-purity property, extended to conditionals: no consumer conditional
 /// advances any generator state.
 ///
 /// A resting conditional is the one order shape that puts a SECOND kind of scan
@@ -3112,7 +3112,7 @@ async fn websocket_commands_cannot_overtake_each_other() {
 ///
 /// WHAT THIS USED TO BE, and why it was not a gate: 50 submits fired in a burst,
 /// then a read for the refusal. Whether a one-deep queue ever overflowed was a
-/// race between the client's send rate and the dispatcher's drain rate, with no
+/// race between the consumer's send rate and the dispatcher's drain rate, with no
 /// condition controlling it - and it got MORE reliable under load, which is the
 /// worst kind of reliability, because the arm that would catch a regression is
 /// the one that only fires on an idle host. It also fired all 50 sends before
@@ -3212,7 +3212,7 @@ async fn websocket_rejects_messages_over_the_protocol_ceiling() {
         .expect("open socket");
     socket
         .send(Message::Text(
-            "x".repeat(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES + 1)
+            "x".repeat(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES + 1)
                 .into(),
         ))
         .await
@@ -3378,14 +3378,14 @@ fn a_generator_arm_on_an_unboated_river_is_accepted() {
 ///
 /// `evict_account` writes a close frame and retires the lane, but the evicted
 /// socket's own read loop used to leave only on the peer's close, the peer's
-/// EOF, or the run ending. A client that ignores its close frame - or is merely
+/// EOF, or the run ending. A consumer that ignores its close frame - or is merely
 /// slow to act on it - therefore kept its `SocketSession`, and with it the
 /// account's SEAT on that boat's cadence, for as long as it liked. The next
 /// connection wanting that account at a DIFFERENT speed was then refused with
 /// "already seated", by a socket the venue had already thrown off.
 ///
 /// THE EVICTED SOCKET IS NEVER READ AFTER THE EVICTION, deliberately: reading
-/// it is what a cooperative client does, and a test that reads it is testing
+/// it is what a cooperative consumer does, and a test that reads it is testing
 /// the cooperative path. It is held in scope so its TCP connection stays up.
 ///
 /// THE FINAL CONNECT IS POLLED, because the seat is released by the evicted
@@ -3425,7 +3425,7 @@ async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() 
 
     let (mut evicting, _) = tokio_tungstenite::connect_async(at("beta", "1"))
         .await
-        .expect("a second client claims the account at the same speed");
+        .expect("a second consumer claims the account at the same speed");
     served(&mut evicting).await;
 
     // The evicting socket leaves properly, so the only thing that can still be
@@ -3454,7 +3454,7 @@ async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() 
 /// A SILENT CANCEL NAMING AN ACCOUNT SEARCHES THAT ACCOUNT'S BOOK AND NO
 /// OTHER.
 ///
-/// Client order ids are CLIENT-CHOSEN, so two subagents numbering their orders
+/// Client order ids are CONSUMER-CHOSEN, so two subagents numbering their orders
 /// from one collide on a shared exchange. The lookup walked every passenger and
 /// took the first match, so a scenario cancelling `ORD-1` on one subagent could
 /// cancel a stranger's `ORD-1` instead - and a silent cancel emits no lifecycle
@@ -3626,7 +3626,7 @@ fn a_pulled_snapshot_does_not_open_the_account_it_reports_on() {
     );
     assert_eq!(
         status, 201,
-        "the read left no ledger behind, so the client's own open still states its terms: {body}"
+        "the read left no ledger behind, so the consumer's own open still states its terms: {body}"
     );
 
     let (status, body) = http_post_json(
@@ -3639,12 +3639,12 @@ fn a_pulled_snapshot_does_not_open_the_account_it_reports_on() {
         "and `/accounts` does refuse an id that IS open, so the 201 above is evidence: {body}"
     );
 
-    // The client's own balance is what the account carries, not the venue
+    // The consumer's own balance is what the account carries, not the venue
     // template a mint on the read path would have handed it.
     let (_, body) = http_get(&venue.http_base(), "/account?account=WYRD-READ");
     assert!(
         body.contains("1000"),
-        "the opened ledger carries the client's balance: {body}"
+        "the opened ledger carries the consumer's balance: {body}"
     );
 }
 

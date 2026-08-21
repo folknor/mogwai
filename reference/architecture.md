@@ -7,10 +7,10 @@ generated river tapes, and one ledger PER ACCOUNT.
 
 A RIVER is a tape and is shared; a PASSENGER is one connected trader - its own
 account, its own ledger, its own orders - and is never shared. The engine is
-per passenger for that reason: one engine per process meant every client's
-fills moved every other client's net, which is right for a venue owned by one
+per passenger for that reason: one engine per process meant every consumer's
+fills moved every other consumer's net, which is right for a venue owned by one
 run and wrong for an exchange serving a batch. A `Passenger` is created on
-demand, keyed by account id, and the id is the CLIENT'S: it outlives the
+demand, keyed by account id, and the id is the consumer's: it outlives the
 connection, so a socket presenting it again resumes that ledger rather than
 opening a fresh one. The venue cannot distinguish a reconnect from a stranger
 claiming the id and does not try, so an account id is effectively a bearer
@@ -24,9 +24,9 @@ about: an order-scoped frame goes to the account that submitted the order, and a
 what is genuinely about the venue - a fault, a run completion, a feed gap.
 
 The account snapshot was the last frame to get this, and until it did, an
-N-account venue sent every client all N snapshots on every pass. A client that
+N-account venue sent every socket all N snapshots on every pass. A consumer that
 believes them sizes against a stranger's equity, and a consumer has no reason to
-suspect it: the snapshot carries its own account id, but a client told the venue
+suspect it: the snapshot carries its own account id, but a consumer told the venue
 serves one ledger per run has no reason to read it. If a consumer's own adapter
 skips that comparison on the strength of the one-ledger-per-run premise, the
 shared-venue topology breaks the premise, so the venue is what has to be right.
@@ -35,7 +35,7 @@ AN ACCOUNT IS ON AT MOST ONE RIVER, WITH ONE READER. A second socket presenting
 a seated account id EVICTS the first, because a ledger read and written from two
 places is one ledger with two notions of its own state. The evicted socket is
 closed with `1000`, normally rather than as a fault: the venue cannot tell a
-returning client from a stranger claiming the id, and treating an eviction as a
+returning consumer from a stranger claiming the id, and treating an eviction as a
 failure would make a consumer's reconnect ladder evict whatever evicted it. By
 default the newcomer RESUMES that account - positions, order history and risk
 state intact - which is what makes a killed worker able to come back to its own
@@ -47,7 +47,7 @@ THE CLOSE CODE DOES NOT CARRY THE MEANING; THE REASON DOES. `1000` is the
 ordinary code for any graceful close, and this venue sends it for THREE
 different things - a completed run, a passenger whose configured duration
 elapsed, and the eviction above - while a proxy or a load balancer sends it for
-reasons of its own. A client that read the code alone would have to treat all
+reasons of its own. A consumer that read the code alone would have to treat all
 four alike, and the adapter did: it read every `1000` as run completion and
 permanently disabled its reconnect. The reason strings are therefore a protocol
 contract rather than log text, and they live in `mogwai_protocol::close`, which
@@ -61,7 +61,7 @@ code takes two of them, so `close::MAX_REASON_BYTES` is 123 - a quarter of the
 512 that bounds a reason inside a text frame. The eviction sentence interpolates
 an account id and reaches 157 bytes at `MAX_ACCOUNT_ID_LEN`, which a conforming
 peer fails the connection over: the close carrying the discriminator would never
-arrive, and a client that sees a bare EOF instead classifies nothing and redials
+arrive, and a consumer that sees a bare EOF instead classifies nothing and redials
 into the loop. Every `CloseSpec` constructor trims to that budget, after
 composing its prefix, so the terminal survives and only the detail is spent.
 
@@ -71,14 +71,14 @@ non-finite speed, a boat that could not be placed, a second cadence on one
 ledger - is decided BEFORE the claim, because claiming closes the incumbent's
 sockets and, under `reset_account_on_reconnect`, discards its ledger. A refused
 upgrade must cost the incumbent nothing; the alternative made a single
-unauthenticated request a way to disconnect a live client and wipe its book
+unauthenticated request a way to disconnect a live consumer and wipe its book
 without ever connecting.
 
 AN UNATTENDED ACCOUNT FREEZES. The moment its last connection goes away it is
 not swept, not marked, not funded and not judged against its policy, and a
 socket returning with the same id resumes it. This is a deliberate departure
 from a real venue, where being away is no defence against liquidation: mogwai
-exists to exercise a client's live path rather than to simulate an account
+exists to exercise a consumer's live path rather than to simulate an account
 nobody is trading. THE CONSEQUENCE TO STATE IN ANY CLAIM is that a run spanning
 a disconnect has a gap in its risk history.
 
@@ -145,7 +145,7 @@ would leave it holding something the new session can neither see nor close.
 AN ORDER ON A RIVER NOBODY READS IS CANCELLED rather than left, and this is the
 other half of the same rule. An attached account's order on a symbol no cursor
 is walking cannot fill, cannot expire, and cannot be told apart from one the
-tape has not reached; the client is attached, so it is told. A frozen account is
+tape has not reached; the consumer is attached, so it is told. A frozen account is
 exempt because it is skipped wholesale - its book is being kept for the socket
 that comes back for it. Between the two, no resting order can sit indefinitely
 on water nothing is reading.
@@ -158,26 +158,26 @@ The setting is on the readiness record, so a consumer whose restart takes longer
 than the TTL can assert on the fact rather than discover it as a clean ledger.
 
 A connection that names no account is served under the venue's DEFAULT account.
-That exists for the ephemeral single-client venue, where making the one client
+That exists for the ephemeral single-consumer venue, where making the one consumer
 name an id would be ceremony; it is not a venue-wide account every connection
 shares.
 
-THE ACCOUNT ID ON A SNAPSHOT IS A LABEL, AND A CLIENT KEEPS ITS OWN. A venue
+THE ACCOUNT ID ON A SNAPSHOT IS A LABEL, AND A CONSUMER KEEPS ITS OWN. A venue
 may seat several ledgers - `/ws?account=` names one, and the seat is keyed by
 that account plus the session - but ONE CONNECTION SEES EXACTLY ONE OF THEM.
 The account a connection carries is the only account on that socket, so nothing
 can be misrouted onto it, and the id the venue writes on an `AccountState`
-therefore identifies nothing a client has to resolve. The
+therefore identifies nothing a consumer has to resolve. The
 adapter reads it exactly once, at connect, where `note_account_label` logs the
 divergence if the venue's name for the ledger differs from the configured one -
 and then stamps the CONFIGURED id onto every snapshot it publishes
 (`handle_account_state`). Both halves of this used to be an equality check, and
 both were per-account-slot invariants that outlived the slots: the connect-time
-one killed the client outright, and one release of the venue reported a bare
+one killed the consumer outright, and one release of the venue reported a bare
 `MOGWAI`, which is a legal `mogwai_protocol::AccountId` and an unconstructable
 nautilus one, so no configured value could satisfy it and every run died on
 connect. The push-path one silently DROPPED a differently-labelled snapshot, so
-a client took every fill while its balances quietly stopped moving.
+a consumer took every fill while its balances quietly stopped moving.
 
 This is written here because the design is counter-intuitive from the outside
 and has been re-derived backwards twice under review: the natural-looking
@@ -203,7 +203,7 @@ opening equity and never ratchets, which is the other common funded-account
 form. A max-position cap is refused at entry: it is the largest |qty| the book
 can reach after this order, given worst-case fill order of the working book
 (worse extreme net under netting, larger side under hedging). Working orders
-count; reduce-only does not. An oversized submit is a client error rather than
+count; reduce-only does not. An oversized submit is a consumer error rather than
 a liquidation.
 THE ACCOUNT DEFINES ITS OWN DAY: the reset
 is a minute of the UTC day named by the policy, not the instrument's calendar,
@@ -246,10 +246,10 @@ every other conditional. `trail_offset` holds the trigger away from the extreme
 the tape has reached, exactly as on a trailing stop market. `limit_offset` holds
 the LIMIT away from that trigger, on the side the order can fill from: a sell
 rests at `trigger - limit_offset`, a buy at `trigger + limit_offset`. The limit
-price is DERIVED rather than client-stated, at acceptance and again on every
+price is DERIVED rather than consumer-stated, at acceptance and again on every
 ratchet through one function, so the two can never disagree about which side of
 the trigger the limit belongs on and the limit can never drift out of reach as
-the trigger advances. A client-stated price is refused on this type for the same
+the trigger advances. A consumer-stated price is refused on this type for the same
 reason: the first ratchet would overwrite it.
 
 What the second distance BUYS is a floor on the exit, and it bites in the gap
@@ -278,7 +278,7 @@ computable: reaping is one generation, so `sizing::LINKAGE_MAX_BYTES` bounds it
 in advance. See `docs/order-lists.md` for the consumer-facing rules.
 
 ADMISSION IS ATOMIC, AND A LINKED ORDER MAY NOT TRAVEL ALONE. A group arrives as
-one `ClientMessage::SubmitOrderGroup` and a linked bare `SubmitOrder` is refused
+one `Command::SubmitOrderGroup` and a linked bare `SubmitOrder` is refused
 at the protocol boundary. That refusal is the load-bearing half: applying a rule
 where the fill is committed bounds nothing if a SIBLING HAS NOT BEEN ADMITTED
 YET, which is exactly what per-leg dispatch produces - the entry fills, the
@@ -358,9 +358,9 @@ would expire orders at a time that market has never heard of.
 
 AN EXPIRY IS NOT A CANCEL, and the wire says so: expiry ends an order with
 `VenueMessage::OrderExpired` and a terminal `Expired` status, never
-`OrderCanceled`. A cancel is an actor's decision - a client's, or the venue's
+`OrderCanceled`. A cancel is an actor's decision - a consumer's, or the venue's
 under havoc or a risk breach - while an expiry is the clock reaching a lifetime
-the client itself stated at submit. A host reconciling the two acts on them
+the consumer itself stated at submit. A host reconciling the two acts on them
 differently, and nautilus carries the same distinction as `OrderStatus::Expired`
 and an `OrderExpired` event, so the adapter maps it straight through rather than
 collapsing it at the last seam that could keep it. This reported `Canceled`
@@ -437,7 +437,7 @@ which read a notional-basis fraction as a per-contract amount and left a
 leveraged account unable to breach at any price.
 
 FUNDING IS CHECKED PER ACCOUNT AT BIND. The venue's `[balances]` is only what an
-unnamed account opens with, so a client that named its own funding cannot be
+unnamed account opens with, so a consumer that named its own funding cannot be
 checked at boot. It is still knowable with no order at all, so a socket binding
 a symbol its account holds no balance line for is refused before the upgrade,
 naming the account and the currency. PRESENCE, never sufficiency: running out is
@@ -493,7 +493,7 @@ having been new so re-binding never resets a live configuration.
 
 The venue exposes `/health`, `/account`, `/accounts`, `/instruments`, `/clock`,
 `/trades`, `/quotes`, `/control/divergence`, and `/ws`. `POST /accounts` opens
-an account on terms the client states - an id, its opening balances, and
+an account on terms the consumer states - an id, its opening balances, and
 optionally the risk policy the venue enforces against it - and is OPTIONAL:
 account resolution is total, so a connection that never calls it is served under
 the default account, unpoliced. A policy the venue cannot enforce is refused
@@ -501,7 +501,7 @@ where it enters rather than hours later. Structured account config goes over HTT
 the same reason a divergence does, and only the id crosses the socket upgrade.
 Re-opening an account that already exists is a `409` rather than a reset,
 because an account outlives its connections and the request cannot be told
-apart from a reconnecting client re-sending its config.
+apart from a reconnecting consumer re-sending its config.
 `GET /account` names whose ledger with `?account=`, defaulting the same way.
 Order entry is WebSocket-only: the
 `POST /orders` carrier went with the HTTP transport profiles. Each socket feeds
@@ -522,26 +522,24 @@ our prose, and one correctly refused to. So the wire states it, and
 `RETRYABLE_REJECT_PREFIX` on the reason - an identifier this repo versions and
 tests, not a sentence. Every refusal the venue issues today is retryable, which
 is the contract rather than a redundancy: an admission refusal means the venue
-was FULL, not that it said no. Absent decodes `false`, so a client reading an
+was FULL, not that it said no. Absent decodes `false`, so a consumer reading an
 older venue takes the safe reading.
 
 Inbound frames and reassembled
-messages are capped at `MAX_CLIENT_MESSAGE_BYTES`, 64 KiB, so a dependency
+messages are capped at `MAX_INBOUND_MESSAGE_BYTES`, 64 KiB, so a dependency
 default no longer sets the venue's memory bound; an oversized frame ends the
 connection. A WebSocket carries its whole binding in the upgrade query string,
 which `deny_unknown_fields` rejects any other key on: the optional, case-exact
 `symbol` names its one river, the optional `speed` names the pacing multiple,
 the optional `duration_ms` names a passenger-local simulated deadline, the
-optional `account` names the ledger it trades, and the optional `session` names
-the CLIENT trading it.
+optional `account` names the ledger it trades, and the optional `session`
+names the identity the socket presents.
 
-That last one exists because a client is not a socket. An account is on at most
-one client at a time and a second claim evicts the incumbent - which is how a
-reconnect works, since the venue cannot distinguish a returning client from a
-stranger - but one client legitimately holds several sockets on one ledger, and a
-nautilus host always does: its data and execution legs name one account by
-construction. Sockets presenting the same session are that one client and
-coexist; a different session evicts every socket the old client held, and so
+That last one lets several sockets present one identity. A second identity
+claiming the account evicts the incumbent connections, while sockets presenting
+the same session coexist. A nautilus host relies on that rule because its data
+and execution legs name one account by construction. A different session evicts
+every incumbent socket, and so
 does an absent one, which keeps silence meaning what it always meant. The venue
 reads nothing into the string beyond equality, and `mogwai-adapter` mints one per
 PROCESS from the pid and start instant so a host configures nothing and a
@@ -559,9 +557,9 @@ boat placement, and per-boat clocks attach. `ws_upgrade` resolves the query
 symbol, registers its instrument on the engine, resolves its `RiverKey`, and
 boards a boat on that river, all before the 101; `handle_socket` then owns the
 already-bound session. Every resolved shape owns a lazily created checkpoint
-chain, keyed and locked independently, and is servable through history. Clients
+chain, keyed and locked independently, and is servable through history. Consumers
 do not send subscribe frames or an account identity. The bounded fanout
-ring remains; a lagging client receives
+ring remains; a lagging consumer receives
 `FeedLagged` on the priority lane and is closed with WS 1011.
 
 A river's tape root is derived from the run seed and the REQUESTED symbol
@@ -655,7 +653,7 @@ on a placement.
 `/health`'s tape fault reads EVERY seated river on those same non-blocking
 terms, not the boot river alone. It read only the boot river until 2026-08-16,
 which was right when a run had one paced tape and became a hole under the open
-instrument set: a client bound to any other river got a healthy answer while
+instrument set: a consumer bound to any other river got a healthy answer while
 its own tape was stuck, and the boot river is the one a strategy under test is
 least likely to have bound. One optional object over N boats forces a choice,
 and it is the faulted river with the smallest symbol - deterministic across
@@ -747,7 +745,7 @@ families take the bare mean. No shipped preset declares the arrival seam, but
 it moves outputs for `(config, seed)` pairs already expressible under 11.
 Version 13 normalizes the decimal price before it is hashed into the fill-band
 draw key, because `rust_decimal`'s serialized form carries the scale and made
-the band a function of how the client spelled its price - `100` and `100.00`
+the band a function of how the consumer spelled its price - `100` and `100.00`
 drew different triggers and different slippage for the same order. Every
 seeded fill trigger and market-slippage offset therefore moves at 13. Version
 14 makes a scheduled calendar jump part of the `ReopenGap` crossing frontier,
@@ -895,7 +893,7 @@ funded account must cover the fee as well as the notional or the margin: the
 submit check, the amend check and the fill check all add commission to the
 requirement, the first two against the worse of the two rates since which side
 the order provides is not known until it fills. A venue-originated liquidation
-is charged the configured schedule but never a client-armed `FeeSurcharge`.
+is charged the configured schedule but never a consumer-armed `FeeSurcharge`.
 
 Margin and fees are treated here as instrument identity, which is not how
 markets work: real schedules vary by account tier and real CME margin varies by
@@ -948,17 +946,17 @@ The ceiling is the NAMED RIVER's now - what its boat has published - and only a
 boatless river answers with venue sim-now. An `end` past that ceiling is
 CLAMPED rather than refused, deliberately asymmetric with the start: a boat
 placed `T` wall-nanoseconds after boot sits `T * speed` simulated nanoseconds
-behind the venue clock by construction, so a client stamping its `end` from
+behind the venue clock by construction, so a consumer stamping its `end` from
 `/clock` with no `?symbol=` is routinely ahead of this answer, and refusing it
-would fail every honest warmup fetch. A client that needs to know where the
+would fail every honest warmup fetch. A consumer that needs to know where the
 tail actually is reads `/clock?symbol=`.
 
 The protocol crate owns every JSON type shared by venue and adapter. The
 adapter uses WebSocket streaming only for market data and execution; `/trades`
 and `/quotes` remain request endpoints, which is how history and warmup are
-fetched. Each adapter client names its river with an optional `symbol` in its
+fetched. Each adapter consumer names its river with an optional `symbol` in its
 own config, which becomes `/ws?symbol=`; it carries no `speed` or
-`duration_ms`, so the data and execution clients of one host board the same
+`duration_ms`, so the data and execution consumers of one host board the same
 boat at the venue's configured speed. The adapter holds NO served-symbol guard
 of its own any more: since resolution became total there is no set to guard
 against, so both clients re-read `/instruments` AFTER binding - binding is what

@@ -33,7 +33,7 @@ bracket quantity, which for a crossed slice reverses the account. So:
 **A LINKED ORDER SENT AS A BARE `SubmitOrder` IS REFUSED.** Not deprecated -
 refused, at the protocol boundary, naming the group frame as the remedy. A venue
 that served both routes could only promise atomicity for one code path, and a
-consumer cannot build a safety argument on which path a client happened to take.
+consumer cannot build a safety argument on which path a consumer happened to take.
 
 What a group frame must satisfy, refused at the protocol boundary and again by
 the exchange core itself - the same validator, called from both, so the
@@ -65,7 +65,7 @@ exits are reduce-only never meets the carve-out. Whether an exit CAN be
 reduce-only depends on the run's `oms_type` and is on your side of the wire:
 under hedging an exit names the `position_id` it reduces and caps against that
 position, while under netting the cap is taken against the account net, which
-is a different number from a slice a client tracks locally. An exit that is not
+is a different number from a slice a consumer tracks locally. An exit that is not
 reduce-only reserves like any other order - it takes initial margin per resting
 contract at admission, and nothing clamps its fill to a position. See
 [Netting and hedging](oms-types.md).
@@ -137,7 +137,7 @@ nothing to wait for.
 
 A parent that goes terminal WITHOUT filling takes its held children with it, in
 the same batch. A child left waiting for a release that can never come would
-rest for the life of the run. EVERY terminal path counts, not just the client's
+rest for the life of the run. EVERY terminal path counts, not just the consumer's
 own cancel and the clock's expiry: a reduce-only parent cancelled at its trigger
 because there is nothing left to reduce, a post-only stop-limit rejected when it
 would have taken liquidity, a resting or triggered order cancelled at its funds
@@ -160,7 +160,7 @@ child is held, not triggered.
   order can legally take: a linked bare `SubmitOrder` is refused for being bare,
   and every member of a `SubmitOrderGroup` is validated individually.
 - `Oco` or `Ouo` naming nothing. It would silently behave like a standalone
-  order, which a client discovers only by watching a stop it thought was reaped
+  order, which a consumer discovers only by watching a stop it thought was reaped
   go on to fill.
 - An order linking or parenting ITSELF.
 - A child whose parent the venue has not seen. Submit a list in its own order,

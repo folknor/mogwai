@@ -20,7 +20,7 @@ makes invalid, and a run that has already materialized its river cap.
 Symbols are LABELS and match case-exactly on the wire, even though
 `[symbols.*]` keys and preset names resolve case-insensitively - `mnq` and
 `MNQ` are two distinct rivers with two distinct tapes. The readiness record
-names no symbol, so a client takes the labels it wants from its own
+names no symbol, so a consumer takes the labels it wants from its own
 configuration; `/instruments` reports the configured shapes unioned with every
 river materialized so far. `/quotes`
 returns only BBO publications whose `ts_event` lies in the inclusive requested
@@ -59,13 +59,13 @@ below `5 ms / speed` is served at 5 ms rather than as written.
 
 ## Accounts that outlive their connection
 
-An account is the CLIENT'S and outlives the socket that named it, so a client
+An account is the consumer's and outlives the socket that named it, so a consumer
 returning with the same id resumes its own ledger. Two keys govern what that
 means, and both are reported on the readiness record so a launcher never has to
 infer them.
 
 `reset_account_on_reconnect` (default `false`) decides whether a returning
-client gets its ledger back or a clean one. False, the default, is what makes a
+consumer gets its ledger back or a clean one. False, the default, is what makes a
 reconnect a continuation - kill a worker holding a position, start it again,
 find the book where it was left. Set it true when a batch reuses ids across
 independent experiments.
@@ -74,7 +74,7 @@ independent experiments.
 survives before the venue collects it. While unattended an account is FROZEN: it
 is not swept, its positions do not mark, its funding does not accrue and its
 policy cannot liquidate it. That is deliberate - mogwai exists to exercise a
-client's live path, not to run an account nobody is trading - and it means a run
+consumer's live path, not to run an account nobody is trading - and it means a run
 spanning a disconnect has a gap in its risk history. Set the TTL longer than the
 slowest restart any consumer performs; a collected account is gone, and the next
 socket presenting that id opens a clean ledger.
@@ -88,9 +88,9 @@ frontier sits in the new cursor's future. And whatever the account held off the
 river the new socket bound - resting orders, positions - is retired, because the
 new session can neither see nor close it.
 
-While a client is ATTACHED, an order on a symbol no cursor is reading is
+While a consumer is ATTACHED, an order on a symbol no cursor is reading is
 cancelled rather than left resting: nothing could ever fill or expire it, and
-the client is there to be told.
+the consumer is there to be told.
 
 History synthesis runs four `/trades` or `/quotes` requests at a time per run. A
 slot is held until the response has been WRITTEN, not merely until synthesis
@@ -107,7 +107,7 @@ a strategy as a QUIET WINDOW, indistinguishable from a tape that genuinely
 printed nothing, and the run reasons about a market it was never shown.
 
 That mattered more than the headline suggested, because one warmup is not one
-request: the venue serves no bars, so a client pages `/trades` and aggregates
+request: the venue serves no bars, so a consumer pages `/trades` and aggregates
 locally, and the attach topology exists to point tens of runs at one venue. A
 boot storm is dozens of runs taking dozens of sequential pages against four
 slots, so ordinary paging fired the gate constantly and silently.
@@ -116,7 +116,7 @@ Two things still answer `503 history request capacity exhausted`, and both mean
 the venue is genuinely saturated rather than merely busy: a wait that outlives
 its 30 seconds, and more than 128 requests in the building at once (synthesizing
 or waiting), which is the fail-fast bound that keeps the queue from becoming a
-way to accept everything and answer nothing. A client that sees one should treat
+way to accept everything and answer nothing. A consumer that sees one should treat
 it as real overload - stagger its boots - and never as an empty window.
 
 The fill band is `fill_band_vol_mult` and `fill_band_max_ticks`. Every resting
@@ -139,7 +139,7 @@ is the only thing that ever fills a resting limit or delivers a market order's
 slipped fill unsolicited, so boot refuses a zero interval.
 
 Config does NOT declare the run's instrument. A run serves whatever symbol a
-client asks for; what config supplies is the SHAPE each requested label
+consumer asks for; what config supplies is the SHAPE each requested label
 resolves to, and one boot label so a run has a river under a boat before it
 announces readiness.
 
@@ -206,43 +206,41 @@ requirement moves with the price - ten-times leverage is `initial = 0.1`. That i
 the leveraged account forex, crypto margin and Reg-T equity margin need.
 
 `[regime]` selects the single run-wide market regime. `[balances]` is the
-OPENING balance every account is funded with when its client names none - not
-the balance of one shared ledger. A client that wants its own size opens an
+OPENING balance every account is funded with when its consumer names none - not
+the balance of one shared ledger. A consumer that wants its own size opens an
 account with `POST /accounts`, naming an id and its balances; a connection that
 never does is served under the default account on these values.
 `oms_type` is `netting` (the default) or `hedging`; the venue serves both and
-refuses a client over neither, and `/health` reports the run's choice.
+refuses a consumer over neither, and `/health` reports the run's choice.
 
 `account_id` names the DEFAULT account - the one a connection naming none is
 served under - and defaults to `MOGWAI-001`. Every socket may name its own with
 `/ws?account=`, and `GET /account?account=` reports whichever ledger it names,
 so this selects a default rather than declaring the venue's one account. Set it
-because the CONSUMER asserts it: a nautilus host holds an account of its own
+because the consumer asserts it: a nautilus host holds an account of its own
 naming and compares it against what the venue reports, so a venue insisting on
 its own label is a venue that host cannot use.
 
 WHO OWES AN ACCOUNT ID, stated as the usage contract it is, because the answer
 differs by how you run the venue and the venue cannot tell which you meant.
 
-- A SHARED VENUE - one `mogwai serve` whose address you hand to several clients
-  at once - REQUIRES every client to name its own account. This is on you, not
-  on the venue: an id identifies a TRADER, and two clients presenting one id ARE
+- A SHARED VENUE - one `mogwai serve` whose address you hand to several consumers
+  at once - REQUIRES every consumer to name its own account. This is on you, not
+  on the venue: an id identifies a TRADER, and two consumers presenting one id ARE
   one trader as far as the venue can tell. It will hand the account to whichever
-  connected most recently, which is the same mechanism that lets a dropped client
+  connected most recently, which is the same mechanism that lets a dropped consumer
   reconnect to its own book. Leave them all on the default and they will take
   each other's ledger in turn.
-- AN EPHEMERAL VENUE - spawned for one run, dying with the client that owns it -
+- AN EPHEMERAL VENUE - spawned for one run, dying with the consumer that owns it -
   owes nothing. One connection has nobody to collide with, so naming an id would
   be ceremony. This is what the default exists for.
 
-A CLIENT IS NOT A SOCKET, and `/ws?session=` is what says so. One client
-routinely holds several sockets on one ledger - a nautilus host dials `/ws`
-twice, once for market data and once for execution, and both legs name the same
-account by construction - so eviction keyed on the account id alone would make
-that host's second dial disconnect its own first. A session id is the client's
-own string: sockets presenting the SAME one are one client and coexist, and a
-different one is a new client and takes the ledger over, closing every socket the
-old client held.
+`/ws?session=` carries the identity a socket presents. A nautilus host dials
+`/ws` twice, once for market data and once for execution, and both legs name the
+same account by construction. Eviction keyed on the account id alone would make
+the second dial disconnect the first. Sockets presenting the same session
+coexist; a different one takes the ledger over and closes every incumbent
+socket.
 
 Absent means EVICT, on both sides. A socket that names no session has made no
 claim to be the incumbent, so it displaces whoever is there and is displaced in
@@ -250,15 +248,15 @@ turn - which is exactly what every socket did before sessions existed. Coexistin
 is therefore opt-in, and the safe reading is what you get by saying nothing.
 
 The venue reads nothing into the string beyond equality. What it needs is a value
-stable across one client's sockets and their redials, and fresh in a restarted
+stable across related sockets and their redials, and fresh in a restarted
 process - `mogwai-adapter` mints one per process from the pid and the start
-instant and puts it on both its clients, so a nautilus host configures nothing and
+instant and puts it on both adapter objects, so a nautilus host configures nothing and
 a restarted worker correctly reclaims its ledger from the sockets of the dead one.
 Like the account id it is a bearer token: anyone who knows the pair joins that
 ledger rather than displacing it, which is acceptable on a loopback venue and is
 stated rather than assumed.
 
-The contract also bounds what a misdial can cost. Distinct ids mean a client that
+The contract also bounds what a misdial can cost. Distinct ids mean a consumer that
 reaches the wrong venue - a recycled ephemeral port, say - presents an id that
 venue has never seen and opens a fresh account there, rather than displacing
 somebody's live session. Shared ids on a shared venue are the case where a wrong
@@ -273,7 +271,7 @@ load costs a line.
 
 ## Account policies
 
-A connecting client may name a RISK POLICY, which the venue ENFORCES. This is
+A connecting consumer may name a RISK POLICY, which the venue ENFORCES. This is
 a risk-policy layer, not a funded-account feature: a live venue has the same
 machinery. A rule is a triple - what it measures, on what basis, and what it
 does on breach - and two breach actions cover the known cases:
@@ -297,7 +295,7 @@ This build ships five illustrative shapes, not any firm's terms:
 - `intraday-trail-sized` - the hard trail plus a 10-contract position cap
 
 Register your own under `[account_policies.<name>]` with the same knobs a
-client can POST: `currency` (required whenever any rule is set),
+consumer can POST: `currency` (required whenever any rule is set),
 `trailing_drawdown` (`amount`, `basis` of `peak_equity` or `end_of_day_balance`,
 optional `lock_at_equity`, `on_breach`), `daily_loss_limit` (`amount`,
 `on_breach`), `overall_drawdown` (`amount`, `on_breach`), `max_position`
@@ -463,7 +461,7 @@ that is the point: an admission refusal means the venue was FULL, not that it
 said no, and stating that as data rather than as prose is what lets a consumer
 act on it. A refusal that is genuinely not retryable would set it `false`, and
 absent - a venue predating the field - decodes as `false`, so the safe reading is
-what a client gets by not knowing.
+what a consumer gets by not knowing.
 
 The distinction survives the trip into a nautilus host, which is where it was
 being lost. Nautilus's `OrderRejected` carries a reason string and nothing else
@@ -499,7 +497,7 @@ comparison; it is derived from the latent median, reference price, contract
 multiplier, and lognormal shape and never feeds the sampler.
 
 Websocket requests accept `?symbol=`, `?speed=` and `?duration_ms=`. An absent
-symbol binds the boot river, which is what a client written before symbols
+symbol binds the boot river, which is what a consumer written before symbols
 moved to the request does. An absent
 speed uses the configured default. Speed is finite and non-negative, capped at
 1,000,000, and quantized to micro-multiples, so `100` and `100.0000001` share.

@@ -6,7 +6,7 @@
 //! facade) drive this engine and serialize whatever it emits.
 //!
 //! The engine is intentionally synchronous and side-effect free: `process` takes
-//! a [`ClientMessage`] and returns the [`VenueMessage`]s to send. The venue
+//! a [`Command`] and returns the [`VenueMessage`]s to send. The venue
 //! owns sockets, timers and the clock; the engine owns order and account state.
 //! Fills are synthetic - mogwai never matches against a book or a market - so
 //! the fill an order gets is whatever the armed divergences dictate, defaulting
@@ -21,9 +21,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use mogwai_protocol::{
-    AccountId, AccountState, ClientMessage, ClientOrderId, FillSnapshot, Hit, InstrumentDef,
-    OrderFilled, OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, ScanKind, Side,
-    SimClock, SubmitOrder, Symbol, TimeInForce, VenueMessage, VenueOrderId, WireOrderStatus,
+    AccountId, AccountState, ClientOrderId, Command, FillSnapshot, Hit, InstrumentDef, OrderFilled,
+    OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, ScanKind, Side, SimClock,
+    SubmitOrder, Symbol, TimeInForce, VenueMessage, VenueOrderId, WireOrderStatus,
     control::Divergence, default_instruments,
 };
 use rust_decimal::Decimal;
@@ -70,7 +70,7 @@ pub enum Resting {
     /// predicate an order is waiting on.
     Conditional { stop_px: Decimal, toward: bool },
     /// Never scanned: a market remainder left by a partial fill, which has no
-    /// meaningful price for the tape to reach. Ends only on a client cancel.
+    /// meaningful price for the tape to reach. Ends only on a consumer cancel.
     Inert,
     /// An order-list CHILD waiting for its parent to fill. Accepted, on the
     /// book, answerable to `QueryOrders` - and inert in every other respect: it
@@ -158,7 +158,7 @@ pub struct EngineConfig {
     pub instruments: Vec<InstrumentDef>,
     pub balances: HashMap<String, Decimal>,
     /// Root of the fill-band RNG stream. Never the generator's stream: a draw
-    /// that advanced the tape's state would make the tape a function of client
+    /// that advanced the tape's state would make the tape a function of consumer
     /// behaviour, which is exactly the market impact this venue excludes.
     pub fill_seed: u64,
 }
@@ -169,9 +169,9 @@ pub struct EngineConfig {
 pub const DEFAULT_LIQUIDATION_BAND_TICKS: u32 = 200;
 
 /// THE CLIENT ORDER ID PREFIXES THE VENUE MINTS FOR ITSELF, and therefore the
-/// ones a client may not submit under. Both are venue-originated reduce-only
+/// ones a consumer may not submit under. Both are venue-originated reduce-only
 /// closes: `LQ-` is a margin-maintenance liquidation, `RISK-` an account-policy
-/// flatten. The reservation is not cosmetic - a client that claims one of these
+/// flatten. The reservation is not cosmetic - a consumer that claims one of these
 /// ids burns it in `seen_client_order_ids`, and the forced close that later
 /// mints the same id is refused as a duplicate, so pre-claiming ids is a way to
 /// make the venue unable to liquidate you. `RISK-` was minted without being
@@ -931,9 +931,9 @@ impl Engine {
             events.retain(|event| !matches!(event, VenueMessage::AccountState(_)));
             // VENUE MAINTENANCE, so this consults no `DropNextAccountUpdate`
             // and calls `push_account_snapshot` not at all - one of the three
-            // sites that helper's doc names. A re-mark is not a client command
+            // sites that helper's doc names. A re-mark is not a consumer command
             // and originates its own liquidations, so spending an arm the
-            // client aimed at its own next fill would burn it on the venue's
+            // consumer aimed at its own next fill would burn it on the venue's
             // act. `apply_margin_breaches` is entered with
             // `apply_divergences` false throughout for the same reason.
             events.push(VenueMessage::AccountState(self.snapshot(ts)));
@@ -1204,7 +1204,7 @@ impl Engine {
                 Some(MarketReading {
                     last_px: mark,
                     ts_ns: ts,
-                    // A venue-originated close has no client reading to inherit,
+                    // A venue-originated close has no consumer reading to inherit,
                     // so it is judged against the run's CONFIGURED band cap
                     // rather than an invented constant. That is deliberately
                     // pessimistic: a forced close is the one moment a venue is
@@ -1221,7 +1221,7 @@ impl Engine {
     }
 
     /// Close every open position and cancel every resting order, as the venue
-    /// rather than as the client.
+    /// rather than as the consumer.
     ///
     /// This is what enforcing an ACCOUNT POLICY does on breach: a strategy that
     /// would have been liquidated must actually be liquidated, or the forward
@@ -1370,7 +1370,7 @@ impl Engine {
     /// what advances the venue's notion of now. Returns whether anything moved,
     /// so the caller can decide whether the pass owes a snapshot - a released
     /// credit changes `free` and `locked` without changing `total`, which a
-    /// client watching its buying power very much notices.
+    /// consumer watching its buying power very much notices.
     pub fn release_settled_cash(&mut self, now_ns: u64) -> bool {
         let before = self.account.unsettled.len();
         self.account
@@ -1386,7 +1386,7 @@ impl Engine {
     /// it to, so it cannot fill, cannot expire and cannot be told apart from an
     /// order the tape simply has not reached. Leaving it there is the one
     /// outcome that is neither of the two honest ones - so the venue refuses to
-    /// leave it, and the client is told with an ordinary `OrderCanceled`.
+    /// leave it, and the consumer is told with an ordinary `OrderCanceled`.
     ///
     /// A FROZEN account never reaches this: it is skipped by the sweeper
     /// wholesale, and its book survives untouched for the socket that returns to
@@ -1800,11 +1800,11 @@ impl Engine {
         format!("T-{}", self.trade_seq)
     }
 
-    /// Process one client message, emitting the resulting execution events.
+    /// Process one consumer message, emitting the resulting execution events.
     ///
     /// `ts` is supplied by the caller (the venue's clock) so the engine stays
     /// free of wall-clock access and remains deterministic in tests.
-    pub fn process(&mut self, msg: ClientMessage, ts: u64) -> Vec<VenueMessage> {
+    pub fn process(&mut self, msg: Command, ts: u64) -> Vec<VenueMessage> {
         self.process_with_market(msg, ts, None)
     }
 
@@ -1824,7 +1824,7 @@ impl Engine {
     /// `process_with_market_on_clock` with the commanding socket's boat clock.
     pub fn process_with_market(
         &mut self,
-        msg: ClientMessage,
+        msg: Command,
         ts: u64,
         reading: Option<MarketReading>,
     ) -> Vec<VenueMessage> {
@@ -1836,7 +1836,7 @@ impl Engine {
     /// surcharge is judged on it too.
     pub fn process_with_market_on_clock(
         &mut self,
-        msg: ClientMessage,
+        msg: Command,
         ts: u64,
         reading: Option<MarketReading>,
         sim: SimClock,
@@ -1846,27 +1846,23 @@ impl Engine {
             self.reconcile_order_locked();
         }
         let events = match msg {
-            ClientMessage::SubmitOrder(order) => self.on_submit(order, ts, reading),
-            ClientMessage::SubmitOrderGroup { orders } => {
-                self.on_submit_group(&orders, ts, reading)
-            }
-            ClientMessage::CancelOrder { client_order_id } => {
-                self.on_cancel(client_order_id, ts, true)
-            }
-            ClientMessage::ModifyOrder {
+            Command::SubmitOrder(order) => self.on_submit(order, ts, reading),
+            Command::SubmitOrderGroup { orders } => self.on_submit_group(&orders, ts, reading),
+            Command::CancelOrder { client_order_id } => self.on_cancel(client_order_id, ts, true),
+            Command::ModifyOrder {
                 client_order_id,
                 price,
                 quantity,
                 trigger_price,
             } => self.on_modify(client_order_id, price, quantity, trigger_price, ts, reading),
-            ClientMessage::QueryOrders {
+            Command::QueryOrders {
                 request_id,
                 client_order_id,
                 open_only,
             } => vec![VenueMessage::OrderStatusSnapshot(
                 self.order_status_snapshot(request_id, client_order_id.as_deref(), open_only, ts),
             )],
-            ClientMessage::QueryFills {
+            Command::QueryFills {
                 request_id,
                 client_order_id,
             } => vec![VenueMessage::FillSnapshot(self.fill_snapshot(
@@ -1890,7 +1886,7 @@ impl Engine {
     /// - `Limit` yields a `FillThrough` scan against the order's DRAWN band
     ///   trigger. A print strictly through it fills the order at its own stated
     ///   price.
-    /// - `Conditional` yields a `TriggerTouch` scan against the client's STATED
+    /// - `Conditional` yields a `TriggerTouch` scan against the consumer's STATED
     ///   stop price. A print merely reaching it triggers, because a stop holds
     ///   no queue position and so needs none of the strictness the limit case
     ///   does.
@@ -1900,7 +1896,7 @@ impl Engine {
     ///   tape walk would hold it until the market traded through a price the
     ///   venue itself synthesized. A market remainder, and a triggered
     ///   stop-market's remainder, have no meaningful price for the tape to
-    ///   reach; they rest, are never scanned, and end only on a client cancel.
+    ///   reach; they rest, are never scanned, and end only on a consumer cancel.
     #[must_use]
     pub fn pending_scans(&self) -> Vec<PendingScan> {
         // The slot order is NOT stable - `OpenBook::remove` swaps - so the
@@ -1955,7 +1951,7 @@ impl Engine {
     /// orders plus the retained terminal records. This is the reconciliation
     /// witness, so its content is NEVER touched by divergences - havoc may
     /// only delay or drop the reply's delivery (the venue's writer windows),
-    /// per the honest-content contract on `ClientMessage::QueryOrders`.
+    /// per the honest-content contract on `Command::QueryOrders`.
     ///
     /// A targeted query (`client_order_id: Some`) ignores `open_only`: asking
     /// about one specific order deserves its terminal state, not an empty
@@ -2043,7 +2039,7 @@ impl Engine {
     /// The control-plane out-of-band cancel (`CancelOpenOrderSilently`):
     /// remove a RESTING order from the book and free its reservation,
     /// emitting no lifecycle event - the fault class where the venue
-    /// cancelled and the client never heard. The truth store records the
+    /// cancelled and the consumer never heard. The truth store records the
     /// order `Canceled` at `ts`, so a later `QueryOrders` reports it
     /// honestly while the event stream stays silent. Errs when the id is not
     /// currently resting (unknown or already terminal), so the control plane
@@ -2059,16 +2055,16 @@ impl Engine {
         let order = self.open[pos].clone();
         // The children go with it, and they go silently too. A held child of an
         // order that will now never fill is waiting on a release nothing can
-        // perform; the fault class here is "the venue cancelled and the client
+        // perform; the fault class here is "the venue cancelled and the consumer
         // never heard", so the reaped cancellations are recorded in the truth
         // store and DROPPED rather than emitted, exactly as the parent's own is.
         //
         // THIS WIDENS THE FAULT, deliberately, and a scenario author should
-        // know by how much: the divergence stops meaning "the client's view of
+        // know by how much: the divergence stops meaning "the consumer's view of
         // ONE order is stale" and starts meaning "and of every held child of
         // it", up to `MAX_LINKED_ORDERS` of them. That is the honest
         // simulation. The alternative - reap the children but emit their
-        // cancels - would tell a client its bracket's exits were pulled while
+        // cancels - would tell a consumer its bracket's exits were pulled while
         // the entry it hung them on still reads live, which is a state no real
         // venue produces and which no reconciliation could make sense of.
         // Aim this arm at a parent only if you mean the whole bracket.
@@ -2435,7 +2431,7 @@ mod tests {
     fn a_stop_market_rests_untriggered_until_a_print_touches_its_stop() {
         let mut e = banded(7);
         let out = e.process_with_market(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "stop",
                 Side::Sell,
                 OrderType::StopMarket,
@@ -2498,7 +2494,7 @@ mod tests {
             client_order_id: "dup-stop".into(),
             fraction: Decimal::new(5, 1),
         });
-        e.process_with_market(ClientMessage::SubmitOrder(stop), 10, Some(reading(0)));
+        e.process_with_market(Command::SubmitOrder(stop), 10, Some(reading(0)));
         let scan = e.pending_scans().remove(0);
         let results = [ScanResult {
             client_order_id: scan.client_order_id,
@@ -2533,7 +2529,7 @@ mod tests {
     fn a_stop_triggers_on_a_print_exactly_at_its_stop_price() {
         let mut e = banded(8);
         let out = e.process_with_market(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "touch-stop",
                 Side::Buy,
                 OrderType::StopMarket,
@@ -2553,7 +2549,7 @@ mod tests {
     fn a_gapped_stop_limit_triggers_and_rests_without_filling() {
         let mut e = banded(9);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "gap",
                 Side::Sell,
                 OrderType::StopLimit,
@@ -2587,7 +2583,7 @@ mod tests {
     fn query_orders_reports_a_triggered_stop_limit_as_open() {
         let mut e = banded(10);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "query-stop",
                 Side::Sell,
                 OrderType::StopLimit,
@@ -2616,7 +2612,7 @@ mod tests {
         assert_eq!(
             snapshot.orders[0].trigger_price,
             Some(Decimal::from(100)),
-            "the row echoes the stop the client stated"
+            "the row echoes the stop the consumer stated"
         );
     }
 
@@ -2651,12 +2647,12 @@ mod tests {
     #[test]
     fn a_triggered_stop_market_fills_slipped_off_the_triggering_print() {
         // The fill comes from the print that MADE the order live, slipped
-        // adversely. Never the stop price (that is the client's own number) and
+        // adversely. Never the stop price (that is the consumer's own number) and
         // never the acceptance-time last price (that is the look-ahead's mirror
         // image: a reading the trigger did not happen at).
         let mut e = banded(11);
         e.process_with_market(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "slip",
                 Side::Sell,
                 OrderType::StopMarket,
@@ -2687,7 +2683,7 @@ mod tests {
         // leg submitted a beat late must end up protected-and-filled.
         let mut e = banded(12);
         let out = e.process_with_market(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "late",
                 Side::Buy,
                 OrderType::StopMarket,
@@ -2714,7 +2710,7 @@ mod tests {
             let mut e = banded(13);
             let mut order = stop_order("nowait", Side::Sell, OrderType::StopMarket, 90, None);
             order.time_in_force = tif;
-            let out = e.process(ClientMessage::SubmitOrder(order), 10);
+            let out = e.process(Command::SubmitOrder(order), 10);
             assert!(
                 reject_reason(&out).starts_with("conditional orders cannot be immediate-or-cancel"),
                 "{tif:?} stop must be refused"
@@ -2784,7 +2780,7 @@ mod tests {
             let mut e = banded(14);
             let mut order = order("shape", 1);
             shape(&mut order);
-            let out = e.process(ClientMessage::SubmitOrder(order), 10);
+            let out = e.process(Command::SubmitOrder(order), 10);
             assert_eq!(reject_reason(&out), reason, "{name}");
         }
     }
@@ -2795,7 +2791,7 @@ mod tests {
     /// it - the wire `Limit || rests_after_trigger()`, the engine a hand-rolled
     /// `Limit | StopLimit | LimitIfTouched` - and they disagreed on
     /// `TrailingStopLimit`, which the wire admitted and the engine then rejected
-    /// after the client had already been told its order was on its way. The
+    /// after the consumer had already been told its order was on its way. The
     /// order type that came apart is the one added LAST, which is what a
     /// hand-rolled list does to the next type anyone adds.
     ///
@@ -2906,7 +2902,7 @@ mod tests {
                 "the wire gate must admit post_only on exactly the resting-limit types: {ty:?}"
             );
             let mut engine = banded(14);
-            let out = engine.process(ClientMessage::SubmitOrder(submit), 10);
+            let out = engine.process(Command::SubmitOrder(submit), 10);
             if legal {
                 assert!(
                     matches!(out[0], VenueMessage::OrderAccepted { .. }),
@@ -2934,7 +2930,7 @@ mod tests {
         // default `Gtc`, so none of them can see the second half of the defect:
         // unifying the PREDICATE while the two gates reach it in opposite
         // orders leaves one order earning two different refusals depending on
-        // which gate spoke, which is the same "a client cannot tell which of
+        // which gate spoke, which is the same "a consumer cannot tell which of
         // them spoke" the shared constant exists to remove. A post-only
         // `StopMarket` marked `Ioc` is illegal twice over - post-only on a
         // market-on-trigger type, and now-or-never on a conditional - and both
@@ -2948,7 +2944,7 @@ mod tests {
             "the wire gate checks post-only before the conditional-IOC rule"
         );
         let mut engine = banded(14);
-        let out = engine.process(ClientMessage::SubmitOrder(both), 10);
+        let out = engine.process(Command::SubmitOrder(both), 10);
         assert_eq!(
             reject_reason(&out),
             POST_ONLY_REFUSAL,
@@ -2986,11 +2982,8 @@ mod tests {
                 client_order_id: id.into(),
                 fraction: Decimal::new(5, 1),
             });
-            let out = engine.process_with_market(
-                ClientMessage::SubmitOrder(submit),
-                10,
-                Some(reading(0)),
-            );
+            let out =
+                engine.process_with_market(Command::SubmitOrder(submit), 10, Some(reading(0)));
             (engine, out)
         };
 
@@ -3002,7 +2995,7 @@ mod tests {
         assert!(engine.closed.is_empty());
 
         // IOC cancels its remainder. The type wanted to rest it; the time in
-        // force wins, and the client is told so with an explicit cancel.
+        // force wins, and the consumer is told so with an explicit cancel.
         let (engine, out) = armed("mtl-ioc", TimeInForce::Ioc);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         assert!(matches!(
@@ -3042,14 +3035,14 @@ mod tests {
 
         // AND THE LIMIT BINDS THE FIRST ACT TOO. A market at 101 is short of a
         // buy limit of 100, so there is nothing to take: the whole quantity
-        // rests rather than filling at a price the client refused. This is the
+        // rests rather than filling at a price the consumer refused. This is the
         // arm that separates "takes the market" from "fills at the market
         // whatever it is", and it needs no divergence to reach.
         let mut submit = order("mtl-away", 2);
         submit.order_type = OrderType::MarketToLimit;
         let mut engine = banded(14);
         let out = engine.process_with_market(
-            ClientMessage::SubmitOrder(submit),
+            Command::SubmitOrder(submit),
             10,
             Some(MarketReading {
                 last_px: Decimal::from(101),
@@ -3075,13 +3068,13 @@ mod tests {
         let mut e = banded(15);
         let mut taker = limit_order("taker", 1);
         taker.post_only = true;
-        let out = e.process_with_market(ClientMessage::SubmitOrder(taker), 10, Some(reading(0)));
+        let out = e.process_with_market(Command::SubmitOrder(taker), 10, Some(reading(0)));
         assert_eq!(reject_reason(&out), "post-only order would take liquidity");
 
         let mut e = banded(15);
         let mut stop = stop_order("post-stop", Side::Buy, OrderType::StopLimit, 99, Some(100));
         stop.post_only = true;
-        let out = e.process_with_market(ClientMessage::SubmitOrder(stop), 10, Some(reading(0)));
+        let out = e.process_with_market(Command::SubmitOrder(stop), 10, Some(reading(0)));
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         assert!(matches!(out[1], VenueMessage::OrderTriggered { .. }));
         assert!(
@@ -3102,12 +3095,11 @@ mod tests {
         let mut resting = limit_order("post-amend", 1);
         resting.price = Some(Decimal::from(90));
         resting.post_only = true;
-        let accepted =
-            e.process_with_market(ClientMessage::SubmitOrder(resting), 10, Some(reading(0)));
+        let accepted = e.process_with_market(Command::SubmitOrder(resting), 10, Some(reading(0)));
         assert!(matches!(accepted[0], VenueMessage::OrderAccepted { .. }));
 
         let out = e.process_with_market(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "post-amend".into(),
                 price: Some(Decimal::from(100)),
                 quantity: None,
@@ -3133,7 +3125,7 @@ mod tests {
         let mut e = funded(1_000);
         let mut stop = stop_order("protect", Side::Sell, OrderType::StopMarket, 90, None);
         stop.reduce_only = true;
-        let out = e.process(ClientMessage::SubmitOrder(stop), 10);
+        let out = e.process(Command::SubmitOrder(stop), 10);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let state = account(&out, out.len() - 1);
         assert_eq!(balance(state, "USDT").locked, Decimal::ZERO);
@@ -3145,7 +3137,7 @@ mod tests {
         let mut e = banded(16);
         let mut stop = stop_order("flat", Side::Sell, OrderType::StopMarket, 90, None);
         stop.reduce_only = true;
-        e.process(ClientMessage::SubmitOrder(stop), 10);
+        e.process(Command::SubmitOrder(stop), 10);
         let out = sweep(&mut e, 90, 11);
         assert!(matches!(out[0], VenueMessage::OrderTriggered { .. }));
         assert!(
@@ -3167,11 +3159,11 @@ mod tests {
         // remainder reaches no further fill decision, so it would sit open
         // forever. It is closed in the same batch instead.
         let mut e = banded(17);
-        e.process(ClientMessage::SubmitOrder(order("open-1", 1)), 10);
+        e.process(Command::SubmitOrder(order("open-1", 1)), 10);
         let mut stop = stop_order("clamped", Side::Sell, OrderType::StopMarket, 90, None);
         stop.reduce_only = true;
         stop.quantity = Decimal::from(3);
-        e.process(ClientMessage::SubmitOrder(stop), 11);
+        e.process(Command::SubmitOrder(stop), 11);
         let out = sweep(&mut e, 90, 12);
         assert_eq!(
             filled(&out).last_qty,
@@ -3194,7 +3186,7 @@ mod tests {
         let mut e = funded(1_000);
         let mut stop = stop_order("hold", Side::Buy, OrderType::StopMarket, 100, None);
         stop.quantity = Decimal::from(2);
-        let out = e.process(ClientMessage::SubmitOrder(stop), 10);
+        let out = e.process(Command::SubmitOrder(stop), 10);
         let state = account(&out, out.len() - 1);
         assert_eq!(balance(state, "USDT").locked, Decimal::from(200));
         assert_eq!(balance(state, "USDT").free, Decimal::from(800));
@@ -3208,7 +3200,7 @@ mod tests {
         let mut e = funded(200);
         let mut stop = stop_order("own-hold", Side::Buy, OrderType::StopMarket, 100, None);
         stop.quantity = Decimal::from(2);
-        e.process(ClientMessage::SubmitOrder(stop), 10);
+        e.process(Command::SubmitOrder(stop), 10);
         let out = sweep(&mut e, 100, 11);
         assert_eq!(filled(&out).last_qty, Decimal::from(2));
         assert_eq!(e.closed["own-hold"].status, WireOrderStatus::Filled);
@@ -3221,7 +3213,7 @@ mod tests {
         // budget-truncated walk would skip a span nothing looked at.
         let mut e = banded(18);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "banded",
                 Side::Sell,
                 OrderType::StopLimit,
@@ -3266,7 +3258,7 @@ mod tests {
         // with its frontier past that print would discard a fill it was owed.
         let mut e = banded(19);
         let out = e.process_with_market(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "atonce",
                 Side::Buy,
                 OrderType::StopLimit,
@@ -3292,7 +3284,7 @@ mod tests {
         let mut e = banded(20);
         let mut stop = stop_order("armed", Side::Sell, OrderType::StopLimit, 100, Some(99));
         stop.quantity = Decimal::from(2);
-        e.process(ClientMessage::SubmitOrder(stop), 10);
+        e.process(Command::SubmitOrder(stop), 10);
         e.arm(Divergence::PartialFillNext {
             client_order_id: "armed".into(),
             fraction: Decimal::new(5, 1),
@@ -3321,7 +3313,7 @@ mod tests {
         // a conditional, not new machinery.
         let mut e = banded(31);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "raced",
                 Side::Sell,
                 OrderType::StopMarket,
@@ -3378,7 +3370,7 @@ mod tests {
     fn a_trigger_amend_restarts_the_trigger_window_and_is_rejected_after_triggering() {
         let mut e = banded(21);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "amend-stop",
                 Side::Sell,
                 OrderType::StopMarket,
@@ -3388,7 +3380,7 @@ mod tests {
             10,
         );
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "amend-stop".into(),
                 price: None,
                 quantity: None,
@@ -3410,7 +3402,7 @@ mod tests {
         // refusal rather than the terminal-order one.
         let mut e = banded(21);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "fired",
                 Side::Sell,
                 OrderType::StopLimit,
@@ -3421,7 +3413,7 @@ mod tests {
         );
         sweep(&mut e, 95, 11);
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "fired".into(),
                 price: None,
                 quantity: None,
@@ -3436,9 +3428,9 @@ mod tests {
 
         // And on an order that never had a trigger, the reason says THAT.
         let mut e = banded(21);
-        e.process(ClientMessage::SubmitOrder(limit_order("plain", 1)), 10);
+        e.process(Command::SubmitOrder(limit_order("plain", 1)), 10);
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "plain".into(),
                 price: None,
                 quantity: None,
@@ -3459,7 +3451,7 @@ mod tests {
         // Promoting it here would make the venue fill a stop that never fired.
         let mut e = banded(22);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "repriced",
                 Side::Sell,
                 OrderType::StopLimit,
@@ -3469,7 +3461,7 @@ mod tests {
             10,
         );
         e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "repriced".into(),
                 price: Some(Decimal::from(98)),
                 quantity: None,
@@ -3493,7 +3485,7 @@ mod tests {
         // preference to the trigger.
         let mut e = banded(23);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "priceless",
                 Side::Sell,
                 OrderType::StopMarket,
@@ -3503,7 +3495,7 @@ mod tests {
             10,
         );
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "priceless".into(),
                 price: Some(Decimal::from(80)),
                 quantity: None,
@@ -3522,7 +3514,7 @@ mod tests {
         let mut e = banded(24);
         let mut stop = stop_order("ladder", Side::Sell, OrderType::StopLimit, 100, Some(99));
         stop.quantity = Decimal::from(2);
-        e.process(ClientMessage::SubmitOrder(stop), 10);
+        e.process(Command::SubmitOrder(stop), 10);
         let row = |e: &mut Engine, ts| {
             e.order_status_snapshot("q".into(), None, true, ts)
                 .orders
@@ -3585,7 +3577,7 @@ mod tests {
         assert!(state.positions.is_empty());
 
         // Buy 2 @ 100: quote debits to 800, base credits to 2.
-        let out = e.process(ClientMessage::SubmitOrder(order("F1", 2)), 2);
+        let out = e.process(Command::SubmitOrder(order("F1", 2)), 2);
         let state = account(&out, out.len() - 1);
         assert_eq!(balance(state, "USDT").total, Decimal::from(800));
         assert_eq!(balance(state, "BTC").total, Decimal::from(2));
@@ -3659,7 +3651,7 @@ mod tests {
 
     fn fill_future(engine: &mut Engine, id: &str, side: Side, quantity: i64, price: i64) {
         let events = engine.process_with_market(
-            ClientMessage::SubmitOrder(mnq_order(id, side, quantity, price)),
+            Command::SubmitOrder(mnq_order(id, side, quantity, price)),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(price),
@@ -3684,7 +3676,7 @@ mod tests {
     ) -> OrderFilled {
         engine
             .process_with_market(
-                ClientMessage::SubmitOrder(mnq_order(id, Side::Buy, quantity, price)),
+                Command::SubmitOrder(mnq_order(id, Side::Buy, quantity, price)),
                 ts,
                 Some(MarketReading {
                     last_px: Decimal::from(price),
@@ -3744,7 +3736,7 @@ mod tests {
             let mut engine = futures_engine(50_000, BreachAction::Refuse);
             let mut order = mnq_order("REST", side, 1, 21_000);
             order.order_type = OrderType::Limit;
-            engine.process(ClientMessage::SubmitOrder(order), 1);
+            engine.process(Command::SubmitOrder(order), 1);
             let usd = engine
                 .account_snapshot(2)
                 .balances
@@ -3788,7 +3780,7 @@ mod tests {
             );
             let order = order_with(symbol, Side::Buy, symbol, 1, Some(Decimal::from(21_000)));
             let events = engine.process_with_market(
-                ClientMessage::SubmitOrder(order),
+                Command::SubmitOrder(order),
                 1,
                 Some(MarketReading {
                     last_px: Decimal::from(21_000),
@@ -3830,7 +3822,7 @@ mod tests {
             let mut order = mnq_order(id, Side::Sell, 1, price);
             order.order_type = OrderType::Limit;
             order.reduce_only = true;
-            engine.process(ClientMessage::SubmitOrder(order), 2);
+            engine.process(Command::SubmitOrder(order), 2);
         }
         let usd = engine
             .account_snapshot(3)
@@ -3859,7 +3851,7 @@ mod tests {
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         engine.mark(&[("MNQ".into(), Decimal::from(21_000))], 2);
         let events = engine.process(
-            ClientMessage::SubmitOrder(mnq_order("F-2", Side::Sell, 1, 21_000)),
+            Command::SubmitOrder(mnq_order("F-2", Side::Sell, 1, 21_000)),
             3,
         );
         assert!(
@@ -3874,7 +3866,7 @@ mod tests {
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
         let rejected = engine.process(
-            ClientMessage::SubmitOrder(mnq_order("F-2", Side::Buy, 1, 20_000)),
+            Command::SubmitOrder(mnq_order("F-2", Side::Buy, 1, 20_000)),
             3,
         );
         // The refusal NAMES ITS CURRENCY. A consumer reads a margin breach as a
@@ -3891,7 +3883,7 @@ mod tests {
         let mut reduce = mnq_order("F-3", Side::Sell, 1, 20_000);
         reduce.reduce_only = true;
         let reduced = engine.process_with_market(
-            ClientMessage::SubmitOrder(reduce),
+            Command::SubmitOrder(reduce),
             4,
             Some(MarketReading {
                 last_px: Decimal::from(20_000),
@@ -3934,11 +3926,11 @@ mod tests {
     }
 
     #[test]
-    fn a_liquidation_bypasses_and_preserves_client_armed_divergences() {
+    fn a_liquidation_bypasses_and_preserves_consumer_armed_divergences() {
         let mut engine = futures_engine(3_000, BreachAction::Liquidate);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         engine.arm(Divergence::RejectNextSubmit {
-            reason: "client scenario".into(),
+            reason: "consumer scenario".into(),
         });
         engine.arm(Divergence::DuplicateNextFill);
         engine.arm(Divergence::DropNextAccountUpdate);
@@ -3962,15 +3954,15 @@ mod tests {
 
         let mut client_order = mnq_order("CLIENT-1", Side::Buy, 1, 20_000);
         client_order.reduce_only = true;
-        let rejected = engine.process(ClientMessage::SubmitOrder(client_order), 4);
-        assert_eq!(reject_reason(&rejected), "client scenario");
+        let rejected = engine.process(Command::SubmitOrder(client_order), 4);
+        assert_eq!(reject_reason(&rejected), "consumer scenario");
 
         engine
             .account
             .balances
             .insert("USD".into(), Decimal::from(10_000));
         let filled = engine.process_with_market(
-            ClientMessage::SubmitOrder(mnq_order("CLIENT-2", Side::Buy, 1, 20_000)),
+            Command::SubmitOrder(mnq_order("CLIENT-2", Side::Buy, 1, 20_000)),
             5,
             Some(MarketReading {
                 last_px: Decimal::from(20_000),
@@ -3994,11 +3986,11 @@ mod tests {
 
     #[test]
     fn a_liquidation_neither_pays_nor_spends_an_armed_fee_surcharge() {
-        // `FeeSurcharge` is client-armed havoc. A venue-originated liquidation
+        // `FeeSurcharge` is consumer-armed havoc. A venue-originated liquidation
         // must not be charged it (a large enough multiplier would fail the
         // liquidation's own funds check and leave the breached position open),
         // and must not expire its window either - the arm belongs to the next
-        // client fill.
+        // consumer fill.
         let mut engine = futures_engine(3_000, BreachAction::Liquidate);
         engine.set_fee_schedule(
             "MNQ".into(),
@@ -4026,7 +4018,7 @@ mod tests {
             .expect("the liquidation fills rather than failing its funds check");
         assert_eq!(liquidation.commission, Decimal::ONE);
 
-        // The window is still armed and still un-expired: the next CLIENT fill
+        // The window is still armed and still un-expired: the next consumer fill
         // pays the surcharge the liquidation walked past.
         engine
             .account
@@ -4058,8 +4050,7 @@ mod tests {
         );
         let mut resting = order_with("HOLD", Side::Buy, "BTCUSDT", 1, Some(Decimal::from(50)));
         resting.order_type = OrderType::Limit;
-        let out =
-            engine.process_with_market(ClientMessage::SubmitOrder(resting), 1, Some(reading(0)));
+        let out = engine.process_with_market(Command::SubmitOrder(resting), 1, Some(reading(0)));
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         assert_eq!(
             balance(&engine.account_snapshot(2), "USDT").locked,
@@ -4095,14 +4086,13 @@ mod tests {
         );
         let mut resting = order_with("R1", Side::Buy, "BTCUSDT", 1, Some(Decimal::from(50)));
         resting.order_type = OrderType::Limit;
-        let out =
-            engine.process_with_market(ClientMessage::SubmitOrder(resting), 1, Some(reading(0)));
+        let out = engine.process_with_market(Command::SubmitOrder(resting), 1, Some(reading(0)));
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
 
         // 2 @ 50 is 100 of notional plus 2 of commission. Free is 51 and the
         // order's own hold is 50, so 101 covers the notional but not the fee.
         let out = engine.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "R1".into(),
                 price: None,
                 quantity: Some(Decimal::from(2)),
@@ -4149,7 +4139,7 @@ mod tests {
                 },
             },
         );
-        let out = engine.process(ClientMessage::SubmitOrder(order("FEE", 1)), 1);
+        let out = engine.process(Command::SubmitOrder(order("FEE", 1)), 1);
         assert_eq!(reject_reason(&out), "insufficient USDT balance");
         assert_eq!(
             balance(&engine.account_snapshot(2), "USDT").total,
@@ -4173,8 +4163,7 @@ mod tests {
         );
         let mut resting = order_with("FEE-REST", Side::Buy, "BTCUSDT", 1, Some(Decimal::from(50)));
         resting.order_type = OrderType::Limit;
-        let out =
-            engine.process_with_market(ClientMessage::SubmitOrder(resting), 3, Some(reading(0)));
+        let out = engine.process_with_market(Command::SubmitOrder(resting), 3, Some(reading(0)));
         assert_eq!(reject_reason(&out), "insufficient USDT balance");
         assert!(engine.open_orders().is_empty());
     }
@@ -4208,7 +4197,7 @@ mod tests {
             1,
             Some(Decimal::from(100)),
         );
-        let out = engine.process(ClientMessage::SubmitOrder(sell), 1);
+        let out = engine.process(Command::SubmitOrder(sell), 1);
         assert_eq!(reject_reason(&out), "insufficient USDT balance");
         assert_eq!(
             balance(&engine.account_snapshot(2), "USDT").total,
@@ -4225,8 +4214,7 @@ mod tests {
             Some(Decimal::from(100)),
         );
         resting.order_type = OrderType::Limit;
-        let out =
-            engine.process_with_market(ClientMessage::SubmitOrder(resting), 3, Some(reading(0)));
+        let out = engine.process_with_market(Command::SubmitOrder(resting), 3, Some(reading(0)));
         assert_eq!(reject_reason(&out), "insufficient USDT balance");
         assert!(engine.open_orders().is_empty());
     }
@@ -4330,7 +4318,7 @@ mod tests {
         sell.position_id = Some("CLIENT-SHORT".into());
         for order in [buy, sell] {
             engine.process_with_market(
-                ClientMessage::SubmitOrder(order),
+                Command::SubmitOrder(order),
                 1,
                 Some(MarketReading {
                     last_px: Decimal::from(21_000),
@@ -4355,7 +4343,7 @@ mod tests {
         sell.position_id = Some("SHORT".into());
         for order in [buy, sell] {
             engine.process_with_market(
-                ClientMessage::SubmitOrder(order),
+                Command::SubmitOrder(order),
                 1,
                 Some(MarketReading {
                     last_px: Decimal::from(21_000),
@@ -4387,7 +4375,7 @@ mod tests {
         let mut order = mnq_order("HEDGE-1", Side::Buy, 1, 21_000);
         order.position_id = Some("BOOK-7".into());
         let events = engine.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(21_000),
@@ -4443,7 +4431,7 @@ mod tests {
     #[test]
     fn a_market_submit_without_a_reading_uses_its_stated_price() {
         let mut e = Engine::new();
-        let out = e.process(ClientMessage::SubmitOrder(order("legacy", 1)), 7);
+        let out = e.process(Command::SubmitOrder(order("legacy", 1)), 7);
         assert!(
             matches!(out.as_slice(), [VenueMessage::OrderAccepted { .. }, VenueMessage::OrderFilled(fill), VenueMessage::AccountState(_)] if fill.last_px == Decimal::from(100))
         );
@@ -4453,7 +4441,7 @@ mod tests {
     #[test]
     fn a_submit_with_no_reading_rests_rather_than_filling() {
         let mut e = banded(1);
-        let out = e.process(ClientMessage::SubmitOrder(limit_order("rest", 2)), 7);
+        let out = e.process(Command::SubmitOrder(limit_order("rest", 2)), 7);
         assert!(matches!(
             out.as_slice(),
             [
@@ -4472,7 +4460,7 @@ mod tests {
         // price. A band wide enough to put the trigger below 99 does not.
         let mut e = banded(1);
         let out = e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("cross", 1)),
+            Command::SubmitOrder(limit_order("cross", 1)),
             7,
             Some(reading(0)),
         );
@@ -4487,11 +4475,8 @@ mod tests {
         assert!(e.pending_scans().is_empty());
 
         let wide = reading(10_000);
-        let out = e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("short", 1)),
-            8,
-            Some(wide),
-        );
+        let out =
+            e.process_with_market(Command::SubmitOrder(limit_order("short", 1)), 8, Some(wide));
         assert!(
             !out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
@@ -4507,12 +4492,12 @@ mod tests {
         // configures: the trigger IS the stated price, so a print AT it is the
         // market touching rather than trading through and does not fill.
         let mut e = banded(9);
-        e.process(ClientMessage::SubmitOrder(limit_order("degenerate", 1)), 10);
+        e.process(Command::SubmitOrder(limit_order("degenerate", 1)), 10);
         assert!(
             matches!(e.open[0].resting, Resting::Limit { fill_trigger_px } if fill_trigger_px == Decimal::from(100))
         );
         let at_touch = e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("touch", 1)),
+            Command::SubmitOrder(limit_order("touch", 1)),
             11,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -4530,7 +4515,7 @@ mod tests {
     #[test]
     fn a_truncated_scan_advances_only_what_it_covered() {
         let mut e = banded(3);
-        e.process(ClientMessage::SubmitOrder(limit_order("short", 1)), 10);
+        e.process(Command::SubmitOrder(limit_order("short", 1)), 10);
         let scan = e.pending_scans().remove(0);
         e.apply_scans(&[result(&scan, false, 12)], 99);
         assert_eq!(e.open[0].band_draw, 0);
@@ -4540,7 +4525,7 @@ mod tests {
     #[test]
     fn a_scan_against_a_stale_revision_is_dropped() {
         let mut e = banded(2);
-        e.process(ClientMessage::SubmitOrder(limit_order("stale", 1)), 10);
+        e.process(Command::SubmitOrder(limit_order("stale", 1)), 10);
         let scan = e.pending_scans().remove(0);
         e.apply_scans(&[result(&scan, false, 20)], 20);
         let (_, emitted) = e.apply_scans(&[result(&scan, true, 20)], 20);
@@ -4554,11 +4539,11 @@ mod tests {
         // being unequal: a redraw may legitimately land on the same offset, so
         // a test asserting the price moved would be flaky by construction.
         let mut e = banded(3);
-        e.process(ClientMessage::SubmitOrder(limit_order("amend", 2)), 10);
+        e.process(Command::SubmitOrder(limit_order("amend", 2)), 10);
         let scan = e.pending_scans().remove(0);
         e.apply_scans(&[result(&scan, false, 20)], 20);
         e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "amend".into(),
                 price: None,
                 quantity: Some(Decimal::from(3)),
@@ -4568,7 +4553,7 @@ mod tests {
         );
         assert_eq!(e.open[0].band_draw, 0);
         e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "amend".into(),
                 price: Some(Decimal::from(101)),
                 quantity: None,
@@ -4584,7 +4569,7 @@ mod tests {
     fn a_price_amend_adopts_a_fresh_band_when_the_venue_supplies_one() {
         let mut e = banded(3);
         e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("regime", 2)),
+            Command::SubmitOrder(limit_order("regime", 2)),
             10,
             Some(MarketReading {
                 last_px: Decimal::from(101),
@@ -4593,7 +4578,7 @@ mod tests {
             }),
         );
         assert_eq!(e.open[0].band_ticks, 4);
-        let amend = |price: i64| ClientMessage::ModifyOrder {
+        let amend = |price: i64| Command::ModifyOrder {
             client_order_id: "regime".into(),
             price: Some(Decimal::from(price)),
             quantity: None,
@@ -4619,7 +4604,7 @@ mod tests {
     #[test]
     fn apply_scans_fills_an_order_the_tape_traded_through() {
         let mut e = banded(1);
-        e.process(ClientMessage::SubmitOrder(limit_order("swept", 1)), 10);
+        e.process(Command::SubmitOrder(limit_order("swept", 1)), 10);
         let scan = e.pending_scans().remove(0);
         let (out, emitted) = e.apply_scans(&[result(&scan, true, 20)], 20);
         assert_eq!(emitted, 1);
@@ -4647,7 +4632,7 @@ mod tests {
             client_order_id: "part".into(),
             fraction: Decimal::new(5, 1),
         });
-        e.process(ClientMessage::SubmitOrder(limit_order("part", 2)), 10);
+        e.process(Command::SubmitOrder(limit_order("part", 2)), 10);
         let scan = e.pending_scans().remove(0);
         let (out, emitted) = e.apply_scans(&[result(&scan, true, 20)], 20);
         assert_eq!(emitted, 1);
@@ -4670,7 +4655,7 @@ mod tests {
             client_order_id: "leaves".into(),
             fraction: Decimal::new(5, 1),
         });
-        e.process(ClientMessage::SubmitOrder(limit_order("leaves", 4)), 10);
+        e.process(Command::SubmitOrder(limit_order("leaves", 4)), 10);
         let scan = e.pending_scans().remove(0);
         e.apply_scans(&[result(&scan, true, 20)], 20);
         assert_eq!(e.open[0].leaves_qty, Decimal::from(2));
@@ -4692,7 +4677,7 @@ mod tests {
             client_order_id: "armed".into(),
             fraction: Decimal::new(5, 1),
         });
-        e.process(ClientMessage::SubmitOrder(limit_order("armed", 2)), 10);
+        e.process(Command::SubmitOrder(limit_order("armed", 2)), 10);
         assert_eq!(e.armed.len(), 1);
         let scan = e.pending_scans().remove(0);
         let (out, _) = e.apply_scans(&[result(&scan, true, 20)], 20);
@@ -4706,7 +4691,7 @@ mod tests {
     #[test]
     fn a_duplicate_fill_divergence_applies_to_a_swept_fill() {
         let mut e = banded(1);
-        e.process(ClientMessage::SubmitOrder(limit_order("dup", 1)), 10);
+        e.process(Command::SubmitOrder(limit_order("dup", 1)), 10);
         e.arm(Divergence::DuplicateNextFill);
         let scan = e.pending_scans().remove(0);
         let (out, emitted) = e.apply_scans(&[result(&scan, true, 20)], 20);
@@ -4726,7 +4711,7 @@ mod tests {
         let mut e = banded(5);
         let mut fok = limit_order("fok-through", 1);
         fok.time_in_force = TimeInForce::Fok;
-        let out = e.process_with_market(ClientMessage::SubmitOrder(fok), 1, Some(reading(0)));
+        let out = e.process_with_market(Command::SubmitOrder(fok), 1, Some(reading(0)));
         assert!(
             out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
@@ -4739,7 +4724,7 @@ mod tests {
             price: Some(Decimal::from(100)),
             ..market
         };
-        let out = e.process(ClientMessage::SubmitOrder(market), 2);
+        let out = e.process(Command::SubmitOrder(market), 2);
         assert!(
             out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
@@ -4762,7 +4747,7 @@ mod tests {
             order_type: OrderType::Market,
             ..order("mkt-part", 2)
         };
-        e.process(ClientMessage::SubmitOrder(market), 1);
+        e.process(Command::SubmitOrder(market), 1);
         assert_eq!(e.open[0].leaves_qty, Decimal::ONE);
         assert!(e.pending_scans().is_empty());
     }
@@ -4771,7 +4756,7 @@ mod tests {
     fn a_dropped_account_update_survives_a_resting_accept_and_applies_to_the_swept_fill() {
         let mut e = banded(1);
         e.arm(Divergence::DropNextAccountUpdate);
-        let accepted = e.process(ClientMessage::SubmitOrder(limit_order("drop", 1)), 10);
+        let accepted = e.process(Command::SubmitOrder(limit_order("drop", 1)), 10);
         assert!(matches!(
             accepted.last(),
             Some(VenueMessage::AccountState(_))
@@ -4797,12 +4782,12 @@ mod tests {
         // wrong FOK branch or any future refusal that happens to mention a
         // trigger price.
         let rejected =
-            e.process_with_market(ClientMessage::SubmitOrder(fok.clone()), 1, Some(reading(0)));
+            e.process_with_market(Command::SubmitOrder(fok.clone()), 1, Some(reading(0)));
         assert_eq!(
             reject_reason(&rejected),
             "fill-or-kill could not fully fill"
         );
-        let accepted = e.process_with_market(ClientMessage::SubmitOrder(fok), 2, Some(reading(0)));
+        let accepted = e.process_with_market(Command::SubmitOrder(fok), 2, Some(reading(0)));
         assert!(matches!(
             accepted.first(),
             Some(VenueMessage::OrderAccepted { .. })
@@ -4814,7 +4799,7 @@ mod tests {
         let mut e = banded(1);
         let mut miss = limit_order("ioc-miss", 1);
         miss.time_in_force = TimeInForce::Ioc;
-        let out = e.process(ClientMessage::SubmitOrder(miss), 1);
+        let out = e.process(Command::SubmitOrder(miss), 1);
         assert!(matches!(
             out.as_slice(),
             [
@@ -4825,7 +4810,7 @@ mod tests {
         ));
         let mut hit = limit_order("ioc-hit", 1);
         hit.time_in_force = TimeInForce::Ioc;
-        let out = e.process_with_market(ClientMessage::SubmitOrder(hit), 2, Some(reading(0)));
+        let out = e.process_with_market(Command::SubmitOrder(hit), 2, Some(reading(0)));
         assert!(
             out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
@@ -4837,7 +4822,7 @@ mod tests {
         // means against the trigger like everything else.
         let mut fok = limit_order("fok-short", 1);
         fok.time_in_force = TimeInForce::Fok;
-        let out = e.process(ClientMessage::SubmitOrder(fok), 3);
+        let out = e.process(Command::SubmitOrder(fok), 3);
         assert!(matches!(
             out.as_slice(),
             [VenueMessage::OrderRejected { reason, .. }]
@@ -4854,12 +4839,12 @@ mod tests {
         let mut e = funded(1_000);
 
         // Buy past the quote balance: 11 * 100 > 1000.
-        let out = e.process(ClientMessage::SubmitOrder(order("B1", 11)), 1);
+        let out = e.process(Command::SubmitOrder(order("B1", 11)), 1);
         assert_eq!(reject_reason(&out), "insufficient USDT balance");
 
         // Sell with no base at all.
         let out = e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "S1",
                 Side::Sell,
                 "BTCUSDT",
@@ -4872,16 +4857,16 @@ mod tests {
 
         // Spend-then-overspend: a 5 @ 100 buy leaves 500 free, so a second
         // 6 @ 100 buy is refused while a 5 @ 100 one still clears.
-        let out = e.process(ClientMessage::SubmitOrder(order("B2", 5)), 3);
+        let out = e.process(Command::SubmitOrder(order("B2", 5)), 3);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
-        let out = e.process(ClientMessage::SubmitOrder(order("B3", 6)), 4);
+        let out = e.process(Command::SubmitOrder(order("B3", 6)), 4);
         assert_eq!(reject_reason(&out), "insufficient USDT balance");
-        let out = e.process(ClientMessage::SubmitOrder(order("B4", 5)), 5);
+        let out = e.process(Command::SubmitOrder(order("B4", 5)), 5);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
 
         // The acquired base is spendable: selling it back clears.
         let out = e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "S2",
                 Side::Sell,
                 "BTCUSDT",
@@ -4907,20 +4892,20 @@ mod tests {
             client_order_id: "R1".into(),
             fraction: Decimal::new(5, 1),
         });
-        let out = e.process(ClientMessage::SubmitOrder(order("R1", 4)), 1);
+        let out = e.process(Command::SubmitOrder(order("R1", 4)), 1);
         let state = account(&out, out.len() - 1);
         assert_eq!(balance(state, "USDT").free, Decimal::from(600));
         assert_eq!(balance(state, "USDT").locked, Decimal::from(200));
 
         // 7 @ 100 exceeds the 600 free even though the total is 800.
-        let out = e.process(ClientMessage::SubmitOrder(order("B1", 7)), 2);
+        let out = e.process(Command::SubmitOrder(order("B1", 7)), 2);
         assert_eq!(reject_reason(&out), "insufficient USDT balance");
 
         // Amending the resting order up to 8 total (6 leaves = 600 hold) fits:
         // 600 free plus its own 200 hold covers it. Afterwards the whole 800
         // of unspent quote backs this one order (free 200, hold 600).
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "R1".into(),
                 price: None,
                 quantity: Some(Decimal::from(8)),
@@ -4932,7 +4917,7 @@ mod tests {
 
         // 11 total (9 leaves = 900 hold) exceeds the 800 the account has left.
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "R1".into(),
                 price: None,
                 quantity: Some(Decimal::from(11)),
@@ -4948,13 +4933,13 @@ mod tests {
         // Canceling the resting order frees its hold; the refused submit now
         // clears (a rejected id is free to reuse).
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "R1".into(),
             },
             5,
         );
         assert!(matches!(out[0], VenueMessage::OrderCanceled { .. }));
-        let out = e.process(ClientMessage::SubmitOrder(order("B1", 7)), 6);
+        let out = e.process(Command::SubmitOrder(order("B1", 7)), 6);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
     }
 
@@ -4970,11 +4955,11 @@ mod tests {
             client_order_id: "DRIFT".into(),
             fraction: Decimal::new(5, 1),
         });
-        e.process(ClientMessage::SubmitOrder(order("DRIFT", 4)), 1);
+        e.process(Command::SubmitOrder(order("DRIFT", 4)), 1);
         e.corrupt_order_locked_for_test("USDT", Decimal::ZERO);
 
         e.process(
-            ClientMessage::QueryFills {
+            Command::QueryFills {
                 request_id: "Q".into(),
                 client_order_id: None,
             },
@@ -5003,7 +4988,7 @@ mod tests {
             let mut order =
                 order_decimal(id, Side::Buy, "MNQ", Decimal::ONE, Some(Decimal::from(100)));
             order.order_type = OrderType::Limit;
-            engine.process(ClientMessage::SubmitOrder(order), 1);
+            engine.process(Command::SubmitOrder(order), 1);
         }
         // READ THE CACHE WHILE THE ZERO-HOLD ORDERS ARE STILL RESTING, which is
         // the only instant the defect is visible, and the reason this test does
@@ -5021,7 +5006,7 @@ mod tests {
             engine.order_locked
         );
         engine.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "Z1".into(),
             },
             2,
@@ -5029,7 +5014,7 @@ mod tests {
         // The next command reconciles the aggregate against the fold over the
         // one remaining zero-hold order; both must say "no entry".
         engine.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "Z2".into(),
             },
             3,
@@ -5045,17 +5030,17 @@ mod tests {
                 client_order_id: id.into(),
                 fraction: Decimal::new(5, 1),
             });
-            e.process(ClientMessage::SubmitOrder(order(id, 2)), 1);
+            e.process(Command::SubmitOrder(order(id, 2)), 1);
         }
 
         e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "I1".into(),
             },
             2,
         );
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "I3".into(),
                 price: None,
                 quantity: Some(Decimal::from(3)),
@@ -5083,7 +5068,7 @@ mod tests {
         // checks: its documented purpose is exercising the negative-balance
         // path, which enforcement would make unreachable.
         let mut e = Engine::new();
-        let out = e.process(ClientMessage::SubmitOrder(order("U1", 5)), 1);
+        let out = e.process(Command::SubmitOrder(order("U1", 5)), 1);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let state = account(&out, out.len() - 1);
         assert_eq!(balance(state, "USDT").total, Decimal::from(-500));
@@ -5143,7 +5128,7 @@ mod tests {
     #[test]
     fn submit_fully_fills_by_default() {
         let mut e = Engine::new();
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         let VenueMessage::OrderFilled(f) = &out[1] else {
@@ -5253,7 +5238,7 @@ mod tests {
         const FUNDS: i64 = 10_000;
         for (order, expected) in cases {
             let mut e = funded(FUNDS);
-            let out = e.process(ClientMessage::SubmitOrder(order), 1);
+            let out = e.process(Command::SubmitOrder(order), 1);
 
             assert_eq!(reject_reason(&out), expected);
             let state = e.account_snapshot(2);
@@ -5285,10 +5270,10 @@ mod tests {
     fn duplicate_client_order_id_is_rejected_after_acceptance() {
         let mut e = Engine::new();
 
-        let first = e.process(ClientMessage::SubmitOrder(order("DUP", 1)), 1);
+        let first = e.process(Command::SubmitOrder(order("DUP", 1)), 1);
         assert!(matches!(first[0], VenueMessage::OrderAccepted { .. }));
 
-        let duplicate = e.process(ClientMessage::SubmitOrder(order("DUP", 1)), 2);
+        let duplicate = e.process(Command::SubmitOrder(order("DUP", 1)), 2);
         assert_eq!(reject_reason(&duplicate), "duplicate client_order_id");
     }
 
@@ -5299,7 +5284,7 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(out.len(), 3);
         let VenueMessage::OrderFilled(f) = &out[1] else {
             panic!("expected fill")
@@ -5320,7 +5305,7 @@ mod tests {
         let mut order = order("O1", 10);
         order.time_in_force = TimeInForce::Ioc;
 
-        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+        let out = e.process(Command::SubmitOrder(order), 1);
 
         assert_eq!(out.len(), 4);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
@@ -5344,7 +5329,7 @@ mod tests {
         let mut order = order("O1", 10);
         order.time_in_force = TimeInForce::Fok;
 
-        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+        let out = e.process(Command::SubmitOrder(order), 1);
 
         assert_eq!(reject_reason(&out), "fill-or-kill could not fully fill");
         assert!(e.open_orders().is_empty());
@@ -5358,7 +5343,7 @@ mod tests {
         e.arm(Divergence::RejectNextSubmit {
             reason: "risk".into(),
         });
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], VenueMessage::OrderRejected { .. }));
     }
@@ -5368,7 +5353,7 @@ mod tests {
         let mut e = Engine::new();
         e.arm(Divergence::DuplicateNextFill);
 
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 4);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
@@ -5388,7 +5373,7 @@ mod tests {
         let mut e = Engine::new();
         e.arm(Divergence::DropNextAccountUpdate);
 
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
@@ -5403,7 +5388,7 @@ mod tests {
         e.arm(Divergence::DuplicateNextFill);
         e.arm(Divergence::DropNextAccountUpdate);
 
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
@@ -5419,11 +5404,11 @@ mod tests {
         });
         e.arm(Divergence::DropNextAccountUpdate);
 
-        let rejected = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let rejected = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(rejected.len(), 1);
         assert!(matches!(rejected[0], VenueMessage::OrderRejected { .. }));
 
-        let filled = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 2);
+        let filled = e.process(Command::SubmitOrder(order("O2", 10)), 2);
         assert_eq!(filled.len(), 2);
         assert!(matches!(filled[0], VenueMessage::OrderAccepted { .. }));
         assert!(matches!(filled[1], VenueMessage::OrderFilled(_)));
@@ -5444,7 +5429,7 @@ mod tests {
         });
         e.arm(Divergence::DropNextAccountUpdate);
         let out = e.process(
-            ClientMessage::SubmitOrder(order_decimal(
+            Command::SubmitOrder(order_decimal(
                 "Z0",
                 Side::Buy,
                 "BTCUSDT",
@@ -5460,7 +5445,7 @@ mod tests {
         );
         // Still armed; the cancel that frees the hold is what spends it.
         let canceled = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "Z0".into(),
             },
             2,
@@ -5596,7 +5581,7 @@ mod tests {
             vec![&Divergence::DuplicateNextFill]
         );
 
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         // Length FIRST: a regression emitting fewer events would otherwise
         // panic on an index rather than naming the count it produced.
@@ -5610,7 +5595,7 @@ mod tests {
         let mut e = Engine::new();
         e.arm(Divergence::ClearDivergences);
 
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
@@ -5632,7 +5617,7 @@ mod tests {
 
         // O1 is submitted first; the O2-targeted partial must NOT apply to it,
         // but the duplicate behind it must still fire (was silently disarmed).
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         assert_eq!(
             out.len(),
             4,
@@ -5650,7 +5635,7 @@ mod tests {
         assert!(matches!(out[3], VenueMessage::AccountState(_)));
 
         // The O2-targeted partial is still armed and now applies to O2.
-        let out = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 2);
+        let out = e.process(Command::SubmitOrder(order("O2", 10)), 2);
         let f = fill(&out, 1);
         assert_eq!(f.last_qty, Decimal::from(3));
         assert_eq!(f.leaves_qty, Decimal::from(7));
@@ -5667,7 +5652,7 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::ZERO,
         });
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         assert_eq!(out.len(), 3);
         let f = fill(&out, 1);
@@ -5688,7 +5673,7 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from(-1),
         });
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         let f = fill(&out, 1);
         assert_eq!(f.last_qty, Decimal::from(10));
@@ -5706,7 +5691,7 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from(3),
         });
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         let f = fill(&out, 1);
         assert_eq!(
@@ -5734,7 +5719,7 @@ mod tests {
                 client_order_id: "O1".into(),
                 fraction,
             });
-            let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+            let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
             let f = fill(&out, 1);
             assert_eq!(f.last_qty, Decimal::from(10));
@@ -5764,7 +5749,7 @@ mod tests {
         });
         let mut fok = order_decimal("FOK", Side::Buy, "BTCUSDT", lot, Some(px));
         fok.time_in_force = TimeInForce::Fok;
-        let out = e.process(ClientMessage::SubmitOrder(fok), 1);
+        let out = e.process(Command::SubmitOrder(fok), 1);
         assert_eq!(reject_reason(&out), "fill-or-kill could not fully fill");
         assert!(e.open_orders().is_empty());
         assert!(e.account_snapshot(2).balances.is_empty());
@@ -5779,7 +5764,7 @@ mod tests {
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
         let gtc = order_decimal("GTC", Side::Buy, "BTCUSDT", lot, Some(px));
-        let out = e.process(ClientMessage::SubmitOrder(gtc), 1);
+        let out = e.process(Command::SubmitOrder(gtc), 1);
         assert_eq!(out.len(), 2, "accept + account state only, no fill event");
         assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
         assert!(matches!(out[1], VenueMessage::AccountState(_)));
@@ -5810,7 +5795,7 @@ mod tests {
 
         // With the stale partial flushed, a later order reusing the id fills
         // fully instead of being ambushed into a partial.
-        let out = e.process(ClientMessage::SubmitOrder(order("NEVER", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("NEVER", 10)), 1);
         let f = fill(&out, 1);
         assert_eq!(f.last_qty, Decimal::from(10));
         assert_eq!(f.leaves_qty, Decimal::ZERO);
@@ -5880,7 +5865,7 @@ mod tests {
     #[test]
     fn buy_fill_moves_base_and_quote_balances() {
         let mut e = Engine::new();
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         let state = account(&out, 2);
 
         let btc = balance(state, "BTC");
@@ -5898,7 +5883,7 @@ mod tests {
     fn sell_fill_moves_balances_opposite() {
         let mut e = Engine::new();
         let order = order_with("O1", Side::Sell, "BTCUSDT", 10, Some(Decimal::from(100)));
-        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+        let out = e.process(Command::SubmitOrder(order), 1);
         let state = account(&out, 2);
 
         let btc = balance(state, "BTC");
@@ -5927,13 +5912,13 @@ mod tests {
 
         let mut e = Engine::new();
         let first = e.process(
-            ClientMessage::SubmitOrder(order_decimal("O1", Side::Buy, "BTCUSDT", qty, Some(px))),
+            Command::SubmitOrder(order_decimal("O1", Side::Buy, "BTCUSDT", qty, Some(px))),
             1,
         );
         assert!(matches!(first[0], VenueMessage::OrderAccepted { .. }));
 
         let out = e.process(
-            ClientMessage::SubmitOrder(order_decimal("O2", Side::Buy, "BTCUSDT", qty, Some(px))),
+            Command::SubmitOrder(order_decimal("O2", Side::Buy, "BTCUSDT", qty, Some(px))),
             2,
         );
 
@@ -5977,11 +5962,11 @@ mod tests {
         }
 
         e.process(
-            ClientMessage::SubmitOrder(order_decimal("O1", Side::Buy, "BTCUSDT", qty, Some(px))),
+            Command::SubmitOrder(order_decimal("O1", Side::Buy, "BTCUSDT", qty, Some(px))),
             1,
         );
         let out = e.process(
-            ClientMessage::SubmitOrder(order_decimal("O2", Side::Buy, "BTCUSDT", qty, Some(px))),
+            Command::SubmitOrder(order_decimal("O2", Side::Buy, "BTCUSDT", qty, Some(px))),
             2,
         );
 
@@ -5996,9 +5981,9 @@ mod tests {
     #[test]
     fn position_vwap_averages_same_direction_adds() {
         let mut e = Engine::new();
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
         let second = order_with("O2", Side::Buy, "BTCUSDT", 10, Some(Decimal::from(200)));
-        let out = e.process(ClientMessage::SubmitOrder(second), 2);
+        let out = e.process(Command::SubmitOrder(second), 2);
         let pos = position(account(&out, 2), "BTCUSDT");
 
         assert_eq!(pos.quantity, Decimal::from(20));
@@ -6008,9 +5993,9 @@ mod tests {
     #[test]
     fn position_reduce_keeps_avg_px_and_shrinks_qty() {
         let mut e = Engine::new();
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
         let reduce = order_with("O2", Side::Sell, "BTCUSDT", 4, Some(Decimal::from(150)));
-        let out = e.process(ClientMessage::SubmitOrder(reduce), 2);
+        let out = e.process(Command::SubmitOrder(reduce), 2);
         let pos = position(account(&out, 2), "BTCUSDT");
 
         assert_eq!(pos.quantity, Decimal::from(6));
@@ -6020,9 +6005,9 @@ mod tests {
     #[test]
     fn position_flip_reopens_at_fill_price() {
         let mut e = Engine::new();
-        e.process(ClientMessage::SubmitOrder(order("O1", 5)), 1);
+        e.process(Command::SubmitOrder(order("O1", 5)), 1);
         let flip = order_with("O2", Side::Sell, "BTCUSDT", 8, Some(Decimal::from(120)));
-        let out = e.process(ClientMessage::SubmitOrder(flip), 2);
+        let out = e.process(Command::SubmitOrder(flip), 2);
         let pos = position(account(&out, 2), "BTCUSDT");
 
         assert_eq!(pos.quantity, Decimal::from(-3));
@@ -6036,7 +6021,7 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         let state = account(&out, 2);
 
         let btc = balance(state, "BTC");
@@ -6061,10 +6046,10 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "O1".into(),
             },
             2,
@@ -6125,7 +6110,7 @@ mod tests {
             fill_seed: 7,
         });
         let accepted = e.process_with_market(
-            ClientMessage::SubmitOrder(trailing_stop("T1", Side::Sell, 90, 10)),
+            Command::SubmitOrder(trailing_stop("T1", Side::Sell, 90, 10)),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6168,7 +6153,7 @@ mod tests {
             fill_seed: 7,
         });
         e.process_with_market(
-            ClientMessage::SubmitOrder(trailing_stop("T2", Side::Buy, 110, 10)),
+            Command::SubmitOrder(trailing_stop("T2", Side::Buy, 110, 10)),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6224,7 +6209,7 @@ mod tests {
             fill_seed: 7,
         });
         let accepted = e.process_with_market(
-            ClientMessage::SubmitOrder(trailing_stop_limit("TL1", Side::Sell, 90, 10, 2)),
+            Command::SubmitOrder(trailing_stop_limit("TL1", Side::Sell, 90, 10, 2)),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6270,7 +6255,7 @@ mod tests {
             fill_seed: 7,
         });
         e.process_with_market(
-            ClientMessage::SubmitOrder(trailing_stop_limit("TL2", Side::Buy, 110, 10, 2)),
+            Command::SubmitOrder(trailing_stop_limit("TL2", Side::Buy, 110, 10, 2)),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6301,7 +6286,7 @@ mod tests {
         });
         // Trigger 90, limit 88: sell at 88 or better, never worse.
         e.process_with_market(
-            ClientMessage::SubmitOrder(trailing_stop_limit("TL3", Side::Sell, 90, 10, 2)),
+            Command::SubmitOrder(trailing_stop_limit("TL3", Side::Sell, 90, 10, 2)),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6372,7 +6357,7 @@ mod tests {
     }
 
     /// The new fields belong to exactly one shape each, and stating one
-    /// elsewhere is refused rather than ignored - a client whose trail offset
+    /// elsewhere is refused rather than ignored - a consumer whose trail offset
     /// was silently dropped would believe its stop moves.
     #[test]
     fn the_new_order_fields_are_refused_where_they_mean_nothing() {
@@ -6386,7 +6371,7 @@ mod tests {
         assert!(validate_submit_order(&fixed).is_err());
 
         // A trailing stop LIMIT owes both distances, and the limit price is the
-        // venue's to derive - a client-stated one would be overwritten by the
+        // venue's to derive - a consumer-stated one would be overwritten by the
         // first ratchet, so it is refused rather than silently replaced.
         let sound = trailing_stop_limit("TL9", Side::Sell, 90, 10, 2);
         assert!(validate_submit_order(&sound).is_ok());
@@ -6437,7 +6422,7 @@ mod tests {
         day.expire_time = Some(10);
         assert!(
             validate_submit_order(&day).is_err(),
-            "a day order's expiry comes from the calendar, not the client"
+            "a day order's expiry comes from the calendar, not the consumer"
         );
     }
 
@@ -6523,7 +6508,7 @@ mod tests {
 
     fn trade(engine: &mut Engine, order: SubmitOrder, ts: u64) -> Vec<VenueMessage> {
         engine.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             ts,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6741,7 +6726,7 @@ mod tests {
         let mut order = limit_order("REST", 1);
         order.price = Some(Decimal::from(1));
         e.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6761,7 +6746,7 @@ mod tests {
         assert!(
             out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderCanceled { client_order_id, .. } if client_order_id == "REST")),
-            "the client is told rather than left with an order nothing can decide: {out:?}"
+            "the consumer is told rather than left with an order nothing can decide: {out:?}"
         );
         assert!(e.open.is_empty());
     }
@@ -6780,7 +6765,7 @@ mod tests {
         let mut order = limit_order("REST", 1);
         order.price = Some(Decimal::from(1));
         e.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             9_000,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6819,7 +6804,7 @@ mod tests {
         let mut order = limit_order("REST", 1);
         order.price = Some(Decimal::from(1));
         e.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             9_000,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6866,7 +6851,7 @@ mod tests {
         let mut order = limit_order("REST", 1);
         order.price = Some(Decimal::from(1));
         e.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -6957,7 +6942,7 @@ mod tests {
                 order,
                 link_of(mogwai_protocol::Contingency::Oco, &[sibling], None),
             );
-            e.process_with_market(ClientMessage::SubmitOrder(order), 1, Some(away_reading()));
+            e.process_with_market(Command::SubmitOrder(order), 1, Some(away_reading()));
         }
         assert_eq!(e.open.len(), 2, "both legs rest");
 
@@ -6995,7 +6980,7 @@ mod tests {
                 order,
                 link_of(mogwai_protocol::Contingency::Oco, &[sibling], None),
             );
-            e.process_with_market(ClientMessage::SubmitOrder(order), 1, Some(away_reading()));
+            e.process_with_market(Command::SubmitOrder(order), 1, Some(away_reading()));
         }
         let scans = e.pending_scans();
         // BOTH legs are handed back as triggered in one batch, which is exactly
@@ -7046,7 +7031,7 @@ mod tests {
             entry,
             link_of(mogwai_protocol::Contingency::Ouo, &["STOP"], None),
         );
-        let out = e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+        let out = e.process_with_market(Command::SubmitOrder(entry), 1, Some(away_reading()));
         assert!(
             out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderFilled(fill) if fill.client_order_id == "ENTRY")),
@@ -7060,7 +7045,7 @@ mod tests {
             stop,
             link_of(mogwai_protocol::Contingency::Ouo, &["ENTRY"], None),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(stop), 2, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(stop), 2, Some(away_reading()));
 
         let resting = e
             .open
@@ -7102,7 +7087,7 @@ mod tests {
         );
 
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![entry, stop],
             },
             1,
@@ -7162,7 +7147,7 @@ mod tests {
 
         // Stop FIRST, so it is resting by the time the entry fills.
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![stop, entry],
             },
             1,
@@ -7222,7 +7207,7 @@ mod tests {
         );
 
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![entry, exit],
             },
             1,
@@ -7286,7 +7271,7 @@ mod tests {
         );
 
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![first, second],
             },
             1,
@@ -7336,7 +7321,7 @@ mod tests {
 
         // Child FIRST.
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![exit, entry],
             },
             1,
@@ -7382,7 +7367,7 @@ mod tests {
         );
 
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![good, bad],
             },
             1,
@@ -7425,7 +7410,7 @@ mod tests {
     /// THE GROUP'S CLOSING SNAPSHOT OBEYS `DropNextAccountUpdate`, because it
     /// goes through `push_account_snapshot`, whose doc names exactly which
     /// sites do not. It used to be pushed unconditionally, which made the group
-    /// one of three paths where a client could arm the divergence and still be
+    /// one of three paths where a consumer could arm the divergence and still be
     /// told the truth about its balances. `expire_orders` was the second and
     /// was closed alongside it. The third, `on_modify`, was RULED THE OTHER WAY
     /// rather than closed: `modify_does_not_consume_armed_drop` pins the arm
@@ -7458,7 +7443,7 @@ mod tests {
 
         let mut plain = linked_engine();
         let out = plain.process_with_market(
-            ClientMessage::SubmitOrderGroup { orders: bracket() },
+            Command::SubmitOrderGroup { orders: bracket() },
             1,
             Some(away_reading()),
         );
@@ -7478,7 +7463,7 @@ mod tests {
         armed.arm(Divergence::DropNextAccountUpdate);
         armed.arm(Divergence::DropNextAccountUpdate);
         let out = armed.process_with_market(
-            ClientMessage::SubmitOrderGroup { orders: bracket() },
+            Command::SubmitOrderGroup { orders: bracket() },
             1,
             Some(away_reading()),
         );
@@ -7542,7 +7527,7 @@ mod tests {
                 })
                 .collect();
             let out = e.process_with_market(
-                ClientMessage::SubmitOrderGroup { orders },
+                Command::SubmitOrderGroup { orders },
                 1,
                 Some(away_reading()),
             );
@@ -7601,7 +7586,7 @@ mod tests {
         );
 
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![entry, exit],
             },
             1,
@@ -7634,7 +7619,7 @@ mod tests {
             entry,
             link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(entry), 1, Some(away_reading()));
 
         let mut exit = limit_order("EXIT", 1);
         exit.side = Side::Sell;
@@ -7647,7 +7632,7 @@ mod tests {
                 Some("ENTRY"),
             ),
         );
-        let out = e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+        let out = e.process_with_market(Command::SubmitOrder(exit), 2, Some(away_reading()));
         assert!(
             out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderAccepted { .. })),
@@ -7699,7 +7684,7 @@ mod tests {
     /// The reduce-only cap-zero cancel inside `on_trigger` is one of six
     /// terminal paths that used to take an order off the book without reaping:
     /// the child was left resting `Held`, scanned by nothing, holding nothing,
-    /// waiting for a release that could never come, and only a client cancel
+    /// waiting for a release that could never come, and only a consumer cancel
     /// could ever end it. `close_out` now owns the rule for every terminal
     /// path.
     #[test]
@@ -7716,7 +7701,7 @@ mod tests {
             entry,
             link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(entry), 1, Some(away_reading()));
 
         let mut exit = limit_order("EXIT", 1);
         exit.side = Side::Sell;
@@ -7729,7 +7714,7 @@ mod tests {
                 Some("ENTRY"),
             ),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(exit), 2, Some(away_reading()));
         assert!(
             e.open
                 .iter()
@@ -7778,7 +7763,7 @@ mod tests {
             entry,
             link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(entry), 1, Some(away_reading()));
 
         let mut exit = limit_order("EXIT", 1);
         exit.side = Side::Sell;
@@ -7791,10 +7776,10 @@ mod tests {
                 Some("ENTRY"),
             ),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(exit), 2, Some(away_reading()));
 
         let out = e.process_with_market(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "EXIT".into(),
                 price: Some(Decimal::from(250)),
                 quantity: None,
@@ -7846,7 +7831,7 @@ mod tests {
             link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
         );
         e.process_with_market(
-            ClientMessage::SubmitOrder(entry),
+            Command::SubmitOrder(entry),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -7865,7 +7850,7 @@ mod tests {
                 Some("ENTRY"),
             ),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(exit), 2, Some(away_reading()));
         assert!(
             e.open
                 .iter()
@@ -7910,7 +7895,7 @@ mod tests {
         );
 
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![exit, entry],
             },
             1,
@@ -7963,7 +7948,7 @@ mod tests {
             entry,
             link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(entry), 1, Some(away_reading()));
         let mut exit = limit_order("EXIT", 1);
         exit.side = Side::Sell;
         exit.price = Some(Decimal::from(300));
@@ -7975,10 +7960,10 @@ mod tests {
                 Some("ENTRY"),
             ),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(exit), 2, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(exit), 2, Some(away_reading()));
 
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "ENTRY".into(),
             },
             3,
@@ -8002,7 +7987,7 @@ mod tests {
                 order,
                 link_of(mogwai_protocol::Contingency::Ouo, &[sibling], None),
             );
-            e.process_with_market(ClientMessage::SubmitOrder(order), 1, Some(away_reading()));
+            e.process_with_market(Command::SubmitOrder(order), 1, Some(away_reading()));
         }
         e.arm(Divergence::PartialFillNext {
             client_order_id: "TP".into(),
@@ -8094,8 +8079,7 @@ mod tests {
                 Some("NOBODY"),
             ),
         );
-        let out =
-            e.process_with_market(ClientMessage::SubmitOrder(orphan), 1, Some(away_reading()));
+        let out = e.process_with_market(Command::SubmitOrder(orphan), 1, Some(away_reading()));
         assert!(
             reject_reason(&out).contains("unknown parent order"),
             "{out:?}"
@@ -8113,7 +8097,7 @@ mod tests {
             entry,
             link_of(mogwai_protocol::Contingency::Oto, &["CHILD"], None),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(entry), 1, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(entry), 1, Some(away_reading()));
 
         let mut child = limit_order("CHILD", 1);
         child.price = Some(Decimal::from(100));
@@ -8125,7 +8109,7 @@ mod tests {
                 Some("ENTRY"),
             ),
         );
-        e.process_with_market(ClientMessage::SubmitOrder(child), 2, Some(away_reading()));
+        e.process_with_market(Command::SubmitOrder(child), 2, Some(away_reading()));
 
         let mut grandchild = limit_order("GRANDCHILD", 1);
         grandchild.price = Some(Decimal::from(100));
@@ -8137,11 +8121,7 @@ mod tests {
                 Some("CHILD"),
             ),
         );
-        let out = e.process_with_market(
-            ClientMessage::SubmitOrder(grandchild),
-            3,
-            Some(away_reading()),
-        );
+        let out = e.process_with_market(Command::SubmitOrder(grandchild), 3, Some(away_reading()));
         assert!(
             reject_reason(&out).contains("may not itself be a parent"),
             "{out:?}"
@@ -8164,7 +8144,7 @@ mod tests {
         order.time_in_force = TimeInForce::Gtd;
         order.expire_time = Some(500);
         e.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -8217,7 +8197,7 @@ mod tests {
         order.price = Some(Decimal::from(1));
         order.time_in_force = TimeInForce::Day;
         e.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -8302,7 +8282,7 @@ mod tests {
             },
         );
         e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "P1",
                 Side::Buy,
                 "BTCUSDT.P",
@@ -8345,7 +8325,7 @@ mod tests {
             },
         );
         e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "P1",
                 Side::Buy,
                 "BTCUSDT.P",
@@ -8401,7 +8381,7 @@ mod tests {
                 },
             );
             let out = e.process(
-                ClientMessage::SubmitOrder(order_with(
+                Command::SubmitOrder(order_with(
                     "S1",
                     Side::Sell,
                     "BTCUSDT.P",
@@ -8469,7 +8449,7 @@ mod tests {
             },
         );
         e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "P1",
                 Side::Buy,
                 "BTCUSDT.P",
@@ -8517,7 +8497,7 @@ mod tests {
             },
         );
         e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "P1",
                 Side::Buy,
                 "BTCUSDT.P",
@@ -8539,7 +8519,7 @@ mod tests {
 
     fn rest_limit(engine: &mut Engine, order: SubmitOrder, last_px: i64, ts: u64) {
         let out = engine.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             ts,
             Some(MarketReading {
                 last_px: Decimal::from(last_px),
@@ -8584,7 +8564,7 @@ mod tests {
     fn projected_qty_ignores_reduce_only_working_orders() {
         let mut e = funded(1_000_000);
         e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "P1",
                 Side::Buy,
                 "BTCUSDT",
@@ -8611,7 +8591,7 @@ mod tests {
     fn projected_qty_does_not_net_an_opposing_working_order() {
         let mut e = funded(1_000_000);
         e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "P1",
                 Side::Buy,
                 "BTCUSDT",
@@ -8635,7 +8615,7 @@ mod tests {
     fn projected_qty_allows_a_netting_flip_inside_the_open_side() {
         let mut e = funded(1_000_000);
         e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "P1",
                 Side::Buy,
                 "BTCUSDT",
@@ -8741,7 +8721,7 @@ mod tests {
     /// `RejectNextCancel` refuses a cancel the venue COULD have honoured, and
     /// the order stays resting.
     ///
-    /// The order staying resting is the whole arm: a client that published a
+    /// The order staying resting is the whole arm: a consumer that published a
     /// replacement before its cancel was acknowledged now has two live orders
     /// where its script rests one, which is a real live-path defect no venue
     /// could previously provoke. A refusal that also removed the order would
@@ -8753,13 +8733,13 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
         e.arm(Divergence::RejectNextCancel {
             reason: "venue said no".into(),
         });
 
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "O1".into(),
             },
             2,
@@ -8773,7 +8753,7 @@ mod tests {
 
         // Still there, and cancellable once the single-shot arm is spent.
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "O1".into(),
             },
             3,
@@ -8785,7 +8765,7 @@ mod tests {
         );
     }
 
-    /// A VENUE-ORIGINATED CANCEL PAYS NO CLIENT-ARMED DIVERGENCE, exactly as a
+    /// A VENUE-ORIGINATED CANCEL PAYS NO CONSUMER-ARMED DIVERGENCE, exactly as a
     /// venue-originated submit does not.
     ///
     /// `liquidate_all` flattens the book through `on_cancel`, and an armed
@@ -8798,7 +8778,7 @@ mod tests {
     #[test]
     fn a_venue_liquidation_neither_spends_nor_suffers_a_cancel_arm() {
         let mut e = Engine::new();
-        e.process(ClientMessage::SubmitOrder(limit_order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(limit_order("O1", 10)), 1);
         assert_eq!(e.open.len(), 1, "premise: the order is resting");
         e.arm(Divergence::RejectNextCancel {
             reason: "venue said no".into(),
@@ -8809,7 +8789,7 @@ mod tests {
             !out.events
                 .iter()
                 .any(|event| matches!(event, VenueMessage::OrderCancelRejected { .. })),
-            "the venue's own cancel is not refused by an arm aimed at the client: {:?}",
+            "the venue's own cancel is not refused by an arm aimed at the consumer: {:?}",
             out.events
         );
         assert!(
@@ -8817,11 +8797,11 @@ mod tests {
             "and the liquidation really did clear the book"
         );
 
-        // The arm is UNSPENT: it is still there for the client cancel the
+        // The arm is UNSPENT: it is still there for the consumer cancel the
         // scenario author aimed it at.
-        e.process(ClientMessage::SubmitOrder(limit_order("O2", 10)), 3);
+        e.process(Command::SubmitOrder(limit_order("O2", 10)), 3);
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "O2".into(),
             },
             4,
@@ -8843,7 +8823,7 @@ mod tests {
             reason: "venue said no".into(),
         });
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "ghost".into(),
             },
             1,
@@ -8854,9 +8834,9 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 2);
+        e.process(Command::SubmitOrder(order("O1", 10)), 2);
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "O1".into(),
             },
             3,
@@ -8875,10 +8855,10 @@ mod tests {
         // different situation from an id the venue never accepted at all. The
         // reason must say so rather than reusing "unknown order" for both.
         let mut e = Engine::new();
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "O1".into(),
             },
             2,
@@ -8889,7 +8869,7 @@ mod tests {
         );
 
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "ghost".into(),
             },
             3,
@@ -8904,11 +8884,11 @@ mod tests {
         // carry the venue id it was accepted under, while a genuinely unknown
         // id carries none - no venue id was ever assigned to it.
         let mut e = Engine::new();
-        let accepted = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let accepted = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         let venue_id = accepted_venue_id(&accepted);
 
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "O1".into(),
             },
             2,
@@ -8923,7 +8903,7 @@ mod tests {
         ));
 
         let out = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "ghost".into(),
             },
             3,
@@ -8941,10 +8921,10 @@ mod tests {
     #[test]
     fn modify_of_already_filled_order_distinguishes_terminal_from_unknown() {
         let mut e = Engine::new();
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
@@ -8965,11 +8945,11 @@ mod tests {
         // is known, so it must go out on the reject; only a genuinely unknown
         // id is bare (see modify_unknown_order_is_rejected_without_venue_id).
         let mut e = Engine::new();
-        let accepted = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let accepted = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         let venue_id = accepted_venue_id(&accepted);
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
@@ -8992,7 +8972,7 @@ mod tests {
         let mut e = Engine::new();
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "ghost".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
@@ -9022,13 +9002,13 @@ mod tests {
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
         e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("O1", 10)),
+            Command::SubmitOrder(limit_order("O1", 10)),
             1,
             Some(reading(0)),
         );
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
@@ -9058,11 +9038,11 @@ mod tests {
             client_order_id: "MARKET-REST".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("MARKET-REST", 10)), 1);
+        e.process(Command::SubmitOrder(order("MARKET-REST", 10)), 1);
         assert!(matches!(e.open[0].resting, Resting::Inert));
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "MARKET-REST".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
@@ -9086,10 +9066,10 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: None,
                 quantity: Some(Decimal::from(20)),
@@ -9118,7 +9098,7 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         // Both the equality case (new total == 3 filled, zero would remain)
         // and the strictly-below case must reject, and the reason must say
@@ -9126,7 +9106,7 @@ mod tests {
         // "below" would misdescribe the equality rejection.
         for new_total in [Decimal::from(3), Decimal::from(2)] {
             let out = e.process(
-                ClientMessage::ModifyOrder {
+                Command::ModifyOrder {
                     client_order_id: "O1".into(),
                     price: None,
                     quantity: Some(new_total),
@@ -9156,10 +9136,10 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: None,
                 quantity: Some(Decimal::ZERO),
@@ -9189,13 +9169,13 @@ mod tests {
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
         e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("O1", 10)),
+            Command::SubmitOrder(limit_order("O1", 10)),
             1,
             Some(reading(0)),
         );
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::ZERO),
                 quantity: None,
@@ -9224,10 +9204,10 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
         let out = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: None,
                 quantity: None,
@@ -9257,14 +9237,14 @@ mod tests {
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
         e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("O1", 10)),
+            Command::SubmitOrder(limit_order("O1", 10)),
             1,
             Some(reading(0)),
         );
 
         e.arm(Divergence::DropNextAccountUpdate);
         let modified = e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: None,
@@ -9276,7 +9256,7 @@ mod tests {
         assert!(matches!(modified[0], VenueMessage::OrderUpdated { .. }));
         assert!(matches!(modified[1], VenueMessage::AccountState(_)));
 
-        let filled = e.process(ClientMessage::SubmitOrder(order("O2", 10)), 3);
+        let filled = e.process(Command::SubmitOrder(order("O2", 10)), 3);
         assert_eq!(filled.len(), 2);
         assert!(matches!(filled[0], VenueMessage::OrderAccepted { .. }));
         assert!(matches!(filled[1], VenueMessage::OrderFilled(_)));
@@ -9286,7 +9266,7 @@ mod tests {
     fn missing_instrument_rejects_without_booking_position() {
         let mut e = Engine::new();
         let order = order_with("O1", Side::Buy, "ETHUSDT", 10, Some(Decimal::from(100)));
-        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+        let out = e.process(Command::SubmitOrder(order), 1);
 
         assert_eq!(reject_reason(&out), "unknown instrument");
         assert!(e.account_snapshot(2).balances.is_empty());
@@ -9302,22 +9282,22 @@ mod tests {
             client_order_id: "O1".into(),
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
-        e.process(ClientMessage::SubmitOrder(order("O2", 5)), 2);
+        e.process(Command::SubmitOrder(order("O1", 10)), 1);
+        e.process(Command::SubmitOrder(order("O2", 5)), 2);
         e.arm(Divergence::PartialFillNext {
             client_order_id: "O3".into(),
             fraction: Decimal::from_f64(0.5).unwrap(),
         });
-        e.process(ClientMessage::SubmitOrder(order("O3", 4)), 3);
+        e.process(Command::SubmitOrder(order("O3", 4)), 3);
         e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "O3".into(),
             },
             4,
         );
 
         let out = e.process(
-            ClientMessage::QueryOrders {
+            Command::QueryOrders {
                 request_id: "Q1".into(),
                 client_order_id: None,
                 open_only: false,
@@ -9373,12 +9353,12 @@ mod tests {
             fraction: Decimal::from_f64(0.3).unwrap(),
         });
         e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("O1", 10)),
+            Command::SubmitOrder(limit_order("O1", 10)),
             1,
             Some(reading(0)),
         );
         e.process(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "O1".into(),
                 price: Some(Decimal::from(200)),
                 quantity: Some(Decimal::from(20)),
@@ -9400,7 +9380,7 @@ mod tests {
     fn query_fills_books_each_fill_once_despite_duplicate_wire_events() {
         let mut e = Engine::new();
         e.arm(Divergence::DuplicateNextFill);
-        let out = e.process(ClientMessage::SubmitOrder(order("O1", 10)), 1);
+        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
         // The wire carried the fill twice (the injected lie)...
         assert_eq!(
             out.iter()
@@ -9408,11 +9388,11 @@ mod tests {
                 .count(),
             2
         );
-        e.process(ClientMessage::SubmitOrder(order("O2", 5)), 2);
+        e.process(Command::SubmitOrder(order("O2", 5)), 2);
 
         // ...but the truth store booked it once.
         let out = e.process(
-            ClientMessage::QueryFills {
+            Command::QueryFills {
                 request_id: "Q1".into(),
                 client_order_id: None,
             },
@@ -9434,7 +9414,7 @@ mod tests {
     #[test]
     fn silent_cancel_removes_the_order_wordlessly_and_query_tells_the_truth() {
         // The poll-heal fault: the venue cancels a resting order out-of-band
-        // and no lifecycle event is emitted - the client's belief and the
+        // and no lifecycle event is emitted - the consumer's belief and the
         // venue's book now disagree, and only a QueryOrders reply tells the
         // truth.
         let mut e = funded(1_000);
@@ -9442,7 +9422,7 @@ mod tests {
             client_order_id: "R1".into(),
             fraction: Decimal::new(5, 1),
         });
-        e.process(ClientMessage::SubmitOrder(order("R1", 4)), 1);
+        e.process(Command::SubmitOrder(order("R1", 4)), 1);
         assert_eq!(e.open_orders().len(), 1);
 
         e.cancel_open_order_silently("R1", 7)
@@ -9484,7 +9464,7 @@ mod tests {
         });
         let mut order = order("O1", 10);
         order.time_in_force = TimeInForce::Ioc;
-        e.process(ClientMessage::SubmitOrder(order), 1);
+        e.process(Command::SubmitOrder(order), 1);
 
         let snap = e.order_status_snapshot("Q".into(), Some("O1"), false, 2);
         let row = &snap.orders[0];
@@ -9500,7 +9480,7 @@ mod tests {
             fraction: Decimal::from_f64(0.5).unwrap(),
         });
         let order = order_with("O1", Side::Buy, "BTCUSDT", 10, None);
-        let out = e.process(ClientMessage::SubmitOrder(order), 1);
+        let out = e.process(Command::SubmitOrder(order), 1);
 
         assert_eq!(reject_reason(&out), "submit price required");
         assert!(e.account_snapshot(2).balances.is_empty());
@@ -9534,7 +9514,7 @@ mod tests {
         // cover a full linkage reap and a widened account snapshot). Any
         // per-case ceiling over that spread is a table of magic numbers that
         // reads as a gate and is not one.
-        let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_CLIENT_ID_LEN);
+        let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_ECHOED_ID_LEN);
 
         // Book 1: an empty venue, and a submit that fills - the first fill in a
         // fresh pair, which introduces TWO balance rows and one position the
@@ -9559,7 +9539,7 @@ mod tests {
         for i in 0..200 {
             // A far-from-market limit rests; a marketable one fills and closes.
             deep.process(
-                ClientMessage::SubmitOrder(order_with(
+                Command::SubmitOrder(order_with(
                     &format!("resting-{i}"),
                     Side::Buy,
                     "BTCUSDT",
@@ -9569,7 +9549,7 @@ mod tests {
                 i,
             );
             deep.process(
-                ClientMessage::SubmitOrder(order_with(
+                Command::SubmitOrder(order_with(
                     &format!("filled-{i}"),
                     Side::Buy,
                     "BTCUSDT",
@@ -9606,12 +9586,12 @@ mod tests {
 
         let mut ioc = order_with(&esc_id, Side::Buy, "BTCUSDT", 10, Some(Decimal::from(100)));
         ioc.time_in_force = TimeInForce::Ioc;
-        let query_orders = ClientMessage::QueryOrders {
+        let query_orders = Command::QueryOrders {
             request_id: esc_id.clone(),
             client_order_id: None,
             open_only: false,
         };
-        let query_fills = ClientMessage::QueryFills {
+        let query_fills = Command::QueryFills {
             request_id: esc_id.clone(),
             client_order_id: None,
         };
@@ -9643,22 +9623,22 @@ mod tests {
             })
             .collect();
 
-        let cases: Vec<(&str, &mut Engine, Vec<ClientMessage>)> = vec![
+        let cases: Vec<(&str, &mut Engine, Vec<Command>)> = vec![
             (
                 "fresh book, first fill in a new pair",
                 &mut fresh,
                 vec![
-                    ClientMessage::SubmitOrder(order_with(
+                    Command::SubmitOrder(order_with(
                         &esc_id,
                         Side::Buy,
                         "BTCUSDT",
                         10,
                         Some(Decimal::from(1_000_000)),
                     )),
-                    ClientMessage::CancelOrder {
+                    Command::CancelOrder {
                         client_order_id: esc_id.clone(),
                     },
-                    ClientMessage::ModifyOrder {
+                    Command::ModifyOrder {
                         client_order_id: esc_id.clone(),
                         price: Some(Decimal::from(101)),
                         quantity: None,
@@ -9674,10 +9654,10 @@ mod tests {
                 vec![
                     query_orders.clone(),
                     query_fills.clone(),
-                    ClientMessage::CancelOrder {
+                    Command::CancelOrder {
                         client_order_id: "resting-7".into(),
                     },
-                    ClientMessage::SubmitOrder(order_with(
+                    Command::SubmitOrder(order_with(
                         &esc_id,
                         Side::Sell,
                         "BTCUSDT",
@@ -9689,7 +9669,7 @@ mod tests {
             (
                 "armed RejectNextSubmit at MAX_REASON_LEN",
                 &mut armed,
-                vec![ClientMessage::SubmitOrder(order_with(
+                vec![Command::SubmitOrder(order_with(
                     &esc_id,
                     Side::Buy,
                     "BTCUSDT",
@@ -9700,7 +9680,7 @@ mod tests {
             (
                 "duplicate + partial + IOC remainder",
                 &mut widest,
-                vec![ClientMessage::SubmitOrder(ioc), query_fills],
+                vec![Command::SubmitOrder(ioc), query_fills],
             ),
             // A GROUP is the one command whose output scales with the command
             // rather than with the book, so its bound is the one most easily
@@ -9710,7 +9690,7 @@ mod tests {
             (
                 "a full-size marketable group on a fresh book",
                 &mut group_book,
-                vec![ClientMessage::SubmitOrderGroup {
+                vec![Command::SubmitOrderGroup {
                     orders: group_members,
                 }],
             ),
@@ -9725,7 +9705,7 @@ mod tests {
             let mut leg = mnq_order(&format!("HEDGE-{index}"), side, 1, 21_000);
             leg.position_id = Some(format!("LEG-{index}"));
             hedged.process_with_market(
-                ClientMessage::SubmitOrder(leg),
+                Command::SubmitOrder(leg),
                 1,
                 Some(MarketReading {
                     last_px: Decimal::from(21_000),
@@ -9740,13 +9720,13 @@ mod tests {
             "the hedged fixture must actually carry two positions in one symbol"
         );
 
-        let futures_cases: Vec<(&str, &mut Engine, Vec<ClientMessage>)> = vec![(
+        let futures_cases: Vec<(&str, &mut Engine, Vec<Command>)> = vec![(
             "hedged futures book with margin rows",
             &mut hedged,
             vec![
-                ClientMessage::SubmitOrder(mnq_order(&esc_id, Side::Buy, 1, 21_000)),
+                Command::SubmitOrder(mnq_order(&esc_id, Side::Buy, 1, 21_000)),
                 query_orders.clone(),
-                ClientMessage::CancelOrder {
+                Command::CancelOrder {
                     client_order_id: esc_id.clone(),
                 },
             ],
@@ -9777,7 +9757,7 @@ mod tests {
     }
 
     /// The sweep-side half of the reservation claim, which `process`-shaped
-    /// cases cannot reach: a liquidation cascade emits order frames NO client
+    /// cases cannot reach: a liquidation cascade emits order frames NO consumer
     /// order paid for, so `emitted` alone under-reserves it and `originated`
     /// is what covers the gap.
     #[test]
@@ -9788,7 +9768,7 @@ mod tests {
             let mut leg = mnq_order(&format!("LONG-{index}"), Side::Buy, 1, 21_000);
             leg.position_id = Some(format!("LEG-{index}"));
             engine.process_with_market(
-                ClientMessage::SubmitOrder(leg),
+                Command::SubmitOrder(leg),
                 1,
                 Some(MarketReading {
                     last_px: Decimal::from(21_000),
@@ -9825,7 +9805,7 @@ mod tests {
         // fill, and the cancel that closes the remainder the reduce-only cap
         // clamped. FIVE order events - one more than the IOC limit shape, and
         // the reason the submit multiplier is five rather than four.
-        let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_CLIENT_ID_LEN);
+        let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_ECHOED_ID_LEN);
         let mut e = Engine::build(EngineConfig {
             account_id: AccountId::parse(&"Z".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN))
                 .expect("max length account id"),
@@ -9836,7 +9816,7 @@ mod tests {
         // The position the protective leg reduces, one lot against a ten-lot
         // stop, so the cap clamps the fill and cancels the remainder.
         e.process(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "seed",
                 Side::Buy,
                 "BTCUSDT",
@@ -9851,7 +9831,7 @@ mod tests {
         stop.trigger_price = Some(Decimal::from(1_000_000));
         stop.reduce_only = true;
 
-        let cmd = ClientMessage::SubmitOrder(stop);
+        let cmd = Command::SubmitOrder(stop);
         let shape = e.book_shape();
         let bound = mogwai_protocol::sizing::worst_case_output_bytes(&cmd, &shape);
         let output = e.process_with_market(cmd, 2, Some(reading(50)));
@@ -9880,7 +9860,7 @@ mod tests {
         // against an under-reserving bound. Every fill duplicated and every id
         // at max length in `\u{0001}`, which serde escapes to six bytes each.
         let esc =
-            |n: usize| "\u{0001}".repeat(mogwai_protocol::MAX_CLIENT_ID_LEN - 1) + &n.to_string();
+            |n: usize| "\u{0001}".repeat(mogwai_protocol::MAX_ECHOED_ID_LEN - 1) + &n.to_string();
         let pairs = [
             ("AAABBB", "AAA", "BBB"),
             ("CCCDDD", "CCC", "DDD"),
@@ -9916,7 +9896,7 @@ mod tests {
                 Some(Decimal::from(1_000_000)),
             );
             resting.order_type = OrderType::Limit;
-            e.process(ClientMessage::SubmitOrder(resting), index as u64);
+            e.process(Command::SubmitOrder(resting), index as u64);
             e.arm(Divergence::DuplicateNextFill);
         }
         let scans = e.pending_scans();
@@ -9944,11 +9924,11 @@ mod tests {
         // remainder the position cap clamped. Four order events, which is why
         // the per-order multiplier is four rather than three.
         let mut e = banded(31);
-        e.process(ClientMessage::SubmitOrder(order("seed", 1)), 1);
+        e.process(Command::SubmitOrder(order("seed", 1)), 1);
         let mut stop = stop_order("wide", Side::Sell, OrderType::StopMarket, 90, None);
         stop.quantity = Decimal::from(10);
         stop.reduce_only = true;
-        e.process(ClientMessage::SubmitOrder(stop), 2);
+        e.process(Command::SubmitOrder(stop), 2);
         e.arm(Divergence::DuplicateNextFill);
 
         let scan = e.pending_scans().remove(0);
@@ -9982,7 +9962,7 @@ mod tests {
         // zero-order reservation.
         let mut e = banded(32);
         e.process(
-            ClientMessage::SubmitOrder(stop_order(
+            Command::SubmitOrder(stop_order(
                 "trigger-only",
                 Side::Sell,
                 OrderType::StopLimit,
@@ -10018,10 +9998,7 @@ mod tests {
     #[test]
     fn a_limit_rests_until_the_tape_reaches_its_drawn_trigger() {
         let mut e = banded(7);
-        e.process(
-            ClientMessage::SubmitOrder(limit_order("trigger-rest", 1)),
-            10,
-        );
+        e.process(Command::SubmitOrder(limit_order("trigger-rest", 1)), 10);
         let scan = e.pending_scans().remove(0);
         let (quiet, emitted) = e.apply_scans(&[result(&scan, false, 20)], 20);
         assert!(quiet.is_empty());
@@ -10046,17 +10023,17 @@ mod tests {
         let mut a = banded(42);
         let mut b = banded(42);
         a.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("same", 1)),
+            Command::SubmitOrder(limit_order("same", 1)),
             1,
             Some(reading),
         );
         b.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("unrelated", 1)),
+            Command::SubmitOrder(limit_order("unrelated", 1)),
             1,
             Some(reading),
         );
         b.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("same", 1)),
+            Command::SubmitOrder(limit_order("same", 1)),
             2,
             Some(reading),
         );
@@ -10084,7 +10061,7 @@ mod tests {
             fraction: Decimal::new(5, 1),
         });
         let out = e.process_with_market(
-            ClientMessage::SubmitOrder(limit_order("arrival-part", 2)),
+            Command::SubmitOrder(limit_order("arrival-part", 2)),
             10,
             Some(reading(0)),
         );
@@ -10109,7 +10086,7 @@ mod tests {
             client_order_id: "fok-arm".into(),
             fraction: Decimal::new(5, 1),
         });
-        let rejected = e.process(ClientMessage::SubmitOrder(fok.clone()), 1);
+        let rejected = e.process(Command::SubmitOrder(fok.clone()), 1);
         // The short-of-trigger refusal by its exact text, not by the word
         // "trigger": its sibling refusal ("could not fully fill") is the one
         // this test must NOT be satisfied by, and only the full string
@@ -10119,7 +10096,7 @@ mod tests {
             "fill-or-kill could not fill at its trigger"
         );
         assert!(e.armed.is_empty(), "the rejected FOK left its arm standing");
-        let resubmit = e.process_with_market(ClientMessage::SubmitOrder(fok), 2, Some(reading(0)));
+        let resubmit = e.process_with_market(Command::SubmitOrder(fok), 2, Some(reading(0)));
         assert!(matches!(
             resubmit.iter().find(|event| matches!(event, VenueMessage::OrderFilled(_))),
             Some(VenueMessage::OrderFilled(fill)) if fill.last_qty == Decimal::from(2)
@@ -10136,8 +10113,8 @@ mod tests {
         let mut sell = limit_order("cross-sell", 1);
         sell.side = Side::Sell;
         sell.price = Some(Decimal::from(90));
-        let first = e.process(ClientMessage::SubmitOrder(buy), 1);
-        let second = e.process(ClientMessage::SubmitOrder(sell), 2);
+        let first = e.process(Command::SubmitOrder(buy), 1);
+        let second = e.process(Command::SubmitOrder(sell), 2);
         assert!(
             !first
                 .iter()
@@ -10184,7 +10161,7 @@ mod tests {
         };
         let mut e = banded(42);
         let buy = e.process_with_market(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "slip-buy",
                 Side::Buy,
                 "BTCUSDT",
@@ -10195,7 +10172,7 @@ mod tests {
             Some(reading),
         );
         let sell = e.process_with_market(
-            ClientMessage::SubmitOrder(order_with(
+            Command::SubmitOrder(order_with(
                 "slip-sell",
                 Side::Sell,
                 "BTCUSDT",
@@ -10235,7 +10212,7 @@ mod tests {
         let filled = |last_px: i64, band_ticks: u32, side: Side, i: usize| {
             let mut e = banded(42);
             let out = e.process_with_market(
-                ClientMessage::SubmitOrder(order_with(
+                Command::SubmitOrder(order_with(
                     &format!("slip-{side:?}-{i}"),
                     side,
                     "BTCUSDT",
@@ -10286,7 +10263,7 @@ mod tests {
     #[test]
     fn a_market_order_with_no_reading_fills_at_its_stated_price_and_warns() {
         let mut e = banded(42);
-        let out = e.process(ClientMessage::SubmitOrder(order("market-fallback", 1)), 1);
+        let out = e.process(Command::SubmitOrder(order("market-fallback", 1)), 1);
         assert!(out.iter().any(|event| matches!(event, VenueMessage::OrderFilled(fill) if fill.last_px == Decimal::from(100))));
     }
 
@@ -10307,7 +10284,7 @@ mod tests {
             balances: HashMap::from([("USDT".to_string(), Decimal::from(100))]),
             fill_seed: 42,
         });
-        let out = e.process_with_market(ClientMessage::SubmitOrder(candidate), 1, Some(reading));
+        let out = e.process_with_market(Command::SubmitOrder(candidate), 1, Some(reading));
         assert!(
             matches!(out.as_slice(), [VenueMessage::OrderRejected { reason, .. }] if reason.contains("insufficient USDT"))
         );
@@ -10384,7 +10361,7 @@ mod tests {
     fn id_namespaces_advance_independently_and_saturate() {
         let mut e = Engine::new();
         e.venue_order_seq = u64::MAX;
-        let first = e.process(ClientMessage::SubmitOrder(order("ID-1", 1)), 1);
+        let first = e.process(Command::SubmitOrder(order("ID-1", 1)), 1);
         let accepted = first.iter().find_map(|event| match event {
             VenueMessage::OrderAccepted { venue_order_id, .. } => Some(venue_order_id),
             _ => None,
@@ -10398,7 +10375,7 @@ mod tests {
 
         let mut hedged = Engine::new();
         hedged.set_oms_type(mogwai_protocol::OmsType::Hedging);
-        let events = hedged.process(ClientMessage::SubmitOrder(order("ID-2", 1)), 1);
+        let events = hedged.process(Command::SubmitOrder(order("ID-2", 1)), 1);
         let fill = events
             .iter()
             .find_map(|event| match event {
@@ -10452,7 +10429,7 @@ mod tests {
 
     /// EVERY PREFIX THE VENUE MINTS IS RESERVED, not just the first one.
     ///
-    /// The reservation is not cosmetic: a client that claims one of these ids
+    /// The reservation is not cosmetic: a consumer that claims one of these ids
     /// burns it in `seen_client_order_ids`, so the forced close that later mints
     /// the same id is refused as a duplicate and the venue cannot liquidate the
     /// account that pre-claimed it. `RISK-`, which `liquidate_all` mints, was
@@ -10461,7 +10438,7 @@ mod tests {
     /// The loop runs over the constant the MINTING SITES read, so a prefix added
     /// later is covered by this test the moment it exists.
     #[test]
-    fn client_cannot_claim_the_liquidation_order_namespace() {
+    fn a_consumer_cannot_claim_the_liquidation_order_namespace() {
         // The two prefixes are named LITERALLY as well as looped over, because a
         // test that only reads the constant shrinks with it: deleting a prefix
         // from the list would delete the case that proves it reserved.
@@ -10472,10 +10449,8 @@ mod tests {
             );
         }
         for prefix in RESERVED_ID_PREFIXES {
-            let out = Engine::new().process(
-                ClientMessage::SubmitOrder(order(&format!("{prefix}MNQ-1"), 1)),
-                1,
-            );
+            let out =
+                Engine::new().process(Command::SubmitOrder(order(&format!("{prefix}MNQ-1"), 1)), 1);
             assert_eq!(
                 reject_reason(&out),
                 "client_order_id uses reserved liquidation prefix",
@@ -10486,7 +10461,7 @@ mod tests {
         // same letters is an ordinary client id - which is what makes the
         // refusals above a statement about the reserved namespace rather than
         // about ids that look vaguely like it.
-        let out = Engine::new().process(ClientMessage::SubmitOrder(order("RISKY-MNQ-1", 1)), 1);
+        let out = Engine::new().process(Command::SubmitOrder(order("RISKY-MNQ-1", 1)), 1);
         assert!(
             !out.iter()
                 .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
@@ -10497,10 +10472,10 @@ mod tests {
     #[test]
     fn cancel_consumes_drop_next_account_update() {
         let mut e = banded(1);
-        e.process(ClientMessage::SubmitOrder(limit_order("cancel-drop", 1)), 1);
+        e.process(Command::SubmitOrder(limit_order("cancel-drop", 1)), 1);
         e.arm(Divergence::DropNextAccountUpdate);
         let canceled = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "cancel-drop".into(),
             },
             2,
@@ -10518,7 +10493,7 @@ mod tests {
         e.set_oms_type(mogwai_protocol::OmsType::Hedging);
         let mut reduce = order("hedge-reduce", 1);
         reduce.reduce_only = true;
-        let out = e.process(ClientMessage::SubmitOrder(reduce), 1);
+        let out = e.process(Command::SubmitOrder(reduce), 1);
         assert_eq!(
             reject_reason(&out),
             "hedging reduce-only order requires a position_id"
@@ -10566,7 +10541,7 @@ mod tests {
             order_type: OrderType::Limit,
             ..resting
         };
-        e.process(ClientMessage::SubmitOrder(resting), 1);
+        e.process(Command::SubmitOrder(resting), 1);
         e.arm(Divergence::PartialFillNext {
             client_order_id: "zero-redraw".into(),
             fraction: Decimal::new(3, 1),
@@ -10601,7 +10576,7 @@ mod tests {
             order_type: OrderType::Limit,
             ..resting
         };
-        e.process(ClientMessage::SubmitOrder(resting), 1);
+        e.process(Command::SubmitOrder(resting), 1);
         e.arm(Divergence::PartialFillNext {
             client_order_id: "zero-frontier".into(),
             fraction: Decimal::new(3, 1),
@@ -10634,7 +10609,7 @@ mod tests {
             order_type: OrderType::Limit,
             ..resting
         };
-        e.process(ClientMessage::SubmitOrder(resting), 1);
+        e.process(Command::SubmitOrder(resting), 1);
         e.arm(Divergence::PartialFillNext {
             client_order_id: "partial-frontier".into(),
             fraction: Decimal::new(3, 1),
@@ -10657,7 +10632,7 @@ mod tests {
     fn a_resting_acceptance_leaves_drop_next_account_update_armed() {
         let mut e = banded(1);
         e.arm(Divergence::DropNextAccountUpdate);
-        let accepted = e.process(ClientMessage::SubmitOrder(limit_order("rest-keeps", 1)), 1);
+        let accepted = e.process(Command::SubmitOrder(limit_order("rest-keeps", 1)), 1);
         assert!(
             accepted
                 .iter()
@@ -10666,7 +10641,7 @@ mod tests {
         );
         // Still armed, and the later cancel is what spends it.
         let canceled = e.process(
-            ClientMessage::CancelOrder {
+            Command::CancelOrder {
                 client_order_id: "rest-keeps".into(),
             },
             2,
@@ -10684,7 +10659,7 @@ mod tests {
     /// one function away from the group's after that one was closed.
     ///
     /// An expiry FREES A HOLD, which is exactly what `DropNextAccountUpdate` is
-    /// armed against, and this path handed the client the fresh balances anyway
+    /// armed against, and this path handed the consumer the fresh balances anyway
     /// while leaving the arm loaded for a later fill. The unarmed half is what
     /// makes the assertion discriminating: the same order, the same expiry, and
     /// the snapshot present.
@@ -10702,7 +10677,7 @@ mod tests {
         };
 
         let mut plain = banded(1);
-        plain.process(ClientMessage::SubmitOrder(gtd()), 1);
+        plain.process(Command::SubmitOrder(gtd()), 1);
         let expired = plain.expire_orders(60, None, 60);
         assert!(
             expired
@@ -10718,7 +10693,7 @@ mod tests {
         );
 
         let mut armed = banded(1);
-        armed.process(ClientMessage::SubmitOrder(gtd()), 1);
+        armed.process(Command::SubmitOrder(gtd()), 1);
         armed.arm(Divergence::DropNextAccountUpdate);
         let expired = armed.expire_orders(60, None, 60);
         assert!(
@@ -10757,7 +10732,7 @@ mod tests {
         let submit = |id: &str, quantity: Decimal, price: Decimal| {
             let mut e = Engine::new();
             e.process(
-                ClientMessage::SubmitOrder(order_decimal(
+                Command::SubmitOrder(order_decimal(
                     id,
                     Side::Buy,
                     "BTCUSDT",
@@ -11005,7 +10980,7 @@ mod tests {
         stop.price = None;
         stop.trigger_price = Some(Decimal::from(21_000));
         let out = e.process_with_market(
-            ClientMessage::SubmitOrder(stop),
+            Command::SubmitOrder(stop),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(20_000),
@@ -11050,7 +11025,7 @@ mod tests {
             let mut resting = mnq_order("A1", Side::Buy, 1, 21_000);
             resting.order_type = OrderType::Limit;
             e.process_with_market(
-                ClientMessage::SubmitOrder(resting),
+                Command::SubmitOrder(resting),
                 1,
                 Some(MarketReading {
                     last_px: Decimal::from(22_000),
@@ -11059,7 +11034,7 @@ mod tests {
                 }),
             );
             e.process_with_market(
-                ClientMessage::ModifyOrder {
+                Command::ModifyOrder {
                     client_order_id: "A1".into(),
                     quantity: Some(Decimal::from(10)),
                     price: None,
@@ -11088,7 +11063,7 @@ mod tests {
         let mut resting = mnq_order("A1", Side::Buy, 1, 21_000);
         resting.order_type = OrderType::Limit;
         let out = e.process_with_market(
-            ClientMessage::SubmitOrder(resting),
+            Command::SubmitOrder(resting),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(22_000),
@@ -11103,7 +11078,7 @@ mod tests {
         );
         // Ten contracts would need 42,000 against an account holding 5,000.
         let out = e.process_with_market(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "A1".into(),
                 quantity: Some(Decimal::from(10)),
                 price: None,
@@ -11269,7 +11244,7 @@ mod tests {
             link_of(mogwai_protocol::Contingency::NoContingency, &[], None),
         );
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup {
+            Command::SubmitOrderGroup {
                 orders: vec![first, second],
             },
             2,
@@ -11329,7 +11304,7 @@ mod tests {
             })
             .collect();
         let out = e.process_with_market(
-            ClientMessage::SubmitOrderGroup { orders },
+            Command::SubmitOrderGroup { orders },
             3,
             Some(MarketReading {
                 last_px: Decimal::from(100),
@@ -11466,7 +11441,7 @@ mod tests {
         // hypothetical Reg-T initial (50,000) exceeds everything the account
         // has must still be admitted, because no hold is taken either way.
         let out = e.process_with_market(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "C".into(),
                 quantity: Some(Decimal::from(500)),
                 price: None,
@@ -11499,7 +11474,7 @@ mod tests {
         sell.order_type = OrderType::Limit;
         trade(&mut e, sell, 2);
         let out = e.process_with_market(
-            ClientMessage::ModifyOrder {
+            Command::ModifyOrder {
                 client_order_id: "S1".into(),
                 quantity: Some(Decimal::from(50)),
                 price: None,

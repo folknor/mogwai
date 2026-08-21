@@ -4,7 +4,7 @@
 //! Ignored havoc tests for the mogwai adapter.
 //!
 //! These bind a real TCP listener and exercise behavior that unit tests cannot
-//! reach: venue-side divergence shipping, client-side inbound corruption,
+//! reach: venue-side divergence shipping, adapter-inbound corruption,
 //! connection-lifecycle havoc, and the end-to-end divergence surfaces the suite
 //! claims (partial fills, duplicate fills, dropped account updates, blackouts).
 //! They share the stub harness in `tests/common`.
@@ -33,7 +33,7 @@ use mogwai_adapter::{
     MogwaiExecutionClient,
 };
 use mogwai_protocol::{
-    ClientHavoc, ConnHavoc, EventKind, HavocLatency, HavocSpec, control::Divergence,
+    ConnHavoc, EventKind, HavocLatency, HavocSpec, InboundHavoc, control::Divergence,
 };
 use nautilus_common::{
     cache::Cache,
@@ -95,9 +95,9 @@ fn subscribe(client: &mut MogwaiDataClient) {
         .expect("subscribe trades");
 }
 
-fn data_havoc(client: ClientHavoc) -> HavocSpec {
+fn data_havoc(inbound: InboundHavoc) -> HavocSpec {
     HavocSpec {
-        client,
+        inbound,
         ..HavocSpec::default()
     }
 }
@@ -291,7 +291,7 @@ async fn submit_exec_client(
 }
 
 /// As `submit_exec_client`, but submits a nautilus `StopMarketOrder` under the
-/// supplied client havoc. The order shape is what differs: only a conditional
+/// supplied inbound havoc. The order shape is what differs: only a conditional
 /// produces an `OrderTriggered` for havoc to reach.
 async fn submit_stop_exec_client(
     state: Arc<StubState>,
@@ -339,7 +339,7 @@ async fn ships_venue_havoc() {
     // below, and validate() now refuses a venue temporal window (GoDark,
     // DelayAcks, StallData under polling) the chosen carrier cannot deliver.
     let havoc = HavocSpec {
-        client: ClientHavoc::default(),
+        inbound: InboundHavoc::default(),
         venue: vec![
             Divergence::RejectNextSubmit {
                 reason: "nope".into(),
@@ -470,9 +470,9 @@ async fn havoc_latency_delays_inbound_event() {
     // construction.
     let delay = mogwai_protocol::BASELINE_LATENCY.delay_for(EventKind::Data)
         + armed.delay_for(EventKind::Data);
-    let havoc = data_havoc(ClientHavoc {
+    let havoc = data_havoc(InboundHavoc {
         latency: Some(armed),
-        ..ClientHavoc::default()
+        ..InboundHavoc::default()
     });
 
     // THE CLOCK STARTS AT THE STUB'S SEND, not at `connect()`. Measuring from
@@ -515,10 +515,10 @@ async fn havoc_drop_prob_one_drops_all() {
             trades.push(trade_json(ts, "100.00"));
         }
     }
-    let havoc = data_havoc(ClientHavoc {
+    let havoc = data_havoc(InboundHavoc {
         drop_prob: 1.0,
         seed: Some(1),
-        ..ClientHavoc::default()
+        ..InboundHavoc::default()
     });
 
     let mut rx = subscribed_data_client(Arc::clone(&state), Some(havoc)).await;
@@ -542,10 +542,10 @@ async fn havoc_duplicate_prob_one_doubles() {
         .lock()
         .expect("ws trades mutex")
         .push(trade_json(10, "100.00"));
-    let havoc = data_havoc(ClientHavoc {
+    let havoc = data_havoc(InboundHavoc {
         duplicate_prob: 1.0,
         seed: Some(1),
-        ..ClientHavoc::default()
+        ..InboundHavoc::default()
     });
 
     let mut rx = subscribed_data_client(state, Some(havoc)).await;
@@ -601,10 +601,10 @@ async fn havoc_reorder_swaps_adjacent() {
         trades.push(trade_json(20, "101.00"));
         trades.push(trade_json(30, "102.00"));
     }
-    let havoc = data_havoc(ClientHavoc {
+    let havoc = data_havoc(InboundHavoc {
         reorder_prob: 1.0,
         seed: Some(1),
-        ..ClientHavoc::default()
+        ..InboundHavoc::default()
     });
 
     let mut rx = subscribed_data_client(state, Some(havoc)).await;
@@ -1437,7 +1437,7 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
 /// would also pass if every frame were delayed, and passing only the second
 /// would also pass if havoc reached nothing.
 ///
-/// It drives the client-side filter rather than a venue-armed `DelayAcks`
+/// It drives the inbound filter rather than a venue-armed `DelayAcks`
 /// because the venue here is the test stub, which has no writer windows to
 /// arm - and the classification under test is shared, so the client-side
 /// bucket is the same decision observed from the reachable end.
@@ -1462,7 +1462,7 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
         );
     }
     let havoc = HavocSpec {
-        client: ClientHavoc {
+        inbound: InboundHavoc {
             latency: Some(HavocLatency {
                 base_nanos: 0,
                 exec_event_nanos: 400_000_000,
@@ -1472,7 +1472,7 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
                 // upper bound below would catch it.
                 data_nanos: 4_000_000_000,
             }),
-            ..ClientHavoc::default()
+            ..InboundHavoc::default()
         },
         ..HavocSpec::default()
     };

@@ -96,11 +96,11 @@ of them are structural rather than nominal.
 | Passenger | `ws.rs` `SocketSession.passenger` field doc: `"The ledger this connection trades on"` | field + doc | correct object, and the doc calls it a ledger | local | 1 | Minor but symptomatic: the field is a `Passenger`, the doc calls it a Ledger, and the glossary distinguishes them (a Passenger HAS a ledger). One word either way. |
 | Ticket | `boatyard.rs` `Ticket { yard, boat }` vs `admission.rs` `Ticket { _permit }` | two types, one crate | a boat's rider handle; a priority-lane frame slot | local | 1 | The glossary names only the boatyard sense ("the tickets that keep them alive"). Two `Ticket` types in one crate, both `pub(crate)`, imported into `ws.rs` side by side. Rename the admission one to `FrameSlot` - `OutboundFrame.slot` already calls it that. |
 | Ticket | `admission.rs` `ADMISSION_PROMISE_TICKETS` | constant | outstanding PROMISES of a future priority frame | wire (config key) | 1 | Third sense of ticket, and the only one an operator reads. `promise_slots`. |
-| Session | `ws.rs` `SocketSession`, `Run::sessions_tx` / `session_guard` / `sessions_drained`, `serve.rs` `serve_until_drained` | types, fields, methods | ONE WEBSOCKET CONNECTION | cross | 1 | **[extends P2]** Pass 2 named the collision from the `SocketQuery::session` side. Internally it is larger than one struct: the whole shutdown-drain vocabulary is built on the connection sense while `SocketSession.client_session` carries the glossary sense in the same value. `conns_tx` / `conns_drained` / `SocketConn`. |
+| Session | `ws.rs` `SocketSession`, `Run::sessions_tx` / `session_guard` / `sessions_drained`, `serve.rs` `serve_until_drained` | types, fields, methods | ONE WEBSOCKET CONNECTION | cross | 1 | **[extends P2]** Pass 2 named the collision from the `SocketQuery::session` side. Internally it is larger than one struct: the whole shutdown-drain vocabulary is built on the connection sense while `SocketSession.presented_identity` carries the glossary sense in the same value. `conns_tx` / `conns_drained` / `SocketConn`. |
 | Freeze | `run.rs` `frozen_for` doc `"how long this account has been unattended"`, `freeze_if_unattended`, `collect_expired_accounts` doc `"UNATTENDED IS THE SAME TWO-PART QUESTION"` | methods, doc prose | the freeze state | local | 1 | **[extends P2]** Pass 2 found "unattended" in `ReadyRecord` and `account_ttl_ms`. Internally it is the PRIMARY word - three method names and a capitalized doc heading - and "freeze" is the secondary one. Whichever wins, the two-part predicate (no lane AND no admission) deserves the definition, because that is the load-bearing part and neither word carries it. |
 | Ledger | `run.rs` `LedgerTemplate` | type | opening balances, fill seed, oms type, liquidation band | local | 1 | Not a ledger and not a template of one: a ledger is a `mogwai-engine` instance and this is the four venue-wide settings every engine is built from. Its own doc admits the drift ("the same value doing a different job"). `EngineDefaults` or `AccountOpeningTerms`. |
 | Ledger | `run.rs` `unopened_ledger` | method | a throwaway `Engine` built to answer a read | local | 2/1 | Honest name for what it returns, but it returns an Engine and the crate's word for an Engine-per-account is Ledger via Passenger. Keep, but note the trio `passenger` / `peek_passenger` / `unopened_ledger` are three return shapes over one concept. |
-| Client | `run.rs` `has_client_on`, `evict_account`'s `same_client` closure, `"a ledger is never read from two clients at once"` | method, closure, close text | the SESSION STRING | local, wire | - | Correct per the glossary's Client entry (the counterparty process, identified only by its session id). No defect; recorded because it is the one place the overloaded word is used precisely. |
+| Client | `run.rs` `has_matching_identity_on`, `evict_account`'s `same_client` closure, `"a ledger is never read from two clients at once"` | method, closure, close text | the SESSION STRING | local, wire | - | Correct per the glossary's Client entry (the counterparty process, identified only by its session id). No defect; recorded because it is the one place the overloaded word is used precisely. |
 | Client | `ws.rs` `ws_upgrade` comment `"a ledger is never read from two sockets at once"` | comment | contradicts the close reason two files away, which says "two clients" | local | 1 | One client's two sockets DO read one ledger - that is the entire point of `session`. The comment states the opposite of the behaviour it sits above. Fix the comment. |
 
 ---
@@ -182,7 +182,7 @@ higher and two of them are actively misleading.
 | term | site | source |
 |---|---|---|
 | `Engine`, `EngineConfig`, `PendingScan`, `ScanResult`, `book_shape`, `valuation_symbols`, `projected_qty` | `run.rs`, `sweeper.rs` | `mogwai-engine`'s own API |
-| `AccountId`, `VenueOrderId`, `ServerMessage`, `ClientMessage`, `SimClock`, `OmsType`, `InstrumentDef`, `Symbol`, `CommandClass` | throughout | `mogwai-protocol` / nautilus; pass 1's quarantine |
+| `AccountId`, `VenueOrderId`, `ServerMessage`, `Command`, `SimClock`, `OmsType`, `InstrumentDef`, `Symbol`, `CommandClass` | throughout | `mogwai-protocol` / nautilus; pass 1's quarantine |
 | `TickSource`, `TickEvent`, `TickFault`, `GeneratedSource`, `MergeSource`, `CheckpointIndex` | `source.rs`, `tape.rs` | `mogwai-data` |
 | Semaphore, permit, `forget`, RAII guard, watch/broadcast/mpsc channel, `spawn_blocking` | `admission.rs`, `boatyard.rs`, `tape.rs` | tokio / Rust |
 | mark, VWAP, settlement, maintenance/initial margin, funding index, liquidation, drawdown, equity | `sweeper.rs`, `risk.rs` | universal trading vocabulary |
@@ -237,8 +237,8 @@ narrower than the gate" shape, and the blast radius is the entire process.
 
 **4. [P2 CONFIRMED] Two doc comments are attached to the wrong item in `run.rs`.**
 `evict_account`'s entire doc block - four paragraphs ending "Returns how many
-were displaced, so the caller can say so" - runs straight into `has_client_on`'s
-doc with no separator, so `has_client_on` carries it and `evict_account` (the
+were displaced, so the caller can say so" - runs straight into `has_matching_identity_on`'s
+doc with no separator, so `has_matching_identity_on` carries it and `evict_account` (the
 most consequential method in the file, and the one both the glossary's Eviction
 entry and `CloseSpec::evicted` cite) has NO doc at all. The same defect repeats
 at `session_guard`, whose doc is attached to `fault_venue`. Both read as a

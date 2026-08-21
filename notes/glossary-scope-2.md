@@ -60,7 +60,7 @@ doc-prose to externally visible:
 | Account policy = "balance plus rules" | `OpenAccountRequest` proves the glossary wrong on the wire: `balances` and `policy` are siblings, and `policy_preset` is a third. |
 | `ClearDivergences` scope | confirmed at the routing site: it clears venue arms and flow surges only; engine one-shots stay armed. |
 | `RunComplete` / "passenger duration complete" | confirmed: `handle_socket` emits the same `RunComplete` variant for the venue deadline and for `SocketQuery::duration_ms`, and closes 1000 with two different reasons. The overload is on the primary text frame, as pass 1 said. |
-| `MAX_CLIENT_ID_LEN` naming | the server adds a SECOND echo cap, `MAX_ECHOED_SYMBOL = 64`, under its own name for the same rule. Pass 1's `MAX_ECHOED_ID_LEN` proposal should absorb both. |
+| `MAX_ECHOED_ID_LEN` naming | the server adds a SECOND echo cap, `MAX_ECHOED_SYMBOL = 64`, under its own name for the same rule. Pass 1's `MAX_ECHOED_ID_LEN` proposal should absorb both. |
 | Fault undefined | this crate spends "fault" five ways; see the fault cluster below. |
 
 ---
@@ -79,7 +79,7 @@ doc-prose to externally visible:
 | Run | `serve.rs`: `tracing::info!(account_id, "run ledger account fixed")` | log text | the default account id was resolved | wire (operator) | 1 | Same stale premise, in the boot log. "default account id fixed". |
 | Freeze | `config.rs` `account_ttl_ms` doc: "How long an UNATTENDED account survives" | doc prose | the freeze TTL | wire | 1 | Fourth word for Freeze, same as pass 1's `ReadyRecord` row, now in the operator's config reference. Use Freeze once, in both. |
 | Divergence / StallData | `config.rs` `zero_speed_stall_ms` | config key | how long a `speed = 0` tape parks waiting for ring headroom | wire | 1 | `StallData` is an armed transport divergence; this stall is an unarmed backpressure park inside the tape. Two mechanisms, one word, and the config key is the one an operator reads first. Rename the knob (`zero_speed_ring_wait_ms`) - it is the newer and cheaper of the two. |
-| Session | `serve.rs` `serve_until_drained` / `Run::sessions_drained`, and `SocketSession` | type, fn, doc prose | one live WebSocket connection | cross, wire (indirect) | 1 | The glossary's Session is the CLIENT IDENTITY on `?session=`, and this crate uses the same word for the connection - the glossary's Connection. Both appear in one struct: `SocketSession.client_session` is the glossary's Session, and the struct it sits in is not. Rename the connection sense (`SocketConn` / `conns_drained`) and keep Session for the identity. Mostly internal, but `SocketQuery::session` is on the wire and the collision is one field away from a reader. |
+| Session | `serve.rs` `serve_until_drained` / `Run::sessions_drained`, and `SocketSession` | type, fn, doc prose | one live WebSocket connection | cross, wire (indirect) | 1 | The glossary's Session is the CLIENT IDENTITY on `?session=`, and this crate uses the same word for the connection - the glossary's Connection. Both appear in one struct: `SocketSession.presented_identity` is the glossary's Session, and the struct it sits in is not. Rename the connection sense (`SocketConn` / `conns_drained`) and keep Session for the identity. Mostly internal, but `SocketQuery::session` is on the wire and the collision is one field away from a reader. |
 | Account policy | `http.rs` `OpenAccountRequest` (`balances` + `policy` + `policy_preset`) | JSON fields | balances and rules as SEPARATE fields | wire | 1 | Confirms pass 1: the glossary's "opening balance plus risk rules" describes no type on either side. Correct the entry to say the policy is the RULES, and that opening balances are stated beside it. |
 | Session calendar | `http.rs` `refuse_all(..., "market closed", ts)` | refusal text (`OrderRejected.reason`) | the resolved shape's session calendar says the market is shut | wire | - | **[P2 REFUTED]** The code emits this reason only from `calendar.is_open(ts) == false`; `ReopenGap` is not an alternate branch producing the same refusal. "Market closed" is also quarantined below as standard trading vocabulary. The message could be more diagnostic, but it neither misuses Session calendar nor collapses two code paths. |
 
@@ -285,7 +285,7 @@ consumer.
 
 **8. Two echo caps, one rule, and only one of them is tested against its
 message.** `MAX_ECHOED_SYMBOL = 64` (this crate) and
-`MAX_CLIENT_ID_LEN` (protocol) both exist so a caller-supplied string cannot
+`MAX_ECHOED_ID_LEN` (protocol) both exist so a caller-supplied string cannot
 amplify a refusal body. The symbol refusal hard-codes `1 to 32 characters` in
 its message while validating through `validate_wire_symbol`, and truncates at
 64 - so the message names 32, the cap is 64, and the validator owns both

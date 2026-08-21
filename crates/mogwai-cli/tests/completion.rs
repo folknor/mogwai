@@ -4,7 +4,7 @@
 //! L2 gates: the declared run duration, the announced completion, and the
 //! deliberate difference between finishing and being killed.
 //!
-//! `RunComplete` exists so a client can tell a finished run from a dead one.
+//! `RunComplete` exists so a consumer can tell a finished run from a dead one.
 //! These tests are therefore as much about what is NOT sent under a signal as
 //! about what is sent at the deadline.
 
@@ -399,13 +399,13 @@ async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadlin
 /// is deliberately an end-to-end gate because it pins the fault side channel,
 /// its ERROR diagnostic and the binary's exit status together.  Sampling
 /// `/health` for a terminal fault is intentionally not gated: the process may
-/// exit before a client can observe that transient state.
+/// exit before a consumer can observe that transient state.
 #[test]
 #[ignore = "binds a loopback listener"]
 fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
     // The null side of the field, on a HEALTHY venue, taken first. It is a
     // separate launch rather than a phase of the faulted one below because a
-    // venue whose source faults may be gone before any client can poll it - so
+    // venue whose source faults may be gone before any consumer can poll it - so
     // "`fault` is null before the fault" is not observable on that process, and
     // asserting it there would be a race dressed as a property.
     //

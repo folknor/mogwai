@@ -92,8 +92,8 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
 /// `default_session` return `None` left every one of them green.
 ///
 /// What breaks without it is not this test's stub, which seats everyone: the
-/// VENUE seats one client per ledger and evicts a second, so a nautilus host -
-/// which holds two sockets on one account by construction - would disconnect
+/// venue compares the identity presented by each account connection, so a
+/// nautilus host, which holds two sockets on one account by construction, would disconnect
 /// its own data leg the instant its execution leg dialled. That failure is
 /// invisible from either client's own side, which is why the assertion has to
 /// be on what crossed the wire.
@@ -164,7 +164,7 @@ async fn both_legs_disclose_one_process_session_on_the_upgrade() {
     let first = &sessions[0];
     assert!(
         sessions.iter().all(|session| session == first),
-        "the two legs of one process are ONE client of one ledger; differing \
+        "the two legs of one process present one identity; differing \
          sessions make the venue evict one with the other: {sessions:?}"
     );
     // Wire-legal by the venue's rule, not by a local charset guess, so the two

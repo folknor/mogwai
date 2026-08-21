@@ -18,9 +18,9 @@ use axum::{
 use mogwai_data::TickEvent;
 use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
-    AccountState, AdmissionSubject, ClientMessage, CommandClass, DEFAULT_HISTORY_LIMIT,
-    InstrumentDef, MAX_HISTORY_LIMIT, OrderType, QuoteTick, SimClock, TradeTick, VenueClock,
-    VenueMessage, control::Divergence, trades_through, truncate_client_id, truncate_reason,
+    AccountState, AdmissionSubject, Command, CommandClass, DEFAULT_HISTORY_LIMIT, InstrumentDef,
+    MAX_HISTORY_LIMIT, OrderType, QuoteTick, SimClock, TradeTick, VenueClock, VenueMessage,
+    control::Divergence, trades_through, truncate_echoed_id, truncate_reason,
     validate_client_order_id, validate_divergence, validate_modify_order, validate_request_id,
     validate_submit_order,
 };
@@ -56,7 +56,7 @@ pub(crate) struct DivergenceRequest {
 ///
 /// NAMING AN ACCOUNT NEVER CREATES ONE. Arming a blackout is not a reason to
 /// bring a ledger into existence - a typo would otherwise mint `WYRD-01` and
-/// arm a ledger nothing ever connects to, and would answer the real client's own
+/// arm a ledger nothing ever connects to, and would answer the real consumer's own
 /// `POST /account` with a `409`. The arm is RECORDED against the name instead,
 /// and the account's first mint consumes it; see `VenueArms`. A stale line here
 /// said the request "resolves to the EMPTY set", which was the finding-5
@@ -109,35 +109,35 @@ pub(crate) enum OrderOutcome {
 
 /// Name what a refusal refused, so the consumer can translate it per command -
 /// a refused cancel must not read as a rejected order.
-pub(crate) fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
+pub(crate) fn admission_subject(cmd: &Command) -> AdmissionSubject {
     match cmd {
-        ClientMessage::SubmitOrder(o) => AdmissionSubject::Submit {
+        Command::SubmitOrder(o) => AdmissionSubject::Submit {
             client_order_id: o.client_order_id.clone(),
         },
         // Named by the LIST, because a group is admitted or refused whole.
         // A group whose first member carries no link is one
         // `validate_submit_group` refuses anyway, so the empty id here is a
         // subject for a frame that only ever accompanies that refusal.
-        ClientMessage::SubmitOrderGroup { orders } => AdmissionSubject::SubmitGroup {
+        Command::SubmitOrderGroup { orders } => AdmissionSubject::SubmitGroup {
             order_list_id: orders
                 .first()
                 .and_then(|order| order.link.as_ref())
                 .map(|link| link.order_list_id.clone())
                 .unwrap_or_default(),
         },
-        ClientMessage::CancelOrder { client_order_id } => AdmissionSubject::Cancel {
+        Command::CancelOrder { client_order_id } => AdmissionSubject::Cancel {
             client_order_id: client_order_id.clone(),
         },
-        ClientMessage::ModifyOrder {
+        Command::ModifyOrder {
             client_order_id, ..
         } => AdmissionSubject::Modify {
             client_order_id: client_order_id.clone(),
         },
-        ClientMessage::QueryOrders { request_id, .. } => AdmissionSubject::Query {
+        Command::QueryOrders { request_id, .. } => AdmissionSubject::Query {
             request_id: request_id.clone(),
             query: mogwai_protocol::QueryKind::Orders,
         },
-        ClientMessage::QueryFills { request_id, .. } => AdmissionSubject::Query {
+        Command::QueryFills { request_id, .. } => AdmissionSubject::Query {
             request_id: request_id.clone(),
             query: mogwai_protocol::QueryKind::Fills,
         },
@@ -147,7 +147,7 @@ pub(crate) fn admission_subject(cmd: &ClientMessage) -> AdmissionSubject {
 /// The protocol-boundary verdict on one order-entry command: `Some(reason)`
 /// when it is malformed. Ids are length-checked here, alongside the numeric
 /// checks that were always here, because both are malformed-request failures.
-pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
+pub(crate) fn boundary_error(cmd: &Command) -> Option<&'static str> {
     match cmd {
         // A LINKED order may not arrive alone on the wire, and this is the
         // refusal that makes the group frame's guarantee worth anything.
@@ -164,17 +164,17 @@ pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
         // The ENGINE still accepts a linked standalone submit: it is the
         // in-process API the group path itself is built on, and the venue's own
         // liquidation submits go through it. This is a WIRE rule, refused where
-        // the client's choice of route is actually made.
-        ClientMessage::SubmitOrder(order) => validate_submit_order(order).err().or_else(|| {
+        // the consumer's choice of route is actually made.
+        Command::SubmitOrder(order) => validate_submit_order(order).err().or_else(|| {
             order.link.is_some().then_some(
                 "a linked order must be submitted as part of a SubmitOrderGroup: sent alone, a \
                  sibling can fill before the rest of the group is admitted",
             )
         }),
-        ClientMessage::SubmitOrderGroup { orders } => {
+        Command::SubmitOrderGroup { orders } => {
             mogwai_protocol::validate_submit_group(orders).err()
         }
-        ClientMessage::ModifyOrder {
+        Command::ModifyOrder {
             client_order_id,
             price,
             quantity,
@@ -186,15 +186,13 @@ pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
         // answered truthfully whatever it asks (an unknown id is an empty
         // snapshot, not an error) - so for these the id caps are the whole
         // boundary check.
-        ClientMessage::CancelOrder { client_order_id } => {
-            validate_client_order_id(client_order_id).err()
-        }
-        ClientMessage::QueryOrders {
+        Command::CancelOrder { client_order_id } => validate_client_order_id(client_order_id).err(),
+        Command::QueryOrders {
             request_id,
             client_order_id,
             ..
         }
-        | ClientMessage::QueryFills {
+        | Command::QueryFills {
             request_id,
             client_order_id,
             ..
@@ -207,7 +205,7 @@ pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
 }
 
 /// The refusal frames for a malformed order-entry command, echoing the
-/// offending id TRUNCATED to `MAX_CLIENT_ID_LEN`. Echoing it at full length
+/// offending id TRUNCATED to `MAX_ECHOED_ID_LEN`. Echoing it at full length
 /// would turn an 8 MiB `client_order_id` into an 8 MiB `OrderRejected`,
 /// recreating exactly the unbounded frame the cap exists to prevent; a
 /// truncated echo cannot be mistaken for a live correlation because the venue
@@ -218,9 +216,9 @@ pub(crate) fn boundary_error(cmd: &ClientMessage) -> Option<&'static str> {
 /// and owes every member its own rejection. Every other command answers with
 /// exactly one, which is what `boundary_frame_count` states and what the
 /// reservation is sized from.
-fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<VenueMessage> {
+fn boundary_refusal(cmd: &Command, reason: &str, ts: u64) -> Vec<VenueMessage> {
     let note = |id: &str| {
-        if id.len() > mogwai_protocol::MAX_CLIENT_ID_LEN {
+        if id.len() > mogwai_protocol::MAX_ECHOED_ID_LEN {
             format!(
                 "{reason}; the identifier was truncated for display and no order \
                  exists under either spelling"
@@ -230,36 +228,36 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<VenueMess
         }
     };
     match cmd {
-        ClientMessage::ModifyOrder {
+        Command::ModifyOrder {
             client_order_id, ..
         } => vec![VenueMessage::OrderModifyRejected {
-            client_order_id: truncate_client_id(client_order_id.clone()),
+            client_order_id: truncate_echoed_id(client_order_id.clone()),
             venue_order_id: None,
             reason: note(client_order_id),
             ts_event: ts,
         }],
-        ClientMessage::CancelOrder { client_order_id } => {
+        Command::CancelOrder { client_order_id } => {
             vec![VenueMessage::OrderCancelRejected {
-                client_order_id: truncate_client_id(client_order_id.clone()),
+                client_order_id: truncate_echoed_id(client_order_id.clone()),
                 venue_order_id: None,
                 reason: note(client_order_id),
                 ts_event: ts,
             }]
         }
-        ClientMessage::SubmitOrder(order) => vec![VenueMessage::OrderRejected {
-            client_order_id: truncate_client_id(order.client_order_id.clone()),
+        Command::SubmitOrder(order) => vec![VenueMessage::OrderRejected {
+            client_order_id: truncate_echoed_id(order.client_order_id.clone()),
             reason: note(&order.client_order_id),
             ts_event: ts,
         }],
         // A group is refused WHOLE, so every member gets its own rejection.
-        // Answering with one frame naming one member would leave the client
+        // Answering with one frame naming one member would leave the consumer
         // waiting on the others, and answering with none would leave it waiting
         // on all of them. An EMPTY group has no member to answer, so it falls
         // through to the untargeted diagnostic like a malformed query.
-        ClientMessage::SubmitOrderGroup { orders } if !orders.is_empty() => orders
+        Command::SubmitOrderGroup { orders } if !orders.is_empty() => orders
             .iter()
             .map(|order| VenueMessage::OrderRejected {
-                client_order_id: truncate_client_id(order.client_order_id.clone()),
+                client_order_id: truncate_echoed_id(order.client_order_id.clone()),
                 reason: note(&order.client_order_id),
                 ts_event: ts,
             })
@@ -281,10 +279,10 @@ fn boundary_refusal(cmd: &ClientMessage, reason: &str, ts: u64) -> Vec<VenueMess
 /// ONCE over both carriers. A guard that only looked at `SubmitOrder` would let
 /// a group walk past it, and every one of those guards is a rule about capital
 /// rather than a formality.
-fn submitted_orders(cmd: &ClientMessage) -> &[mogwai_protocol::SubmitOrder] {
+fn submitted_orders(cmd: &Command) -> &[mogwai_protocol::SubmitOrder] {
     match cmd {
-        ClientMessage::SubmitOrder(order) => std::slice::from_ref(order),
-        ClientMessage::SubmitOrderGroup { orders } => orders,
+        Command::SubmitOrder(order) => std::slice::from_ref(order),
+        Command::SubmitOrderGroup { orders } => orders,
         _ => &[],
     }
 }
@@ -295,8 +293,8 @@ fn submitted_orders(cmd: &ClientMessage) -> &[mogwai_protocol::SubmitOrder] {
 /// the same rule the atomic-admission guarantee states, applied at the pre-engine
 /// guards rather than inside the engine. Each frame names the member it is
 /// addressed to, and a group's frames say which member was actually at fault so
-/// a client is not left guessing which leg to fix.
-fn refuse_submitted(cmd: &ClientMessage, blamed: &str, reason: &str, ts: u64) -> Vec<VenueMessage> {
+/// a consumer is not left guessing which leg to fix.
+fn refuse_submitted(cmd: &Command, blamed: &str, reason: &str, ts: u64) -> Vec<VenueMessage> {
     let orders = submitted_orders(cmd);
     orders
         .iter()
@@ -317,9 +315,9 @@ fn refuse_submitted(cmd: &ClientMessage, blamed: &str, reason: &str, ts: u64) ->
 /// One place rather than one per guard, because each guard owes exactly the
 /// same three steps - reserve for as many frames as there are members, refuse
 /// them all, blame the offender - and writing them out six times is how a group
-/// ends up refused with one frame and a client left waiting on the rest.
+/// ends up refused with one frame and a consumer left waiting on the rest.
 fn refuse_all(
-    cmd: &ClientMessage,
+    cmd: &Command,
     lanes: &ExecLanes,
     blamed: &str,
     reason: &str,
@@ -342,9 +340,9 @@ fn refuse_all(
 /// How many boundary refusal frames `cmd` can produce, which is what its
 /// reservation is sized from. One for everything except a group, which owes one
 /// per member and is bounded by `MAX_GROUP_ORDERS`.
-fn boundary_frame_count(cmd: &ClientMessage) -> usize {
+fn boundary_frame_count(cmd: &Command) -> usize {
     match cmd {
-        ClientMessage::SubmitOrderGroup { orders } => orders.len().max(1),
+        Command::SubmitOrderGroup { orders } => orders.len().max(1),
         _ => 1,
     }
 }
@@ -363,7 +361,7 @@ fn boundary_frame_count(cmd: &ClientMessage) -> usize {
 ///    occur.
 /// 3. The post-stamp synthesis-failure refusal (a MARKET order still priceless
 ///    for a symbol this venue DOES list), which is the venue's own failure and
-///    is not the engine's to blame on the client.
+///    is not the engine's to blame on the consumer.
 /// 4. Take the engine lock, read `book_shape()`, reserve worst-case output.
 ///    The lock spans the shape read and the processing, so the shape cannot
 ///    drift out from under the reservation that covers it.
@@ -373,7 +371,7 @@ fn boundary_frame_count(cmd: &ClientMessage) -> usize {
 ///
 /// The websocket order carrier uses this one gate for every command. `None`
 /// means the command cleared the protocol boundary.
-fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Option<OrderOutcome> {
+fn boundary_outcome(order_cmd: &Command, lanes: &ExecLanes, ts: u64) -> Option<OrderOutcome> {
     let reason = boundary_error(order_cmd)?;
     let Some(reservation) = lanes.try_reserve_boundary_frames(boundary_frame_count(order_cmd))
     else {
@@ -398,7 +396,7 @@ fn boundary_outcome(order_cmd: &ClientMessage, lanes: &ExecLanes, ts: u64) -> Op
 }
 
 pub(crate) async fn process_order_cmd(
-    order_cmd: ClientMessage,
+    order_cmd: Command,
     state: &AppState,
     run: &Arc<Run>,
     lanes: &ExecLanes,
@@ -415,7 +413,7 @@ pub(crate) async fn process_order_cmd(
     }
     // A submit names its own symbol on the wire; it is CHECKED against the
     // river this socket bound, never overridden by it. Without the check a
-    // client could bind one river and trade another.
+    // consumer could bind one river and trade another.
     //
     // PLACEMENT IS THE CONTRACT: right after the protocol boundary and BEFORE
     // the act delay, the market reading, the calendar lookup and the engine
@@ -425,7 +423,7 @@ pub(crate) async fn process_order_cmd(
     // refusal at the entry-time `ts`, like its boundary neighbours.
     //
     // The frame is `OrderRejected`, NOT `AdmissionRejected`: a mismatch is a
-    // client error, and `AdmissionRejected` reads as a capacity signal at every
+    // consumer error, and `AdmissionRejected` reads as a capacity signal at every
     // observer. Only the failure to reserve a boundary slot is capacity.
     //
     // EVERY member of a group is checked, and one mismatch refuses all of them.
@@ -456,7 +454,7 @@ pub(crate) async fn process_order_cmd(
     // settling in it qualifies, and so does a spot pair quoted in it - buying
     // BTC on BTCUSDT under a USDT policy leaves a BTC balance the BTCUSDT mark
     // can value. What does not qualify is a shape that would leave a holding
-    // nothing prices in the policy currency, and asking for one is a client
+    // nothing prices in the policy currency, and asking for one is a consumer
     // error with a reason that says why.
     if let Some(currency) = passenger
         .risk
@@ -486,11 +484,11 @@ pub(crate) async fn process_order_cmd(
     }
     // A LOCKED ACCOUNT OPENS NOTHING. This is the other half of enforcement: the
     // breach flattened the book, and this is what stops the strategy putting it
-    // straight back on. Placed with the other client-error refusals and BEFORE
+    // straight back on. Placed with the other consumer-error refusals and BEFORE
     // the act delay and market reading, because a locked account's order needs
     // no price to be refused.
     //
-    // Cancels and queries are deliberately still served: a locked client must
+    // Cancels and queries are deliberately still served: a locked consumer must
     // still be able to see and tidy its own book, and refusing a query would
     // make a locked account indistinguishable from a broken one.
     if let Some(order) = submitted_orders(&order_cmd).first()
@@ -523,7 +521,7 @@ pub(crate) async fn process_order_cmd(
         let _configured = run.ensure_instrument(passenger, &order.symbol).await;
     }
     // A POSITION CAP is refused here, by name, before the act delay. An
-    // oversized submit is a client error: the firm would not have taken the
+    // oversized submit is a consumer error: the firm would not have taken the
     // order, so the venue must not either. Reduce-only never grows the book
     // and is left alone.
     //
@@ -606,9 +604,9 @@ pub(crate) async fn process_order_cmd(
     // A MARKET order still price-less after the stamp, for a symbol this venue
     // DOES list, means market price synthesis failed (most likely the task
     // itself died).
-    // Reject it here with the honest story - the client correctly sent no price
+    // Reject it here with the honest story - the consumer correctly sent no price
     // (nautilus never stamps a market order), so letting the engine's "submit
-    // price required" fire would blame the client for the venue's own synthesis
+    // price required" fire would blame the consumer for the venue's own synthesis
     // failure. A symbol the resolver REFUSES - illegal, funding-barred, or one
     // whose resolved shape does not validate - is deliberately left price-less:
     // the engine checks instrument existence before the price, so its "unknown
@@ -733,7 +731,7 @@ pub(crate) struct AppState {
     pub(crate) cfg: Config,
     pub(crate) rivers: Arc<source::Rivers>,
     /// Process-wide ceiling on websocket commands sleeping out an armed ACT
-    /// delay. The per-connection lane bounds one client; this bounds the run.
+    /// delay. The per-connection lane bounds one consumer; this bounds the run.
     pub(crate) pending_commands: Arc<tokio::sync::Semaphore>,
     /// Slots for history syntheses IN FLIGHT, which is what bounds resident
     /// page memory. A caller over the cap WAITS for one; see `admit_history`.
@@ -750,7 +748,7 @@ pub(crate) struct Health {
     /// Identifies this RUN, not this process.
     ///
     /// The endpoint is an ephemeral port, and a port outlives nothing: once a
-    /// venue exits, the number is free and anything may take it. A client
+    /// venue exits, the number is free and anything may take it. A consumer
     /// holding that address has no way to tell the run it was launched against
     /// from whatever now answers there, and the window is not hypothetical -
     /// this venue stops accepting BEFORE it exits, draining live connections for
@@ -758,7 +756,7 @@ pub(crate) struct Health {
     /// alive and any consumer watching for child exit sees nothing.
     ///
     /// The seed is already unique per run and already reported in the readiness
-    /// record, so a launcher can hand it to its clients and they can check they
+    /// record, so a launcher can hand it to its consumers and they can check they
     /// are still talking to the venue they were given.
     run_seed: u64,
     /// A FAULTED TAPE ON ANY SEATED RIVER, not merely on the boot one.
@@ -768,7 +766,7 @@ pub(crate) struct Health {
     /// tape. Under the open instrument set a run seats a boat per keyed river,
     /// every one owns its own tape and can fault independently, and the boot
     /// river is the one a strategy under test is LEAST likely to have bound -
-    /// so a client whose own arrival draw refused was reading a healthy
+    /// so a consumer whose own arrival draw refused was reading a healthy
     /// `/health`. That is not cosmetic: a launcher and an orchestrator poll
     /// this to decide whether a fire-and-forget run is worth keeping, and a
     /// fault that never reaches the poll gets the run scored healthy and its
@@ -1090,7 +1088,7 @@ pub(crate) async fn arm_divergence(
             // VENUE-WIDE WHATEVER THE REQUEST NAMED, which is why this passes
             // `None` rather than `target`: a surcharge is a statement about the
             // venue's fees, not about one trader's connection, and the wire has
-            // never let a client be charged differently. A passenger connecting
+            // never let a consumer be charged differently. A passenger connecting
             // later gets it too - that is what `Run::arm`'s record is for. This
             // used to walk `run.passengers()` while a comment here claimed the
             // arm was "stored on the template", which it was not, so an account
@@ -1378,10 +1376,10 @@ enum ClockAxis {
 /// only when the first fill's `AccountState` arrives.
 ///
 /// WHOSE ACCOUNT is named by `?account=`, defaulting to the venue's default
-/// account - the same resolution the socket does, so a client that named no
+/// account - the same resolution the socket does, so a consumer that named no
 /// account on either surface sees one ledger. An id nobody has traded under is
 /// not an error: the answer is the opening balances a ledger under that id
-/// WOULD carry, which is what a client asking before its first order expects.
+/// WOULD carry, which is what a consumer asking before its first order expects.
 ///
 /// A READ DOES NOT ALLOCATE, and it used to. This resolved through
 /// `Run::passenger`, which is create-on-first-sight, so an unauthenticated GET
@@ -1500,7 +1498,7 @@ fn sole_currency(account: &AccountState) -> Option<String> {
     held.next().is_none().then(|| first.currency.clone())
 }
 
-/// Open an account on terms the CLIENT states, before it trades.
+/// Open an account on terms the consumer states, before it trades.
 ///
 /// Structured account config goes over HTTP for the same reason a divergence
 /// does: it is a nested document validated at its own boundary, and the socket
@@ -1509,7 +1507,7 @@ fn sole_currency(account: &AccountState) -> Option<String> {
 ///
 /// OPTIONAL, and that is the design rather than a convenience. Account
 /// resolution is TOTAL: a connection that never calls this is served under the
-/// default account, so the ephemeral single-client venue needs no call at all.
+/// default account, so the ephemeral single-consumer venue needs no call at all.
 /// What this buys is the case the default cannot express - a batch of subagents
 /// on one exchange, each sized differently.
 #[derive(Deserialize)]
@@ -1608,18 +1606,18 @@ pub(crate) async fn clock(
     Query(query): Query<ClockQuery>,
     State(state): State<AppState>,
 ) -> Json<VenueClock> {
-    // Publish the tape boundary alongside the affine map so a client can guard
+    // Publish the tape boundary alongside the affine map so a consumer can guard
     // its own warmup against `data_origin_ns` rather than issuing a doomed
-    // off-tape fetch. `venue_now_ns` is sampled here so the client gets sim-now
+    // off-tape fetch. `venue_now_ns` is sampled here so the consumer gets sim-now
     // and the floor from one round trip, without reading its own (skewable) wall
     // clock. `data_origin_ns` is the fixed floor; the horizon is echoed so
-    // the client can report the floor in its own terms.
+    // the consumer can report the floor in its own terms.
     //
     // `?symbol=` answers for that river's lead boat when more than one
     // cadence is seated; `?speed=` names one.
     // For a boat, `venue_now_ns` is the sim instant of the last tick it
     // PUBLISHED rather than the affine map evaluated at the wall: a boat placed
-    // mid-run is deliberately behind its own clock's projection, and a client
+    // mid-run is deliberately behind its own clock's projection, and a consumer
     // pacing against a projection the feed has not reached would ask for water
     // that has not been delivered. With no boat the two coincide.
     let now = if let Some(symbol) = query.symbol.as_deref() {
@@ -1666,12 +1664,12 @@ pub(crate) async fn clock(
 /// per symbol by construction: another symbol's requests take another
 /// river's lock and do not queue here at all (S13).
 async fn market_reading(
-    msg: ClientMessage,
+    msg: Command,
     state: &AppState,
     boat: &Arc<crate::boatyard::Boat>,
     ts: u64,
     socket_symbol: &mogwai_protocol::Symbol,
-) -> (ClientMessage, Option<mogwai_engine::MarketReading>) {
+) -> (Command, Option<mogwai_engine::MarketReading>) {
     // Whether this command needs a reading at all. WHICH river it is read for
     // is never in question: a submit's wire symbol was already refused unless
     // it equals the socket's, an amend names no symbol at all, and the socket's
@@ -1679,7 +1677,7 @@ async fn market_reading(
     // `read_last` fallback below therefore take the boat's own river, so the
     // two cannot name different rivers even if that resolution ever changes.
     let needs_reading = match &msg {
-        ClientMessage::SubmitOrder(_) | ClientMessage::SubmitOrderGroup { .. } => {
+        Command::SubmitOrder(_) | Command::SubmitOrderGroup { .. } => {
             for order in submitted_orders(&msg) {
                 debug_assert_eq!(order.symbol.as_ref(), boat.symbol());
             }
@@ -1687,7 +1685,7 @@ async fn market_reading(
         }
         // An amend names no symbol on the wire, so it resolves to the river
         // this socket is bound to.
-        ClientMessage::ModifyOrder { price: Some(_), .. } => {
+        Command::ModifyOrder { price: Some(_), .. } => {
             debug_assert_eq!(socket_symbol.as_ref(), boat.symbol());
             true
         }
@@ -1725,13 +1723,13 @@ async fn market_reading(
             }
         };
         let msg = match msg {
-            ClientMessage::SubmitOrder(mut order) => {
+            Command::SubmitOrder(mut order) => {
                 stamp(&mut order);
-                ClientMessage::SubmitOrder(order)
+                Command::SubmitOrder(order)
             }
-            ClientMessage::SubmitOrderGroup { mut orders } => {
+            Command::SubmitOrderGroup { mut orders } => {
                 orders.iter_mut().for_each(stamp);
-                ClientMessage::SubmitOrderGroup { orders }
+                Command::SubmitOrderGroup { orders }
             }
             other => other,
         };
@@ -1755,7 +1753,7 @@ pub(crate) async fn trades(
     let history_slot = admit_history(&state.history_requests, &state.history_queue).await?;
     // No `regime` parameter: the market regime is boot config for the whole run
     // now, so history and the live tape are the same realization by
-    // construction rather than by a client remembering to ask for the same one.
+    // construction rather than by a consumer remembering to ask for the same one.
     let limit = normalize_limit(query.limit);
     let rivers = Arc::clone(&state.rivers);
     let data_origin = source::TAPE_ORIGIN_NS;
@@ -1787,11 +1785,11 @@ pub(crate) async fn trades(
     // That gap is NOT a hair. The ceiling here is the river's own now - what
     // its boat has PUBLISHED - and a boat placed `T` wall-nanoseconds after
     // boot sits `T * speed` simulated nanoseconds behind the venue clock,
-    // permanently and by construction. So a client that reads `/clock` with no
+    // permanently and by construction. So a consumer that reads `/clock` with no
     // `?symbol=` and passes that instant as `end` is routinely far ahead of
     // this answer, and refusing it would fail every honest warmup fetch to
     // prevent nothing: the clamp serves exactly the data that exists and no
-    // more, so nothing is silently short about it. A client that needs to know
+    // more, so nothing is silently short about it. A consumer that needs to know
     // where the tail actually is reads `/clock?symbol=`.
     //
     // Clamping the served tail also stops a no-`end` request - which otherwise
@@ -1809,7 +1807,7 @@ pub(crate) async fn trades(
     //
     // Serialization runs on the SAME blocking task as the synthesis, and the
     // admission permit RIDES that task rather than staying a handler local:
-    // hyper drops this handler future the moment the client disconnects, but a
+    // hyper drops this handler future the moment the connection drops, but a
     // running blocking task cannot be cancelled, so a permit left out here
     // would be released while the synthesis it admitted was still resident -
     // the exact scope-ends-before-the-work defect `HistoryPage` closes on the
@@ -1876,7 +1874,7 @@ pub(crate) async fn quotes(
     // caller-clock spelling of "everything through now", so clamp the latter.
     let end = Some(end.map_or(river_now, |end| end.min(river_now)));
     // The permit rides the blocking task for the same reason as `/trades`: a
-    // client disconnect drops this future, and only the closure outlives that.
+    // a dropped connection drops this future, and only the closure outlives that.
     let named = truncated_symbol(&symbol);
     let (history_slot, body) = match tokio::task::spawn_blocking(move || {
         let body = bounded_quotes(&symbol, start, end, limit, &rivers)
@@ -1930,7 +1928,7 @@ pub(crate) const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 4;
 /// which is after the response has been written.
 ///
 /// The permit's OTHER end is guarded too: it is moved INTO the blocking
-/// closure, not merely awaited past, because a client disconnect drops the
+/// closure, not merely awaited past, because a dropped connection drops the
 /// handler future while the blocking task keeps running to completion. A
 /// permit held by the dropped future would readmit a new synthesis while the
 /// orphaned one was still resident; one held by the closure returns only when
@@ -1967,7 +1965,7 @@ fn history_page(
     );
     // A streamed body advertises no size, so without this hyper falls back to
     // chunked transfer encoding - which is legal HTTP and which the crate's own
-    // raw-socket test client does not implement. The length is known exactly
+    // raw-socket test consumer does not implement. The length is known exactly
     // here (the whole page is already serialized), so state it and keep the
     // response byte-shaped exactly as the `Json` it replaced.
     headers.insert(
@@ -1989,7 +1987,7 @@ fn history_page(
 /// indistinguishable from a tape that genuinely printed nothing, and the run
 /// then reasons about a market it was never shown.
 ///
-/// That was survivable when one client owned one venue. It is not survivable in
+/// That was survivable when one consumer owned one venue. It is not survivable in
 /// the attach topology, which exists to point tens of runs at one venue: one
 /// warmup is not one request, because the venue serves no bars and the adapter
 /// pages `/trades` and aggregates locally, so a boot storm is dozens of runs
@@ -1999,7 +1997,7 @@ fn history_page(
 /// WAITING FIXES THAT WITHOUT WEAKENING THE BOUND. Four syntheses are resident
 /// at once whatever the queue does, so the measured ~41 MB ceiling is untouched;
 /// what changes is that the fifth caller is SERVED LATE instead of told nothing
-/// happened. The deadline is what keeps "late" from becoming "never": a client
+/// happened. The deadline is what keeps "late" from becoming "never": a consumer
 /// that waits this long is looking at a venue that is genuinely saturated rather
 /// than merely busy, and a refusal it can see beats a hang it cannot.
 ///
@@ -2080,7 +2078,7 @@ fn history_failure_body(symbol: &str, start: Option<u64>, end: Option<u64>) -> S
 /// How much of a caller-supplied symbol any refusal body, log line or reject
 /// reason may echo.
 ///
-/// Echo the request back TRUNCATED, for the reason `truncate_client_id` exists
+/// Echo the request back TRUNCATED, for the reason `truncate_echoed_id` exists
 /// on the order path: none of those may become an amplifier for an arbitrarily
 /// long caller-supplied string. The cap is far above any symbol a run can
 /// serve, so it only ever shortens a request that was going to be refused
@@ -2104,7 +2102,7 @@ const MAX_ECHOED_SYMBOL: usize = 64;
 /// The charset rule is stated on the DECODED value, which is the whole of it
 /// venue-side: `axum::extract::Query` percent-decodes before serde sees the
 /// field, so `?symbol=%4DNQ` arrives as `MNQ` and passes, exactly as it should.
-/// The needs-no-encoding framing belongs to the client-side caller of
+/// The needs-no-encoding framing belongs to the consumer-side caller of
 /// `validate_wire_symbol`, which builds a URL by concatenation.
 ///
 /// The comparison against `bound` is EXACT and case-sensitive, and so is
@@ -2166,7 +2164,7 @@ mod health_fault_tests {
     }
 
     /// A fault on a NON-BOOT river reaches the poll. The handler used to read
-    /// one boat - the boot river's - so a client bound to any other river got a
+    /// one boat - the boot river's - so a consumer bound to any other river got a
     /// healthy answer while its own tape was stuck, and a fire-and-forget run
     /// was scored keepable on the strength of a river nobody was using.
     #[test]
@@ -2808,7 +2806,7 @@ mod calendar_tests {
     /// lets leg one fill before leg two is admitted.
     #[test]
     fn a_linked_order_may_not_be_submitted_alone() {
-        let reason = boundary_error(&ClientMessage::SubmitOrder(linked_leg("A", &["B"])))
+        let reason = boundary_error(&Command::SubmitOrder(linked_leg("A", &["B"])))
             .expect("a linked bare submit is refused");
         assert!(reason.contains("SubmitOrderGroup"), "{reason}");
 
@@ -2817,7 +2815,7 @@ mod calendar_tests {
         // is every order this venue served before linkage existed.
         let mut standalone = linked_leg("A", &[]);
         standalone.link = None;
-        assert!(boundary_error(&ClientMessage::SubmitOrder(standalone)).is_none());
+        assert!(boundary_error(&Command::SubmitOrder(standalone)).is_none());
     }
 
     /// A group is self-contained, and the boundary is where that is enforced:
@@ -2825,12 +2823,12 @@ mod calendar_tests {
     /// group admits every sibling.
     #[test]
     fn a_group_may_not_link_outside_itself() {
-        let group = ClientMessage::SubmitOrderGroup {
+        let group = Command::SubmitOrderGroup {
             orders: vec![linked_leg("A", &["B"]), linked_leg("B", &["OUTSIDER"])],
         };
         assert!(boundary_error(&group).is_some_and(|reason| reason.contains("own members")));
 
-        let legal = ClientMessage::SubmitOrderGroup {
+        let legal = Command::SubmitOrderGroup {
             orders: vec![linked_leg("A", &["B"]), linked_leg("B", &["A"])],
         };
         assert!(
@@ -2840,11 +2838,11 @@ mod calendar_tests {
     }
 
     /// A refused group answers EVERY member. One frame naming one member would
-    /// leave the client waiting on the rest of a bracket the venue has already
+    /// leave the consumer waiting on the rest of a bracket the venue has already
     /// refused whole.
     #[test]
     fn a_refused_group_answers_every_member() {
-        let group = ClientMessage::SubmitOrderGroup {
+        let group = Command::SubmitOrderGroup {
             orders: vec![linked_leg("A", &["B"]), linked_leg("B", &["OUTSIDER"])],
         };
         let frames = boundary_refusal(&group, "no", 7);

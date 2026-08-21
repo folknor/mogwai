@@ -7,19 +7,19 @@ use serde::{Deserialize, Serialize};
 use crate::havoc::EventKind;
 use crate::{ClientOrderId, Symbol, VenueOrderId};
 
-/// Maximum byte length of any client-supplied identifier the venue echoes back
+/// Maximum byte length of any consumer-supplied identifier the venue echoes back
 /// into its own output: `client_order_id`, `request_id`. The cap exists so a
 /// produced frame has a computable upper bound - the admission reservation in
 /// `mogwai-venue` sizes worst-case output against it, and an unbounded id
 /// would make that bound unprovable (and let one 8 MiB order id exhaust a
 /// connection's whole execution budget).
-pub const MAX_CLIENT_ID_LEN: usize = 64;
+pub const MAX_ECHOED_ID_LEN: usize = 64;
 /// Maximum byte length of the account identity carried by the transport.
 pub const MAX_ACCOUNT_ID_LEN: usize = 64;
-/// Maximum websocket frame and reassembled message accepted from a client.
+/// Maximum websocket frame and reassembled message accepted from a consumer.
 /// Legal command frames are only a few hundred bytes; this leaves ample room
 /// while preventing dependency defaults from setting the venue's memory bound.
-pub const MAX_CLIENT_MESSAGE_BYTES: usize = 64 * 1024;
+pub const MAX_INBOUND_MESSAGE_BYTES: usize = 64 * 1024;
 
 /// True only when a traded price is strictly through a resting limit.
 ///
@@ -173,10 +173,10 @@ impl<'de> Deserialize<'de> for AccountId {
 }
 
 /// Maximum byte length of a symbol on the wire, same reasoning as
-/// `MAX_CLIENT_ID_LEN`.
+/// `MAX_ECHOED_ID_LEN`.
 pub const MAX_SYMBOL_LEN: usize = 32;
 
-/// Validate a CLIENT-INBOUND symbol, wherever one arrives.
+/// Validate an INBOUND symbol, wherever one arrives.
 ///
 /// The alphabet was chosen for the URL ingresses - it needs no percent encoding,
 /// and is shared by the adapter constructing the URL and the venue validating
@@ -205,16 +205,16 @@ pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Maximum byte length of a client session id on the wire. Same reasoning as
+/// Maximum byte length of a session id on the wire. Same reasoning as
 /// `MAX_SYMBOL_LEN`, and generous enough for a uuid-shaped value.
 pub const MAX_SESSION_LEN: usize = 64;
 
-/// Validate the `/ws?session=` client identity, which shares the URL alphabet
+/// Validate the `/ws?session=` socket identity, which shares the URL alphabet
 /// with a wire symbol and is bounded for the same reason: it is carried in a
 /// query string with no percent encoding, and it is retained per socket for the
 /// life of the connection.
 ///
-/// Empty is REFUSED rather than treated as absent. A client that sends
+/// Empty is REFUSED rather than treated as absent. A consumer that sends
 /// `session=` has said something, and reading an empty string as "no opinion"
 /// would silently give it the always-evict behaviour it was trying to leave.
 pub fn validate_session_id(session: &str) -> Result<(), &'static str> {
@@ -238,10 +238,10 @@ pub const MAX_REASON_LEN: usize = 512;
 
 /// The refusal a `post_only` order on the wrong type earns, at the wire gate
 /// and in the engine's own validator alike. ONE STRING, because the two gates
-/// carried two copies of it and a client cannot tell which of them spoke.
+/// carried two copies of it and a consumer cannot tell which of them spoke.
 ///
 /// IT NAMES BOTH SETS - the legal types and then the refused ones - rather than
-/// stating a rule the client has to apply. The rule it used to state, "legal
+/// stating a rule the consumer has to apply. The rule it used to state, "legal
 /// only on orders that rest as a limit", is FALSE for `MarketToLimit`, which
 /// rests its remainder as a limit and is refused anyway. The LEGAL half is what
 /// `mogwai-engine`'s admission-table test parses, up to the first " orders", so
@@ -275,12 +275,12 @@ pub const JSON_ESCAPE_FACTOR: usize = 6;
 /// `truncate_reason`.
 ///
 /// The figure is the next power of two above `JSON_ESCAPE_FACTOR *
-/// (MAX_CLIENT_ID_LEN + MAX_REASON_LEN) + ADMISSION_ENVELOPE_BYTES` - 3712,
+/// (MAX_ECHOED_ID_LEN + MAX_REASON_LEN) + ADMISSION_ENVELOPE_BYTES` - 3712,
 /// so 4096 - and `admission_frames_fit_their_ceiling` runs that derivation
 /// rather than trusting this comment. NO SYMBOL TERM: neither admission frame
 /// carries a symbol. `AdmissionSubject` names the refused command by ID, never
 /// by instrument, and every one of its id-shaped fields is truncated to
-/// `MAX_CLIENT_ID_LEN` by the hand-written `Serialize` below, so ONE CAPPED ID
+/// `MAX_ECHOED_ID_LEN` by the hand-written `Serialize` below, so ONE CAPPED ID
 /// IS THE ONLY UNBOUNDED SUBJECT CONTRIBUTION. The variants are not otherwise
 /// identical and this bound does not need them to be: they differ in key name,
 /// in the width of the `kind` tag, and - for `Query` alone - by a serialized
@@ -313,17 +313,17 @@ pub fn truncate_reason(mut reason: String) -> String {
     reason
 }
 
-/// Truncate a client-supplied identifier to `MAX_CLIENT_ID_LEN` bytes on a
+/// Truncate a consumer-supplied identifier to `MAX_ECHOED_ID_LEN` bytes on a
 /// char boundary, for ECHOING back in a refusal. An over-length id is never
 /// accepted, so a truncated echo cannot be mistaken for a live correlation: a
-/// client matching on it finds no order, which is the truth. Echoing the id at
+/// consumer matching on it finds no order, which is the truth. Echoing the id at
 /// full length would recreate the unbounded frame the cap exists to prevent.
 #[must_use]
-pub fn truncate_client_id(mut id: String) -> String {
-    if id.len() <= MAX_CLIENT_ID_LEN {
+pub fn truncate_echoed_id(mut id: String) -> String {
+    if id.len() <= MAX_ECHOED_ID_LEN {
         return id;
     }
-    let mut end = MAX_CLIENT_ID_LEN;
+    let mut end = MAX_ECHOED_ID_LEN;
     while !id.is_char_boundary(end) {
         end -= 1;
     }
@@ -335,17 +335,17 @@ pub fn truncate_client_id(mut id: String) -> String {
 /// refused with the existing rejection mechanism, never with
 /// `AdmissionRejected` (which reads as a capacity signal).
 pub fn validate_client_order_id(id: &ClientOrderId) -> Result<(), &'static str> {
-    (id.len() <= MAX_CLIENT_ID_LEN)
+    (id.len() <= MAX_ECHOED_ID_LEN)
         .then_some(())
-        .ok_or("client_order_id exceeds MAX_CLIENT_ID_LEN")
+        .ok_or("client_order_id exceeds MAX_ECHOED_ID_LEN")
 }
 
 /// Boundary guard for a venue-truth query's `request_id`, which the venue
 /// echoes on its reply and on a refusal.
 pub fn validate_request_id(id: &str) -> Result<(), &'static str> {
-    (id.len() <= MAX_CLIENT_ID_LEN)
+    (id.len() <= MAX_ECHOED_ID_LEN)
         .then_some(())
-        .ok_or("request_id exceeds MAX_CLIENT_ID_LEN")
+        .ok_or("request_id exceeds MAX_ECHOED_ID_LEN")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,7 +442,7 @@ pub enum OrderType {
     ///
     /// WHAT IT BUYS over `TrailingStopMarket`: a bound on the price the exit
     /// accepts. A trailing stop that takes liquidity fills at whatever the
-    /// triggering print slipped to, which is the shape a client uses when
+    /// triggering print slipped to, which is the shape a consumer uses when
     /// certainty of exit beats price; this one refuses to fill through its
     /// limit, and rests instead. That is a real strategy choice and the venue
     /// does not make it for anyone.
@@ -520,7 +520,7 @@ impl OrderType {
     ///
     /// The limit sits on the FILLABLE side: a sell triggers as price falls, so
     /// resting below the trigger is what makes it reachable, and the offset is
-    /// the slippage the client will accept before it would rather not trade.
+    /// the slippage the consumer will accept before it would rather not trade.
     /// Putting it on the other side would rest a limit the tape has already
     /// passed through.
     #[must_use]
@@ -562,16 +562,21 @@ impl TimeInForce {
     }
 }
 
-/// Client → venue order-entry messages. Market data is streamed immediately
+/// Consumer → venue order-entry messages. Market data is streamed immediately
 /// when the websocket is upgraded; there is no subscription command.
+///
+/// Named for what it carries rather than for who sent it, which is why it does
+/// not mirror `VenueMessage`. The crate-level doc states the reason: the venue
+/// is one party and names its own frames, while the inbound side has no
+/// singular party to be named after.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum ClientMessage {
+pub enum Command {
     SubmitOrder(SubmitOrder),
     /// Submit a LINKED GROUP in one step: every member accepted, or the whole
     /// group rejected and nothing on the book.
     ///
-    /// WHY THE WIRE NEEDS THIS AT ALL, because a client can obviously send the
+    /// WHY THE WIRE NEEDS THIS AT ALL, because a consumer can obviously send the
     /// legs one at a time and the venue will take them. It can, and that is the
     /// hazard. A two-leg `Ouo` bracket dispatched per leg lets leg one FILL
     /// before leg two has been admitted: the shrink runs against a sibling that
@@ -586,7 +591,7 @@ pub enum ClientMessage {
     ///
     /// 1. ATOMIC ADMISSION. Every member is validated against the book and
     ///    against the rest of the group BEFORE any of them is accepted. One
-    ///    unacceptable member rejects the whole group, and the client sees one
+    ///    unacceptable member rejects the whole group, and the consumer sees one
     ///    `OrderRejected` per member and no `OrderAccepted` at all.
     /// 2. NO TAPE ADVANCE BETWEEN MEMBERS. The whole group is one engine call at
     ///    one instant against one market reading, so no member meets a market
@@ -636,7 +641,7 @@ pub enum ClientMessage {
     },
     /// Reconciliation query: ask the venue for the CURRENT status of its
     /// orders, answered from the engine's own book - not from any event the
-    /// client may or may not have received. This is the second, independent
+    /// consumer may or may not have received. This is the second, independent
     /// witness Nautilus' reconciliation (startup mass-status and the
     /// continuous open-order poll) consumes: after a havoc scenario cancels a
     /// resting order venue-side and drops the lifecycle event, this query
@@ -652,7 +657,7 @@ pub enum ClientMessage {
     /// unprovable; a lying venue-truth source is a different fault class that
     /// would need its own explicitly-named havoc, never a side effect here.
     QueryOrders {
-        /// Client-chosen correlation id echoed verbatim on the reply, so a
+        /// Consumer-chosen correlation id echoed verbatim on the reply, so a
         /// requester sharing the socket with unsolicited events can match
         /// replies to requests.
         request_id: String,
@@ -666,7 +671,7 @@ pub enum ClientMessage {
         open_only: bool,
     },
     /// Reconciliation query for the venue's fill history, the fill-report
-    /// twin of [`ClientMessage::QueryOrders`] with the same honest-content /
+    /// twin of [`Command::QueryOrders`] with the same honest-content /
     /// havoc-able-delivery contract. The venue records each fill ONCE as it
     /// books - a `DuplicateNextFill` doubles the wire event, not the truth -
     /// so this reply is the ground truth a dropped or duplicated
@@ -684,7 +689,7 @@ pub enum ClientMessage {
 /// apply that command class's ack latency. `None` on the wire-diagnostic and
 /// query paths, which carry no per-command latency.
 ///
-/// Never serialized. It lives here, next to `ClientMessage` and `EventKind`, for
+/// Never serialized. It lives here, next to `Command` and `EventKind`, for
 /// the same reason `EventKind` does: the classification of a wire type belongs
 /// with the wire type, so the two ends cannot disagree about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -699,13 +704,11 @@ impl CommandClass {
     /// queries. Queries are deliberately classless: the
     /// reconciliation witness is never made the slowest thing on the venue.
     #[must_use]
-    pub fn of(cmd: &ClientMessage) -> Option<Self> {
+    pub fn of(cmd: &Command) -> Option<Self> {
         match cmd {
-            ClientMessage::SubmitOrder(_) | ClientMessage::SubmitOrderGroup { .. } => {
-                Some(Self::Submit)
-            }
-            ClientMessage::ModifyOrder { .. } => Some(Self::Modify),
-            ClientMessage::CancelOrder { .. } => Some(Self::Cancel),
+            Command::SubmitOrder(_) | Command::SubmitOrderGroup { .. } => Some(Self::Submit),
+            Command::ModifyOrder { .. } => Some(Self::Modify),
+            Command::CancelOrder { .. } => Some(Self::Cancel),
             _ => None,
         }
     }
@@ -727,14 +730,14 @@ pub enum WireOrderStatus {
     PartiallyFilled,
     /// Terminal: fully filled.
     Filled,
-    /// Terminal: canceled (client cancel, IOC remainder, or a venue-side
+    /// Terminal: canceled (consumer cancel, IOC remainder, or a venue-side
     /// havoc cancel).
     Canceled,
     /// Terminal: the order's own time in force ended it - a `Gtd` reaching its
     /// instant, or a `Day` whose session closed. DISTINCT FROM `Canceled`
     /// because nobody cancelled it: a cancel is an actor's decision and an
     /// expiry is the clock, and a venue that reports one as the other tells a
-    /// client its order was pulled when the client's own stated lifetime
+    /// consumer its order was pulled when the consumer's own stated lifetime
     /// simply ran out. Nautilus carries the same distinction as
     /// `OrderStatus::Expired` and an `OrderExpired` event, so the fidelity is
     /// available end to end rather than collapsing at the adapter.
@@ -802,7 +805,7 @@ pub struct OrderStatusInfo {
     pub ts_last: u64,
 }
 
-/// Reply to [`ClientMessage::QueryOrders`]: the venue's truthful order book
+/// Reply to [`Command::QueryOrders`]: the venue's truthful order book
 /// read at `ts_event`. An empty `orders` for a targeted query means the venue
 /// never accepted that id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -813,7 +816,7 @@ pub struct OrderStatusSnapshot {
     pub ts_event: u64,
 }
 
-/// Reply to [`ClientMessage::QueryFills`]: the venue's booked fills in the
+/// Reply to [`Command::QueryFills`]: the venue's booked fills in the
 /// order they booked. Each fill appears exactly once regardless of how many
 /// `OrderFilled` events the wire carried for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -864,7 +867,7 @@ pub struct SubmitOrder {
     /// tape's extreme: this one holds the limit away from the trigger, so a
     /// trailing stop limit carries two independent distances and collapsing
     /// them would silently tie how far the stop trails to how much slippage the
-    /// client tolerates.
+    /// consumer tolerates.
     ///
     /// The limit price is DERIVED from it rather than stated, at acceptance and
     /// again on every ratchet, which is why `price` is refused on this type: a
@@ -879,7 +882,7 @@ pub struct SubmitOrder {
     pub time_in_force: TimeInForce,
     /// Sim instant a `Gtd` order expires at. REQUIRED on `Gtd` and refused on
     /// every other time-in-force, including `Day` - a day order's expiry comes
-    /// from the instrument's calendar, not from the client.
+    /// from the instrument's calendar, not from the consumer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expire_time: Option<u64>,
     /// Fills are clamped to the position this order would close, and the order
@@ -928,7 +931,7 @@ pub const MAX_GROUP_ORDERS: usize = MAX_LINKED_ORDERS + 1;
 ///   `parent_order_id` must name another member. A group naming an outsider
 ///   could not promise that admitting the group admits every sibling, which is
 ///   the whole guarantee - the outsider might be rejected, or might already be
-///   filled, and the client would have a bracket with a leg missing.
+///   filled, and the consumer would have a bracket with a leg missing.
 /// - EVERY MEMBER IS LINKED, and to the SAME list. An unlinked order in a group
 ///   frame is a standalone order asking for a guarantee that means nothing for
 ///   it; two list ids in one frame are two groups, and admitting them together
@@ -1053,7 +1056,7 @@ pub enum Contingency {
 }
 
 /// API-boundary guard for a `SubmitOrder`, mirroring `validate_conn_havoc` /
-/// `validate_market_regime` / `validate_divergence` / `validate_client_havoc`
+/// `validate_market_regime` / `validate_divergence` / `validate_inbound_havoc`
 /// in style and message convention. `quantity` must be strictly positive, and
 /// a `Limit` order must carry a strictly positive `price` (a `Market` order's
 /// price is legitimately absent - Nautilus MARKET orders carry no price).
@@ -1084,16 +1087,16 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
     // came back through the rejection path as a reason string. Nothing
     // downstream depended on that latitude: every symbol the venue can actually
     // serve comes from a config instrument or a preset, and the engine refuses
-    // an unknown one anyway. One alphabet across every client-inbound symbol is
+    // an unknown one anyway. One alphabet across every inbound symbol is
     // what makes "a symbol is 1 to 32 bytes of the URL-safe alphabet" a true
     // sentence rather than one that holds at two ingresses out of three.
     validate_wire_symbol(&order.symbol)?;
     if order
         .position_id
         .as_ref()
-        .is_some_and(|id| id.len() > MAX_CLIENT_ID_LEN)
+        .is_some_and(|id| id.len() > MAX_ECHOED_ID_LEN)
     {
-        return Err("position_id exceeds MAX_CLIENT_ID_LEN");
+        return Err("position_id exceeds MAX_ECHOED_ID_LEN");
     }
     if order.quantity <= Decimal::ZERO {
         return Err("quantity must be > 0");
@@ -1137,7 +1140,7 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         }
         // The trail offset is what makes a trailing stop one, and it is
         // meaningless anywhere else - accepting it silently on a fixed stop
-        // would leave a client believing its stop moves.
+        // would leave a consumer believing its stop moves.
         _ if order.order_type.trails() && order.trail_offset.is_none() => {
             Err("a trailing order must carry trail_offset")
         }
@@ -1145,7 +1148,7 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
             Err("trail_offset is legal only on a trailing order")
         }
         // The limit price is DERIVED from the trigger and this offset, and is
-        // re-derived on every ratchet. A client-stated price would be
+        // re-derived on every ratchet. A consumer-stated price would be
         // overwritten by the first trail, so accepting one would be a lie
         // rather than a harmless redundancy.
         OrderType::TrailingStopLimit if order.limit_offset.is_none() => {
@@ -1199,7 +1202,7 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
             )
         }
         // `expire_time` is Gtd's whole content, and it belongs to nothing else -
-        // a Day order's expiry comes from the instrument's calendar, so a client
+        // a Day order's expiry comes from the instrument's calendar, so a consumer
         // stating one would be stating a deadline the venue ignores.
         _ if order.time_in_force == TimeInForce::Gtd && order.expire_time.is_none() => {
             Err("Gtd order must carry expire_time")
@@ -1218,7 +1221,7 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
 ///
 /// - A rule that acts on siblings must NAME some. `Oco` and `Ouo` with nothing
 ///   linked is an order that silently behaves like a standalone one, which is
-///   the failure a client would discover only by watching a stop it thought was
+///   the failure a consumer would discover only by watching a stop it thought was
 ///   reaped go on to fill.
 /// - An order may not link ITSELF. A self-cancelling `Oco` would try to cancel
 ///   the order whose fill triggered it.
@@ -1230,8 +1233,8 @@ fn validate_order_link(order: &SubmitOrder, link: &OrderLink) -> Result<(), &'st
     if link.order_list_id.is_empty() {
         return Err("order_list_id must not be empty");
     }
-    if link.order_list_id.len() > MAX_CLIENT_ID_LEN {
-        return Err("order_list_id exceeds MAX_CLIENT_ID_LEN");
+    if link.order_list_id.len() > MAX_ECHOED_ID_LEN {
+        return Err("order_list_id exceeds MAX_ECHOED_ID_LEN");
     }
     if link.linked_order_ids.len() > MAX_LINKED_ORDERS {
         return Err("linked_order_ids exceeds MAX_LINKED_ORDERS");
@@ -1280,7 +1283,7 @@ pub enum AdmissionSubject {
     /// A whole `SubmitOrderGroup`, named by its LIST id rather than by its
     /// members. One id keeps the frame bounded the way every other subject is,
     /// and it loses nothing: a group is admitted or refused whole, so naming
-    /// one member would be as wrong as naming none, and the client knows which
+    /// one member would be as wrong as naming none, and the consumer knows which
     /// orders it sent under that list id.
     SubmitGroup {
         order_list_id: String,
@@ -1306,8 +1309,8 @@ pub enum AdmissionSubject {
     Frame,
 }
 
-/// Hand-written so every embedded id is truncated to `MAX_CLIENT_ID_LEN` on a
-/// char boundary. Without it the derived impl would echo a client-supplied id
+/// Hand-written so every embedded id is truncated to `MAX_ECHOED_ID_LEN` on a
+/// char boundary. Without it the derived impl would echo a consumer-supplied id
 /// of any length, which makes `ADMISSION_FRAME_MAX_BYTES` - and therefore the
 /// priority lane's frame-count memory bound - fictional.
 ///
@@ -1345,10 +1348,10 @@ impl Serialize for AdmissionSubject {
             Frame,
         }
         fn bounded(value: &str) -> &str {
-            if value.len() <= MAX_CLIENT_ID_LEN {
+            if value.len() <= MAX_ECHOED_ID_LEN {
                 return value;
             }
-            let mut end = MAX_CLIENT_ID_LEN;
+            let mut end = MAX_ECHOED_ID_LEN;
             while !value.is_char_boundary(end) {
                 end -= 1;
             }
@@ -1385,7 +1388,7 @@ pub enum QueryKind {
     Fills,
 }
 
-/// API-boundary guard for a `ClientMessage::ModifyOrder`'s `price`/`quantity`
+/// API-boundary guard for a `Command::ModifyOrder`'s `price`/`quantity`
 /// pair, mirroring `validate_submit_order` in style. At least one of the two
 /// must be present - both absent decodes as a no-op amend that changes
 /// nothing - and whichever is present must be strictly positive.
@@ -1409,7 +1412,7 @@ pub fn validate_modify_order(
     Ok(())
 }
 
-/// Venue → client messages (execution events + market data).
+/// Venue → consumer messages (execution events + market data).
 ///
 /// These map onto nautilus `OrderEventAny` variants on the adapter side. The
 /// divergences mogwai is built to emit (partials via `leaves_qty`, rejects,
@@ -1458,7 +1461,7 @@ pub enum VenueMessage {
     /// sets it `false` and no consumer has to be told.
     ///
     /// `#[serde(default)]` because absent must mean the safe reading, which is
-    /// NOT retryable: a client that infers retryability from a venue predating
+    /// NOT retryable: a consumer that infers retryability from a venue predating
     /// the field would retry against a refusal nobody promised was transient.
     AdmissionRejected {
         subject: AdmissionSubject,
@@ -1477,7 +1480,7 @@ pub enum VenueMessage {
     /// A conditional order's trigger fired. Always precedes whatever the
     /// trigger produced (a fill, or the order resting as a live limit), in the
     /// same batch. Never duplicated by `DuplicateNextFill`: it is not a fill,
-    /// and a duplicated trigger would be a transition the client's FSM has no
+    /// and a duplicated trigger would be a transition the consumer's FSM has no
     /// arm for.
     OrderTriggered {
         client_order_id: ClientOrderId,
@@ -1504,7 +1507,7 @@ pub enum VenueMessage {
     /// flag on the cancel arm is a distinction every consumer must remember to
     /// read. It is not duplicated by `DuplicateNextFill` for the same reason
     /// `OrderTriggered` is not - it is not a fill, and a duplicated expiry is
-    /// a transition no client FSM has an arm for.
+    /// a transition no consumer FSM has an arm for.
     OrderExpired {
         client_order_id: ClientOrderId,
         venue_order_id: VenueOrderId,
@@ -1570,13 +1573,13 @@ pub enum VenueMessage {
     Quote(QuoteTick),
     /// Venue-originated liveness signal. Carries the venue wall clock
     /// unix-ns so the frame is non-empty and timestamp-comparable, but no
-    /// market or execution payload. Clients may ignore it; its job is to keep
+    /// market or execution payload. Consumers may ignore it; its job is to keep
     /// the socket frame-active through a `StallData` window.
     Heartbeat {
         ts_event: u64,
     },
     /// The bounded tape fanout overwrote frames for this connection. This is a
-    /// venue fault, not a client refusal; the venue closes with WS 1011 after
+    /// venue fault, not a consumer refusal; the venue closes with WS 1011 after
     /// delivering it.
     FeedLagged {
         skipped: u64,
@@ -1589,7 +1592,7 @@ pub enum VenueMessage {
         sim_now_ns: u64,
     },
     /// A whole frame the venue could not decode or attribute: a
-    /// frame that is not a `ClientMessage` (bad JSON, unknown `type`, or a
+    /// frame that is not a `Command` (bad JSON, unknown `type`, or a
     /// known `type` missing required fields), or a request on a carrier that
     /// does not support it. Emitted in
     /// place of a silent drop: without it, an unservable request and a
@@ -1605,7 +1608,7 @@ pub enum VenueMessage {
     ///
     /// `reason` is venue-generated prose and MUST be routed through
     /// `truncate_reason` at every construction site: serde's decode-error text
-    /// echoes client-controlled field names, and without the truncation
+    /// echoes consumer-controlled field names, and without the truncation
     /// `ADMISSION_FRAME_MAX_BYTES` - hence the priority lane's frame count as a
     /// memory bound - is unproven.
     ProtocolError {
@@ -1685,7 +1688,7 @@ impl VenueMessage {
             // The query replies are execution-channel traffic: `DelayAcks`
             // holds them and `GoDark` drops them (delivery is havoc-able),
             // while their content stays a truthful book read - the invariant
-            // documented on `ClientMessage::QueryOrders`.
+            // documented on `Command::QueryOrders`.
             VenueMessage::AccountState(_)
             | VenueMessage::OrderStatusSnapshot(_)
             | VenueMessage::FillSnapshot(_)
@@ -1833,7 +1836,7 @@ mod tests {
 
     /// The one alphabet both ends judge a URL-carried symbol by. Written here
     /// rather than only at the two call sites because a drift in this function
-    /// is a client that builds a URL the venue then refuses.
+    /// is a consumer that builds a URL the venue then refuses.
     #[test]
     fn wire_symbols_are_the_url_safe_alphabet() {
         for legal in [
@@ -1868,7 +1871,7 @@ mod tests {
     /// ORDER ENTRY JUDGES A SYMBOL BY THE SAME ALPHABET THE URL INGRESSES DO.
     /// It did not until 2026-08-19: `validate_submit_order` carried a bare
     /// `symbol.len() > MAX_SYMBOL_LEN` check, so the EMPTY string and any byte
-    /// outside the wire alphabet were admitted at the one client-inbound symbol
+    /// outside the wire alphabet were admitted at the one inbound symbol
     /// ingress this workspace has, while a 2026-08 audit's record asserted
     /// that all three ingresses validated. The claim was wrong at exactly
     /// this call.
@@ -1943,7 +1946,7 @@ mod tests {
     /// alphabet and a different cap, so a drift between them is representable;
     /// this pins the half that is not a symbol. The empty case is called out
     /// because the function makes an explicit ruling on it: `session=` with
-    /// nothing after it is a client that HAS spoken, and reading it as absent
+    /// nothing after it is a consumer that HAS spoken, and reading it as absent
     /// would silently hand back the always-evict behaviour it was trying to
     /// leave.
     #[test]
@@ -1998,8 +2001,8 @@ mod tests {
     /// case at its own boundary.
     #[test]
     fn the_echo_id_guards_admit_exactly_their_cap() {
-        let at_cap = "x".repeat(MAX_CLIENT_ID_LEN);
-        let over = "x".repeat(MAX_CLIENT_ID_LEN + 1);
+        let at_cap = "x".repeat(MAX_ECHOED_ID_LEN);
+        let over = "x".repeat(MAX_ECHOED_ID_LEN + 1);
         assert!(validate_client_order_id(&at_cap).is_ok());
         assert!(validate_client_order_id(&over).is_err());
         assert!(validate_request_id(&at_cap).is_ok());
@@ -2021,18 +2024,18 @@ mod tests {
     #[test]
     fn truncation_cuts_on_a_char_boundary_and_leaves_short_values_alone() {
         // Untouched below the cap, and AT it: the guard is `<=`.
-        let at_cap = "x".repeat(MAX_CLIENT_ID_LEN);
-        assert_eq!(truncate_client_id(at_cap.clone()), at_cap);
+        let at_cap = "x".repeat(MAX_ECHOED_ID_LEN);
+        assert_eq!(truncate_echoed_id(at_cap.clone()), at_cap);
         let short = "O-1".to_string();
         assert_eq!(truncate_reason(short.clone()), short);
 
         // A four-byte character straddling the cap: the cut lands BEFORE it,
         // never inside it, so the result is short of the cap rather than at it.
-        let straddling = format!("{}\u{1f600}", "x".repeat(MAX_CLIENT_ID_LEN - 2));
-        let cut = truncate_client_id(straddling);
+        let straddling = format!("{}\u{1f600}", "x".repeat(MAX_ECHOED_ID_LEN - 2));
+        let cut = truncate_echoed_id(straddling);
         assert_eq!(
             cut.len(),
-            MAX_CLIENT_ID_LEN - 2,
+            MAX_ECHOED_ID_LEN - 2,
             "the cut must fall before the straddling character, not inside it"
         );
         assert!(cut.chars().all(|ch| ch == 'x'));
@@ -2044,7 +2047,7 @@ mod tests {
 
         // An ASCII overflow cuts exactly AT the cap on both, which is the term
         // `ORDER_EVENT_MAX_BYTES` charges `MAX_REASON_LEN` and
-        // `2 * MAX_CLIENT_ID_LEN` for. Asserted on both because the straddling
+        // `2 * MAX_ECHOED_ID_LEN` for. Asserted on both because the straddling
         // case above lands SHORT of the cap and so cannot pin the ceiling the
         // reservation is derived from.
         assert_eq!(
@@ -2052,8 +2055,8 @@ mod tests {
             MAX_REASON_LEN
         );
         assert_eq!(
-            truncate_client_id("z".repeat(MAX_CLIENT_ID_LEN * 3)).len(),
-            MAX_CLIENT_ID_LEN
+            truncate_echoed_id("z".repeat(MAX_ECHOED_ID_LEN * 3)).len(),
+            MAX_ECHOED_ID_LEN
         );
     }
 
@@ -2151,9 +2154,9 @@ mod tests {
             r#"{"type":"ModifyOrder","client_order_id":"O-1","price":null,"quantity":"2"}"#;
         let modify_absent = r#"{"type":"ModifyOrder","client_order_id":"O-1","quantity":"2"}"#;
         for frame in [modify_null, modify_absent] {
-            let Ok(ClientMessage::ModifyOrder {
+            let Ok(Command::ModifyOrder {
                 price, quantity, ..
-            }) = serde_json::from_str::<ClientMessage>(frame)
+            }) = serde_json::from_str::<Command>(frame)
             else {
                 panic!("an absent or null optional decimal must decode as None: {frame}");
             };
@@ -2164,14 +2167,12 @@ mod tests {
         // The two order shapes that actually reach the venue without a price.
         // The Market one OMITS the field, exactly as the serving suite's
         // fixtures do; the StopMarket one spells it NULL, exactly as the
-        // adapter's `ClientMessage` serialization does.
+        // adapter's `Command` serialization does.
         for frame in [
             r#"{"type":"SubmitOrder","client_order_id":"O-1","symbol":"BTCUSDT","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}"#,
             r#"{"type":"SubmitOrder","client_order_id":"O-2","symbol":"BTCUSDT","side":"Sell","order_type":"StopMarket","quantity":"1","price":null,"trigger_price":"95.00","time_in_force":"Gtc"}"#,
         ] {
-            let Ok(ClientMessage::SubmitOrder(order)) =
-                serde_json::from_str::<ClientMessage>(frame)
-            else {
+            let Ok(Command::SubmitOrder(order)) = serde_json::from_str::<Command>(frame) else {
                 panic!("a priceless submit must decode: {frame}");
             };
             assert_eq!(order.price, None, "{frame}");
@@ -2179,10 +2180,9 @@ mod tests {
 
         // And `null` still round-trips as `null` rather than vanishing: the
         // byte form the wire test pins is unchanged by the annotations.
-        let reserialized = serde_json::to_string(
-            &serde_json::from_str::<ClientMessage>(modify_null).expect("decode"),
-        )
-        .expect("re-serialize");
+        let reserialized =
+            serde_json::to_string(&serde_json::from_str::<Command>(modify_null).expect("decode"))
+                .expect("re-serialize");
         assert_eq!(reserialized, modify_null);
     }
 
@@ -2272,7 +2272,7 @@ mod tests {
         // while pinning a shape the venue does not serve. The loop below runs
         // the validator over every decoded `SubmitOrder`, so this cannot
         // silently happen again.
-        let client: &[(&str, &str, &[&str])] = &[
+        let commands: &[(&str, &str, &[&str])] = &[
             (
                 "SubmitOrder StopLimit",
                 r#"{"type":"SubmitOrder","client_order_id":"O-1","symbol":"BTCUSDT","side":"Buy","order_type":"StopLimit","quantity":"2","price":"100.5","trigger_price":"99.5","time_in_force":"Gtc"}"#,
@@ -2350,14 +2350,14 @@ mod tests {
             out
         }
 
-        for (label, frame, fields) in client {
-            let decoded = serde_json::from_str::<ClientMessage>(frame)
+        for (label, frame, fields) in commands {
+            let decoded = serde_json::from_str::<Command>(frame)
                 .unwrap_or_else(|e| panic!("{label}: the string spelling must still decode: {e}"));
             // EVERY FIXTURE IS A FRAME THE VENUE WOULD ACTUALLY ADMIT. Decode
             // tests skip validation, so without this a fixture can pin an
             // illegal shape and a reader auditing the table for exhaustiveness
             // will believe that shape is legal.
-            if let ClientMessage::SubmitOrder(order) = &decoded {
+            if let Command::SubmitOrder(order) = &decoded {
                 validate_submit_order(order).unwrap_or_else(|e| {
                     panic!("{label}: the fixture must be a submit the venue admits: {e}")
                 });
@@ -2365,7 +2365,7 @@ mod tests {
             assert!(!fields.is_empty(), "{label}: no fields listed");
             for field in *fields {
                 let numeric = unquote(frame, field);
-                let decoded = serde_json::from_str::<ClientMessage>(&numeric);
+                let decoded = serde_json::from_str::<Command>(&numeric);
                 assert!(
                     decoded.is_err(),
                     "{label}.{field}: a numeric spelling must be refused, got {decoded:?}"
@@ -2400,13 +2400,13 @@ mod tests {
     fn client_and_venue_messages_round_trip() {
         let client_frames = [
             (
-                ClientMessage::CancelOrder {
+                Command::CancelOrder {
                     client_order_id: "O-1".into(),
                 },
                 r#"{"type":"CancelOrder","client_order_id":"O-1"}"#,
             ),
             (
-                ClientMessage::ModifyOrder {
+                Command::ModifyOrder {
                     client_order_id: "O-1".into(),
                     price: None,
                     quantity: Some(Decimal::from(2)),
@@ -2415,7 +2415,7 @@ mod tests {
                 r#"{"type":"ModifyOrder","client_order_id":"O-1","price":null,"quantity":"2"}"#,
             ),
             (
-                ClientMessage::QueryOrders {
+                Command::QueryOrders {
                     request_id: "Q-1".into(),
                     client_order_id: None,
                     open_only: true,
@@ -2423,7 +2423,7 @@ mod tests {
                 r#"{"type":"QueryOrders","request_id":"Q-1","open_only":true}"#,
             ),
             (
-                ClientMessage::QueryFills {
+                Command::QueryFills {
                     request_id: "Q-2".into(),
                     client_order_id: None,
                 },
@@ -2433,20 +2433,20 @@ mod tests {
         for (frame, expected) in client_frames {
             let json = serde_json::to_string(&frame).expect("serialize");
             assert_eq!(json, expected);
-            let decoded: ClientMessage = serde_json::from_str(&json).expect("decode");
+            let decoded: Command = serde_json::from_str(&json).expect("decode");
             assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
         }
 
         // There is no Subscribe frame left to send: the venue pushes the run's
-        // one tape unbidden, so a client that still sends one is refused by the
+        // one tape unbidden, so a consumer that still sends one is refused by the
         // decoder rather than silently ignored.
         assert!(
-            serde_json::from_str::<ClientMessage>(r#"{"type":"Subscribe","symbols":["BTCUSDT"]}"#)
+            serde_json::from_str::<Command>(r#"{"type":"Subscribe","symbols":["BTCUSDT"]}"#)
                 .is_err(),
             "Subscribe was retired with the subscription model"
         );
         assert!(
-            serde_json::from_str::<ClientMessage>(r#"{"type":"Unsubscribe"}"#).is_err(),
+            serde_json::from_str::<Command>(r#"{"type":"Unsubscribe"}"#).is_err(),
             "Unsubscribe was retired with the subscription model"
         );
 
@@ -2505,10 +2505,10 @@ mod tests {
             ),
             (
                 VenueMessage::ProtocolError {
-                    reason: "invalid client frame".into(),
+                    reason: "invalid command frame".into(),
                     ts_event: 2,
                 },
-                r#"{"type":"ProtocolError","reason":"invalid client frame","ts_event":2}"#,
+                r#"{"type":"ProtocolError","reason":"invalid command frame","ts_event":2}"#,
             ),
         ];
         for (frame, expected) in venue_frames {
@@ -2606,7 +2606,7 @@ mod tests {
     fn admission_frames_fit_their_ceiling() {
         // The worst case is every capped field at its cap, in characters that
         // JSON escapes maximally - which is what JSON_ESCAPE_FACTOR prices.
-        let worst_id = "\u{7}".repeat(MAX_CLIENT_ID_LEN);
+        let worst_id = "\u{7}".repeat(MAX_ECHOED_ID_LEN);
         let worst_reason = "\u{7}".repeat(MAX_REASON_LEN);
 
         // EVERY subject variant, not just `Submit`. The variants differ in key
@@ -2672,7 +2672,7 @@ mod tests {
         // The analytic bound the constant is derived FROM, so the constant is
         // not merely large enough for the case above by luck.
         let analytic =
-            JSON_ESCAPE_FACTOR * (MAX_CLIENT_ID_LEN + MAX_REASON_LEN) + ADMISSION_ENVELOPE_BYTES;
+            JSON_ESCAPE_FACTOR * (MAX_ECHOED_ID_LEN + MAX_REASON_LEN) + ADMISSION_ENVELOPE_BYTES;
         assert!(
             analytic <= ADMISSION_FRAME_MAX_BYTES,
             "the analytic worst case is {analytic} bytes, over the {ADMISSION_FRAME_MAX_BYTES} ceiling"
@@ -2688,7 +2688,7 @@ mod tests {
     fn admission_subject_serialization_bounds_raw_client_ids() {
         let frame = VenueMessage::AdmissionRejected {
             subject: AdmissionSubject::Submit {
-                client_order_id: "x".repeat(MAX_CLIENT_ID_LEN + 10_000),
+                client_order_id: "x".repeat(MAX_ECHOED_ID_LEN + 10_000),
             },
             reason: "capacity exhausted".into(),
             retryable: true,
@@ -2704,6 +2704,6 @@ mod tests {
         else {
             panic!("wrong frame shape")
         };
-        assert_eq!(client_order_id.len(), MAX_CLIENT_ID_LEN);
+        assert_eq!(client_order_id.len(), MAX_ECHOED_ID_LEN);
     }
 }

@@ -5,9 +5,9 @@ or a connection.
 Order-path divergences operate on the run ledger; data-path divergences operate
 on the selected river or on connected sockets. Admission and execution
 lanes remain connection-local memory bounds. Order-path arms apply only to
-client-originated orders, which reach the venue over the websocket carrier and
+consumer-originated orders, which reach the venue over the websocket carrier and
 nowhere else. Venue-originated maintenance, including forced
-liquidation, bypasses them and leaves them armed for the next matching client
+liquidation, bypasses them and leaves them armed for the next matching consumer
 action.
 
 Two nouns run through what follows and `reference/glossary.md` defines both. A
@@ -40,23 +40,23 @@ The venue ships no bars: every bar a nautilus host receives is FABRICATED by the
 adapter by folding the trades it was delivered. Dropping or duplicating a trade
 therefore changes a bar's open, high, low, close or volume rather than removing
 or duplicating a whole bar frame, because the fold happens downstream of the
-filter. That is what a real client-side aggregator on a lossy feed experiences,
+filter. That is what a real consumer-side aggregator on a lossy feed experiences,
 so it is the honest simulation of THIS venue; modelling a dropped bar would be
 modelling a venue that ships bars natively, which mogwai is not. It follows the
 same principle as the rest of the surface: mogwai injects faults and declines to
 repair them downstream.
 
-WHAT A CLIENT CAN DO ABOUT IT DEPENDS ON THE CLIENT, and the nautilus case is
+WHAT A CONSUMER CAN DO ABOUT IT DEPENDS ON THE CONSUMER, and the nautilus case is
 the constrained one. The venue declares the hole on the wire: `FeedLagged`
-carries the skipped count, so a client reading the protocol directly can tell a
+carries the skipped count, so a consumer reading the protocol directly can tell a
 quiet feed from a lossy one rather than inferring it from bar shape. A nautilus
-host CANNOT: `DataEvent` has no gap or degradation variant, the client reaches
-the host as a `dyn DataClient` with no downcast, and fabricating an
+host cannot: `DataEvent` has no gap or degradation variant, the adapter object
+reaches the host as a `dyn DataClient` with no downcast, and fabricating an
 `InstrumentStatus` would report a venue halt that did not happen - so
 `mogwai-adapter` logs the frame at ERROR, at the level a host alerts on, and
 that log line is the only channel the signal has. A bar-folding strategy is
 therefore not in a position to read it, and a run that needs the distinction
-programmatically wants a client on the raw protocol. The real fix is a declared
+programmatically wants a consumer on the raw protocol. The real fix is a declared
 feed-gap event upstream; it is filed in `notes/todo.md`.
 
 Generator havoc is river-scoped. The control payload accepts an optional
@@ -186,11 +186,11 @@ carved out and no new arm exists for the trigger itself.
 | Arm | Where it lands on a conditional |
 |---|---|
 | `RejectNextSubmit` | The submit. The conditional never exists, so nothing can trigger. |
-| `RejectNextCancel` | A cancel for a RESTING order, refusing it and leaving the order where it was. Not spent on an unknown or already-terminal id, which would be refused anyway and would look like the arm failing to fire. The point is what the client is left believing: publish a replacement before the cancel is acknowledged, have the cancel refused, and two orders rest where the script rests one. |
+| `RejectNextCancel` | A cancel for a RESTING order, refusing it and leaving the order where it was. Not spent on an unknown or already-terminal id, which would be refused anyway and would look like the arm failing to fire. The point is what the consumer is left believing: publish a replacement before the cancel is acknowledged, have the cancel refused, and two orders rest where the script rests one. |
 | `PartialFillNext` | The fill the trigger produces, never the trigger itself. An untriggered stop consumes no arm - only a fill targets one by client order id. |
-| `DuplicateNextFill` | The fill event only. `OrderTriggered` is never duplicated - it is not a fill, and a duplicated trigger has no client FSM transition to land on. |
+| `DuplicateNextFill` | The fill event only. `OrderTriggered` is never duplicated - it is not a fill, and a duplicated trigger has no consumer FSM transition to land on. |
 | `DropNextAccountUpdate` | The account snapshot that follows the triggered fill, or the cancel a trigger's funds check produced, on the same rule as anywhere else. A trigger that only comes to rest still emits its snapshot, and consumes no arm. |
-| `CommandLatency` submit act/ack | The submit only. There is no trigger-act or trigger-ack knob - the trigger is venue-internal with no client command behind it, and the sweep interval already bounds how late it can fire. |
+| `CommandLatency` submit act/ack | The submit only. There is no trigger-act or trigger-ack knob - the trigger is venue-internal with no consumer command behind it, and the sweep interval already bounds how late it can fire. |
 | `DelayAcks` / `GoDark` / `StallData` | Transport, unchanged. `OrderTriggered` classifies as execution, so `DelayAcks` holds it and `GoDark` drops it; `StallData` never touches it. |
 | `CancelOpenOrderSilently` | An untriggered conditional is a resting order, so it works today's way - the venue silently kills the protective leg and only a `QueryOrders` poll reveals it. A silent cancel racing a trigger in the same sweep pass leaves the order canceled: the cancel takes the lock first and removes the order, so the in-flight trigger fails its lookup and is dropped. |
-| `VolStorm` / `LiquidityDrought` / `ReopenGap` | Not an arm at all - a boot regime baked into the run's tape, so the sweep and the client see the same water. A drought thins what a stop has to trigger on rather than hiding prints from the client. |
+| `VolStorm` / `LiquidityDrought` / `ReopenGap` | Not an arm at all - a boot regime baked into the run's tape, so the sweep and the consumer see the same water. A drought thins what a stop has to trigger on rather than hiding prints from the consumer. |

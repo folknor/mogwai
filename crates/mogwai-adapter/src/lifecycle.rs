@@ -13,7 +13,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ClientMessage, ConnHavoc, SimClock, VenueMessage};
+use mogwai_protocol::{Command, ConnHavoc, SimClock, VenueMessage};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tokio::{
     sync::{
@@ -389,7 +389,7 @@ pub(crate) async fn run_ws_connection<
     mut on_undelivered: OnUndelivered,
 ) where
     Cmd: Send + 'static,
-    Serialize: Fn(&Cmd) -> ClientMessage + Send + Sync + 'static,
+    Serialize: Fn(&Cmd) -> Command + Send + Sync + 'static,
     OnConnect: Fn() -> Vec<Cmd> + Send + Sync + 'static,
     Handler: FnMut(VenueMessage) -> HandlerFut + Send + 'static,
     HandlerFut: Future<Output = ()> + Send,
@@ -443,7 +443,7 @@ async fn run_ws_connection_inner<
     on_undelivered: &mut OnUndelivered,
 ) where
     Cmd: Send + 'static,
-    Serialize: Fn(&Cmd) -> ClientMessage + Send + Sync + 'static,
+    Serialize: Fn(&Cmd) -> Command + Send + Sync + 'static,
     OnConnect: Fn() -> Vec<Cmd> + Send + Sync + 'static,
     Handler: FnMut(VenueMessage) -> HandlerFut + Send + 'static,
     HandlerFut: Future<Output = ()> + Send,
@@ -463,7 +463,7 @@ async fn run_ws_connection_inner<
     let policy = ReconnectPolicy::from_conn(&conn, sim);
     // The reconnect-jitter RNG is seeded from the configured havoc seed when one
     // is set, so jitter is reproducible (D.6). Both client.rs construction sites
-    // pass `seed: client_havoc.seed` into `WsConnectionConfig`, so a configured
+    // pass `seed: inbound_havoc.seed` into `WsConnectionConfig`, so a configured
     // seed reaches here; absent a seed we fall back to entropy.
     let mut rng = seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
     let mut attempt = 0u32;
@@ -913,7 +913,7 @@ fn send_reattach_commands<Cmd, Serialize, OnUndelivered>(
     unwritten: &Arc<StdMutex<VecDeque<(u64, Cmd)>>>,
     on_undelivered: &mut OnUndelivered,
 ) where
-    Serialize: Fn(&Cmd) -> ClientMessage,
+    Serialize: Fn(&Cmd) -> Command,
     OnUndelivered: FnMut(Cmd),
 {
     let mut pending = commands.into_iter();
@@ -945,7 +945,7 @@ fn send_command<Cmd, Serialize>(
     unwritten: &Arc<StdMutex<VecDeque<(u64, Cmd)>>>,
 ) -> Option<Cmd>
 where
-    Serialize: Fn(&Cmd) -> ClientMessage,
+    Serialize: Fn(&Cmd) -> Command,
 {
     let msg = serialize(&cmd);
     let Ok(payload) = serde_json::to_string(&msg) else {
@@ -1011,18 +1011,18 @@ mod tests {
 
     use super::*;
 
-    fn a_cancel(id: &str) -> ClientMessage {
-        ClientMessage::CancelOrder {
+    fn a_cancel(id: &str) -> Command {
+        Command::CancelOrder {
             client_order_id: id.to_string(),
         }
     }
 
-    /// `ClientMessage` is not `PartialEq`, and its wire form is the identity
+    /// `Command` is not `PartialEq`, and its wire form is the identity
     /// that matters here anyway: these tests assert WHICH command came back.
-    fn ids_of(msgs: &[ClientMessage]) -> Vec<String> {
+    fn ids_of(msgs: &[Command]) -> Vec<String> {
         msgs.iter()
             .map(|msg| match msg {
-                ClientMessage::CancelOrder { client_order_id } => client_order_id.clone(),
+                Command::CancelOrder { client_order_id } => client_order_id.clone(),
                 other => panic!("unexpected command {other:?}"),
             })
             .collect()
@@ -1039,9 +1039,9 @@ mod tests {
     #[test]
     fn a_queued_frame_leaves_a_receipt_until_the_writer_retires_it() {
         let (out_tx, mut out_rx) = unbounded_channel::<(u64, Message)>();
-        let unwritten: Arc<StdMutex<VecDeque<(u64, ClientMessage)>>> =
+        let unwritten: Arc<StdMutex<VecDeque<(u64, Command)>>> =
             Arc::new(StdMutex::new(VecDeque::new()));
-        let serialize = |cmd: &ClientMessage| cmd.clone();
+        let serialize = |cmd: &Command| cmd.clone();
 
         assert!(
             send_command(&out_tx, &serialize, a_cancel("A"), 1, &unwritten).is_none(),
@@ -1062,7 +1062,7 @@ mod tests {
         let (seq, _) = out_rx.try_recv().expect("the first frame is queued");
         lock_unwritten(&unwritten).retain(|(queued, _)| *queued != seq);
 
-        let residue: Vec<ClientMessage> = lock_unwritten(&unwritten)
+        let residue: Vec<Command> = lock_unwritten(&unwritten)
             .drain(..)
             .map(|(_, cmd)| cmd)
             .collect();
@@ -1079,11 +1079,11 @@ mod tests {
     fn a_command_queued_onto_a_dead_writer_comes_straight_back() {
         let (out_tx, out_rx) = unbounded_channel::<(u64, Message)>();
         drop(out_rx);
-        let unwritten: Arc<StdMutex<VecDeque<(u64, ClientMessage)>>> =
+        let unwritten: Arc<StdMutex<VecDeque<(u64, Command)>>> =
             Arc::new(StdMutex::new(VecDeque::new()));
         let returned = send_command(
             &out_tx,
-            &|cmd: &ClientMessage| cmd.clone(),
+            &|cmd: &Command| cmd.clone(),
             a_cancel("A"),
             1,
             &unwritten,
@@ -1114,14 +1114,14 @@ mod tests {
     fn every_untried_reattach_command_is_reported_not_just_the_one_that_failed() {
         let (out_tx, out_rx) = unbounded_channel::<(u64, Message)>();
         drop(out_rx);
-        let unwritten: Arc<StdMutex<VecDeque<(u64, ClientMessage)>>> =
+        let unwritten: Arc<StdMutex<VecDeque<(u64, Command)>>> =
             Arc::new(StdMutex::new(VecDeque::new()));
-        let mut reported: Vec<ClientMessage> = Vec::new();
+        let mut reported: Vec<Command> = Vec::new();
         let mut seq = 7;
         send_reattach_commands(
             vec![a_cancel("A"), a_cancel("B"), a_cancel("C")],
             &out_tx,
-            &|cmd: &ClientMessage| cmd.clone(),
+            &|cmd: &Command| cmd.clone(),
             &mut seq,
             &unwritten,
             &mut |cmd| reported.push(cmd),
@@ -1152,7 +1152,7 @@ mod tests {
     /// ever dialing, so every queued command is guaranteed unread.
     #[tokio::test(flavor = "current_thread")]
     async fn commands_queued_when_the_loop_gives_up_are_reported_undelivered() {
-        let (cmd_tx, cmd_rx) = unbounded_channel::<ClientMessage>();
+        let (cmd_tx, cmd_rx) = unbounded_channel::<Command>();
         cmd_tx.send(a_cancel("A")).expect("queue A");
         cmd_tx.send(a_cancel("B")).expect("queue B");
         let conn = ConnHavoc {
@@ -1415,7 +1415,7 @@ mod tests {
 
     /// Drives `run_ws_connection` with inert callbacks against a loopback stub.
     async fn run_lifecycle(port: u16, conn: ConnHavoc) {
-        let (_cmd_tx, cmd_rx) = unbounded_channel::<ClientMessage>();
+        let (_cmd_tx, cmd_rx) = unbounded_channel::<Command>();
         drop(run_lifecycle_recording(port, conn, cmd_rx).await);
     }
 
@@ -1424,8 +1424,8 @@ mod tests {
     async fn run_lifecycle_recording(
         port: u16,
         conn: ConnHavoc,
-        cmd_rx: UnboundedReceiver<ClientMessage>,
-    ) -> Arc<StdMutex<Vec<ClientMessage>>> {
+        cmd_rx: UnboundedReceiver<Command>,
+    ) -> Arc<StdMutex<Vec<Command>>> {
         let undelivered = Arc::new(StdMutex::new(Vec::new()));
         let sink = Arc::clone(&undelivered);
         run_ws_connection(
@@ -1439,11 +1439,11 @@ mod tests {
                 identity: None,
             },
             Some(cmd_rx),
-            |cmd: &ClientMessage| cmd.clone(),
+            |cmd: &Command| cmd.clone(),
             Vec::new,
             |_msg: VenueMessage| async {},
             || async {},
-            move |cmd: ClientMessage| {
+            move |cmd: Command| {
                 sink.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(cmd);

@@ -282,12 +282,12 @@ outliers but a FLOOR: 55 of those 59 sat in a 419-892 ms band with a hard
 and 23 ms.
 
 A floor that flat is a fixed cost inside `connect()`, and it was one. The test
-stub answered `GET /clock` with the catch-all `[]`, which the client cannot
+stub answered `GET /clock` with the catch-all `[]`, which the consumer cannot
 decode, so every connecting test walked `fetch_clock_or_identity`'s full ladder
 - three attempts with a 200 ms wall sleep between them - before falling back to
 the identity clock. 57 of the 59 connect, at ~400 ms each: about 24 s.
 
-The fix is in the harness, not the client. The stub now serves a real identity
+The fix is in the harness, not the consumer. The stub now serves a real identity
 envelope (`common::IDENTITY_CLOCK_JSON`, speed 1, zero floor), which is
 behaviourally identical downstream - `ensure_on_tape` receives `Some(0)`
 instead of `None` and no start can precede zero - and is a more honest fixture,
@@ -1553,7 +1553,7 @@ the type rather than a validator a caller must remember to call. Audited, it
 named one live gap, now closed in the same commit as this table:
 `validate_submit_order` checked ONLY `symbol.len() > MAX_SYMBOL_LEN`, so the
 empty string and any byte outside the wire alphabet were admitted at order
-entry - the one client-inbound symbol ingress - while this document asserted
+entry - the one inbound symbol ingress - while this document asserted
 every ingress validated. It runs `validate_wire_symbol` now, on both the
 `SubmitOrder` and the `SubmitOrderGroup` carriers, pinned by
 `an_order_entry_symbol_is_judged_by_the_wire_alphabet`. What each ingress checks
@@ -1567,7 +1567,7 @@ today:
   `validate_wire_symbol` on an instrument's `index_symbol` and NOT on its own
   `symbol`, so a configured instrument may carry a symbol order entry would now
   refuse. Filed as an owner-level item in `notes/todo.md` rather than tightened
-  here: it is operator-supplied rather than client-supplied, and it is a
+  here: it is operator-supplied rather than consumer-supplied, and it is a
   `mogwai-venue` decision.
 - THE ADAPTER'S DECODE: unvalidated DELIBERATELY, with `convert::instrument_id`
   using `NautilusSymbol::new_checked` so a hostile symbol drops one frame rather

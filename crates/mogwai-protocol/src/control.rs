@@ -30,7 +30,7 @@ pub enum Divergence {
     /// Refuse the next `CancelOrder` with `reason`, leaving the order RESTING.
     ///
     /// The mirror of `RejectNextSubmit`, and it exists because nothing else can
-    /// produce the shape: a client that publishes a replacement before its
+    /// produce the shape: a consumer that publishes a replacement before its
     /// cancel is acknowledged, and then has the cancel refused, is left with two
     /// live orders where its script rests one. That is a real live-path defect a
     /// consumer fixed and could pin only with in-process tests, because no venue
@@ -39,7 +39,7 @@ pub enum Divergence {
     /// Distinct from the order being unknown or already terminal, which produce
     /// the same frame for real reasons. This one refuses a cancel the venue
     /// COULD have honoured, so the order stays exactly what it was - the point
-    /// is that the book and the client's model disagree afterwards.
+    /// is that the book and the consumer's model disagree afterwards.
     RejectNextCancel { reason: String },
     /// Delay every outbound execution event by `ms`, bounded by
     /// `MAX_DIVERGENCE_MS`. Arm with `ms: 0` to clear, or post
@@ -117,8 +117,8 @@ pub enum Divergence {
     /// event - the out-of-band cancel with a lost `OrderCanceled` that the
     /// consumer's reconciliation poll exists to catch. Unlike the armed
     /// single-shot divergences this is not queued for a trigger: it acts on
-    /// the book the moment it is posted (there is no client action to key
-    /// off), frees the order's reservation, and leaves the client believing
+    /// the book the moment it is posted (there is no consumer action to key
+    /// off), frees the order's reservation, and leaves the consumer believing
     /// the order still rests until it reconciles - a `QueryOrders` reply
     /// truthfully reports the order `Canceled` from then on. Posting it for
     /// an id that is not currently resting is refused with a 4xx, so a

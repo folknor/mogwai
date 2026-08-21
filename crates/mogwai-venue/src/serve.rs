@@ -53,7 +53,7 @@ const WARMUP_WARN_SECS: f64 = 60.0;
 /// the readiness record (or, for a human, the `mogwai listening` log line).
 ///
 /// The HOST is not choosable because the venue models latency on the sim axis
-/// only and runs on the same machine as its client, where physical latency is
+/// only and runs on the same machine as its consumer, where physical latency is
 /// negligible by construction. Serving another interface would put a real
 /// network under a fixture that does not model one.
 const BIND_ADDR: &str = "127.0.0.1:0";

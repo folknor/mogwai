@@ -12,12 +12,12 @@ are keyed within it. Two accounts on one venue never share a position book.
 
 - **Netting** collapses every fill on an instrument into one position per
   symbol: an opposing fill reduces or reverses that one position, and a
-  client-supplied position id is echoed back on the wire but is not used to
+  consumer-supplied position id is echoed back on the wire but is not used to
   key anything.
 - **Hedging** keeps opposing fills as separate positions, keyed by
   `position_id`. An order submitted with no id opens a fresh venue-assigned
   one; a fill reports the id the venue actually booked it against, which
-  under hedging may not be the id the client sent.
+  under hedging may not be the id the consumer sent.
 
 EVERY PRICE AND QUANTITY ON THE WIRE IS A JSON STRING, in both directions:
 `"quantity":"2"`, `"price":"100.25"`, never `"price":100.25`. A numeric
@@ -63,7 +63,7 @@ and waits rather than trading through your limit.
 other type. Those four are the ones whose purpose is to REST. It is refused on
 `MarketToLimit` even though that type rests a remainder as a limit, because its
 FIRST act is to take what the touch offers, which is exactly what `post_only`
-forbids. The refusal names the legal set rather than stating a rule, so a client
+forbids. The refusal names the legal set rather than stating a rule, so a consumer
 reading it does not have to infer which types it meant.
 
 A `MarketToLimit` may carry any time in force, and THE TIME IN FORCE GOVERNS
@@ -78,7 +78,7 @@ its name. Its first act is priced off the tape exactly as a market order's is -
 the last print, slipped adversely by the fill band - except that its own stated
 price BOUNDS what it pays: a buy never fills above its limit, a sell never below
 it. If the touch is short of the limit - a buy limited at 100 against a print of
-101 - nothing is taken and the whole quantity rests, because the client asked not
+101 - nothing is taken and the whole quantity rests, because the consumer asked not
 to trade through that price. Marketability is judged against the BAND-DRAWN
 trigger rather than the stated price, exactly as a `Limit`'s is, so a touch
 inside the limit but outside that draw also rests; the two types answer the
@@ -88,7 +88,7 @@ ordinary limit at the stated price and is swept, filled and expired like one,
 subject to the time in force above.
 
 That is a change of behaviour as of 2026-08-19, and it is stated rather than
-quietly corrected because a client testing against the old venue saw the
+quietly corrected because a consumer testing against the old venue saw the
 divergence: the fill used to take the WHOLE quantity at the order's own stated
 limit with no reference to the tape - a buy limited at 200 against a last print
 of 100 filled at 200 - so no remainder arose on the clean path at all, and where
@@ -112,12 +112,12 @@ ORDER LISTS are served, so a genuine bracket needs no workaround. See
 TIME-IN-FORCE: Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd but
 never Ioc or Fok - an order that must fill immediately cannot also wait for a
 trigger. `Gtd` carries an `expire_time`; `Day` does not, because its expiry is
-the instrument's own session close rather than anything a client states, and an
+the instrument's own session close rather than anything a consumer states, and an
 instrument with no calendar never expires one.
 
 AN EXPIRED ORDER REPORTS `OrderExpired`, not `OrderCanceled`, and its terminal
 status on an order query is `Expired`. Match on it: an order you cancelled and
-an order whose stated lifetime ran out are different outcomes, and a client that
+an order whose stated lifetime ran out are different outcomes, and a consumer that
 folds both into "cancelled" cannot tell a venue action from its own time in
 force. A nautilus host sees the distinction as `OrderStatus::Expired` and an
 `OrderExpired` event.
@@ -137,23 +137,23 @@ oms_type = "hedging"
 venue it did not configure itself can confirm which mode it landed on before
 trading.
 
-## The venue does not gate on your client's configuration
+## The venue does not gate on your consumer's configuration
 
 On the nautilus side, `MogwaiExecClientConfig` carries its own `oms_type`
 (matching your strategy's OMS style) and its own `account_type` (defaulting
 to `Cash`). **mogwai never refuses a connection over either of these.** A
-client configured for hedging can trade against a netting-mode run and vice
-versa; a client configured with a cash account can trade a futures instrument
+consumer configured for hedging can trade against a netting-mode run and vice
+versa; a consumer configured with a cash account can trade a futures instrument
 that posts margin. The venue is authoritative for its own book regardless of
-what the connecting client declares about itself.
+what the connecting consumer declares about itself.
 
 That permissiveness has one real consequence worth knowing about rather than
 discovering: nautilus' `CashAccount` has no storage for margin balances, so a
-client left on the default `account_type = "cash"` while trading a futures
+consumer left on the default `account_type = "cash"` while trading a futures
 instrument will see the venue's reported margin rows dropped on its own side.
 The venue still posts and reports margin correctly - `/account`, the account
 snapshot on the wire, and the adapter's forwarded `MarginBalance` rows are all
-correct - the client simply has nowhere local to keep what it receives. If you
+correct - the consumer simply has nowhere local to keep what it receives. If you
 are trading futures instruments and want your own nautilus account object to
 carry margin, configure `account_type = "margin"` on the exec client. mogwai
 will not do this for you and will not refuse you if you don't.

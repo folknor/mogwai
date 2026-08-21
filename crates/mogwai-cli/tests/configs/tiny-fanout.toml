@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # The lag-policy gate's venue. The bounded fanout ring and its kill-the-slow-
-# connection policy survive the tenancy rip - one client still holds sockets
+# connection policy survive the tenancy rip - one consumer still holds sockets
 # onto one tape - so they have to stay reachable. At the shipped 4096-frame
 # depth reaching the policy means driving hours of tape through a stalled
 # socket; at 8 it is one stalled read away.

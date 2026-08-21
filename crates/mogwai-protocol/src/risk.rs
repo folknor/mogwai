@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The account policy a client trades under, and what the venue enforces.
+//! The account policy a consumer trades under, and what the venue enforces.
 //!
 //! THIS IS A RISK-POLICY LAYER, NOT A PROP-FIRM FEATURE, and reading it the
 //! other way builds the wrong thing. A live account has the same machinery: an
@@ -113,7 +113,7 @@ pub struct OverallDrawdown {
 /// cap - the largest |qty| it can reach given worst-case fill order of the
 /// working book, reduce-only excluded - rather than flattening after the fact.
 /// Under netting that is the worse extreme net; under hedging, the larger
-/// side. Sizing past the firm is a client error, not a liquidation.
+/// side. Sizing past the firm is a consumer error, not a liquidation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaxPosition {
     pub quantity: Decimal,
@@ -121,7 +121,7 @@ pub struct MaxPosition {
 
 /// The rules an account is enforced under. Every field is optional, and an
 /// account naming none is unpoliced - which is the default account's policy and
-/// the behaviour every client had before this existed.
+/// the behaviour every consumer had before this existed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountPolicy {
@@ -649,7 +649,7 @@ mod tests {
         .expect("a named currency satisfies the rule");
 
         // ... and an UNPOLICED account owes no currency at all, which is the
-        // default account and every client that predates this policy layer.
+        // default account and every consumer that predates this policy layer.
         assert!(AccountPolicy::default().currency.is_none());
         AccountPolicy::default()
             .validate()
@@ -707,7 +707,7 @@ mod tests {
     }
 
     /// The default reset is a convention and the default breach actions differ
-    /// per rule, both of which a client inherits by saying nothing - so they are
+    /// per rule, both of which a consumer inherits by saying nothing - so they are
     /// pinned rather than left to a reader of the derive.
     #[test]
     fn the_defaults_a_client_inherits_are_the_documented_ones() {
@@ -729,7 +729,7 @@ mod tests {
     }
 
     /// Every shipped name resolves, validates, and is policed. A name that
-    /// does not is a broken binary, not a client error.
+    /// does not is a broken binary, not a consumer error.
     #[test]
     fn every_shipped_policy_is_usable() {
         for name in SHIPPED_POLICIES {

@@ -1,5 +1,7 @@
 # Adapter lifecycle: the order a host must call the clients in
 
+This page uses `client` only for nautilus's inherited adapter objects.
+
 `mogwai-adapter` ships an `ExecutionClient`/`DataClient` pair a nautilus host
 registers for the `MOGWAI` venue. Both are ordinary nautilus components, and a
 host that drives them through the standard kernel path already satisfies

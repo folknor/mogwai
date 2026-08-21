@@ -120,7 +120,7 @@ impl InstrumentProfiles {
     }
     /// The TOTAL resolver: the same configured shapes, plus the config needed
     /// to resolve a label nobody configured. `from_profiles` stays non-total on
-    /// purpose, so a test rig does not silently acquire client-driven
+    /// purpose, so a test rig does not silently acquire consumer-driven
     /// resolution it was never written against.
     pub(crate) fn from_config(
         cfg: Arc<crate::config::Config>,
@@ -258,7 +258,7 @@ pub(crate) const CHECKPOINT_K: usize = 8_192;
 /// evicted river would resurrect at a different position, which is a worse lie
 /// than a refusal. Exhaustion by 256 genuinely materialized rivers is an
 /// operational contract, not a hole: this venue serves the owner's own agents,
-/// one consumer population per run, and mounts no defence against a client that
+/// one consumer population per run, and mounts no defence against a consumer that
 /// spends the budget deliberately.
 pub(crate) const MAX_MATERIALIZED_RIVERS: usize = 256;
 

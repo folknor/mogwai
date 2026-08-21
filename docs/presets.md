@@ -36,7 +36,7 @@ are.
 
 ## Selecting a bundle in your config
 
-Name the boot symbol at top level - the river a client gets when it binds
+Name the boot symbol at top level - the river a consumer gets when it binds
 without naming one. If its name matches a shipped preset, case-insensitively,
 that preset supplies the whole bundle.
 
@@ -162,12 +162,12 @@ A shape can only trade if its SETTLEMENT currency is funded in `[balances]`.
 The rule lands in two places. A shape you configured is checked at boot: an
 unfunded one refuses the run rather than rejecting every buy minutes in. Every
 shipped preset is resolved at boot too, and one whose settlement currency is
-unfunded is recorded as funding-barred - a client that later asks for a symbol
+unfunded is recorded as funding-barred - a consumer that later asks for a symbol
 landing on that shape is refused when it binds, with a message naming the
 symbol and the currency.
 
 This bites the shipped default. The default balances fund USDT only, which
 covers BTCUSDT and every unmatched symbol resolving through it, but NOT the
 USD-settled MNQ and MES bundles. Fund USD in `[balances]` for a run whose
-clients may ask for the index futures. The payoff is that a funds rejection on
+consumers may ask for the index futures. The payoff is that a funds rejection on
 a served shape then means depletion and only depletion.

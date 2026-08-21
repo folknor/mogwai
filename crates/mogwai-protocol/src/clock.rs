@@ -104,14 +104,14 @@ impl SimClock {
 
 /// The `/clock` payload: the affine `SimClock` plus the tape boundary the
 /// venue derived at boot. `SimClock` stays the pure wall-to-sim map; this
-/// richer envelope publishes where the synthetic tape begins so a client can
+/// richer envelope publishes where the synthetic tape begins so a consumer can
 /// guard its own warmup window instead of issuing a doomed off-tape fetch.
 ///
 /// `venue_now_ns` is `sim.sim_ns(wall)` sampled when the request is served, so
-/// a client gets sim-now and the tape floor from one round trip without having
+/// a consumer gets sim-now and the tape floor from one round trip without having
 /// to read its own (possibly skewed) wall clock. `data_origin_ns` is the
 /// earliest `ts_event` any source can serve (`run_start_ns - warmup_ns`); a
-/// request for a `start` below it is refused. The span is echoed so the client
+/// request for a `start` below it is refused. The span is echoed so the consumer
 /// can report the floor in its own terms.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VenueClock {
@@ -136,7 +136,7 @@ pub struct VenueClock {
 }
 
 /// API-boundary guard for `SimClock`, mirroring `validate_conn_havoc` /
-/// `validate_market_regime` / `validate_client_havoc` in style. `speed` must
+/// `validate_market_regime` / `validate_inbound_havoc` in style. `speed` must
 /// be finite and strictly positive.
 ///
 /// `sim_ns`/`wall_ns`/`wall_span` all tolerate a non-finite or non-positive

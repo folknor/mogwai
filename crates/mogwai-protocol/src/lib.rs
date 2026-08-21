@@ -7,6 +7,16 @@
 //! adapter side depends on this crate so both ends serialize identical types.
 //! mogwai never imports nautilus; nautilus types are mirrored here only as far as
 //! the wire needs them.
+//!
+//! THE TWO DIRECTIONS ARE NAMED ASYMMETRICALLY, AND THE ASYMMETRY IS THE POINT.
+//! Outbound frames are `VenueMessage`, named for the party that sends them,
+//! because the venue is one thing and every frame comes from it. Inbound frames
+//! are `Command`, named for what they carry, because there is no singular party
+//! to name them after: a consumer may be one process, several sharing nothing
+//! but the wire, or the program the venue is embedded in, and what the venue
+//! perceives is one connection under one account rather than a consumer. A
+//! `ConsumerMessage` would name something the venue cannot see. See the
+//! Consumer entry in `reference/glossary.md`.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -33,22 +43,22 @@ pub mod risk;
 pub use clock::{SimClock, VenueClock, now_unix_nanos, validate_sim_clock};
 pub use decimal::{decimal_from_f64, decimal_to_f64};
 pub use havoc::{
-    BASELINE_LATENCY, ClientHavoc, ConnHavoc, EventKind, HavocLatency, HavocSpec,
-    MAX_LATENCY_NANOS, MarketRegime, finite_in, finite_in_excl_lo, validate_client_havoc,
-    validate_conn_havoc, validate_divergence, validate_market_regime,
+    BASELINE_LATENCY, ConnHavoc, EventKind, HavocLatency, HavocSpec, InboundHavoc,
+    MAX_LATENCY_NANOS, MarketRegime, finite_in, finite_in_excl_lo, validate_conn_havoc,
+    validate_divergence, validate_inbound_havoc, validate_market_regime,
 };
 pub use instruments::{
     FundingTerms, InstrumentClass, InstrumentDef, OmsType, WireAssetClass, default_instruments,
 };
 pub use messages::{
     ADMISSION_ENVELOPE_BYTES, ADMISSION_FRAME_MAX_BYTES, AccountId, AccountIdError, AccountState,
-    AdmissionSubject, AggressorSide, Balance, ClientMessage, CommandClass, Contingency,
-    FillSnapshot, Hit, JSON_ESCAPE_FACTOR, LiquiditySide, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN,
-    MAX_CLIENT_MESSAGE_BYTES, MAX_CURRENCY_LEN, MAX_GROUP_ORDERS, MAX_LINKED_ORDERS,
+    AdmissionSubject, AggressorSide, Balance, Command, CommandClass, Contingency, FillSnapshot,
+    Hit, JSON_ESCAPE_FACTOR, LiquiditySide, MAX_ACCOUNT_ID_LEN, MAX_CURRENCY_LEN,
+    MAX_ECHOED_ID_LEN, MAX_GROUP_ORDERS, MAX_INBOUND_MESSAGE_BYTES, MAX_LINKED_ORDERS,
     MAX_REASON_LEN, MAX_SESSION_LEN, MAX_SYMBOL_LEN, OrderFilled, OrderLink, OrderStatusInfo,
     OrderStatusSnapshot, OrderType, POST_ONLY_REFUSAL, Position, PostedMargin, QueryKind,
     QuoteTick, ScanKind, Side, SubmitOrder, TimeInForce, TradeTick, VenueMessage, WireOrderStatus,
-    touches_toward, touches_trigger, trades_through, truncate_client_id, truncate_reason,
+    touches_toward, touches_trigger, trades_through, truncate_echoed_id, truncate_reason,
     validate_client_order_id, validate_modify_order, validate_request_id, validate_session_id,
     validate_submit_group, validate_submit_order, validate_wire_symbol,
 };
@@ -56,7 +66,7 @@ pub use ready::ReadyRecord;
 pub use seeds::RunSeeds;
 
 pub type Symbol = std::sync::Arc<str>;
-/// Client-assigned order id (nautilus `ClientOrderId`).
+/// Consumer-assigned order id (nautilus `ClientOrderId`).
 pub type ClientOrderId = String;
 /// Venue-assigned order id (mogwai-assigned `VenueOrderId`).
 pub type VenueOrderId = String;

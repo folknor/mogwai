@@ -405,7 +405,7 @@ impl LaunchedVenue {
         self.record.addr
     }
 
-    /// The `ws://` base URL a client config takes.
+    /// The `ws://` base URL a consumer config takes.
     #[must_use]
     pub fn base_url(&self) -> String {
         format!("ws://{}", self.record.addr)

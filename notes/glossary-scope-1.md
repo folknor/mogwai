@@ -8,7 +8,7 @@ within a group they run roughly in order of how much a rename would cost.
 the scoped code before opening this report. Its row annotations use **[P2
 ADDED]**, **[P2 CHANGED]**, and **[P2 REFUTED]**. A refuted row remains in place
 so the disagreement is visible. Pass 2 also enforced the brief's narrower
-surface: `ClientMessage`, `ServerMessage`, `control::Divergence`, `close`,
+surface: `Command`, `ServerMessage`, `control::Divergence`, `close`,
 `risk`, `launch`, `ReadyRecord`, and validators/constants attached to those.
 Rows about the rest of `havoc`, `instruments`, `sizing`, `clock`, or `seeds`
 are retained as first-pass provenance but are not findings in this inventory.
@@ -35,8 +35,8 @@ wire (JSON field or variant name, close-frame reason, or `ReadyRecord` key).
 | Run / RunComplete | `ServerMessage::RunComplete`; `reference/glossary.md`, `RunComplete` | variant / wire | announces either the run's declared duration or one connection's independently declared duration | wire | 1 | **[P2 ADDED]** `Run` is one foreground venue process, but the same `RunComplete` frame is emitted when a single socket's duration elapses while the run continues. The glossary accurately admits both behaviours yet calls both `RunComplete`, so its entry records rather than resolves the overload. Split the wire vocabulary, for example `RunComplete` for venue-wide completion and `ConnectionComplete` for the per-connection deadline. Merely renaming the close reason leaves the primary text-frame discriminator wrong. |
 | Account policy | `risk::AccountPolicy` | type | risk rules only - no opening balance field exists | wire, cross | 1 | Glossary: "Account policy: the rules an account is enforced under - **opening balance plus risk rules**". `AccountPolicy` carries no balance; the opening balances live in `mogwai-venue`'s `OpenAccountRequest.balances`. The glossary describes a type that does not exist. Either fold the balances in or correct the entry. |
 | Seat / river | `risk.rs` `MaxPosition` doc: "An account is on at most one river, so one number is enough" | doc prose | justifies a single scalar position cap | wire, cross | 1 | **Direct contradiction with the glossary's Seat entry**, which says "An account holds as many seats as the distinct boats its sockets have bound, so one account trades many rivers at once (many strategies, one ledger)". One of the two is false. If the glossary is right, `MaxPosition { quantity }` is unsound as a per-account cap across symbols and the type owes a per-symbol shape. Flagged again in the lateral section - this is the most consequential row in the file. |
-| Client | `ClientHavoc`, `HavocSpec.client` | type, field | havoc the **adapter applies to its own inbound stream** - it never crosses the native WS protocol | wire (config), cross | 1 | **[P2 REFUTED: out of scope.]** `ClientHavoc` and `HavocSpec` are not among the public surfaces named by the brief, except insofar as the Divergence validator touches `control::Divergence`. The naming concern may be real in a broader glossary pass, but it is not a finding in this inventory. |
-| Client | `MAX_CLIENT_ID_LEN`, `truncate_client_id` | constant, fn | the cap on **any** client-supplied echoed identifier: `client_order_id`, `request_id`, `order_list_id`, `position_id`, linked ids | wire, cross | 1 | The name says "client id" - a thing that does not exist on this protocol (a client is identified by `session`, and that has its own `MAX_SESSION_LEN`). The constant's own doc has to enumerate what it covers because the name does not. `MAX_ECHOED_ID_LEN` / `truncate_echoed_id`. |
+| Client | `InboundHavoc`, `HavocSpec.client` | type, field | havoc the **adapter applies to its own inbound stream** - it never crosses the native WS protocol | wire (config), cross | 1 | **[P2 REFUTED: out of scope.]** `InboundHavoc` and `HavocSpec` are not among the public surfaces named by the brief, except insofar as the Divergence validator touches `control::Divergence`. The naming concern may be real in a broader glossary pass, but it is not a finding in this inventory. |
+| Client | `MAX_ECHOED_ID_LEN`, `truncate_echoed_id` | constant, fn | the cap on **any** client-supplied echoed identifier: `client_order_id`, `request_id`, `order_list_id`, `position_id`, linked ids | wire, cross | 1 | The name says "client id" - a thing that does not exist on this protocol (a client is identified by `session`, and that has its own `MAX_SESSION_LEN`). The constant's own doc has to enumerate what it covers because the name does not. `MAX_ECHOED_ID_LEN` / `truncate_echoed_id`. |
 | Connection | `ConnHavoc`, `HavocSpec.conn` | type, field | adapter transport-machinery knobs: reconnect backoff, idle timeout, WS ping interval, HTTP quota, HTTP request timeout | wire (config), cross | 1 | **[P2 REFUTED: out of scope.]** Neither type is in the surface assigned by the brief. Preserve for a later whole-crate pass, not this report's verdict set. |
 | Lane | `reference/glossary.md`, Connection entry: "holds no lane and no seat" | doc prose | uses an undefined queueing term | - | 3 | **[P2 CHANGED]** This is not direction 1: Connection still means a WebSocket. It is direction 3 because `lane` is load-bearing and undefined. Keep the Lane cluster finding below; no rename of Connection follows from this site. |
 | Client | `reference/glossary.md`, Client entry | doc prose | names three senses and picks none | - | 1 | The entry **disambiguates rather than defines**, which the brief calls a finding and I agree it is. It is the right instinct in the wrong artifact: a glossary that admits a three-way overload licenses every future site to pick a sense. Pick one (the counterparty process), give the other two their own words (`session` for the identity; the nautilus client objects are inherited and stay quarantined), and let `client_order_id` be a recorded inherited exception rather than a third sense. |
@@ -52,7 +52,7 @@ wire (JSON field or variant name, close-frame reason, or `ReadyRecord` key).
 | term | site | kind | what it means there | reach | direction | verdict |
 |---|---|---|---|---|---|---|
 | Venue | `HavocSpec.server` | field | the `Vec<Divergence>` relayed to the venue | wire (config), cross | 2 | **[P2 REFUTED: out of scope.]** `HavocSpec` is outside the assigned surface. Also, `server` in a client/server pair names a protocol role, not necessarily a synonym competing with the glossary's Venue object. |
-| Venue | `ServerMessage`, `ServerClock`, `server_now_ns`, `mogwai-venue` | type, field, crate | frames from the server endpoint; its clock and reading | wire | 2 | **[P2 REFUTED in the scoped part.]** `ServerMessage` is conventional directional vocabulary paired with `ClientMessage`; it does not rename the running process or compete with Venue. Renaming only one side to `VenueMessage` would make polarity less regular, not clearer. `ServerClock` and the crate name are outside the assigned surface. Keep Client/Server for wire direction and Venue for the modeled exchange/process. |
+| Venue | `ServerMessage`, `ServerClock`, `server_now_ns`, `mogwai-venue` | type, field, crate | frames from the server endpoint; its clock and reading | wire | 2 | **[P2 REFUTED in the scoped part.]** `ServerMessage` is conventional directional vocabulary paired with `Command`; it does not rename the running process or compete with Venue. Renaming only one side to `VenueMessage` would make polarity less regular, not clearer. `ServerClock` and the crate name are outside the assigned surface. Keep Client/Server for wire direction and Venue for the modeled exchange/process. |
 | Tape | `ServerMessage::FeedLagged`, `is_market_data`'s "data watchdog" | variant, doc prose | the boat's broadcast ring overwrote frames for this connection | wire | 2 | The glossary word for the paced frame stream is Tape (and Boat for the ring's owner). "Feed" appears only here. `TapeLagged` costs one wire rename and removes a synonym. |
 | Freeze / Session | `ReadyRecord.reset_account_on_reconnect` | field | whether a returning account id gets a clean ledger | wire | 2 | The mechanism the glossary describes is not reconnection - it is resolution on first sight of an account id (Account entry), moderated by Session and Freeze. "Reconnect" implies the venue tracks a prior connection, which it does not. `reset_account_on_reclaim` matches the Eviction/Freeze vocabulary. Low urgency; the field's own doc is accurate. |
 | Account policy preset | `risk::SHIPPED_POLICIES`, `shipped_policy` | constant, fn | the named policies this build ships | cross | 2 | **[P2 REFUTED.]** "Shipped" qualifies provenance and availability; it is not an alternate noun for preset. `shipped_policy(name)` resolves the policy presets bundled with the build, exactly compatible with the glossary. Renaming it to `preset` would also collide with instrument presets without adding meaning. |
@@ -102,21 +102,21 @@ out-of-scope havoc types and is retained below as provenance, not counted.
 ### The polarity cluster
 
 **[P2 REFUTED AS A CLUSTER FOR THIS SCOPE.]** The polarity disagreement is
-real across the full crate, but nearly all its evidence is `ClientHavoc`,
+real across the full crate, but nearly all its evidence is `InboundHavoc`,
 `HavocLatency`, and `ConnHavoc`, which the brief did not assign. Only
 `validate_wire_symbol` is scoped, and "client-inbound" there is locally
 unambiguous. Keep this cluster for a later whole-havoc inventory.
 
 | term | site | kind | what it means there | reach | direction | verdict |
 |---|---|---|---|---|---|---|
-| - | `ClientHavoc` / `HavocLatency` docs: "inbound event", "the inbound stream", `BASELINE_LATENCY` "inbound network latency" | doc prose, constant | venue -> adapter (frames the adapter receives) | cross | 3 | |
+| - | `InboundHavoc` / `HavocLatency` docs: "inbound event", "the inbound stream", `BASELINE_LATENCY` "inbound network latency" | doc prose, constant | venue -> adapter (frames the adapter receives) | cross | 3 | |
 | - | `validate_wire_symbol` doc: "Validate a CLIENT-INBOUND symbol"; `ConnHavoc.idle_timeout_ms`: "no inbound application-data frame" | doc prose | **the opposite polarity in one case and the same in the other**: "client-inbound" means client -> venue, the adapter's "inbound" means venue -> adapter | wire, cross | 3 | The word flips meaning depending on whose stream you stand in. This is a live comprehension hazard on the one crate both ends read. Fix by naming the ends, not the direction: `to_venue` / `from_venue`, and glossary the pair. |
 
 ### The linkage cluster
 
 | term | site | kind | what it means there | reach | direction | verdict |
 |---|---|---|---|---|---|---|
-| - | `OrderLink`, `SubmitOrder.link` | type, field | one order's membership of an order list, as a group id plus a rule | wire | 3 | The whole atomic-group guarantee is stated in `ClientMessage::SubmitOrderGroup`'s doc and nowhere durable. Glossary owes: Linkage, Group, Sibling, Parent/Child, and the *atomic admission* guarantee itself. |
+| - | `OrderLink`, `SubmitOrder.link` | type, field | one order's membership of an order list, as a group id plus a rule | wire | 3 | The whole atomic-group guarantee is stated in `Command::SubmitOrderGroup`'s doc and nowhere durable. Glossary owes: Linkage, Group, Sibling, Parent/Child, and the *atomic admission* guarantee itself. |
 | - | `linked_order_ids`, `parent_order_id`, `order_list_id` | fields | siblings acted on; the order this one waits for; the list identity | wire | 3 | `order_list_id` is nautilus-shaped (`OrderList`) - see inherited. `parent`/`child` are ours. |
 | - | "bracket" (`SubmitOrderGroup` doc, `Contingency::Ouo` doc, `MAX_LINKED_ORDERS` doc) | doc prose | the two-or-three-leg entry/stop/target shape | cross | 3 | Industry term, but load-bearing in the *justification* of `MAX_GROUP_ORDERS = MAX_LINKED_ORDERS + 1`. Worth an entry saying what mogwai means by it. |
 | - | `MAX_LINKED_ORDERS`, `MAX_GROUP_ORDERS`, `LINKAGE_MAX_BYTES` | constants | caps that make the batch's output computable in advance | wire, cross | 3 | Fine as names; they inherit whatever Linkage ends up meaning. |
@@ -125,7 +125,7 @@ unambiguous. Keep this cluster for a later whole-havoc inventory.
 
 | term | site | kind | what it means there | reach | direction | verdict |
 |---|---|---|---|---|---|---|
-| - | `ClientMessage::QueryOrders` / `QueryFills` doc: "venue-truth", "the second, independent **witness**", "honest-content invariant" | doc prose | the guarantee that a query's content never lies even when its delivery is havoc'd | wire | 3 | This is one of the strongest contracts on the protocol and exists only as a doc comment on two variants. Glossary owes: Venue truth, Witness, and the content/delivery split. |
+| - | `Command::QueryOrders` / `QueryFills` doc: "venue-truth", "the second, independent **witness**", "honest-content invariant" | doc prose | the guarantee that a query's content never lies even when its delivery is havoc'd | wire | 3 | This is one of the strongest contracts on the protocol and exists only as a doc comment on two variants. Glossary owes: Venue truth, Witness, and the content/delivery split. |
 | - | `OrderStatusSnapshot`, `FillSnapshot`, `SNAPSHOT_ENVELOPE_MAX_BYTES` | types, constant | a point-in-time truthful read | wire | 3 | "Snapshot" is also used for `AccountState` in `HavocLatency.data_nanos`' doc ("Account-state snapshots are execution traffic") and for the server's account snapshot elsewhere. Three snapshot kinds, no entry. |
 | - | `WireOrderStatus` (+ `Accepted`/`Triggered`/`PartiallyFilled`/`Filled`/`Canceled`/`Expired`/`Rejected`), `is_open` | type, variants, fn | states the venue itself can attest to | wire | 3 | The `Wire` prefix exists to separate it from nautilus's `OrderStatus`; the variant spellings are inherited. What is undefined is *open* - `is_open` includes `Triggered`, which is a real ruling with a real reason and lives only in a `//` comment. |
 | - | `request_id` doc: "correlation id echoed verbatim" | field, doc prose | matching replies to requests on a shared socket | wire | 3 | One entry. |
@@ -244,7 +244,7 @@ Ordered by how much I think they matter.
 
 **1. `CommandClass::of` is a vacuous gate waiting to happen.** It matches
 `SubmitOrder | SubmitOrderGroup`, `ModifyOrder`, `CancelOrder`, then `_ => None`.
-A new order-entry variant added to `ClientMessage` compiles clean and is
+A new order-entry variant added to `Command` compiles clean and is
 silently classless, so it gets no per-command ack latency and `CommandLatency`
 quietly stops covering it. This is precisely the shape `EventKind::is_execution`
 in the sibling module goes out of its way to avoid - its doc says it is written
@@ -357,7 +357,7 @@ the contract both ends serialize against.
 type is outside the assigned row inventory, but the stale statement was exposed
 while checking the glossary's false claim that market regimes are Divergences.
 `havoc.rs` says the regime is "carried per subscription on `Subscribe`" while
-`ClientMessage` has no such variant and its regression test explicitly refuses
+`Command` has no such variant and its regression test explicitly refuses
 that tag. The actual live carriers need to replace this sentence. This is a
 vacuous-documentation-family defect: the type-level comment promises a wire
 path that cannot be constructed.
@@ -376,7 +376,7 @@ three:
 2. `ClearDivergences` -> `ClearTemporalWindows`, because the current command
    explicitly leaves several divergences armed and cannot undo an act already
    sleeping.
-3. `MAX_CLIENT_ID_LEN` -> `MAX_ECHOED_ID_LEN`, because the constant covers
+3. `MAX_ECHOED_ID_LEN` -> `MAX_ECHOED_ID_LEN`, because the constant covers
    several client-supplied id namespaces while a client identity is `session`.
 
 And the two glossary edits that are not optional, because they are false rather

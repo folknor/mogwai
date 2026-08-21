@@ -23,7 +23,7 @@ fitted to real trade archives. The bars above are only a rendering of it: 5,760
 one-minute windows aggregated from those trades so four days fit on a screen,
 none of them empty. Swap `--type bars --interval 1m` for `--type trades` to dump
 the ticks themselves. The venue never serves a bar either - it streams trades,
-and a client that wants candles aggregates them itself, which is what the
+and a consumer that wants candles aggregates them itself, which is what the
 nautilus adapter does.
 
 The seed is the whole of the reproduction: that command draws the same tape on
@@ -106,7 +106,7 @@ mogwai man cli                     # read a bundled doc; bare `man` lists topics
 
 One venue is ONE RUN: one account and one ledger, on an ephemeral loopback port.
 It is not a service you start once and point many strategies at - two
-independent forward tests are two processes, not two clients of one venue.
+independent forward tests are two processes, not two consumers of one venue.
 Sockets may still be many (the adapter alone opens two, data and execution), but
 they all speak for the same account, so anything they submit lands in one shared
 ledger.
@@ -162,7 +162,7 @@ let venue = launch(LaunchSpec {
 // 2. Both clients speak for ONE account against ONE ledger, so they take one
 //    account id - nothing on the wire notices if they disagree - and `for_run`
 //    binds them to THIS run rather than to the address it happened to land on.
-//    The port is ephemeral and is freed before the venue exits, so a client
+//    The port is ephemeral and is freed before the venue exits, so a consumer
 //    that only knows where to dial cannot tell its own run from whatever
 //    answers there next.
 let account_id = AccountId::from("MOGWAI-001");
@@ -181,11 +181,11 @@ venue's life.
 
 Three things worth knowing at the call site. The venue's own knobs - `warmup_ns`,
 `[balances]`, the instrument shapes and the default `speed` - live in the file
-passed as `config`, and the host restates none of them; a client picks its own
+passed as `config`, and the host restates none of them; a consumer picks its own
 symbol and pacing on the socket it opens. Trading a futures preset wants
 `.with_account_type(AccountType::Margin)` on the exec config, because a nautilus
 `CashAccount` has nowhere to keep the margin rows the venue reports and drops
-them client-side. And divergences are armed either per-client with
+them in the adapter. And divergences are armed either per adapter config with
 `.with_havoc(..)` or at runtime over `POST /control/divergence`; see
 [`docs/havoc.md`](docs/havoc.md).
 

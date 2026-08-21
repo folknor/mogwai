@@ -19,7 +19,7 @@ use std::{
 
 use anyhow::{Context, ensure};
 use mogwai_protocol::{
-    ClientHavoc, ConnHavoc, HavocLatency, HavocSpec, InstrumentDef, SimClock, Symbol, VenueClock,
+    ConnHavoc, HavocLatency, HavocSpec, InboundHavoc, InstrumentDef, SimClock, Symbol, VenueClock,
     VenueMessage,
 };
 use nautilus_common::messages::DataEvent;
@@ -315,13 +315,13 @@ pub(crate) struct HavocFilter {
 }
 
 impl HavocFilter {
-    pub(crate) fn from_client(client: &ClientHavoc) -> Self {
+    pub(crate) fn from_inbound(inbound: &InboundHavoc) -> Self {
         Self {
-            latency: client.latency,
-            drop_prob: client.drop_prob,
-            duplicate_prob: client.duplicate_prob,
-            reorder_prob: client.reorder_prob,
-            rng: client
+            latency: inbound.latency,
+            drop_prob: inbound.drop_prob,
+            duplicate_prob: inbound.duplicate_prob,
+            reorder_prob: inbound.reorder_prob,
+            rng: inbound
                 .seed
                 .map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64),
             held: None,
@@ -377,9 +377,9 @@ impl HavocFilter {
         probability > 0.0 && self.rng.random::<f64>() < probability
     }
 }
-pub(crate) fn client_havoc(spec: &Option<HavocSpec>) -> ClientHavoc {
+pub(crate) fn inbound_havoc(spec: &Option<HavocSpec>) -> InboundHavoc {
     spec.as_ref()
-        .map_or_else(ClientHavoc::default, |spec| spec.client.clone())
+        .map_or_else(InboundHavoc::default, |spec| spec.inbound.clone())
 }
 pub(crate) fn conn_havoc(spec: &Option<HavocSpec>) -> ConnHavoc {
     spec.as_ref()
@@ -499,7 +499,7 @@ pub(crate) fn run_identity_check(
         // another mogwai venue, which speaks the wire perfectly and will serve
         // a tape from a different run without either side noticing.
         tracing::warn!(
-            client = label,
+            socket = label,
             base_url = %http_base,
             "no expected_run_seed: this client cannot tell its venue from another \
              holding the same address. Build the config with `for_run` from the \
@@ -778,7 +778,7 @@ mod tests {
         // anchors each deadline at arrival, so a simultaneous burst collapses to
         // a single window while preserving order.
         let sim = SimClock::identity();
-        let mut filter = HavocFilter::from_client(&ClientHavoc::default());
+        let mut filter = HavocFilter::from_inbound(&InboundHavoc::default());
         let per_msg = filter.delay_for(&VenueMessage::Heartbeat { ts_event: 0 });
         assert!(
             !per_msg.is_zero(),

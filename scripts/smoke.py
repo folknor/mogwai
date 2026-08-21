@@ -210,7 +210,7 @@ class Venue:
 
 
 # --------------------------------------------------------------------------
-# A minimal websocket client. Hand-rolled so the smoke has no dependency
+# A minimal websocket consumer. Hand-rolled so the smoke has no dependency
 # outside the standard library, which is what lets it be the reference the
 # launcher contract points at.
 # --------------------------------------------------------------------------
@@ -770,7 +770,7 @@ def mode_band_swept(venue: Venue) -> str:
             # So an already-delivered fill SATISFIES this mode rather than
             # failing it: the point of the mode is that the fill arrives
             # unsolicited from the run, and a fill that beat the query is still a
-            # fill the client never asked for.
+            # fill the consumer never asked for.
             ws.send({"type": "QueryOrders", "request_id": "BAND-SWEPT-Q", "open_only": True})
             fill = ws.until(
                 lambda frame: (
@@ -816,7 +816,7 @@ def mode_stop(venue: Venue) -> str:
     - TRIGGERED BY THE TAPE. The `OrderTriggered` event, waited on as a
       CONDITION and with nothing interposed that could race it.
     - FILLED ADVERSELY. At or below the trigger for a sell, at or above it for
-      a buy. Never the client's own stop price, which is the lie the fill band
+      a buy. Never the consumer's own stop price, which is the lie the fill band
       exists to remove.
 
     Two things make the outcome independent of the drawn seed.
@@ -937,7 +937,7 @@ def mode_stop(venue: Venue) -> str:
             assert fill, "a triggered stop did not fill"
             # The fill is priced off the print that TRIGGERED it, slipped
             # adversely - down for a sell, up for a buy. Never the stop price
-            # itself, which is the client's own number and the lie the fill
+            # itself, which is the consumer's own number and the lie the fill
             # band exists to remove.
             filled_px = Decimal(fill["last_px"])
             if side == "Sell":

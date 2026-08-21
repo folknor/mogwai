@@ -59,7 +59,7 @@ pub struct Config {
     /// every run using it dead on arrival at the consumer. Refusing at boot
     /// costs a line; the alternative was discovered a minute into a run.
     pub(crate) account_id: String,
-    /// Whether a returning client gets its ledger back, or a clean one.
+    /// Whether a returning consumer gets its ledger back, or a clean one.
     ///
     /// FALSE BY DEFAULT, meaning accounts PERSIST: a socket presenting an id
     /// that has traded resumes that ledger, with its positions and order history
@@ -145,7 +145,7 @@ pub struct Config {
     /// Run seed to reproduce. Absent, one pasteable 63-bit seed is drawn once
     /// at launch.
     pub(crate) seed: Option<u64>,
-    /// Replay speed multiplier. `0.0` means unthrottled (stream as fast as the client
+    /// Replay speed multiplier. `0.0` means unthrottled (stream as fast as the consumer
     /// drains). `1.0` is the default and paces to real wall-clock gaps; otherwise
     /// inter-tick wall delay = (tick gap) / speed.
     pub(crate) speed: f64,
@@ -160,7 +160,7 @@ pub struct Config {
     /// other river materializes the span on first read. A request below the
     /// floor is refused loudly rather than
     /// served short, so this default need not be exact - 24h covers a day's
-    /// warmup. Formerly `backfill_horizon_ns`, which bounded what a client was
+    /// warmup. Formerly `backfill_horizon_ns`, which bounded what a consumer was
     /// allowed to ASK for; with warmup declared and generated those are the
     /// same number.
     pub(crate) warmup_ns: u64,
@@ -185,8 +185,8 @@ pub struct Config {
     /// How long a `speed = 0` tape parks waiting for ring headroom before
     /// giving up on its slowest subscriber and letting that subscriber lag.
     /// Only consulted when `speed == 0.0`, where the throttle moves from the
-    /// connection to the tape: long enough that a healthy in-process client is
-    /// never the reason a firehose stalls, short enough that a dead client
+    /// connection to the tape: long enough that a healthy in-process consumer is
+    /// never the reason a firehose stalls, short enough that a dead consumer
     /// costs one stall and is then refused.
     pub(crate) zero_speed_stall_ms: u64,
     /// Per-connection byte ceiling on execution output that has been produced
@@ -239,7 +239,7 @@ pub struct Config {
     /// built-in default (matching the committed mogwai.toml); an explicitly
     /// EMPTY `[balances]` table runs the account unfunded on purpose.
     pub(crate) balances: HashMap<String, Decimal>,
-    /// Named risk policies a client can ask for by name instead of restating.
+    /// Named risk policies a consumer can ask for by name instead of restating.
     ///
     /// THE SAME IDEA AS AN INSTRUMENT PRESET: a named bundle of knobs a user
     /// could set by hand, carrying no authority and conferring no status. What
@@ -585,7 +585,7 @@ pub const DEFAULT_PRESET: &str = "BTCUSDT";
 /// string to be wire-ILLEGAL to be collision-proof, and a wire-illegal symbol
 /// does not survive `profile_from_configured`, which enforces `MAX_SYMBOL_LEN`
 /// on the resolved def. A wire-legal sentinel would instead be nameable by a
-/// client and shadowable by a `[symbols.*]` key, which is the collision the
+/// consumer and shadowable by a `[symbols.*]` key, which is the collision the
 /// sentinel existed to prevent.
 ///
 /// `None` is exact and needs neither. `bundle_name` picks a bundle from the
@@ -1272,7 +1272,7 @@ pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::Instrum
         resolved.push(profile);
     }
     // The reachable shape set is CLOSED at boot and wider than the configured
-    // one: client-driven resolution can select any shipped preset by name, plus
+    // one: consumer-driven resolution can select any shipped preset by name, plus
     // the default bundle under the `[instrument]` overlay. Boot RESOLVES all of
     // them and records the unfundable ones; it does not refuse over them, since
     // that would force a BTCUSDT-only operator to fund USD forever. A request
@@ -1758,10 +1758,10 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
     // to refuse: a connection can then never out-produce its own reservation.
     //
     // THE SAME VALIDATOR THE WIRE USES, and that is the point rather than an
-    // implementation detail. A configured symbol is reached by clients through
+    // implementation detail. A configured symbol is reached by consumers through
     // `/trades`, `/quotes` and order entry, and `validate_submit_order` holds
     // those to the URL-safe alphabet - so a config checked only for LENGTH could
-    // name a symbol the venue serves and no client can trade or fetch, with both
+    // name a symbol the venue serves and no consumer can trade or fetch, with both
     // validators green and neither able to see the other's rule. Ruled
     // 2026-08-20: one alphabet, read from one function, on both sides. It
     // refuses nothing any shipped preset or test config does.
@@ -2289,9 +2289,9 @@ mod tests {
     }
 
     /// ONE ALPHABET, READ BY BOTH SIDES. A configured symbol is reached by
-    /// clients through `/trades`, `/quotes` and order entry, and the wire holds
+    /// consumers through `/trades`, `/quotes` and order entry, and the wire holds
     /// those to the URL-safe alphabet. A config checked only for LENGTH could
-    /// therefore name a shape the venue serves and no client can trade, with
+    /// therefore name a shape the venue serves and no consumer can trade, with
     /// both validators green and neither able to see the other's rule.
     ///
     /// Asserted against `validate_wire_symbol`'s OWN verdict rather than
@@ -2312,13 +2312,13 @@ mod tests {
             let Err(error) = profile_for(&cfg, Some(illegal)) else {
                 panic!(
                     "{illegal} resolved to a served shape, so the venue would serve a symbol no \
-                     client can trade or fetch"
+                     consumer can trade or fetch"
                 );
             };
             let error = error.to_string();
             assert!(
                 error.contains("not a legal symbol"),
-                "a symbol no client could trade was configured anyway: {error}"
+                "a symbol no consumer could trade was configured anyway: {error}"
             );
         }
         // The negative half, without which the loop above passes for a config

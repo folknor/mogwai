@@ -19,7 +19,7 @@ before choosing its answer.
 the run's one pacing rate: a `/ws` upgrade may name its own `speed`, and the
 boat it boards is keyed by river and by that speed quantized to micro-multiples.
 An unserved speed is a second boat on the same river, not a refusal. An
-absent `speed` means the configured one and is what every client that predates
+absent `speed` means the configured one and is what every consumer that predates
 the carrier sends. `/clock?symbol=` answers the lead boat when a river carries
 more than one cadence; `/clock?symbol=&speed=` names one.
 `speed = 0.0` is unpaced
@@ -49,19 +49,19 @@ so the unpublished tick lies in the future of sim-now and market readings are
 filtered to at-or-before sim-now. The engine cannot price from it, and that
 window cannot bite.
 
-So the only way a client sees a market older than the one it is filled against
-is that it HAS NOT DRAINED ITS SOCKET. Everything the engine can price from was
-published already; unread frames are the client's own backlog, every real venue
+So the only way a connection sees a market older than the one it is filled against
+is that it has not drained its socket. Everything the engine can price from was
+published already; unread frames are the connection's own backlog, every real venue
 behaves this way, and `FeedLagged` is the signal for it.
 
 What is worth knowing is the ACCELERATION MULTIPLIER. At speed 100, every 10 ms
-a consumer spends not reading - aggregating bars, evaluating a strategy - is a
+a connection spends not reading - aggregating bars, evaluating a strategy - is a
 simulated SECOND of tape it never saw. Forward tests always run accelerated, so
 an accelerated run is systematically further behind the tape than a real one
-would be, in proportion to the speed factor and to how long the consumer thinks
-between reads. That is a property of accelerating past the consumer, not a
+would be, in proportion to the speed factor and to how long the connection waits
+between reads. That is a property of accelerating past the connection, not a
 venue defect, and a reader of forward results should know it. Under N
-instruments it is the consumer's read budget that splits N ways.
+instruments it is the connection's read budget that splits N ways.
 
 No measurement is owed here: the backlog is unbounded by construction, and a
 number for one host on one day would change no decision. What would give a

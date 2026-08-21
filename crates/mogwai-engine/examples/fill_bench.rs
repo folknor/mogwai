@@ -18,13 +18,13 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use mogwai_engine::{BreachAction, Engine, EngineConfig, MarginPolicy, MarketReading, ScanResult};
 use mogwai_protocol::Hit;
 use mogwai_protocol::{
-    AccountId, ClientMessage, InstrumentClass, InstrumentDef, OrderType, Side, SubmitOrder,
-    TimeInForce, WireAssetClass, default_instruments,
+    AccountId, Command, InstrumentClass, InstrumentDef, OrderType, Side, SubmitOrder, TimeInForce,
+    WireAssetClass, default_instruments,
 };
 use rust_decimal::Decimal;
 
 /// Every benchmark builds its engine in the setup closure. The engine is
-/// stateful in ways that grow without bound across iterations - accepted client
+/// stateful in ways that grow without bound across iterations - accepted consumer
 /// order ids are retained for duplicate detection, closed orders and fills are
 /// retained as history, and every resting submit leaves another order in
 /// `open` - so reusing one engine would price a monotonically growing
@@ -65,7 +65,7 @@ fn order(id: String) -> SubmitOrder {
 fn scans(size: usize, fill: bool) -> (Engine, Vec<ScanResult>) {
     let mut engine = engine(1);
     for index in 0..size {
-        let _ = engine.process(ClientMessage::SubmitOrder(order(format!("b{index}"))), 1);
+        let _ = engine.process(Command::SubmitOrder(order(format!("b{index}"))), 1);
     }
     let results = engine
         .pending_scans()
@@ -133,7 +133,7 @@ fn futures_book(size: usize) -> (Engine, Vec<(mogwai_protocol::Symbol, Decimal)>
             link: None,
         };
         let _ = engine.process_with_market(
-            ClientMessage::SubmitOrder(submit),
+            Command::SubmitOrder(submit),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(21_000),
@@ -163,7 +163,7 @@ fn benches(c: &mut Criterion) {
         b.iter_batched(
             || (engine(0), order("full".into())),
             |(mut engine, order)| {
-                let out = engine.process(ClientMessage::SubmitOrder(order), 1);
+                let out = engine.process(Command::SubmitOrder(order), 1);
                 (engine, out)
             },
             BatchSize::SmallInput,
@@ -173,7 +173,7 @@ fn benches(c: &mut Criterion) {
         b.iter_batched(
             || (engine(1), order("rest".into())),
             |(mut engine, order)| {
-                let out = engine.process_with_market(ClientMessage::SubmitOrder(order), 1, None);
+                let out = engine.process_with_market(Command::SubmitOrder(order), 1, None);
                 (engine, out)
             },
             BatchSize::SmallInput,
@@ -189,7 +189,7 @@ fn benches(c: &mut Criterion) {
             || (engine(1), order("seed".into())),
             |(mut engine, order)| {
                 let out = engine.process_with_market(
-                    ClientMessage::SubmitOrder(order),
+                    Command::SubmitOrder(order),
                     1,
                     Some(mogwai_engine::MarketReading {
                         last_px: Decimal::from(99),

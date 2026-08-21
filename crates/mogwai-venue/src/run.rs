@@ -119,7 +119,7 @@ pub(crate) struct Passenger {
     /// not funded and not judged against its policy until a socket returns.
     ///
     /// This is a deliberate departure from a real venue, where being away is no
-    /// defence against liquidation. Mogwai exists to exercise a client's live
+    /// defence against liquidation. Mogwai exists to exercise a consumer's live
     /// path rather than to simulate an account nobody is trading, and the
     /// consequence to state in any claim is that a run spanning a disconnect has
     /// a GAP IN ITS RISK HISTORY.
@@ -153,7 +153,7 @@ pub(crate) struct Passenger {
     /// The lane table alone cannot answer "is anybody reading this account",
     /// and the gap is not theoretical. An eviction retires the incumbent's lane
     /// EAGERLY, and the newcomer binds its own only once `handle_socket` runs -
-    /// which is after the 101 and never at all if the client abandons the
+    /// which is after the 101 and never at all if the consumer abandons the
     /// upgrade. Between those two instants the account has no lane, and a freeze
     /// decided on the lane table alone would either fire on a live account or,
     /// as it did, never fire at all and leave the ledger un-frozen, un-swept-out
@@ -596,11 +596,11 @@ fn apply_transport_arm(arm: &VenueArm, passenger: &Passenger) {
 /// standing state and is replayed onto EVERY ledger this run ever mints.
 /// `pending` holds an arm posted against a NAMED account that does not exist
 /// yet, and is consumed by that account's first mint - which is precisely the
-/// promise a named arm makes ("the arm is standing when the client dials") and
+/// promise a named arm makes ("the arm is standing when the consumer dials") and
 /// nothing more. Recording rather than minting is what keeps the control plane
-/// from deciding an account's terms: the client's own `POST /account` still
+/// from deciding an account's terms: the consumer's own `POST /account` still
 /// opens the ledger, with its own balances and policy, and finds the arm on it.
-/// A previous draft minted the ledger here, which locked that client out with a
+/// A previous draft minted the ledger here, which locked that consumer out with a
 /// `409` and handed it default balances.
 ///
 /// WHAT A CLEAR TOUCHES AND WHAT IT DOES NOT is mirrored here, because a ledger
@@ -668,7 +668,7 @@ impl VenueArms {
 /// and the values it is built from are venue configuration.
 ///
 /// This is the venue-wide `[balances]` seed, which the account-policy design
-/// retires in favour of a client-named opening balance and risk policy. Until
+/// retires in favour of a consumer-named opening balance and risk policy. Until
 /// that lands it is the OPENING balance applied to each passenger rather than
 /// the balance of one shared ledger, which is the same value doing a different
 /// job.
@@ -724,7 +724,7 @@ pub(crate) struct Run {
     pub(crate) rivers: Arc<source::Rivers>,
     pub(crate) oms_type: mogwai_protocol::OmsType,
     /// Every account this venue has served, created on demand and keyed by
-    /// account id. An id is the CLIENT'S to choose and outlives its connection,
+    /// account id. An id is the consumer's to choose and outlives its connection,
     /// so a returning socket finds its own ledger rather than a fresh one; that
     /// is what makes a reconnect a continuation instead of a new trader.
     passengers: Mutex<std::collections::HashMap<String, Arc<Passenger>>>,
@@ -736,14 +736,14 @@ pub(crate) struct Run {
     /// mint land in exactly one of the two paths rather than in neither.
     venue_arms: Mutex<VenueArms>,
     /// The account a connection that names none is served under. It exists for
-    /// the ephemeral single-client venue, where making the one client name an
+    /// the ephemeral single-consumer venue, where making the one consumer name an
     /// id would be ceremony; it is NOT the venue's one account.
     default_account_id: mogwai_protocol::AccountId,
-    /// Whether a returning client is handed a CLEAN ledger instead of its own.
+    /// Whether a returning consumer is handed a CLEAN ledger instead of its own.
     /// See the config key of the same name; the readiness record reports it, so
     /// nobody has to infer which way a venue is set.
     reset_account_on_reconnect: bool,
-    /// Risk policies the operator registered by name, which a client asks for
+    /// Risk policies the operator registered by name, which a consumer asks for
     /// instead of restating. Shadows a shipped name of the same spelling.
     account_policies: std::collections::HashMap<String, mogwai_protocol::risk::AccountPolicy>,
     pub(crate) seeds: RunSeeds,
@@ -801,7 +801,7 @@ pub(crate) struct Run {
     ///
     /// This was a BROADCAST target: the argument was that with a single ledger a
     /// fill is a fact about the run rather than about whichever socket submitted
-    /// the order. That is true of the ledger and false of the client, which is
+    /// the order. That is true of the ledger and false of the consumer, which is
     /// told about orders it never placed. Delivery is now ATTRIBUTED through
     /// `order_owners` below; the table stays a list of every live connection
     /// because venue-wide frames (the account snapshot, a venue fault) still go
@@ -813,7 +813,7 @@ pub(crate) struct Run {
     /// Keyed by `VenueOrderId` because that is what every sweep-produced frame
     /// and every query row carries; the value is the ACCOUNT ID the order
     /// belongs to. EVERY live order is claimed: the command dispatcher claims
-    /// a client's submissions at acceptance, and `claim_produced_orders`
+    /// a consumer's submissions at acceptance, and `claim_produced_orders`
     /// claims venue-originated orders (liquidations) for the account whose
     /// ledger produced them. An order absent from this table is therefore a
     /// BUG in whoever built the batch, and the fallback - delivered to every
@@ -824,7 +824,7 @@ pub(crate) struct Run {
     /// BY ACCOUNT, NOT BY CONNECTION, and the difference is not cosmetic. A
     /// ledger belongs to an account, so two sockets presenting the same id are
     /// the SAME TRADER and must each see the whole account's orders; keying on
-    /// the connection hid a client's own resting order from its own second
+    /// the connection hid a consumer's own resting order from its own second
     /// socket. Different accounts is what invisibility is about.
     ///
     /// A claim survives its order's TERMINAL state. Retiring on the ending frame
@@ -904,7 +904,7 @@ impl Run {
     /// `balances`.
     ///
     /// THE ONE PLACE THE TEMPLATE IS APPLIED. Three callers build an engine -
-    /// the mint on first sight, the client's own `open_account`, and the
+    /// the mint on first sight, the consumer's own `open_account`, and the
     /// throwaway preview `unopened_ledger` - and each carried its own copy of
     /// `Engine::build` plus the two `set_*` calls. Those copies are the
     /// two-implementations-without-a-gate shape: the next setting added to the
@@ -914,7 +914,7 @@ impl Run {
     /// construction is shared.
     ///
     /// `balances` is a parameter rather than read from the template because
-    /// `open_account` is the client stating its own; the other two pass the
+    /// `open_account` is the consumer stating its own; the other two pass the
     /// template's.
     fn template_engine(
         &self,
@@ -973,7 +973,7 @@ impl Run {
             account_id: account_id.clone(),
             engine: AsyncMutex::new(engine),
             // Unpoliced: an account nobody stated rules for is enforced against
-            // nothing, which is what every client had before policies existed.
+            // nothing, which is what every consumer had before policies existed.
             risk: Mutex::new(crate::risk::RiskLedger::new(
                 mogwai_protocol::risk::AccountPolicy::default(),
                 opening,
@@ -1101,7 +1101,7 @@ impl Run {
                         apply_transport_arm(&arm, passenger);
                         vec![Arc::clone(passenger)]
                     }
-                    // NOT MINTED HERE. Recording leaves the client's own
+                    // NOT MINTED HERE. Recording leaves the consumer's own
                     // `POST /account` free to open the ledger on its own terms
                     // and find the arm already on it; minting would answer that
                     // request `409 already open` and hand the account default
@@ -1179,24 +1179,24 @@ impl Run {
     /// the ledger or a clean one.
     ///
     /// The whole reconnection story in one call. A second socket presenting a
-    /// seated id under a DIFFERENT session is indistinguishable from that client
+    /// seated id under a different session is indistinguishable from an incumbent
     /// returning, so the venue does not try to tell them apart: the incumbent is
     /// closed and the newcomer gets the account. Whether it gets that account's
     /// HISTORY is the operator's `reset_account_on_reconnect` choice, reported
     /// in the readiness record so nobody has to guess which way a venue is set.
     ///
-    /// A socket presenting the same session as a sitting one is the SAME CLIENT
+    /// A socket presenting the same session as a sitting one carries the same identity
     /// dialling again - a nautilus host's data and execution legs, which name
     /// one account by construction - so it neither evicts nor resets. Resetting
-    /// there would discard the ledger the client's own first socket is trading
+    /// there would discard the ledger the first socket is trading
     /// on, which is the reset knob eating a live book rather than a stale one.
     ///
     /// `resetting` IS PASSED IN RATHER THAN RE-DERIVED, from
     /// `seat_discards_ledger`. `/ws` has to know the answer BEFORE it seats -
     /// the funding refusal is a statement about the ledger the connection will
     /// actually get - and computing it a second time here would evaluate the
-    /// same predicate against a LATER state of the venue: `has_client_on` reads
-    /// the lane table, and this client's other lane can drop in the window
+    /// same predicate against a LATER state of the venue: `has_matching_identity_on` reads
+    /// the lane table, and another matching lane can drop in the window
     /// between the two reads. The two values would then disagree about whether
     /// the ledger `/ws` funding-checked and cadence-checked is the ledger this
     /// call returns. One evaluation, one decision, one reader.
@@ -1209,13 +1209,13 @@ impl Run {
     ) -> Arc<Passenger> {
         // ONLY A CLAIMED ACCOUNT EVICTS. Naming an id is a statement about
         // identity - "this ledger is mine, hand it over" - and eviction is the
-        // answer to it. Naming NONE is not: it means the client has no opinion,
+        // answer to it. Naming NONE is not: it means the consumer has no opinion,
         // and the default account is a convenience for exactly that case.
         //
         // Evicting there broke the ordinary shape it exists to serve. A single
-        // client opening two sockets on two symbols names no account on either,
+        // consumer opening two sockets on two symbols names no account on either,
         // so both land on the default and the second closed the first - which
-        // is a client evicting itself.
+        // is a consumer evicting itself.
         let displaced = if claimed {
             self.evict_account(account_id.as_str(), session)
         } else {
@@ -1242,9 +1242,9 @@ impl Run {
     /// the ledger the connection will actually get, and under the reset knob
     /// that is a fresh one built from the venue template rather than whatever
     /// the account holds now - and then hands the answer to `seat`. It must be
-    /// asked before any eviction, because `has_client_on` reads the lane table
-    /// and an eviction prunes exactly the lanes that answer "is the claiming
-    /// client already here".
+    /// asked before any eviction, because `has_matching_identity_on` reads the lane table
+    /// and an eviction prunes exactly the lanes that answer "is this identity
+    /// already here".
     pub(crate) fn seat_discards_ledger(
         &self,
         account_id: &mogwai_protocol::AccountId,
@@ -1253,7 +1253,7 @@ impl Run {
     ) -> bool {
         claimed
             && self.reset_account_on_reconnect
-            && !self.has_client_on(account_id.as_str(), session)
+            && !self.has_matching_identity_on(account_id.as_str(), session)
     }
 
     /// The account's ledger IF IT ALREADY EXISTS. Unlike `passenger`, this
@@ -1287,7 +1287,7 @@ impl Run {
     /// PRESENCE, never sufficiency - see `Engine::is_funded_in`. Asked of the
     /// prospective ledger rather than of the current one, because a seat that
     /// resets replaces the account's balances with the venue template's, and an
-    /// account opened through `/account` with client-named balances can differ
+    /// account opened through `/account` with consumer-named balances can differ
     /// from that template in exactly which currencies it carries.
     pub(crate) async fn funded_in(
         &self,
@@ -1334,7 +1334,7 @@ impl Run {
                 // disagree. `freeze_if_unattended` refuses to freeze an account
                 // an admitted socket is still on; this asked a STALE freeze
                 // stamp, which a returning socket does not clear until its
-                // handler reaches `resume` - so a client reclaiming a
+                // handler reaches `resume` - so a consumer reclaiming a
                 // long-frozen ledger could have it collected out from under it
                 // between the admission and the attach, and would silently be
                 // handed a fresh one instead of the book it came back for. The
@@ -1382,12 +1382,12 @@ impl Run {
     /// Resolve a risk policy the way a symbol resolves: total, three steps,
     /// step three never fails.
     ///
-    /// 1. Knobs the client stated INLINE win.
+    /// 1. Knobs the consumer stated INLINE win.
     /// 2. Otherwise a policy the operator REGISTERED under that name, or one
     ///    this build ships under it. Registered shadows shipped, because the
     ///    whole reason registration exists is that shipped terms go stale.
     /// 3. Otherwise UNPOLICED, which is the default account's policy and what
-    ///    every client had before policies existed.
+    ///    every consumer had before policies existed.
     ///
     /// A name nobody has is an ERROR rather than a silent fall to step three:
     /// asking for `apex-50k` and quietly getting no rules at all would be a run
@@ -1417,11 +1417,11 @@ impl Run {
         self.default_account_id.clone()
     }
 
-    /// Open an account with a CLIENT-NAMED opening balance, before anything
+    /// Open an account with a CONSUMER-NAMED opening balance, before anything
     /// trades on it.
     ///
     /// This is step one of the three-step account resolution, the one where the
-    /// client states its own terms. Steps two and three - a named policy preset,
+    /// consumer states its own terms. Steps two and three - a named policy preset,
     /// and the default account preset - are what a connection gets when it never
     /// calls this, which is why calling it is OPTIONAL and its absence is not an
     /// error anywhere.
@@ -1430,10 +1430,10 @@ impl Run {
     /// account outlives the connection that named it, so re-opening one is
     /// ambiguous between "I am starting a fresh experiment" and "I reconnected
     /// and re-sent my config", and the second reading would silently wipe a
-    /// live position book. A client that wants a clean ledger names a different
+    /// live position book. A consumer that wants a clean ledger names a different
     /// id, which costs it nothing.
     ///
-    /// THIS IS THE SECOND MINT SITE AND IT OWES THE VENUE ARMS TOO. The client
+    /// THIS IS THE SECOND MINT SITE AND IT OWES THE VENUE ARMS TOO. The consumer
     /// states its balances and its policy; it does not get to state whether the
     /// operator's havoc reaches it. Replaying the record here is what makes
     /// `VenueArms`'s claim - a ledger minted now is indistinguishable from one
@@ -1509,7 +1509,7 @@ impl Run {
     ///
     /// `account` IS THE REQUEST'S OWN `account` FIELD, and naming it is how a
     /// caller resolves the ambiguity rather than losing to it. Client order ids
-    /// are CLIENT-CHOSEN, so they are unique within one trader's book and not
+    /// are CONSUMER-CHOSEN, so they are unique within one trader's book and not
     /// across a venue serving fifty of them: two subagents that both number
     /// their orders from one collide, and an unqualified search returns
     /// whichever passenger the map iterated first. That is a scenario control
@@ -1581,7 +1581,7 @@ impl Run {
     ///
     /// This is the ONE path from a profile to engine policy - `Run::new` no
     /// longer has a copy - and the installs are guarded on the registration
-    /// having been NEW, so re-binding a symbol a client is already trading never
+    /// having been NEW, so re-binding a symbol a consumer is already trading never
     /// resets its configuration.
     pub(crate) async fn ensure_instrument(
         &self,
@@ -1655,7 +1655,7 @@ impl Run {
     }
 
     /// Enrol one connection's lanes for venue-originated output. The returned
-    /// id is what `release_lanes` retires, so a reconnecting client cannot
+    /// id is what `release_lanes` retires, so a reconnecting consumer cannot
     /// retire the lanes of the connection that replaced it.
     ///
     /// The id is the LANES' OWN, minted when they were constructed rather than
@@ -1715,7 +1715,7 @@ impl Run {
     /// THE COUNT IS ONLY REACHABLE THROUGH THE GUARD, which is the whole reason
     /// this returns one rather than pairing with a `depart` call. A raise and a
     /// release written as two statements leave a window - a panic, or an
-    /// `async fn` cancelled by a client disconnect, between the two - in which
+    /// `async fn` cancelled by a dropped connection, between the two - in which
     /// the count is raised and nothing will ever lower it, and an account
     /// permanently counted-in is exactly the never-frozen, never-collected,
     /// still-swept ledger this counter exists to close. Returning the guard
@@ -1794,7 +1794,7 @@ impl Run {
     ///    freeze makes.
     ///
     /// STEPS 2 AND 3 RUN ONLY FOR A RETURNING ACCOUNT, and that is not a
-    /// shortcut. A client that opens two sockets on two symbols and names no
+    /// shortcut. A consumer that opens two sockets on two symbols and names no
     /// account lands both on the DEFAULT account, which is a supported shape;
     /// retiring on every bind would make the second socket close the first
     /// socket's book. Neither step has anything to do with a live account
@@ -1836,41 +1836,39 @@ impl Run {
         events
     }
 
-    /// Close every connection already trading `account_id` under a DIFFERENT
-    /// session than the newcomer's, because a newer client has claimed it.
+    /// Close every connection already trading `account_id` under a different
+    /// session than the newcomer's, because a different identity has claimed it.
     ///
-    /// AN ACCOUNT IS ON AT MOST ONE CLIENT AT A TIME. Two clients on one id
-    /// would be one ledger read and written from two places, with a trailing
-    /// drawdown computed across two instruments, so the venue evicts rather than
-    /// admitting the second alongside the first.
+    /// Connections presenting different identities do not coexist on one
+    /// account. That would leave one ledger read and written from unrelated
+    /// places, so the venue evicts rather than admitting the claimant alongside
+    /// the incumbent.
     ///
-    /// A CLIENT IS NOT A SOCKET, which is what `session` exists to say. One
-    /// client routinely holds several sockets on one ledger - a nautilus host
-    /// dials `/ws` twice, once for market data and once for execution, and both
-    /// legs name the same account by construction - and evicting on the bare id
-    /// would make that client evict itself on its second dial. A session id is
-    /// the client's own, stable across its sockets and across their redials, and
-    /// fresh in a restarted process: sockets presenting the SAME one are one
-    /// client and coexist, and a different one is a new client and evicts.
+    /// Several sockets may present the same identity. A nautilus host dials
+    /// `/ws` twice, once for market data and once for execution, and both legs
+    /// name the same account by construction. Evicting on the bare id would make
+    /// the second dial evict the first. A session id is stable across related
+    /// sockets and their redials, and fresh in a restarted process: sockets
+    /// presenting the same one coexist, and a different one evicts.
     ///
     /// AN ABSENT SESSION ALWAYS EVICTS, which keeps the pre-session contract
-    /// exactly: a client that says nothing about its identity has made no claim
-    /// to be the incumbent, and reading silence as "same client" would let a
+    /// exactly: a socket that says nothing about its identity has made no claim
+    /// to be the incumbent, and reading silence as "same identity" would let a
     /// stranger quietly share a ledger. So the coexistence is opt-in and the
     /// safe reading is the default.
     ///
     /// The evicted socket is closed NORMALLY, not faulted: from the venue's side
-    /// a second connection presenting an id is indistinguishable from that
-    /// client reconnecting, and handing the ledger over is what makes a
+    /// a second connection presenting an id is indistinguishable from an
+    /// incumbent reconnecting, and handing the ledger over is what makes a
     /// reconnect work. A consumer must not treat it as a reason to redial, or it
     /// would evict whatever evicted it.
     ///
     /// Returns how many were displaced, so the caller can say so.
-    /// Whether a socket of THIS client is already bound to `account_id`. A
-    /// client that named no session is never "already here": silence is not a
+    /// Whether a socket with this identity is already bound to `account_id`. A
+    /// socket that named no session is never "already here": silence is not a
     /// claim to be the incumbent, which is the same reading
     /// [`Run::evict_account`] takes of it.
-    pub(crate) fn has_client_on(&self, account_id: &str, session: Option<&str>) -> bool {
+    pub(crate) fn has_matching_identity_on(&self, account_id: &str, session: Option<&str>) -> bool {
         let Some(session) = session else {
             return false;
         };
@@ -1880,13 +1878,13 @@ impl Run {
     }
 
     pub(crate) fn evict_account(&self, account_id: &str, session: Option<&str>) -> usize {
-        let same_client = |bound: &BoundLane| {
+        let same_session = |bound: &BoundLane| {
             session.is_some_and(|session| bound.session.as_deref() == Some(session))
         };
         let displaced: Vec<BoundLane> = self
             .locked_lanes()
             .iter()
-            .filter(|bound| bound.account_id == account_id && !same_client(bound))
+            .filter(|bound| bound.account_id == account_id && !same_session(bound))
             .cloned()
             .collect();
         for bound in &displaced {
@@ -1895,7 +1893,7 @@ impl Run {
                     .lanes
                     .send_close(crate::admission::CloseSpec::evicted(format!(
                         "another connection claimed account {account_id}; a ledger is never \
-                     read from two clients at once"
+                     read from two sessions at once"
                     ))),
             );
         }
@@ -1904,7 +1902,7 @@ impl Run {
         // instant it takes them to notice the close, or its first batch would
         // be delivered to a socket that is on its way out.
         self.locked_lanes()
-            .retain(|bound| bound.account_id != account_id || same_client(bound));
+            .retain(|bound| bound.account_id != account_id || same_session(bound));
         displaced.len()
     }
 
@@ -1958,7 +1956,7 @@ impl Run {
     /// (booking) and never at delivery, which is the rule the `AccountState`
     /// broadcast defect taught.
     ///
-    /// `or_insert`, never overwrite: a client-submitted order in the same
+    /// `or_insert`, never overwrite: a consumer-submitted order in the same
     /// batch is already claimed by the dispatcher, and its claim is the same
     /// account's anyway. Claims retire with the account (`discard_account`),
     /// exactly like a dispatcher's claims, so a frozen-and-resumed account
@@ -2143,8 +2141,9 @@ impl std::fmt::Display for AccountRefusal {
 pub(crate) struct BoundLane {
     pub(crate) id: u64,
     pub(crate) account_id: String,
-    /// The CLIENT this socket belongs to, as the client named itself on the
-    /// upgrade. `None` for a socket that named none, which is every socket
+    /// The identity this socket announced on the upgrade, which is all the venue
+    /// has: it never sees a consumer, only what a connection claims to be.
+    /// `None` for a socket that named none, which is every socket
     /// predating the carrier and every one that has no opinion. See
     /// [`Run::evict_account`] for what it buys and why absent means "evict".
     pub(crate) session: Option<String>,
@@ -2157,9 +2156,9 @@ pub(crate) struct BoundLane {
 /// the whole point. Delivery used to attribute by two chained lookups whose
 /// shared default was "unrecognized means everyone", and `AccountState` rode
 /// that default silently - the sweep runs one engine pass PER PASSENGER, so an
-/// N-account venue handed every client N snapshots per pass, N-1 of them
+/// N-account venue handed every socket N snapshots per pass, N-1 of them
 /// somebody else's balances and positions. A consumer had no way to tell: the
-/// snapshot names its account, but a client promised one ledger per run has no
+/// snapshot names its account, but a consumer promised one ledger per run has no
 /// reason to check, and the known nautilus adapter deliberately does not.
 /// Sizing off a sibling's equity was the consequence, and it moves capital.
 /// The next ledger-owned frame variant would have joined the broadcast set the
@@ -2189,7 +2188,7 @@ pub(crate) enum Audience<'a> {
     /// cannot know. These frames are delivered on the issuing lane at the
     /// point of refusal or reply and MUST NOT enter a swept batch; delivery
     /// drops one that does, loudly, because broadcasting it would leak one
-    /// client's orders, fills or refusals to every other.
+    /// consumer's orders, fills or refusals to every other.
     Requester,
 }
 
@@ -2729,7 +2728,7 @@ mod tests {
     /// newcomer onto the account BEFORE closing the incumbent, so the account
     /// never goes unattended and `resume` sees `returning == false`.
     ///
-    /// For the case that ordering was aimed at - a client reconnecting on the
+    /// For the case that ordering was aimed at - a consumer reconnecting on the
     /// same river - nothing is lost, because the newcomer boards the same boat
     /// and the cursor never rewound. The gap is the CROSS-RIVER claim: the
     /// newcomer boards a different `BoatKey`, the incumbent's ticket drops, and
@@ -2778,7 +2777,7 @@ mod tests {
         {
             let mut engine = passenger.engine.lock().await;
             let events = engine.process(
-                mogwai_protocol::ClientMessage::SubmitOrder(mogwai_protocol::SubmitOrder {
+                mogwai_protocol::Command::SubmitOrder(mogwai_protocol::SubmitOrder {
                     client_order_id: "FRONTIER-ORDER".into(),
                     symbol: Symbol::clone(&symbol),
                     position_id: None,
@@ -2858,13 +2857,14 @@ mod tests {
         drop(newcomer_admission);
     }
 
-    /// A CLIENT IS NOT A SOCKET. The nautilus host that drives this venue holds
+    /// A CONSUMER IS NOT A SOCKET. The nautilus host that drives this venue holds
     /// two sockets on one ledger - data and execution - and both name the same
     /// account, so eviction keyed on the bare id made the host's second dial
-    /// disconnect its own first. Sockets presenting one session are one client
-    /// and coexist; a different session is a different client and takes over.
+    /// disconnect its own first. Sockets presenting one session coexist; a
+    /// different session takes over. The venue decides on the session it was
+    /// shown and never on the consumer behind it, which it cannot see.
     #[test]
-    fn one_clients_sockets_share_a_ledger_and_a_stranger_evicts_them_all() {
+    fn one_sessions_sockets_share_a_ledger_and_a_stranger_evicts_them_all() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("CLAUDETTE-07").unwrap();
 
@@ -2875,7 +2875,7 @@ mod tests {
         assert_eq!(
             run.evict_account(account.as_str(), Some("worker-1")),
             0,
-            "the host's second leg is the same client, not a claimant"
+            "the host's second leg presents the same session, not a claim"
         );
         seat(&run, &account, Some("worker-1"));
         run.bind_lanes(exec, account.as_str(), Some("worker-1"));
@@ -2888,13 +2888,13 @@ mod tests {
             "both legs are reading the ledger they were configured for"
         );
 
-        // A RESTARTED worker is a genuinely new client, and it takes the whole
+        // A RESTARTED worker presents a genuinely new session, and it takes the whole
         // ledger: both stale sockets go, which is the reconnection story the
         // eviction exists for.
         assert_eq!(
             run.evict_account(account.as_str(), Some("worker-2")),
             2,
-            "a different client displaces every socket of the old one"
+            "a different session displaces every socket of the old one"
         );
         assert!(
             run.bound_lanes()
@@ -2956,7 +2956,7 @@ mod tests {
     }
 
     /// THE SECOND MINT SITE OWES THE SAME REPLAY. `POST /account` builds its own
-    /// ledger from client-named balances, and the cold review found it opening
+    /// ledger from consumer-named balances, and the cold review found it opening
     /// that ledger with every havoc field at zero - so a subagent that starts by
     /// POSTing its account escaped the operator's arms entirely, which is
     /// verbatim the scenario finding 5 names.
@@ -2964,7 +2964,7 @@ mod tests {
     /// The three observables and the cap trick are `a_ledger_minted_after_a_
     /// venue_wide_arm_carries_it`'s; what is new here is only the path.
     #[tokio::test]
-    async fn an_account_opened_by_its_client_carries_the_venue_wide_arms() {
+    async fn an_account_opened_by_its_consumer_carries_the_venue_wide_arms() {
         let run = run(1_000, 400, None);
         fill_venue_record(&run).await;
 
@@ -2979,12 +2979,12 @@ mod tests {
 
         assert!(
             opened.dark.open_at(SimClock::identity(), 1_000),
-            "a blackout armed venue-wide must reach an account its client opened afterwards"
+            "a blackout armed venue-wide must reach an account its consumer opened afterwards"
         );
         assert_eq!(
             opened.delay_ms.load(Ordering::Relaxed),
             37,
-            "an ack delay armed venue-wide must reach a client-opened account too"
+            "an ack delay armed venue-wide must reach a consumer-opened account too"
         );
         let shed = run
             .arm(
@@ -2994,20 +2994,20 @@ mod tests {
             .await;
         assert!(
             shed.is_some(),
-            "a client-opened ledger must hold the venue's armed queue, at the cap with the \
+            "a consumer-opened ledger must hold the venue's armed queue, at the cap with the \
              ledgers that were already seated"
         );
     }
 
     /// AN ARM AGAINST AN ACCOUNT THAT HAS NOT CONNECTED MUST NOT COST THAT
-    /// CLIENT ITS OWN ACCOUNT. The arm is recorded, not minted: the client's
+    /// CONSUMER ITS OWN ACCOUNT. The arm is recorded, not minted: the consumer's
     /// `POST /account` still succeeds, still gets the balances it asked for, and
     /// finds the arm standing on the ledger it opened.
     ///
     /// Minting at the control plane instead - which an earlier draft of this
     /// round did - answers that request `409 already open` and hands the account
     /// default balances and no policy, so the fix for a silent no-op became a
-    /// refusal on a legitimate client path.
+    /// refusal on a legitimate consumer path.
     ///
     /// HONEST ABOUT WHAT BITES: the second assertion bites on a dropped record.
     /// The `open_account` call succeeding is a GUARD, not a proven-biting
@@ -3015,7 +3015,7 @@ mod tests {
     /// back into `Run::arm`, and there is no perturbation of the shipped code
     /// that produces it.
     #[tokio::test]
-    async fn a_named_arm_before_a_client_opens_its_account_does_not_lock_it_out() {
+    async fn a_named_arm_before_a_consumer_opens_its_account_does_not_lock_it_out() {
         let run = run(1_000, 400, None);
         run.arm(
             Some("SUB-01"),
@@ -3036,7 +3036,7 @@ mod tests {
         let opened = run.peek_passenger(&named).expect("just opened");
         assert!(
             opened.dark.open_at(SimClock::identity(), 1_000),
-            "the arm posted before the client existed must be standing on the ledger it opened"
+            "the arm posted before the consumer existed must be standing on the ledger it opened"
         );
     }
 
@@ -3208,7 +3208,7 @@ mod tests {
     /// A returning `/ws` upgrade is counted onto its account before the 101 and
     /// only clears the freeze once its handler reaches `resume` - the 101, a
     /// task spawn and an instrument registration later. Collecting on the stamp
-    /// alone therefore discarded the account inside that window, and the client
+    /// alone therefore discarded the account inside that window, and the consumer
     /// that came back for its book was silently minted a fresh one. Both
     /// assertions are here because the second alone passes against the broken
     /// shape: what proves the fix is the account surviving WHILE admitted.

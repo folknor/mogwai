@@ -200,7 +200,7 @@ skip = [
     # `venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline`
     # and `run_complete_reaches_every_open_socket` - each giving the venue a
     # fixed `--duration` measured from readiness and then betting that the
-    # client's connect beat it. Under parallel execution the connect could lose,
+    # consumer's connect beat it. Under parallel execution the connect could lose,
     # the run completed and closed before the socket existed, and the test failed
     # on not having seen the frame: a WRONG ANSWER rather than a timeout, which is
     # why it read like a real regression.
@@ -216,7 +216,7 @@ skip = [
     # A SECOND CAUSE SURFACED ONCE THE FAILURES WERE TRUTHFUL, and it is the one
     # that actually kept this lane red: those venues were `speed = 0.0`, so
     # delivery is unpaced and `RunComplete` is queued behind the entire backlog
-    # the run generated flat out - over 1.4 million frames against a client
+    # the run generated flat out - over 1.4 million frames against a consumer
     # draining about 111,000 a second. The family runs on
     # `tests/configs/bounded-run.toml` now, which is `fast.toml` at `speed = 1.0`.
     #
@@ -465,7 +465,7 @@ package = "mogwai-lab"
 example = "screen_projection_bench"
 features = ["hotpath"]
 
-# How late a paced tape arrives at a client that keeps up, under acceleration.
+# How late a paced tape arrives at a consumer that keeps up, under acceleration.
 #
 # A GATE THAT BECAME A MEASUREMENT. It was `tape_lateness_under_acceleration`,
 # asserting a 50 ms p99 - a statement about the host rather than about the code,

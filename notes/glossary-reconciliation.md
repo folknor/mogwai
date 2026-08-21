@@ -131,7 +131,7 @@ words "and nothing else".
 
 | # | Scope |
 |---|---|
-| 1 | The wire: the whole of `mogwai-protocol`'s public surface. `ClientMessage`, `ServerMessage`, `control::Divergence`, `close`, `risk`, `launch` and `ReadyRecord` are the load-bearing parts, not the boundary |
+| 1 | The wire: the whole of `mogwai-protocol`'s public surface. `Command`, `ServerMessage`, `control::Divergence`, `close`, `risk`, `launch` and `ReadyRecord` are the load-bearing parts, not the boundary |
 | 2 | The venue's external surface: `mogwai-venue`'s routes, query structs, JSON bodies, status codes, operator config keys, and every refusal, error and log string a consumer or operator reads |
 | 3 | The venue's internal domain model: `Run`, `Passenger`, `Boat`, `Boatyard`, the lane and seat apparatus, the sweeper, and the names they use among themselves |
 | 4 | `mogwai-engine`'s public API |
@@ -353,7 +353,7 @@ not arrive from a consumer, it arrives from one connection under one session.
 
 So the inbound wire type is named for what it carries rather than for who sent
 it. There is no singular party to name it after, and `ConsumerMessage` would be
-wrong for the same reason `ClientMessage` is. The crate already classifies its
+wrong for the same reason `Command` is. The crate already classifies its
 inbound traffic as commands and its outbound as events, which is the naming that
 depends on nothing unobservable.
 
@@ -368,10 +368,10 @@ classified by the job it does, and the jobs visible in the inventory so far:
 - The submitting side's id namespace, `client_order_id`: inherited from nautilus
   and FIX. This is not a separate sense of ours - the submitting side is the
   consumer - and it stays only because the spelling is inherited.
-- Havoc the adapter applies to its own inbound stream, `ClientHavoc` and
+- Havoc the adapter applies to its own inbound stream, `InboundHavoc` and
   `HavocSpec.client`: not the consumer sense at all, and wrong under any
   reading. Takes an adapter or inbound word, not `consumer`.
-- Any consumer-supplied echoed id, `MAX_CLIENT_ID_LEN` and `truncate_client_id`,
+- Any consumer-supplied echoed id, `MAX_ECHOED_ID_LEN` and `truncate_echoed_id`,
   covering `client_order_id`, `request_id`, `order_list_id` and `position_id` at
   once. Takes an echoed-id word, not `consumer`.
 
@@ -560,6 +560,74 @@ cold review found this and it is correct. The owner ruled on 2026-08-21 that
 it is out of scope and stays as it is: the artifacts are not reverted, not
 regenerated and not annotated. A later round must not re-raise it as a new
 finding.
+
+**Round 3, the `client` family, 2026-08-21.** The ruled classification applied:
+the driving program becomes `consumer`, the inbound wire type becomes `Command`,
+`HavocSpec.client` becomes `inbound`, `MAX_CLIENT_ID_LEN` becomes
+`MAX_ECHOED_ID_LEN`, the socket-leg log label resolves to `socket`, and the
+nautilus adapter objects and the `client_order_id` namespace do not move at all.
+`MAX_CLIENT_MESSAGE_BYTES` fitted the inbound sense and was the last `client`
+identifier on the protocol crate's public surface, so it became
+`MAX_INBOUND_MESSAGE_BYTES`; the remaining `client` identifiers this project
+owned were test names and two locals, and they took the sense each was doing.
+The two consumer-visible breaks are `HavocSpec.inbound` and that constant's
+name. `deny_unknown_fields` makes the retired `client` key a hard load failure
+rather than a silent ignore, pinned beside the round-1 `server` refusal in
+`havoc_spec_defaults_from_empty_object`, and `HavocSpec`'s own doc now says so -
+round 1 left that guarantee stated only in a commit message. No tape byte and no
+`VenueMessage` byte moves, so no `TAPE_PROTOCOL_VERSION` bump is owed. The gated
+check reports 1339 workspace and 468 instrumented tests, unchanged.
+
+`ClientMessage` became `Command` rather than `ConsumerMessage`, which is the
+ruling's own consequence and is deliberate asymmetry against `VenueMessage`:
+the venue is singular and names its own frames, while the inbound side has no
+singular party to be named after. It reads as an unfinished rename unless it is
+stated, so `mogwai-protocol`'s crate doc now states it and `Command`'s own doc
+points at that paragraph.
+
+What the fix-and-commit pass found in the half no cold reviewer reads, and the
+pattern is round 1's characteristic failure again with a third polarity - the
+sweep moving a word off a job that was never the ruled one:
+
+- Source paths rewritten into directories that do not exist. The adapter's
+  `src/client/` is the inherited sense and is unchanged on disk, so
+  `reference/performance.md`, `mogwai-venue`'s `http.rs` and
+  `mogwai-protocol`'s `lib.rs` all named files nobody can open. Restored.
+- The inherited wire field swept in PROSE while its identifier stood still:
+  about twenty sites said "consumer order id" over `client_order_id` and
+  `validate_client_order_id`. The spelling is inherited from nautilus and FIX
+  and the prose form must not drift from it, so all of them are back, test
+  fixture ids included.
+- Half-swept emphasis, six sites: an upper-case CLIENT replaced by a lower-case
+  `consumer` inside a sentence whose whole point was the emphasis. Cheap to
+  find only once you look for the case mismatch.
+- Sentences the new word's own definition forbids, which is the check the
+  glossary edits already warned about. The eviction close reason said a ledger
+  is never read "from two consumers at once", and the venue does not discriminate
+  consumers - it discriminates the presented session, and two sockets of one
+  consumer with different sessions do evict each other. It now says sessions, in
+  both the venue's constructor and the frame-size test that hand-builds the same
+  sentence. Same correction on `BoundLane::session`'s doc, on the eviction test's
+  prose and assertion messages, and on the account-snapshot fanout paragraphs,
+  where the count is per socket rather than per consuming program.
+- `consumer` put on the INHERITED objects in durable prose - `README.md`,
+  `AGENTS.md`, `docs/cli.md`, `docs/oms-types.md`, `reference/architecture.md`
+  all called the nautilus client pair "consumers" - and on hyper's own
+  documented "client disconnect", and on HTTP's own 4xx status class in
+  `analysis/databento_download.py`, which is itself an HTTP client. Restored; a
+  dropped socket is now described as a dropped connection, which is what the
+  venue perceives.
+- `mogwai gen --havoc`'s help text still named a `consumer` surface after the
+  key became `inbound`, while the stderr note beside it already said `inbound`.
+
+Raised by the cold review and correctly DECLINED, recorded so a later round does
+not re-file it: the glossary specifies `/ws?callsign=` while the code still
+accepts `?session=`, and the review offered reverting the glossary as one
+option. The glossary is the end state, so that is a gap the code owes and never
+a case against the entry - the arc has ruled this three times. The callsign
+round is next and it is where `session` moves. Nothing about `session` moved in
+this round; where a `client` site needed a word for the party on one socket it
+took the code's existing `session`, which that round will carry.
 
 ### Cross-cutting observations, recorded so they survive the merge
 

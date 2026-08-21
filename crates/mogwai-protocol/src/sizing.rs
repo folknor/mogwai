@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Worst-case SERIALIZED-byte bounds on what one `ClientMessage` can make the
+//! Worst-case SERIALIZED-byte bounds on what one `Command` can make the
 //! engine produce. It lives in the protocol crate because it is a statement
 //! about the wire format: the venue reserves against it before it lets the
 //! engine mutate, and the engine's own test suite checks the claim.
@@ -44,7 +44,7 @@
 //! per-struct constant owes a `brackets` call.
 
 use crate::{
-    ClientMessage, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN,
+    Command, JSON_ESCAPE_FACTOR, MAX_ACCOUNT_ID_LEN, MAX_CURRENCY_LEN, MAX_ECHOED_ID_LEN,
     MAX_LINKED_ORDERS, MAX_SYMBOL_LEN,
 };
 
@@ -82,12 +82,12 @@ const ESC: usize = JSON_ESCAPE_FACTOR;
 /// 390, rounded to 576. Charged separately: four id-shaped strings, one symbol
 /// and one currency.
 const ORDER_FILLED_MAX_BYTES: usize =
-    576 + ESC * (4 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
+    576 + ESC * (4 * MAX_ECHOED_ID_LEN + MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
 
 /// Widest reason-bearing lifecycle frame: client id, optional venue id, capped
 /// reason, timestamp and about 100 bytes of envelope, rounded to 192.
 const ORDER_REJECTION_MAX_BYTES: usize =
-    192 + ESC * (2 * MAX_CLIENT_ID_LEN + crate::MAX_REASON_LEN);
+    192 + ESC * (2 * MAX_ECHOED_ID_LEN + crate::MAX_REASON_LEN);
 
 pub const ORDER_EVENT_MAX_BYTES: usize = if ORDER_FILLED_MAX_BYTES > ORDER_REJECTION_MAX_BYTES {
     ORDER_FILLED_MAX_BYTES
@@ -103,7 +103,7 @@ pub const BALANCE_ROW_MAX_BYTES: usize = 192 + ESC * MAX_CURRENCY_LEN;
 /// One `Position` row inside `AccountState`: `symbol`, `position_id`,
 /// `quantity`, `avg_px`, `mark_px`, `unrealized_pnl` - four decimals at about
 /// 32 bytes plus key names and punctuation, rounded to 256.
-pub const POSITION_ROW_MAX_BYTES: usize = 256 + ESC * (MAX_SYMBOL_LEN + MAX_CLIENT_ID_LEN);
+pub const POSITION_ROW_MAX_BYTES: usize = 256 + ESC * (MAX_SYMBOL_LEN + MAX_ECHOED_ID_LEN);
 
 pub const MARGIN_ROW_MAX_BYTES: usize = 192 + ESC * (MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
 
@@ -114,7 +114,7 @@ pub const MARGIN_ROW_MAX_BYTES: usize = 192 + ESC * (MAX_SYMBOL_LEN + MAX_CURREN
 /// `ts_last` - ~180 bytes of key names and punctuation, four decimals (132),
 /// three u64s (60), four short enum spellings (~40) and two bools (10): about
 /// 430, rounded to 512 on top of the charged strings.
-pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 512 + ESC * (3 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN);
+pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 512 + ESC * (3 * MAX_ECHOED_ID_LEN + MAX_SYMBOL_LEN);
 
 /// One fill row inside a `FillSnapshot`, which is an `OrderFilled` verbatim:
 /// FOUR client-id-shaped strings (client, venue, trade and the optional
@@ -123,12 +123,12 @@ pub const ORDER_STATUS_ROW_MAX_BYTES: usize = 512 + ESC * (3 * MAX_CLIENT_ID_LEN
 /// symbol and the currency are charged separately below; the addend is
 /// scaffolding and numerics only.
 pub const FILL_ROW_MAX_BYTES: usize =
-    384 + ESC * (4 * MAX_CLIENT_ID_LEN + MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
+    384 + ESC * (4 * MAX_ECHOED_ID_LEN + MAX_SYMBOL_LEN + MAX_CURRENCY_LEN);
 
 /// The envelope either snapshot wraps its rows in: `type`, `request_id`, the
 /// row-array brackets and `ts_event`, rounded to 128 plus the echoed
-/// `request_id` (capped by `validate_request_id` at `MAX_CLIENT_ID_LEN`).
-pub const SNAPSHOT_ENVELOPE_MAX_BYTES: usize = 128 + ESC * MAX_CLIENT_ID_LEN;
+/// `request_id` (capped by `validate_request_id` at `MAX_ECHOED_ID_LEN`).
+pub const SNAPSHOT_ENVELOPE_MAX_BYTES: usize = 128 + ESC * MAX_ECHOED_ID_LEN;
 
 /// What ONE executed order's LINKAGE can add to the batch it fills in.
 ///
@@ -220,7 +220,7 @@ pub fn swept_batch_max_bytes(shape: &BookShape, swept: usize, originated: usize)
 /// `worst_case_reservation_covers_actual_output` in `mogwai-engine`, which
 /// samples the claim the derivations above argue.
 #[must_use]
-pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize {
+pub fn worst_case_output_bytes(cmd: &Command, shape: &BookShape) -> usize {
     match cmd {
         // Five order-shaped frames - accepted, the trigger, a duplicated fill,
         // the fill, and the cancel that closes the remainder - plus one account
@@ -237,7 +237,7 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
         // Plus the linkage allowance: a submit that fills on arrival reaps or
         // shrinks every sibling its rule names, in the same batch, which is what
         // makes the bracket real rather than swept-later.
-        ClientMessage::SubmitOrder(_) => {
+        Command::SubmitOrder(_) => {
             5 * ORDER_EVENT_MAX_BYTES
                 + LINKAGE_MAX_BYTES
                 + account_state_max_bytes(&BookShape {
@@ -258,7 +258,7 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
         // double-counting: the group-closing pass applies the rule of EVERY
         // member that filled, against siblings admitted after it, so a group of
         // N filling members can emit N linkages in the one batch.
-        ClientMessage::SubmitOrderGroup { orders } => {
+        Command::SubmitOrderGroup { orders } => {
             let members = orders.len();
             // Each member runs the ordinary submit path and takes its OWN
             // snapshot, and the group-closing linkage pass takes one more, so
@@ -281,14 +281,14 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
         // held children in the same batch, because a child left waiting on an
         // order that is gone would rest for the life of the run. One generation
         // only, which is what the depth rule in `Engine::validate_link` buys.
-        ClientMessage::CancelOrder { .. } | ClientMessage::ModifyOrder { .. } => {
+        Command::CancelOrder { .. } | Command::ModifyOrder { .. } => {
             ORDER_EVENT_MAX_BYTES + LINKAGE_MAX_BYTES + account_state_max_bytes(shape)
         }
-        ClientMessage::QueryOrders { .. } => {
+        Command::QueryOrders { .. } => {
             SNAPSHOT_ENVELOPE_MAX_BYTES
                 + (shape.open_orders + shape.closed_orders) * ORDER_STATUS_ROW_MAX_BYTES
         }
-        ClientMessage::QueryFills { .. } => {
+        Command::QueryFills { .. } => {
             SNAPSHOT_ENVELOPE_MAX_BYTES + shape.recorded_fills * FILL_ROW_MAX_BYTES
         }
     }
@@ -298,7 +298,7 @@ pub fn worst_case_output_bytes(cmd: &ClientMessage, shape: &BookShape) -> usize 
 mod tests {
     use super::*;
     use crate::{
-        AccountId, AccountState, Balance, ClientMessage, FillSnapshot, LiquiditySide, OrderFilled,
+        AccountId, AccountState, Balance, Command, FillSnapshot, LiquiditySide, OrderFilled,
         OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, PostedMargin, Side, TimeInForce,
         VenueMessage, WireOrderStatus,
     };
@@ -329,7 +329,7 @@ mod tests {
     fn maximal_position() -> Position {
         Position {
             symbol: worst(MAX_SYMBOL_LEN).into(),
-            position_id: Some(worst(MAX_CLIENT_ID_LEN)),
+            position_id: Some(worst(MAX_ECHOED_ID_LEN)),
             quantity: Decimal::MIN,
             avg_px: Decimal::MIN,
             mark_px: Decimal::MIN,
@@ -351,10 +351,10 @@ mod tests {
     /// bound that holds only for the short spellings is not a bound.
     fn maximal_status_row() -> OrderStatusInfo {
         OrderStatusInfo {
-            client_order_id: worst(MAX_CLIENT_ID_LEN),
-            venue_order_id: worst(MAX_CLIENT_ID_LEN),
+            client_order_id: worst(MAX_ECHOED_ID_LEN),
+            venue_order_id: worst(MAX_ECHOED_ID_LEN),
             symbol: worst(MAX_SYMBOL_LEN).into(),
-            position_id: Some(worst(MAX_CLIENT_ID_LEN)),
+            position_id: Some(worst(MAX_ECHOED_ID_LEN)),
             side: Side::Sell,
             order_type: OrderType::TrailingStopMarket,
             time_in_force: TimeInForce::Gtd,
@@ -373,11 +373,11 @@ mod tests {
 
     fn maximal_fill() -> OrderFilled {
         OrderFilled {
-            client_order_id: worst(MAX_CLIENT_ID_LEN),
-            venue_order_id: worst(MAX_CLIENT_ID_LEN),
-            trade_id: worst(MAX_CLIENT_ID_LEN),
+            client_order_id: worst(MAX_ECHOED_ID_LEN),
+            venue_order_id: worst(MAX_ECHOED_ID_LEN),
+            trade_id: worst(MAX_ECHOED_ID_LEN),
             symbol: worst(MAX_SYMBOL_LEN).into(),
-            position_id: Some(worst(MAX_CLIENT_ID_LEN)),
+            position_id: Some(worst(MAX_ECHOED_ID_LEN)),
             side: Side::Sell,
             last_qty: Decimal::MIN,
             last_px: Decimal::MIN,
@@ -502,12 +502,12 @@ mod tests {
     #[test]
     fn the_snapshot_envelope_bound_covers_an_empty_reply_of_either_kind() {
         let orders = VenueMessage::OrderStatusSnapshot(OrderStatusSnapshot {
-            request_id: worst(MAX_CLIENT_ID_LEN),
+            request_id: worst(MAX_ECHOED_ID_LEN),
             orders: Vec::new(),
             ts_event: u64::MAX,
         });
         let fills = VenueMessage::FillSnapshot(FillSnapshot {
-            request_id: worst(MAX_CLIENT_ID_LEN),
+            request_id: worst(MAX_ECHOED_ID_LEN),
             fills: Vec::new(),
             ts_event: u64::MAX,
         });
@@ -578,13 +578,13 @@ mod tests {
             ..empty_shape()
         };
 
-        let query_orders = ClientMessage::QueryOrders {
-            request_id: worst(MAX_CLIENT_ID_LEN),
+        let query_orders = Command::QueryOrders {
+            request_id: worst(MAX_ECHOED_ID_LEN),
             client_order_id: None,
             open_only: false,
         };
         let reply = VenueMessage::OrderStatusSnapshot(OrderStatusSnapshot {
-            request_id: worst(MAX_CLIENT_ID_LEN),
+            request_id: worst(MAX_ECHOED_ID_LEN),
             orders: vec![maximal_status_row(); ROWS],
             ts_event: u64::MAX,
         });
@@ -592,12 +592,12 @@ mod tests {
         let bound = worst_case_output_bytes(&query_orders, &shape);
         brackets("order status reply", bound, bytes);
 
-        let query_fills = ClientMessage::QueryFills {
-            request_id: worst(MAX_CLIENT_ID_LEN),
+        let query_fills = Command::QueryFills {
+            request_id: worst(MAX_ECHOED_ID_LEN),
             client_order_id: None,
         };
         let reply = VenueMessage::FillSnapshot(FillSnapshot {
-            request_id: worst(MAX_CLIENT_ID_LEN),
+            request_id: worst(MAX_ECHOED_ID_LEN),
             fills: vec![maximal_fill(); ROWS],
             ts_event: u64::MAX,
         });
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn order_event_bound_covers_both_maximal_lifecycle_frames() {
         use crate::{
-            LiquiditySide, MAX_CLIENT_ID_LEN, MAX_CURRENCY_LEN, MAX_REASON_LEN, MAX_SYMBOL_LEN,
+            LiquiditySide, MAX_CURRENCY_LEN, MAX_ECHOED_ID_LEN, MAX_REASON_LEN, MAX_SYMBOL_LEN,
             OrderFilled, Side, VenueMessage,
         };
         use rust_decimal::Decimal;
@@ -682,11 +682,11 @@ mod tests {
         let worst = |len: usize| char::from(1).to_string().repeat(len);
 
         let filled = VenueMessage::OrderFilled(OrderFilled {
-            client_order_id: worst(MAX_CLIENT_ID_LEN),
-            venue_order_id: worst(MAX_CLIENT_ID_LEN),
-            trade_id: worst(MAX_CLIENT_ID_LEN),
+            client_order_id: worst(MAX_ECHOED_ID_LEN),
+            venue_order_id: worst(MAX_ECHOED_ID_LEN),
+            trade_id: worst(MAX_ECHOED_ID_LEN),
             symbol: worst(MAX_SYMBOL_LEN).into(),
-            position_id: Some(worst(MAX_CLIENT_ID_LEN)),
+            position_id: Some(worst(MAX_ECHOED_ID_LEN)),
             side: Side::Sell,
             last_qty: Decimal::MIN,
             last_px: Decimal::MIN,
@@ -697,7 +697,7 @@ mod tests {
             ts_event: u64::MAX,
         });
         let rejected = VenueMessage::OrderRejected {
-            client_order_id: worst(MAX_CLIENT_ID_LEN),
+            client_order_id: worst(MAX_ECHOED_ID_LEN),
             reason: worst(MAX_REASON_LEN),
             ts_event: u64::MAX,
         };

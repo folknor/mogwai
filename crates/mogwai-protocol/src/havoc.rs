@@ -7,12 +7,18 @@ use serde::{Deserialize, Serialize};
 use crate::control;
 
 /// One config object that arms mogwai's havoc surfaces.
+///
+/// `deny_unknown_fields` is load-bearing for the operator, because two keys
+/// have been retired and a silently ignored havoc table is a scenario that
+/// looks armed and is not. `server` became `venue` and `client` became
+/// `inbound`; both old spellings now fail the load rather than being dropped,
+/// and `havoc_spec_defaults_from_empty_object` pins that.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct HavocSpec {
     /// Transport-level corruption the adapter applies to its own inbound stream.
     #[serde(default)]
-    pub client: ClientHavoc,
+    pub inbound: InboundHavoc,
     /// Execution divergences the adapter relays to mogwai-venue on connect.
     #[serde(default)]
     pub venue: Vec<control::Divergence>,
@@ -34,7 +40,7 @@ pub struct HavocSpec {
 ///
 /// `#[serde(default)]` at the container fills any OMITTED field from
 /// `ConnHavoc::default()`, so a partial `[havoc.conn]` table (arming one knob,
-/// e.g. only `heartbeat_interval_ms`) loads the way partial `[havoc.client]`
+/// e.g. only `heartbeat_interval_ms`) loads the way partial `[havoc.inbound]`
 /// and `[havoc.data]` tables already do. It must be the CONTAINER default, not
 /// per-field: per-field `#[serde(default)]` pulls each field type's own
 /// `Default` (`0.0` for `reconnect_backoff_factor`, `0` for the delays), and a
@@ -144,7 +150,7 @@ pub fn validate_conn_havoc(conn: &ConnHavoc) -> Result<(), &'static str> {
 
 /// Market-regime havoc: perturbs the generator before ticks are produced.
 ///
-/// This is distinct from venue divergences and client-side transport havoc,
+/// This is distinct from venue divergences and adapter-inbound transport havoc,
 /// which corrupt events after production. It is carried per subscription on
 /// `Subscribe` and per request on `GET /trades`; it never travels the
 /// `/control/divergence` control plane.
@@ -357,9 +363,9 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
     }
 }
 
-/// Client-side, in-adapter havoc knobs.
+/// Inbound, in-adapter havoc knobs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct ClientHavoc {
+pub struct InboundHavoc {
     /// Added delay before each inbound event reaches the sink.
     #[serde(default)]
     pub latency: Option<HavocLatency>,
@@ -399,7 +405,7 @@ pub struct HavocLatency {
 ///
 /// A modest one-way delay carried by every inbound event regardless of armed
 /// havoc, so the no-havoc path still has realistic network delay. Armed
-/// `ClientHavoc.latency`, when present, adds on top of this baseline instead of
+/// `InboundHavoc.latency`, when present, adds on top of this baseline instead of
 /// replacing it: the network's own latency is always present, and havoc latency
 /// is an additional perturbation above the honest floor.
 pub const BASELINE_LATENCY: HavocLatency = HavocLatency {
@@ -442,27 +448,28 @@ impl HavocLatency {
     }
 }
 
-/// API-boundary guard for the client-side transport havoc knobs, mirroring
+/// API-boundary guard for the adapter's inbound transport havoc knobs, mirroring
 /// `validate_conn_havoc` / `validate_market_regime` / `validate_divergence` in
 /// style and message convention. The adapter runs it at config-`validate` time
-/// (via `validate_havoc`) so an out-of-range knob never constructs a client.
+/// (via `validate_havoc`) so an out-of-range knob never constructs an adapter
+/// object.
 ///
 /// `drop_prob`, `duplicate_prob`, and `reorder_prob` must each be a finite
 /// probability in `[0.0, 1.0]`. The four `HavocLatency` delay fields must each
 /// be `<= MAX_LATENCY_NANOS` (60 s), so an armed latency stays within the
 /// pathological-but-plausible network band instead of wedging the stream with a
 /// multi-century delay.
-pub fn validate_client_havoc(client: &ClientHavoc) -> Result<(), &'static str> {
-    if !finite_in(client.drop_prob, 0.0, 1.0) {
+pub fn validate_inbound_havoc(inbound: &InboundHavoc) -> Result<(), &'static str> {
+    if !finite_in(inbound.drop_prob, 0.0, 1.0) {
         return Err("drop_prob must be in [0.0, 1.0]");
     }
-    if !finite_in(client.duplicate_prob, 0.0, 1.0) {
+    if !finite_in(inbound.duplicate_prob, 0.0, 1.0) {
         return Err("duplicate_prob must be in [0.0, 1.0]");
     }
-    if !finite_in(client.reorder_prob, 0.0, 1.0) {
+    if !finite_in(inbound.reorder_prob, 0.0, 1.0) {
         return Err("reorder_prob must be in [0.0, 1.0]");
     }
-    if let Some(latency) = client.latency
+    if let Some(latency) = inbound.latency
         && (latency.base_nanos > MAX_LATENCY_NANOS
             || latency.exec_event_nanos > MAX_LATENCY_NANOS
             || latency.fill_nanos > MAX_LATENCY_NANOS
@@ -473,7 +480,7 @@ pub fn validate_client_havoc(client: &ClientHavoc) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Inbound-event categories the client-side latency knob distinguishes.
+/// Inbound-event categories the adapter's latency knob distinguishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
     Exec,
@@ -657,7 +664,7 @@ mod tests {
     #[test]
     fn havoc_spec_round_trips() {
         let spec = HavocSpec {
-            client: ClientHavoc {
+            inbound: InboundHavoc {
                 latency: Some(HavocLatency {
                     base_nanos: 10,
                     exec_event_nanos: 20,
@@ -714,20 +721,20 @@ mod tests {
         // connection lifecycle, so an omitted key decodes to this object.
         assert_eq!(
             json,
-            r#"{"client":{"latency":null,"drop_prob":0.0,"duplicate_prob":0.0,"reorder_prob":0.0,"seed":null},"venue":[],"conn":{"idle_timeout_ms":0,"heartbeat_interval_ms":0,"reconnect_delay_initial_ms":1000,"reconnect_delay_max_ms":10000,"reconnect_backoff_factor":2.0,"reconnect_jitter_ms":0,"reconnect_max_attempts":null,"max_requests_per_second":null,"request_timeout_secs":0}}"#
+            r#"{"inbound":{"latency":null,"drop_prob":0.0,"duplicate_prob":0.0,"reorder_prob":0.0,"seed":null},"venue":[],"conn":{"idle_timeout_ms":0,"heartbeat_interval_ms":0,"reconnect_delay_initial_ms":1000,"reconnect_delay_max_ms":10000,"reconnect_backoff_factor":2.0,"reconnect_jitter_ms":0,"reconnect_max_attempts":null,"max_requests_per_second":null,"request_timeout_secs":0}}"#
         );
     }
 
     #[test]
     fn havoc_spec_defaults_from_empty_object() {
         let decoded: HavocSpec = serde_json::from_str("{}").unwrap();
-        assert_eq!(decoded.client, ClientHavoc::default());
+        assert_eq!(decoded.inbound, InboundHavoc::default());
         assert!(decoded.venue.is_empty());
         assert_eq!(decoded.data, None);
         assert_eq!(decoded.conn, ConnHavoc::default());
 
         let decoded: HavocSpec = serde_json::from_str(r#"{"venue":[]}"#).unwrap();
-        assert_eq!(decoded.client, ClientHavoc::default());
+        assert_eq!(decoded.inbound, InboundHavoc::default());
         assert!(decoded.venue.is_empty());
         assert_eq!(decoded.data, None);
         assert_eq!(decoded.conn, ConnHavoc::default());
@@ -735,6 +742,10 @@ mod tests {
         let retired = serde_json::from_str::<HavocSpec>(r#"{"server":[]}"#)
             .expect_err("the retired server field must not be silently ignored");
         assert!(retired.to_string().contains("unknown field `server`"));
+
+        let retired = serde_json::from_str::<HavocSpec>(r#"{"client":{}}"#)
+            .expect_err("the retired client field must not be silently ignored");
+        assert!(retired.to_string().contains("unknown field `client`"));
     }
 
     #[test]
@@ -743,7 +754,7 @@ mod tests {
         // not be forced to spell out the other eight fields. A partial
         // `[havoc.conn]` table fills every omission from `ConnHavoc::default()`
         // (the container `#[serde(default)]`), matching how partial
-        // `[havoc.client]` / `[havoc.data]` tables already load, and the result
+        // `[havoc.inbound]` / `[havoc.data]` tables already load, and the result
         // still passes `validate_conn_havoc` - which a per-field default would
         // NOT, since it would zero `reconnect_backoff_factor` below its 1.0 floor.
         let decoded: ConnHavoc = serde_json::from_str(r#"{"heartbeat_interval_ms":2000}"#).unwrap();
@@ -1165,7 +1176,7 @@ mod tests {
 
     #[test]
     fn validate_divergence_rejects_unmatchable_targets_and_oversized_reason() {
-        let oversized_id = "X".repeat(crate::MAX_CLIENT_ID_LEN + 1);
+        let oversized_id = "X".repeat(crate::MAX_ECHOED_ID_LEN + 1);
         assert_eq!(
             validate_divergence(&control::Divergence::PartialFillNext {
                 client_order_id: oversized_id.clone(),
@@ -1188,10 +1199,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_client_havoc_bounds_probabilities_and_latency() {
+    fn validate_inbound_havoc_bounds_probabilities_and_latency() {
         // A clean default and a fully-armed-but-in-range spec both pass.
-        validate_client_havoc(&ClientHavoc::default()).expect("default is clean");
-        validate_client_havoc(&ClientHavoc {
+        validate_inbound_havoc(&InboundHavoc::default()).expect("default is clean");
+        validate_inbound_havoc(&InboundHavoc {
             latency: Some(HavocLatency {
                 base_nanos: MAX_LATENCY_NANOS,
                 exec_event_nanos: MAX_LATENCY_NANOS,
@@ -1208,23 +1219,23 @@ mod tests {
         // Each probability is rejected out of [0.0, 1.0], including non-finite.
         for bad in [1.0001, -0.0001, f64::NAN, f64::INFINITY] {
             assert_eq!(
-                validate_client_havoc(&ClientHavoc {
+                validate_inbound_havoc(&InboundHavoc {
                     drop_prob: bad,
-                    ..ClientHavoc::default()
+                    ..InboundHavoc::default()
                 }),
                 Err("drop_prob must be in [0.0, 1.0]")
             );
             assert_eq!(
-                validate_client_havoc(&ClientHavoc {
+                validate_inbound_havoc(&InboundHavoc {
                     duplicate_prob: bad,
-                    ..ClientHavoc::default()
+                    ..InboundHavoc::default()
                 }),
                 Err("duplicate_prob must be in [0.0, 1.0]")
             );
             assert_eq!(
-                validate_client_havoc(&ClientHavoc {
+                validate_inbound_havoc(&InboundHavoc {
                     reorder_prob: bad,
-                    ..ClientHavoc::default()
+                    ..InboundHavoc::default()
                 }),
                 Err("reorder_prob must be in [0.0, 1.0]")
             );
@@ -1250,9 +1261,9 @@ mod tests {
             },
         ] {
             assert_eq!(
-                validate_client_havoc(&ClientHavoc {
+                validate_inbound_havoc(&InboundHavoc {
                     latency: Some(latency),
-                    ..ClientHavoc::default()
+                    ..InboundHavoc::default()
                 }),
                 Err("HavocLatency fields must each be <= MAX_LATENCY_NANOS (60s)")
             );

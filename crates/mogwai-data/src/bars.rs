@@ -65,10 +65,10 @@ pub fn window_close_ns(ts: u64, interval: NonZeroU64) -> u64 {
 ///
 /// Do NOT "fix" this by buffering or rejecting. One consumer violates the
 /// expectation ON PURPOSE: the adapter's live path runs trades through the
-/// client `HavocFilter` BEFORE aggregating, so an armed `reorder_prob` hands
+/// consumer `HavocFilter` BEFORE aggregating, so an armed `reorder_prob` hands
 /// this function out-of-order timestamps by design. Bars are fabricated
 /// adapter-side from the trade feed, so a reordered feed producing a reshaped
-/// bar is the honest consequence a real client-side aggregator would also
+/// bar is the honest consequence a real consumer-side aggregator would also
 /// suffer; buffering here would silently repair a divergence the operator armed.
 /// The CLI's `GeneratedSource` is monotone, so it never exercises this path.
 ///
@@ -286,7 +286,7 @@ mod tests {
     }
 
     /// Pins the DEFINED outcome for an out-of-order trade, which the adapter
-    /// feeds this function on purpose whenever client `reorder_prob` is armed
+    /// feeds this function on purpose whenever consumer `reorder_prob` is armed
     /// (trades pass the `HavocFilter` before aggregation). The point is that the
     /// distortion is bounded and legible: the stale trade is absorbed by the
     /// window that was open when it arrived, nothing wedges, and no bar is lost,

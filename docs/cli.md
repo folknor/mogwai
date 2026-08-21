@@ -9,7 +9,7 @@ and no way to serve another interface. The kernel allocates the port, so two
 concurrent runs on one machine cannot collide on a shared default and cannot be
 made to by an operator hand-assigning ports; and loopback is the only interface
 because the venue models latency on the sim axis and runs on the same machine as
-its client.
+its consumer.
 
 The endpoint therefore has to be learned rather than assumed. On boot the venue
 writes ONE line of JSON to STDOUT - the version 8 `ReadyRecord`, carrying
@@ -19,7 +19,7 @@ and `version_string` - and in practice that is the only thing it ever writes
 there, though the shipped launcher does not require it: it drains stdout for the
 whole run and discards everything past the record, so a stray write is ignored
 rather than taking `EPIPE` mid-run. The last
-two are the account-persistence policy: whether a returning client gets its own
+two are the account-persistence policy: whether a returning consumer gets its own
 ledger back, and how long an unattended one survives before the venue collects
 it. It reports no symbol. Logs go to stderr, so
 the two never interleave. A launcher captures stdout and reads a line; a human
@@ -27,7 +27,7 @@ sees the same line in the terminal.
 
 The WebSocket endpoint is `GET /ws?symbol=<symbol>`. The query parameter is
 optional; omitting it binds the socket to the run's boot symbol for compatibility
-with older clients. A socket owns exactly one river. A supplied symbol is 1 to
+with older consumers. A socket owns exactly one river. A supplied symbol is 1 to
 32 ASCII letters, digits, dot, dash, or underscore, and matching is case exact.
 Malformed symbols are refused with HTTP 400 before the upgrade. Every legal
 symbol is resolved; the only other pre-upgrade refusals are a shape this run
@@ -36,21 +36,21 @@ different speed. The upgrade also accepts `?speed=` (absent means the configured
 `speed`) and `?duration_ms=`. The first passenger at a given speed places that
 cursor; later passengers at the same speed share it; a different speed places a
 second cursor on the same water.
-A client names that river from its own configuration; the readiness record does
+A consumer names that river from its own configuration; the readiness record does
 not supply one.
 
 `GET /instruments` reports the configured shapes plus every river materialized
 so far. A socket bind or history poll materializes a river and grows the list.
 A run retains at most 256 materialized rivers and never evicts them. This is an
-operational bound for trusted clients belonging to the run's owner, not a
-hostile-client defence.
+operational bound for trusted consumers belonging to the run's owner, not a
+hostile-consumer defence.
 
 The history endpoints `GET /trades` and `GET /quotes` both REQUIRE `symbol`;
 `start`, `end` and `limit` are optional. They are bounded by the named river's
 now. For a seated river that is the last instant its boat published; for a
 boatless river it is the venue clock. An omitted or future `end` is clamped to
 that ceiling, and a `start` above it - or below the tape origin - is refused
-with HTTP 400. A client must therefore read `/clock?symbol=<symbol>` before
+with HTTP 400. A consumer must therefore read `/clock?symbol=<symbol>` before
 constructing a history window. Using boatless `/clock` as the `start` for a
 seated river can be ahead of that river and is refused.
 
@@ -190,7 +190,7 @@ A port identifies nothing over time. It is ephemeral, and this venue frees it
 BEFORE it exits: a declared completion stops the accept loop first, then drains
 live connections for up to the shutdown grace, so the address is available while
 the process is still alive. A consumer watching for child exit sees nothing
-during that window, and a client that only knows where to dial cannot tell its
+during that window, and a consumer that only knows where to dial cannot tell its
 own run from whatever answers there next.
 
 THAT DRAIN COVERS WEBSOCKET SESSIONS, and saying so is not redundant: an
@@ -210,12 +210,12 @@ sockets with it.
 A venue whose live connections do NOT drain within that grace exits NONZERO. It
 used to log a warning and exit 0, which made an abandoned connection
 indistinguishable from a clean teardown to a launcher inspecting exit status. A
-client that holds `/ws` open past the venue's completion is what produces it, so
+consumer that holds `/ws` open past the venue's completion is what produces it, so
 a consumer that wants a clean exit closes its sockets when it sees `RunComplete`
 rather than waiting to be dropped.
 
 The readiness record already carries `run_seed`, so a launcher can bind its
-clients to the run it started rather than to the address it landed on. The
+consumers to the run it started rather than to the address it landed on. The
 nautilus adapter does this through `MogwaiDataClientConfig::for_run` /
 `MogwaiExecClientConfig::for_run`, which check `/health` on every connect and
 refuse - terminally, logging `venue identity mismatch` - when the address is
@@ -228,14 +228,14 @@ that can know where to dial and not know what it is dialling.
 
 - If you LAUNCH the venue, you parsed that record to get the address. Build the
   client config with `for_run`, not `for_addr`.
-- If you hand ONE venue's address to several clients, hand them the `run_seed`
-  with it. You are already distributing per-client configuration - the account
+- If you hand ONE venue's address to several consumers, hand them the `run_seed`
+  with it. You are already distributing per-consumer configuration - the account
   id each one must name - and the seed rides the same path.
 
 `for_addr` is the lossy path: it takes an address alone and sets no expected
-seed, so the client cannot tell its venue from whatever answers there next. It
-is not a client that COULDN'T check, it is a config that dropped the identity one
-call earlier, so a client built that way logs a warning naming the fix.
+seed, so the consumer cannot tell its venue from whatever answers there next. It
+is not a consumer that COULDN'T check, it is a config that dropped the identity one
+call earlier, so a consumer built that way logs a warning naming the fix.
 
 What the contract buys is worth stating plainly, because the failure is silent
 rather than loud. A recycled port is most likely held by ANOTHER MOGWAI VENUE -
@@ -261,7 +261,7 @@ its output. A run is fire-and-forget, so discarding one is cheap and
 reproducing it means a fresh instance with the same seed and config.
 
 Absence of the field is not a promise that the venue is healthy in every other
-sense - it reports tape faults, not consumer-side backlog - and a faulted run
+sense - it reports tape faults, not a connection's delivery backlog - and a faulted run
 may also die on its own terminal-fault path, which is separate. What the field
 buys is seeing the fault BEFORE that.
 

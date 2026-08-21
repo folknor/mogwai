@@ -634,7 +634,7 @@ impl Engine {
             *total = total.saturating_add(reserve);
         }
 
-        // Unsettled sale proceeds, so the `locked` a client reads is the same
+        // Unsettled sale proceeds, so the `locked` a consumer reads is the same
         // number `free_balance` subtracts. A wire snapshot that disagreed with
         // the venue's own funds check would be the worst of both.
         for credit in &self.account.unsettled {

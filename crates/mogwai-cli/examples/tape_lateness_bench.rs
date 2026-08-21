@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! How late a paced tape arrives at a client that keeps up, under acceleration.
+//! How late a paced tape arrives at a consumer that keeps up, under acceleration.
 //!
 //! THIS WAS A TEST AND SHOULD NOT HAVE BEEN. It asserted a 50 ms p99 and was
 //! excluded from every lane that could have run it, because the budget is a
@@ -159,7 +159,7 @@ async fn main() {
 
 /// One blocking HTTP GET, returning the body. Hand-rolled for the same reason
 /// the gates do it: the venue's request surface is a handful of routes and a
-/// status line, and an HTTP client is a dependency this does not need.
+/// status line, and an HTTP consumer is a dependency this does not need.
 fn http_get(base: &str, path: &str) -> String {
     use std::io::{Read, Write};
 

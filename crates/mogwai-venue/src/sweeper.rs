@@ -8,7 +8,7 @@
 //! is still just one lock acquisition and a `continue`.
 //!
 //! Owned by the RUN rather than by an account or a session: one process is one
-//! ledger now, and a session-owned sweep would freeze a disconnected client's
+//! ledger now, and a session-owned sweep would freeze a disconnected consumer's
 //! book mid-window, make the `QueryOrders` truth store honestly report a venue
 //! that cannot execute, and double the tape walk when two sockets are open on
 //! the one run.
@@ -112,7 +112,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             // does not accrue and its policy cannot liquidate somebody who is
             // not there. That is a deliberate departure from a real venue, where
             // being away is no defence, and it is the right one here - mogwai
-            // exists to exercise a client's live path, not to run an account
+            // exists to exercise a consumer's live path, not to run an account
             // nobody is trading. The consequence to state in any claim is that a
             // run spanning a disconnect has a gap in its risk history.
             //
@@ -132,7 +132,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             // order outside this set rests on a river with no clock: nothing can
             // sweep it, nothing can expire it, and it cannot be told apart from
             // an order the tape has not reached. The venue refuses to leave it
-            // there rather than letting it sit forever - the client is attached,
+            // there rather than letting it sit forever - the consumer is attached,
             // so it can be told. A FROZEN account is not here at all, and its
             // book survives for the socket that returns to it.
             let readable: Vec<mogwai_protocol::Symbol> = next_due
@@ -363,7 +363,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     );
                     // The account's own rules, judged against the equity this
                     // pass just produced. HERE rather than after delivery,
-                    // because a breach flattens - and a client must not be told
+                    // because a breach flattens - and a consumer must not be told
                     // its position is open in one batch and gone in the next
                     // when both describe the same instant.
                     let mut events = events;
@@ -392,9 +392,9 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     }
                     // A TERMINATING breach on the venue's ONLY account ends the
                     // run: its one account is dead, so there is nothing left to
-                    // serve, which is the same "no client, no job" rule that
+                    // serve, which is the same "no consumer, no job" rule that
                     // governs disconnection. Announced AFTER the batch is
-                    // delivered, so the client learns why rather than seeing a
+                    // delivered, so the consumer learns why rather than seeing a
                     // bare close.
                     //
                     // Conditioned on there being only one account, deliberately.
@@ -611,7 +611,7 @@ fn apply_engine_pass_on_clock(
     } else if settled_cash {
         // Cash settling moves `free` and `locked` without moving `total` and
         // without producing an order event, so it is the one transition that
-        // owes a snapshot nothing else in the pass would have taken. A client
+        // owes a snapshot nothing else in the pass would have taken. A consumer
         // watching its buying power is watching exactly this.
         events.push(VenueMessage::AccountState(engine.account_snapshot(to_ns)));
     }
@@ -624,7 +624,7 @@ fn apply_engine_pass_on_clock(
 /// is per connection. A connection whose reservation is refused gets the
 /// ordinary `AdmissionRejected` on its priority lane and learns the real state
 /// from `QueryOrders`/`QueryFills`; the EXECUTION is never rolled back. A
-/// client's byte budget does not get to decide whether the market traded
+/// consumer's byte budget does not get to decide whether the market traded
 /// through a price, and making it decide is what would wedge a book permanently
 /// once a batch outgrew the fixed per-connection budget.
 ///
@@ -639,7 +639,7 @@ fn apply_engine_pass_on_clock(
 /// THE ACCOUNT SNAPSHOT WAS THE RESIDUAL HOLE, and it was the expensive one.
 /// Order attribution alone left `AccountState` unaddressed, so it fanned to
 /// every lane - and the sweep takes one engine pass per passenger, so an
-/// N-account venue sent each client N snapshots per pass, N-1 of them somebody
+/// N-account venue sent each socket N snapshots per pass, N-1 of them somebody
 /// else's balances and positions. Attribution is now [`crate::run::audience`],
 /// an exhaustive classification with no catch-all, so the next ledger-owned
 /// frame variant is a compile error rather than a silent broadcast.
@@ -647,7 +647,7 @@ fn apply_engine_pass_on_clock(
 /// The reservation is taken against the UNFILTERED batch size, so a connection
 /// reserves for frames it may not receive. Over-reserving is the safe direction:
 /// sizing per connection would mean walking the ownership table once per lane
-/// before knowing what to reserve, and a refusal costs the client only a
+/// before knowing what to reserve, and a refusal costs the consumer only a
 /// requery.
 /// Claim and then deliver a batch one passenger's ledger just produced.
 ///
@@ -694,7 +694,7 @@ fn deliver(
             crate::run::Audience::Venue | crate::run::Audience::Unattributable => Route::Everyone,
             crate::run::Audience::Account(account) => Route::Account(account.as_str().to_owned()),
             // Every order-scoped frame reaching this point is claimed: the
-            // dispatcher claims client submissions at acceptance, and
+            // dispatcher claims consumer submissions at acceptance, and
             // `deliver_produced` claims venue-originated orders for the
             // ledger that produced them. A miss is therefore a BUG in whoever
             // built the batch, not a class of order - reported, then routed
@@ -713,7 +713,7 @@ fn deliver(
             ),
             // A requester-scoped frame has no business in a swept batch: it
             // belongs to the connection that issued the request, which this
-            // path cannot know, and broadcasting it would leak one client's
+            // path cannot know, and broadcasting it would leak one consumer's
             // orders, fills or refusals to every other. Dropped loudly - the
             // defect is in whatever put it here, not in delivery.
             crate::run::Audience::Requester => {
@@ -900,8 +900,8 @@ mod tests {
     use super::*;
     use mogwai_engine::{BreachAction, EngineConfig, MarginPolicy, MarketReading};
     use mogwai_protocol::{
-        AccountId, ClientMessage, Hit, InstrumentClass, InstrumentDef, OrderType, Side,
-        SubmitOrder, TimeInForce, WireAssetClass,
+        AccountId, Command, Hit, InstrumentClass, InstrumentDef, OrderType, Side, SubmitOrder,
+        TimeInForce, WireAssetClass,
     };
     use rust_decimal::Decimal;
 
@@ -1282,7 +1282,7 @@ mod tests {
             link: None,
         };
         engine.process_with_market(
-            ClientMessage::SubmitOrder(order),
+            Command::SubmitOrder(order),
             1,
             Some(MarketReading {
                 last_px: Decimal::from(21_000),
@@ -1446,7 +1446,7 @@ mod tests {
             expire_time: None,
             link: None,
         };
-        engine.process(ClientMessage::SubmitOrder(trail), 2);
+        engine.process(Command::SubmitOrder(trail), 2);
         let symbol = mogwai_protocol::Symbol::from("MNQ");
         // Spiked to 21,100 and closed back at 21,000.
         engine.mark_over(
@@ -1552,7 +1552,7 @@ mod tests {
             expire_time: None,
             link: None,
         };
-        engine.process(ClientMessage::SubmitOrder(order), 2);
+        engine.process(Command::SubmitOrder(order), 2);
         let scan = engine
             .pending_scans()
             .into_iter()

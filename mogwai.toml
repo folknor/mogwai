@@ -33,7 +33,7 @@ global_pending_command_acts = 4096
 
 # The boot symbol selects a matching preset, or the BTCUSDT default when
 # unmatched. It is the river boarded at startup and the default for a request
-# that names no symbol; any other symbol a client asks for is served too.
+# that names no symbol; any other symbol a consumer asks for is served too.
 # symbol = "FOOBAR"
 # Default knobs apply to every resolved symbol.
 # [instrument]

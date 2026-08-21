@@ -13,7 +13,7 @@
 //! scenario by mutating the shared [`StubState`] - the one thing that
 //! legitimately differs between tests.
 //!
-//! The WS leg matches on a parsed [`ClientMessage`] rather than a type-name
+//! The WS leg matches on a parsed [`Command`] rather than a type-name
 //! substring, so a wire-format change (a field rename, an envelope change) makes
 //! the stub stop recognising the client's `Subscribe` / `SubmitOrder` and the
 //! test fails loudly instead of passing against a broken protocol.
@@ -50,9 +50,9 @@
 //! premise it depends on, so a libtest change fails on the premise rather than
 //! on whatever the test was really asserting.
 //!
-//! THE ONE GENUINELY PROCESS-WIDE THING IS THE SESSION ID.
+//! The process-wide value here is the session id.
 //! `mogwai_adapter::config`'s `process_session_id` is a `OnceLock`, by design -
-//! one worker process is one client, so its data and execution legs present one
+//! one worker process presents one identity, so its data and execution legs share that
 //! identity and cannot evict each other off their shared ledger. The
 //! consequence for THESE binaries is that every client built through a
 //! `Mogwai*ClientConfig::default()` presents the SAME session string, which is
@@ -93,7 +93,7 @@ use std::{
 
 use mogwai_adapter::{MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient};
 use mogwai_protocol::{
-    ClientMessage, FillSnapshot, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, VenueMessage,
+    Command, FillSnapshot, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, VenueMessage,
     WireOrderStatus,
 };
 use nautilus_common::{
@@ -194,7 +194,7 @@ pub const IDENTITY_CLOCK_JSON: &str = r#"{"sim":{"sim_epoch_ns":0,"wall_anchor_n
 /// A NEW FIELD BELONGS IN EXACTLY ONE OF THOSE THREE, and a fixture that arms a
 /// data-leg switch on a test whose client is an exec client is arming nothing:
 /// exec clients never enter the tape push, data clients never send a
-/// `ClientMessage`.
+/// `Command`.
 #[derive(Default)]
 pub struct StubState {
     /// Optional body served by `/instruments`; absent uses BTCUSDT spot.
@@ -223,7 +223,7 @@ pub struct StubState {
     /// carries both and a test that seeds an amend ack must not have it
     /// delivered on the submit.
     pub ws_modify_frames: Mutex<Vec<String>>,
-    /// Raw text of every `ClientMessage` frame the stub received, in arrival
+    /// Raw text of every `Command` frame the stub received, in arrival
     /// order. A test asserting that a field CROSSED THE WIRE (rather than
     /// merely being accepted by the client) reads it here.
     pub ws_client_messages: Mutex<Vec<String>>,
@@ -307,7 +307,7 @@ pub struct StubState {
     /// wire. A test measuring an inbound-latency contribution starts its clock
     /// here rather than at `connect()`: everything the stub does between the
     /// upgrade and the push - scheduling turns, blackout windows, whatever the
-    /// harness grows next - is otherwise counted as client-side latency, and a
+    /// harness grows next - is otherwise counted as adapter-side latency, and a
     /// delay the client never applied passes the assertion.
     pub ws_first_frame_at: Mutex<Option<Instant>>,
     /// `ws_first_frame_at`'s twin for the EXEC leg: the wall instant at which
@@ -799,7 +799,7 @@ pub async fn respond_json(stream: &mut TcpStream, status: &str, body: &str) {
 /// Completes a tungstenite venue handshake against an already-read request
 /// head, then pushes the state-driven frames. Data clients send `Subscribe` and
 /// receive `ws_trades`; exec clients send `SubmitOrder` and receive
-/// `ws_exec_frames`. Matching is on a parsed `ClientMessage`, not a substring.
+/// `ws_exec_frames`. Matching is on a parsed `Command`, not a substring.
 pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState>) {
     use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 
@@ -914,7 +914,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
                     .lock()
                     .expect("ws client messages mutex")
                     .push(text.to_string());
-                if let Ok(message) = serde_json::from_str::<ClientMessage>(&text) {
+                if let Ok(message) = serde_json::from_str::<Command>(&text) {
                     serve_exec_message(&mut ws, &message, &state).await;
                 }
             }
@@ -923,13 +923,13 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     }
 }
 
-/// The EXEC leg's whole behaviour: a reply to one client command.
+/// The EXEC leg's whole behaviour: a reply to one command.
 ///
 /// WHY THIS IS A SEPARATE FUNCTION. The two legs share the handshake and
 /// nothing else. The data leg is entirely ABOVE the read loop in `serve_ws` -
 /// it pushes the tape at upgrade and then only counts control frames, because
 /// a data client's subscription never crosses the wire and it sends no
-/// `ClientMessage` at all (only `ExecWsCommand`s become frames, in
+/// `Command` at all (only `ExecWsCommand`s become frames, in
 /// `client/exec.rs`). So every `Message::Text` a stub socket receives is exec
 /// traffic by construction, and keeping the reply logic inline invited the
 /// defect that was actually found here: the `ModifyOrder` arm had grown a copy
@@ -940,7 +940,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
 /// structural rather than a fact about today's tests, which is why deleting it
 /// is safe: `close_after_trades` returns from `serve_ws` before the read loop
 /// is ever entered, so its guard here could not run under any fixture; and no
-/// data client sends a `ClientMessage`, so no socket that has `dark_ms` or
+/// data client sends a `Command`, so no socket that has `dark_ms` or
 /// `ws_venue_pings` armed for the data path reaches this code by any route a
 /// client can take. The `served_once` guard the block held was structurally
 /// unreachable HERE and moved to the data leg above, where the behaviour its
@@ -955,7 +955,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
 /// by two handlers chosen at the handshake.
 async fn serve_exec_message<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
-    message: &ClientMessage,
+    message: &Command,
     state: &StubState,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -963,7 +963,7 @@ async fn serve_exec_message<S>(
     use futures_util::SinkExt;
 
     match message {
-        ClientMessage::ModifyOrder { .. } => {
+        Command::ModifyOrder { .. } => {
             let frames = state
                 .ws_modify_frames
                 .lock()
@@ -973,7 +973,7 @@ async fn serve_exec_message<S>(
                 drop(ws.send(Message::Text(frame.into())).await);
             }
         }
-        ClientMessage::SubmitOrder(_) => {
+        Command::SubmitOrder(_) => {
             let frames = state
                 .ws_exec_frames
                 .lock()
@@ -992,7 +992,7 @@ async fn serve_exec_message<S>(
                 drop(ws.send(Message::Text(frame.into())).await);
             }
         }
-        ClientMessage::QueryOrders { .. } | ClientMessage::QueryFills { .. } => {
+        Command::QueryOrders { .. } | Command::QueryFills { .. } => {
             if let Some(reply) = venue_query_reply(message, state) {
                 let json = serde_json::to_string(&reply).expect("encode venue query reply");
                 drop(ws.send(Message::Text(json.into())).await);
@@ -1015,9 +1015,9 @@ pub fn position_json(quantity: &str, avg_px: &str) -> String {
 }
 
 /// Answers a venue-truth query using rows seeded into the shared stub.
-pub fn venue_query_reply(message: &ClientMessage, state: &StubState) -> Option<VenueMessage> {
+pub fn venue_query_reply(message: &Command, state: &StubState) -> Option<VenueMessage> {
     match message {
-        ClientMessage::QueryOrders {
+        Command::QueryOrders {
             request_id,
             client_order_id,
             open_only,
@@ -1042,7 +1042,7 @@ pub fn venue_query_reply(message: &ClientMessage, state: &StubState) -> Option<V
                 ts_event: VENUE_SNAPSHOT_TS_EVENT,
             }))
         }
-        ClientMessage::QueryFills {
+        Command::QueryFills {
             request_id,
             client_order_id,
         } => {

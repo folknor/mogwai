@@ -77,7 +77,7 @@ pub use trigger::{
 /// 13 normalizes the decimal price before it is hashed into the fill-band draw
 /// key. `rust_decimal`'s serialized form carries the scale, so `100` and
 /// `100.00` used to draw different fill triggers and different slippage for
-/// economically identical orders - the band was a function of how the client
+/// economically identical orders - the band was a function of how the consumer
 /// wrote its JSON. Every seeded fill trigger and market-slippage offset moves.
 ///
 /// 14 makes calendar jumps part of the `ReopenGap` crossing frontier. An arm

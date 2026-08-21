@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use mogwai_protocol::{
-    ClientMessage, CommandClass, VenueMessage,
+    Command, CommandClass, VenueMessage,
     sizing::{BOUNDARY_REFUSAL_BYTES, BookShape, worst_case_output_bytes},
     truncate_reason,
 };
@@ -55,7 +55,7 @@ pub(crate) const ADMISSION_PROMISE_TICKETS: usize = 1;
 /// Per-connection capacity of the sequential command queue.
 pub(crate) const PENDING_COMMAND_SLOTS: usize = 256;
 /// Process-wide ceiling on queued or executing websocket commands.
-/// `PENDING_COMMAND_SLOTS` bounds one client; this bounds the run across clients.
+/// `PENDING_COMMAND_SLOTS` bounds one consumer; this bounds the run across consumers.
 pub(crate) const GLOBAL_PENDING_COMMAND_SLOTS: usize = 4096;
 
 /// WS 1013 "Try Again Later": the venue is refusing further work on this
@@ -64,7 +64,7 @@ pub(crate) const GLOBAL_PENDING_COMMAND_SLOTS: usize = 4096;
 /// invariant permits, and it is the least ambiguous signal available.
 pub(crate) const CLOSE_ADMISSION_OVERLOAD: u16 = 1013;
 
-/// WS 1011 "Internal Error": the venue itself failed, in a way no client
+/// WS 1011 "Internal Error": the venue itself failed, in a way no consumer
 /// behavior caused and none can plan for. Reserved for exactly one condition
 /// today - a subscriber's tape ring turned over, so the venue no longer holds
 /// market data it already promised to deliver in ascending order.
@@ -88,7 +88,7 @@ pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
 /// reconnect work at all.
 ///
 /// `1000` (normal closure) rather than a fault code: nothing failed, and the
-/// distinction is what stops a consumer's reconnect ladder from firing. A client
+/// distinction is what stops a consumer's reconnect ladder from firing. A consumer
 /// that redialled on this would evict whatever evicted it, forever.
 ///
 /// THE CODE ALONE CANNOT SAY THAT, because the venue also closes 1000 on run
@@ -96,7 +96,7 @@ pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
 /// reasons of its own. The REASON string carries the meaning, and it is a
 /// protocol contract: `CloseSpec::evicted` is the only constructor for this
 /// code and it prepends `mogwai_protocol::close::EVICTED_PREFIX` itself, so a
-/// client can tell the three apart and no call site can forget to say which one
+/// consumer can tell the three apart and no call site can forget to say which one
 /// this is. See that module.
 pub(crate) const CLOSE_EVICTED: u16 = mogwai_protocol::close::NORMAL;
 
@@ -306,7 +306,7 @@ pub(crate) struct Ticket {
 ///
 /// `GoDark` gates the writer wholesale and `StallData` gates market data only,
 /// which is what makes a stalled feed and a dead venue distinguishable to a
-/// client. `Terminal` is exempt from both: the run announcing that it reached
+/// consumer. `Terminal` is exempt from both: the run announcing that it reached
 /// its declared duration is not venue output a scenario armed away, and
 /// dropping it would make a planned completion indistinguishable from the death
 /// a blackout is imitating - the exact confusion `RunComplete` exists to end.
@@ -364,7 +364,7 @@ pub(crate) struct CloseSpec {
 ///
 /// What an oversized control frame costs is the whole point. A conforming peer
 /// must fail the connection on one, so the close either never leaves the venue
-/// or arrives as an abrupt EOF - and an evicted client that sees an EOF instead
+/// or arrives as an abrupt EOF - and an evicted consumer that sees an EOF instead
 /// of a reasoned close classifies nothing, redials, and evicts whatever evicted
 /// it. The reason string is a protocol contract precisely so that cannot
 /// happen, so it has to fit the frame that carries it.
@@ -389,7 +389,7 @@ impl CloseSpec {
     }
 
     /// A newer connection claimed this account, so this one is done. The caller
-    /// passes the DETAIL - which account, and why one client at a time - and
+    /// passes the DETAIL - which account, and why one consumer at a time - and
     /// this constructor prepends `mogwai_protocol::close::EVICTED_PREFIX`.
     ///
     /// The prefix lives HERE rather than at the call site because it is the wire
@@ -453,7 +453,7 @@ pub(crate) struct ExecLanes {
     /// WRITING THE CLOSE IS NOT ENDING THE SESSION, which is the gap this
     /// closes. `run_writer` writes the frame and breaks, but `handle_socket`'s
     /// loop only leaves on the peer's close, the peer's EOF or the run's
-    /// completion - so a client that ignores its close frame (or is simply
+    /// completion - so a consumer that ignores its close frame (or is simply
     /// slow to act on it) kept its `SocketSession` alive, and with it the
     /// account's SEAT on that boat. The newcomer that evicted it was then
     /// refused its own reconnect at a different speed, because the account
@@ -527,7 +527,7 @@ impl ExecLanes {
 
     /// Reserve worst-case output for `cmd` against `shape`. `None` means the
     /// caller must refuse WITHOUT letting the engine see the command.
-    pub(crate) fn reserve(&self, cmd: &ClientMessage, shape: &BookShape) -> Option<Reservation> {
+    pub(crate) fn reserve(&self, cmd: &Command, shape: &BookShape) -> Option<Reservation> {
         self.held_budget
             .try_reserve(worst_case_output_bytes(cmd, shape))
     }
@@ -911,7 +911,7 @@ mod tests {
         let account_id = "A".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN);
         let evicted = CloseSpec::evicted(format!(
             "another connection claimed account {account_id}; a ledger is never \
-             read from two clients at once"
+             read from two sessions at once"
         ));
         assert!(
             evicted.reason.len() <= mogwai_protocol::close::MAX_REASON_BYTES,

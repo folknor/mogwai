@@ -193,7 +193,7 @@ fn pace(tape: &Tape, spawn: &TapeSpawn, ts: u64, wall_anchor: u64, instant_ancho
 /// Park an unpaced (`speed == 0.0`) tape while the ring is more than half full,
 /// so it does not overwrite frames its readers are actively draining. A
 /// subscriber that is not merely slow but STOPPED never drains, so the park
-/// times out at `zero_speed_stall_ms` and the tape resumes: one dead client
+/// times out at `zero_speed_stall_ms` and the tape resumes: one dead consumer
 /// costs one stall and is then ejected by the ring as `FeedLagged`, rather than
 /// stalling the whole run forever.
 fn await_headroom(tape: &Tape, spawn: &TapeSpawn) {

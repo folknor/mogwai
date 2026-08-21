@@ -2277,7 +2277,7 @@ fn dwell_is_bounded_across_run_seeds() {
     }
 }
 
-/// No two TRADES on one river share a `ts_event`, and a CONSUMER'S CORRECTNESS
+/// No two TRADES on one river share a `ts_event`, and a consumer's CORRECTNESS
 /// RESTS ON IT even though nothing here said so until this test.
 ///
 /// The history endpoints page by row count and the cursor that walks them is

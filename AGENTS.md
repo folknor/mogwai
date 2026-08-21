@@ -44,7 +44,7 @@ sequence for what this binds.
 
 A Cargo workspace, seven crates under `crates/`:
 
-- `mogwai-protocol` - the wire types (`ClientMessage`, `VenueMessage`) plus
+- `mogwai-protocol` - the wire types (`Command`, `VenueMessage`) plus
   `control::Divergence`. The single source of truth both ends serialize against;
   it never imports nautilus. Also carries `launch`, the SHIPPED launcher: it
   lives here rather than in `mogwai-adapter` because this workspace's own test
@@ -354,7 +354,7 @@ Test and process rules the arcs paid for, a dozen non-biting tests among them:
 - RUN THE SOCKET SUITES AFTER ANY CHANGE TO THE SERVING PATH. `brokkr check` is
   blind to roughly thirty tests that bind loopback listeners, and a real
   regression shipped through that gap and stayed red across four commits -
-  eviction on the default account closing a client's own second socket, which
+  eviction on the default account closing a consumer's own second socket, which
   only the socket suite surfaced. `brokkr check --gate` is the invocation that
   covers them, and it is the one to run. It was red on master through
   2026-08-16 for a coverage-audit reason that was never a property of this
@@ -376,7 +376,7 @@ Test and process rules the arcs paid for, a dozen non-biting tests among them:
   glance it is indistinguishable from a real regression.
 - AUDIT THE SEAM ITSELF: a test double must be verified against the real
   endpoint's semantics, not against what the test needs. A stub that replays
-  queued responses whatever the client asked for is blind by construction;
+  queued responses whatever the caller asked for is blind by construction;
   serve real semantics and record the requests so tests can assert the
   request sequence too.
 - A test observing only an ERROR cannot distinguish a bound from a check

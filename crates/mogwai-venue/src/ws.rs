@@ -14,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
-use mogwai_protocol::{ClientMessage, CommandClass, VenueMessage, truncate_reason};
+use mogwai_protocol::{Command, CommandClass, VenueMessage, truncate_reason};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
 use crate::{
@@ -24,16 +24,16 @@ use crate::{
     http::{AppState, OrderOutcome, process_order_cmd, resolve_socket_symbol},
 };
 
-/// The upgrade's query string, exactly as the client wrote it.
+/// The upgrade's query string, exactly as the consumer wrote it.
 ///
 /// `deny_unknown_fields` is a WIRE-COMPATIBILITY decision, taken knowingly: a
-/// client that sends a key this carrier does not handle is REFUSED rather than
+/// consumer that sends a key this carrier does not handle is REFUSED rather than
 /// silently served a different river, speed or duration than it asked for. The
 /// price is that ANY unrecognized key is a `400`, including
-/// one an unrelated client, proxy or tracing layer appends, and including a
+/// one an unrelated consumer, proxy or tracing layer appends, and including a
 /// future key added before its handling lands. That is accepted:
 /// accepted-and-ignored is the failure mode this carrier exists to prevent, and
-/// the venue's clients are its own. Relaxing it later is a wire change that owes
+/// the venue's consumers are its own. Relaxing it later is a wire change that owes
 /// its own reasoning, not a tidy-up.
 ///
 /// A repeated `symbol` key is NOT an error - `serde_urlencoded` keeps the last
@@ -41,7 +41,7 @@ use crate::{
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SocketQuery {
-    /// Absent means "the run's boot symbol", which is what every client that
+    /// Absent means "the run's boot symbol", which is what every consumer that
     /// predates this carrier sends.
     #[serde(default)]
     symbol: Option<String>,
@@ -62,11 +62,11 @@ pub(crate) struct SocketQuery {
     #[serde(default)]
     duration_ms: Option<u64>,
     /// The account to trade under. Absent means the venue's default account,
-    /// which exists for the ephemeral single-client venue where naming one
+    /// which exists for the ephemeral single-consumer venue where naming one
     /// would be ceremony - it is NOT a venue-wide account every connection
     /// shares.
     ///
-    /// The id is the CLIENT'S and outlives the connection, so presenting the
+    /// The id is the consumer's and outlives the connection, so presenting the
     /// same one again resumes that ledger. The venue cannot distinguish a
     /// reconnect from a stranger claiming the id and does not try; anyone who
     /// knows an id can claim its account, which is acceptable on a loopback
@@ -74,18 +74,18 @@ pub(crate) struct SocketQuery {
     /// assumed.
     #[serde(default)]
     account: Option<String>,
-    /// The CLIENT presenting the account, so one client's several sockets on
-    /// one ledger are not read as several clients fighting over it.
+    /// The identity this socket presents, so several sockets presenting the
+    /// same value can coexist on one ledger.
     ///
     /// A nautilus host dials `/ws` twice - market data and execution - and both
     /// legs carry the same `account` by construction, so without this the second
     /// dial evicts the first and the host disconnects itself. Sockets sharing a
-    /// session coexist; a socket presenting a different one, or none, is a new
-    /// client and takes the ledger. Absent on both sides is therefore exactly
+    /// session coexist; a socket presenting a different one, or none, takes the
+    /// ledger. Absent on both sides is therefore exactly
     /// the pre-session behaviour.
     ///
-    /// It is the CLIENT'S string and the venue reads nothing into it beyond
-    /// equality: stable across a client's sockets and their redials, fresh in a
+    /// The venue reads nothing into the string beyond equality: it is stable
+    /// across related sockets and their redials, and fresh in a
     /// restarted process. Like the account id it is a bearer token - anyone who
     /// knows the pair can join that ledger rather than displace it - which is
     /// acceptable on a loopback venue and is stated rather than assumed.
@@ -107,10 +107,10 @@ pub(crate) struct SocketSession {
     /// The ledger this connection trades on. Resolved before the upgrade, so a
     /// frame cannot reach a handler before the account it books into exists.
     pub(crate) passenger: Arc<crate::run::Passenger>,
-    /// The client identity this socket presented, kept on the bound lane so a
-    /// later claim on the same account can tell this client's other sockets
+    /// The identity this socket presented, kept on the bound lane so a later
+    /// claim on the same account can tell related sockets
     /// from a stranger's. See `Run::evict_account`.
-    pub(crate) client_session: Option<String>,
+    pub(crate) presented_identity: Option<String>,
     /// This socket's claim to be reading the account, given up when the socket
     /// is done with it. An `Option` so `handle_socket` can give it up the
     /// instant it has released its lane, rather than at the end of its own
@@ -189,11 +189,11 @@ pub(crate) async fn ws_upgrade(
     //
     // SEATED, not merely looked up: claiming an account evicts whoever already
     // holds it, because a ledger is never read from two sockets at once and a
-    // second socket presenting an id is indistinguishable from that client
+    // second socket presenting an id is indistinguishable from the incumbent
     // reconnecting.
     // Bounded and charset-checked before it is stored or compared: it arrives
     // in a URL, is echoed in no frame, and an unbounded one would be per-socket
-    // memory a client sets for free.
+    // memory a consumer sets for free.
     if let Some(session) = query.session.as_deref()
         && let Err(reason) = mogwai_protocol::validate_session_id(session)
     {
@@ -208,7 +208,7 @@ pub(crate) async fn ws_upgrade(
     // refusal this handler can make is decided BEFORE `seat`, because seating
     // closes the incumbent's sockets and, under `reset_account_on_reconnect`,
     // discards its ledger. Refusing after that turned any of these five 400s
-    // into a one-request, unauthenticated way to disconnect a live client and
+    // into a one-request, unauthenticated way to disconnect a live consumer and
     // wipe its position book while never connecting at all -
     // `GET /ws?account=X&speed=NaN` was the cheapest spelling. Eviction is now
     // the LAST thing that happens before the 101.
@@ -241,7 +241,7 @@ pub(crate) async fn ws_upgrade(
     //
     // The boot-time barred set answers the same question for the venue's
     // configured `[balances]`, which is now only what an UNNAMED account opens
-    // with - a client that named its own balances is funded in whatever it said,
+    // with - a consumer that named its own balances is funded in whatever it said,
     // and the venue has no way to know at boot what that will be. So the check
     // moves here for named accounts, where it is still knowable with no order at
     // all and is still a CONFIGURATION error rather than a trading outcome.
@@ -403,13 +403,13 @@ pub(crate) async fn ws_upgrade(
         ticket,
         duration_ms: query.duration_ms,
         passenger,
-        client_session: query.session.clone(),
+        presented_identity: query.session.clone(),
         admission: Some(admission),
         // Before the 101, not inside the spawned handler. See the field.
         alive: state.run.session_guard(),
     };
-    ws.max_message_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
-        .max_frame_size(mogwai_protocol::MAX_CLIENT_MESSAGE_BYTES)
+    ws.max_message_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
+        .max_frame_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
         .on_upgrade(move |socket| handle_socket(socket, state, session))
 }
 
@@ -425,7 +425,7 @@ fn send_admission(lanes: &ExecLanes, msg: VenueMessage) -> Result<(), CloseSpec>
 }
 
 struct QueuedCommand {
-    cmd: ClientMessage,
+    cmd: Command,
     /// The process-wide command slot, deliberately NOT underscore-prefixed:
     /// the dispatcher drops it EXPLICITLY after the command has been acted on,
     /// so an edit that releases it early has to delete a visible `drop`, not
@@ -434,7 +434,7 @@ struct QueuedCommand {
 }
 
 async fn dispatch_command(
-    cmd: ClientMessage,
+    cmd: Command,
     state: &AppState,
     lanes: &ExecLanes,
     symbol: &mogwai_protocol::Symbol,
@@ -466,7 +466,7 @@ async fn dispatch_command(
             // in call order, and the exec pump is one sequential task that sleeps
             // in-line, so it is head-of-line and cannot reorder. A sweep that
             // enqueued a fill for this order first would therefore hand the
-            // client a fill for an order it was never told was accepted.
+            // consumer a fill for an order it was never told was accepted.
             //
             // That does not happen today, and the protection is TIMING rather
             // than design. The sweeper must gather `pending_scans`, WALK THE
@@ -654,7 +654,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
     let lane_id = state.run.bind_lanes(
         lanes.clone(),
         session.passenger.account_id.as_str(),
-        session.client_session.as_deref(),
+        session.presented_identity.as_deref(),
     );
     // ATTACHED from here, which is what un-freezes the account and puts it back
     // in the sweep. Bound AFTER the lane, so anything the resume retires has a
@@ -739,7 +739,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                         }
                     }
                     // A VENUE FAULT, not a divergence and not a refusal the
-                    // client could have planned for: the ring turned over, so
+                    // consumer could have planned for: the ring turned over, so
                     // the venue has lost market data it already promised to
                     // deliver in ascending order. The connection dies rather
                     // than serving past the hole, because a forward-validation
@@ -786,7 +786,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
     // Venue-originated liveness. Survives `StallData` (it is not market data)
     // but not `GoDark` (which gates the writer wholesale), which is exactly the
     // distinction it exists to make observable: a stalled feed and a dead venue
-    // must not look the same to a client.
+    // must not look the same to a consumer.
     let heartbeat = (state.cfg.venue_heartbeat_ms > 0).then(|| {
         let out_tx = out_tx.clone();
         let beat_state = state.clone();
@@ -864,7 +864,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
         );
     } else {
         // THE VENUE'S OWN CLOSE ENDS THIS LOOP, without waiting on the peer.
-        // Every other exit below needs the client to act - its close frame, its
+        // Every other exit below needs the consumer to act - its close frame, its
         // EOF, or the run ending - so an evicted socket whose peer ignores the
         // close frame stayed here, and its `SocketSession` held the account's
         // SEAT on that boat. The connection that evicted it was then refused
@@ -891,7 +891,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                 }
                 message = stream.next() => match message {
                     Some(Ok(Message::Close(_)) | Err(_)) | None => break,
-                    Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
+                    Some(Ok(Message::Text(text))) => match serde_json::from_str::<Command>(&text) {
                         Ok(command) => {
                             let subject = crate::http::admission_subject(&command);
                             let queued = Arc::clone(&state.pending_commands)
@@ -907,11 +907,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                                 }));
                             }
                         }
-                        Err(err) => { drop(send_admission(&lanes, VenueMessage::ProtocolError { reason: truncate_reason(format!("invalid client frame: {err}")), ts_event: sim_now_ns(boat_sim) })); }
+                        Err(err) => { drop(send_admission(&lanes, VenueMessage::ProtocolError { reason: truncate_reason(format!("invalid command frame: {err}")), ts_event: sim_now_ns(boat_sim) })); }
                     },
                     Some(Ok(Message::Binary(_))) => {
                         drop(send_admission(&lanes, VenueMessage::ProtocolError {
-                            reason: "binary client frames are unsupported; send JSON text".into(),
+                            reason: "binary command frames are unsupported; send JSON text".into(),
                             ts_event: sim_now_ns(boat_sim),
                         }));
                     }

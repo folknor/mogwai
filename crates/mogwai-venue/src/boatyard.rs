@@ -33,10 +33,10 @@ pub(crate) struct BoatKey {
 }
 
 /// THE ONE QUANTIZATION. Boarding and looking a cadence up both go through
-/// here, so a client writing `100.0000001` cannot board one boat and then fail
+/// here, so a consumer writing `100.0000001` cannot board one boat and then fail
 /// to find it.
 ///
-/// Micro-multiples, so the key is `Hash` and `Eq` and two clients writing
+/// Micro-multiples, so the key is `Hash` and `Eq` and two consumers writing
 /// `100` and `100.0000001` share a boat. Bounded first: a float cast saturates
 /// rather than wrapping, so an absurd speed would otherwise be silently
 /// REPLACED by a different one and then paced at it.
@@ -69,7 +69,7 @@ impl BoatKey {
         self.speed_micros
     }
 
-    /// The quantized speed, back in the units a client asked in. THE ONE
+    /// The quantized speed, back in the units a consumer asked in. THE ONE
     /// dequantization, so a message naming a sitting cadence and a lookup
     /// matching one cannot disagree about what `2` means.
     pub(crate) fn speed(&self) -> f64 {

@@ -1,4 +1,4 @@
-//! Websocket close semantics, shared by the venue and by every client that
+//! Websocket close semantics, shared by the venue and by every consumer that
 //! reads a close frame.
 //!
 //! THE CLOSE CODE DOES NOT CARRY THE SEMANTIC, and this module exists because
@@ -10,14 +10,14 @@
 //! non-meaning share two bytes.
 //!
 //! So the REASON string is the discriminator, and it is a protocol contract
-//! rather than a log line: the venue writes these exact strings and a client
+//! rather than a log line: the venue writes these exact strings and a consumer
 //! classifies against them. `VenueMessage::RunComplete` remains the primary
 //! completion signal; the close is its socket-level fallback for a reader that
 //! loses the final text frame while the venue drains.
 //!
 //! A reason this module does not recognize is NOT terminal. That is the safe
 //! default in both directions: an unrecognized graceful close is a transport
-//! event a client may redial through, where treating it as completion would
+//! event a consumer may redial through, where treating it as completion would
 //! silently end a run that is still going.
 
 /// WS 1000, "Normal Closure".
@@ -35,7 +35,7 @@ pub const NORMAL: u16 = 1000;
 /// AN OVER-LONG REASON IS NOT A COSMETIC DEFECT HERE, which is why the cap
 /// lives beside `classify` rather than at a call site. A conforming peer must
 /// fail the connection on an oversized control frame, so the close that carries
-/// the discriminator either never leaves or never arrives - and a client that
+/// the discriminator either never leaves or never arrives - and a consumer that
 /// sees an abrupt EOF instead of a reasoned close classifies nothing, which is
 /// exactly the eviction-redial loop this module exists to prevent. The venue's
 /// own eviction reason reaches 157 bytes at `MAX_ACCOUNT_ID_LEN`.
@@ -70,22 +70,22 @@ pub const RUN_COMPLETE: &str = "run complete";
 /// duration rather than resume anything.
 ///
 /// THE VENUE SENDS A `RunComplete` TEXT FRAME AHEAD OF THIS CLOSE, the same as
-/// it does for a genuinely finished run, so a client that classifies on the
+/// it does for a genuinely finished run, so a consumer that classifies on the
 /// text frame will call this a run completion and never look at the close. This
-/// reason is therefore a REFINEMENT available to a client that reads the close,
-/// not a signal it is guaranteed to act on. Both readings stop the client,
+/// reason is therefore a REFINEMENT available to a consumer that reads the close,
+/// not a signal it is guaranteed to act on. Both readings stop the consumer,
 /// which is why the imprecision is tolerable; nothing may be built on this arm
 /// being reached.
 pub const DURATION_COMPLETE: &str = "passenger duration complete";
 
 /// Prefix on the eviction close's reason. The remainder names the account.
 ///
-/// Terminal for this client, and terminal for a DIFFERENT reason than
-/// completion: nothing failed and nothing finished, but a client that redialled
+/// Terminal for this consumer, and terminal for a DIFFERENT reason than
+/// completion: nothing failed and nothing finished, but a consumer that redialled
 /// here would evict whatever evicted it, forever.
 pub const EVICTED_PREFIX: &str = "evicted: ";
 
-/// What a graceful close means to a client that must decide whether to redial.
+/// What a graceful close means to a consumer that must decide whether to redial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terminal {
     /// The run is over. Stop.
@@ -98,7 +98,7 @@ pub enum Terminal {
 
 /// Classifies a close frame. `None` means "not a terminal this protocol
 /// defines", which includes every non-1000 code and every 1000 whose reason
-/// this venue did not write - redial policy for those belongs to the client.
+/// this venue did not write - redial policy for those belongs to the consumer.
 #[must_use]
 pub fn classify(code: u16, reason: &str) -> Option<Terminal> {
     if code != NORMAL {

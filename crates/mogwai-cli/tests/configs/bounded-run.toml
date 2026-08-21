@@ -7,10 +7,10 @@
 # Those gates give the venue a `--duration` and then wait on a socket for the
 # `RunComplete` the venue writes at its deadline. On an UNPACED venue - which is
 # every `speed = 0.0` fixture beside this one - that announcement is queued
-# BEHIND the whole market backlog the run generated flat out, and the client has
+# BEHIND the whole market backlog the run generated flat out, and the consumer has
 # to drain the backlog before it can see the frame. Measured on fast.toml: over
 # 1.4 MILLION frames on one socket in the 2 s of a declared run, against a
-# client draining about 111,000 a second, so clearing it takes essentially the
+# consumer draining about 111,000 a second, so clearing it takes essentially the
 # test's entire wall budget - and under load it does not clear at all. The test
 # then reports that the run never announced its completion, which is a WRONG
 # ANSWER about the venue produced by a fixture choice.

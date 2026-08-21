@@ -38,7 +38,7 @@ pub struct ReadyRecord {
     /// rivers. Every river is servable back to `data_origin_ns`. Materializing
     /// that span is a changing, per-river latency property and is not reported.
     pub warmup_ns: u64,
-    /// Whether a client returning with an account id it has already traded is
+    /// Whether a consumer returning with an account id it has already traded is
     /// handed a CLEAN ledger instead of its own.
     ///
     /// FALSE means accounts PERSIST across reconnection, which is the default

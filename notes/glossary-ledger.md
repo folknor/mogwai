@@ -97,9 +97,9 @@ ruling, both found in the adapter.
 | the driving program | pervasive in prose, ~99 sites in the durable corpus alone | becomes `consumer` |
 | nautilus's adapter objects | `MogwaiDataClient`, `MogwaiExecutionClient` | inherited, quarantined |
 | the submitting side's id namespace | `client_order_id` | inherited from nautilus and FIX |
-| the adapter's own inbound havoc | `ClientHavoc`, `HavocSpec.client`, `HavocFilter::from_client` | not the consumer sense; `inbound_havoc` |
-| any consumer-supplied echoed id | `MAX_CLIENT_ID_LEN`, `truncate_client_id` | `MAX_ECHOED_ID_LEN` |
-| **the socket leg** | `tracing::warn!(client = label)` where label is `"data"`/`"exec"` | new; resolves to `socket`, which `lifecycle.rs` already uses for the same value |
+| the adapter's own inbound havoc | `InboundHavoc`, `HavocSpec.inbound`, `HavocFilter::from_inbound` | not the consumer sense; `inbound_havoc` |
+| any consumer-supplied echoed id | `MAX_ECHOED_ID_LEN`, `truncate_echoed_id` | `MAX_ECHOED_ID_LEN` |
+| **the socket leg** | `tracing::warn!(socket = label)` where label is `"data"`/`"exec"` | resolved to `socket`, which `lifecycle.rs` already used for the same value |
 | **the transport generation** | adapter reconnect vocabulary | new; a real distinct concept, see D14 |
 | one socket's view | `reference/clock.md`'s backlog argument, several `architecture.md` sites | `callsign` or "connection", not `consumer` - a consumer may hold several sockets with different backlogs |
 

@@ -20,7 +20,7 @@ use std::{
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use mogwai_protocol::{
-    ClientMessage, FillSnapshot, HavocSpec, InstrumentDef, OrderStatusInfo, OrderStatusSnapshot,
+    Command, FillSnapshot, HavocSpec, InstrumentDef, OrderStatusInfo, OrderStatusSnapshot,
     SimClock, Symbol, VenueMessage,
 };
 use nautilus_common::{
@@ -59,9 +59,9 @@ use tokio::task::JoinHandle;
 use crate::{
     MOGWAI_VENUE, MogwaiExecClientConfig,
     client::shared::{
-        HavocDelivery, HavocFilter, abort_tasks, client_havoc, conn_havoc, enqueue_havoc,
-        fetch_clock_or_identity, flush_havoc_into_pump, instrument_def, join_url, lock_recover,
-        now_unix_nanos, request_timeout_secs, run_identity_check, seed_instruments,
+        HavocDelivery, HavocFilter, abort_tasks, conn_havoc, enqueue_havoc,
+        fetch_clock_or_identity, flush_havoc_into_pump, inbound_havoc, instrument_def, join_url,
+        lock_recover, now_unix_nanos, request_timeout_secs, run_identity_check, seed_instruments,
         spawn_latency_pump, symbol_from_instrument, track_task, wait_connected,
     },
     convert,
@@ -1077,7 +1077,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                 return Err(anyhow::Error::new(err).context("initial account snapshot"));
             }
         }
-        let client_havoc = client_havoc(&self.config.havoc);
+        let inbound_havoc = inbound_havoc(&self.config.havoc);
 
         // `ws_url` already carries the `/ws` path.
         let ws_url = self.config.ws_url();
@@ -1086,8 +1086,8 @@ impl ExecutionClient for MogwaiExecutionClient {
         let undelivered_ctx = self.exec_context();
 
         let connected = Arc::clone(&self.connected);
-        let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
-            &client_havoc,
+        let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_inbound(
+            &inbound_havoc,
         )));
         // Exec drain pipelines the per-message havoc latency through a pump
         // rather than sleeping inline in the reader loop, which capped throughput
@@ -1135,7 +1135,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                 WsConnectionConfig {
                     ws_url: task_ws_url,
                     conn,
-                    seed: client_havoc.seed,
+                    seed: inbound_havoc.seed,
                     connected,
                     sim,
                     label: "exec",
@@ -1393,7 +1393,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         Ok(())
     }
 
-    /// Order status reports from VENUE TRUTH, not the client-side mirror.
+    /// Order status reports from VENUE TRUTH, not the adapter-side mirror.
     ///
     /// The mirror is populated by the same lifecycle stream havoc corrupts,
     /// so a report built from it can only repeat the client's (possibly
@@ -1402,7 +1402,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// report confidently confirms the stale open order. Querying the venue
     /// over the wire makes this generator a second, independent witness: the
     /// reply content is always a truthful engine book read (honest-content
-    /// contract on `ClientMessage::QueryOrders`), while havoc may still
+    /// contract on `Command::QueryOrders`), while havoc may still
     /// delay or drop its DELIVERY - which surfaces here as a query timeout,
     /// exercising the consumer's own timeout path.
     async fn generate_order_status_reports(
@@ -1507,7 +1507,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// Position status reports from VENUE TRUTH, completing the set alongside
     /// `generate_order_status_reports` and `generate_fill_reports`.
     ///
-    /// These used to be rebuilt from the client-side account-snapshot mirror,
+    /// These used to be rebuilt from the adapter-side account-snapshot mirror,
     /// which is populated by the same pushed `AccountState` stream havoc
     /// corrupts - and mogwai ships a divergence, `DropNextAccountUpdate`, whose
     /// entire purpose is swallowing one of those pushes. A mirror-built report
@@ -1749,13 +1749,13 @@ enum ExecWsCommand {
 /// reach the socket - that is what lets it report the command back if the
 /// socket dies first. The clone is one order's worth of `String`s and
 /// `Decimal`s, on the order-entry path rather than the tick path.
-fn exec_command_to_client_message(cmd: &ExecWsCommand) -> ClientMessage {
+fn exec_command_to_client_message(cmd: &ExecWsCommand) -> Command {
     match cmd {
-        ExecWsCommand::Submit(order) => ClientMessage::SubmitOrder(order.clone()),
-        ExecWsCommand::SubmitGroup(orders) => ClientMessage::SubmitOrderGroup {
+        ExecWsCommand::Submit(order) => Command::SubmitOrder(order.clone()),
+        ExecWsCommand::SubmitGroup(orders) => Command::SubmitOrderGroup {
             orders: orders.clone(),
         },
-        ExecWsCommand::Cancel { client_order_id } => ClientMessage::CancelOrder {
+        ExecWsCommand::Cancel { client_order_id } => Command::CancelOrder {
             client_order_id: client_order_id.clone(),
         },
         ExecWsCommand::Modify {
@@ -1763,7 +1763,7 @@ fn exec_command_to_client_message(cmd: &ExecWsCommand) -> ClientMessage {
             price,
             quantity,
             trigger_price,
-        } => ClientMessage::ModifyOrder {
+        } => Command::ModifyOrder {
             client_order_id: client_order_id.clone(),
             price: *price,
             quantity: *quantity,
@@ -1773,7 +1773,7 @@ fn exec_command_to_client_message(cmd: &ExecWsCommand) -> ClientMessage {
             request_id,
             client_order_id,
             open_only,
-        } => ClientMessage::QueryOrders {
+        } => Command::QueryOrders {
             request_id: request_id.clone(),
             client_order_id: client_order_id.clone(),
             open_only: *open_only,
@@ -1781,7 +1781,7 @@ fn exec_command_to_client_message(cmd: &ExecWsCommand) -> ClientMessage {
         ExecWsCommand::QueryFills {
             request_id,
             client_order_id,
-        } => ClientMessage::QueryFills {
+        } => Command::QueryFills {
             request_id: request_id.clone(),
             client_order_id: client_order_id.clone(),
         },
@@ -2037,7 +2037,7 @@ struct ExecState {
     /// There is deliberately no position mirror behind this watermark any more.
     /// One existed to serve `generate_position_status_reports`, and it was that
     /// generator's only reader; since the generator now pulls venue truth from
-    /// `GET /account`, a client-side copy could only ever be a second, staler
+    /// `GET /account`, a adapter-side copy could only ever be a second, staler
     /// answer to a question the venue already answers - and mogwai's own
     /// `DropNextAccountUpdate` divergence exists to make exactly that copy
     /// wrong.
@@ -2688,7 +2688,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
         VenueMessage::OrderFilled(fill) => handle_order_filled(&fill, ctx),
         // Venue-truth query replies: resolve the waiter registered under the
         // echoed correlation id. A reply with no waiter is a straggler whose
-        // requester already timed out (client havoc delayed it past the
+        // requester already timed out (inbound havoc delayed it past the
         // request timeout) or a duplicate - log it and move on; the content
         // was truthful either way, only the delivery was havoc'd.
         VenueMessage::OrderStatusSnapshot(snapshot) => {

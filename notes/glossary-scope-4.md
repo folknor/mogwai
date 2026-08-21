@@ -167,7 +167,7 @@ funds, and what a query reports.
 | term | site | kind | what it means there | reach | direction | verdict |
 |---|---|---|---|---|---|---|
 | - | `apply_linkage_after_fill`, `release_child`, `held_children_of`, `reap_children_of`, `close_out`, `close_unrested`, `note_absent_sibling`, `has_filled` | methods | release, cancel-siblings, shrink-siblings, reap-orphans | cross | 3 | **[extends P1's linkage cluster]** Pass 1 asked the glossary for Linkage, Group, Sibling, Parent/Child and the atomic-admission guarantee. This crate adds four more verbs the wire never sees: RELEASE (a held child becoming live, emitting NO frame), REAP (cancelling orphaned children), CLOSE-OUT, and the `has_filled` predicate that decides which. "Release emits no wire frame" is a consumer-visible fact - a client watching for a status change on its bracket's exit legs will wait forever - and it is in a doc comment. |
-| - | `on_submit_group`'s two-pass structure: "dry pass", "pass one", "pass two", "the closing linkage pass", `dry_refusal`, `report_group_member_refusal` | methods, doc prose | the atomic-admission mechanism | cross | 3 | The best-documented code in the crate and entirely absent from any durable document. The DISCLOSED FUNDS CARVE-OUT - a group member CAN be refused after admission when an earlier member's fill spent the balance - is a hole in the atomicity guarantee that a consumer must know about, and it is stated in a doc comment here and one on `ClientMessage::SubmitOrderGroup`. That is the contract, and it lives on the two ends of a seam rather than in the middle. |
+| - | `on_submit_group`'s two-pass structure: "dry pass", "pass one", "pass two", "the closing linkage pass", `dry_refusal`, `report_group_member_refusal` | methods, doc prose | the atomic-admission mechanism | cross | 3 | The best-documented code in the crate and entirely absent from any durable document. The DISCLOSED FUNDS CARVE-OUT - a group member CAN be refused after admission when an earlier member's fill spent the balance - is a hole in the atomicity guarantee that a consumer must know about, and it is stated in a doc comment here and one on `Command::SubmitOrderGroup`. That is the contract, and it lives on the two ends of a seam rather than in the middle. |
 | - | `MAX_LINKED_ORDERS` depth bound: "`validate_submit` refusing a child of a child" | doc prose | why the reap worklist terminates | cross | 3 | A termination argument for a `while let` loop that depends on a rule enforced in a different function three hundred lines away. True today. It is the "check the callee's unreachable!s" shape: a future relaxation of the child-of-a-child rule makes this loop unbounded and nothing says so at the loop. |
 
 ### The refusal vocabulary, engine half
@@ -209,7 +209,7 @@ funds, and what a query reports.
 
 | term | site | source |
 |---|---|---|
-| `AccountState`, `Balance`, `Position`, `OrderFilled`, `SubmitOrder`, `ClientMessage`, `ServerMessage`, `WireOrderStatus`, `OmsType`, `InstrumentDef`, `Symbol`, `ClientOrderId`, `VenueOrderId`, `SimClock`, `Hit`, `ScanKind`, `Contingency`, `LiquiditySide`, `TimeInForce`, `OrderType`, `Side` | throughout | `mogwai-protocol` / nautilus; passes 1-3's quarantine |
+| `AccountState`, `Balance`, `Position`, `OrderFilled`, `SubmitOrder`, `Command`, `ServerMessage`, `WireOrderStatus`, `OmsType`, `InstrumentDef`, `Symbol`, `ClientOrderId`, `VenueOrderId`, `SimClock`, `Hit`, `ScanKind`, `Contingency`, `LiquiditySide`, `TimeInForce`, `OrderType`, `Side` | throughout | `mogwai-protocol` / nautilus; passes 1-3's quarantine |
 | `OmsType::Netting` / `Hedging` and the whole `position_id` keying | `position_key_id`, `apply_position` | nautilus |
 | maintenance margin, initial margin, notional, VWAP, mark, unrealized/realized P and L, commission, maker/taker, drawdown, equity, liquidation, flatten, settlement, T+N, round lot, Reg-T, funding rate, basis points, coin-margined / inverse | throughout | universal derivatives and accounting vocabulary |
 | "post-only", "reduce-only", "fill-or-kill", "immediate-or-cancel", "good-til-date", "day order", bracket / OCO / OTO / OUO | `orders.rs` | FIX / industry |
@@ -232,7 +232,7 @@ clamped arithmetic)." runs straight into "The account's NET quantity in one
 symbol ..." with no separator, so the whole `free_balance` doc is attached to
 `net_position`, and `free_balance` - the function every funds check calls - has
 NO doc at all. This is the identical defect pass 3 found twice in `run.rs`
-(`evict_account`/`has_client_on` and `session_guard`/`fault_venue`). Three
+(`evict_account`/`has_matching_identity_on` and `session_guard`/`fault_venue`). Three
 instances now, in two crates, all reading like a misplaced merge, and rustdoc
 renders every one of them happily. Nothing detects it. Worth a lint pass over
 the whole workspace, not three individual fixes.

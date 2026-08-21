@@ -54,7 +54,7 @@ impl Engine {
     /// The rule has two halves and both are load-bearing. A batch that MOVED
     /// THE LEDGER owes a snapshot, and that snapshot is exactly what
     /// `DropNextAccountUpdate` exists to hide - so an armed drop takes it and
-    /// the client is left to notice. A batch that moved NOTHING (a bare
+    /// the consumer is left to notice. A batch that moved NOTHING (a bare
     /// acceptance, a held child taking no reservation) still reports the
     /// account, because there is nothing to hide and spending the arm on it
     /// would burn a divergence the operator armed against a real fill.
@@ -62,7 +62,7 @@ impl Engine {
     /// `apply_divergences` carries the same meaning it does everywhere else in
     /// this file: FALSE for a VENUE-ORIGINATED batch - a margin or risk breach
     /// closing a position at the mark - which reports the account but must
-    /// never spend an arm the client aimed at its own next fill. Passing it is
+    /// never spend an arm the consumer aimed at its own next fill. Passing it is
     /// what makes that structural rather than incidental; see `on_cancel`,
     /// which states the same rule for the cancel path.
     ///
@@ -115,7 +115,7 @@ impl Engine {
     /// precisely because `validate_submit` is a pure read.
     ///
     /// PASS TWO submits each member through the ordinary path, in the order the
-    /// client sent them, at ONE instant against ONE market reading. So no tape
+    /// consumer sent them, at ONE instant against ONE market reading. So no tape
     /// advances between members and no member meets a market a sibling did not.
     ///
     /// THEN THE CLOSING LINKAGE PASS, which is what makes the guarantee bite
@@ -196,7 +196,7 @@ impl Engine {
 
         // PASS ONE. Note it validates each member against the book as it is
         // NOW, not as it will be after earlier members fill - which is why the
-        // funds carve-out on `ClientMessage::SubmitOrderGroup` exists and is
+        // funds carve-out on `Command::SubmitOrderGroup` exists and is
         // stated there rather than papered over here.
         for order in orders {
             if let Some(reason) = self.dry_refusal(order, ts, orders) {
@@ -549,7 +549,7 @@ impl Engine {
         };
         // THE LIMIT HALF OF THE NAME. The band's adverse slip is drawn against
         // the last print and can carry a market-to-limit past its own stated
-        // price; the limit is the one thing the client asked the venue to
+        // price; the limit is the one thing the consumer asked the venue to
         // respect, so it bounds the fill rather than the other way round. A
         // plain market order has no such bound and is left alone.
         let fill_px = if order.order_type == OrderType::MarketToLimit {
@@ -808,7 +808,7 @@ impl Engine {
             // reduce-only market order, and a position that went flat between
             // the breach walk and this submit caps it at zero. Hence
             // `apply_divergences` rather than `true` - the venue's own flatten
-            // must not spend the client's arm here any more than it does at the
+            // must not spend the consumer's arm here any more than it does at the
             // fill snapshot below.
             self.push_account_snapshot(&mut out, ts, apply_divergences);
             return out;
@@ -983,7 +983,7 @@ impl Engine {
     /// `closed_symbol` names an instrument whose SESSION JUST CLOSED, which the
     /// caller detects by asking the calendar whether the span it swept crossed
     /// from open to shut. A day order's expiry is that instant rather than
-    /// anything the client stated, and an instrument with no calendar never
+    /// anything the consumer stated, and an instrument with no calendar never
     /// supplies one - so a day order on a 24/7 symbol rests like a `Gtc`, which
     /// is the honest answer: with no session to end there is no instant to
     /// expire at, and inventing one (midnight UTC, say) would expire orders at a
@@ -1016,7 +1016,7 @@ impl Engine {
             };
             let order = self.open[pos].clone();
             let reaped = self.close_out(pos, &order, WireOrderStatus::Expired, ts);
-            // EXPIRED, not Canceled. Nobody cancelled this order: the client
+            // EXPIRED, not Canceled. Nobody cancelled this order: the consumer
             // stated its lifetime at submit and the clock reached the end of
             // it. Reporting a cancel says an actor pulled the order, which is
             // a different fact about the venue and the one a host would act on
@@ -1046,7 +1046,7 @@ impl Engine {
             // was the last unconditional push outside the two marked
             // exemptions: an operator could arm the arm, watch a GTD order
             // expire, and be handed the fresh balances anyway. TRUE, though the
-            // clock rather than a client drives it: the arm is armed against an
+            // clock rather than a consumer drives it: the arm is armed against an
             // order LEAVING THE BOOK, which is exactly what an expiry is, and
             // `an_expiry_obeys_drop_next_account_update` pins that.
             self.push_account_snapshot(&mut out, ts, true);
@@ -1135,7 +1135,7 @@ impl Engine {
                 // that overflows or drives the limit non-positive leaves the
                 // trigger where it was rather than moving one of the two: a
                 // trigger that advanced without its limit would rest at a price
-                // the client never agreed to.
+                // the consumer never agreed to.
                 let trailing_limit = if order.submit.order_type == OrderType::TrailingStopLimit {
                     match order.submit.limit_offset.and_then(|gap| {
                         OrderType::trailing_limit_px(order.submit.side, candidate, gap)
@@ -1486,7 +1486,7 @@ impl Engine {
                         sibling.ts_last = ts;
                         // A shrink is an amend the venue performed, so it
                         // invalidates any walk planned against the old size for
-                        // the same reason a client's amend does.
+                        // the same reason a consumer's amend does.
                         sibling.revision = sibling.revision.saturating_add(1);
                         VenueMessage::OrderUpdated {
                             client_order_id: sibling.submit.client_order_id.clone(),
@@ -1516,8 +1516,8 @@ impl Engine {
     /// sibling that has not been ADMITTED yet, which is what a per-leg
     /// submission of a bracket produces: the rule adjusts nothing, and the
     /// sibling then arrives at full size with the position already open. That
-    /// second case is what `ClientMessage::SubmitOrderGroup` exists to make
-    /// unreachable, and this line is what makes it visible when a client takes
+    /// second case is what `Command::SubmitOrderGroup` exists to make
+    /// unreachable, and this line is what makes it visible when a consumer takes
     /// the per-leg route anyway.
     ///
     /// It is a log rather than a refusal because a rule cannot tell the two
@@ -1605,7 +1605,7 @@ impl Engine {
     ///
     /// THE SET THIS COVERS, stated exactly, because a comment claiming a wider
     /// set than it has is how the rule got lost the first time. Every terminal
-    /// path that closes an order the CLIENT submitted routes through here or
+    /// path that closes an order the consumer submitted routes through here or
     /// through `close_unrested` - including the several whose reap is provably
     /// a no-op because the order filled, since a site that skips the call on
     /// the strength of an early return three hundred lines up is maintained by
@@ -2056,7 +2056,7 @@ impl Engine {
         ts: u64,
         apply_divergences: bool,
     ) -> Vec<VenueMessage> {
-        // `FeeSurcharge` is a client-armed divergence, so a venue-originated
+        // `FeeSurcharge` is a consumer-armed divergence, so a venue-originated
         // order (liquidation) does not pay it. The window is read purely from
         // `ts`; booking a later fill must not erase its answer for an earlier
         // replayed timestamp.
@@ -2316,7 +2316,7 @@ impl Engine {
         // THE SAME PREDICATE THE WIRE GATE READS, IN THE SAME POSITION. This
         // was a hand-rolled `Limit | StopLimit | LimitIfTouched` and it had
         // drifted: the wire admitted a post-only `TrailingStopLimit` and this
-        // then rejected it, so a client was told its order was on its way and
+        // then rejected it, so a consumer was told its order was on its way and
         // then that it was not. `on_trigger` has always enforced post-only on
         // that type, so the list was the only thing refusing it.
         //
@@ -2325,7 +2325,7 @@ impl Engine {
         // once - a post-only `StopMarket` marked `Ioc` - and unifying the
         // PREDICATE while leaving the two gates to reach it in opposite orders
         // reinstates the same defect one layer up: two gates, one order, two
-        // different reasons, and a client that still cannot tell which of them
+        // different reasons, and a consumer that still cannot tell which of them
         // spoke. Post-only is checked FIRST here because `validate_submit_order`
         // checks it first. Pinned by
         // `post_only_is_admitted_by_one_rule_at_the_wire_and_in_the_engine`.
@@ -2342,7 +2342,7 @@ impl Engine {
         // child and an `Ioc`/`Fok` child for exactly these reasons, and
         // `validate_submit_order` runs it on every wire submit - the standalone
         // `SubmitOrder` frame and every member of a `SubmitOrderGroup` alike -
-        // so no client-reachable route delivers one here. Restating it in this
+        // so no consumer-reachable route delivers one here. Restating it in this
         // function would be a second home for a rule that has one, which is the
         // defect the reap consolidation above just closed. The engine's own
         // exposure to a caller that skips the protocol validator is the whole
@@ -2555,7 +2555,7 @@ impl Engine {
             qty,
             fill_px,
             liquidity_side,
-            // A venue-originated order pays no client-armed `FeeSurcharge`,
+            // A venue-originated order pays no consumer-armed `FeeSurcharge`,
             // so checking it against one could cancel a forced liquidation
             // and leave the breached position open.
             if apply_divergences {
@@ -2651,7 +2651,7 @@ impl Engine {
     /// as it is for every venue-originated submit.
     ///
     /// `liquidate_all`, `retire_off_river` and `cancel_unreadable_orders` all
-    /// flatten the book through here, and an arm the client aimed at its own
+    /// flatten the book through here, and an arm the consumer aimed at its own
     /// next cancel must not be spent on one of those. `RejectNextCancel` was
     /// the serious half: the first order a risk-breach liquidation tried to
     /// pull came back `OrderCancelRejected` AND STAYED RESTING, so the
@@ -2665,10 +2665,10 @@ impl Engine {
     /// false the `DropNextAccountUpdate` check is not merely unspent, it is not
     /// consulted, so a flatten emits one `AccountState` per cancelled order
     /// unconditionally. That is the same stream a run with no arm produces, and
-    /// it is the right one: a snapshot suppressed here would leave the client's
-    /// ledger disagreeing with the venue's over a transition the client did not
+    /// it is the right one: a snapshot suppressed here would leave the consumer's
+    /// ledger disagreeing with the venue's over a transition the consumer did not
     /// ask for. They stay one flag because both effects answer the same
-    /// question - is this cancel the client's, or the venue's.
+    /// question - is this cancel the consumer's, or the venue's.
     pub(crate) fn on_cancel(
         &mut self,
         client_order_id: ClientOrderId,
@@ -2678,7 +2678,7 @@ impl Engine {
         // Divergence: refuse a cancel the venue COULD have honoured, leaving the
         // order resting. Checked before the book is touched, so the refusal
         // really does leave everything where it was - the whole point is that
-        // the client's model and the book disagree afterwards.
+        // the consumer's model and the book disagree afterwards.
         //
         // Only when the order EXISTS: refusing a cancel for an unknown or
         // already-terminal id would spend the arm on a rejection that was going
@@ -2722,7 +2722,7 @@ impl Engine {
             // A cancel takes the order OFF the book and gives its hold back, so
             // the snapshot it owes is exactly the account movement
             // `DropNextAccountUpdate` exists to hide - suppressing it leaves the
-            // client overstating `locked`, which is the drift the arm is for.
+            // consumer overstating `locked`, which is the drift the arm is for.
             // The arm is spent on transitions, not on fills specifically; the
             // one carve-out is an order merely COMING TO REST, which `on_submit`
             // holds open for the fill the author is aiming at.
@@ -3189,7 +3189,7 @@ impl Engine {
                 // still waiting on its parent into a live, scannable limit -
                 // taking a reservation it had deliberately not taken and
                 // letting it fill before its parent ever executed. That is
-                // one-triggers-the-other defeated by a client amend. The amend
+                // one-triggers-the-other defeated by a consumer amend. The amend
                 // moves `submit.price`, which is the price the child will rest
                 // at when its parent releases it and re-draws.
                 if !matches!(order.resting, Resting::Conditional { .. } | Resting::Held) {
@@ -3249,9 +3249,9 @@ impl Engine {
 }
 
 /// FNV-1a over the run's fill seed and the order's identity. Deliberately a
-/// pure function of client-supplied fields plus `fill_seed`, which means a
-/// client that dislikes its trigger can cancel and resubmit under a fresh
-/// `client_order_id` to re-roll it. For a test venue whose clients are
+/// pure function of consumer-supplied fields plus `fill_seed`, which means a
+/// consumer that dislikes its trigger can cancel and resubmit under a fresh
+/// `client_order_id` to re-roll it. For a test venue whose consumers are
 /// strategies rather than adversaries that is accepted; it is written down here
 /// so nobody later reports it as a leak.
 fn draw_key(fill_seed: u64, order: &SubmitOrder, price: Decimal, band_draw: u32) -> u64 {
@@ -3336,8 +3336,8 @@ pub(super) fn draw_trigger(
 /// The fill price for a MARKET order: the last print slipped adversely by a
 /// draw from the same band and the same key, with `band_draw = 0`.
 ///
-/// The client's stated price is ignored for PRICING - answering "what price did
-/// this trade at" with the client's own number is the same defect the limit
+/// The consumer's stated price is ignored for PRICING - answering "what price did
+/// this trade at" with the consumer's own number is the same defect the limit
 /// band removes - but it is still validated and still keys the draw, because
 /// the wire contract requires it. The magnitude here is borrowed rather than
 /// fitted: it is the limit band's multiplier, so it introduces no unmeasured

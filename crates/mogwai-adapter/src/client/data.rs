@@ -48,12 +48,12 @@ use tokio::task::JoinHandle;
 use crate::{
     MOGWAI_VENUE, MogwaiDataClientConfig,
     client::shared::{
-        HavocDelivery, HavocFilter, abort_tasks, cache_instruments, capped_limit, client_havoc,
-        conn_havoc, date_to_unix_nanos, emit_seeded_instruments, enqueue_havoc, ensure_instrument,
+        HavocDelivery, HavocFilter, abort_tasks, cache_instruments, capped_limit, conn_havoc,
+        date_to_unix_nanos, emit_seeded_instruments, enqueue_havoc, ensure_instrument,
         ensure_on_tape, fetch_clock_or_identity, fetch_instruments, flush_havoc_into_pump,
-        instrument_any_or_warn, instrument_def, join_url, lock_recover, now_unix_nanos,
-        run_identity_check, seed_instruments, spawn_latency_pump, symbol_from_instrument,
-        track_task, wait_connected, warn_missing_instrument_once,
+        inbound_havoc, instrument_any_or_warn, instrument_def, join_url, lock_recover,
+        now_unix_nanos, run_identity_check, seed_instruments, spawn_latency_pump,
+        symbol_from_instrument, track_task, wait_connected, warn_missing_instrument_once,
     },
     convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
@@ -364,8 +364,8 @@ impl DataClient for MogwaiDataClient {
         // here; both transport branches move/clone it afterwards.
         emit_seeded_instruments(&sink, &self.instruments, sim);
         // Venue-side divergences are execution-owned. The data client accepts
-        // the same config object but only applies its client-side transport half.
-        let client_havoc = client_havoc(&self.config.havoc);
+        // the same config object but only applies its inbound transport half.
+        let inbound_havoc = inbound_havoc(&self.config.havoc);
 
         // `ws_url` already carries the `/ws` path.
         let ws_url = self.config.ws_url();
@@ -376,8 +376,8 @@ impl DataClient for MogwaiDataClient {
         let subs = Arc::clone(&self.subs);
         let quote_delivery = Arc::clone(&self.quote_delivery);
         let bars = Arc::clone(&self.bars);
-        let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_client(
-            &client_havoc,
+        let havoc_filter = Arc::new(tokio::sync::Mutex::new(HavocFilter::from_inbound(
+            &inbound_havoc,
         )));
         // The market-data drain no longer sleeps the per-message havoc latency
         // inline in the reader loop (which capped throughput at ~33 msg/s and
@@ -439,7 +439,7 @@ impl DataClient for MogwaiDataClient {
                 WsConnectionConfig {
                     ws_url: task_ws_url,
                     conn,
-                    seed: client_havoc.seed,
+                    seed: inbound_havoc.seed,
                     connected,
                     sim,
                     label: "data",

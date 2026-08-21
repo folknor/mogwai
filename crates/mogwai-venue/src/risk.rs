@@ -96,7 +96,7 @@ impl RiskLedger {
     }
 
     /// The position cap, if the policy sets one. Refused at entry, not
-    /// evaluated on the mark: an oversized submit is a client error.
+    /// evaluated on the mark: an oversized submit is a consumer error.
     pub(crate) fn max_position(&self) -> Option<Decimal> {
         self.policy.max_position.as_ref().map(|cap| cap.quantity)
     }

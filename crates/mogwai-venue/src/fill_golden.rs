@@ -182,7 +182,7 @@ use std::path::PathBuf;
 use mogwai_data::TickEvent;
 use mogwai_engine::{Engine, EngineConfig, ScanResult};
 use mogwai_protocol::{
-    AccountId, ClientMessage, OrderType, RunSeeds, Side, SubmitOrder, TimeInForce, VenueMessage,
+    AccountId, Command, OrderType, RunSeeds, Side, SubmitOrder, TimeInForce, VenueMessage,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -349,8 +349,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
             // path, refusals included: a refused reading is passed on as `None`
             // rather than papered over with a synthetic zero band.
             let reading = fills::read_market(SYMBOL, ts, profiles, band_vol_mult, MAX_TICKS);
-            let submitted =
-                engine.process_with_market(ClientMessage::SubmitOrder(order), ts, reading);
+            let submitted = engine.process_with_market(Command::SubmitOrder(order), ts, reading);
             record_fills(&submitted, &meta, &mut samples);
         }
         let scans = engine.pending_scans();

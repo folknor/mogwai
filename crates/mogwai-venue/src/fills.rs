@@ -204,7 +204,7 @@ fn history_or_warn(
 /// history and trigger decisions agree.
 ///
 /// Composed from the same `Rivers::history_source` the `/trades` cursor pages
-/// through, so the prints deciding a fill are the prints the client can fetch
+/// through, so the prints deciding a fill are the prints the consumer can fetch
 /// and check. `None` when the positioning seek could not reach the earliest
 /// bound; the caller then leaves every frontier unadvanced rather than treating
 /// an unreachable span as a span nothing triggered in.
@@ -582,7 +582,7 @@ mod tests {
         // unconfigured symbol is unservable" - it is servable now. This fixture
         // is built through `from_profiles`, which carries NO config, so the
         // resolver here is deliberately non-total and refuses. What is pinned
-        // is that a test rig does not silently acquire client-driven
+        // is that a test rig does not silently acquire consumer-driven
         // resolution; the total path is exercised in `source.rs`.
         let rivers = super::test_rivers_with_a_second_symbol();
         assert!(source::build_history_source("BTCUSDT", Some(TEST_ORIGIN), &rivers).is_some());

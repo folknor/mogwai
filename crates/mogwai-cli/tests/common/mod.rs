@@ -10,7 +10,7 @@
 //! That is deliberate and is the reason the launcher lives in `mogwai-protocol`
 //! rather than in `mogwai-adapter`: the venue's own gates cannot depend on the
 //! adapter (it would pull nautilus into the venue's test graph, and the adapter
-//! is the client of the thing under test), so a launcher shipped from there
+//! is the consumer of the thing under test), so a launcher shipped from there
 //! would leave mogwai re-deriving the contract by hand forever. Here, a change
 //! to the handshake breaks these tests immediately instead of breaking a
 //! consumer later.
@@ -208,7 +208,7 @@ pub struct Venue {
     ///
     /// A VENUE REPORTS NO SYMBOL, and that is a ruling rather than an omission:
     /// under the boatyard model a venue serves many rivers, so a symbol on the
-    /// readiness record could only lie about which one a client gets. The
+    /// readiness record could only lie about which one a consumer gets. The
     /// harness therefore resolves the boot river the way `serve.rs` does -
     /// through the venue's own profile resolution, not the raw config key, which
     /// diverges from the served spelling under case-insensitive preset matching.
@@ -498,7 +498,7 @@ impl CapturedLog {
 /// THIS RECOMPUTES THE VENUE'S OWN ANSWER, and that is deliberate rather than an
 /// oversight to fix by putting the symbol back on the readiness record. Dropping
 /// it from the record was a ruling: under the boatyard model a venue serves many
-/// rivers, so a record naming one could only lie about which river a client
+/// rivers, so a record naming one could only lie about which river a consumer
 /// gets, and `ReadyRecord::VERSION` 6 was the designed loud break for consumers
 /// still reading it. This resolution is what that landing put here in its place,
 /// and it must go through the profile resolution rather than the raw config key,
@@ -612,7 +612,7 @@ pub fn band_config() -> String {
 /// Paced because those gates wait on a socket for the `RunComplete` the venue
 /// writes at its deadline, and on an unpaced venue that frame is queued behind
 /// the entire backlog the run generated flat out - over 1.4 million frames in
-/// the 2 s of a declared run, measured - which the client then cannot drain
+/// the 2 s of a declared run, measured - which the consumer then cannot drain
 /// inside its wall budget. The file itself carries the reasoning.
 pub fn bounded_run_config() -> String {
     format!(
@@ -718,7 +718,7 @@ pub fn scratch(name: &str) -> Scratch {
 }
 
 /// One blocking HTTP GET, returning the status code and the body. Hand-rolled
-/// rather than pulling an HTTP client into the dev-dependencies: the venue's
+/// rather than pulling an HTTP consumer into the dev-dependencies: the venue's
 /// request surface is four routes and a status line.
 pub fn http_get(base: &str, path: &str) -> (u16, String) {
     let authority = base.trim_start_matches("http://");

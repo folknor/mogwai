@@ -22,8 +22,8 @@ use anyhow::{Context, bail};
 use clap::{Args, ValueEnum};
 use mogwai_data::{BarAcc, TickEvent, TickSource, fold_trade};
 use mogwai_protocol::{
-    AggressorSide, ClientHavoc, ConnHavoc, HavocSpec, MarketRegime, TradeTick,
-    validate_client_havoc, validate_conn_havoc, validate_divergence, validate_market_regime,
+    AggressorSide, ConnHavoc, HavocSpec, InboundHavoc, MarketRegime, TradeTick,
+    validate_conn_havoc, validate_divergence, validate_inbound_havoc, validate_market_regime,
 };
 use rust_decimal::Decimal;
 
@@ -119,7 +119,7 @@ pub(crate) struct GenArgs {
     regime: Option<String>,
     /// Read a full HavocSpec from this JSON file and apply its `data` market
     /// regime. The whole spec is validated (a file the venue would reject is
-    /// rejected here), but the client, conn, and venue surfaces do not affect an
+    /// rejected here), but the inbound, conn, and venue surfaces do not affect an
     /// offline tape dump and are noted on stderr. Mutually exclusive with
     /// --regime.
     #[arg(long, value_name = "PATH", conflicts_with = "regime")]
@@ -477,8 +477,8 @@ fn resolve_regime(args: &GenArgs) -> anyhow::Result<Option<MarketRegime>> {
 /// over the text (no filesystem), so tests drive it directly.
 fn resolve_havoc_regime(text: &str) -> anyhow::Result<Option<MarketRegime>> {
     let spec: HavocSpec = serde_json::from_str(text).context("parsing havoc JSON")?;
-    validate_client_havoc(&spec.client)
-        .map_err(|e| anyhow::anyhow!("invalid client havoc: {e}"))?;
+    validate_inbound_havoc(&spec.inbound)
+        .map_err(|e| anyhow::anyhow!("invalid inbound havoc: {e}"))?;
     validate_conn_havoc(&spec.conn).map_err(|e| anyhow::anyhow!("invalid conn havoc: {e}"))?;
     for div in &spec.venue {
         validate_divergence(div).map_err(|e| anyhow::anyhow!("invalid venue divergence: {e}"))?;
@@ -489,7 +489,7 @@ fn resolve_havoc_regime(text: &str) -> anyhow::Result<Option<MarketRegime>> {
     if havoc_has_offline_inapplicable_surfaces(&spec) {
         eprintln!(
             "note: --havoc applies only the data (market regime) surface offline; \
-             the client, conn, and venue surfaces are ignored"
+             the inbound, conn, and venue surfaces are ignored"
         );
     }
     Ok(spec.data)
@@ -497,7 +497,7 @@ fn resolve_havoc_regime(text: &str) -> anyhow::Result<Option<MarketRegime>> {
 
 /// True when a loaded HavocSpec carries a surface a tape dump cannot honor.
 fn havoc_has_offline_inapplicable_surfaces(spec: &HavocSpec) -> bool {
-    spec.client != ClientHavoc::default()
+    spec.inbound != InboundHavoc::default()
         || spec.conn != ConnHavoc::default()
         || !spec.venue.is_empty()
 }
@@ -1203,8 +1203,8 @@ mod tests {
             other => panic!("expected LiquidityDrought, got {other:?}"),
         }
 
-        let no_data =
-            resolve_havoc_regime(r#"{"client":{"drop_prob":0.5}}"#).expect("valid client, no data");
+        let no_data = resolve_havoc_regime(r#"{"inbound":{"drop_prob":0.5}}"#)
+            .expect("valid inbound havoc, no data");
         assert_eq!(no_data, None);
 
         assert!(
@@ -1214,7 +1214,7 @@ mod tests {
         );
 
         assert!(
-            resolve_havoc_regime(r#"{"client":{"drop_prob":7.0}}"#).is_err(),
+            resolve_havoc_regime(r#"{"inbound":{"drop_prob":7.0}}"#).is_err(),
             "whole-spec validation must reject an invalid inapplicable surface"
         );
 
@@ -1260,14 +1260,14 @@ mod tests {
             &HavocSpec::default()
         ));
 
-        let client_armed = HavocSpec {
-            client: ClientHavoc {
+        let inbound_armed = HavocSpec {
+            inbound: InboundHavoc {
                 drop_prob: 0.5,
                 ..Default::default()
             },
             ..Default::default()
         };
-        assert!(havoc_has_offline_inapplicable_surfaces(&client_armed));
+        assert!(havoc_has_offline_inapplicable_surfaces(&inbound_armed));
 
         let venue_armed = HavocSpec {
             venue: vec![
