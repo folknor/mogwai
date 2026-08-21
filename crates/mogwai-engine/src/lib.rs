@@ -74,12 +74,12 @@ pub enum Resting {
     Inert,
     /// An order-list CHILD waiting for its parent to fill. Accepted, on the
     /// book, answerable to `QueryOrders` - and inert in every other respect: it
-    /// is never scanned and it holds no reservation, because an order that
+    /// is never scanned and it places no hold, because an order that
     /// cannot execute must not tie up funds the parent's own fill will need.
     ///
     /// A fill of the parent promotes it to the state it would have been given at
     /// submit - `Limit` with a freshly drawn trigger, or `Conditional` - and it
-    /// takes its reservation then. That promotion is the whole of
+    /// places its hold then. That promotion is the whole of
     /// one-triggers-the-other.
     Held,
 }
@@ -171,7 +171,7 @@ pub const DEFAULT_LIQUIDATION_BAND_TICKS: u32 = 200;
 /// THE CLIENT ORDER ID PREFIXES THE VENUE MINTS FOR ITSELF, and therefore the
 /// ones a consumer may not submit under. Both are venue-originated reduce-only
 /// closes: `LQ-` is a margin-maintenance liquidation, `RISK-` an account-policy
-/// flatten. The reservation is not cosmetic - a consumer that claims one of these
+/// flatten. The restriction is not cosmetic - a consumer that claims one of these
 /// ids burns it in `seen_client_order_ids`, and the forced close that later
 /// mints the same id is refused as a duplicate, so pre-claiming ids is a way to
 /// make the venue unable to liquidate you. `RISK-` was minted without being
@@ -481,13 +481,13 @@ impl<'a> IntoIterator for &'a OpenBook {
 pub struct Engine {
     account_id: AccountId,
     open: OpenBook,
-    /// Aggregate resting-order reservations by currency. Position maintenance
+    /// Aggregate resting-order holds by currency. Position maintenance
     /// is folded separately because position count is independent of book
     /// depth; the hot funds path must not walk every resting order.
-    order_locked: HashMap<String, Decimal>,
+    order_holds: HashMap<String, Decimal>,
     /// A saturated aggregate cannot be decremented soundly. The next removal
     /// rebuilds the cache from the authoritative orders instead.
-    order_locked_clipped: HashSet<String>,
+    order_holds_clipped: HashSet<String>,
     account: Account,
     /// Whether submits and amends are checked against free balance. Set once
     /// at construction: a FUNDED account (non-empty seed) is an honest cash
@@ -503,7 +503,7 @@ pub struct Engine {
     enforce_funds: bool,
     /// `InstrumentDef` (from `mogwai-protocol`) is used directly as the engine's
     /// instrument representation - it carries exactly the base/quote and
-    /// precision/increment fields the fill and reservation path needs, so the
+    /// precision/increment fields the fill and hold path needs, so the
     /// engine keeps no parallel struct that could drift from the wire type.
     instruments: HashMap<Symbol, InstrumentDef>,
     /// Every ACCEPTED client order id, mapped to the venue order id it was
@@ -579,9 +579,9 @@ impl Engine {
     pub fn set_margin_policy(&mut self, symbol: Symbol, policy: MarginPolicy) {
         self.margin.insert(symbol, policy);
         // Public callers may replace policy after orders already rest. Their
-        // holds still derive from `order_reservation`; rebuild the aggregate
+        // holds still derive from `order_hold`; rebuild the aggregate
         // rather than teaching this setter a second margin formula.
-        self.rebuild_order_locked_excluding(None);
+        self.rebuild_order_holds_excluding(None);
     }
 
     pub fn set_fee_schedule(&mut self, symbol: Symbol, schedule: FeeSchedule) {
@@ -951,22 +951,22 @@ impl Engine {
     ///
     /// `maintenance` is what the open positions require; `initial` is what the
     /// resting non-reduce-only orders require, taken from each order's OWN
-    /// reservation. Reduce-only orders reserve nothing and appear here as
+    /// hold. Reduce-only orders place no hold and appear here as
     /// nothing.
     ///
     /// WHAT RECONCILES, EXACTLY. Every `initial` row here is a settlement-
-    /// currency term `locked_balances` also folds, computed by the same
+    /// currency term `held_balances` also folds, computed by the same
     /// expression, so no `initial` row can disagree with the hold it reports.
     /// The reported `locked` is nonetheless a WIDER sum than
     /// `sum(initial) + sum(maintenance)`, and the difference is not a defect on
     /// either side - it is three deliberate carve-outs:
     ///
-    /// - `locked_balances` also folds `account.unsettled` sale proceeds, which
+    /// - `held_balances` also folds `account.unsettled` sale proceeds, which
     ///   are not collateral and have no margin row;
     /// - it also folds holds on symbols carrying no margin policy, and on
     ///   unmarked classes, which this function skips because a spot symbol posts
     ///   no collateral;
-    /// - a `Reservation::Base` hold - the spot sell's base-currency hold - is
+    /// - a `Hold::Base` hold - the spot sell's base-currency hold - is
     ///   skipped here, because a margin row is denominated in the settlement
     ///   currency and a base-currency amount cannot be added to it.
     ///
@@ -975,14 +975,14 @@ impl Engine {
     /// unsettled, and it is a `<=` in general. Do not read the tests that pin
     /// the equality as pinning more than that case.
     ///
-    /// BOTH HALVES READ THE DERIVATIONS `locked_balances` READS rather than
+    /// BOTH HALVES READ THE DERIVATIONS `held_balances` READS rather than
     /// restating them.
     /// This function used to multiply `maintenance_per_contract` by a contract
     /// count and `initial_per_contract` by a leaves quantity - the raw fields,
     /// not `policy.maintenance` and `policy.initial` - so under
     /// `MarginBasis::Notional`, where those fields are FRACTIONS, a 40 percent
     /// requirement on two contracts was reported as eighty cents while
-    /// `locked_balances` correctly reserved the notional fraction. The reported
+    /// `held_balances` correctly held the notional fraction. The reported
     /// `margins` and the reported `locked` then contradicted each other on every
     /// notional-basis account, and the invariant this comment asserts was simply
     /// false. It is the same defect `apply_margin_breaches` was already fixed
@@ -995,7 +995,7 @@ impl Engine {
                 continue;
             };
             // Only a MARKED class posts maintenance collateral, the same gate
-            // `locked_balances` applies: a margin policy attached to a spot
+            // `held_balances` applies: a margin policy attached to a spot
             // symbol must move no number on either side of the reconciliation.
             let Some(def) = self
                 .instruments
@@ -1021,12 +1021,12 @@ impl Engine {
             else {
                 continue;
             };
-            // THE ORDER'S OWN RESERVATION, not a second derivation of it. This
+            // THE ORDER'S OWN HOLD, not a second derivation of it. This
             // is what makes the stated reconciliation true for reduce-only
             // orders, held order-list children and the equity sell's
-            // already-covered portion alike: each of those reserves nothing, so
+            // already-covered portion alike: each of those places no hold, so
             // each posts nothing, and neither rule has to be repeated here.
-            let Some((currency, amount, _)) = self.order_reservation_entry(order) else {
+            let Some((currency, amount, _)) = self.order_hold_entry(order) else {
                 continue;
             };
             if currency != def.class.settlement_currency() {
@@ -1753,8 +1753,8 @@ impl Engine {
         Self {
             account_id: config.account_id,
             open: OpenBook::default(),
-            order_locked: HashMap::new(),
-            order_locked_clipped: HashSet::new(),
+            order_holds: HashMap::new(),
+            order_holds_clipped: HashSet::new(),
             enforce_funds,
             account: Account {
                 balances: config.balances,
@@ -1843,7 +1843,7 @@ impl Engine {
     ) -> Vec<VenueMessage> {
         self.event_sim = sim;
         if cfg!(debug_assertions) {
-            self.reconcile_order_locked();
+            self.reconcile_order_holds();
         }
         let events = match msg {
             Command::SubmitOrder(order) => self.on_submit(order, ts, reading),
@@ -1872,7 +1872,7 @@ impl Engine {
             ))],
         };
         if cfg!(debug_assertions) {
-            self.reconcile_order_locked();
+            self.reconcile_order_holds();
         }
         events
     }
@@ -2037,7 +2037,7 @@ impl Engine {
     }
 
     /// The control-plane out-of-band cancel (`CancelOpenOrderSilently`):
-    /// remove a RESTING order from the book and free its reservation,
+    /// remove a RESTING order from the book and free its hold,
     /// emitting no lifecycle event - the fault class where the venue
     /// cancelled and the consumer never heard. The truth store records the
     /// order `Canceled` at `ts`, so a later `QueryOrders` reports it
@@ -2102,7 +2102,7 @@ impl Engine {
     ///
     /// - A `Resting::Held` order-list child CANNOT EXECUTE until its parent
     ///   fills, so it contributes nothing. This is the same rule
-    ///   `order_reservation_entry` applies when it declines to hold funds
+    ///   `order_hold_entry` applies when it declines to hold funds
     ///   against a held child, and for the same reason; a bracket's two exit
     ///   legs must not be counted against the entry that has to fill first.
     /// - MUTUALLY EXCLUSIVE LEGS CONTRIBUTE THEIR MAX, NOT THEIR SUM. An `Oco`
@@ -3120,7 +3120,7 @@ mod tests {
     fn a_reduce_only_order_rests_while_flat_on_a_funded_account() {
         // The admission exemption: a protective sell-stop placed while flat
         // holds no base, so the funded-sell check must not refuse it and it must
-        // reserve nothing - otherwise the shape this whole surface exists to
+        // place no hold - otherwise the shape this whole surface exists to
         // serve is unreachable on the only account mode that checks anything.
         let mut e = funded(1_000);
         let mut stop = stop_order("protect", Side::Sell, OrderType::StopMarket, 90, None);
@@ -3179,9 +3179,9 @@ mod tests {
     }
 
     #[test]
-    fn an_untriggered_buy_stop_reserves_against_its_trigger_price() {
-        // A stop-market has no price, so the reservation is the only number it
-        // has. Under-reserved by exactly the slippage, which the fill-time
+    fn an_untriggered_buy_stop_holds_against_its_trigger_price() {
+        // A stop-market has no price, so the hold is the only number it
+        // has. Under-held by exactly the slippage, which the fill-time
         // re-check is what covers.
         let mut e = funded(1_000);
         let mut stop = stop_order("hold", Side::Buy, OrderType::StopMarket, 100, None);
@@ -3193,7 +3193,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fully_funded_buy_stop_does_not_fail_its_own_trigger_on_its_own_reservation() {
+    fn a_fully_funded_buy_stop_does_not_fail_its_own_trigger_on_its_own_hold() {
         // The double-count: at trigger time the order IS resting, so its own
         // hold has already left `free_balance`. Comparing the notional against
         // that would fail a fully funded order at zero slippage.
@@ -3481,7 +3481,7 @@ mod tests {
     #[test]
     fn a_price_amend_on_a_stop_market_is_refused() {
         // It carries no price by construction, so an amend must not be able to
-        // give it one - `locked_balances` and the RNG key both read `price` in
+        // give it one - `held_balances` and the RNG key both read `price` in
         // preference to the trigger.
         let mut e = banded(23);
         e.process(
@@ -3731,7 +3731,7 @@ mod tests {
     }
 
     #[test]
-    fn a_resting_futures_order_reserves_margin_not_notional() {
+    fn a_resting_futures_order_holds_margin_not_notional() {
         for side in [Side::Buy, Side::Sell] {
             let mut engine = futures_engine(50_000, BreachAction::Refuse);
             let mut order = mnq_order("REST", side, 1, 21_000);
@@ -3815,7 +3815,7 @@ mod tests {
     }
 
     #[test]
-    fn two_reduce_only_legs_reserve_nothing_against_one_position() {
+    fn two_reduce_only_legs_place_no_hold_against_one_position() {
         let mut engine = futures_engine(10_000, BreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         for (id, price) in [("STOP", 20_000), ("TARGET", 22_000)] {
@@ -4030,8 +4030,8 @@ mod tests {
     }
 
     #[test]
-    fn a_spot_symbol_carrying_a_margin_policy_still_reserves_notional() {
-        // `held_for` and `locked_balances` derive from one `order_reservation`,
+    fn a_spot_symbol_carrying_a_margin_policy_still_holds_notional() {
+        // `hold_for` and `held_balances` derive from one `order_hold`,
         // so a margin policy attached to a SPOT symbol - which venue config
         // refuses at boot, but the public `set_margin_policy` cannot - changes
         // neither the account's hold nor the add-back the funds check makes
@@ -4879,9 +4879,9 @@ mod tests {
     }
 
     #[test]
-    fn funded_account_counts_reservations_and_gates_amends() {
-        // A resting buy's reservation reduces free balance for later submits,
-        // and an amend that grows the reservation past free-plus-own-hold is
+    fn funded_account_counts_holds_and_gates_amends() {
+        // A resting buy's hold reduces free balance for later submits,
+        // and an amend that grows the hold past free-plus-own-hold is
         // refused - the venue must never advertise free < 0 in its own
         // snapshot.
         let mut e = funded(1_000);
@@ -4948,15 +4948,15 @@ mod tests {
     // release test sweep, where nothing panics by design.
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "resting-order reservation cache drifted from the book")]
-    fn reservation_cache_reconciliation_catches_drift_before_a_funded_command() {
+    #[should_panic(expected = "resting-order hold cache drifted from the book")]
+    fn hold_cache_reconciliation_catches_drift_before_a_funded_command() {
         let mut e = funded(1_000);
         e.arm(Divergence::PartialFillNext {
             client_order_id: "DRIFT".into(),
             fraction: Decimal::new(5, 1),
         });
         e.process(Command::SubmitOrder(order("DRIFT", 4)), 1);
-        e.corrupt_order_locked_for_test("USDT", Decimal::ZERO);
+        e.corrupt_order_holds_for_test("USDT", Decimal::ZERO);
 
         e.process(
             Command::QueryFills {
@@ -4968,7 +4968,7 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_initial_margin_policy_cannot_drift_the_reservation_cache() {
+    fn a_zero_initial_margin_policy_cannot_drift_the_hold_cache() {
         // A zero hold must be NO cache entry, not an entry whose amount is
         // zero: the reconciliation fold and the incremental remove would
         // otherwise disagree about whether the currency KEY exists while
@@ -4998,12 +4998,12 @@ mod tests {
         // a release sweep - and by the time both cancels have run the
         // incremental remove has deleted the key in the broken build too, so
         // the end state cannot tell the two apart either. With the zero-hold
-        // filter in `order_reservation_entry` removed, each submit inserts a
+        // filter in `order_hold_entry` removed, each submit inserts a
         // zero-amount entry here and this fires in BOTH profiles.
         assert!(
-            engine.order_locked.is_empty(),
+            engine.order_holds.is_empty(),
             "a zero hold must be NO cache key, not a key holding zero: {:?}",
-            engine.order_locked
+            engine.order_holds
         );
         engine.process(
             Command::CancelOrder {
@@ -5234,7 +5234,7 @@ mod tests {
         // funds it had no right to would have left that reading green, because
         // there was nothing there to debit. With a stated 10,000 USDT the
         // assertion is a real before/after on a non-empty ledger, and `locked`
-        // is the field the reservation path would move.
+        // is the field the hold path would move.
         const FUNDS: i64 = 10_000;
         for (order, expected) in cases {
             let mut e = funded(FUNDS);
@@ -5246,7 +5246,7 @@ mod tests {
             assert_eq!(
                 (usdt.total, usdt.free, usdt.locked),
                 (Decimal::from(FUNDS), Decimal::from(FUNDS), Decimal::ZERO),
-                "a refusal reserved or spent funds: {expected}"
+                "a refusal held or spent funds: {expected}"
             );
             // BOTH HALVES OF THE OLD CLAIM ARE KEPT. `funded` seeds exactly one
             // currency, so reading the USDT row alone would no longer see a
@@ -5757,7 +5757,7 @@ mod tests {
 
         // GTC: accepted, NO fill event emitted, and the order rests fully open
         // with the whole lot as leaves. The snapshot shows only the locked
-        // quote reservation - nothing filled, so no base/position leg.
+        // quote hold - nothing filled, so no base/position leg.
         let mut e = Engine::new();
         e.arm(Divergence::PartialFillNext {
             client_order_id: "GTC".into(),
@@ -5940,13 +5940,13 @@ mod tests {
     }
 
     #[test]
-    fn resting_reservations_saturate_locked_instead_of_panicking() {
-        // Two resting buys whose SUMMED reservations (`leaves_qty * price`,
+    fn resting_holds_saturate_locked_instead_of_panicking() {
+        // Two resting buys whose SUMMED holds (`leaves_qty * price`,
         // each individually within range and `checked_mul`-approved at
         // submit) exceed `Decimal::MAX`. A tiny armed partial (1e-9 of 7e20
         // = 7e11, still on the 1e-8 grid) leaves almost the whole quantity
         // resting, so each order locks just under 7e28 of quote. Before the
-        // clamped helpers the second snapshot panicked in `locked_balances`'
+        // clamped helpers the second snapshot panicked in `held_balances`'
         // `+=` accumulation; the `free = total - locked` subtraction then
         // also needs clamping (small negative total minus a boundary lock).
         let qty: Decimal = "700000000000000000000".parse().unwrap();
@@ -6040,7 +6040,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_frees_reservation_and_emits_account_state() {
+    fn cancel_frees_hold_and_emits_account_state() {
         let mut e = Engine::new();
         e.arm(Divergence::PartialFillNext {
             client_order_id: "O1".into(),
@@ -7650,11 +7650,11 @@ mod tests {
                     && matches!(order.resting, Resting::Held)),
             "the child rests held"
         );
-        let locked_while_held = e.snapshot(2);
+        let snapshot_while_held = e.snapshot(2);
         assert_eq!(
-            balance(&locked_while_held, "BTC").locked,
+            balance(&snapshot_while_held, "BTC").locked,
             Decimal::ZERO,
-            "a held sell child reserves no base currency"
+            "a held sell child places no base-currency hold"
         );
 
         let scans = e.pending_scans();
@@ -7675,7 +7675,7 @@ mod tests {
         assert_eq!(
             balance(&e.snapshot(5), "BTC").locked,
             Decimal::ONE,
-            "and it takes its reservation at release"
+            "and it takes its hold at release"
         );
     }
 
@@ -7752,7 +7752,7 @@ mod tests {
     ///
     /// `Resting::Held` is not `Resting::Conditional`, so the amend's promotion
     /// guard used to let it through: the child became a live scannable limit,
-    /// took a reservation it had deliberately not taken, and could fill before
+    /// took a hold it had deliberately not taken, and could fill before
     /// its parent ever executed - one-triggers-the-other defeated by an amend.
     #[test]
     fn a_price_amend_does_not_release_a_held_child() {
@@ -8086,7 +8086,7 @@ mod tests {
         );
     }
 
-    /// The depth rule, which is what makes a cancel's byte reservation
+    /// The depth rule, which is what makes a cancel's byte budget
     /// computable: one generation, never a chain.
     #[test]
     fn a_child_may_not_itself_be_a_parent() {
@@ -8995,7 +8995,7 @@ mod tests {
     }
 
     #[test]
-    fn modify_price_reprices_resting_reservation() {
+    fn modify_price_reprices_resting_hold() {
         let mut e = Engine::new();
         e.arm(Divergence::PartialFillNext {
             client_order_id: "O1".into(),
@@ -9429,7 +9429,7 @@ mod tests {
             .expect("resting order cancels");
 
         assert!(e.open_orders().is_empty(), "the book no longer holds R1");
-        // The reservation is freed: only the filled half's spend remains.
+        // The hold is freed: only the filled half's spend remains.
         let state = e.account_snapshot(8);
         let usdt = balance(&state, "USDT");
         assert_eq!(usdt.locked, Decimal::ZERO);
@@ -9489,7 +9489,7 @@ mod tests {
     }
 
     #[test]
-    fn worst_case_reservation_covers_actual_output() {
+    fn worst_case_byte_budget_covers_actual_output() {
         // The sizing model's claim - `worst_case_output_bytes` DOMINATES what
         // `process` really produces - checked against a matrix of books crossed
         // with every command class, including the divergence-armed worst cases
@@ -9501,7 +9501,7 @@ mod tests {
         //
         // THIS TEST IS DELIBERATELY ONE-SIDED, and that is a ruling rather than
         // an omission. An `actual <= bound` assertion is also satisfied by a
-        // derivation that over-reserves wildly, and over-reservation is not
+        // derivation that over-reserves wildly, and over-budgeting is not
         // free - so every bound `worst_case_output_bytes` is BUILT from carries
         // a two-sided bracket (`bound < 2 * actual` against its maximal
         // fixture) in `mogwai_protocol::sizing`'s own tests. A ceiling HERE
@@ -9685,7 +9685,7 @@ mod tests {
             // A GROUP is the one command whose output scales with the command
             // rather than with the book, so its bound is the one most easily
             // written a factor too small - and a single-submit-sized
-            // reservation would be under by the group's size. Marketable legs,
+            // byte budget would be under by the group's size. Marketable legs,
             // so every member really fills and really snapshots.
             (
                 "a full-size marketable group on a fresh book",
@@ -9736,7 +9736,7 @@ mod tests {
             for (ts, cmd) in commands.into_iter().enumerate() {
                 // The shape is read exactly where the real caller reads it -
                 // immediately before processing, under the same lock - so it
-                // cannot drift between the reservation and the production.
+                // cannot drift between the byte budget and the production.
                 let shape = engine.book_shape();
                 let bound = mogwai_protocol::sizing::worst_case_output_bytes(&cmd, &shape);
                 let output = engine.process(cmd, ts as u64);
@@ -9750,18 +9750,18 @@ mod tests {
                     .sum();
                 assert!(
                     actual <= bound,
-                    "{label}: produced {actual} bytes against a {bound} byte reservation"
+                    "{label}: produced {actual} bytes against a {bound} byte budget"
                 );
             }
         }
     }
 
-    /// The sweep-side half of the reservation claim, which `process`-shaped
+    /// The sweep-side half of the byte-budget claim, which `process`-shaped
     /// cases cannot reach: a liquidation cascade emits order frames NO consumer
     /// order paid for, so `emitted` alone under-reserves it and `originated`
     /// is what covers the gap.
     #[test]
-    fn worst_case_reservation_covers_a_liquidation_cascade() {
+    fn worst_case_byte_budget_covers_a_liquidation_cascade() {
         let mut engine = futures_engine(3_000, BreachAction::Liquidate);
         engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
         for index in 1..=2 {
@@ -9793,12 +9793,12 @@ mod tests {
             .sum();
         assert!(
             actual <= bound,
-            "a cascade produced {actual} bytes against a {bound} byte reservation"
+            "a cascade produced {actual} bytes against a {bound} byte budget"
         );
     }
 
     #[test]
-    fn worst_case_reservation_covers_an_arrival_triggered_conditional() {
+    fn worst_case_byte_budget_covers_an_arrival_triggered_conditional() {
         // The widest CONDITIONAL arrival, which the matrix above cannot express
         // because it drives `process` with no market reading and a stop needs
         // one to fire on arrival: accepted, triggered, the duplicated fill, the
@@ -9849,12 +9849,12 @@ mod tests {
             .sum();
         assert!(
             actual <= bound,
-            "produced {actual} bytes against a {bound} byte reservation"
+            "produced {actual} bytes against a {bound} byte budget"
         );
     }
 
     #[test]
-    fn swept_fill_reservation_covers_a_multi_pair_sweep_batch() {
+    fn swept_fill_byte_budget_covers_a_multi_pair_sweep_batch() {
         // THREE distinct pairs, none previously held: a single-pair batch cannot
         // distinguish per-batch from per-order account widening and would pass
         // against an under-reserving bound. Every fill duplicated and every id
@@ -9913,12 +9913,12 @@ mod tests {
             .sum();
         assert!(
             actual <= bound,
-            "a three-pair sweep produced {actual} bytes against a {bound} byte reservation"
+            "a three-pair sweep produced {actual} bytes against a {bound} byte budget"
         );
     }
 
     #[test]
-    fn swept_reservation_covers_a_trigger_that_fills_duplicates_and_cancels() {
+    fn swept_byte_budget_covers_a_trigger_that_fills_duplicates_and_cancels() {
         // The widest SWEPT shape for one order: `OrderTriggered`, the
         // duplicated fill, the fill, and the cancel that closes the reduce-only
         // remainder the position cap clamped. Four order events, which is why
@@ -9950,7 +9950,7 @@ mod tests {
             .sum();
         assert!(
             actual <= bound,
-            "produced {actual} bytes against a {bound} byte reservation"
+            "produced {actual} bytes against a {bound} byte budget"
         );
     }
 
@@ -9959,7 +9959,7 @@ mod tests {
         // The sharpest hole the reviews found: a pass in which a stop-limit
         // triggers and RESTS books no fill, so a fill-keyed `emitted` would be
         // zero and the `OrderTriggered` frame would be written against a
-        // zero-order reservation.
+        // zero-order byte budget.
         let mut e = banded(32);
         e.process(
             Command::SubmitOrder(stop_order(
@@ -10429,7 +10429,7 @@ mod tests {
 
     /// EVERY PREFIX THE VENUE MINTS IS RESERVED, not just the first one.
     ///
-    /// The reservation is not cosmetic: a consumer that claims one of these ids
+    /// The restriction is not cosmetic: a consumer that claims one of these ids
     /// burns it in `seen_client_order_ids`, so the forced close that later mints
     /// the same id is refused as a duplicate and the venue cannot liquidate the
     /// account that pre-claimed it. `RISK-`, which `liquidate_all` mints, was
@@ -10626,7 +10626,7 @@ mod tests {
     }
 
     /// The `DropNextAccountUpdate` carve-out that survives the widening: an
-    /// order COMING TO REST reserves funds, but must not spend an arm the
+    /// order COMING TO REST places a hold, but must not spend an arm the
     /// author pointed at the fill it has not had yet.
     #[test]
     fn a_resting_acceptance_leaves_drop_next_account_update_armed() {
@@ -10826,7 +10826,7 @@ mod tests {
         assert!(matches!(kept_fees.taker, FeeRate::BasisPoints { rate } if rate == Decimal::ONE));
     }
 
-    // --- The P and L, margin and reservation cluster --------------------------
+    // --- The P and L, margin and hold cluster --------------------------
 
     /// One inverse contract worth 100 quote units, settling in the base asset.
     fn inverse_engine() -> Engine {
@@ -10909,7 +10909,7 @@ mod tests {
     }
 
     /// `margin_requirement`'s doc says its rows sum to exactly what
-    /// `locked_balances` reserves. Under a NOTIONAL basis it multiplied the raw
+    /// `held_balances` holds. Under a NOTIONAL basis it multiplied the raw
     /// fraction by a contract count instead of asking the policy, so a Reg-T
     /// account's reported `margins` said 37.50 while its reported `locked` said
     /// 3,750 - the wire contradicting itself on every leveraged account. The
@@ -10939,7 +10939,7 @@ mod tests {
             Decimal::from(3_750),
             "a quarter of 150 shares at 100, not a quarter of 150 contracts"
         );
-        let locked = state
+        let held = state
             .balances
             .iter()
             .find(|balance| balance.currency == "USD")
@@ -10947,7 +10947,7 @@ mod tests {
             .locked;
         assert_eq!(
             margin.initial.saturating_add(margin.maintenance),
-            locked,
+            held,
             "the reported margin must sum to the reported locked"
         );
     }
@@ -10967,13 +10967,13 @@ mod tests {
         engine
     }
 
-    /// `order_reservation` took a `price` argument and ignored it, reaching back
+    /// `order_hold` took a `price` argument and ignored it, reaching back
     /// into `submit.price` - which a `StopMarket` does not have. Under a
     /// notional basis that made its requirement `initial(qty, 0)`, so a resting
     /// stop held NO collateral at all until it triggered, while the caller had
     /// already resolved the trigger fallback the branch threw away.
     #[test]
-    fn a_resting_stop_market_reserves_against_its_trigger() {
+    fn a_resting_stop_market_holds_against_its_trigger() {
         let mut e = leveraged_futures(200_000);
         let mut stop = mnq_order("S1", Side::Buy, 1, 21_000);
         stop.order_type = OrderType::StopMarket;
@@ -10993,7 +10993,7 @@ mod tests {
                 .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "{out:?}"
         );
-        let locked = e
+        let held = e
             .account_snapshot(2)
             .balances
             .iter()
@@ -11002,7 +11002,7 @@ mod tests {
             .locked;
         // One contract at 21,000 with a multiplier of two is 42,000 of
         // notional; a tenth of that is 4,200. Reading `submit.price` gave zero.
-        assert_eq!(locked, Decimal::from(4_200));
+        assert_eq!(held, Decimal::from(4_200));
     }
 
     /// `on_modify`'s futures branch priced the AMENDED requirement at the
@@ -11177,7 +11177,7 @@ mod tests {
     }
 
     /// A `Resting::Held` order-list child cannot execute until its parent fills,
-    /// which is exactly why `order_reservation_entry` holds no funds against
+    /// which is exactly why `order_hold_entry` holds no funds against
     /// one. The worst-fill-order accounting has to apply the SAME rule, or a
     /// bracket's held exit legs count as working shorts against an entry that
     /// has not filled.
@@ -11404,10 +11404,10 @@ mod tests {
         );
     }
 
-    /// `order_reservation_entry` declines a `Resting::Held` child before it
+    /// `order_hold_entry` declines a `Resting::Held` child before it
     /// computes anything, so the venue takes NO hold against a bracket's
     /// unreleased exit leg. `on_modify` reached past that home into
-    /// `order_reservation` for both sides of its funds comparison, so amending
+    /// `order_hold` for both sides of its funds comparison, so amending
     /// such a child was judged against a hold the venue would never take, and
     /// an amend the account could plainly afford (it costs nothing) was refused
     /// for funds.

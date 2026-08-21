@@ -55,7 +55,7 @@ impl Engine {
     /// THE LEDGER owes a snapshot, and that snapshot is exactly what
     /// `DropNextAccountUpdate` exists to hide - so an armed drop takes it and
     /// the consumer is left to notice. A batch that moved NOTHING (a bare
-    /// acceptance, a held child taking no reservation) still reports the
+    /// acceptance, a held child taking no hold) still reports the
     /// account, because there is nothing to hide and spending the arm on it
     /// would burn a divergence the operator armed against a real fill.
     ///
@@ -361,7 +361,7 @@ impl Engine {
 
     /// A trailing stop limit's LIMIT is derived, never stated - the wire refuses
     /// a price on this type for exactly that reason. Deriving it before
-    /// `risk_px` reads it is what makes the reservation the one the limit
+    /// `risk_px` reads it is what makes the hold the one the limit
     /// implies rather than the one the trigger implies; the ratchet re-derives
     /// it through the same function so the two cannot disagree about which side
     /// of the trigger the limit sits on.
@@ -442,7 +442,7 @@ impl Engine {
                 client_order_id: order.client_order_id,
                 // `validate_divergence` refuses an over-length reason at every
                 // WIRE arming path, but `Engine::arm` is a public in-process
-                // API that reaches no validator, so the reservation sized
+                // API that reaches no validator, so the byte budget sized
                 // against `MAX_REASON_LEN` cannot rest on the caller alone.
                 // Truncating at the ECHO closes it by construction for every
                 // arming path there will ever be, and an already-valid reason
@@ -485,7 +485,7 @@ impl Engine {
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
             // MARKED EXEMPTION FROM `push_account_snapshot`, two of three, and
             // for the same reason as the resting-limit one: a held child takes
-            // no reservation and books no balance, so there is no update for
+            // no hold and books no balance, so there is no update for
             // `DropNextAccountUpdate` to hide and spending the arm here would
             // burn it on an order that cannot fill until its parent does.
             let out = vec![
@@ -633,7 +633,7 @@ impl Engine {
                 };
                 out.extend(self.on_trigger(pos, hit, ts, ts));
             }
-            // A trigger that booked a fill or freed a reservation owes its
+            // A trigger that booked a fill or freed a hold owes its
             // snapshot under the same `DropNextAccountUpdate` rule as any other
             // fill; a bare acceptance moves no balance and leaves the arm alone.
             self.push_account_snapshot(&mut out, ts, apply_divergences);
@@ -1040,7 +1040,7 @@ impl Engine {
             out.extend(reaped);
         }
         if !out.is_empty() {
-            // An expiry FREES A RESERVATION, so this batch moves the ledger and
+            // An expiry FREES A HOLD, so this batch moves the ledger and
             // owes the snapshot under the same rule a fill does - including the
             // `DropNextAccountUpdate` half, which this site used to skip. It
             // was the last unconditional push outside the two marked
@@ -1064,7 +1064,7 @@ impl Engine {
     /// improves on where the trigger already is.
     ///
     /// The trigger is moved on BOTH the resting state and the submit, because
-    /// the order's reservation is derived from the submit and a trail that moved
+    /// the order's hold is derived from the submit and a trail that moved
     /// only the scan predicate would hold the wrong amount.
     ///
     /// `extremes` carries, per symbol, the highest and lowest price the tape
@@ -1162,7 +1162,7 @@ impl Engine {
                 order.scanned_ns = ts;
                 order.revision = order.revision.saturating_add(1);
                 order.ts_last = ts;
-                self.refresh_open_reservation(pos, &before);
+                self.refresh_open_hold(pos, &before);
             }
         }
     }
@@ -1178,7 +1178,7 @@ impl Engine {
     ) -> (Vec<VenueMessage>, usize) {
         self.event_sim = sim;
         if cfg!(debug_assertions) {
-            self.reconcile_order_locked();
+            self.reconcile_order_holds();
         }
         let mut out = Vec::new();
         let mut emitted = 0;
@@ -1239,8 +1239,8 @@ impl Engine {
                 .expect("validated resting limit carries a price");
             // The order is RESTING, so `free_balance` has already had its own
             // hold subtracted; adding it back is what keeps a fully funded
-            // order from failing its own fill against its own reservation.
-            let held = self.held_for(&submit, leaves, fill_px);
+            // order from failing its own fill against its own hold.
+            let held = self.hold_for(&submit, leaves, fill_px);
             if let Err(reason) = self.validate_fill_funds(
                 &submit,
                 last_qty,
@@ -1285,7 +1285,7 @@ impl Engine {
             // this point, and must not be.
             //
             // No `emitted` increment: linkage only ever runs off a fill, and the
-            // fill already counted this order once - the per-order reservation
+            // fill already counted this order once - the per-order hold
             // `swept_fill_max_bytes` charges includes the linkage allowance.
             if last_qty > Decimal::ZERO {
                 let linkage = self.apply_linkage_after_fill(&submit, last_qty, ts);
@@ -1343,7 +1343,7 @@ impl Engine {
                     order.scanned_ns = ts;
                 }
                 order.revision = order.revision.saturating_add(1);
-                self.refresh_open_reservation(pos, &before);
+                self.refresh_open_hold(pos, &before);
             } else {
                 let order = self.open[pos].clone();
                 out.extend(self.close_out(pos, &order, WireOrderStatus::Filled, ts));
@@ -1351,7 +1351,7 @@ impl Engine {
         }
         // ONE snapshot for the whole batch, taken after every transition it
         // booked - which is what `sizing::swept_fill_max_bytes` bounds. A pass
-        // whose only transitions were reservation-freeing cancels still owes
+        // whose only transitions were hold-freeing cancels still owes
         // it, so the test is "did anything move the ledger", not "did anything
         // fill".
         // THE OUTER TEST IS NOT REDUNDANT WITH THE HELPER'S. A sweep pass runs
@@ -1367,7 +1367,7 @@ impl Engine {
             self.push_account_snapshot(&mut out, ts, true);
         }
         if cfg!(debug_assertions) {
-            self.reconcile_order_locked();
+            self.reconcile_order_holds();
         }
         (out, emitted)
     }
@@ -1422,7 +1422,7 @@ impl Engine {
     ///    whole effect is the release above.
     ///
     /// Deliberately emits no `AccountState`: the caller owns the batch's single
-    /// snapshot, so a linkage that freed reservations is reflected in a snapshot
+    /// snapshot, so a linkage that freed holds is reflected in a snapshot
     /// taken after it rather than in one of its own.
     pub(crate) fn apply_linkage_after_fill(
         &mut self,
@@ -1498,7 +1498,7 @@ impl Engine {
                             ts_event: ts,
                         }
                     };
-                    self.refresh_open_reservation(pos, &before);
+                    self.refresh_open_hold(pos, &before);
                     out.push(updated);
                 }
             }
@@ -1538,7 +1538,7 @@ impl Engine {
     }
 
     /// Promote a held child to the state it would have rested in had it been
-    /// submitted standalone, and give it the reservation it was not holding
+    /// submitted standalone, and place the hold it did not have
     /// while it waited.
     ///
     /// The draw is FRESH (`band_draw` advances), because a queue position earned
@@ -1586,7 +1586,7 @@ impl Engine {
             child.revision = child.revision.saturating_add(1);
             child.ts_last = ts;
         }
-        self.refresh_open_reservation(pos, &before);
+        self.refresh_open_hold(pos, &before);
         tracing::debug!(child = %client_order_id, "order-list child released by its parent's fill");
     }
 
@@ -1654,7 +1654,7 @@ impl Engine {
     /// Iterative over a worklist rather than recursive, and the depth it can
     /// reach is bounded by `validate_submit` refusing a child of a child: a
     /// cancel reaps one generation, and each generation is capped at
-    /// `MAX_LINKED_ORDERS`, which is what makes the byte reservation for a
+    /// `MAX_LINKED_ORDERS`, which is what makes the byte budget for a
     /// cancel computable.
     pub(crate) fn reap_children_of(
         &mut self,
@@ -1717,7 +1717,7 @@ impl Engine {
     /// print is already through its drawn trigger), REJECTS a post-only
     /// stop-limit that would take liquidity, or cancels the order when the
     /// slipped price outruns the account or a reduce-only cap has gone to zero.
-    /// Every terminal branch removes the order, frees its reservation and calls
+    /// Every terminal branch removes the order, frees its hold and calls
     /// `record_closed`.
     ///
     /// `hit` is a real print on the sweep path and the reading's own last print
@@ -1785,7 +1785,7 @@ impl Engine {
                 );
                 let planned = self.plan_fill(&order.submit, order.leaves_qty, true);
                 let fill_qty = cap.map_or(planned, |cap| planned.min(cap));
-                let held = self.held_for(&order.submit, order.leaves_qty, risk_px(&order.submit));
+                let held = self.hold_for(&order.submit, order.leaves_qty, risk_px(&order.submit));
                 if let Err(reason) = self.validate_fill_funds(
                     &order.submit,
                     fill_qty,
@@ -1872,7 +1872,7 @@ impl Engine {
                     order.scanned_ns = frontier;
                     order.revision = order.revision.saturating_add(1);
                     // Writing the slot back directly would bypass the
-                    // reservation cache. Today it moves no hold - a stop-limit
+                    // hold cache. Today it moves no hold - a stop-limit
                     // becoming live changes neither `leaves_qty` nor
                     // `submit.price`, which is what the hold derives from -
                     // but the refresh is what keeps that a fact about this
@@ -1880,7 +1880,7 @@ impl Engine {
                     // to it has to rediscover.
                     let before = self.open[pos].clone();
                     self.open[pos] = order;
-                    self.refresh_open_reservation(pos, &before);
+                    self.refresh_open_hold(pos, &before);
                     return out;
                 }
                 if order.submit.post_only {
@@ -1896,7 +1896,7 @@ impl Engine {
                 }
                 let planned = self.plan_fill(&order.submit, order.leaves_qty, true);
                 let fill_qty = cap.map_or(planned, |cap| planned.min(cap));
-                let held = self.held_for(&order.submit, order.leaves_qty, stated);
+                let held = self.hold_for(&order.submit, order.leaves_qty, stated);
                 if let Err(reason) = self.validate_fill_funds(
                     &order.submit,
                     fill_qty,
@@ -1964,21 +1964,19 @@ impl Engine {
         out
     }
 
-    /// The reservation this order itself already contributes to
-    /// `locked_balances` IN THE SETTLEMENT CURRENCY, which
+    /// The hold this order itself already contributes to
+    /// `held_balances` IN THE SETTLEMENT CURRENCY, which
     /// `validate_fill_funds` adds back before it compares. Zero for a
-    /// reduce-only order (which reserves nothing) and zero for a spot sell
+    /// reduce-only order (which places no hold) and zero for a spot sell
     /// (whose hold is base currency, and whose settlement-side check is about
     /// commission rather than the hold). Derived from the same
-    /// `order_reservation` the snapshot folds, so the add-back can never be a
+    /// `order_hold` the snapshot folds, so the add-back can never be a
     /// different shape from the hold it is canceling.
-    fn held_for(&self, order: &SubmitOrder, leaves: Decimal, price: Decimal) -> Decimal {
+    fn hold_for(&self, order: &SubmitOrder, leaves: Decimal, price: Decimal) -> Decimal {
         let mut clipped = false;
-        match self.order_reservation(order, leaves, price, &mut clipped) {
-            crate::account::Reservation::Settlement(amount) => amount,
-            crate::account::Reservation::None | crate::account::Reservation::Base(_) => {
-                Decimal::ZERO
-            }
+        match self.order_hold(order, leaves, price, &mut clipped) {
+            crate::account::Hold::Settlement(amount) => amount,
+            crate::account::Hold::None | crate::account::Hold::Base(_) => Decimal::ZERO,
         }
     }
 
@@ -2156,7 +2154,7 @@ impl Engine {
     ///
     /// THE DEPTH RULE IS LOAD-BEARING, not tidiness. A child of a child would
     /// make cancelling one order reap a chain of unbounded length, and the byte
-    /// reservation a cancel takes has to be computable before the cancel runs.
+    /// budget a cancel takes has to be computable before the cancel runs.
     /// One generation, capped at `MAX_LINKED_ORDERS`, is what
     /// `sizing::LINKAGE_MAX_BYTES` bounds - and it costs nothing real, because a
     /// bracket is one entry and its exits.
@@ -2379,7 +2377,7 @@ impl Engine {
         // Funded accounts are honest cash accounts: an order the free balance
         // cannot cover is rejected at the door, exactly like a real exchange.
         // A buy requires the full quote notional (the immediate synthetic fill
-        // spends it, or the resting remainder reserves it - same requirement
+        // spends it, or the resting remainder holds it - same requirement
         // either way); a sell requires the base quantity. Unfunded accounts
         // skip this entirely and keep the permissive delta-off-zero ledger -
         // see `Engine::enforce_funds`.
@@ -2931,10 +2929,10 @@ impl Engine {
             }
         }
 
-        // The price this order's reservation, notional and funds check are
+        // The price this order's hold, notional and funds check are
         // taken against AFTER the amend - `risk_px` under amendment. For a
         // price-less `StopMarket` that is its trigger, new or existing, which
-        // is what `locked_balances` will hold against; for everything else it
+        // is what `held_balances` will hold against; for everything else it
         // is the limit price. Spelled as `or` rather than unwrapped so the
         // validation degrades instead of panicking if the invariant loosens.
         let effective_price = if order.submit.order_type == OrderType::StopMarket {
@@ -2952,7 +2950,7 @@ impl Engine {
                 }];
             }
 
-            // Same overflow guard as `validate_submit`: `locked_balances`
+            // Same overflow guard as `validate_submit`: `held_balances`
             // multiplies `leaves_qty * price` for every open buy order on
             // every snapshot, including the one this very modify emits below,
             // so an unbounded notional here panics immediately rather than in
@@ -2966,11 +2964,11 @@ impl Engine {
                 }];
             }
 
-            // Funded accounts check the amended reservation against free
+            // Funded accounts check the amended hold against free
             // balance, mirroring the submit-side funds check: an amend that
-            // grows a reservation past what the account holds is refused, or
+            // grows a hold past what the account holds is refused, or
             // the venue would advertise free < 0 in its own snapshot. The
-            // order's CURRENT reservation is excluded from the comparison
+            // order's CURRENT hold is excluded from the comparison
             // (it is being replaced, not added to), so free-plus-own-hold
             // must cover the new hold. Both products are bounded: the new
             // one by the checked_mul just above (leaves <= total), the old
@@ -2986,7 +2984,7 @@ impl Engine {
                 // then cancels.
                 let commission =
                     self.maximum_commission(&order.submit, new_leaves, effective_price, ts, true);
-                // A spot sell reserves BASE, but pays its fee out of the
+                // A spot sell places a BASE hold, but pays its fee out of the
                 // quote proceeds, so its commission is checked against the
                 // settlement balance separately - the same split
                 // `validate_submit` makes.
@@ -3002,7 +3000,7 @@ impl Engine {
                         }];
                     }
                 }
-                // BOTH SIDES OF THE COMPARISON COME FROM `order_reservation`,
+                // BOTH SIDES OF THE COMPARISON COME FROM `order_hold`,
                 // the one home of the hold's shape. This block used to be a
                 // fourth hand-rolled copy of that formula, and it had drifted
                 // twice over: the futures arm priced the amended requirement at
@@ -3010,11 +3008,11 @@ impl Engine {
                 // `effective_price`, so a quantity-only amend of a futures order
                 // under a notional policy required `initial(new_leaves, 0)` -
                 // zero - and the funds check could not fail however far the
-                // amend grew the position; and the buy arm reserved the full
+                // amend grew the position; and the buy arm held the full
                 // notional even for a margined equity, which posts the Reg-T
                 // initial instead. The refusals below stay explicit because they
                 // name a MISCONFIGURED instrument rather than a funding
-                // shortfall, and `order_reservation` answers `None` for both.
+                // shortfall, and `order_hold` answers `None` for both.
                 if instrument.class.is_future() && !self.margin.contains_key(&order.submit.symbol) {
                     return vec![VenueMessage::OrderModifyRejected {
                         client_order_id,
@@ -3023,7 +3021,7 @@ impl Engine {
                         ts_event: ts,
                     }];
                 }
-                // A NON-FUTURE, NON-EQUITY SELL reserves its BASE asset, so an
+                // A NON-FUTURE, NON-EQUITY SELL places a hold on its BASE asset, so an
                 // instrument declaring no base currency has nowhere to take the
                 // hold from. The reason string used to say "cash-settled futures
                 // require the margin ledger" here, carried over verbatim from
@@ -3038,9 +3036,10 @@ impl Engine {
                     return vec![VenueMessage::OrderModifyRejected {
                         client_order_id,
                         venue_order_id: Some(venue_order_id),
-                        reason: "a sell of this instrument reserves its base asset, which it \
+                        reason:
+                            "a sell of this instrument places a hold on its base asset, which it \
                                  declares none of"
-                            .into(),
+                                .into(),
                         ts_event: ts,
                     }];
                 }
@@ -3048,8 +3047,8 @@ impl Engine {
                 // comparison, and an amend does not release it - round 1's
                 // promotion guard excludes `Held` deliberately - so the amended
                 // order is still held and still holds nothing. The rule's home
-                // is `order_reservation_entry`, which declines a held child
-                // before it computes anything; asking `order_reservation`
+                // is `order_hold_entry`, which declines a held child
+                // before it computes anything; asking `order_hold`
                 // directly (as the two calls below do, because they must price
                 // an order that is not on the book in this shape yet) BYPASSES
                 // that home, so the test is made here rather than left implicit.
@@ -3059,9 +3058,9 @@ impl Engine {
                 if !matches!(order.resting, Resting::Held) {
                     // The AMENDED order, built as a submit and priced at
                     // `effective_price`, is what the venue would hold once the
-                    // amend lands - the same construction `held_for` makes for a
+                    // amend lands - the same construction `hold_for` makes for a
                     // resting order, so an amend can never be checked against a
-                    // requirement the reservation would not actually take.
+                    // requirement the hold would not actually take.
                     let mut amended = order.submit.clone();
                     amended.quantity = new_total;
                     if let Some(new_price) = price {
@@ -3070,12 +3069,12 @@ impl Engine {
                     if let Some(new_trigger) = trigger_price {
                         amended.trigger_price = Some(new_trigger);
                     }
-                    // `clipped` is DROPPED, exactly as `held_for` drops it and
-                    // every other check-time reservation site does. The flag
-                    // belongs to the RECORDING path: `add_order_reservation`
-                    // re-derives it through `order_reservation_entry` when the
+                    // `clipped` is DROPPED, exactly as `hold_for` drops it and
+                    // every other check-time hold site does. The flag
+                    // belongs to the RECORDING path: `add_order_hold`
+                    // re-derives it through `order_hold_entry` when the
                     // amend actually lands below, and that is what puts the
-                    // currency into `order_locked_clipped` and raises the
+                    // currency into `order_holds_clipped` and raises the
                     // saturation warning. Recording it here would warn about a
                     // hold the venue may yet refuse to take.
                     let mut clipped = false;
@@ -3088,50 +3087,41 @@ impl Engine {
                         .price
                         .or(order.submit.trigger_price)
                         .unwrap_or_default();
-                    let held_reservation = self.order_reservation(
-                        &order.submit,
-                        order.leaves_qty,
-                        held_price,
-                        &mut clipped,
-                    );
-                    let required_reservation =
-                        self.order_reservation(&amended, new_leaves, effective_price, &mut clipped);
+                    let existing_hold =
+                        self.order_hold(&order.submit, order.leaves_qty, held_price, &mut clipped);
+                    let required_hold =
+                        self.order_hold(&amended, new_leaves, effective_price, &mut clipped);
                     let settlement = instrument.class.settlement_currency();
                     let base = instrument.class.base_currency().unwrap_or(settlement);
-                    let amount_in = |currency: &str, reservation: &crate::account::Reservation| {
-                        match reservation {
-                            crate::account::Reservation::None => Decimal::ZERO,
-                            crate::account::Reservation::Settlement(amount) => {
-                                if currency == settlement {
-                                    *amount
-                                } else {
-                                    Decimal::ZERO
-                                }
+                    let amount_in = |currency: &str, hold: &crate::account::Hold| match hold {
+                        crate::account::Hold::None => Decimal::ZERO,
+                        crate::account::Hold::Settlement(amount) => {
+                            if currency == settlement {
+                                *amount
+                            } else {
+                                Decimal::ZERO
                             }
-                            crate::account::Reservation::Base(amount) => {
-                                if currency == base {
-                                    *amount
-                                } else {
-                                    Decimal::ZERO
-                                }
+                        }
+                        crate::account::Hold::Base(amount) => {
+                            if currency == base {
+                                *amount
+                            } else {
+                                Decimal::ZERO
                             }
                         }
                     };
                     // The currency the check runs in is whichever one the
                     // AMENDED hold lands in, falling back to the current hold's
-                    // when the amend reserves nothing at all - a comparison
+                    // when the amend places no hold at all - a comparison
                     // against a currency neither side touches is vacuously true,
                     // which is exactly what it should be.
-                    let currency = match (&required_reservation, &held_reservation) {
-                        (crate::account::Reservation::Base(_), _)
-                        | (
-                            crate::account::Reservation::None,
-                            crate::account::Reservation::Base(_),
-                        ) => base,
+                    let currency = match (&required_hold, &existing_hold) {
+                        (crate::account::Hold::Base(_), _)
+                        | (crate::account::Hold::None, crate::account::Hold::Base(_)) => base,
                         _ => settlement,
                     };
-                    let held = amount_in(currency, &held_reservation);
-                    let required = amount_in(currency, &required_reservation).saturating_add(
+                    let held = amount_in(currency, &existing_hold);
+                    let required = amount_in(currency, &required_hold).saturating_add(
                         // Commission is paid in settlement cash; a base-currency
                         // hold's fee was already checked against the settlement
                         // balance by the spot-sell branch above.
@@ -3187,7 +3177,7 @@ impl Engine {
                 // AND A HELD CHILD STAYS HELD. `Resting::Held` is not
                 // `Conditional`, so this used to promote an order-list child
                 // still waiting on its parent into a live, scannable limit -
-                // taking a reservation it had deliberately not taken and
+                // taking a hold it had deliberately not taken and
                 // letting it fill before its parent ever executed. That is
                 // one-triggers-the-other defeated by a consumer amend. The amend
                 // moves `submit.price`, which is the price the child will rest
@@ -3221,11 +3211,11 @@ impl Engine {
             order.ts_last = ts;
             (order.submit.quantity, order.submit.price, order.leaves_qty)
         };
-        self.refresh_open_reservation(pos, &before);
+        self.refresh_open_hold(pos, &before);
 
         // MARKED EXEMPTION FROM `push_account_snapshot`, three of three, and the
         // only one whose batch genuinely DOES move the ledger -
-        // `refresh_open_reservation` above just moved the hold. It is exempt by
+        // `refresh_open_hold` above just moved the hold. It is exempt by
         // an existing ruling rather than by the helper's rule:
         // `modify_does_not_consume_armed_drop` pins the arm SURVIVING an amend
         // so it lands on the next FILL, which is what an author arming
@@ -3369,7 +3359,7 @@ fn draw_market_price(
 }
 
 /// The one price a price-less `StopMarket` substitutes everywhere the engine
-/// assumes an order has one: its reservation, its notional overflow guard, its
+/// assumes an order has one: its hold, its notional overflow guard, its
 /// funded-account requirement and its RNG key. Total for every shape
 /// `validate_submit_order` admits.
 fn risk_px(order: &SubmitOrder) -> Decimal {
@@ -3380,7 +3370,7 @@ fn risk_px(order: &SubmitOrder) -> Decimal {
 }
 
 /// Whether a batch moved the ledger and therefore owes an account snapshot. A
-/// no-fill transition that FREES a reservation - a cap-zero reduce-only cancel,
+/// no-fill transition that FREES a hold - a cap-zero reduce-only cancel,
 /// a post-only trigger rejection, a trigger-time funds cancel - owes one just
 /// as a fill does.
 /// EXHAUSTIVE OVER `VenueMessage` deliberately: the predicate claims to answer

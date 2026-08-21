@@ -903,6 +903,92 @@ and nautilus's historical response types carry no error channel at all, so the
 added to avoid. Whether the fix is two distinct bodies, a `Retry-After`, or
 something the adapter can type is a design question this arc has no ruling on.
 
+**Round 7, the `reservation` family, 2026-08-21.** A split rather than a
+substitution. The word named two unrelated money-adjacent quantities that sat
+two paragraphs apart in `mogwai-engine` and read identically: a byte
+reservation against a connection's outbound budget, and the portion of a
+balance tied up by a resting order. THE BYTE SENSE KEEPS THE WORD - the
+protocol crate's `sizing` module, `mogwai-venue`'s `admission::Reservation`,
+`try_reserve` and the sweeper's delivery reservations are untouched, which is
+the shape a correct classification produces. The funds sense wore FIVE nouns in
+one crate - reservation, hold, lock, locked, and an enum whose `None` variant
+meant the order ties up nothing - and that was the defect rather than the
+untidiness: a reader could not tell which of the two quantities a sentence was
+about, and `held_for` next to `order_reservation` next to `order_locked` read
+as three mechanisms where there is one. It collapses onto `hold` as the noun
+and `held` as the verb: `Reservation` is `Hold`, `order_reservation` is
+`order_hold`, `order_reservation_entry` is `order_hold_entry`,
+`refresh_open_reservation` is `refresh_open_hold`, `add`/`remove` follow,
+`order_locked` and `order_locked_clipped` are `order_holds` and
+`order_holds_clipped`, `rebuild_order_locked_excluding` and
+`reconcile_order_locked` follow those, `locked_balances` is `held_balances`,
+and `held_for` is `hold_for`. The byte-sense test names in `mogwai-engine` that
+said `reservation` say `byte_budget`, so the two senses no longer share a test
+vocabulary either.
+
+THE WIRE SPELLING DELIBERATELY DID NOT MOVE. `Balance.locked` is the
+consumer-visible field, the adapter reads it as `balance.locked` into
+nautilus's `AccountBalance`, and renaming it would be a designed break this
+round has no ruling for. The engine now assigns `locked: held` at the one
+construction site, which is the whole of the seam. No tape byte and no wire
+byte moves, so no `TAPE_PROTOCOL_VERSION` bump is owed. The gated check reports
+1340 workspace and 468 instrumented tests, unchanged.
+
+ONE OBSERVABLE STRING MOVED, and it was checked rather than assumed. The
+order-modification refusal for a sell of an instrument declaring no base
+currency now says "places a hold on its base asset" instead of "reserves its
+base asset". Nothing pins it: the phrase appears exactly once in the workspace,
+no test, constant or consumer-side matcher reads it, and it is not one of the
+refusal strings that ARE contracts - the post-only refusal lives as a shared
+constant the engine's admission table parses to a fixed substring, and the
+retryable prefix is a public string a consumer is invited to prefix-test.
+Neither moved. The one two-sided literal the round did touch moved on both
+sides in the same change: the debug reconciliation panic message
+"resting-order hold cache drifted from the book" and the `should_panic`
+expectation that reads it.
+
+What the close pass found in the half no cold reviewer reads, which is the
+recurring failures again:
+
+- THE SWEEP STOPPED AT THE ENGINE. Live funds-sense siblings survived in
+  `mogwai-protocol`'s `messages.rs` (the atomic-group doc's "a reduce-only
+  member reserves nothing ... a member without that flag reserves like any
+  other order"), in `docs/order-lists.md` twice, in `docs/config.md` ("posts
+  collateral rather than reserving notional at every funds site") and in one
+  engine test comment. Grep the sentence across the workspace, not the
+  identifier inside the crate.
+- TWO SENTENCES CAME OUT AWKWARD AROUND A CORRECT SUBSTITUTION - a resting
+  remainder that "is held against it", and the same passive in the group doc.
+  Both now take a hold rather than being held against.
+- THE ROUND'S OWN NEW GLOSSARY ENTRY WAS THE FALSE ONE. The Hold entry as
+  drafted said `locked` carries order holds and unsettled equity proceeds and
+  does not distinguish "the two quantities". `held_balances` folds THREE: the
+  order holds, the maintenance collateral of open marked positions, and the
+  unsettled credits. The entry now names all three and distinguishes none of
+  them, which is the true statement, and it points at Admission for the byte
+  sense so the split is readable from the glossary.
+
+RAISED AND NOT ACTED ON:
+
+- **The `locked` split stays unruled and was not pre-empted.** The field
+  carries economically different quantities with opposite remedies. But
+  `Account::unsettled`'s doc in `mogwai-engine` already asserts the conflation
+  is fine - "it appears on the wire as `locked` - which is exactly what it is,
+  and needs no new balance field for a consumer to understand". That prose
+  predates this round and nothing in it moved; it is recorded here because it
+  argues one side of a question awaiting an owner ruling.
+- **`held` is already taken by the byte sense at one operator-visible site.**
+  `mogwai-venue`'s "held lane" and the config key `exec_held_budget_bytes` use
+  the word for the outbound frame budget, which is the sense that KEPT
+  `reservation`. That is a fresh collision the ruling created rather than
+  cured, at a consumer-visible config key, so it needs its own ruling rather
+  than a sweep.
+- **`reserves its id`** in `mogwai-engine`'s `orders.rs`, and the venue-minted
+  prefix paragraphs, are a third generic sense - an id namespace, neither bytes
+  nor funds. Unruled and untouched, except where the rename pass replaced one
+  awkward "the reservation is not cosmetic" with "the restriction is not
+  cosmetic", which is the same claim in plainer words.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
@@ -946,6 +1032,11 @@ These belong to no single scope, so nothing else holds them.
   budget, which the wire publishes, and - unruled, and not to be swept as
   though it were retired - for `mogwai-engine`'s acceptance of an order onto
   the book.
+- `reservation`, `lock` and `locked` as names for the funds a resting order
+  ties up. That quantity is a Hold, and the verb is `held`. `reservation`
+  survives for the per-connection outbound byte budget, which is the sense the
+  wire and the operator config already publish; `locked` survives as the
+  consumer-visible balance field and nowhere else in that sense.
 
 ### Left as inherited
 
@@ -965,8 +1056,8 @@ Recorded per scope in the scope reports until the merge collects them.
 
 ## What the rename rounds keep getting wrong
 
-Six rounds in, three failures recur often enough to belong in every brief. Round
-6 produced all three at once, which is the first time one round has.
+Seven rounds in, three failures recur often enough to belong in every brief.
+Round 6 produced all three at once, which is the first time one round has.
 
 **The sweep stops at one crate.** A rename pass finds the family in the crate
 that owns it and leaves live siblings in the others. Twice now a false sentence
@@ -987,7 +1078,7 @@ the sentence existed to draw. Whatever the house style for emphasis, both halves
 move together or neither does.
 
 The evidence for all three is that the cold review found something in two rounds
-of six and the fix-and-commit stage found something in six of six. That is not
+of seven and the fix-and-commit stage found something in seven of seven. That is not
 a criticism of the cold review, which catches what a reader without the arc's
 priors sees. It is that a rename arc's defects live in prose, and prose defects
 compile, pass and read fluently.

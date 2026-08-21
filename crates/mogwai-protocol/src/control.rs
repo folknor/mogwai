@@ -74,7 +74,7 @@ pub enum Divergence {
     /// leaving the book (induce account drift). A fill qualifies, and so does a
     /// cancel freeing a resting order's hold, a funds-check eviction, and a stop
     /// trigger that booked either. An order merely COMING TO REST does not,
-    /// even though its reservation moves `locked`: acceptance always precedes
+    /// even though its hold moves `locked`: acceptance always precedes
     /// the fill, so an arm spent there could never reach what it was aimed at.
     DropNextAccountUpdate,
     /// Stop sending anything for `ms` (simulate a venue blackout), bounded
@@ -118,7 +118,7 @@ pub enum Divergence {
     /// consumer's reconciliation poll exists to catch. Unlike the armed
     /// single-shot divergences this is not queued for a trigger: it acts on
     /// the book the moment it is posted (there is no consumer action to key
-    /// off), frees the order's reservation, and leaves the consumer believing
+    /// off), frees the order's hold, and leaves the consumer believing
     /// the order still rests until it reconciles - a `QueryOrders` reply
     /// truthfully reports the order `Canceled` from then on. Posting it for
     /// an id that is not currently resting is refused with a 4xx, so a

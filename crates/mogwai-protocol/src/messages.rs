@@ -609,8 +609,8 @@ pub enum Command {
     /// balance the group's own fills moved.
     ///
     /// Whether your group can meet it is a question about YOUR orders. A
-    /// reduce-only member reserves nothing and cannot meet it; a member without
-    /// that flag reserves like any other order, and whether an exit CAN be
+    /// reduce-only member places no hold and cannot meet it; a member without
+    /// that flag takes a hold like any other order, and whether an exit CAN be
     /// reduce-only depends on the run's `oms_type` and is on your side of the
     /// wire. Size a group so its members are jointly affordable against the
     /// balance the venue holds at submission, and the carve-out is unreachable.
@@ -887,7 +887,7 @@ pub struct SubmitOrder {
     pub expire_time: Option<u64>,
     /// Fills are clamped to the position this order would close, and the order
     /// is canceled rather than filled when that position is gone. Exempt from
-    /// the funded-admission check and from `locked_balances`: it can only
+    /// the funded-admission check and from `held_balances`: it can only
     /// shrink an exposure the position itself already represents.
     #[serde(default)]
     pub reduce_only: bool,
@@ -1023,7 +1023,7 @@ pub struct OrderLink {
     #[serde(default)]
     pub linked_order_ids: Vec<ClientOrderId>,
     /// The order this one WAITS FOR. A child rests inert - unscanned, holding
-    /// no reservation - until its parent fills, which is the whole of
+    /// no hold - until its parent fills, which is the whole of
     /// one-triggers-the-other. `None` for a parent or a standalone member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_order_id: Option<ClientOrderId>,

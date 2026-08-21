@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The account ledger: balances, positions, locked reservations, and the
+//! The account ledger: balances, positions, order holds, and the
 //! `AccountState` snapshot. Includes the saturating arithmetic that keeps
 //! unbounded cross-fill accumulation from panicking the engine.
 
@@ -13,9 +13,9 @@ use rust_decimal::Decimal;
 use crate::Engine;
 
 /// What one resting order holds, and in which of the instrument's two
-/// currencies. Returned by `Engine::order_reservation`, the single derivation
+/// currencies. Returned by `Engine::order_hold`, the single derivation
 /// both the account snapshot and the order-path funds checks read.
-pub(crate) enum Reservation {
+pub(crate) enum Hold {
     /// Nothing is held: a reduce-only order, or a future with no margin policy.
     None,
     /// Settlement (quote) cash: futures initial margin, or a spot buy notional.
@@ -73,30 +73,30 @@ pub(crate) struct Warned {
 
 impl Engine {
     pub(crate) fn rest_open(&mut self, order: crate::OpenOrder) {
-        self.add_order_reservation(&order);
+        self.add_order_hold(&order);
         self.open.push(order);
     }
 
     pub(crate) fn take_open(&mut self, pos: usize) -> crate::OpenOrder {
         let order = self.open.remove(pos);
-        self.remove_order_reservation(&order);
+        self.remove_order_hold(&order);
         order
     }
 
-    pub(crate) fn refresh_open_reservation(&mut self, pos: usize, before: &crate::OpenOrder) {
-        self.remove_order_reservation(before);
+    pub(crate) fn refresh_open_hold(&mut self, pos: usize, before: &crate::OpenOrder) {
+        self.remove_order_hold(before);
         let after = self.open[pos].clone();
-        self.add_order_reservation(&after);
+        self.add_order_hold(&after);
     }
 
-    pub(crate) fn order_reservation_entry(
+    pub(crate) fn order_hold_entry(
         &self,
         order: &crate::OpenOrder,
     ) -> Option<(String, Decimal, bool)> {
-        // A HELD order-list child reserves nothing. It cannot execute until its
+        // A HELD order-list child places no hold. It cannot execute until its
         // parent fills, and holding funds against it would let a bracket's exit
         // legs starve the entry that has to fill before either can do anything.
-        // The hold appears at RELEASE, through the same `refresh_open_reservation`
+        // The hold appears at RELEASE, through the same `refresh_open_hold`
         // any other state change goes through.
         if matches!(order.resting, crate::Resting::Held) {
             return None;
@@ -104,16 +104,15 @@ impl Engine {
         let instrument = self.instruments.get(&order.submit.symbol)?;
         let price = order.submit.price.or(order.submit.trigger_price)?;
         let mut clipped = false;
-        let reservation =
-            self.order_reservation(&order.submit, order.leaves_qty, price, &mut clipped);
-        let entry = match reservation {
-            Reservation::None => None,
-            Reservation::Settlement(amount) => Some((
+        let hold = self.order_hold(&order.submit, order.leaves_qty, price, &mut clipped);
+        let entry = match hold {
+            Hold::None => None,
+            Hold::Settlement(amount) => Some((
                 instrument.class.settlement_currency().to_owned(),
                 amount,
                 clipped,
             )),
-            Reservation::Base(amount) => instrument
+            Hold::Base(amount) => instrument
                 .class
                 .base_currency()
                 .map(|currency| (currency.to_owned(), amount, clipped)),
@@ -128,65 +127,65 @@ impl Engine {
         entry.filter(|(_, amount, clipped)| !amount.is_zero() || *clipped)
     }
 
-    fn add_order_reservation(&mut self, order: &crate::OpenOrder) {
-        let Some((currency, amount, mut clipped)) = self.order_reservation_entry(order) else {
+    fn add_order_hold(&mut self, order: &crate::OpenOrder) {
+        let Some((currency, amount, mut clipped)) = self.order_hold_entry(order) else {
             return;
         };
-        if let Some(total) = self.order_locked.get_mut(currency.as_str()) {
+        if let Some(total) = self.order_holds.get_mut(currency.as_str()) {
             *total = add_clamped(*total, amount, &mut clipped);
         } else {
-            self.order_locked.insert(currency.clone(), amount);
+            self.order_holds.insert(currency.clone(), amount);
         }
         if clipped {
-            self.order_locked_clipped.insert(currency);
+            self.order_holds_clipped.insert(currency);
         }
     }
 
-    fn remove_order_reservation(&mut self, order: &crate::OpenOrder) {
-        let Some((currency, amount, _)) = self.order_reservation_entry(order) else {
+    fn remove_order_hold(&mut self, order: &crate::OpenOrder) {
+        let Some((currency, amount, _)) = self.order_hold_entry(order) else {
             return;
         };
-        if self.order_locked_clipped.contains(&currency) {
-            self.rebuild_order_locked_excluding(Some(&order.submit.client_order_id));
+        if self.order_holds_clipped.contains(&currency) {
+            self.rebuild_order_holds_excluding(Some(&order.submit.client_order_id));
             return;
         }
-        let Some(total) = self.order_locked.get_mut(&currency) else {
-            debug_assert!(false, "reservation cache missing currency");
+        let Some(total) = self.order_holds.get_mut(&currency) else {
+            debug_assert!(false, "hold cache missing currency");
             return;
         };
         *total = total.saturating_sub(amount);
         if total.is_zero() {
-            self.order_locked.remove(&currency);
+            self.order_holds.remove(&currency);
         }
     }
 
-    pub(crate) fn rebuild_order_locked_excluding(&mut self, excluded: Option<&str>) {
-        let (locked, clipped) = self.compute_order_locked(excluded);
-        self.order_locked = locked;
-        self.order_locked_clipped = clipped;
+    pub(crate) fn rebuild_order_holds_excluding(&mut self, excluded: Option<&str>) {
+        let (holds, clipped) = self.compute_order_holds(excluded);
+        self.order_holds = holds;
+        self.order_holds_clipped = clipped;
     }
 
-    fn compute_order_locked(
+    fn compute_order_holds(
         &self,
         excluded: Option<&str>,
     ) -> (HashMap<String, Decimal>, HashSet<String>) {
-        let mut locked = HashMap::<String, Decimal>::new();
+        let mut holds = HashMap::<String, Decimal>::new();
         let mut clipped_currencies = HashSet::new();
         for order in self
             .open
             .iter()
             .filter(|order| excluded != Some(order.submit.client_order_id.as_str()))
         {
-            let Some((currency, amount, mut clipped)) = self.order_reservation_entry(order) else {
+            let Some((currency, amount, mut clipped)) = self.order_hold_entry(order) else {
                 continue;
             };
-            let total = locked.entry(currency.clone()).or_default();
+            let total = holds.entry(currency.clone()).or_default();
             *total = add_clamped(*total, amount, &mut clipped);
             if clipped {
                 clipped_currencies.insert(currency);
             }
         }
-        (locked, clipped_currencies)
+        (holds, clipped_currencies)
     }
 
     /// Compare the fast aggregate with a fresh fold through the authoritative
@@ -205,22 +204,22 @@ impl Engine {
     ///
     /// What holds the invariant in release is construction, not verification.
     /// `OpenBook`'s storage is private and every mutation of a resting order's
-    /// reservation inputs goes through `rest_open`, `take_open` or
-    /// `refresh_open_reservation`. A new mutation path that bypasses those
+    /// hold inputs goes through `rest_open`, `take_open` or
+    /// `refresh_open_hold`. A new mutation path that bypasses those
     /// three is the defect this design is exposed to, and the debug assertion
     /// is what catches it: the whole test suite runs under it.
-    pub(crate) fn reconcile_order_locked(&self) {
-        let (locked, clipped) = self.compute_order_locked(None);
+    pub(crate) fn reconcile_order_holds(&self) {
+        let (holds, clipped) = self.compute_order_holds(None);
         assert_eq!(
-            (&self.order_locked, &self.order_locked_clipped),
-            (&locked, &clipped),
-            "resting-order reservation cache drifted from the book"
+            (&self.order_holds, &self.order_holds_clipped),
+            (&holds, &clipped),
+            "resting-order hold cache drifted from the book"
         );
     }
 
     #[cfg(all(test, debug_assertions))]
-    pub(crate) fn corrupt_order_locked_for_test(&mut self, currency: &str, amount: Decimal) {
-        self.order_locked.insert(currency.to_owned(), amount);
+    pub(crate) fn corrupt_order_holds_for_test(&mut self, currency: &str, amount: Decimal) {
+        self.order_holds.insert(currency.to_owned(), amount);
     }
 
     pub(crate) fn apply_fill(&mut self, fill: &OrderFilled) {
@@ -416,9 +415,9 @@ impl Engine {
     // `&mut self` purely for the once-per-currency saturation warning below;
     // the account state itself is only read.
     pub(crate) fn snapshot(&mut self, ts: u64) -> AccountState {
-        let (locked, mut clipped_currencies) = self.locked_balances();
+        let (held_balances, mut clipped_currencies) = self.held_balances();
         let mut currencies: Vec<String> = self.account.balances.keys().cloned().collect();
-        for currency in locked.keys() {
+        for currency in held_balances.keys() {
             if !currencies.contains(currency) {
                 currencies.push(currency.clone());
             }
@@ -433,14 +432,14 @@ impl Engine {
                     .balances
                     .get(&currency)
                     .unwrap_or(&Decimal::ZERO);
-                let locked = *locked.get(&currency).unwrap_or(&Decimal::ZERO);
-                // `total` and `locked` are each in range, but they can sit
+                let held = *held_balances.get(&currency).unwrap_or(&Decimal::ZERO);
+                // `total` and the held amount are each in range, but they can sit
                 // near opposite Decimal boundaries (a huge short spend vs a
-                // huge buy reservation), so the difference itself can
+                // huge buy hold), so the difference itself can
                 // overflow. Saturate rather than panic; a clipped `free` is
                 // already implied by the clipped inputs it derives from.
                 let mut clipped = false;
-                let free = sub_clamped(total, locked, &mut clipped);
+                let free = sub_clamped(total, held, &mut clipped);
                 if clipped {
                     clipped_currencies.push(currency.clone());
                 }
@@ -448,7 +447,7 @@ impl Engine {
                     currency,
                     total,
                     free,
-                    locked,
+                    locked: held,
                 }
             })
             .collect();
@@ -467,10 +466,10 @@ impl Engine {
     }
 
     /// The spendable amount of one currency: the booked total minus every
-    /// resting order's reservation. This is what the funds checks in
+    /// resting order's hold. This is what the funds checks in
     /// `validate_submit` and `on_modify` compare an order's requirement
     /// against, and it matches the `free` the snapshot reports for the same
-    /// currency (both derive from `locked_balances` with clamped arithmetic).
+    /// currency (both derive from `held_balances` with clamped arithmetic).
     /// The account's NET quantity in one symbol, across every position key. The
     /// number a short-sale check is against: under hedging two legs of opposite
     /// sign are one net exposure to the borrow desk.
@@ -491,7 +490,7 @@ impl Engine {
             .get(currency)
             .unwrap_or(&Decimal::ZERO);
         let mut clipped = false;
-        let mut locked = *self.order_locked.get(currency).unwrap_or(&Decimal::ZERO);
+        let mut held = *self.order_holds.get(currency).unwrap_or(&Decimal::ZERO);
         // Unsettled sale proceeds are HELD, not absent: the account owns them
         // and cannot spend them until their instant.
         for credit in self
@@ -500,7 +499,7 @@ impl Engine {
             .iter()
             .filter(|credit| credit.currency == currency)
         {
-            locked = add_clamped(locked, credit.amount, &mut clipped);
+            held = add_clamped(held, credit.amount, &mut clipped);
         }
         for ((symbol, _), position) in &self.account.positions {
             let Some(policy) = self.margin.get(symbol) else {
@@ -522,35 +521,35 @@ impl Engine {
                 // requirement move with the price the way a leveraged account's
                 // actually does. A per-contract policy ignores the price, so
                 // this is the same number it always was for futures.
-                let reserve = policy.maintenance(instrument, position.qty, position.mark_px);
-                locked = add_clamped(locked, reserve, &mut clipped);
+                let maintenance = policy.maintenance(instrument, position.qty, position.mark_px);
+                held = add_clamped(held, maintenance, &mut clipped);
             }
         }
-        sub_clamped(total, locked, &mut clipped)
+        sub_clamped(total, held, &mut clipped)
     }
 
-    /// The reservation ONE resting order contributes, as a currency kind and
+    /// The hold ONE resting order contributes, as a currency kind and
     /// an amount. The single authority on the shape of an open order's hold:
-    /// `locked_balances` folds it into the account totals and `held_for` adds
+    /// `held_balances` folds it into the account totals and `hold_for` adds
     /// the same number back before a funds check, so the two cannot disagree
     /// about branch order. A future posts initial margin in settlement cash on
     /// either side (and needs a margin policy to post anything at all); a spot
-    /// buy reserves quote notional, a spot sell reserves base quantity. The
+    /// buy holds quote notional, a spot sell holds base quantity. The
     /// instrument CLASS is consulted before the margin map, so a margin policy
     /// configured against a spot symbol - which venue config rejects at boot,
     /// but the public `set_margin_policy` cannot - moves neither number.
-    pub(crate) fn order_reservation(
+    pub(crate) fn order_hold(
         &self,
         submit: &SubmitOrder,
         leaves: Decimal,
         price: Decimal,
         clipped: &mut bool,
-    ) -> Reservation {
+    ) -> Hold {
         if submit.reduce_only {
-            return Reservation::None;
+            return Hold::None;
         }
         let Some(instrument) = self.instruments.get(&submit.symbol) else {
-            return Reservation::None;
+            return Hold::None;
         };
         if instrument.class.is_future() {
             return match self.margin.get(&submit.symbol) {
@@ -559,16 +558,16 @@ impl Engine {
                 // has not filled. It is the argument and not `submit.price`
                 // because a price-less `StopMarket` commits at its TRIGGER, and
                 // every caller already resolves that fallback - reaching back
-                // into `submit` discarded the resolution and reserved
+                // into `submit` discarded the resolution and held
                 // `initial(qty, 0)`, which under `MarginBasis::Notional` is
                 // nothing at all, so a resting stop held no collateral.
-                Some(policy) => Reservation::Settlement(policy.initial(instrument, leaves, price)),
-                None => Reservation::None,
+                Some(policy) => Hold::Settlement(policy.initial(instrument, leaves, price)),
+                None => Hold::None,
             };
         }
         // AN EQUITY IS A CASH ACCOUNT OR A MARGIN ACCOUNT, and the margin policy
         // is which. A cash account commits the whole notional on a buy, the way
-        // a spot buy does, and reserves nothing on a sell because it can only
+        // a spot buy does, and places no hold on a sell because it can only
         // ever sell shares it already holds. A MARGIN account commits the
         // Reg-T initial requirement on either side - and on a sell, only for the
         // portion the account is not already long, since selling what you hold
@@ -577,18 +576,18 @@ impl Engine {
             let policy = self.margin.get(&submit.symbol);
             return match (submit.side, policy) {
                 (Side::Buy, Some(policy)) => {
-                    Reservation::Settlement(policy.initial(instrument, leaves, price))
+                    Hold::Settlement(policy.initial(instrument, leaves, price))
                 }
-                (Side::Buy, None) => Reservation::Settlement(mul_clamped(leaves, price, clipped)),
+                (Side::Buy, None) => Hold::Settlement(mul_clamped(leaves, price, clipped)),
                 (Side::Sell, Some(policy)) => {
                     let uncovered = leaves - self.net_position(&submit.symbol).max(Decimal::ZERO);
                     if uncovered <= Decimal::ZERO {
-                        Reservation::None
+                        Hold::None
                     } else {
-                        Reservation::Settlement(policy.initial(instrument, uncovered, price))
+                        Hold::Settlement(policy.initial(instrument, uncovered, price))
                     }
                 }
-                (Side::Sell, None) => Reservation::None,
+                (Side::Sell, None) => Hold::None,
             };
         }
         match submit.side {
@@ -596,21 +595,21 @@ impl Engine {
             // both `checked_mul` the full notional), but the SUM across all
             // resting buys is unbounded - saturate instead of letting `*`
             // panic.
-            Side::Buy => Reservation::Settlement(mul_clamped(leaves, price, clipped)),
-            Side::Sell => Reservation::Base(leaves),
+            Side::Buy => Hold::Settlement(mul_clamped(leaves, price, clipped)),
+            Side::Sell => Hold::Base(leaves),
         }
     }
 
-    /// Sums the per-order reservations. Returns the locked totals plus the
+    /// Sums the per-order holds. Returns the totals published as `locked` plus the
     /// currencies whose accumulation clipped at the Decimal boundary, so the
     /// caller (`snapshot`, which holds `&mut self`) can warn once per key -
     /// this stays `&self` because it runs inside iteration over `self.open`.
-    fn locked_balances(&self) -> (HashMap<String, Decimal>, Vec<String>) {
-        let mut locked = self.order_locked.clone();
+    fn held_balances(&self) -> (HashMap<String, Decimal>, Vec<String>) {
+        let mut held = self.order_holds.clone();
         // Sorted because the source is a `HashSet`: the only consumer is the
         // once-per-currency saturation warning, and an unordered log is a
         // needless nondeterminism in an otherwise deterministic venue.
-        let mut clipped_currencies: Vec<_> = self.order_locked_clipped.iter().cloned().collect();
+        let mut clipped_currencies: Vec<_> = self.order_holds_clipped.iter().cloned().collect();
         clipped_currencies.sort();
 
         for ((symbol, _), position) in &self.account.positions {
@@ -623,26 +622,26 @@ impl Engine {
             // Only a MARKED class posts maintenance collateral - futures,
             // perpetuals, inverses, and an equity whose margin policy makes it a
             // Reg-T margin account. The class is checked here for the same
-            // reason `order_reservation` checks it: a margin policy attached to
+            // reason `order_hold` checks it: a margin policy attached to
             // a spot symbol must move no number.
             if !instrument.class.is_marked() {
                 continue;
             }
             let currency = instrument.class.settlement_currency().to_owned();
-            let reserve = policy.maintenance(instrument, position.qty, position.mark_px);
-            let total = locked.entry(currency).or_default();
-            *total = total.saturating_add(reserve);
+            let maintenance = policy.maintenance(instrument, position.qty, position.mark_px);
+            let total = held.entry(currency).or_default();
+            *total = total.saturating_add(maintenance);
         }
 
         // Unsettled sale proceeds, so the `locked` a consumer reads is the same
         // number `free_balance` subtracts. A wire snapshot that disagreed with
         // the venue's own funds check would be the worst of both.
         for credit in &self.account.unsettled {
-            let total = locked.entry(credit.currency.clone()).or_default();
+            let total = held.entry(credit.currency.clone()).or_default();
             *total = total.saturating_add(credit.amount);
         }
 
-        (locked, clipped_currencies)
+        (held, clipped_currencies)
     }
 
     fn warn_missing_instrument(&mut self, symbol: &str) {
@@ -769,7 +768,7 @@ fn same_sign(a: Decimal, b: Decimal) -> bool {
 // `validate_submit` and `on_modify` bound a SINGLE order's notional with
 // `checked_mul`, so any one fill's arithmetic is representable - but nothing
 // bounds what many individually-valid orders accumulate to. Balance totals,
-// locked reservations, the position VWAP numerator and the snapshot's
+// held funds, the position VWAP numerator and the snapshot's
 // `total - locked` all combine values across fills and orders, and
 // rust_decimal's operator forms panic on overflow, so two orders the
 // validators rightly accept could crash the engine mid-fill. These helpers

@@ -409,7 +409,7 @@ greater than the initial - the reverse opens every position already in breach)
 and `breach_action`, either `refuse` (the default: no new risk while equity is
 below the maintenance requirement) or `liquidate` (the venue closes the
 position through its own fill band). A future posts collateral rather than
-reserving notional at every funds site: submit, fill and amend alike.
+holding notional at every funds site: submit, fill and amend alike.
 
 `[instrument.fees.maker]` and `[instrument.fees.taker]` each take
 `basis = "basis_points"` with a `rate` in `0 ..= 1000`, or

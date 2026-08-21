@@ -966,7 +966,7 @@ message construction) swamps the matching scan.
 ### Finding 8 close reading, 2026-08-14
 
 Host `bygg`, release, the uncommitted round-3 working tree after incremental
-order reservations and keyed book lookup. One criterion run after the final
+order holds and keyed book lookup. One criterion run after the final
 shape; every standard deviation is below the 5 percent usability limit.
 
 | id | mean | std dev |

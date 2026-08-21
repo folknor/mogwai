@@ -131,7 +131,7 @@ with HTTP 400 rather than using the supplied symbol to choose a clock.
 order EXECUTING or LEAVING THE BOOK - a fill, a cancel that frees a resting
 order's hold, a funds-check eviction during a sweep, a stop trigger that booked
 any of these. It is deliberately NOT spent on an order JOINING the book, even
-though the reservation that joining takes does move `locked`: acceptance
+though the hold that joining places does move `locked`: acceptance
 necessarily precedes the fill, so an arm consumed there could never reach the
 event a scenario author aimed it at. That one carve-out is the whole of the
 asymmetry - everywhere else the question is whether an order's state actually

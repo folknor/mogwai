@@ -37,7 +37,7 @@
 //! CLASS can produce, so any sample feeds one command to one book and the
 //! ratio is a property of the sample. Measured over the engine's reservation
 //! matrix it runs 2.2x to 249x, which is why
-//! `worst_case_reservation_covers_actual_output` in `mogwai-engine` is
+//! `worst_case_byte_budget_covers_actual_output` in `mogwai-engine` is
 //! one-sided by ruling rather than by omission. `worst_case_output_bytes` is
 //! bracketed on its two QUERY arms only, where the reply really does have one
 //! maximal shape. A NEW COMPOSED BOUND INHERITS THAT REFUSAL; a new
@@ -217,7 +217,7 @@ pub fn swept_batch_max_bytes(shape: &BookShape, swept: usize, originated: usize)
 /// Upper bound on the total serialized bytes `Engine::process` can produce for
 /// `cmd` against a book of `shape`. The worst cases are enumerated from the
 /// engine's own branches and pinned by
-/// `worst_case_reservation_covers_actual_output` in `mogwai-engine`, which
+/// `worst_case_byte_budget_covers_actual_output` in `mogwai-engine`, which
 /// samples the claim the derivations above argue.
 #[must_use]
 pub fn worst_case_output_bytes(cmd: &Command, shape: &BookShape) -> usize {

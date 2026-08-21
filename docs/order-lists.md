@@ -60,13 +60,13 @@ On that one axis the guarantee covers everything the venue can decide in
 advance, and not a balance the group's own fills moved.
 
 Whether your own group meets it is a question about YOUR orders, not about
-brackets in general. A reduce-only order reserves nothing, so a group whose
+brackets in general. A reduce-only order places no hold, so a group whose
 exits are reduce-only never meets the carve-out. Whether an exit CAN be
 reduce-only depends on the run's `oms_type` and is on your side of the wire:
 under hedging an exit names the `position_id` it reduces and caps against that
 position, while under netting the cap is taken against the account net, which
 is a different number from a slice a consumer tracks locally. An exit that is not
-reduce-only reserves like any other order - it takes initial margin per resting
+reduce-only takes a hold like any other order - it takes initial margin per resting
 contract at admission, and nothing clamps its fill to a position. See
 [Netting and hedging](oms-types.md).
 
@@ -123,12 +123,12 @@ legs of an OCO pair swept together produce exactly one fill and one cancel.
 ## Children: what `parent_order_id` buys
 
 A child is ACCEPTED at submit and then HELD: on the book, answerable to
-`QueryOrders`, scanned by nothing, and **holding no reservation**. An order that
+`QueryOrders`, scanned by nothing, and **placing no hold**. An order that
 cannot execute must not tie up funds the parent's own fill needs.
 
 Its parent's first fill RELEASES it: it takes the resting state it would have
 been given at submit, draws a fresh fill-band trigger, starts its scan from the
-release instant, and takes its reservation then. Release emits no wire frame -
+release instant, and places its hold then. Release emits no wire frame -
 the child was already accepted and its status has not changed.
 
 A child of a parent that has ALREADY filled is live at once. That is the
@@ -148,7 +148,7 @@ of that fault class.
 
 AMENDING A HELD CHILD LEAVES IT HELD. A price amend moves the price the child
 will rest at once it is released; it does not promote the child to a live limit,
-does not give it a reservation, and does not offer it any tape. A trigger amend
+does not give it a hold, and does not offer it any tape. A trigger amend
 on a held conditional child is refused, and says which of the two it is - the
 child is held, not triggered.
 

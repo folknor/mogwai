@@ -148,6 +148,14 @@ so.
   instruments is trading one book. Order entry is WebSocket-only - there is no
   HTTP order carrier. A ledger outlives the connection that named it, which is
   what makes a reconnect a continuation.
+- **Hold**: the portion of a balance tied up by a resting order. An order places
+  a hold when it comes to rest and frees that hold when it leaves the book; a
+  held order-list child places no hold until its parent releases it, and a
+  reduce-only order places none at all. The consumer-visible `locked` balance is
+  wider than the order holds alone: it also carries the maintenance collateral
+  of open marked positions and the unsettled proceeds of an equity sale, and it
+  distinguishes none of the three. The word is the funds sense only - the
+  per-connection byte budget is a reservation, see Admission.
 - **Passenger**: the venue-side object for one account riding the run: the
   account id, its engine, its risk ledger, its freeze stamp and its seats. One
   per account, not per connection, and it outlives every connection that speaks

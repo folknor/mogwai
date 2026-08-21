@@ -269,7 +269,7 @@ says about the orders it names. THE RULE IS APPLIED WHERE THE FILL IS COMMITTED,
 between sweep results and never after the batch: a tape span can cross both legs
 of a bracket at once, so a sibling reaped on a later pass would already have
 filled against the same prints. A CHILD (`parent_order_id`) rests HELD -
-accepted, answerable, scanned by nothing and holding no reservation - until its
+accepted, answerable, scanned by nothing and placing no hold - until its
 parent's first fill releases it into the state it would have been submitted
 into, drawing a fresh band trigger and taking its hold then. A parent that goes
 terminal without filling reaps its held children in the same batch.
@@ -872,7 +872,7 @@ a fill moves the position and the VWAP, a quantity-reducing fill books
 settlement balance, and margin - `maintenance_per_contract` per open contract
 plus `initial_per_contract` per resting non-reduce-only contract - is what the
 account locks, reported per symbol as posted margin the adapter forwards as
-nautilus `MarginBalance` rows. Reduce-only orders reserve nothing, which is
+nautilus `MarginBalance` rows. Reduce-only orders place no hold, which is
 what makes two bracket legs against one position exclusive rather than
 additive. The sweep pass marks every open futures position to the tape, strikes
 every settlement instant the calendar crossed AT ITS OWN INSTANT rather than at
