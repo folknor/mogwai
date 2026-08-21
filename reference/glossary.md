@@ -11,7 +11,7 @@ so.
   loopback: one run, many rivers, many accounts. It gates on no symbol and
   admits any account id; both resolutions are total. Whether it runs as its own
   PID or embedded in the consumer's own program is a deployment detail and never
-  part of its identity - `mogwai-server` is a library, and the venue is one
+  part of its identity - `mogwai-venue` is a library, and the venue is one
   thing either way.
 - **Server mode**: the venue launched by `mogwai serve` on the command line - a
   long-lasting exchange accepting connections from as many accounts as the user

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 mod clock;
 /// `Decimal` conversions, and the serde glue that makes a wire decimal a JSON
 /// string rather than a JSON number. Public for the one decode path outside
-/// this crate that carries money: `mogwai-server`'s `POST /accounts` balances.
+/// this crate that carries money: `mogwai-venue`'s `POST /accounts` balances.
 pub mod decimal;
 mod havoc;
 mod instruments;

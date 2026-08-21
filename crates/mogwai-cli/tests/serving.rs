@@ -314,7 +314,7 @@ async fn a_symbol_no_preset_covers_is_served_under_the_default_bundle() {
     assert_eq!(defs.len(), 1);
     let def = &defs[0];
     assert_eq!(def.symbol.as_ref(), "FOOBAR");
-    let preset = mogwai_server::config::profile_from_preset("BTCUSDT").unwrap();
+    let preset = mogwai_venue::config::profile_from_preset("BTCUSDT").unwrap();
     assert_eq!(def.class, preset.def.class);
     assert_eq!(def.price_precision, preset.def.price_precision);
     assert_eq!(def.size_precision, preset.def.size_precision);

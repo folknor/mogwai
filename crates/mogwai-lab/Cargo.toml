@@ -16,16 +16,16 @@ build = "build.rs"
 # them exclusively. Nothing here adds, changes or observes a draw, so the
 # crate carries no TAPE_PROTOCOL_VERSION obligation of its own (spec 2.3, the
 # same consumer-only standing measure12a.rs has). It still depends on neither
-# mogwai-server nor mogwai-engine: the parity tests that need preset and
+# mogwai-venue nor mogwai-engine: the parity tests that need preset and
 # profile resolution live in mogwai-cli, which depends on both, precisely so
 # the axum stack never lands under the lab.
 [dependencies]
 mogwai-data.workspace = true
 mogwai-protocol.workspace = true
 # Phase 3b only: `summary`/`fit` walk against an `InstrumentProfile`, which
-# `mogwai-server` defines and resolves through `Config::load` - the same path
+# `mogwai-venue` defines and resolves through `Config::load` - the same path
 # `mnq_fit.py`'s scratch-config walks took.
-mogwai-server.workspace = true
+mogwai-venue.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
@@ -37,7 +37,7 @@ sha2.workspace = true
 rust_decimal.workspace = true
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # `sidecar` opens the benchmark marker FIFO non-blocking, and needs exactly one
-# thing from here: the `O_NONBLOCK` flag value. Same pin mogwai-server carries;
+# thing from here: the `O_NONBLOCK` flag value. Same pin mogwai-venue carries;
 # no feature is enabled because `nix::libc` is unconditional.
 nix = { version = "0.31.3", default-features = false }
 hotpath = { workspace = true, optional = true }

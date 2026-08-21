@@ -658,7 +658,7 @@ async fn sigterm_closes_without_announcing_run_complete() {
 /// if the deadline epoch regresses to boot. The run-clock half - never stopping
 /// before `sim_ns(now) >= deadline_ns`, which the truncating conversion of
 /// `wall_ns` would otherwise do - is pinned deterministically and without a host
-/// by `mogwai-server`'s `the_deadline_wait_never_reports_done_before_the_sim_clock_arrives`.
+/// by `mogwai-venue`'s `the_deadline_wait_never_reports_done_before_the_sim_clock_arrives`.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {

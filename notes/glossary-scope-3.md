@@ -1,6 +1,6 @@
 # Glossary scope pass 3: the venue's internal domain model
 
-Inventory of `mogwai-server`'s internal model - the run and its passengers, the
+Inventory of `mogwai-venue`'s internal model - the run and its passengers, the
 boatyard and its boats and tickets, the rivers, the lanes and seats and the
 delivery apparatus, the sweeper, the account lifecycle machinery, and the words
 these use among themselves - measured against `reference/glossary.md`. Nothing

@@ -677,7 +677,7 @@ mod tests {
     // hang watchdog, blaming a test that was never meant to run there.
     //
     // Run it deliberately by name, raising the watchdog for that one run:
-    //   test -p mogwai-server vol_probe --timeout 280
+    //   test -p mogwai-venue vol_probe --timeout 280
     // `--timeout` applies to the focused runner only, takes 1 to 280 seconds,
     // and is refused when the name matches more than one test. 280 is a hard
     // cap. See AGENTS.md for the runner these arguments belong to.
@@ -830,7 +830,7 @@ mod tests {
     // hang watchdog, blaming a test that was never meant to run there.
     //
     // Run it deliberately by name, raising the watchdog for that one run:
-    //   test -p mogwai-server read_market_latency_stays_within_submit_budget --timeout 280
+    //   test -p mogwai-venue read_market_latency_stays_within_submit_budget --timeout 280
     // `--timeout` applies to the focused runner only, takes 1 to 280 seconds,
     // and is refused when the name matches more than one test. 280 is a hard
     // cap. See AGENTS.md for the runner these arguments belong to.

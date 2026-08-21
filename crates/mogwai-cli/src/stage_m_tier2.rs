@@ -1275,7 +1275,7 @@ fn controls(args: &ControlsArgs) -> anyhow::Result<()> {
     }
     std::fs::create_dir_all(&args.output)?;
     let profile =
-        mogwai_server::config::profile_from_preset("MNQ").map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_venue::config::profile_from_preset("MNQ").map_err(|e| anyhow!(e.to_string()))?;
     let frame = mogwai_lab::session::ScheduleFrame::stage_m(Path::new(
         "analysis/tz-america-chicago-2026c.json",
     ))
@@ -1311,7 +1311,7 @@ fn controls(args: &ControlsArgs) -> anyhow::Result<()> {
             profile.scalars.clone(),
             seed,
             walk_start,
-            mogwai_server::source::fingerprint(),
+            mogwai_venue::source::fingerprint(),
             &profile.session,
             None,
             mogwai_data::SizeGrid::from_def(&profile.def),

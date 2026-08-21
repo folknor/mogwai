@@ -224,7 +224,7 @@ group by any other route has no API for it, and none is owed until one is wanted
 
 - THE VENUE ANNOUNCES `RunComplete` TO A PASSENGER WHOSE OWN DURATION ENDED,
   which is why the adapter's duration-complete log line is unreachable on the
-  ordinary path. In `crates/mogwai-server/src/ws.rs` the passenger-duration arm
+  ordinary path. In `crates/mogwai-venue/src/ws.rs` the passenger-duration arm
   sends a `RunComplete` frame and only THEN closes with
   `close::DURATION_COMPLETE`, exactly as the whole-run arm does - so a client
   classifying on the text frame calls a duration end a run completion and never
@@ -371,7 +371,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   the socket's, would close it and is a wire change nobody has asked for.
   The tests that tripped over it now bound the skew through
   `completion.rs`'s `boat_skew_floor`; the run-clock half they used to imply is
-  pinned by `mogwai-server`'s
+  pinned by `mogwai-venue`'s
   `the_deadline_wait_never_reports_done_before_the_sim_clock_arrives`.
 
 - CLOSED 2026-08-20 BY OWNER RULING: `ClearDivergences` DOES NOT DRAIN THE
@@ -389,7 +389,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   It is the CONTROL PLANE - `POST /control/divergence` - and the misreading is
   most of why this looked like a consumer-facing defect. The convention and the
   fact that the venue does NOT enforce it are stated at the route registration
-  in `mogwai-server`'s `serve.rs`.
+  in `mogwai-venue`'s `serve.rs`.
 
 - ENGINE-ARM APPLICATION ORDER IS UNORDERED ACROSS CONCURRENT CONTROL REQUESTS.
   `Run::arm` records under the passenger map lock, but the engine half is applied
@@ -437,7 +437,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   Retirement is NOT part of this: `retire_off_river` retires what sits off the
   bound river, and an order on it is untouched even when the retirement is
   forced.
-  DEMONSTRATED, not argued, by `mogwai-server`'s
+  DEMONSTRATED, not argued, by `mogwai-venue`'s
   `an_eviction_reconnect_keeps_a_frontier_from_the_departed_cursor`, which pins
   the frontier at the departed cursor's 5_000 against a binding cursor at 1_000.
   Bite-checked by forcing `returning` true, which fires that assertion and no
@@ -451,7 +451,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   ones and `resume` calls it on every bind. Trailing frontiers are left alone,
   which is what keeps this from being the unconditional re-base under another
   name: that span is water the account is owed a scan over.
-  The regression test is `mogwai-server`'s
+  The regression test is `mogwai-venue`'s
   `an_eviction_reconnect_rebases_a_frontier_from_the_departed_cursor`, with
   `mogwai-engine`'s `only_a_frontier_that_leads_the_cursor_is_rebased` pinning
   both halves of the predicate. `reference/architecture.md` carried the false
@@ -636,7 +636,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   now counted correctly by `Engine::worst_case_leaves` - held children
   contribute nothing, an exclusive group contributes its max - but the
   `additional` argument cannot be, because the caller does not pass the order.
-  The effect is a conservative over-projection in `mogwai-server`'s optional
+  The effect is a conservative over-projection in `mogwai-venue`'s optional
   `max_position` cap: it can refuse an order the book could not actually have
   reached, never admit one it could. Fixing it means giving `projected_qty` the
   `SubmitOrder` rather than a `Decimal`, which is a signature change through
@@ -714,7 +714,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   becomes a hang the moment anything serves a composed river or asks it for a
   window. `fault` is the harder half: the composer's one terminal condition,
   clock exhaustion, has no `TickFault` variant, and adding one ripples into
-  `mogwai-server`'s `http.rs` fault rendering. Today it is reported through the
+  `mogwai-venue`'s `http.rs` fault rendering. Today it is reported through the
   inherent `SegmentSource::clock_exhausted`, which a `dyn TickSource` consumer
   cannot see. Filed 2026-08-19 by the `bugs-data` round-2 fix pass; the residual
   sub-item of that document's finding 4.
@@ -778,7 +778,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   2026-08-19 by the `bugs-protocol` round-4 fix-and-commit pass, which closed the
   order-entry half and stopped there. `validate_submit_order` runs
   `validate_wire_symbol` as of that commit, so a client-inbound symbol is 1 to 32
-  bytes of the URL-safe alphabet; `mogwai-server`'s `config.rs` checks an
+  bytes of the URL-safe alphabet; `mogwai-venue`'s `config.rs` checks an
   instrument's own `symbol` for non-empty and `MAX_SYMBOL_LEN` ONLY (it does run
   `validate_wire_symbol` on `index_symbol`), so a config naming `MNQ!` loads, is
   served, and cannot be ordered. Nothing in this tree does that - every shipped
@@ -865,7 +865,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   one integration test to read the venue's LOG instead. Filed 2026-08-18 by the
   lifecycle-test fix pass.
 
-  `market_reading` in `mogwai-server`'s command path takes a `MarketReading` for
+  `market_reading` in `mogwai-venue`'s command path takes a `MarketReading` for
   every submit and passes it to the engine. When `read_market` refuses - a cold
   volatility estimator, a truncated walk - the engine falls back to the order's
   stated price with no slippage and logs a WARN. Whether the reading happened is
@@ -912,7 +912,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   per river, readable from a route that already exists - a field on `/clock` or
   `/health` would do. A test could then read it, wait for it to advance by N, and
   say exactly what it waited for. Nothing on the wire carries it today; the
-  sweeper is internal to `mogwai-server`'s fill path and emits no frame, no
+  sweeper is internal to `mogwai-venue`'s fill path and emits no frame, no
   counter and no log a test can consume.
 
   WHAT WAS DONE INSTEAD. The resting-stop test polls `/clock?symbol=` until the
@@ -1927,7 +1927,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   the reset reading would silently wipe a position book.
   THE RISK POLICY LANDED, 2026-08-16. `POST /accounts` carries an optional
   `policy`; `mogwai_protocol::risk` is the wire type and
-  `mogwai-server/src/risk.rs` the evaluator. A rule is the TRIPLE the design
+  `mogwai-venue/src/risk.rs` the evaluator. A rule is the TRIPLE the design
   named - measure, basis, breach action - with `lock_until_reset` and
   `terminate` as the two actions, a trailing drawdown ratcheting on either
   intraday peak equity or end-of-day balance with an optional lock level, and a
@@ -3071,7 +3071,7 @@ HAVOC KNOBS ARE PER-ACCOUNT, POSTED ON CONNECT, AND CONSTANT FOR THAT
 CONNECTION. That is how every consumer drives the venue. The venue does NOT
 enforce it - `POST /control/divergence` accepts an arm at any instant, including
 against an account mid-connection, and answers 202 - and the gap is stated at
-the route registration in `mogwai-server`'s `serve.rs`. Enforcement was
+the route registration in `mogwai-venue`'s `serve.rs`. Enforcement was
 considered and declined: nobody does it, and the convention is cheaper to state
 than to police. Several entries above read as live hazards ONLY under the
 assumption this convention does not hold, the pending-arm shed cap and the
@@ -3178,11 +3178,11 @@ The Rust crates are deliberately env-var-free for runtime knobs; run config live
 in `mogwai.toml`. `RUST_LOG` is the only ambient read on the SERVING path. The
 reads:
 
-- `RUST_LOG` - `mogwai-server` via `EnvFilter::try_from_default_env`, falls back
+- `RUST_LOG` - `mogwai-venue` via `EnvFilter::try_from_default_env`, falls back
   to `mogwai=info`. The one documented, deliberate ambient exception; a prior
   `MOGWAI_REPLAY_SPEED`/`MOGWAI_GAP_CAP_MS` pair was removed in favour of
   `mogwai.toml`.
-- `NO_COLOR` - `mogwai-server/src/man.rs`, standard convention, `man`-output only.
+- `NO_COLOR` - `mogwai-cli/src/man.rs`, standard convention, `man`-output only.
 - `MOGWAI_DATA_DIR` - `analysis/characterize.py` and `analysis/recon.py`, default
   `/home/folk/Kraken`. Offline-analysis input only, never a
   server runtime knob. The default path string is duplicated verbatim in both
@@ -3238,7 +3238,7 @@ Inline literals (no named const):
 - Test fixtures repeat `BTCUSDT`/`BTC`/`USDT`, a base price of 100, and
   partial-fill fractions 0.3/0.4/0.5 across dozens of sites (no shared consts).
 
-### mogwai-server
+### mogwai-venue
 
 - Bind: the `BIND_ADDR` const, `127.0.0.1:0`, not configurable at all - the
   `--addr` flag is gone, so ephemeral loopback is the only endpoint and it is
@@ -3246,7 +3246,7 @@ Inline literals (no named const):
 - HTTP route strings (`/health`, `/account`, `/instruments`, `/trades`,
   `/quotes`, `/clock`, `/ws`, `/control/divergence`) as inline
   literals, no shared registry with the adapter's route segments.
-- `Config::default()`: `speed 1.0`, `server_heartbeat_ms 0`,
+- `Config::default()`: `speed 1.0`, `venue_heartbeat_ms 0`,
   `warmup_ns 86_400_000_000_000` (24h), `account_id` from
   `DEFAULT_ACCOUNT_ID = "MOGWAI-001"`. `gap_cap_ms` no longer exists anywhere in
   the workspace, and `sim_epoch_ns` is no longer a config key at all - it is
@@ -3326,7 +3326,7 @@ golden-test seed.
   --profile build` (gpt-5.6-terra, medium, workspace-write). `[_defaults]`
   pins the provider to `codex`. `prevent-harness-bug.sh` default sleep `60`.
 - Smoke fixture configs `smoke-accelerated.toml` (`speed 100.0`) and
-  `smoke-heartbeat.toml` (`server_heartbeat_ms 100`) - by-design knobs.
+  `smoke-heartbeat.toml` (`venue_heartbeat_ms 100`) - by-design knobs.
 - `analysis/`: `MAX_LAG 50` in `characterize.py` with `build_fingerprint.py`
   hardcoding ACF indices `[9]`/`[49]` as lag10/lag50 (hidden coupling - changing
   MAX_LAG silently breaks the indices); `TICK_DICT_CAP 500_000`, histogram bin
@@ -3341,7 +3341,7 @@ golden-test seed.
   dependencies pinned at 0.61 with default-features off. `brokkr.toml` only sets
   `project = "mogwai"`. Root `mogwai.toml` is an EXAMPLE run config, not one the
   server reads (nothing consults the working directory): `speed 1.0`,
-  `server_heartbeat_ms 0`, `run_duration_ns 0`, `warmup_ns` 24h,
+  `venue_heartbeat_ms 0`, `run_duration_ns 0`, `warmup_ns` 24h,
   `fanout_depth 65536`, `zero_speed_stall_ms 5000`, the fill-band and admission
   knobs, and the funded `balances` table. It states neither `sim_epoch_ns` nor
   `wall_anchor_ns` - both are derived at boot, and the former is refused as a

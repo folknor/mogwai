@@ -135,7 +135,7 @@ session-rate heterogeneity, and only the decomposition separates them.
    historical and current files are not byte-identical:
 
    ```text
-   crates/mogwai-server/presets/mnq.toml
+   crates/mogwai-venue/presets/mnq.toml
      historical (12a, 1e9506c)  46622ce226922d96457fcc0ea57411b63b5d7f0f
      current (bound by Stage 0) c1b352efbc35c878dd3cc75cb282fa29fde57f6a
 

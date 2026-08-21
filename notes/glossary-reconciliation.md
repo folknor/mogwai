@@ -132,7 +132,7 @@ words "and nothing else".
 | # | Scope |
 |---|---|
 | 1 | The wire: the whole of `mogwai-protocol`'s public surface. `ClientMessage`, `ServerMessage`, `control::Divergence`, `close`, `risk`, `launch` and `ReadyRecord` are the load-bearing parts, not the boundary |
-| 2 | The venue's external surface: `mogwai-server`'s routes, query structs, JSON bodies, status codes, operator config keys, and every refusal, error and log string a consumer or operator reads |
+| 2 | The venue's external surface: `mogwai-venue`'s routes, query structs, JSON bodies, status codes, operator config keys, and every refusal, error and log string a consumer or operator reads |
 | 3 | The venue's internal domain model: `Run`, `Passenger`, `Boat`, `Boatyard`, the lane and seat apparatus, the sweeper, and the names they use among themselves |
 | 4 | `mogwai-engine`'s public API |
 | 5 | `mogwai-data` and `mogwai-lab` public APIs - the `TickSource` seam, the sources, `segment`, the measurement and fit surfaces |
@@ -335,7 +335,7 @@ free: it is a mode name.
 
 A consumer is the program or system driving the venue. It may be one process,
 several sharing nothing but the wire, or the very process the venue is embedded
-in, since `mogwai-server` is a library. So there is no process-shaped object at
+in, since `mogwai-venue` is a library. So there is no process-shaped object at
 the other end to name, and the venue never perceives a consumer at all: what it
 perceives is a session id, an account and its connections.
 
@@ -491,11 +491,11 @@ and refusal text that carried the word. What the close pass found in the half no
 cold reviewer reads:
 
 - Two sites where the sweep put `venue` on a sentence whose subject was the
-  `mogwai-server` CRATE rather than the running process - `mogwai-lab`'s
-  manifest comment on its `mogwai-server` dependency, and the crate-graph
-  paragraph in `reference/architecture.md`. Both now name the crate. That is
-  the round's characteristic failure and it will recur in the crate-rename
-  round with the polarity reversed.
+  crate rather than the running process - `mogwai-lab`'s manifest comment on
+  its dependency, and the crate-graph paragraph in `reference/architecture.md`.
+  Both were corrected to name the crate, which at that point was still
+  `mogwai-server`. That is the round's characteristic failure and it recurred
+  in round 2 with the polarity reversed.
 - `.gitignore` carried `scripts/server.log`, which the sweep renamed to
   `scripts/venue.log`. Nothing has ever written either path - `smoke.py` drains
   the child's stderr into memory - so the rename turned a dead entry into a
@@ -516,6 +516,51 @@ rename moves no byte on the wire; the only consumer-visible breaks are
 `TAPE_PROTOCOL_VERSION` bump is owed. `client` did not move: the workspace's
 occurrence count is identical before and after.
 
+**Round 2, the crate, 2026-08-21.** `mogwai-server` becomes `mogwai-venue`:
+the package name, the directory under `crates/`, the workspace dependency
+entry, the three dependents' manifests, and every prose, doc-comment,
+manifest-comment, config-comment and tooling reference that spelled the old
+crate or its `mogwai_server` module path. This closes the last surviving use
+of the retired word, since round 1 deliberately protected prose whose subject
+was the crate rather than the process.
+
+The word `server` now appears in the workspace in exactly three places, all
+of them correct: the glossary's Server mode entry, the two regression tests
+pinning the retired `server_heartbeat_ms` config key and `HavocSpec.server`
+JSON field as refused rather than ignored, and the substring inside
+`observer`. There is no third reading to sweep later.
+
+What the round did not touch, checked rather than assumed: the binary target
+name stays `mogwai` in `mogwai-cli`, which the shipped launcher and every
+document exec by that name, so nothing about `brokkr run mogwai` or
+`target/release/mogwai` moves. No `client` site moved - the arc's own ruling
+gives that family its own round, and the only `client` lines in the diff are
+unchanged context inside ledger rows whose crate path was rewritten. No tape
+byte moves and no wire byte moves, so no `TAPE_PROTOCOL_VERSION` bump is
+owed. The gated workspace check reports 1339 workspace tests and 468
+instrumented, unchanged from before the round, which is the expected outcome
+for a pure rename - any movement in that count would itself have been a
+finding.
+
+Corrected in the close pass, the half no cold reviewer reads: the round-1
+paragraph immediately above had been swept too, which turned a historical
+record of round 1's characteristic failure into a self-contradiction, since
+the crate it says was wrongly called `venue` is now called exactly that. It
+is restored to describe what was true at the time. `notes/todo.md` carried
+the retired `server_heartbeat_ms` spelling in three inventory entries and
+named `man.rs` under the venue crate when it has always lived in
+`mogwai-cli`; both are now correct.
+
+A disclosed decision rather than an oversight.
+`analysis/mnq-arrival-control.json` and
+`analysis/mnq-arrival-screen.json` are committed measurement provenance bound
+to specific commits, and the sweep rewrote the preset paths recorded inside
+them, so the paths they now claim did not exist at the commits they name. The
+cold review found this and it is correct. The owner ruled on 2026-08-21 that
+it is out of scope and stays as it is: the artifacts are not reverted, not
+regenerated and not annotated. A later round must not re-raise it as a new
+finding.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
@@ -533,7 +578,7 @@ These belong to no single scope, so nothing else holds them.
   the gap and the work that has to be undone to close it, not a correction to
   the entry. Nobody re-opens this as a naming question.
 - **Doc comments attached to the wrong item are a family, not a coincidence.**
-  Three instances across two scopes: two in `mogwai-server`'s `run.rs`, where
+  Three instances across two scopes: two in `mogwai-venue`'s `run.rs`, where
   `evict_account` and `session_guard` both lost their doc to the following
   item, and one in `mogwai-engine`, where `free_balance`'s entire doc sits on
   `net_position` and `free_balance` has none. Nothing in the workspace detects
@@ -542,7 +587,7 @@ These belong to no single scope, so nothing else holds them.
   ledgers.
 - **The late-boarder rule is open-coded twice, in two crates, with nothing
   shared** - the fee surcharge window in `mogwai-engine` and the FlowSurge
-  branch of `arm_divergence` in `mogwai-server`. That is the shape `AGENTS.md`
+  branch of `arm_divergence` in `mogwai-venue`. That is the shape `AGENTS.md`
   says to anchor with a shared fixture or a common module.
 
 ### Retired

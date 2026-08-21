@@ -57,7 +57,7 @@ A Cargo workspace, seven crates under `crates/`:
   `GeneratedSource` synthetic generator the running venue uses (fitted to the
   committed fingerprint) plus the `KrakenCsvSource` streaming loader kept as the
   offline-analysis lineage.
-- `mogwai-server` - the axum LIBRARY that owns the sockets, the clock and replay
+- `mogwai-venue` - the axum LIBRARY that owns the sockets, the clock and replay
   pacing, synthesizing market data per subscription; exposes `/health`, `/ws`,
   `/control/divergence`, `/instruments`, `/trades`, `/quotes`, `/account` and
   `/clock`. Order entry is websocket-only - the `POST /orders` carrier went with
@@ -75,7 +75,7 @@ A Cargo workspace, seven crates under `crates/`:
   month into a returns-space segment library and `tape` composing that library
   into an endless tape dumped as trades or bars in CSV - `presets` and `man`.
   `serve` does no work here - it hands its three arguments to
-  `mogwai_server::serve`. The bin TARGET name is `mogwai`, not the package name,
+  `mogwai_venue::serve`. The bin TARGET name is `mogwai`, not the package name,
   and that is load-bearing: `brokkr run mogwai` and the shipped launcher both
   exec `target/release/mogwai` by that name. The Python measurement harness
   did too, until phase 4b retired it; renaming the target no longer breaks it,
@@ -87,8 +87,8 @@ A Cargo workspace, seven crates under `crates/`:
   records are retired to git history):
   TBBO/Binance-trades corpus parsing, the protocol-12a measurement engine,
   fingerprint/cadence synthesis and the protocol-11 fit. Depends on
-  `mogwai-data`, `mogwai-protocol` and `mogwai-server` (session-summary work
-  resolves an `InstrumentProfile` through `Config::load`); `mogwai-server`
+  `mogwai-data`, `mogwai-protocol` and `mogwai-venue` (session-summary work
+  resolves an `InstrumentProfile` through `Config::load`); `mogwai-venue`
   depends on none of it, so there is no cycle. `mogwai-cli` calls it for
   `preflight`, `measure`, `fit`, `cache` and `synth`. It also carries
   `sidecar`, the observation-only benchmarking channels (stderr `key=value`

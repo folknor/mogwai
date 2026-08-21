@@ -1009,7 +1009,7 @@ brokkr check
 ### Brick G: generated-side measurement
 
 Adds a consumer-only `GenType::Measure12a` to
-`crates/mogwai-server/src/gen.rs`: a `Measure12aAcc` that enables the
+`crates/mogwai-venue/src/gen.rs`: a `Measure12aAcc` that enables the
 existing `VolTrace`, consumes each generated parent and its children
 once, computes Blocks 1-4 streaming, retains one compact forensic
 accumulator per populated minute plus the predecessor state

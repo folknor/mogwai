@@ -35,7 +35,7 @@ A Cargo workspace of seven crates under `crates/`:
   the shipped launcher.
 - `mogwai-engine` - the venue-agnostic exchange core and divergence seam.
 - `mogwai-data` - the synthetic generator and the k-way tick merge.
-- `mogwai-server` - the axum library owning sockets, clock and replay pacing.
+- `mogwai-venue` - the axum library owning sockets, clock and replay pacing.
 - `mogwai-cli` - the `mogwai` binary: `serve` plus the offline generator and
   measurement subcommands.
 - `mogwai-lab` - the offline corpus-to-fingerprint method library: corpus
@@ -93,7 +93,7 @@ readiness line on stdout; see [`docs/cli.md`](docs/cli.md).
 Linux only, for now. The venue arms `PR_SET_PDEATHSIG` so the kernel terminates
 it when its launcher dies, which is the whole of its cleanup story - there is no
 PID file and no `stop` to fall back on - and that call is unconditional, so
-`mogwai-server` does not build elsewhere, and neither does the `mogwai` binary.
+`mogwai-venue` does not build elsewhere, and neither does the `mogwai` binary.
 
 ## Usage
 

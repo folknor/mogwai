@@ -16,7 +16,7 @@
     "exposure": {
       "divergence": null,
       "instrument": "MNQ",
-      "preset": "crates/mogwai-server/presets/mnq.toml",
+      "preset": "crates/mogwai-venue/presets/mnq.toml",
       "regime": "neutral",
       "warmup": "3d",
       "window_length_ns": 2674800000000000,
@@ -82,7 +82,7 @@
           "frozen_paths": [
             "crates/mogwai-data/",
             "crates/mogwai-protocol/",
-            "crates/mogwai-server/presets/",
+            "crates/mogwai-venue/presets/",
             "analysis/fingerprint.json"
           ],
           "passed": true,

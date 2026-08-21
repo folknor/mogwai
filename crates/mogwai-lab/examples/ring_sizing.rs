@@ -11,7 +11,7 @@ static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 /// restated: a measurement that can drift from the knob it verifies measures
 /// nothing.
 fn depth() -> usize {
-    mogwai_server::config::DEFAULT_FANOUT_DEPTH
+    mogwai_venue::config::DEFAULT_FANOUT_DEPTH
 }
 
 fn rss_bytes() -> u64 {

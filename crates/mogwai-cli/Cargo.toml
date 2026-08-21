@@ -15,7 +15,7 @@ name = "mogwai"
 path = "src/main.rs"
 
 [dependencies]
-mogwai-server.workspace = true
+mogwai-venue.workspace = true
 mogwai-protocol.workspace = true
 mogwai-data.workspace = true
 mogwai-lab.workspace = true

@@ -152,7 +152,7 @@ pub(super) const BOUNCE_HIGH_TO_LOW_PROB: f64 = 0.022;
 /// This is NOT a spread, and the name it carried until 2026-08-04
 /// (`HALF_SPREAD_TICKS`) asserted a mechanism the generator does not have. The
 /// generator constructs no `QuoteTick` anywhere: there is no bid, no ask and no
-/// top of book, and `mogwai-server`'s `/quotes` route returns empty by
+/// top of book, and `mogwai-venue`'s `/quotes` route returns empty by
 /// construction. What this constant produces is the bounce amplitude of the
 /// PRINT series - two consecutive opposite-sided prints at an unchanged mid land
 /// `2.0 * TRADE_BOUNCE_HALF_WIDTH_TICKS` apart.

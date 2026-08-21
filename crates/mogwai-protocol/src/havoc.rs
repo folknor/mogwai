@@ -13,7 +13,7 @@ pub struct HavocSpec {
     /// Transport-level corruption the adapter applies to its own inbound stream.
     #[serde(default)]
     pub client: ClientHavoc,
-    /// Execution divergences the adapter relays to mogwai-server on connect.
+    /// Execution divergences the adapter relays to mogwai-venue on connect.
     #[serde(default)]
     pub venue: Vec<control::Divergence>,
     /// Generator-level market regime applied before market-data ticks exist.

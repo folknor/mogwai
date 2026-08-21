@@ -292,7 +292,7 @@ fn is_char_literal(bytes: &[u8], at: usize) -> bool {
 /// gate sets `include_ignored` ON PURPOSE, so an `#[ignore]`d test with no skip
 /// entry RUNS - and for most of them that is the intent, not an omission. The
 /// socket-backed adapter binaries are the whole reason the flag is on; the two
-/// `/trades` sizing instruments in `mogwai-server`'s `http` module are ignored,
+/// `/trades` sizing instruments in `mogwai-venue`'s `http` module are ignored,
 /// unskipped and finish in milliseconds. A check demanding an entry for every
 /// ignored test would refuse both families and would have to grow an exception
 /// list, which is the shape this arc keeps paying for. And where a missing entry
@@ -315,7 +315,7 @@ fn is_char_literal(bytes: &[u8], at: usize) -> bool {
 /// THE LINE IS `tests/fixtures/`, and it is drawn by what the directory MEANS
 /// rather than around any one file. A fixture is a committed input: the suite
 /// reads it and a deliberate tool produces it. A GOLDEN (`tests/golden/`) is a
-/// different contract - `mogwai-server`'s `fill_distribution_matches_the_golden`
+/// different contract - `mogwai-venue`'s `fill_distribution_matches_the_golden`
 /// writes one, but only when the file is ABSENT, and it panics after writing so
 /// the run can never be green on a fresh bless. That shape is safe and stays
 /// legal here. If a golden ever grows an unguarded writer, the rule it needs is

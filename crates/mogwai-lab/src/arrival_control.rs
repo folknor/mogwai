@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use mogwai_data::{TickEvent, TickSource};
-use mogwai_server::source::InstrumentProfile;
+use mogwai_venue::source::InstrumentProfile;
 use serde_json::{Value, json};
 
 use crate::aggregate::RefusalRec;
@@ -358,7 +358,7 @@ pub fn control_generated_pass(
         profile.scalars.clone(),
         seed,
         walk_start,
-        mogwai_server::source::fingerprint(),
+        mogwai_venue::source::fingerprint(),
         &profile.session,
         None,
         mogwai_data::SizeGrid::from_def(&profile.def),
@@ -390,7 +390,7 @@ pub fn control_generated_pass(
 
 /// MNQ as `mogwai_cli::measure::run_final_walk` resolves it: the shipped preset.
 fn default_mnq_profile() -> LabResult<InstrumentProfile> {
-    mogwai_server::config::profile_from_preset("MNQ")
+    mogwai_venue::config::profile_from_preset("MNQ")
         .map_err(|e| LabError::refusal(format!("resolving the MNQ preset: {e}")))
 }
 
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn an_unexposed_hour_is_not_a_refusal() {
         let obs = observed_ctx();
-        let profile = mogwai_server::config::profile_from_preset("MNQ").unwrap();
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").unwrap();
         let hours = gate_hours(&profile).unwrap();
         let tests = [walk_from(
             ObsContext::new(obs.per_session().to_vec()),
@@ -744,7 +744,7 @@ mod tests {
     #[test]
     fn a_gate_with_a_refusal_fails_rather_than_passing_vacuously() {
         let obs = observed_ctx();
-        let profile = mogwai_server::config::profile_from_preset("MNQ").unwrap();
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").unwrap();
         let hours = gate_hours(&profile).unwrap();
 
         // B6 and B7: one gate hour's block2 cell removed from every generated
@@ -864,7 +864,7 @@ mod tests {
         // preset rather than written down, so a legitimate MNQ calendar change
         // fails at `gate_hours_excludes_the_unexposed_hour`, which owns that
         // fact, instead of failing here behind a message about window length.
-        let profile = mogwai_server::config::profile_from_preset("MNQ").unwrap();
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").unwrap();
         let exposed = gate_hours(&profile).unwrap().len();
         let covered = by_hour.values().filter(|r| r.parents > 0).count();
         assert_eq!(
@@ -883,7 +883,7 @@ mod tests {
 
     #[test]
     fn gate_hours_excludes_the_unexposed_hour() {
-        let profile = mogwai_server::config::profile_from_preset("MNQ").unwrap();
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").unwrap();
         let hours = gate_hours(&profile).unwrap();
         assert_eq!(hours.len(), 23);
         assert!(!hours.contains(&21));
@@ -891,7 +891,7 @@ mod tests {
 
     #[test]
     fn normalizer_drift_is_one_for_a_constant_ratio() {
-        let profile = mogwai_server::config::profile_from_preset("MNQ").unwrap();
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").unwrap();
         let old = profile.session.intensity_hour;
         let new = old.map(|x| x / 7.0);
         assert!((normalizer_drift(&old, &new, &profile).unwrap() - 1.0).abs() < 1e-12);

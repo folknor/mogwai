@@ -14,7 +14,7 @@
 //! ([`measure12a`]), and from phase 3b the protocol-11 fit ([`fit`]) with the
 //! `gen --type summary` accumulator ([`summary`]) it walks in-process.
 //! Depends on `mogwai-data`/`mogwai-protocol` READ-ONLY for the generated
-//! measurement side, and on `mogwai-server` for exactly one thing: the
+//! measurement side, and on `mogwai-venue` for exactly one thing: the
 //! `InstrumentProfile` a fit walk runs against, resolved through the
 //! venue's own `Config::load` the way `mnq_fit.py`'s scratch configs were.
 //! It never depends on `mogwai-engine`.

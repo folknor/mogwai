@@ -23,7 +23,7 @@ sees. If the per-hour factors do not reproduce the probe's ~1.063, the excess
 is not this mechanism and the frame recalibration would repair the wrong thing.
 
 Reads nothing at runtime: the curves and windows below are transcribed from
-crates/mogwai-server/presets/mnq.toml and re-verified against it by the
+crates/mogwai-venue/presets/mnq.toml and re-verified against it by the
 assertions in `main`.
 """
 

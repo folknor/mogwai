@@ -122,7 +122,7 @@ observable by one consumer in one run.
 
 ## B4. `seat` / `seated` - four senses, two shadowing each other in one loop
 
-The single largest readability win available in `mogwai-server`, and the
+The single largest readability win available in `mogwai-venue`, and the
 glossary's own sense is implemented correctly in exactly one place.
 
 | sense | where | disposition |
@@ -182,7 +182,7 @@ richer, so the flag and module move: `--jobs-manifest`, `delivery`.
 The same module also carries the git-cleanliness gate, which is a third
 unrelated job under one file name.
 
-`LedgerTemplate` in `mogwai-server` is a fourth sense - it is neither a ledger
+`LedgerTemplate` in `mogwai-venue` is a fourth sense - it is neither a ledger
 nor a template of one, and its own doc admits the drift.
 
 ## B9. `tape` - four jobs

@@ -27,7 +27,7 @@ use mogwai_protocol::{
 };
 use rust_decimal::Decimal;
 
-use mogwai_server::source::fingerprint;
+use mogwai_venue::source::fingerprint;
 
 // The summary accumulator moved to `mogwai_lab::summary` at phase 3b so the
 // protocol-11 fit driver can drive it in-process. This CLI surface is
@@ -275,7 +275,7 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
 /// and per-parent `VolTrace` records only.
 pub(crate) fn run_measure12a(
     source: &mut mogwai_data::GeneratedSource,
-    profile: &mogwai_server::source::InstrumentProfile,
+    profile: &mogwai_venue::source::InstrumentProfile,
     seed: u64,
     offset: i16,
     start: u64,
@@ -507,7 +507,7 @@ fn havoc_has_offline_inapplicable_surfaces(spec: &HavocSpec) -> bool {
 /// error, not a panic).
 fn build_source(
     args: &GenArgs,
-    profile: &mogwai_server::source::InstrumentProfile,
+    profile: &mogwai_venue::source::InstrumentProfile,
     start_ns: u64,
 ) -> anyhow::Result<mogwai_data::GeneratedSource> {
     let fp = fingerprint();
@@ -541,7 +541,7 @@ fn build_source(
 /// The instrument to generate: `--config` resolves an operator config through
 /// the venue's real loading path; otherwise `--symbol` resolves a built-in
 /// venue symbol first, then an embedded preset of that name.
-fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
+fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<mogwai_venue::source::InstrumentProfile> {
     if let Some(path) = &args.config {
         return profile_from_config(path);
     }
@@ -555,8 +555,8 @@ fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<mogwai_server::source::
 /// resolves to DEFAULT_PRESET and would silently ignore every scratch scalar.
 fn profile_from_config(
     path: &std::path::Path,
-) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
-    let cfg = mogwai_server::config::Config::load(Some(path.to_path_buf()))
+) -> anyhow::Result<mogwai_venue::source::InstrumentProfile> {
+    let cfg = mogwai_venue::config::Config::load(Some(path.to_path_buf()))
         .with_context(|| format!("loading --config {}", path.display()))?;
     if cfg.boot_symbol_carries_no_knobs() {
         bail!(
@@ -565,7 +565,7 @@ fn profile_from_config(
             path.display()
         );
     }
-    let profiles = mogwai_server::config::build_instrument_profiles(&cfg)?;
+    let profiles = mogwai_venue::config::build_instrument_profiles(&cfg)?;
     let def = profiles.boot_symbol_def(cfg.boot_symbol())?;
     Ok((*profiles
         .configured(&def.symbol)
@@ -576,8 +576,8 @@ fn profile_from_config(
 /// Every symbol resolves through the shipped preset registry. An unmatched
 /// string uses the default bundle under its own symbol, and BTCUSDT renders the
 /// fitted BTCUSDT preset.
-fn resolve_profile(symbol: &str) -> anyhow::Result<mogwai_server::source::InstrumentProfile> {
-    mogwai_server::config::profile_for_symbol(symbol)
+fn resolve_profile(symbol: &str) -> anyhow::Result<mogwai_venue::source::InstrumentProfile> {
+    mogwai_venue::config::profile_for_symbol(symbol)
 }
 
 fn aggressor_word(side: AggressorSide) -> &'static str {
@@ -1084,8 +1084,8 @@ mod tests {
         let mut cli_source = build_source(&args, &profile, args.start).expect("cli source");
 
         let fp = fingerprint();
-        let profiles = mogwai_server::source::InstrumentProfiles::from_profiles(vec![
-            mogwai_server::config::profile_for_symbol("BTCUSDT")
+        let profiles = mogwai_venue::source::InstrumentProfiles::from_profiles(vec![
+            mogwai_venue::config::profile_for_symbol("BTCUSDT")
                 .expect("BTCUSDT preset must resolve"),
         ]);
         let profile = profiles.configured("BTCUSDT").expect("BTCUSDT profile");
@@ -1359,8 +1359,7 @@ mod tests {
             "[instrument]\npreset = \"MNQ\"\n[balances]\n",
         );
         let from_config = profile_from_config(&path).expect("config profile");
-        let from_preset =
-            mogwai_server::config::profile_from_preset("MNQ").expect("preset profile");
+        let from_preset = mogwai_venue::config::profile_from_preset("MNQ").expect("preset profile");
         assert_eq!(
             format!("{:?}", from_config.def),
             format!("{:?}", from_preset.def)

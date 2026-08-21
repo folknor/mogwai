@@ -721,7 +721,7 @@ pub struct TickTraversal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalarError {
     /// The BARE name of the offending scalar, and nothing else. Consumers
-    /// render it as a config path (`mogwai-server`'s config loader prints
+    /// render it as a config path (`mogwai-venue`'s config loader prints
     /// `generator.{field}`) and may match on it, so a sentence here would be
     /// both unmatchable and unrenderable. Where one field has several distinct
     /// ways to fail, the discriminating prose goes in [`Self::detail`].

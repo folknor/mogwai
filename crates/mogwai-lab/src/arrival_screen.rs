@@ -25,7 +25,7 @@ use std::time::Instant;
 use mogwai_data::{
     ArrivalConfig, ArrivalRefusal, CadenceWalk, GeneratedSource, ParentSummary, SizeGrid, TickFault,
 };
-use mogwai_server::source::InstrumentProfile;
+use mogwai_venue::source::InstrumentProfile;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -694,7 +694,7 @@ impl ScreenContext {
         let hist = &measure["observed"]["monthly"]["block1"]["hist"];
         let observed_marginal = parent_count_marginal(hist)?;
         let observed_projection = ScreenReduced::from_sessions(&sessions)?;
-        let profile = mogwai_server::config::profile_from_preset("MNQ")
+        let profile = mogwai_venue::config::profile_from_preset("MNQ")
             .map_err(|e| LabError::refusal(e.to_string()))?;
         let hours = gate_hours(&profile)?;
         let fingerprint_path =
@@ -760,7 +760,7 @@ impl ScreenContext {
     /// because nothing reachable from a `verdict_from_walks` test walks a tape.
     #[cfg(test)]
     fn over(sessions: Vec<Value>) -> LabResult<Self> {
-        let profile = mogwai_server::config::profile_from_preset("MNQ")
+        let profile = mogwai_venue::config::profile_from_preset("MNQ")
             .map_err(|e| LabError::refusal(e.to_string()))?;
         let hours = gate_hours(&profile)?;
         let mut hist = Vec::new();
@@ -1542,7 +1542,7 @@ fn project_walk(
                 scalars,
                 seed,
                 walk_start,
-                mogwai_server::source::fingerprint(),
+                mogwai_venue::source::fingerprint(),
                 &profile.session,
                 None,
                 SizeGrid::from_def(&profile.def),
@@ -3998,7 +3998,7 @@ mod tests {
         // would accept - so hour 21, MNQ's daily break, must appear in no row.
         let observed = observed_sessions();
         let ctx = ScreenContext::over(observed.clone()).expect("a screen context");
-        let profile = mogwai_server::config::profile_from_preset("MNQ").expect("the MNQ preset");
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").expect("the MNQ preset");
         assert_eq!(ctx.gate_hours(), gate_hours(&profile).expect("gate hours"));
         assert!(!ctx.gate_hours().contains(&21));
         assert_eq!(ctx.gate_hours().len(), 23);

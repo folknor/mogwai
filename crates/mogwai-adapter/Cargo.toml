@@ -30,7 +30,7 @@ tokio-tungstenite = "0.30.0"
 # A.11 unsurfaced rejects, unrepresentable balances, and omitted status reports)
 # is discarded unseen. With it, tracing events fall back to emitting `log` records
 # when no subscriber consumes them, so they reach the worker log alongside
-# nautilus' own lines; where a subscriber IS present (mogwai-server) they still
+# nautilus' own lines; where a subscriber IS present (mogwai-venue) they still
 # go there instead.
 tracing = { workspace = true, features = ["log"] }
 ustr = "1.1.0"

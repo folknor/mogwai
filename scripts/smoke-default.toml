@@ -1,4 +1,4 @@
-# mogwai-server config for scripts/smoke.py (the default mode).
+# mogwai-venue config for scripts/smoke.py (the default mode).
 #
 # The mode asserts the launcher contract - a tape pushed unbidden, an order
 # worked, one ledger answered - not a cadence. It used to run on the venue's

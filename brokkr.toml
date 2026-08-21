@@ -159,7 +159,7 @@ include_ignored = true
 # Skipping them costs no coverage: the audit accepts a non-run pair that is
 # `#[ignore]`d at the source, and each stays runnable by name, which is the
 # documented way to use an instrument anyway - e.g.
-# `brokkr test -p mogwai-server vol_probe`.
+# `brokkr test -p mogwai-venue vol_probe`.
 #
 # THE INVARIANT every pattern below must satisfy: it may match ONLY tests that
 # are `#[ignore]`d at the source. That is what makes skipping them free - the

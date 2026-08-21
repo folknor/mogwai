@@ -3,7 +3,7 @@
 
 //! Shared trade-to-OHLCV time-bar aggregation core. Nautilus-free; lifted out
 //! of `mogwai-adapter` so its second consumer (the `mogwai gen` CLI in
-//! `mogwai-server`) folds bars through the SAME implementation instead of a
+//! `mogwai-venue`) folds bars through the SAME implementation instead of a
 //! hand-rolled copy.
 //!
 //! Caller contract, in full: the bar interval is nonzero BY TYPE

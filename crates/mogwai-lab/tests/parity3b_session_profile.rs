@@ -8,7 +8,7 @@
 //! `#[ignore]`d: needs `research/market-data/nq-1m_bk.zip` on local disk.
 //!
 //! WHAT THIS SCRIPT ACTUALLY FEEDS THE PRESET, checked rather than assumed.
-//! `crates/mogwai-server/presets/mnq.toml`'s provenance table names three
+//! `crates/mogwai-venue/presets/mnq.toml`'s provenance table names three
 //! `[instrument.session]` entries; only ONE of them still descends from this
 //! fit:
 //!

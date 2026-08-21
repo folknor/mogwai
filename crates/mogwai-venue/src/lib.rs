@@ -9,7 +9,7 @@
 //! for the offline generator subcommands.
 
 #[cfg(not(unix))]
-compile_error!("mogwai-server requires a Unix target");
+compile_error!("mogwai-venue requires a Unix target");
 
 mod admission;
 mod boatyard;

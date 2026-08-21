@@ -1,4 +1,4 @@
-# mogwai-server config for scripts/smoke.py --admission.
+# mogwai-venue config for scripts/smoke.py --admission.
 #
 # Everything is the default except the held-lane budget, which is shrunk from
 # 8 MiB to 32 KiB - about a dozen orders' worth of held execution output.

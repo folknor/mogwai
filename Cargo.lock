@@ -1838,7 +1838,7 @@ dependencies = [
  "mogwai-data",
  "mogwai-lab",
  "mogwai-protocol",
- "mogwai-server",
+ "mogwai-venue",
  "nix",
  "owo-colors",
  "pulldown-cmark",
@@ -1885,7 +1885,7 @@ dependencies = [
  "hotpath",
  "mogwai-data",
  "mogwai-protocol",
- "mogwai-server",
+ "mogwai-venue",
  "nix",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
@@ -1910,7 +1910,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mogwai-server"
+name = "mogwai-venue"
 version = "0.1.0"
 dependencies = [
  "anyhow",

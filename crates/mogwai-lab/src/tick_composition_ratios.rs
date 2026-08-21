@@ -17,7 +17,7 @@
 //! wider stride buys only fewer retained generator clones at the cost of a
 //! longer restore. Sizing it by tick density therefore grew it to 67,108,864
 //! and made an ordinary one-hour positioning cost 115.85 ms. It is now the
-//! latency/memory tradeoff it always was, chosen in `mogwai-server`'s
+//! latency/memory tradeoff it always was, chosen in `mogwai-venue`'s
 //! `source::CHECKPOINT_K` and measured in `reference/performance.md`. The
 //! proposal here is advisory, and the baselines below stay as the historical
 //! record of what the policy proposed when it did decide it.
@@ -186,7 +186,7 @@ pub const IDENTITY_SEPARATELY_VALIDATED: [&str; 3] =
 /// THE REJECTED PROTOCOL-11 FANOUT PROPOSAL, carried forward as DATA.
 ///
 /// `independent_10_11` mechanically proposes a `fanout_depth` of 16,777,216.
-/// That proposal was REJECTED - `mogwai-server`'s
+/// That proposal was REJECTED - `mogwai-venue`'s
 /// `the_fanout_default_carries_the_protocol_11_exception` pins the exception -
 /// and without this record the next comparison re-proposes it and re-litigates
 /// a settled ruling. A sizing tool that cannot remember a refusal will keep
@@ -278,7 +278,7 @@ impl PresetCalendars {
         let mut calendar_free = Vec::new();
         let mut calendar_bearing = Vec::new();
         for name in presets {
-            let has_calendar = match mogwai_server::config::profile_from_preset(name) {
+            let has_calendar = match mogwai_venue::config::profile_from_preset(name) {
                 Ok(profile) => profile.calendar.is_some(),
                 Err(load_error) => *RETIRED_PRESETS
                     .iter()

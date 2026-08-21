@@ -10,7 +10,7 @@ use crate::{ClientOrderId, Symbol, VenueOrderId};
 /// Maximum byte length of any client-supplied identifier the venue echoes back
 /// into its own output: `client_order_id`, `request_id`. The cap exists so a
 /// produced frame has a computable upper bound - the admission reservation in
-/// `mogwai-server` sizes worst-case output against it, and an unbounded id
+/// `mogwai-venue` sizes worst-case output against it, and an unbounded id
 /// would make that bound unprovable (and let one 8 MiB order id exhaust a
 /// connection's whole execution budget).
 pub const MAX_CLIENT_ID_LEN: usize = 64;
@@ -188,7 +188,7 @@ pub const MAX_SYMBOL_LEN: usize = 32;
 ///
 /// SO RELAXING THIS FOR A URL REASON WOULD RELAX ORDER ENTRY WITH IT. The
 /// callers are `validate_submit_order` (and `validate_submit_group` through it),
-/// `mogwai-server`'s `http.rs` and `source.rs`, `config.rs` for an instrument's
+/// `mogwai-venue`'s `http.rs` and `source.rs`, `config.rs` for an instrument's
 /// `index_symbol`, and `mogwai-adapter`'s config check. `config.rs` does NOT
 /// apply it to an instrument's own `symbol`, which is a recorded asymmetry
 /// rather than an oversight.
@@ -253,7 +253,7 @@ pub const POST_ONLY_REFUSAL: &str = "post_only is legal only on Limit, StopLimit
 /// `AccountState`'s balance rows and every position row, so
 /// `sizing::BALANCE_ROW_MAX_BYTES` / `sizing::POSITION_ROW_MAX_BYTES` are only
 /// upper bounds if these are capped too. Enforced where the config is loaded
-/// (`mogwai-server/src/config.rs`), which fails startup rather than a
+/// (`mogwai-venue/src/config.rs`), which fails startup rather than a
 /// connection.
 pub const MAX_CURRENCY_LEN: usize = 16;
 
@@ -2209,7 +2209,7 @@ mod tests {
     /// (execution, account and market data), `risk::RiskState` and its nested
     /// `Breach` (published on `GET /account`, pinned by
     /// `a_published_risk_state_refuses_a_numeric_decimal`), and
-    /// `mogwai-server`'s `OpenAccountRequest.balances` (the `POST /accounts`
+    /// `mogwai-venue`'s `OpenAccountRequest.balances` (the `POST /accounts`
     /// opening balances, pinned by
     /// `an_opening_balance_must_be_spelled_as_a_string`).
     ///

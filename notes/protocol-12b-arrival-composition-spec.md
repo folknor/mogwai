@@ -1196,7 +1196,7 @@ specified as the happy one:
   radius of four implementors. That survey was WRONG, and checking it
   properly is what changed the design: the consumers, not the
   implementors, are the cost. `while let Some(tick) = source.next_tick()`
-  appears in `mogwai-server`'s `tape.rs`, `source.rs` and `http.rs`, in
+  appears in `mogwai-venue`'s `tape.rs`, `source.rs` and `http.rs`, in
   `mogwai-lab`'s `summary.rs`, in `mogwai-cli`'s `measure.rs` and
   `gen.rs` at seven sites, plus `.expect(...)` and `?` uses in
   `fills.rs`, `fill_golden.rs` and `tick_composition.rs`, plus the
@@ -1812,7 +1812,7 @@ is not a Stage A survivor and never enters the family ranking.
 The evidence predicts failure, and the prediction is recorded so the
 failure is not later mistaken for a surprise: protocol 11 already
 fitted the hourly marginal parent counts to a worst-hour error of 0.63
-percent (`crates/mogwai-server/presets/mnq.toml`), so the hourly means
+percent (`crates/mogwai-venue/presets/mnq.toml`), so the hourly means
 are not what is wrong, and a deterministic hourly rate cannot produce a
 within-hour MIXTURE - at hour 20 the observed distribution spans four
 bins and lowering the curve to reach `65-256` cannot simultaneously
@@ -2186,7 +2186,7 @@ fitted to.
 ## 8. The exposure contract
 
 Frozen for every Stage A and Stage B walk: instrument MNQ resolved
-through `Config::load` against `crates/mogwai-server/presets/mnq.toml`,
+through `Config::load` against `crates/mogwai-venue/presets/mnq.toml`,
 no divergence armed, regime neutral; the tape anchor, warmup and
 generated window READ FROM `analysis/mnq-measure-12a.json`'s
 `binding.generated` rather than restated here, so the two cannot drift;

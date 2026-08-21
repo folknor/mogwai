@@ -148,7 +148,7 @@ pub struct VenueClock {
 /// existing - but it cannot round-trip over the wire: serde_json serializes a
 /// non-finite `f64` as JSON `null`, and `null` fails to decode back into the
 /// bare `f64` field, wedging whichever end tries to parse it.
-/// `mogwai-server`'s own config-time check (`build_run_clock`) already guards
+/// `mogwai-venue`'s own config-time check (`build_run_clock`) already guards
 /// the configured speed before a `SimClock` is ever constructed there; this
 /// validator exists so any other sender of a `SimClock` - present or future -
 /// has the same one-line gate to call before serializing one, instead of

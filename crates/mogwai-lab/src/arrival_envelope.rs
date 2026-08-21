@@ -10,7 +10,7 @@ use mogwai_data::{
     ARRIVAL_KERNEL_VERSION, ARRIVAL_X_CEILING, ArrivalEnv, CadenceWalk, GeneratedSource,
     ParentSummary, SizeGrid,
 };
-use mogwai_server::source::InstrumentProfile;
+use mogwai_venue::source::InstrumentProfile;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{Distribution, Exp, Exp1, Gamma, Poisson, StandardNormal};
@@ -659,7 +659,7 @@ pub fn simulate_candidate_month(
                 scalars,
                 seed,
                 grid.start_ns,
-                mogwai_server::source::fingerprint(),
+                mogwai_venue::source::fingerprint(),
                 &profile.session,
                 None,
                 SizeGrid::from_def(&profile.def),
@@ -1066,7 +1066,7 @@ mod tests {
 
     #[test]
     fn the_envelope_stream_identity_mixes_every_frozen_field() {
-        let profile = mogwai_server::config::profile_from_preset("MNQ").expect("MNQ profile");
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").expect("MNQ profile");
         let one_second = ExposureGrid::new(
             &profile,
             1_782_856_800_000_000_000,
@@ -1128,7 +1128,7 @@ mod tests {
     #[ignore = "release-mode conformance gate, minutes of walks, reports its wall"]
     fn the_envelope_matches_the_closed_forms_where_they_are_exact() {
         let started = Instant::now();
-        let profile = mogwai_server::config::profile_from_preset("MNQ").expect("MNQ profile");
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").expect("MNQ profile");
         let start_ns = 1_782_856_800_000_000_000;
         let grid = ExposureGrid::new(
             &profile,
@@ -1508,7 +1508,7 @@ mod tests {
     /// asserted, no constant and no cell moves.
     fn assert_family_fidelity(family: Family, step_ns: u64) {
         const FIDELITY_MONTHS: usize = 32;
-        let profile = mogwai_server::config::profile_from_preset("MNQ").expect("MNQ profile");
+        let profile = mogwai_venue::config::profile_from_preset("MNQ").expect("MNQ profile");
         let start_ns = 1_782_856_800_000_000_000;
         let length_ns = 2_674_800_000_000_000;
         let cell = envelope_probe_cell(family);

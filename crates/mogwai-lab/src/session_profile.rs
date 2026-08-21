@@ -78,7 +78,7 @@ impl Calendar {
     /// the Python re-parsed `presets/mnq.toml` with `tomllib` to reach the
     /// same table.
     pub fn from_preset(name: &str) -> LabResult<Self> {
-        let profile = mogwai_server::config::profile_from_preset(name)
+        let profile = mogwai_venue::config::profile_from_preset(name)
             .map_err(|e| LabError::refusal(format!("loading preset {name}: {e}")))?;
         let calendar = profile
             .calendar

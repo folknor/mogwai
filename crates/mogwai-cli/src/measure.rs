@@ -10,7 +10,7 @@
 //! write.
 //!
 //! Lives here rather than in `mogwai-lab` because the generated side needs
-//! `mogwai-server` preset resolution, same reason `crates/mogwai-cli/tests/
+//! `mogwai-venue` preset resolution, same reason `crates/mogwai-cli/tests/
 //! parity12a.rs`'s generated gate lives in this crate.
 
 use std::collections::BTreeMap;
@@ -624,7 +624,7 @@ pub(crate) fn run_final_walk_with_count_windows(
     seed: u64,
     windows: &'static [i64],
 ) -> anyhow::Result<Value> {
-    let profile = mogwai_server::config::profile_from_preset("MNQ").map_err(|e| anyhow!("{e}"))?;
+    let profile = mogwai_venue::config::profile_from_preset("MNQ").map_err(|e| anyhow!("{e}"))?;
     let calendar = profile
         .calendar
         .as_ref()
@@ -648,7 +648,7 @@ pub(crate) fn run_final_walk_with_count_windows(
         profile.scalars.clone(),
         seed,
         walk_start,
-        mogwai_server::source::fingerprint(),
+        mogwai_venue::source::fingerprint(),
         &profile.session,
         None,
         mogwai_data::SizeGrid::from_def(&profile.def),

@@ -363,7 +363,7 @@ reported `ring_resident_bytes=42213376` for one eagerly allocated Tokio
 broadcast ring. It was measured from the dirty tree that preceded the boatyard
 landing, so brokkr correctly stored no durable results row; the benchmark's
 stderr counter is the measurement record for this landing. The depth itself is
-`mogwai_server::config::DEFAULT_FANOUT_DEPTH`, public precisely so the
+`mogwai_venue::config::DEFAULT_FANOUT_DEPTH`, public precisely so the
 `ring_sizing` harness measures the shipped value rather than a copy of it, and
 the ring is allocated PER BOAT - a run serving several rivers at once pays it
 once per placed boat.
@@ -434,7 +434,7 @@ machines, and a wall-clock assertion inside `brokkr check` would be flaky on any
 shared machine. The benches are operator-run before and after a change that
 touches the fill path, and this file is where the two readings are compared.
 Fill BEHAVIOUR is gated automatically, by
-`crates/mogwai-server/tests/golden/fill_distribution.json`, which runs in
+`crates/mogwai-venue/tests/golden/fill_distribution.json`, which runs in
 `brokkr check`.
 
 ## The invocation surface
@@ -1094,7 +1094,7 @@ BTCUSDT, 4,288,935 projected ticks, 19 checkpoints retained). Release binary.
 | 3 | 1.4790 s | 2.90 M ticks/s |
 
 **2.9 M ticks/s**, spread 0.9 percent across the three. This is the number
-`SYNTHESIS_TICKS_PER_SEC` in `mogwai-server/src/serve.rs` exists to hold, and it
+`SYNTHESIS_TICKS_PER_SEC` in `mogwai-venue/src/serve.rs` exists to hold, and it
 had been carrying 5 M - so the boot projection ran 1.7x optimistic, and the
 60-second WARN threshold it gates was really firing at about 104 seconds of
 actual cost. Corrected to 2.9 M.
@@ -1371,7 +1371,7 @@ consulted after construction at nonzero speed, so the suspected channel
 is the eager allocation shifting boot phase relative to the anchored run
 clock. That mechanism is still unresolved.
 `the_fanout_default_carries_the_protocol_11_exception`, in
-`mogwai-server/src/config.rs`, pins the default so a later mechanical
+`mogwai-venue/src/config.rs`, pins the default so a later mechanical
 application of the generated proposal must be argued, not slipped
 through; it now pins 1,048,576, the per-boat depth the 2026-08-15
 section above records, rather than the 4,194,304 that stood when this
@@ -1406,7 +1406,7 @@ Generated ticks, draws, seeds, and tape origin are unchanged, so no
 
 Same host and tree, from the ignored latency instrument
 `read_market_latency_stays_within_submit_budget` in `fills.rs`, run through
-`brokkr test -p mogwai-server read_market_latency_stays_within_submit_budget`.
+`brokkr test -p mogwai-venue read_market_latency_stays_within_submit_budget`.
 100 reads, each in its own memo bucket so none is served from the entry the
 previous one left:
 
@@ -1568,7 +1568,7 @@ today:
   `symbol`, so a configured instrument may carry a symbol order entry would now
   refuse. Filed as an owner-level item in `notes/todo.md` rather than tightened
   here: it is operator-supplied rather than client-supplied, and it is a
-  `mogwai-server` decision.
+  `mogwai-venue` decision.
 - THE ADAPTER'S DECODE: unvalidated DELIBERATELY, with `convert::instrument_id`
   using `NautilusSymbol::new_checked` so a hostile symbol drops one frame rather
   than an unsupervised task. Validating at decode would move that refusal, not

@@ -149,7 +149,7 @@ impl Engine {
     /// `seen_client_order_ids` and no member is in it yet, so pass one admitted
     /// the group whole and pass two refused the second copy with its sibling
     /// already accepted and possibly filled; and an `Ioc`/`Fok` MEMBER is a
-    /// now-or-never order whose fate admission does not decide. `mogwai-server`
+    /// now-or-never order whose fate admission does not decide. `mogwai-venue`
     /// runs the same validator at the boundary, so nothing arriving over the
     /// wire changes verdict - what changes is that a caller reaching
     /// `process_with_market` directly (a test, a bench, a future gateway) can no

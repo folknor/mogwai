@@ -158,7 +158,7 @@ fn require_baseline(path: &Path) -> anyhow::Result<()> {
 const FROZEN_PATHS: [&str; 4] = [
     "crates/mogwai-data/",
     "crates/mogwai-protocol/",
-    "crates/mogwai-server/presets/",
+    "crates/mogwai-venue/presets/",
     "analysis/fingerprint.json",
 ];
 
@@ -433,7 +433,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
         .ok_or_else(|| anyhow!("observed.per_session is missing"))?
         .clone();
     let obs = ObsContext::new(per);
-    let profile = mogwai_server::config::profile_from_preset("MNQ")?;
+    let profile = mogwai_venue::config::profile_from_preset("MNQ")?;
     let hours = gate_hours(&profile)?;
     // Derived from the same calendar the index set is, so a calendar change
     // moves both together rather than leaving a hardcoded 21 to contradict it.
@@ -527,7 +527,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
         bail!("the tree changed during the arrival-control run; the artifact is unbound");
     }
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
-    let artifact = json!({"binding":{"harness_tree_commit":commit,"clean_tree":true,"input_hashes":{measure_path.to_string_lossy().to_string():sha256_file(&measure_path)?,envelope_path.to_string_lossy().to_string():sha256_file(&envelope_path)?},"exposure":{"instrument":"MNQ","preset":"crates/mogwai-server/presets/mnq.toml","window_start_ns":binding.window_start_ns,"window_length_ns":binding.window_length_ns,"warmup":binding.warmup,"divergence":Value::Null,"regime":"neutral"},"control_fit_seeds":CONTROL_FIT_SEEDS,"control_test_seeds":CONTROL_TEST_SEEDS,"gate_hours":hours,"unexposed_hours":unexposed,"tape_protocol_version":mogwai_data::TAPE_PROTOCOL_VERSION,"spec":"notes/protocol-12b-arrival-composition-spec.md section 5.5, brick N"},"ratios":ratio_json,"old_curve":old,"new_curve":new,"normalizer_drift":drift,"gates":gates,"verdict":if failing.is_empty(){"negative-control-passed"}else{"negative-control-failed"},"failing_gates":failing,"cost":{"fit_walk_s":fit_s,"test_walk_s":test_s,"b1_s":b1_s,"b5_s":b5_s,"total_s":total.elapsed().as_secs_f64(),"peak_rss_bytes":peak_rss}});
+    let artifact = json!({"binding":{"harness_tree_commit":commit,"clean_tree":true,"input_hashes":{measure_path.to_string_lossy().to_string():sha256_file(&measure_path)?,envelope_path.to_string_lossy().to_string():sha256_file(&envelope_path)?},"exposure":{"instrument":"MNQ","preset":"crates/mogwai-venue/presets/mnq.toml","window_start_ns":binding.window_start_ns,"window_length_ns":binding.window_length_ns,"warmup":binding.warmup,"divergence":Value::Null,"regime":"neutral"},"control_fit_seeds":CONTROL_FIT_SEEDS,"control_test_seeds":CONTROL_TEST_SEEDS,"gate_hours":hours,"unexposed_hours":unexposed,"tape_protocol_version":mogwai_data::TAPE_PROTOCOL_VERSION,"spec":"notes/protocol-12b-arrival-composition-spec.md section 5.5, brick N"},"ratios":ratio_json,"old_curve":old,"new_curve":new,"normalizer_drift":drift,"gates":gates,"verdict":if failing.is_empty(){"negative-control-passed"}else{"negative-control-failed"},"failing_gates":failing,"cost":{"fit_walk_s":fit_s,"test_walk_s":test_s,"b1_s":b1_s,"b5_s":b5_s,"total_s":total.elapsed().as_secs_f64(),"peak_rss_bytes":peak_rss}});
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }

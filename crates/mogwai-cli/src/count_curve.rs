@@ -23,7 +23,7 @@ const OUT: &str = "analysis/out/count-curve-measurement.json";
 const CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
 const LEDGER: &str = "analysis/databento-jobs.json";
 const PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
-const PRESET_PATH: &str = "crates/mogwai-server/presets/mnq.toml";
+const PRESET_PATH: &str = "crates/mogwai-venue/presets/mnq.toml";
 const FINGERPRINT_PATH: &str = "analysis/fingerprint.json";
 const HISTORICAL_PRESET: &str = "46622ce226922d96457fcc0ea57411b63b5d7f0f";
 const CURRENT_PRESET: &str = "c1b352efbc35c878dd3cc75cb282fa29fde57f6a";
@@ -551,7 +551,7 @@ impl Exposure {
 fn current_identity() -> anyhow::Result<InputIdentity> {
     Ok(InputIdentity {
         preset: git_blob_id(
-            mogwai_server::config::preset_document("MNQ")
+            mogwai_venue::config::preset_document("MNQ")
                 .ok_or_else(|| anyhow!("embedded MNQ preset is absent"))?
                 .as_bytes(),
         )?,

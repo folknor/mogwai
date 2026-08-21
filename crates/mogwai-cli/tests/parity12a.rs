@@ -16,8 +16,8 @@
 //!   excluded (wall time and RSS are not reproducible by construction).
 //!
 //! They live HERE rather than in `mogwai-lab` because the generated side
-//! needs preset/profile resolution from `mogwai-server`, and `mogwai-lab`
-//! must not depend on `mogwai-server` - that would drag the axum stack under
+//! needs preset/profile resolution from `mogwai-venue`, and `mogwai-lab`
+//! must not depend on `mogwai-venue` - that would drag the axum stack under
 //! the lab. The engine and its unit tests stay in the lab.
 //!
 //! Both are `#[ignore]`d: the observed gate reads a multi-GB corpus and the
@@ -140,7 +140,7 @@ fn run_final_walk(seed: u64) -> serde_json::Value {
     use mogwai_data::{TickEvent, TickSource};
     use mogwai_lab::subcontract::{FINAL_LENGTH, FINAL_START_NS, SUMMARY_WARMUP};
 
-    let profile = mogwai_server::config::profile_from_preset("MNQ")
+    let profile = mogwai_venue::config::profile_from_preset("MNQ")
         .expect("the committed MNQ preset resolves");
     let calendar = profile
         .calendar
@@ -164,7 +164,7 @@ fn run_final_walk(seed: u64) -> serde_json::Value {
         profile.scalars.clone(),
         seed,
         walk_start,
-        mogwai_server::source::fingerprint(),
+        mogwai_venue::source::fingerprint(),
         &profile.session,
         None, // no regime override: the committed preset drives the walk
         mogwai_data::SizeGrid::from_def(&profile.def),

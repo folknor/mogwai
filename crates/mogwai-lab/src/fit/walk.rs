@@ -302,7 +302,7 @@ pub fn run_summary_walk(
         profile.scalars.clone(),
         seed as u64,
         walk_start as u64,
-        mogwai_server::source::fingerprint(),
+        mogwai_venue::source::fingerprint(),
         &profile.session,
         None,
         mogwai_data::SizeGrid::from_def(&profile.def),
@@ -321,8 +321,8 @@ pub fn run_summary_walk(
 
 /// One instrument profile from a scratch config, through the SAME
 /// `Config::load` and profile construction a served run boots with.
-pub fn profile_from_config(path: &Path) -> LabResult<mogwai_server::source::InstrumentProfile> {
-    let cfg = mogwai_server::config::Config::load(Some(path.to_path_buf()))
+pub fn profile_from_config(path: &Path) -> LabResult<mogwai_venue::source::InstrumentProfile> {
+    let cfg = mogwai_venue::config::Config::load(Some(path.to_path_buf()))
         .map_err(|e| LabError::refusal(format!("loading scratch config: {e}")))?;
     if cfg.boot_symbol_carries_no_knobs() {
         return Err(LabError::refusal(
@@ -330,7 +330,7 @@ pub fn profile_from_config(path: &Path) -> LabResult<mogwai_server::source::Inst
              boot symbol; it would ignore every scratch scalar",
         ));
     }
-    let profiles = mogwai_server::config::build_instrument_profiles(&cfg)
+    let profiles = mogwai_venue::config::build_instrument_profiles(&cfg)
         .map_err(|e| LabError::refusal(format!("building instrument profiles: {e}")))?;
     let def = profiles
         .boot_symbol_def(cfg.boot_symbol())

@@ -13,7 +13,7 @@
 //! Stage A round is spending against.
 //!
 //! A DESIGNED WORKLOAD, NOT THE MNQ CELL. This crate cannot see a preset - that
-//! resolution lives in `mogwai-server` and depending on it here would invert
+//! resolution lives in `mogwai-venue` and depending on it here would invert
 //! the layering - so the walk runs on fingerprint medians, an all-ones session
 //! profile and no calendar. That makes the numbers a property of the KERNEL,
 //! and means they are NOT comparable with a screen cell's per-seed cost in

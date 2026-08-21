@@ -260,7 +260,7 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
             "mode":"envelope_demand_census",
             "binding":{
                 "input_hashes":{measure.to_string_lossy().to_string():sha256_file(&measure).map_err(|e|anyhow!(e.to_string()))?},
-                "exposure":{"instrument":"MNQ","preset":"crates/mogwai-server/presets/mnq.toml",
+                "exposure":{"instrument":"MNQ","preset":"crates/mogwai-venue/presets/mnq.toml",
                     "window_start_ns":context.binding.window_start_ns,
                     "window_length_ns":context.binding.window_length_ns,"warmup":context.binding.warmup,
                     "divergence":Value::Null,"regime":"neutral"},
@@ -470,7 +470,7 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     let artifact = json!({
         "binding":{"harness_tree_commit":commit,"clean_tree":true,"schema_version":2,
             "input_hashes":{measure.to_string_lossy().to_string():sha256_file(&measure).map_err(|e|anyhow!(e.to_string()))?},
-            "exposure":{"instrument":"MNQ","preset":"crates/mogwai-server/presets/mnq.toml",
+            "exposure":{"instrument":"MNQ","preset":"crates/mogwai-venue/presets/mnq.toml",
                 "window_start_ns":context.binding.window_start_ns,"window_length_ns":context.binding.window_length_ns,
                 "warmup":context.binding.warmup,"divergence":Value::Null,"regime":"neutral"},
             "stage_a_seeds":STAGE_A_SEEDS,"coarse_seeds":&STAGE_A_SEEDS[..2],"gate_hours":hours,

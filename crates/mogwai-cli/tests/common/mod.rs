@@ -510,7 +510,7 @@ impl CapturedLog {
 /// was proven when it landed. Do not remove that test, and do not let it become
 /// the only config in the tree whose boot river is non-trivial without noticing.
 fn boot_symbol(config_path: Option<&std::path::Path>) -> String {
-    use mogwai_server::config;
+    use mogwai_venue::config;
 
     let cfg = config::Config::load(config_path.map(PathBuf::from))
         .expect("the harness launches only configs the venue accepts");

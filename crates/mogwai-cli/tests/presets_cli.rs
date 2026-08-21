@@ -34,7 +34,7 @@ fn bare_presets_lists_exactly_the_shipped_preset_table() {
         .lines()
         .map(str::to_owned)
         .collect();
-    let expected: Vec<String> = mogwai_server::config::preset_names()
+    let expected: Vec<String> = mogwai_venue::config::preset_names()
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
@@ -103,7 +103,7 @@ fn every_listed_preset_is_fetchable_by_name() {
 /// the broken dispatcher for every preset in the tree.
 #[test]
 fn a_fetched_preset_ends_in_exactly_one_newline() {
-    for name in mogwai_server::config::preset_names() {
+    for name in mogwai_venue::config::preset_names() {
         let fetched = Command::new(common::venue_binary())
             .arg("presets")
             .arg(name)

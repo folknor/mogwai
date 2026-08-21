@@ -3,7 +3,7 @@
 
 //! Unit tests for the unified block engine. The heavy corpus-and-walk parity
 //! gates live in `crates/mogwai-cli/tests/parity12a.rs` (they need preset and
-//! profile resolution from `mogwai-server`, which must never land under this
+//! profile resolution from `mogwai-venue`, which must never land under this
 //! crate); everything provable on a crafted stream is proved here.
 
 use rust_decimal::Decimal;

@@ -1027,10 +1027,10 @@ Seven crates. `mogwai-protocol` owns the wire types and the shipped launcher and
 imports nothing else in the workspace. `mogwai-engine` is the venue-agnostic
 exchange core. `mogwai-data` owns `TickSource`, the k-way merge and the
 `GeneratedSource` synthetic generator fitted to the committed fingerprint.
-`mogwai-server` is a library - it owns the sockets, the clock and the replay
+`mogwai-venue` is a library - it owns the sockets, the clock and the replay
 pacing, and ships no binary of its own. `mogwai-cli` is the `mogwai` BINARY: a
 clap dispatcher over `serve` (which does no work itself, just forwards to
-`mogwai_server::serve`) plus every offline subcommand. `serve` is the only one
+`mogwai_venue::serve`) plus every offline subcommand. `serve` is the only one
 that binds a socket; the rest are the intake and measurement surface - `gen`,
 `tick-composition`, `presets`, `man`, `preflight`, `measure`, `fit`, `cache`,
 `synth`, `cadence-feasible`, `characterize`, `select-windows`,
@@ -1065,16 +1065,16 @@ git history) - streaming TBBO/Binance-trades
 parsing, the protocol-12a measurement engine, aggregation and bootstrap,
 fingerprint and cadence synthesis, and the protocol-11 session-calibration
 fit. Its dependency direction is one-way and asymmetric: `mogwai-lab` depends
-on `mogwai-data`, `mogwai-protocol` AND `mogwai-server` (session-summary work
+on `mogwai-data`, `mogwai-protocol` AND `mogwai-venue` (session-summary work
 needs to resolve an `InstrumentProfile` through `Config::load` exactly as the
-Python's `--config` scratch walks did), but `mogwai-server` depends on none of
+Python's `--config` scratch walks did), but `mogwai-venue` depends on none of
 it - there is no cycle, and `mogwai-lab` stays out of the tape-generation path
 `TAPE_PROTOCOL_VERSION` scopes, the same reason `measure12a.rs` was
-consumer-only inside `mogwai-server` before the rewrite moved it. `mogwai-cli`
-depends on `mogwai-lab` for the pieces that need no `mogwai-server` preset
+consumer-only inside `mogwai-venue` before the rewrite moved it. `mogwai-cli`
+depends on `mogwai-lab` for the pieces that need no `mogwai-venue` preset
 resolution
 (preflight, cache, most of measure/fit/synth) and calls straight into
-`mogwai-server` for the generated side of measurement.
+`mogwai-venue` for the generated side of measurement.
 
 THE INSTRUMENT SET IS OPEN, and that is why `mogwai-lab` is a library rather
 than a folder of scripts. A symbol is a request string, never an admission

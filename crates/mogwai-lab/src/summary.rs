@@ -10,7 +10,7 @@
 //! `summarize` here; `--type summary` output is byte-identical, which the
 //! phase's move gate pins with a before/after comparison.
 //!
-//! This is the one module in `mogwai-lab` that depends on `mogwai-server`:
+//! This is the one module in `mogwai-lab` that depends on `mogwai-venue`:
 //! an `InstrumentProfile` is the walk's instrument, and the fit resolves one
 //! through the venue's own `Config::load` path exactly as the Python's
 //! scratch-config walks did.
@@ -302,7 +302,7 @@ struct OpenParent {
 /// its walk start (possibly `start - warmup`).
 pub fn summarize(
     source: &mut dyn TickSource,
-    profile: &mogwai_server::source::InstrumentProfile,
+    profile: &mogwai_venue::source::InstrumentProfile,
     seed: u64,
     start: u64,
     end: u64,

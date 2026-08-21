@@ -5,7 +5,7 @@
 //! offline generator/measurement subcommands.
 //!
 //! `serve` is the only subcommand that runs a venue, and it does no work here -
-//! it hands its three arguments to `mogwai_server::serve`. Everything else in
+//! it hands its three arguments to `mogwai_venue::serve`. Everything else in
 //! this crate is offline tooling that never binds a socket.
 
 #[cfg(not(unix))]
@@ -33,7 +33,7 @@ use mogwai_cli::{
     arrival_control, arrival_envelope_diagnostic, arrival_screen, count_curve, fit, measure,
     minute_range_envelope, stage_m,
 };
-use mogwai_server::{config, long_version};
+use mogwai_venue::{config, long_version};
 
 #[derive(Parser)]
 #[command(name = "mogwai", version = long_version(), about = "Fake broker/exchange that drives a nautilus live trading path", arg_required_else_help = true)]
@@ -163,7 +163,7 @@ fn main() -> anyhow::Result<()> {
     // decomposition. A no-op outside a benchmark harness.
     mogwai_lab::sidecar::init();
     match Cli::parse().command {
-        Command::Serve(args) => mogwai_server::serve(
+        Command::Serve(args) => mogwai_venue::serve(
             args.config,
             args.duration.map(std::convert::Into::into),
             args.launcher_pid,
