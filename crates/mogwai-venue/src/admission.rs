@@ -388,9 +388,16 @@ impl CloseSpec {
         }
     }
 
-    /// A newer connection claimed this account, so this one is done. The caller
-    /// passes the DETAIL - which account, and why one consumer at a time - and
-    /// this constructor prepends `mogwai_protocol::close::EVICTED_PREFIX`.
+    /// A newer connection claimed this account under a different or absent
+    /// callsign, so this one is done. The caller passes only the account id and
+    /// this constructor composes the whole sentence, prefix included -
+    /// `mogwai_protocol::close::EVICTED_PREFIX` first.
+    ///
+    /// THE SENTENCE IS COMPOSED HERE AND NOWHERE ELSE, because the frame-budget
+    /// test below asserts on the reason that actually goes on the wire. When the
+    /// call site owned the wording, the test hand-built its own copy of it, and
+    /// the two drifted the moment the wording changed - one implementation
+    /// pinned against itself, both halves green.
     ///
     /// The prefix lives HERE rather than at the call site because it is the wire
     /// contract, not a phrasing: `close::classify` reads it to distinguish this
@@ -400,17 +407,17 @@ impl CloseSpec {
     /// non-terminal and redial, evicting whatever evicted it, forever. Prefixing
     /// before the trim keeps the discriminator intact and spends the cap on the
     /// detail, which is the half that may be dropped - and the cap BINDS here:
-    /// this reason reaches 157 bytes at `MAX_ACCOUNT_ID_LEN` against a
+    /// this reason reaches 135 bytes at `MAX_ACCOUNT_ID_LEN` against a
     /// 123-byte close frame. See `close_reason`.
     ///
     /// `CLOSE_EVICTED` and NOT a venue fault: nothing failed. Telling the two
     /// apart matters to a consumer, because a fault is a reason to distrust the
     /// venue and an eviction is a reason to stop reconnecting.
-    pub(crate) fn evicted(detail: impl std::fmt::Display) -> Self {
+    pub(crate) fn evicted(account_id: &str) -> Self {
         Self {
             code: CLOSE_EVICTED,
             reason: close_reason(format!(
-                "{}{detail}",
+                "{}another connection claimed account {account_id} under a different callsign",
                 mogwai_protocol::close::EVICTED_PREFIX
             )),
         }
@@ -902,17 +909,27 @@ mod tests {
     ///
     /// The eviction reason is the one that overflowed: `run.rs` interpolates an
     /// account id bounded only by `MAX_ACCOUNT_ID_LEN`, and against a 123-byte
-    /// close frame that sentence reaches 157. The test builds the venue's own
-    /// sentence rather than an abstract long string, so it measures the reason
-    /// that actually goes on the wire, and it re-classifies the result so a
-    /// trim that ate the discriminator fails here rather than in a redial loop.
+    /// close frame that sentence reaches 135. The test calls the venue's own
+    /// constructor rather than rebuilding its sentence, so it measures the
+    /// reason that actually goes on the wire, and it re-classifies the result so
+    /// a trim that ate the discriminator fails here rather than in a redial
+    /// loop.
     #[test]
     fn every_close_reason_fits_the_control_frame_that_carries_it() {
         let account_id = "A".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN);
-        let evicted = CloseSpec::evicted(format!(
-            "another connection claimed account {account_id}; a ledger is never \
-             read from two sessions at once"
-        ));
+        let evicted = CloseSpec::evicted(&account_id);
+        // THE TRIM MUST ACTUALLY RUN HERE, or the assertions below pass without
+        // exercising the path they exist for. At a maximal account id the
+        // composed sentence overruns the frame, so a reason shorter than the cap
+        // means the wording shrank under the test and the trim is no longer
+        // covered by it.
+        assert_eq!(
+            evicted.reason.len(),
+            mogwai_protocol::close::MAX_REASON_BYTES,
+            "the eviction sentence must still overrun the frame at a maximal \
+             account id, or this test no longer covers the trim: {}",
+            evicted.reason
+        );
         assert!(
             evicted.reason.len() <= mogwai_protocol::close::MAX_REASON_BYTES,
             "an oversized control frame is failed by a conforming peer, so this \

@@ -38,6 +38,13 @@ use crate::{
 ///
 /// A repeated `symbol` key is NOT an error - `serde_urlencoded` keeps the last
 /// occurrence - so the last one wins and is then validated like any other.
+///
+/// The identity key was `session` until the callsign ruling retired `session`
+/// as a name for anything but the trading day. `deny_unknown_fields` is what
+/// makes that break LOUD for a consumer still sending the old spelling: it is a
+/// `400` naming the key rather than a socket silently seated with no identity
+/// and the always-evict reading. Pinned by
+/// `the_retired_session_query_key_is_refused`.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SocketQuery {
@@ -80,9 +87,9 @@ pub(crate) struct SocketQuery {
     /// A nautilus host dials `/ws` twice - market data and execution - and both
     /// legs carry the same `account` by construction, so without this the second
     /// dial evicts the first and the host disconnects itself. Sockets sharing a
-    /// session coexist; a socket presenting a different one, or none, takes the
+    /// callsign coexist; a socket presenting a different one, or none, takes the
     /// ledger. Absent on both sides is therefore exactly
-    /// the pre-session behaviour.
+    /// the pre-callsign behaviour.
     ///
     /// The venue reads nothing into the string beyond equality: it is stable
     /// across related sockets and their redials, and fresh in a
@@ -90,7 +97,7 @@ pub(crate) struct SocketQuery {
     /// knows the pair can join that ledger rather than displace it - which is
     /// acceptable on a loopback venue and is stated rather than assumed.
     #[serde(default)]
-    session: Option<String>,
+    callsign: Option<String>,
 }
 
 /// What one connection is bound to, decided before the upgrade completes and
@@ -188,22 +195,21 @@ pub(crate) async fn ws_upgrade(
     // a venue that accepted one would be refused by every consumer later.
     //
     // SEATED, not merely looked up: claiming an account evicts whoever already
-    // holds it, because a ledger is never read from two sockets at once and a
-    // second socket presenting an id is indistinguishable from the incumbent
-    // reconnecting.
+    // holds it. Sockets presenting the same account and callsign coexist, while
+    // a different or absent callsign is a new claim on the account.
     // Bounded and charset-checked before it is stored or compared: it arrives
     // in a URL, is echoed in no frame, and an unbounded one would be per-socket
     // memory a consumer sets for free.
-    if let Some(session) = query.session.as_deref()
-        && let Err(reason) = mogwai_protocol::validate_session_id(session)
+    if let Some(callsign) = query.callsign.as_deref()
+        && let Err(reason) = mogwai_protocol::validate_callsign(callsign)
     {
         return (
             StatusCode::BAD_REQUEST,
-            format!("session id is not usable: {reason}"),
+            format!("callsign is not usable: {reason}"),
         )
             .into_response();
     }
-    let session = query.session.as_deref();
+    let callsign = query.callsign.as_deref();
     // NOTHING IS CLAIMED YET, and the order below is the whole point: every
     // refusal this handler can make is decided BEFORE `seat`, because seating
     // closes the incumbent's sockets and, under `reset_account_on_reconnect`,
@@ -254,7 +260,7 @@ pub(crate) async fn ws_upgrade(
     let settlement = profile.def.class.settlement_currency();
     let resetting = state
         .run
-        .seat_discards_ledger(&account_id, claimed, session);
+        .seat_discards_ledger(&account_id, claimed, callsign);
     if !state
         .run
         .funded_in(&account_id, resetting, settlement)
@@ -346,7 +352,7 @@ pub(crate) async fn ws_upgrade(
     // was evaluated once, above, and is handed to `seat` rather than re-derived
     // there, so this call cannot decide to reset an account the funding and
     // cadence checks were taken against on the assumption that it would not.
-    let passenger = state.run.seat(&account_id, claimed, session, resetting);
+    let passenger = state.run.seat(&account_id, claimed, callsign, resetting);
     let admission = match seated {
         // The ordinary non-resetting path: the ledger checked above is the one
         // the seat produced, so its seat and its admission carry straight into
@@ -403,7 +409,7 @@ pub(crate) async fn ws_upgrade(
         ticket,
         duration_ms: query.duration_ms,
         passenger,
-        presented_identity: query.session.clone(),
+        presented_identity: query.callsign.clone(),
         admission: Some(admission),
         // Before the 101, not inside the spawned handler. See the field.
         alive: state.run.session_guard(),
@@ -947,7 +953,42 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
 
 #[cfg(test)]
 mod tests {
-    use super::current_completion;
+    use super::{SocketQuery, current_completion};
+
+    /// The identity parameter was `/ws?session=` until the callsign ruling, and
+    /// the break is DESIGNED: a consumer carrying the old spelling must be told,
+    /// not quietly served. `deny_unknown_fields` is the mechanism and this is
+    /// what holds it - the same shape as
+    /// `config::a_config_naming_the_retired_heartbeat_key_is_refused` on the
+    /// operator side.
+    ///
+    /// Silently ignoring the old key would be the worst of the readings
+    /// available: the socket would present NO identity, take the always-evict
+    /// behaviour, and disconnect the very peer leg it was configured to coexist
+    /// with - with nothing in the log saying why.
+    ///
+    /// Parsed through `Query`, which is the carrier the handler uses, so this
+    /// cannot pass against a query string axum would reject or reject one it
+    /// would take.
+    #[test]
+    fn the_retired_session_query_key_is_refused() {
+        let parse = |query: &str| {
+            let uri: axum::http::Uri = format!("http://venue/ws?{query}")
+                .parse()
+                .expect("a legal uri");
+            axum::extract::Query::<SocketQuery>::try_from_uri(&uri)
+        };
+        let err = parse("account=WYRD-820&session=alpha")
+            .expect_err("the retired identity key must be refused");
+        let refusal = format!("{err:?}");
+        assert!(
+            refusal.contains("session"),
+            "the refusal must name the key the consumer sent: {refusal}"
+        );
+        let accepted =
+            parse("account=WYRD-820&callsign=alpha").expect("the current identity key parses");
+        assert_eq!(accepted.0.callsign.as_deref(), Some("alpha"));
+    }
 
     /// The differential is the point: a receiver subscribed AFTER the terminal
     /// transition never sees a change, so a socket that only awaits

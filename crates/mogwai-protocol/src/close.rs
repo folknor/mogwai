@@ -38,7 +38,7 @@ pub const NORMAL: u16 = 1000;
 /// the discriminator either never leaves or never arrives - and a consumer that
 /// sees an abrupt EOF instead of a reasoned close classifies nothing, which is
 /// exactly the eviction-redial loop this module exists to prevent. The venue's
-/// own eviction reason reaches 157 bytes at `MAX_ACCOUNT_ID_LEN`.
+/// own eviction reason reaches 135 bytes at `MAX_ACCOUNT_ID_LEN`.
 pub const MAX_REASON_BYTES: usize = 123;
 
 /// Trim a close reason to `MAX_REASON_BYTES` on a char boundary.

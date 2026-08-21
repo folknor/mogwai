@@ -268,7 +268,7 @@ UNEXPLAINED and was the crate's largest single cost; this is where it went.
 
 COUNTS, because two figures below are ratios and a stale denominator makes them
 unreadable. The four binaries held 58 tests when the work started and hold 60
-now: `adapter_smoke::both_legs_disclose_one_process_session_on_the_upgrade` and
+now: `adapter_smoke::both_legs_disclose_one_process_callsign_on_the_upgrade` and
 `data_client_transport::an_undecodable_clock_is_retried_then_falls_back_without
 _refusing` were added, in that order. The distribution quoted next was taken
 between those two additions, so its denominator is 59.

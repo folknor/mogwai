@@ -86,7 +86,7 @@ Two things happen when a socket returns to a frozen account. Every surviving
 order resumes scanning from the RETURNING boat's clock, since the departed one's
 frontier sits in the new cursor's future. And whatever the account held off the
 river the new socket bound - resting orders, positions - is retired, because the
-new session can neither see nor close it.
+returning connection can neither see nor close it.
 
 While a consumer is ATTACHED, an order on a symbol no cursor is reading is
 cancelled rather than left resting: nothing could ever fill or expire it, and
@@ -235,16 +235,16 @@ differs by how you run the venue and the venue cannot tell which you meant.
   owes nothing. One connection has nobody to collide with, so naming an id would
   be ceremony. This is what the default exists for.
 
-`/ws?session=` carries the identity a socket presents. A nautilus host dials
+`/ws?callsign=` carries the identity a socket presents. A nautilus host dials
 `/ws` twice, once for market data and once for execution, and both legs name the
 same account by construction. Eviction keyed on the account id alone would make
-the second dial disconnect the first. Sockets presenting the same session
+the second dial disconnect the first. Sockets presenting the same callsign
 coexist; a different one takes the ledger over and closes every incumbent
 socket.
 
-Absent means EVICT, on both sides. A socket that names no session has made no
+Absent means EVICT, on both sides. A socket that names no callsign has made no
 claim to be the incumbent, so it displaces whoever is there and is displaced in
-turn - which is exactly what every socket did before sessions existed. Coexisting
+turn - which is exactly what every socket did before callsigns existed. Coexisting
 is therefore opt-in, and the safe reading is what you get by saying nothing.
 
 The venue reads nothing into the string beyond equality. What it needs is a value
@@ -259,7 +259,7 @@ stated rather than assumed.
 The contract also bounds what a misdial can cost. Distinct ids mean a consumer that
 reaches the wrong venue - a recycled ephemeral port, say - presents an id that
 venue has never seen and opens a fresh account there, rather than displacing
-somebody's live session. Shared ids on a shared venue are the case where a wrong
+somebody's live connection. Shared ids on a shared venue are the case where a wrong
 address becomes another run's problem instead of only your own.
 
 The value must have the `ISSUER-NUMBER` shape, and boot is refused otherwise.

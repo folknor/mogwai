@@ -81,15 +81,15 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
     assert!(client.is_connected());
 }
 
-/// THE TWO LEGS OF ONE HOST DISCLOSE ONE SESSION, and it is this process's.
+/// THE TWO LEGS OF ONE HOST DISCLOSE ONE CALLSIGN, and it is this process's.
 ///
-/// This is the property `process_session_id`'s whole design rests on, and until
+/// This is the property `process_callsign`'s whole design rests on, and until
 /// this test it had no end-to-end coverage at all: `MogwaiDataClientConfig` and
-/// `MogwaiExecClientConfig` both default `session` to it, `ws_url` appends it,
+/// `MogwaiExecClientConfig` both default `callsign` to it, `ws_url` appends it,
 /// and `StubState::ws_requests` records the request line precisely so a
 /// disclosure is assertable - but every socket assertion in these four binaries
-/// read that list for `account=` and nothing read it for `session=`. Making
-/// `default_session` return `None` left every one of them green.
+/// read that list for `account=` and nothing read it for `callsign=`. Making
+/// `default_callsign` return `None` left every one of them green.
 ///
 /// What breaks without it is not this test's stub, which seats everyone: the
 /// venue compares the identity presented by each account connection, so a
@@ -101,11 +101,11 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
 /// THREE THINGS, and each is separately losable. The parameter is PRESENT on
 /// both upgrades; the two values are EQUAL, which is the anti-eviction property
 /// itself; and the value is wire-legal by the venue's own rule, because the
-/// URL is built by concatenation and a session needing percent-encoding would
+/// URL is built by concatenation and a callsign needing percent-encoding would
 /// fail as an unreadable 400 from inside the reconnect loop.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn both_legs_disclose_one_process_session_on_the_upgrade() {
+async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
     let state = Arc::new(StubState::default());
     state.serve_account.store(true, Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
@@ -121,7 +121,7 @@ async fn both_legs_disclose_one_process_session_on_the_upgrade() {
     )
     .await;
 
-    // ...and the data leg of the same host, on the same ledger. `session` is
+    // ...and the data leg of the same host, on the same ledger. `callsign` is
     // left at its default on purpose: stating it would test the fixture.
     let (data_tx, _data_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(data_tx);
@@ -154,23 +154,23 @@ async fn both_legs_disclose_one_process_session_on_the_upgrade() {
         "both legs must have upgraded, or there is no pair to compare: {requests:?}"
     );
 
-    let sessions: Vec<String> = requests
+    let callsigns: Vec<String> = requests
         .iter()
         .map(|line| {
-            session_query_value(line)
-                .unwrap_or_else(|| panic!("every upgrade must disclose a session: {line}"))
+            callsign_query_value(line)
+                .unwrap_or_else(|| panic!("every upgrade must disclose a callsign: {line}"))
         })
         .collect();
-    let first = &sessions[0];
+    let first = &callsigns[0];
     assert!(
-        sessions.iter().all(|session| session == first),
+        callsigns.iter().all(|callsign| callsign == first),
         "the two legs of one process present one identity; differing \
-         sessions make the venue evict one with the other: {sessions:?}"
+         callsigns make the venue evict one with the other: {callsigns:?}"
     );
     // Wire-legal by the venue's rule, not by a local charset guess, so the two
     // ends cannot drift on what a URL may carry.
-    mogwai_protocol::validate_session_id(first).unwrap_or_else(|reason| {
-        panic!("the minted session {first:?} is not wire-legal: {reason}")
+    mogwai_protocol::validate_callsign(first).unwrap_or_else(|reason| {
+        panic!("the minted callsign {first:?} is not wire-legal: {reason}")
     });
     // ...and it is THIS PROCESS's, which is what makes a restarted worker get a
     // fresh identity and reclaim its ledger from the sockets of the dead one. A
@@ -178,14 +178,14 @@ async fn both_legs_disclose_one_process_session_on_the_upgrade() {
     let expected_prefix = format!("mogwai-{pid}-", pid = std::process::id());
     assert!(
         first.starts_with(&expected_prefix),
-        "the session must be minted from this process's identity ({expected_prefix}...), got {first:?}"
+        "the callsign must be minted from this process's identity ({expected_prefix}...), got {first:?}"
     );
 }
 
-/// Reads `session=` out of a recorded `/ws` request line. Deliberately exact on
+/// Reads `callsign=` out of a recorded `/ws` request line. Deliberately exact on
 /// the key rather than a substring search for the word: a future query
 /// parameter merely CONTAINING it must not stand in for the disclosure.
-fn session_query_value(request_line: &str) -> Option<String> {
+fn callsign_query_value(request_line: &str) -> Option<String> {
     request_line
         .split_whitespace()
         .nth(1)?
@@ -193,7 +193,7 @@ fn session_query_value(request_line: &str) -> Option<String> {
         .1
         .split('&')
         .filter_map(|pair| pair.split_once('='))
-        .find(|(name, _)| *name == "session")
+        .find(|(name, _)| *name == "callsign")
         .map(|(_, value)| value.to_owned())
         .filter(|value| !value.is_empty())
 }
@@ -361,7 +361,7 @@ async fn adapter_submit_drives_live_exec_events() {
 /// client would take its fills while its balances quietly stopped moving. Both
 /// were per-account-slot invariants that outlived the slots, and THE SCOPE THAT
 /// SURVIVES IS THE CONNECTION rather than the venue: a venue does seat several
-/// ledgers, keyed by account plus session, but a socket names exactly one on its
+/// ledgers, keyed by account plus callsign, but a socket names exactly one on its
 /// `/ws?account=` upgrade, so the account this connection carries is the only
 /// one it can ever see and a label cannot mean it belongs elsewhere. The full
 /// argument, and what would have to change first, is in

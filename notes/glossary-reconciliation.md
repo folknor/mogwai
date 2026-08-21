@@ -629,6 +629,79 @@ round is next and it is where `session` moves. Nothing about `session` moved in
 this round; where a `client` site needed a word for the party on one socket it
 took the code's existing `session`, which that round will carry.
 
+**Round 4, the `callsign` family, 2026-08-21.** The socket identity takes
+`callsign` and the wire parameter follows: `/ws?callsign=`, `SocketQuery::callsign`,
+`BoundLane::callsign`, `validate_callsign`, `MAX_CALLSIGN_LEN`, the adapter's
+`process_callsign` / `default_callsign` and both configs' `callsign` field with
+its `with_callsign` setter, plus the doc comments, refusal text and test names
+that carried the word. The glossary entry moved rather than the operator
+surface, on the ruling's own ground: `session` is the market trading day at
+roughly sixty visible operator sites against the socket sense's six, and the
+trading sense is domain-standard futures vocabulary this project does not own.
+`docs/config.md` moved its identity sites and kept its five trading-day ones,
+`docs/presets.md` kept all seven of its, and nothing in `mogwai-lab`, the
+session profiles, the instrument session table or the `session-profile`
+subcommands moved - which is the shape a correct classification produces. No
+tape byte moves, so no `TAPE_PROTOCOL_VERSION` bump is owed. The gated check
+reports 1340 workspace and 468 instrumented tests, one more than round 3 and
+that one is the refusal test below.
+
+THE WIRE BREAK IS HONEST. `SocketQuery` carries `deny_unknown_fields`, so
+`?session=` is a 400 naming the key rather than a socket silently seated with no
+identity and the always-evict reading - which would disconnect the very peer leg
+it was configured to coexist with. That was true but unpinned and undocumented:
+the struct's doc now records the retired key where a reader meets it, and
+`ws::tests::the_retired_session_query_key_is_refused` holds it, in the shape of
+round 1's `a_config_naming_the_retired_heartbeat_key_is_refused`. Bite-checked
+by deleting `deny_unknown_fields` as a text edit: the test fails naming the
+silently-parsed query with `callsign: None`.
+
+What the close pass found in the half no cold reviewer reads:
+
+- The eviction close sentence was pinned on ONE SIDE ONLY, and it drifted the
+  moment the wording changed. `run.rs` composed it and
+  `admission.rs`'s frame-budget test hand-built its own copy, so the venue said
+  "under a different callsign" while the test still measured "a ledger is never
+  read from two sessions at once" - both halves green, and the test no longer
+  measuring the reason that goes on the wire. `CloseSpec::evicted` now takes the
+  account id and composes the whole sentence, so there is one copy and the test
+  calls it. It also asserts the reason is EXACTLY `MAX_REASON_BYTES` at a
+  maximal account id, because a shortened sentence would leave it passing
+  without the trim ever running.
+- The eviction sentence's byte length is durable prose asserting a live fact,
+  and it was written in four places. 157 becomes 135 in `close.rs`,
+  `admission.rs` twice and `reference/architecture.md`. Grep the number, not
+  the file.
+- Two adapter comments the sweep missed: `exec.rs` still said a venue seats
+  ledgers "keyed by account plus session" - the same sentence
+  `adapter_smoke.rs` had already moved - and `lifecycle.rs` described eviction
+  as "another client claimed this account", which carried the retired `client`
+  as well as the imprecision.
+- `reference/architecture.md` opened its eviction section with "AN ACCOUNT IS
+  ON AT MOST ONE RIVER, WITH ONE READER", which is false in both halves under
+  coexistence and under the Seat entry. It now states the callsign rule and
+  says what coexistence buys: one consumer holding a data leg and an exec leg,
+  and through them as many rivers as those sockets bound.
+
+THE TENURE SENSE DID NOT MOVE and is the round's open item: a socket's served
+tenure is a third job whose word is unruled, so it was left and inventoried.
+`mogwai-venue`: `SocketSession` and its doc, `Run::sessions_tx`,
+`session_guard`, `sessions_drained`, `a_live_session_guard_holds_the_shutdown_open`,
+`serve.rs`'s `sessions` binding and `serve_until_drained`'s doc, `admission.rs`'s
+"a session's outbound machinery" prose, `run.rs`'s freeze and seat comments.
+`mogwai-cli`: `completion.rs` throughout - "a live session", "never became a
+session", "the venue's entire vocabulary for a session" - and `serving.rs`'s
+teardown comments. `mogwai-adapter`: `exec.rs`'s `reset` comment on a prior
+session's orders leaking into the next, `havoc.rs`'s
+`dialing_blind_establishes_a_full_session_with_a_stranger`, `data.rs` and
+`data_client_transport.rs`'s "the sessions piece 13 exists to support". Durable
+prose: `docs/cli.md`'s drain paragraphs and `reference/architecture.md` at the
+abandoned-upgrade, first-session and already-bound-session sentences. `conn` is
+the ledger's recorded candidate; nothing is ruled.
+
+Flagged, not acted on, because it belongs to another family: `mogwai-lab`'s CME
+trade-date vocabulary is inherited and untouched, as intended.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.

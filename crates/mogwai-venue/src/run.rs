@@ -1179,13 +1179,13 @@ impl Run {
     /// the ledger or a clean one.
     ///
     /// The whole reconnection story in one call. A second socket presenting a
-    /// seated id under a different session is indistinguishable from an incumbent
+    /// seated id under a different callsign is indistinguishable from an incumbent
     /// returning, so the venue does not try to tell them apart: the incumbent is
     /// closed and the newcomer gets the account. Whether it gets that account's
     /// HISTORY is the operator's `reset_account_on_reconnect` choice, reported
     /// in the readiness record so nobody has to guess which way a venue is set.
     ///
-    /// A socket presenting the same session as a sitting one carries the same identity
+    /// A socket presenting the same callsign as a sitting one carries the same identity
     /// dialling again - a nautilus host's data and execution legs, which name
     /// one account by construction - so it neither evicts nor resets. Resetting
     /// there would discard the ledger the first socket is trading
@@ -1204,7 +1204,7 @@ impl Run {
         &self,
         account_id: &mogwai_protocol::AccountId,
         claimed: bool,
-        session: Option<&str>,
+        callsign: Option<&str>,
         resetting: bool,
     ) -> Arc<Passenger> {
         // ONLY A CLAIMED ACCOUNT EVICTS. Naming an id is a statement about
@@ -1217,7 +1217,7 @@ impl Run {
         // so both land on the default and the second closed the first - which
         // is a consumer evicting itself.
         let displaced = if claimed {
-            self.evict_account(account_id.as_str(), session)
+            self.evict_account(account_id.as_str(), callsign)
         } else {
             0
         };
@@ -1249,11 +1249,11 @@ impl Run {
         &self,
         account_id: &mogwai_protocol::AccountId,
         claimed: bool,
-        session: Option<&str>,
+        callsign: Option<&str>,
     ) -> bool {
         claimed
             && self.reset_account_on_reconnect
-            && !self.has_matching_identity_on(account_id.as_str(), session)
+            && !self.has_matching_identity_on(account_id.as_str(), callsign)
     }
 
     /// The account's ledger IF IT ALREADY EXISTS. Unlike `passenger`, this
@@ -1666,13 +1666,13 @@ impl Run {
         &self,
         lanes: ExecLanes,
         account_id: &str,
-        session: Option<&str>,
+        callsign: Option<&str>,
     ) -> u64 {
         let id = lanes.id();
         self.locked_lanes().push(BoundLane {
             id,
             account_id: account_id.to_owned(),
-            session: session.map(str::to_owned),
+            callsign: callsign.map(str::to_owned),
             lanes,
         });
         id
@@ -1784,12 +1784,12 @@ impl Run {
     ///    orders cancelled, positions closed at their last mark. A returning
     ///    socket may name a different symbol than the frozen account was
     ///    trading, and carrying that position forward would leave the account
-    ///    holding something the new session can neither see nor close.
+    ///    holding something the new connection can neither see nor close.
     /// 3. Every surviving order's scan frontier is RE-BASED onto this boat's
     ///    clock. A frozen order's frontier is wherever the departed boat got to,
     ///    which sits in the NEW boat's future - so without this the order is
     ///    wedged until the new cursor catches up, which is as long as the
-    ///    previous session ran. The span while nobody was reading was never
+    ///    previous connection ran. The span while nobody was reading was never
     ///    watched and no fill is owed for it, which is the same statement the
     ///    freeze makes.
     ///
@@ -1837,7 +1837,7 @@ impl Run {
     }
 
     /// Close every connection already trading `account_id` under a different
-    /// session than the newcomer's, because a different identity has claimed it.
+    /// callsign than the newcomer's, because a different identity has claimed it.
     ///
     /// Connections presenting different identities do not coexist on one
     /// account. That would leave one ledger read and written from unrelated
@@ -1847,11 +1847,11 @@ impl Run {
     /// Several sockets may present the same identity. A nautilus host dials
     /// `/ws` twice, once for market data and once for execution, and both legs
     /// name the same account by construction. Evicting on the bare id would make
-    /// the second dial evict the first. A session id is stable across related
+    /// the second dial evict the first. A callsign is stable across related
     /// sockets and their redials, and fresh in a restarted process: sockets
     /// presenting the same one coexist, and a different one evicts.
     ///
-    /// AN ABSENT SESSION ALWAYS EVICTS, which keeps the pre-session contract
+    /// An absent callsign always evicts, which keeps the pre-callsign contract
     /// exactly: a socket that says nothing about its identity has made no claim
     /// to be the incumbent, and reading silence as "same identity" would let a
     /// stranger quietly share a ledger. So the coexistence is opt-in and the
@@ -1865,36 +1865,37 @@ impl Run {
     ///
     /// Returns how many were displaced, so the caller can say so.
     /// Whether a socket with this identity is already bound to `account_id`. A
-    /// socket that named no session is never "already here": silence is not a
+    /// socket that named no callsign is never "already here": silence is not a
     /// claim to be the incumbent, which is the same reading
     /// [`Run::evict_account`] takes of it.
-    pub(crate) fn has_matching_identity_on(&self, account_id: &str, session: Option<&str>) -> bool {
-        let Some(session) = session else {
+    pub(crate) fn has_matching_identity_on(
+        &self,
+        account_id: &str,
+        callsign: Option<&str>,
+    ) -> bool {
+        let Some(callsign) = callsign else {
             return false;
         };
         self.locked_lanes().iter().any(|bound| {
-            bound.account_id == account_id && bound.session.as_deref() == Some(session)
+            bound.account_id == account_id && bound.callsign.as_deref() == Some(callsign)
         })
     }
 
-    pub(crate) fn evict_account(&self, account_id: &str, session: Option<&str>) -> usize {
-        let same_session = |bound: &BoundLane| {
-            session.is_some_and(|session| bound.session.as_deref() == Some(session))
+    pub(crate) fn evict_account(&self, account_id: &str, callsign: Option<&str>) -> usize {
+        let same_callsign = |bound: &BoundLane| {
+            callsign.is_some_and(|callsign| bound.callsign.as_deref() == Some(callsign))
         };
         let displaced: Vec<BoundLane> = self
             .locked_lanes()
             .iter()
-            .filter(|bound| bound.account_id == account_id && !same_session(bound))
+            .filter(|bound| bound.account_id == account_id && !same_callsign(bound))
             .cloned()
             .collect();
         for bound in &displaced {
             drop(
                 bound
                     .lanes
-                    .send_close(crate::admission::CloseSpec::evicted(format!(
-                        "another connection claimed account {account_id}; a ledger is never \
-                     read from two sessions at once"
-                    ))),
+                    .send_close(crate::admission::CloseSpec::evicted(account_id)),
             );
         }
         // Retired here rather than left to each socket's own teardown: the new
@@ -1902,7 +1903,7 @@ impl Run {
         // instant it takes them to notice the close, or its first batch would
         // be delivered to a socket that is on its way out.
         self.locked_lanes()
-            .retain(|bound| bound.account_id != account_id || same_session(bound));
+            .retain(|bound| bound.account_id != account_id || same_callsign(bound));
         displaced.len()
     }
 
@@ -2146,7 +2147,7 @@ pub(crate) struct BoundLane {
     /// `None` for a socket that named none, which is every socket
     /// predating the carrier and every one that has no opinion. See
     /// [`Run::evict_account`] for what it buys and why absent means "evict".
-    pub(crate) session: Option<String>,
+    pub(crate) callsign: Option<String>,
     pub(crate) lanes: ExecLanes,
 }
 
@@ -2640,10 +2641,10 @@ mod tests {
     fn seat(
         run: &Arc<Run>,
         account_id: &mogwai_protocol::AccountId,
-        session: Option<&str>,
+        callsign: Option<&str>,
     ) -> Arc<Passenger> {
-        let resetting = run.seat_discards_ledger(account_id, true, session);
-        run.seat(account_id, true, session, resetting)
+        let resetting = run.seat_discards_ledger(account_id, true, callsign);
+        run.seat(account_id, true, callsign, resetting)
     }
 
     fn boat_key(run: &Run, symbol: &str, speed: f64) -> crate::boatyard::BoatKey {
@@ -2819,7 +2820,7 @@ mod tests {
         assert_eq!(
             run.evict_account(account.as_str(), Some("beta")),
             1,
-            "the incumbent is displaced by a claim under a different session"
+            "the incumbent is displaced by a claim under a different callsign"
         );
         // The incumbent's teardown: its lane goes, and its `SocketSession` drop
         // vacates the seat on the river it was riding. That is the step that
@@ -2860,11 +2861,11 @@ mod tests {
     /// A CONSUMER IS NOT A SOCKET. The nautilus host that drives this venue holds
     /// two sockets on one ledger - data and execution - and both name the same
     /// account, so eviction keyed on the bare id made the host's second dial
-    /// disconnect its own first. Sockets presenting one session coexist; a
-    /// different session takes over. The venue decides on the session it was
+    /// disconnect its own first. Sockets presenting one callsign coexist; a
+    /// different callsign takes over. The venue decides on the callsign it was
     /// shown and never on the consumer behind it, which it cannot see.
     #[test]
-    fn one_sessions_sockets_share_a_ledger_and_a_stranger_evicts_them_all() {
+    fn one_callsigns_sockets_share_a_ledger_and_a_stranger_evicts_them_all() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("CLAUDETTE-07").unwrap();
 
@@ -2875,7 +2876,7 @@ mod tests {
         assert_eq!(
             run.evict_account(account.as_str(), Some("worker-1")),
             0,
-            "the host's second leg presents the same session, not a claim"
+            "the host's second leg presents the same callsign, not a claim"
         );
         seat(&run, &account, Some("worker-1"));
         run.bind_lanes(exec, account.as_str(), Some("worker-1"));
@@ -2888,13 +2889,13 @@ mod tests {
             "both legs are reading the ledger they were configured for"
         );
 
-        // A RESTARTED worker presents a genuinely new session, and it takes the whole
+        // A restarted worker presents a genuinely new callsign, and it takes the whole
         // ledger: both stale sockets go, which is the reconnection story the
         // eviction exists for.
         assert_eq!(
             run.evict_account(account.as_str(), Some("worker-2")),
             2,
-            "a different session displaces every socket of the old one"
+            "a different callsign displaces every socket of the old one"
         );
         assert!(
             run.bound_lanes()
@@ -3135,10 +3136,10 @@ mod tests {
         }
     }
 
-    /// An absent session keeps the pre-session contract exactly: silence is not
+    /// An absent callsign keeps the pre-callsign contract exactly: silence is not
     /// a claim to be the incumbent, so it always evicts and is always evicted.
     #[test]
-    fn a_socket_naming_no_session_evicts_and_is_evicted() {
+    fn a_socket_naming_no_callsign_evicts_and_is_evicted() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("QUIET-001").unwrap();
         let (first, _first_rx) = crate::admission::ExecLanes::detached();

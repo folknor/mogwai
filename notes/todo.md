@@ -179,8 +179,8 @@ total. Both client configs now name their configured ledger. THE ASK DID NOT
 ANTICIPATE THE CONSEQUENCE and it is worth knowing: a nautilus host holds TWO
 sockets on one account, and a claimed account EVICTS its incumbent, so naming the
 account alone would have made every host disconnect its own data leg on its exec
-dial. `/ws?session=` is the answer - one client's sockets coexist, a different or
-absent session evicts - and the adapter mints one per process from the pid and
+dial. `/ws?callsign=` is the answer - one consumer's sockets coexist, a different
+or absent callsign evicts - and the adapter mints one per process from the pid and
 start instant, so a host configures nothing. Durable: `docs/config.md`,
 `reference/architecture.md`.
 
@@ -518,16 +518,17 @@ group by any other route has no API for it, and none is owed until one is wanted
   sentence: an HTTP poll or a control-plane POST is not a connection in this
   sense, and nothing says so.
   SESSION is a three-way collision and the worst of the three cases: (1) the
-  client-identity token on `/ws?session=`, (2) the TRADING session - calendar,
+  self-asserted socket identity, (2) the TRADING session - calendar,
   session classes, Asia session - which is domain-standard vocabulary and not
   ours to rename, and (3) a socket's served TENURE (`SocketSession`,
   `session_guard`, the completion family's "this socket was a live session").
-  Since sense 2 is immovable, senses 1 and 3 owe the renames, and both are
-  ours - but sense 1 is a wire parameter, so its rename is a designed
-  consumer break and needs an owner decision on timing; sense 3 is internal
-  and free. Candidate directions recorded, not decided: the identity token is
-  "which process is this" (a tag or badge shape), the tenure is closer to
-  seating. Naming is the owner's gate.
+  SENSE 1 LANDED 2026-08-21 as round 4 of the arc: it is a `callsign`, and the
+  wire parameter followed as a designed break, so the identity is carried on
+  `/ws?callsign=` and the old key is refused rather than ignored. Sense 2 keeps
+  the word, which is the ruling's own ground - the operator surface spends
+  `session` on the trading day roughly sixty times against the socket sense's
+  six. SENSE 3 IS STILL OPEN and is internal and free, awaiting a word from the
+  owner; the sites are listed in `notes/glossary-reconciliation.md`.
 
 - `reject_while_closed` JUDGES MARKETABILITY AGAINST THE STATED PRICE while the
   engine judges it against the BAND-DRAWN trigger, so the two can disagree by

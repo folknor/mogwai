@@ -65,7 +65,7 @@ async fn subscribed_data_client(
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
-        session: None,
+        callsign: None,
         havoc,
         expected_run_seed: None,
     };
@@ -127,7 +127,7 @@ async fn connect_data_client(
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
-        session: None,
+        callsign: None,
         havoc,
         expected_run_seed: None,
     };
@@ -307,7 +307,7 @@ async fn submit_stop_exec_client(
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
-        session: None,
+        callsign: None,
         havoc: Some(havoc),
         ..MogwaiExecClientConfig::default()
     };
@@ -411,7 +411,7 @@ async fn ships_venue_havoc() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
-        session: None,
+        callsign: None,
         havoc: Some(havoc),
         expected_run_seed: None,
     };
@@ -695,7 +695,7 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
-        session: None,
+        callsign: None,
         havoc: None,
         // Bound to a run this stub is not serving.
         expected_run_seed: Some(7),
@@ -833,7 +833,7 @@ async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
         account_id: AccountId::from("MOGWAI-042"),
         base_url,
         symbol: None,
-        session: None,
+        callsign: None,
         havoc: None,
         // The undecided default: no identity to check against.
         expected_run_seed: None,
@@ -919,7 +919,7 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
-        session: None,
+        callsign: None,
         havoc: None,
         expected_run_seed: Some(7),
     };
@@ -978,7 +978,7 @@ async fn conn_reconnect_respects_max_attempts() {
         account_id: AccountId::from("MOGWAI-001"),
         base_url,
         symbol: None,
-        session: None,
+        callsign: None,
         havoc: Some(conn_havoc(ConnHavoc {
             reconnect_max_attempts: Some(3),
             reconnect_delay_initial_ms: 30,

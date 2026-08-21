@@ -50,27 +50,27 @@
 //! premise it depends on, so a libtest change fails on the premise rather than
 //! on whatever the test was really asserting.
 //!
-//! The process-wide value here is the session id.
-//! `mogwai_adapter::config`'s `process_session_id` is a `OnceLock`, by design -
+//! The process-wide value here is the callsign id.
+//! `mogwai_adapter::config`'s `process_callsign` is a `OnceLock`, by design -
 //! one worker process presents one identity, so its data and execution legs share that
 //! identity and cannot evict each other off their shared ledger. The
 //! consequence for THESE binaries is that every client built through a
-//! `Mogwai*ClientConfig::default()` presents the SAME session string, which is
+//! `Mogwai*ClientConfig::default()` presents the SAME callsign string, which is
 //! harmless only because each test binds its own stub and no two clients ever
 //! meet on one venue. Two things follow, and both bite silently:
 //!
-//! - A TEST WANTING TWO DISTINCT CLIENTS ON ONE VENUE MUST SET `session:`
-//!   EXPLICITLY (`havoc.rs` uses `session: None` throughout). A session-eviction
+//! - A TEST WANTING TWO DISTINCT CLIENTS ON ONE VENUE MUST SET `callsign:`
+//!   EXPLICITLY (`havoc.rs` uses `callsign: None` throughout). A callsign-eviction
 //!   test written the obvious way, with two defaulted configs, is asserting
 //!   against a constant.
 //! - A test wanting "same process, two legs, no eviction" is likewise testing a
 //!   constant unless it asserts on what CROSSED THE WIRE. That is what
-//!   `adapter_smoke::both_legs_disclose_one_process_session_on_the_upgrade`
+//!   `adapter_smoke::both_legs_disclose_one_process_callsign_on_the_upgrade`
 //!   does, off `ws_requests`, and it is the only SOCKET test in the crate that
 //!   fails when the default is removed. Re-measured by the close pass, because
 //!   the stronger phrasing that stood here ("the only thing in the crate") is
 //!   false and misleadingly so: `config`'s own
-//!   `both_legs_default_to_the_same_process_session` fails too, and it is a UNIT
+//!   `both_legs_default_to_the_same_process_callsign` fails too, and it is a UNIT
 //!   test, so cargo stops after the lib target and the four socket binaries
 //!   never run at all. Anyone repeating that bite-check has to name this test
 //!   directly, or the sweep reports a failure that says nothing about the wire.
@@ -949,7 +949,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
 ///
 /// The stub CANNOT dispatch the two legs at the upgrade, and that is a fact
 /// about the adapter rather than a shortcut taken here: `MogwaiDataClientConfig`
-/// and `MogwaiExecClientConfig` build the same `/ws?account=...&session=...`
+/// and `MogwaiExecClientConfig` build the same `/ws?account=...&callsign=...`
 /// URL (`config.rs`), so the request line does not distinguish them. The split
 /// is therefore by WHERE the behaviour sits - before the loop, or in here - not
 /// by two handlers chosen at the handshake.

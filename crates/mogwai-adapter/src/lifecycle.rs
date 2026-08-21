@@ -792,8 +792,9 @@ async fn run_ws_connection_inner<
         if let Some(kind) = terminal {
             // Each of these is terminal, and saying WHICH matters to an
             // operator reading the log: a completed run is the expected end of
-            // a session, while an eviction means another client claimed this
-            // account - a configuration problem, not a finish line.
+            // a connection, while an eviction means another connection claimed
+            // this account under a different callsign - a configuration
+            // problem, not a finish line.
             //
             // WHICH ARM RUNS IS NOT A CLEAN THREE-WAY SPLIT, and pretending it
             // is would mislead whoever reads these lines. The venue sends a

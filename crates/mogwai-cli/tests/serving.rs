@@ -1580,7 +1580,7 @@ async fn a_second_speed_on_the_same_account_is_refused() {
 async fn a_refused_upgrade_leaves_the_incumbent_connected() {
     let venue = spawn(&["--config", &fast_config()]);
     let (mut incumbent, _) = tokio_tungstenite::connect_async(format!(
-        "{}&account=WYRD-820&session=alpha&speed=1",
+        "{}&account=WYRD-820&callsign=alpha&speed=1",
         venue.ws_url_for(&venue.symbol)
     ))
     .await
@@ -1610,7 +1610,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
     let refused = while_draining(
         &mut incumbent,
         tokio_tungstenite::connect_async(format!(
-            "{}&account=WYRD-820&session=beta&speed=NaN",
+            "{}&account=WYRD-820&callsign=beta&speed=NaN",
             venue.ws_url_for(&venue.symbol)
         )),
         "the incumbent socket",
@@ -1654,7 +1654,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
     // account - so the survival above is the refusal sparing the incumbent
     // rather than eviction being broken or unobservable on this socket.
     let (_newcomer, _) = tokio_tungstenite::connect_async(format!(
-        "{}&account=WYRD-820&session=beta&speed=1",
+        "{}&account=WYRD-820&callsign=beta&speed=1",
         venue.ws_url_for(&venue.symbol)
     ))
     .await
@@ -1715,7 +1715,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
 async fn a_departing_socket_freezes_its_account_into_collection() {
     let venue = spawn(&["--config", &account_ttl_config()]);
     let (mut socket, _) = tokio_tungstenite::connect_async(format!(
-        "{}&account=WYRD-830&session=alpha&speed=1",
+        "{}&account=WYRD-830&callsign=alpha&speed=1",
         venue.ws_url_for(&venue.symbol)
     ))
     .await
@@ -3398,9 +3398,9 @@ fn a_generator_arm_on_an_unboated_river_is_accepted() {
 #[ignore = "binds a loopback listener"]
 async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() {
     let venue = spawn(&["--config", &fast_config()]);
-    let at = |session: &str, speed: &str| {
+    let at = |callsign: &str, speed: &str| {
         format!(
-            "{}?account=WYRD-920&session={session}&speed={speed}",
+            "{}?account=WYRD-920&callsign={callsign}&speed={speed}",
             venue.ws_url()
         )
     };

@@ -31,9 +31,12 @@ serves one ledger per run has no reason to read it. If a consumer's own adapter
 skips that comparison on the strength of the one-ledger-per-run premise, the
 shared-venue topology breaks the premise, so the venue is what has to be right.
 
-AN ACCOUNT IS ON AT MOST ONE RIVER, WITH ONE READER. A second socket presenting
-a seated account id EVICTS the first, because a ledger read and written from two
-places is one ledger with two notions of its own state. The evicted socket is
+AN ACCOUNT IS READ UNDER ONE CALLSIGN. A second socket presenting a seated
+account id under a DIFFERENT or ABSENT callsign EVICTS the incumbent, because a
+ledger read and written by two unrelated parties is one ledger with two notions
+of its own state. Sockets presenting the same callsign coexist instead, which is
+what lets one consumer hold a data leg and an exec leg - and, through them, as
+many rivers as those sockets bound - on one account. The evicted socket is
 closed with `1000`, normally rather than as a fault: the venue cannot tell a
 returning consumer from a stranger claiming the id, and treating an eviction as a
 failure would make a consumer's reconnect ladder evict whatever evicted it. By
@@ -59,7 +62,7 @@ A close reason is therefore bounded by the FRAME rather than by the ordinary
 reason cap. RFC 6455 allows a control frame 125 payload bytes and the status
 code takes two of them, so `close::MAX_REASON_BYTES` is 123 - a quarter of the
 512 that bounds a reason inside a text frame. The eviction sentence interpolates
-an account id and reaches 157 bytes at `MAX_ACCOUNT_ID_LEN`, which a conforming
+an account id and reaches 135 bytes at `MAX_ACCOUNT_ID_LEN`, which a conforming
 peer fails the connection over: the close carrying the discriminator would never
 arrive, and a consumer that sees a bare EOF instead classifies nothing and redials
 into the loop. Every `CloseSpec` constructor trims to that budget, after
@@ -111,7 +114,7 @@ than the reconnection. Retirement runs only for a RETURNING account - one the
 venue found frozen - and a newcomer that claims a seated account is counted onto
 it before the incumbent is closed, so the account never freezes in that window
 and the newcomer resumes a LIVE ledger. That is deliberate: retiring off it
-would cancel resting orders and close positions the previous session had every
+would cancel resting orders and close positions the incumbent connection had every
 reason to expect to survive its own reconnect. The alternative was worse than a
 rule: before the count existed the incumbent's teardown could win the race and
 freeze the account first, so whether the newcomer's book was retired depended on
@@ -140,7 +143,7 @@ boat would instead repair the freeze proxy, and was not taken for that reason.
 WHAT THE ACCOUNT HELD OFF THE JOINED RIVER IS RETIRED at that moment - resting
 orders cancelled, positions closed at their last mark. A returning socket may
 name a different symbol than the account was trading, and carrying that forward
-would leave it holding something the new session can neither see nor close.
+would leave it holding something the new connection can neither see nor close.
 
 AN ORDER ON A RIVER NOBODY READS IS CANCELLED rather than left, and this is the
 other half of the same rule. An attached account's order on a symbol no cursor
@@ -164,7 +167,7 @@ shares.
 
 THE ACCOUNT ID ON A SNAPSHOT IS A LABEL, AND A CONSUMER KEEPS ITS OWN. A venue
 may seat several ledgers - `/ws?account=` names one, and the seat is keyed by
-that account plus the session - but ONE CONNECTION SEES EXACTLY ONE OF THEM.
+that account plus the callsign - but ONE CONNECTION SEES EXACTLY ONE OF THEM.
 The account a connection carries is the only account on that socket, so nothing
 can be misrouted onto it, and the id the venue writes on an `AccountState`
 therefore identifies nothing a consumer has to resolve. The
@@ -532,13 +535,13 @@ connection. A WebSocket carries its whole binding in the upgrade query string,
 which `deny_unknown_fields` rejects any other key on: the optional, case-exact
 `symbol` names its one river, the optional `speed` names the pacing multiple,
 the optional `duration_ms` names a passenger-local simulated deadline, the
-optional `account` names the ledger it trades, and the optional `session`
+optional `account` names the ledger it trades, and the optional `callsign`
 names the identity the socket presents.
 
 That last one lets several sockets present one identity. A second identity
 claiming the account evicts the incumbent connections, while sockets presenting
-the same session coexist. A nautilus host relies on that rule because its data
-and execution legs name one account by construction. A different session evicts
+the same callsign coexist. A nautilus host relies on that rule because its data
+and execution legs name one account by construction. A different callsign evicts
 every incumbent socket, and so
 does an absent one, which keeps silence meaning what it always meant. The venue
 reads nothing into the string beyond equality, and `mogwai-adapter` mints one per

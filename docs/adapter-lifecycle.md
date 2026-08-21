@@ -64,8 +64,9 @@ client. Three things stop that permanently, and each writes one log line:
 - **this connection's configured duration elapsing** - a WS 1000 close reasoned
   `passenger duration complete`,
 - **eviction** - a WS 1000 close whose reason begins `evicted: `, meaning a
-  newer connection presented this client's account id. Redialling would evict
-  the claimant in turn, forever, so the client stops.
+  newer connection presented this client's account id under a different or
+  absent callsign. Redialling would evict the claimant in turn, forever, so the
+  client stops.
 
 Everything else is a transport event and is redialled, INCLUDING any other WS
 1000. That matters because 1000 is the ordinary code for any graceful close: a

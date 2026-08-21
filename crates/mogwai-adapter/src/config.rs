@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// told about accounts serves exactly the ledger it always did.
 pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 
-/// This process's presented identity, carried on `/ws?session=` by every
+/// This process's presented identity, carried on `/ws?callsign=` by every
 /// adapter object built in the process.
 ///
 /// The venue compares only the presented identity when an already-seated
@@ -43,9 +43,9 @@ pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 /// process builds - not the process's start, which is a distinction with no
 /// consequence for either property and is stated because the two are easy to
 /// conflate and the argument should rest on what the code does.
-fn process_session_id() -> &'static str {
-    static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SESSION.get_or_init(|| {
+fn process_callsign() -> &'static str {
+    static CALLSIGN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CALLSIGN.get_or_init(|| {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos());
@@ -74,13 +74,13 @@ pub struct MogwaiDataClientConfig {
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
-    /// The identity presented on `/ws?session=`, so this process's several
+    /// The identity presented on `/ws?callsign=`, so this process's several
     /// sockets on one ledger can coexist. Defaults
-    /// to [`process_session_id`] and should stay there; see it for why. `None`
-    /// sends no session and takes the venue's always-evict reading, which is
+    /// to [`process_callsign`] and should stay there; see it for why. `None`
+    /// sends no callsign and takes the venue's always-evict reading, which is
     /// what a host wants only if it holds exactly one socket per ledger.
-    #[serde(default = "default_session")]
-    pub session: Option<String>,
+    #[serde(default = "default_callsign")]
+    pub callsign: Option<String>,
     /// The run this client belongs to, checked on every connect.
     ///
     /// `None` keeps the historical behaviour: dial the address and trust
@@ -99,24 +99,24 @@ impl Default for MogwaiDataClientConfig {
             base_url: String::new(),
             symbol: None,
             havoc: None,
-            session: default_session(),
+            callsign: default_callsign(),
             expected_run_seed: None,
         }
     }
 }
 
-/// Serde default for both configs' `session`: this process's identity.
+/// Serde default for both configs' `callsign`: this process's identity.
 ///
 /// PINNED END TO END by
-/// `adapter_smoke::both_legs_disclose_one_process_session_on_the_upgrade`,
+/// `adapter_smoke::both_legs_disclose_one_process_callsign_on_the_upgrade`,
 /// which reads the two upgrade request lines off the stub and asserts they
-/// carry one wire-legal session minted from this pid. Until it existed, making
+/// carry one wire-legal callsign minted from this pid. Until it existed, making
 /// this return `None` left every socket test in the crate green - the only
 /// failure was the unit test below, which reads the struct field and never the
 /// wire, so a client that built the right config and dialled the wrong URL was
 /// undetectable.
-fn default_session() -> Option<String> {
-    Some(process_session_id().to_owned())
+fn default_callsign() -> Option<String> {
+    Some(process_callsign().to_owned())
 }
 
 impl MogwaiDataClientConfig {
@@ -175,14 +175,14 @@ impl MogwaiDataClientConfig {
         self
     }
 
-    /// Override the identity presented on `/ws?session=`. The default is
+    /// Override the identity presented on `/ws?callsign=`. The default is
     /// this process's, which is what a host wants; set it only to make two
     /// adapter objects in one process deliberately present distinct identities,
     /// which makes their connections evict each other, or to `None` to take
     /// the venue's always-evict reading.
     #[must_use]
-    pub fn with_session(mut self, session: Option<String>) -> Self {
-        self.session = session;
+    pub fn with_callsign(mut self, callsign: Option<String>) -> Self {
+        self.callsign = callsign;
         self
     }
 
@@ -197,7 +197,7 @@ impl MogwaiDataClientConfig {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
-        validate_session(self.session.as_deref())?;
+        validate_callsign(self.callsign.as_deref())?;
         validate_havoc(&self.havoc)
     }
 
@@ -209,7 +209,7 @@ impl MogwaiDataClientConfig {
     /// never-connects-with-no-diagnostic failure mode (D.4) the validator
     /// exists to rule out.
     ///
-    /// The symbol, account and session are appended raw and need no percent
+    /// The symbol, account and callsign are appended raw and need no percent
     /// encoding: `validate` refuses every byte outside their wire alphabets
     /// first. An absent symbol takes the venue's boot river.
     #[must_use]
@@ -218,7 +218,7 @@ impl MogwaiDataClientConfig {
             &self.base_url,
             self.symbol.as_deref(),
             &self.account_id,
-            self.session.as_deref(),
+            self.callsign.as_deref(),
         )
     }
 
@@ -262,11 +262,11 @@ pub struct MogwaiExecClientConfig {
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
-    /// The identity presented on `/ws?session=`. See
-    /// [`MogwaiDataClientConfig::session`]; both legs must carry the same one,
+    /// The identity presented on `/ws?callsign=`. See
+    /// [`MogwaiDataClientConfig::callsign`]; both legs must carry the same one,
     /// which is what stops them evicting each other off their shared ledger.
-    #[serde(default = "default_session")]
-    pub session: Option<String>,
+    #[serde(default = "default_callsign")]
+    pub callsign: Option<String>,
     /// The run this client belongs to. See
     /// [`MogwaiDataClientConfig::expected_run_seed`]; both legs should carry the
     /// same one, for the same reason they carry the same account.
@@ -292,7 +292,7 @@ impl Default for MogwaiExecClientConfig {
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
             havoc: None,
-            session: default_session(),
+            callsign: default_callsign(),
             expected_run_seed: None,
         }
     }
@@ -343,12 +343,12 @@ impl MogwaiExecClientConfig {
         self
     }
 
-    /// Override the identity presented on `/ws?session=`. See
-    /// [`MogwaiDataClientConfig::with_session`]; the two legs of one host must
+    /// Override the identity presented on `/ws?callsign=`. See
+    /// [`MogwaiDataClientConfig::with_callsign`]; the two legs of one host must
     /// agree, so overriding one means overriding both.
     #[must_use]
-    pub fn with_session(mut self, session: Option<String>) -> Self {
-        self.session = session;
+    pub fn with_callsign(mut self, callsign: Option<String>) -> Self {
+        self.callsign = callsign;
         self
     }
 
@@ -386,7 +386,7 @@ impl MogwaiExecClientConfig {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
-        validate_session(self.session.as_deref())?;
+        validate_callsign(self.callsign.as_deref())?;
         validate_havoc(&self.havoc)
     }
 
@@ -400,7 +400,7 @@ impl MogwaiExecClientConfig {
             &self.base_url,
             self.symbol.as_deref(),
             &self.account_id,
-            self.session.as_deref(),
+            self.callsign.as_deref(),
         )
     }
 
@@ -425,34 +425,34 @@ impl MogwaiExecClientConfig {
 /// ephemeral single-client venue nothing because the default id on both sides
 /// is the same string.
 ///
-/// The session rides with it for the reason [`process_session_id`] states: the
+/// The callsign rides with it for the reason [`process_callsign`] states: the
 /// two clients of one host name one account, and the venue would otherwise read
 /// the second dial as a stranger claiming the ledger.
 fn ws_url(
     base_url: &str,
     symbol: Option<&str>,
     account_id: &AccountId,
-    session: Option<&str>,
+    callsign: Option<&str>,
 ) -> String {
     let base = base_url.trim().trim_end_matches('/');
     let mut url = format!("{base}/ws?account={account}", account = account_id.as_ref());
     if let Some(symbol) = symbol {
         url.push_str(&format!("&symbol={symbol}"));
     }
-    if let Some(session) = session {
-        url.push_str(&format!("&session={session}"));
+    if let Some(callsign) = callsign {
+        url.push_str(&format!("&callsign={callsign}"));
     }
     url
 }
 
-/// Refuse a session id the `/ws` URL cannot carry, by the rule the venue
+/// Refuse a callsign id the `/ws` URL cannot carry, by the rule the venue
 /// judges the decoded value with, so the two ends cannot drift.
-fn validate_session(session: Option<&str>) -> anyhow::Result<()> {
-    if let Some(session) = session
-        && let Err(reason) = mogwai_protocol::validate_session_id(session)
+fn validate_callsign(callsign: Option<&str>) -> anyhow::Result<()> {
+    if let Some(callsign) = callsign
+        && let Err(reason) = mogwai_protocol::validate_callsign(callsign)
     {
         anyhow::bail!(
-            "session {session:?} cannot be carried directly in a websocket URL: {reason}"
+            "callsign {callsign:?} cannot be carried directly in a websocket URL: {reason}"
         );
     }
     Ok(())
@@ -604,7 +604,7 @@ mod tests {
         let config = MogwaiDataClientConfig {
             base_url: "ws://127.0.0.1:1".into(),
             symbol: Some("MNQ".into()),
-            session: None,
+            callsign: None,
             ..MogwaiDataClientConfig::default()
         };
         assert_eq!(
@@ -617,7 +617,7 @@ mod tests {
     fn ws_url_omits_an_absent_symbol() {
         let config = MogwaiExecClientConfig {
             base_url: "ws://127.0.0.1:1".into(),
-            session: None,
+            callsign: None,
             ..MogwaiExecClientConfig::default()
         };
         assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws?account=MOGWAI-001");
@@ -631,13 +631,13 @@ mod tests {
         let data = MogwaiDataClientConfig {
             base_url: "ws://127.0.0.1:1".into(),
             account_id: AccountId::from("CLAUDETTE-07"),
-            session: None,
+            callsign: None,
             ..MogwaiDataClientConfig::default()
         };
         let exec = MogwaiExecClientConfig {
             base_url: "ws://127.0.0.1:1".into(),
             account_id: AccountId::from("CLAUDETTE-07"),
-            session: None,
+            callsign: None,
             ..MogwaiExecClientConfig::default()
         };
         assert_eq!(data.ws_url(), "ws://127.0.0.1:1/ws?account=CLAUDETTE-07");
@@ -648,28 +648,30 @@ mod tests {
     /// stops the venue reading the second dial as a stranger claiming the
     /// ledger and evicting the first.
     #[test]
-    fn both_legs_default_to_the_same_process_session() {
+    fn both_legs_default_to_the_same_process_callsign() {
         let data = MogwaiDataClientConfig::default();
         let exec = MogwaiExecClientConfig::default();
-        assert_eq!(data.session, exec.session);
+        assert_eq!(data.callsign, exec.callsign);
         assert!(
-            data.session.is_some(),
+            data.callsign.is_some(),
             "a host that configures nothing still gets an identity"
         );
         let config = MogwaiDataClientConfig {
             base_url: "ws://127.0.0.1:1".into(),
             ..MogwaiDataClientConfig::default()
         };
-        let session = config.session.clone().expect("a default session");
-        assert!(config.ws_url().ends_with(&format!("&session={session}")));
-        config.validate().expect("the minted session is wire-legal");
+        let callsign = config.callsign.clone().expect("a default callsign");
+        assert!(config.ws_url().ends_with(&format!("&callsign={callsign}")));
+        config
+            .validate()
+            .expect("the minted callsign is wire-legal");
     }
 
     #[test]
-    fn validate_refuses_a_session_needing_percent_encoding() {
+    fn validate_refuses_a_callsign_needing_percent_encoding() {
         let config = MogwaiDataClientConfig {
             base_url: "ws://127.0.0.1:1".into(),
-            session: Some("a b".into()),
+            callsign: Some("a b".into()),
             ..MogwaiDataClientConfig::default()
         };
         assert!(
@@ -719,7 +721,7 @@ mod tests {
         let config = MogwaiExecClientConfig {
             base_url: "  ws://127.0.0.1:1/  ".into(),
             symbol: Some("MNQ".into()),
-            session: None,
+            callsign: None,
             ..MogwaiExecClientConfig::default()
         };
         assert_eq!(

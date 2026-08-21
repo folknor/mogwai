@@ -205,27 +205,27 @@ pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Maximum byte length of a session id on the wire. Same reasoning as
+/// Maximum byte length of a callsign on the wire. Same reasoning as
 /// `MAX_SYMBOL_LEN`, and generous enough for a uuid-shaped value.
-pub const MAX_SESSION_LEN: usize = 64;
+pub const MAX_CALLSIGN_LEN: usize = 64;
 
-/// Validate the `/ws?session=` socket identity, which shares the URL alphabet
+/// Validate the `/ws?callsign=` socket identity, which shares the URL alphabet
 /// with a wire symbol and is bounded for the same reason: it is carried in a
 /// query string with no percent encoding, and it is retained per socket for the
 /// life of the connection.
 ///
 /// Empty is REFUSED rather than treated as absent. A consumer that sends
-/// `session=` has said something, and reading an empty string as "no opinion"
+/// `callsign=` has said something, and reading an empty string as "no opinion"
 /// would silently give it the always-evict behaviour it was trying to leave.
-pub fn validate_session_id(session: &str) -> Result<(), &'static str> {
-    if session.is_empty() || session.len() > MAX_SESSION_LEN {
-        return Err("session ids are 1 to 64 characters");
+pub fn validate_callsign(callsign: &str) -> Result<(), &'static str> {
+    if callsign.is_empty() || callsign.len() > MAX_CALLSIGN_LEN {
+        return Err("callsigns are 1 to 64 characters");
     }
-    if !session
+    if !callsign
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
     {
-        return Err("session ids use only ASCII letters, digits, dot, dash or underscore");
+        return Err("callsigns use only ASCII letters, digits, dot, dash or underscore");
     }
     Ok(())
 }
@@ -1934,10 +1934,10 @@ mod tests {
         }
     }
 
-    /// The session id's alphabet and bounds, which NOTHING held before this
-    /// test. `validate_session_id` has two production callers - `ws.rs`'s
+    /// The callsign's alphabet and bounds, which nothing held before this
+    /// test. `validate_callsign` has two production callers - `ws.rs`'s
     /// upgrade refusal and the adapter's config check - and one use in
-    /// `adapter_smoke.rs` as an ORACLE on a minted session, so every existing
+    /// `adapter_smoke.rs` as an oracle on a minted callsign, so every existing
     /// use is a POSITIVE case. A body of `Ok(())` passed the whole workspace:
     /// the refusals are what those two call sites exist for, and nothing
     /// exercised one.
@@ -1945,20 +1945,20 @@ mod tests {
     /// It is a separate function from `validate_wire_symbol` with the same
     /// alphabet and a different cap, so a drift between them is representable;
     /// this pins the half that is not a symbol. The empty case is called out
-    /// because the function makes an explicit ruling on it: `session=` with
+    /// because the function makes an explicit ruling on it: `callsign=` with
     /// nothing after it is a consumer that HAS spoken, and reading it as absent
     /// would silently hand back the always-evict behaviour it was trying to
     /// leave.
     #[test]
-    fn session_ids_are_the_url_safe_alphabet() {
+    fn callsigns_use_the_url_safe_alphabet() {
         for legal in [
             "mogwai-4242-1",
             "a",
             "0.1_2-3",
-            &"s".repeat(MAX_SESSION_LEN),
+            &"s".repeat(MAX_CALLSIGN_LEN),
         ] {
             assert!(
-                validate_session_id(legal).is_ok(),
+                validate_callsign(legal).is_ok(),
                 "{legal:?} must be accepted"
             );
         }
@@ -1974,23 +1974,23 @@ mod tests {
             "a&speed=2",
             "a:b",
             "caf\u{e9}",
-            &"s".repeat(MAX_SESSION_LEN + 1),
+            &"s".repeat(MAX_CALLSIGN_LEN + 1),
         ] {
             assert!(
-                validate_session_id(illegal).is_err(),
+                validate_callsign(illegal).is_err(),
                 "{illegal:?} must be refused"
             );
         }
         // THE MESSAGE AND THE CONSTANT ARE CHECKED AGAINST EACH OTHER, not the
-        // constant against a literal. The refusal text is a hardcoded "session
-        // ids are 1 to 64 characters" and nothing else would notice the cap
+        // constant against a literal. The refusal text is a hardcoded
+        // "callsigns are 1 to 64 characters" and nothing else would notice the cap
         // moving out from under it - the durable-prose-asserting-a-live-fact
         // shape, in a string literal.
-        let over = "s".repeat(MAX_SESSION_LEN + 1);
-        let refusal = validate_session_id(&over).unwrap_err();
+        let over = "s".repeat(MAX_CALLSIGN_LEN + 1);
+        let refusal = validate_callsign(&over).unwrap_err();
         assert!(
-            refusal.contains(&MAX_SESSION_LEN.to_string()),
-            "the refusal {refusal:?} must state the cap {MAX_SESSION_LEN} it enforces"
+            refusal.contains(&MAX_CALLSIGN_LEN.to_string()),
+            "the refusal {refusal:?} must state the cap {MAX_CALLSIGN_LEN} it enforces"
         );
     }
 
