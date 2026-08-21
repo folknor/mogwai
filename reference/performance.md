@@ -370,7 +370,7 @@ once per placed boat.
 
 ## History admission gate, 2026-08-15
 
-The server now admits at most four concurrent whole-page history syntheses,
+The venue now admits at most four concurrent whole-page history syntheses,
 bounding worst-case response construction and preventing history from filling
 Tokio's blocking pool ahead of command market readings. The release-mode
 `history_admission_overhead` instrument ran one million uncontended
@@ -1483,7 +1483,7 @@ was. It is kept on that ground alone.
 
 The escaped-tag row is the `Cow` fallback in the probe: when the JSON tag
 carries a `\uXXXX` escape, serde_json cannot borrow it, so the probe owns a
-`String` and the frame costs its two allocations back. The server never emits
+`String` and the frame costs its two allocations back. The venue never emits
 that spelling; the row exists to show the fallback is a bounded cost rather than
 a refusal, which is what a borrowed `&str` probe would have been.
 

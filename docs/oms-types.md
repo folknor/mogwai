@@ -3,8 +3,10 @@
 mogwai's own run config selects an order-management style with `oms_type`,
 either `netting` (the default) or `hedging`. This is a **run-level** choice,
 not an instrument one - it applies to the whole venue for the run, the same
-way `seed` or `speed` does, and every account the venue opens inherits it.
-One ACCOUNT is one ledger: a client trading several symbols books every fill on
+way `seed` does, and every account the venue opens inherits it. (`speed` is not
+a parallel: it is a default a `/ws` upgrade may override, and two speeds of one
+river are two boats.)
+One ACCOUNT is one ledger: a consumer trading several symbols books every fill on
 all of them into its own account, and the style below decides only how positions
 are keyed within it. Two accounts on one venue never share a position book.
 

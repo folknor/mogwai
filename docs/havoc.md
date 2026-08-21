@@ -10,12 +10,18 @@ nowhere else. Venue-originated maintenance, including forced
 liquidation, bypasses them and leaves them armed for the next matching client
 action.
 
-Two nouns run through what follows. A RIVER is one symbol's tape, materialized
-the first time this run is asked for that symbol. A BOAT is the paced reader
-sitting on a river, placed when the first websocket binds to that symbol at a
-given speed; the connections sharing it are its PASSENGERS, and the boat carries
-the clock every answer about that symbol is dated on. There is no venue-wide
-notion of now, so a havoc window cannot be an interval on one clock.
+Two nouns run through what follows and `reference/glossary.md` defines both. A
+RIVER is the generated sequence for one resolved instrument shape, keyed by the
+requested symbol plus that shape's knobs - not by the symbol alone, which
+matters here because a generator arm is part of that key. A BOAT is the paced
+reader sitting on a river, placed when the first connection boards it at a given
+speed, and it carries the clock every answer about that river is dated on.
+
+The venue does keep one wall-to-sim reference, for the answers that have no boat
+- a boatless river, the venue deadline, the venue-scoped account ledger - and it
+is labelled as such on the wire. What it is not is authoritative for a seated
+river, whose answers are dated on its boat. So a havoc window cannot be an
+interval on one clock.
 
 An armed `CommandLatency` act delay is HEAD-OF-LINE on its socket. Each
 connection feeds one sequential dispatcher, so a delayed submit holds every
@@ -80,17 +86,17 @@ request names, since a clear means stop everything.
 
 AN ARM DOES NOT WAIT FOR A CONNECTION, in either spelling. Naming an account
 that has not connected yet records the arm against that name, and the account's
-first ledger - whether it is minted by a socket or by the client's own
-`POST /account` - opens carrying it. Naming none records the arm on the RUN, so
+first ledger - whether it is minted by a socket or by the consumer's own
+`POST /accounts` - opens carrying it. Naming none records the arm on the RUN, so
 every ledger opened afterwards carries it too, engine divergences and the fee
 surcharge included. Both used to reach only the accounts that happened to exist
 at the instant of the request while answering `202` either way, so arming a
 subagent before starting it did nothing and said nothing. An `account` the venue
 cannot parse as an id is now a `400` rather than a `202` that arms nothing.
 
-Recording an arm does not open an account, deliberately: the client still states
-its own opening balances and policy on `POST /account`, and finds the arm
-standing on the ledger that call returns.
+Recording an arm does not open an account, deliberately: the consumer still
+states its own opening balances and policy on `POST /accounts`, and finds the
+arm standing on the ledger that call returns.
 
 The market REGIMES - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are not
 runtime arms. They are a boot choice made by whoever launches the run, apply to

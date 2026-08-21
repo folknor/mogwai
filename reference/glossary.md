@@ -7,9 +7,12 @@ so.
 
 ## The venue and its modes
 
-- **Venue**: one running mogwai process, serving the `MOGWAI` venue over
+- **Venue**: one running instance of mogwai, serving the `MOGWAI` venue over
   loopback: one run, many rivers, many accounts. It gates on no symbol and
-  admits any account id; both resolutions are total.
+  admits any account id; both resolutions are total. Whether it runs as its own
+  PID or embedded in the consumer's own program is a deployment detail and never
+  part of its identity - `mogwai-server` is a library, and the venue is one
+  thing either way.
 - **Server mode**: the venue launched by `mogwai serve` on the command line - a
   long-lasting exchange accepting connections from as many accounts as the user
   wants. The account id is the discriminator: no account sees any other, and
@@ -37,8 +40,10 @@ so.
 - **River**: the generated market-data sequence for one resolved instrument
   shape, keyed by the requested symbol plus that shape's knobs. A river's
   identity is everything that mutates the water - the resolved bundle, the
-  seed, generator-level havoc - and never the delivery speed. Rivers are
-  created on first use and never serialize on each other's checkpoint chain.
+  seed, generator-level havoc - and never the delivery speed. That identity is
+  resolved at boarding, and a river is created when a boarding passenger's key
+  names none that already exists; rivers never serialize on each other's
+  checkpoint chain.
   History reads a river directly; nothing has to be boarded for `/trades` or
   `/quotes` to answer.
 - **Boat**: the paced reader of one river, placed on demand when the first
@@ -49,9 +54,26 @@ so.
   cadence and never a generated value, so two boats at two speeds are reading
   one river. One ledger still carries one cadence. A boat is an implementation
   cache with no semantics of its own: the tape is deterministic and exogenous,
-  so nothing a client can measure reveals whether it shares a hull.
+  so nothing a consumer can measure reveals whether it shares a hull.
 - **Boatyard**: the run-owned registry of keyed boats and the tickets that keep
   them alive. A boat winds down when its last passenger leaves.
+- **Boarding**: the act, at connect, by which one connection's resolved config
+  selects its water. It is the one moment when identity is decided, and every
+  other entry here depends on it. It is per connection rather than per
+  passenger, because an account's several connections may each want different
+  water: they
+  board separately, and the passenger they belong to is what their orders and
+  money land on, never what selects their river. Two things follow, and both are
+  easy to get wrong without them written down. The carrier decides nothing: a
+  knob posted to the control plane and one read from the venue's config are the
+  same input by the time boarding happens, so when or how a knob arrived says
+  nothing about whether it is part of a river's identity. And the river key is
+  whatever in that resolved config can mutate the water: a key naming a river
+  that already exists boards the connection onto it, sharing the boat already
+  reading it, and a key naming none creates the river and places a boat for it.
+  So a connection boarding later is not joining a river's past or altering it -
+  it resolves a key like every other connection and gets the water that key
+  names.
 - **Tape**: what a boat publishes - the paced frame stream broadcast to that
   boat's passengers only. Materialization cost is paid at two different
   moments: the boot river's warmup is synthesized before the venue writes its
@@ -59,9 +81,10 @@ so.
   not exist until a socket bind or history poll first names it and is
   synthesized then - so the first requester of a non-boot symbol pays that
   river's warmup latency inside its own request.
-- **Boot symbol / boot river**: the shape the run boards a boat on before it
-  writes its readiness line, and the river a request that names no symbol
-  binds. It is the only river warmed eagerly and the only boat that never winds
+- **Boot symbol / boot river**: the shape the run places a boat on before it
+  writes its readiness line - the run boards nothing, because boarding is a
+  passenger's act and a run takes no seat - and the river a request that names
+  no symbol binds. It is the only river warmed eagerly and the only boat that never winds
   down; every other river is boatless until someone boards it.
 - **Warmup**: the uniformly servable simulated history from `data_origin_ns`
   through `run_start_ns`. `warmup_ns` is their distance, and every river owes
@@ -71,8 +94,11 @@ so.
   first read.
 - **Served symbol**: any symbol a request names that resolves to a legal,
   fundable shape. A symbol with a preset gets that preset's shape; one without
-  gets the default shape under its own label, memoized per run. Refusals are
-  about the label or the run's balances, never about the absence of a preset.
+  gets the default shape under its own label, memoized per run. A request can
+  still be refused, on any of five grounds: an illegal label, a shape that does
+  not validate, a settlement currency the account or run holds no balance in, an
+  exhausted river cap, or a second cadence on a river the account is already
+  riding. What is never a ground is the absence of a preset.
 
 ## The instruments
 
@@ -109,22 +135,28 @@ so.
 
 - **Account**: an id plus everything the venue holds under it - its ledger, its
   risk state, its havoc arms. Created on first sight of the id and resolved
-  totally: knobs the client named win, else a policy preset matching a
-  requested name, else the default policy. The id is the client's, not minted,
+  totally: knobs the consumer named win, else a policy preset matching a
+  requested name, else the default policy. The id is the consumer's, not minted,
   because a stable id is what makes a returning socket a continuation - and it
   is a bearer token: anyone who names it claims it, which is acceptable on a
   loopback venue and written down so it is not assumed to be more.
 - **Ledger**: one `mogwai-engine` instance, owned by one account and created on
   first sight of that account id. A run holds as many as it has accounts and
   they share nothing: positions, balances, order history and armed divergences
-  are all per ledger. Every socket a client opens under one account id acts on
-  that account's ledger, whatever symbol each bound, so a client trading two
+  are all per ledger. Every socket a consumer opens under one account id acts on
+  that account's ledger, whatever symbol each bound, so a consumer trading two
   instruments is trading one book. Order entry is WebSocket-only - there is no
   HTTP order carrier. A ledger outlives the connection that named it, which is
   what makes a reconnect a continuation.
 - **Passenger**: the venue-side object for one account riding the run: the
-  account id, its engine, its risk ledger, its freeze stamp and its seat. One
-  per account, not per connection. Passengers on a river owe each other
+  account id, its engine, its risk ledger, its freeze stamp and its seats. One
+  per account, not per connection, and it outlives every connection that speaks
+  for it - which is the whole reason it exists, since something has to hold the
+  book across a reconnect. What is per connection belongs to Connection and
+  Seat: a connection boards, holds a lane and a declared duration, and rides one
+  seat; a passenger holds as many seats as its connections have boarded boats.
+  A count of riders on a boat is therefore a count of connections and never of
+  passengers. Passengers on a river owe each other
   non-interference (which the tape's exogeneity gives - order flow never feeds
   back into the water) and invisibility (which attribution and per-account
   ledgers give: every order is claimed for its account - a venue-originated
@@ -137,29 +169,36 @@ so.
   defines its own day as a minute of the UTC day; enforcement is the venue's,
   because a strategy that would have been liquidated must actually be
   liquidated or the forward claim is worth nothing.
-- **Client**: an overloaded word, and the glossary's job is to name the
-  overload rather than pretend one sense wins everywhere. In mogwai's own
-  prose it means the counterparty PROCESS - typically a nautilus host - which
-  holds several connections (a data leg and an exec leg) under one account
-  and identifies itself to the venue only by its session id. Nautilus uses
-  the same word for the adapter OBJECTS inside that host (the
-  `MogwaiDataClient` / `MogwaiExecutionClient` pair a host registers), so
-  "the adapter's client pair" is one process carrying two nautilus clients.
-  And in wire field names (`client_order_id`) it means the submitting side's
-  own namespace, as opposed to ids the venue mints. The venue itself never
-  perceives a client as more than a session id, an account and its
-  connections.
+- **Consumer**: the program or system driving the venue - broadarrow is the
+  known one. It is not a single process, and defining it as one is the mistake
+  this entry exists to prevent: it may
+  be one process, several that share nothing but the wire, or the very process
+  the venue is embedded in. So the venue never perceives a consumer at all. What
+  it perceives is a callsign, an account and that account's connections, and
+  the word for the party on one socket is therefore Callsign, never Consumer.
+  `client` is not used for anything this project owns. It survives in two
+  inherited spellings and nowhere else: nautilus's adapter objects (the
+  `MogwaiDataClient` / `MogwaiExecutionClient` pair a consumer registers), and
+  the wire field `client_order_id`, which names the submitting side's own id
+  namespace as opposed to ids the venue mints.
 - **Connection**: one WebSocket under an account, bound to one river at one
   speed. Delivery, transport havoc and byte budgets are per connection;
   ownership of orders and money is per account. The word covers WebSockets
   only: an HTTP history poll or a control-plane POST is a wire interaction
   but not a connection, holds no lane and no seat, and survives nothing.
-- **Session**: the self-asserted client identity carried on the upgrade as
-  `/ws?session=`, minted once per adapter process. Sockets presenting the same
-  account and session coexist - that is what lets one client hold two legs
-  without evicting itself - while a different or absent session evicts the
-  incumbent. Silence is never a claim to be the incumbent, and no
-  authentication stands behind any of it.
+- **Callsign**: the self-asserted identity carried on the upgrade as
+  `/ws?callsign=`. It is announced by the party itself, conventionally honoured,
+  and nothing stands behind it - which is what the word is for. It is also the
+  only identity the venue has, so every rule about who may coexist and who
+  evicts whom is stated over it rather than over the consumer, which the venue
+  cannot perceive. Sockets presenting the same account and callsign coexist -
+  that is what lets one leg pair live under one account without evicting itself
+  - while a different or absent callsign evicts the incumbent. Silence is never
+  a claim to be the incumbent. The adapter mints one per process, so a consumer
+  spread across several processes is several callsigns unless it supplies one
+  deliberately: sharing a book across processes is a consumer's own act, not
+  something the venue infers. The word `session` is never used for this, because
+  it belongs to the trading day - see Session calendar.
 - **Seat**: an account's riding of one boat, counted per connection - the seat
   is vacated by its last rider. An account holds as many seats as the distinct
   boats its sockets have bound, so one account trades many rivers at once (many
@@ -167,16 +206,19 @@ so.
   account is already riding: one ledger carries one cadence. A freeze clears
   every seat, and when a frozen account returns, what its book holds off the
   river the returning socket joins is retired - resting orders cancelled,
-  positions closed at their last mark - because the new session could neither
-  see nor close it. A live account binding a second symbol retires nothing;
+  positions closed at their last mark - because the returning connection could
+  neither see nor close it. A live account binding a second symbol retires nothing;
   that is the supported many-rivers shape, not a return.
-- **Eviction**: a socket claiming a seated account id from a different client -
-  a different session, or none - closes the incumbent and inherits the account:
-  ledger, orders, risk state. The same client's own sockets coexist instead,
-  which is what lets one process hold its two legs and trade several symbols
-  under one account without evicting itself. The close is
+- **Eviction**: a socket claiming a seated account id under a different
+  callsign, or none, closes the incumbent and inherits the account: ledger,
+  orders, risk state. Sockets sharing a callsign coexist instead, which is what
+  lets one leg pair trade several symbols under one account without evicting
+  itself. The callsign is the discriminator here and the consumer is not,
+  because the venue perceives only the former: two processes of one consumer
+  that mint their own callsigns will evict each other, and that is the
+  consumer's to prevent by sharing one, not the venue's to infer. The close is
   normal (WS 1000, with a machine-readable evicted reason), not a fault: from
-  the venue's side a reconnecting client and a stranger claiming the id are
+  the venue's side a returning callsign and a stranger claiming the id are
   indistinguishable, so handing the account over is the only behaviour that
   lets a killed worker come back to its own book. A consumer must not treat it
   as a reason to redial, or it evicts whatever evicted it.
@@ -194,12 +236,17 @@ so.
 
 ## Havoc
 
-- **Divergence**: one armed havoc injection, posted on `POST
-  /control/divergence` and by convention posted per account on connect,
-  constant for that connection. The classification test for any arm is whether
-  it changes the water or the view. Generator arms (`VolStorm`, `FlowSurge`,
-  `LiquidityDrought` and kin) change the water, so they are part of river
-  identity and fork the river at placement rather than mutating shared water.
+- **Divergence**: one armed havoc injection. It reaches the venue either from
+  config or on `POST /control/divergence`, and which carrier it came by decides
+  nothing: a divergence is resolved with the rest of a passenger's config at
+  boarding, and is constant for that connection. Reading the post as a runtime
+  mutation of a venue already serving is the standing misreading of this entry,
+  and it is what the Boarding entry exists to foreclose. The classification
+  test for any arm is whether it changes the water or the view. Generator arms
+  (`VolStorm`, `FlowSurge`, `LiquidityDrought` and kin) change the water, so
+  they are part of river identity: a passenger whose resolved config carries
+  one boards a different river than a passenger without it, and that is all
+  "forking the river" means. Nothing mutates water someone is already reading.
   Transport arms (`GoDark`, `StallData`, `DelayAcks`, `CommandLatency`)
   corrupt what one account's connections receive, so they ride the passenger.
   Engine arms (`PartialFillNext`, `RejectNextSubmit`, `RejectNextCancel`,

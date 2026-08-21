@@ -4,7 +4,7 @@
 
 mogwai is a fake broker/exchange that plugs into a nautilus trading system to
 exercise the *live* trading path. It synthesizes market data from a committed fingerprint
-fitted offline to Kraken trade history (the running server opens no CSV) and
+fitted offline to Kraken trade history (the running venue opens no CSV) and
 injects the messy, realistic execution divergences (partial fills, rejects,
 delays,
 duplicate fills, dropped account updates, venue blackouts) that an in-process
@@ -47,14 +47,14 @@ A Cargo workspace, seven crates under `crates/`:
 - `mogwai-protocol` - the wire types (`ClientMessage`, `ServerMessage`) plus
   `control::Divergence`. The single source of truth both ends serialize against;
   it never imports nautilus. Also carries `launch`, the SHIPPED launcher: it
-  lives here rather than in `mogwai-adapter` because the server's own test
+  lives here rather than in `mogwai-adapter` because this workspace's own test
   binaries drive the venue through it and cannot depend on the adapter, so a
   launcher shipped from there would leave the contract hand-rolled on both sides.
   `mogwai-adapter` re-exports it for consumers that already depend on it.
 - `mogwai-engine` - the venue-agnostic exchange core, with the seam that injects
   armed divergences into the event stream.
 - `mogwai-data` - the `TickSource` seam and the k-way `MergeSource`. Carries the
-  `GeneratedSource` synthetic generator the running server uses (fitted to the
+  `GeneratedSource` synthetic generator the running venue uses (fitted to the
   committed fingerprint) plus the `KrakenCsvSource` streaming loader kept as the
   offline-analysis lineage.
 - `mogwai-server` - the axum LIBRARY that owns the sockets, the clock and replay
@@ -115,6 +115,10 @@ Document folders section below for what each folder may and may not contain.
 ### General rules
 
 - Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten.
+- No all-caps. Not for emphasis, not for a term of art, not for a warning.
+  Write the sentence so the emphasis is carried by the words and where they sit.
+  A document that shouts every important thing has no way left to mark the one
+  thing that matters, and prose full of capitals is read by nobody twice.
 - Don't remind the user of the rules. They wrote them, so they know them.
 - The user can exempt you from any rule at any time.
 
