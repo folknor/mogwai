@@ -104,11 +104,11 @@ pub(crate) struct Boat {
 /// forever; a closed semaphore fails every later acquire immediately.
 enum Slot {
     Placing(Arc<Semaphore>),
-    Seated(Seat),
+    Placed(PlacedBoat),
 }
-struct Seat {
+struct PlacedBoat {
     boat: Arc<Boat>,
-    passengers: u32,
+    riders: u32,
 }
 
 pub(crate) struct Boatyard {
@@ -161,11 +161,11 @@ impl Boatyard {
             let wait = {
                 let mut boats = self.locked();
                 match boats.get_mut(&key) {
-                    Some(Slot::Seated(seat)) => {
-                        seat.passengers += 1;
+                    Some(Slot::Placed(placed)) => {
+                        placed.riders += 1;
                         return Ok(Ticket {
                             yard: Arc::clone(self),
-                            boat: Arc::clone(&seat.boat),
+                            boat: Arc::clone(&placed.boat),
                         });
                     }
                     Some(Slot::Placing(placing)) => Some(Arc::clone(placing)),
@@ -226,7 +226,7 @@ impl Boatyard {
             Some(Slot::Placing(placing)) => placing,
             _ => unreachable!("placement owns placeholder"),
         };
-        // Closed under the mutex, with the seat already published or the
+        // Closed under the mutex, with the boat already placed or the
         // placeholder already gone, so a joiner that wakes cannot observe the
         // in-flight state it was waiting on.
         placing.close();
@@ -234,9 +234,9 @@ impl Boatyard {
             Ok(boat) => {
                 boats.insert(
                     key,
-                    Slot::Seated(Seat {
+                    Slot::Placed(PlacedBoat {
                         boat: Arc::clone(&boat),
-                        passengers: 1,
+                        riders: 1,
                     }),
                 );
                 Ok(Ticket {
@@ -254,7 +254,7 @@ impl Boatyard {
     }
     pub(crate) fn boat_for_symbol(&self, symbol: &str) -> Option<Arc<Boat>> {
         // Deterministic when a river carries more than one cadence: the
-        // slowest seated boat. Callers that mean "is anyone reading this
+        // slowest placed boat. Callers that mean "is anyone reading this
         // symbol" only need Some; callers that need a particular speed use
         // `boat_at`.
         self.boats_for_symbol(symbol)
@@ -262,20 +262,20 @@ impl Boatyard {
             .min_by_key(|boat| boat.key.speed_micros)
     }
 
-    /// Every seated boat on `symbol`, any speed.
+    /// Every placed boat on `symbol`, any speed.
     pub(crate) fn boats_for_symbol(&self, symbol: &str) -> Vec<Arc<Boat>> {
         self.locked()
             .values()
             .filter_map(|slot| match slot {
-                Slot::Seated(seat) if seat.boat.key.river.symbol() == symbol => {
-                    Some(Arc::clone(&seat.boat))
+                Slot::Placed(placed) if placed.boat.key.river.symbol() == symbol => {
+                    Some(Arc::clone(&placed.boat))
                 }
                 _ => None,
             })
             .collect()
     }
 
-    /// The boat on `symbol` at this quantized speed, if one is seated.
+    /// The boat on `symbol` at this quantized speed, if one is placed.
     ///
     /// Quantized through `BoatKey::new`, the same call `board` keys by, and
     /// compared against the KEY, so a caller naming `100.0000001` finds the
@@ -295,14 +295,14 @@ impl Boatyard {
     /// a boat, which is exactly the look-ahead per-boat clocks exist to remove
     /// and is invisible because the answer is well-formed. The wait is bounded
     /// by the placement itself - `board` closes the handoff semaphore under the
-    /// registry mutex with the seat already published or the placeholder
+    /// registry mutex with the boat already placed or the placeholder
     /// already removed, so the re-read below always makes progress, and a
     /// FAILED placement re-reads to `None` and answers boatless truthfully. A
     /// river with no slot at all returns immediately.
     ///
     /// `boat_for_symbol` keeps the non-blocking form for the callers that must
     /// never block on a placement - the history routes' materialization
-    /// pre-check, and `health`, which reads the whole seated set through
+    /// pre-check, and `health`, which reads the whole placed set through
     /// `boats` on the same non-blocking terms.
     pub(crate) async fn boat_for_symbol_awaiting_placement(
         &self,
@@ -317,7 +317,7 @@ impl Boatyard {
                         continue;
                     }
                     match slot {
-                        Slot::Seated(seat) => return Some(Arc::clone(&seat.boat)),
+                        Slot::Placed(placed) => return Some(Arc::clone(&placed.boat)),
                         Slot::Placing(handoff) => placing = Some(Arc::clone(handoff)),
                     }
                 }
@@ -327,12 +327,12 @@ impl Boatyard {
             drop(wait.acquire().await);
         }
     }
-    pub(crate) fn seated_symbols(&self) -> Vec<String> {
+    pub(crate) fn placed_symbols(&self) -> Vec<String> {
         let mut symbols: Vec<String> = self
             .locked()
             .values()
             .filter_map(|slot| match slot {
-                Slot::Seated(seat) => Some(seat.boat.key.river.symbol().to_owned()),
+                Slot::Placed(placed) => Some(placed.boat.key.river.symbol().to_owned()),
                 _ => None,
             })
             .collect();
@@ -344,7 +344,7 @@ impl Boatyard {
         self.locked()
             .values()
             .filter_map(|slot| match slot {
-                Slot::Seated(seat) => Some(Arc::clone(&seat.boat)),
+                Slot::Placed(placed) => Some(Arc::clone(&placed.boat)),
                 _ => None,
             })
             .collect()
@@ -378,9 +378,9 @@ impl Drop for Ticket {
         let worker = {
             let mut boats = self.yard.locked();
             let remove = match boats.get_mut(&self.boat.key) {
-                Some(Slot::Seated(seat)) => {
-                    seat.passengers -= 1;
-                    seat.passengers == 0
+                Some(Slot::Placed(placed)) => {
+                    placed.riders -= 1;
+                    placed.riders == 0
                 }
                 _ => false,
             };
@@ -580,13 +580,13 @@ mod tests {
         assert_eq!(one.boat().key().speed(), 2.0);
         assert_eq!(two.boat().key().speed(), 3.0);
         assert_eq!(one.boat().symbol(), two.boat().symbol());
-        assert_eq!(yard.seated_symbols(), ["BTCUSDT"]);
+        assert_eq!(yard.placed_symbols(), ["BTCUSDT"]);
         assert_eq!(yard.boats_for_symbol("BTCUSDT").len(), 2);
         drop(two);
         assert_eq!(
             yard.boats_for_symbol("BTCUSDT").len(),
             1,
-            "winding one cadence down leaves the other seated"
+            "winding one cadence down leaves the other placed"
         );
     }
 
@@ -599,7 +599,7 @@ mod tests {
             .unwrap();
         let tape = Arc::clone(&ticket.boat().tape);
         drop(ticket);
-        assert!(yard.seated_symbols().is_empty());
+        assert!(yard.placed_symbols().is_empty());
         // The join is detached, so the assertion is on the worker's own exit
         // flag rather than on the handle the drop already consumed.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -635,15 +635,15 @@ mod tests {
     }
 
     /// Install a placement-in-flight placeholder over a river that already has
-    /// a seat, so the handoff can be driven deterministically instead of raced.
-    /// Returns the displaced seat and the handoff a completing placement would
+    /// a placed boat, so the handoff can be driven deterministically instead of raced.
+    /// Returns the displaced boat and the handoff a completing placement would
     /// close.
     fn hold_placement_open(yard: &Boatyard, key: &BoatKey) -> (Arc<Boat>, Arc<Semaphore>) {
         let handoff = Arc::new(Semaphore::new(0));
         let mut boats = yard.locked();
         let boat = match boats.insert(key.clone(), Slot::Placing(Arc::clone(&handoff))) {
-            Some(Slot::Seated(seat)) => seat.boat,
-            _ => panic!("the river was not seated"),
+            Some(Slot::Placed(placed)) => placed.boat,
+            _ => panic!("the river had no placed boat"),
         };
         (boat, handoff)
     }
@@ -677,15 +677,15 @@ mod tests {
         // `health` keeps the non-blocking form, and this is what it sees.
         assert!(yard.boat_for_symbol("BTCUSDT").is_none());
 
-        // Exactly what `board` does on success: publish the seat and close the
+        // Exactly what `board` does on success: place the boat and close the
         // handoff, both under the registry mutex.
         {
             let mut boats = yard.locked();
             boats.insert(
                 key,
-                Slot::Seated(Seat {
+                Slot::Placed(PlacedBoat {
                     boat: Arc::clone(&boat),
-                    passengers: 1,
+                    riders: 1,
                 }),
             );
             handoff.close();
@@ -767,7 +767,7 @@ mod tests {
                 .all(|ticket| Arc::ptr_eq(ticket.boat(), &first)),
             "concurrent first boarders placed more than one boat"
         );
-        assert_eq!(yard.seated_symbols().len(), 1);
+        assert_eq!(yard.placed_symbols().len(), 1);
     }
 
     /// The race a sequential test cannot catch: a joiner arriving exactly as

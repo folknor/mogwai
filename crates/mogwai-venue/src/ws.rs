@@ -42,7 +42,7 @@ use crate::{
 /// The identity key was `session` until the callsign ruling retired `session`
 /// as a name for anything but the trading day. `deny_unknown_fields` is what
 /// makes that break LOUD for a consumer still sending the old spelling: it is a
-/// `400` naming the key rather than a socket silently seated with no identity
+/// `400` naming the key rather than a socket silently admitted with no identity
 /// and the always-evict reading. Pinned by
 /// `the_retired_session_query_key_is_refused`.
 #[derive(Debug, serde::Deserialize)]
@@ -194,7 +194,7 @@ pub(crate) async fn ws_upgrade(
     // first order: nautilus cannot construct an `AccountId` from a bare word, so
     // a venue that accepted one would be refused by every consumer later.
     //
-    // SEATED, not merely looked up: claiming an account evicts whoever already
+    // CLAIMED, not merely looked up: claiming an account evicts whoever already
     // holds it. Sockets presenting the same account and callsign coexist, while
     // a different or absent callsign is a new claim on the account.
     // Bounded and charset-checked before it is stored or compared: it arrives
@@ -211,7 +211,7 @@ pub(crate) async fn ws_upgrade(
     }
     let callsign = query.callsign.as_deref();
     // NOTHING IS CLAIMED YET, and the order below is the whole point: every
-    // refusal this handler can make is decided BEFORE `seat`, because seating
+    // refusal this handler can make is decided BEFORE `claim_account`, because claiming
     // closes the incumbent's sockets and, under `reset_account_on_reconnect`,
     // discards its ledger. Refusing after that turned any of these five 400s
     // into a one-request, unauthenticated way to disconnect a live consumer and
@@ -238,7 +238,7 @@ pub(crate) async fn ws_upgrade(
     // RESOLVED, not yet registered. Resolution is a property of the venue and
     // is the only fallible half, so it answers here where nothing has been
     // taken from anybody; the ledger-side install happens on the passenger the
-    // seat produces, further down.
+    // claim returns, further down.
     let profile = match state.rivers.resolve_profile(&symbol) {
         Ok(profile) => profile,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
@@ -255,12 +255,12 @@ pub(crate) async fn ws_upgrade(
     // Presence, never sufficiency: running out is depletion, and a funds
     // rejection on a served shape must keep meaning that and only that.
     //
-    // Asked of the ledger this connection WILL get: a seat that resets serves
+    // Asked of the ledger this connection will get: a claim that resets serves
     // the venue template's balances rather than whatever the account holds now.
     let settlement = profile.def.class.settlement_currency();
     let resetting = state
         .run
-        .seat_discards_ledger(&account_id, claimed, callsign);
+        .claim_discards_ledger(&account_id, claimed, callsign);
     if !state
         .run
         .funded_in(&account_id, resetting, settlement)
@@ -311,16 +311,16 @@ pub(crate) async fn ws_upgrade(
     // socket reaches `resume` further down - so two first connections would
     // both read themselves frozen and both sit.
     //
-    // TAKEN ON THE EXISTING LEDGER, BEFORE THE SEAT, and skipped entirely when
-    // the seat is going to reset: a reset ledger holds no seat at all, so
+    // TAKEN ON THE EXISTING LEDGER, BEFORE THE CLAIM, and skipped entirely when
+    // the claim is going to reset: a reset ledger holds no seat at all, so
     // asking the outgoing one would refuse exactly the reconnect-at-a-new-speed
     // the reset knob exists to serve. Where the check does apply, the seat is
     // TAKEN here rather than merely tested, so nothing can slip between the
     // test and the claim - and this is the last fallible step, so a seat taken
     // here is never abandoned.
-    let mut seated: Option<(Arc<crate::run::Passenger>, crate::run::Admission)> = None;
+    let mut prepared_existing: Option<(Arc<crate::run::Passenger>, crate::run::Admission)> = None;
     if !resetting {
-        // The ledger `seat` is about to return, resolved before the eviction so
+        // The passenger `claim_account` is about to return, resolved before the eviction so
         // this socket can be COUNTED ON to the account before the incumbent is
         // closed. Without that the incumbent's teardown could win the race to
         // an account with no lane and no admission, freeze it, and make the
@@ -346,20 +346,23 @@ pub(crate) async fn ws_upgrade(
         // lowers it on the way out instead of stranding the account
         // permanently counted-in.
         let admission = state.run.admit(&existing);
-        seated = Some((existing, admission));
+        prepared_existing = Some((existing, admission));
     }
     // EVICTION HAPPENS HERE, with every refusal already decided. `resetting`
-    // was evaluated once, above, and is handed to `seat` rather than re-derived
-    // there, so this call cannot decide to reset an account the funding and
-    // cadence checks were taken against on the assumption that it would not.
-    let passenger = state.run.seat(&account_id, claimed, callsign, resetting);
-    let admission = match seated {
+    // was evaluated once, above, and is handed to `claim_account` rather than
+    // re-derived there, so this call cannot decide to reset an account the
+    // funding and cadence checks were taken against on the assumption that it
+    // would not.
+    let passenger = state
+        .run
+        .claim_account(&account_id, claimed, callsign, resetting);
+    let admission = match prepared_existing {
         // The ordinary non-resetting path: the ledger checked above is the one
-        // the seat produced, so its seat and its admission carry straight into
+        // the claim returned, so its seat and its admission carry straight into
         // the session.
         Some((existing, admission)) if Arc::ptr_eq(&existing, &passenger) => Some(admission),
         // The ledger MOVED OUT FROM UNDER THE CHECK. `resetting` is false here,
-        // so `seat` did not reopen the account itself: only another upgrade
+        // so `claim_account` did not reopen the account itself: only another upgrade
         // racing this same account inside this window can have replaced the map
         // entry. The admission is given up right here - dropping the guard
         // departs the account it was taken on, so nothing is stranded counted-in
@@ -380,7 +383,7 @@ pub(crate) async fn ws_upgrade(
             // refuse for the cadence rule. It can still lose to another upgrade
             // racing the same account, which is a refusal AFTER the eviction and
             // the one case the ordering above cannot reach - it needs two
-            // upgrades interleaved inside this window, where the pre-seat check
+            // upgrades interleaved inside this window, where the pre-claim check
             // needs none.
             if let Err(sitting) = passenger.try_sit(ticket.boat().key()) {
                 let sitting_speed = sitting.speed();
@@ -402,7 +405,7 @@ pub(crate) async fn ws_upgrade(
             state.run.admit(&passenger)
         }
     };
-    // The ledger-side install, on the passenger the seat actually produced.
+    // The ledger-side install, on the passenger the claim actually returned.
     state.run.register_instrument(&passenger, &profile).await;
     let session = SocketSession {
         symbol,

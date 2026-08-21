@@ -47,12 +47,12 @@ hostile-consumer defence.
 
 The history endpoints `GET /trades` and `GET /quotes` both REQUIRE `symbol`;
 `start`, `end` and `limit` are optional. They are bounded by the named river's
-now. For a seated river that is the last instant its boat published; for a
+now. For a boated river that is the last instant its boat published; for a
 boatless river it is the venue clock. An omitted or future `end` is clamped to
 that ceiling, and a `start` above it - or below the tape origin - is refused
 with HTTP 400. A consumer must therefore read `/clock?symbol=<symbol>` before
 constructing a history window. Using boatless `/clock` as the `start` for a
-seated river can be ahead of that river and is refused.
+boated river can be ahead of that river and is refused.
 
 A history poll materializes the named river, so the only refusals left are
 about the SHAPE rather than about the symbol being unknown: a label that is not
@@ -60,7 +60,7 @@ a legal symbol, a shape whose settlement currency this run does not fund, a
 shape the resolved configuration makes invalid, and an exhausted river cap.
 Each is a 400 naming its reason.
 
-`GET /clock` takes an optional `?symbol=`. Naming a SEATED river answers on its
+`GET /clock` takes an optional `?symbol=`. Naming a BOATED river answers on its
 boat's clock: `venue_now_ns` is the last instant that boat published, and
 `boat_clock` is true. Naming a boatless river, or omitting the parameter,
 answers on the venue clock with `boat_clock` false. `data_origin_ns` and `warmup_ns` are venue facts either
@@ -247,11 +247,11 @@ connect.
 
 ## Whether a run is worth keeping
 
-`GET /health` carries an optional `fault` object, present when a SEATED
+`GET /health` carries an optional `fault` object, present when a BOATED
 RIVER's tape has faulted. It names the river in `symbol`, the refusal in
 `kind`, and the simulated instant in `clock_ns`.
 
-A run seats a boat per river and every boat owns its own tape, so rivers fault
+A run places a boat per river and every boat owns its own tape, so rivers fault
 independently. The field reports the faulted river with the smallest symbol,
 which makes it stable across polls of the same run and still answers the
 question a fleet poller has - is ANY river faulted. It does not enumerate a

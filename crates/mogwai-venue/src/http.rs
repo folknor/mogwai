@@ -759,11 +759,11 @@ pub(crate) struct Health {
     /// record, so a launcher can hand it to its consumers and they can check they
     /// are still talking to the venue they were given.
     run_seed: u64,
-    /// A FAULTED TAPE ON ANY SEATED RIVER, not merely on the boot one.
+    /// A FAULTED TAPE ON ANY BOATED RIVER, not merely on the boot one.
     ///
     /// This used to read `boat_for_symbol(boot_symbol)` and report that one
     /// boat's tape fault, which was exactly right when a run had one paced
-    /// tape. Under the open instrument set a run seats a boat per keyed river,
+    /// tape. Under the open instrument set a run places a boat per keyed river,
     /// every one owns its own tape and can fault independently, and the boot
     /// river is the one a strategy under test is LEAST likely to have bound -
     /// so a consumer whose own arrival draw refused was reading a healthy
@@ -796,7 +796,7 @@ struct HealthFault {
     clock_ns: u64,
 }
 
-/// Which faulted river `/health` reports, given every seated river that has
+/// Which faulted river `/health` reports, given every boated river that has
 /// one. Split out from the handler so the SELECTION is testable without a
 /// boatyard: forcing a real arrival refusal on a chosen river is far more
 /// machinery than the rule deserves, and the rule - smallest symbol wins,
@@ -869,7 +869,7 @@ impl AppState {
     /// Async because it AWAITS an in-flight placement rather than falling
     /// through to the venue clock. A request racing a boarding would otherwise
     /// receive a well-formed answer off a clock strictly ahead of the boat that
-    /// is about to be seated - invisible precisely because it is well-formed.
+    /// is about to be boated - invisible precisely because it is well-formed.
     pub(crate) async fn river_now(&self, symbol: &str, speed: Option<f64>) -> RiverNow {
         // Wait out an in-flight placement so a racing poll does not answer off
         // the venue clock for a river about to have a boat. BEFORE the named
@@ -1033,13 +1033,13 @@ pub(crate) async fn arm_divergence(
             let symbol = if let Some(symbol) = request.symbol.as_deref() {
                 symbol
             } else {
-                let seated = run.boatyard.seated_symbols();
-                if !seated.is_empty() {
+                let placed = run.boatyard.placed_symbols();
+                if !placed.is_empty() {
                     return (
                         StatusCode::BAD_REQUEST,
                         format!(
-                            "generator divergence requires symbol; seated boats: {}",
-                            seated.join(", ")
+                            "generator divergence requires symbol; placed boats: {}",
+                            placed.join(", ")
                         ),
                     );
                 }
@@ -1049,7 +1049,7 @@ pub(crate) async fn arm_divergence(
                 return (
                     StatusCode::BAD_REQUEST,
                     format!(
-                        "river {symbol} has a seated boat; place a boat whose sharing key carries generator havoc"
+                        "river {symbol} has a placed boat; place one whose sharing key carries generator havoc"
                     ),
                 );
             }
@@ -1199,14 +1199,14 @@ pub(crate) async fn arm_divergence(
                         return (
                             StatusCode::BAD_REQUEST,
                             format!(
-                                "river {symbol} has a seated boat; generator controls cannot mutate live water"
+                                "river {symbol} has a placed boat; generator controls cannot mutate live water"
                             ),
                         );
                     }
                     vec![symbol.to_owned()]
                 }
                 // Unqualified, this clears every river whose water exists and
-                // carries no boat. A seated river is SKIPPED rather than
+                // carries no boat. A boated river is SKIPPED rather than
                 // refused: the transport half of this control is run-wide and
                 // must stay reachable while a boat is sitting.
                 None => state
@@ -1305,8 +1305,9 @@ pub(crate) async fn arm_divergence(
             // than `target`: an engine divergence is a statement about the
             // venue's matching, and the wire has never routed one to a single
             // account. It reaches every ledger AND THE RUN, so a ledger minted
-            // later opens holding it. Walking only the seated set - which is
-            // what this did - meant an operator could arm a `PartialFillNext`,
+            // later opens holding it. Walking only the ledgers that already
+            // exist - which is what this did - meant an operator could arm a
+            // `PartialFillNext`,
             // start a subagent, and get a run that believed it was perturbed and
             // was not.
             //
@@ -1314,8 +1315,8 @@ pub(crate) async fn arm_divergence(
             // representative because every ledger holds the same arms and hits
             // the cap together, which is a claim `Run::arm` makes true rather
             // than assumes: the run's own record sheds from the oldest end on
-            // the same cap, so a ledger opened mid-run replays the queue a
-            // seated one is holding.
+            // the same cap, so a ledger opened mid-run replays the queue an
+            // older one is holding.
             let evicted = run.arm(None, VenueArm::Engine(engine_div.clone())).await;
             if let Some(shed) = evicted {
                 let body = format!(
@@ -1446,7 +1447,7 @@ pub(crate) async fn account(
 }
 
 /// The risk half of an account snapshot, over whichever ledger produced the
-/// account half - a seated passenger's or a preview of an unopened one.
+/// account half, an existing passenger's or a preview of an unopened one.
 ///
 /// An unpoliced account still reports its equity, which is the one number an
 /// evaluator wants whether or not anything is enforced against it. With no
@@ -1614,7 +1615,7 @@ pub(crate) async fn clock(
     // the consumer can report the floor in its own terms.
     //
     // `?symbol=` answers for that river's lead boat when more than one
-    // cadence is seated; `?speed=` names one.
+    // cadence is placed; `?speed=` names one.
     // For a boat, `venue_now_ns` is the sim instant of the last tick it
     // PUBLISHED rather than the affine map evaluated at the wall: a boat placed
     // mid-run is deliberately behind its own clock's projection, and a consumer
@@ -2133,7 +2134,7 @@ pub(crate) fn resolve_socket_symbol(
 /// zero origin that lower branch is unreachable for a `u64`, but it remains
 /// tied to the constant the handlers read so moving the origin makes it live.
 /// A start beyond `river_now` is likewise impossible without a look-ahead leak.
-/// `river_now` is the NAMED RIVER's ceiling, not the venue's: for a seated
+/// `river_now` is the named river's ceiling, not the venue's: for a boated
 /// river it is what its boat published, and only a boatless river answers with
 /// venue sim-now. An end beyond the ceiling is instead clamped at each
 /// handler's call site: callers commonly mean "everything through now" and
@@ -2168,7 +2169,7 @@ mod health_fault_tests {
     /// healthy answer while its own tape was stuck, and a fire-and-forget run
     /// was scored keepable on the strength of a river nobody was using.
     #[test]
-    fn a_fault_on_any_seated_river_is_reported() {
+    fn a_fault_on_any_boated_river_is_reported() {
         let reported = health_fault([("NOT-THE-BOOT-RIVER".to_owned(), refusal(77))])
             .expect("a faulted river is reported");
         assert_eq!(reported.symbol, "NOT-THE-BOOT-RIVER");

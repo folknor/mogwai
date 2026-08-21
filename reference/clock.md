@@ -10,7 +10,7 @@ it is. Warmup generation does not consume declared run duration.
 
 The venue retains one wall-to-sim reference for answers that have no boat: a
 boatless river, the venue deadline, and the venue-scoped account ledger. It is
-not the now of a seated boat. A seated river's now is the last instant its boat
+not the now of a placed boat. A boated river's now is the last instant its boat
 published, not the boat clock's affine projection. Every symbol-bearing HTTP
 endpoint uses that same resolution rule and waits for an in-flight placement
 before choosing its answer.

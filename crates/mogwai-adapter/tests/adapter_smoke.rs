@@ -91,7 +91,7 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
 /// read that list for `account=` and nothing read it for `callsign=`. Making
 /// `default_callsign` return `None` left every one of them green.
 ///
-/// What breaks without it is not this test's stub, which seats everyone: the
+/// What breaks without it is not this test's stub, which admits everyone: the
 /// venue compares the identity presented by each account connection, so a
 /// nautilus host, which holds two sockets on one account by construction, would disconnect
 /// its own data leg the instant its execution leg dialled. That failure is
@@ -360,8 +360,8 @@ async fn adapter_submit_drives_live_exec_events() {
 /// killed the client; the pushed path dropped every mismatched snapshot, so a
 /// client would take its fills while its balances quietly stopped moving. Both
 /// were per-account-slot invariants that outlived the slots, and THE SCOPE THAT
-/// SURVIVES IS THE CONNECTION rather than the venue: a venue does seat several
-/// ledgers, keyed by account plus callsign, but a socket names exactly one on its
+/// SURVIVES IS THE CONNECTION rather than the venue: a venue does hold several
+/// ledgers, one per account id, but a socket names exactly one on its
 /// `/ws?account=` upgrade, so the account this connection carries is the only
 /// one it can ever see and a label cannot mean it belongs elsewhere. The full
 /// argument, and what would have to change first, is in

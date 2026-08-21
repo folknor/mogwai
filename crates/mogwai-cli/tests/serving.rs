@@ -1082,7 +1082,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
     );
 }
 
-/// A second socket claiming a seated account evicts the first, and RESUMES its
+/// A second socket claiming an existing account evicts the first, and RESUMES its
 /// ledger.
 ///
 /// Both halves matter together. Eviction is what keeps an account on one river
@@ -1511,7 +1511,7 @@ async fn two_accounts_at_different_speeds_both_stay_open() {
     let fast_clock: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(fast_clock["sim"]["speed"], 3.0);
 
-    // Keep the sockets in scope so the boats stay seated while we read.
+    // Keep the sockets in scope so the boats stay placed while we read.
     drop(slow);
     drop(fast);
 }
@@ -1563,7 +1563,8 @@ async fn a_second_speed_on_the_same_account_is_refused() {
 /// A REFUSED upgrade does not evict the incumbent it was refused instead of
 /// replacing.
 ///
-/// `/ws` used to seat - which closes every socket of the incumbent session and,
+/// `/ws` used to claim the account first - which closes every socket of the
+/// incumbent session and,
 /// under the reset knob, discards its ledger - and only then run its five
 /// refusals, so `?account=X&speed=NaN` was a one-request, unauthenticated way
 /// to disconnect a live consumer while never connecting at all.
@@ -1658,7 +1659,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
         venue.ws_url_for(&venue.symbol)
     ))
     .await
-    .expect("a legal claim on a seated account is admitted");
+    .expect("a legal claim on an existing account is admitted");
     let deadline = common::deadline(Duration::from_secs(10));
     let evicted = loop {
         match tokio::time::timeout_at(deadline, incumbent.next()).await {
@@ -2956,7 +2957,7 @@ fn trade_window_paged(
 fn a_paged_tape_window_equals_the_same_window_read_in_one_query() {
     let venue = spawn(&["--config", &fast_config()]);
     // The venue clock, not a boat's: nothing has connected, so no boat is
-    // seated, and this is only a window bound rather than a claim about who
+    // placed, and this is only a window bound rather than a claim about who
     // published what.
     let (_, clock_body) = http_get(&venue.http_base(), "/clock");
     let clock: mogwai_protocol::VenueClock =
@@ -3288,7 +3289,7 @@ fn a_generator_arm_on_a_boated_river_is_refused_naming_the_forking_alternative()
     );
     assert_eq!(
         status, 400,
-        "a seated river refuses a generator arm: {body}"
+        "a boated river refuses a generator arm: {body}"
     );
     assert!(
         body.contains(&*symbol),
@@ -3301,7 +3302,7 @@ fn a_generator_arm_on_a_boated_river_is_refused_naming_the_forking_alternative()
 }
 
 /// Unqualified, a generator arm does NOT fan out over every river. It is
-/// refused while any boat is seated, and the refusal names those rivers.
+/// refused while any boat is placed, and the refusal names those rivers.
 #[test]
 #[ignore = "binds a loopback listener"]
 fn a_generator_arm_with_no_symbol_is_refused_naming_the_boated_rivers() {
@@ -3316,7 +3317,7 @@ fn a_generator_arm_with_no_symbol_is_refused_naming_the_boated_rivers() {
     );
     assert!(
         body.contains(&*venue.symbol),
-        "the refusal names the seated river: {body}"
+        "the refusal names the boated river: {body}"
     );
 }
 

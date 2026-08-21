@@ -702,6 +702,82 @@ the ledger's recorded candidate; nothing is ruled.
 Flagged, not acted on, because it belongs to another family: `mogwai-lab`'s CME
 trade-date vocabulary is inherited and untouched, as intended.
 
+**Round 5, the `seat` family, 2026-08-21.** A classification rather than a
+substitution, and the only round so far whose ruling left the word in place. The
+glossary sense keeps it: an account's riding of one boat, counted per
+connection, vacated by its last rider - `Passenger::seated_on`, `try_sit`,
+`unsit`, `is_seated_on`, the "already seated on {symbol} at speed" refusal and
+the seat paragraphs of the glossary, `reference/architecture.md` and
+`docs/config.md` are all untouched, because that one site is the model
+implementation. The four other jobs moved:
+
+- The boatyard's registry entry for a placed boat. `Slot::Seated(Seat)` becomes
+  `Slot::Placed(PlacedBoat)` and its `passengers` field becomes `riders`, which
+  is the ruling that a count of riders on a boat is a count of connections and
+  never of passengers - the old field name asserted the opposite. `Berth` was
+  the ledger's recorded candidate and was deliberately not taken: `place` is
+  already the glossary's verb for putting a boat on a river, so `Placed` invents
+  no noun where `Berth` would have.
+- A passenger existing in the run's map. Locals and doc sites become `existing`
+  and `minted`. The value at the site the pass renamed is born frozen and holds
+  no seat, so nothing there may imply it is riding anything.
+- A river carrying a boat: `boated`, against `boatless`, which the prose already
+  had.
+- `Run::seat`, which takes no seat at all and never did: `claim_account`, with
+  `seat_discards_ledger` becoming `claim_discards_ledger`. A reader tracing
+  "where is the seat taken" now lands on `try_sit` rather than here.
+
+ONE OUTRIGHT DEFECT RODE WITH THE FAMILY, and it is a shadowed binding rather
+than a naming problem. `sweeper.rs` bound `seated` twice inside one loop body -
+once for the live boat key set, once about fifty lines later for the attached
+passenger vector - and the second shadowed the first, so a membership test and
+an index into a different collection read identically. They are now
+`placed_boats` and `attached_passengers`. Nothing detected it because both
+bindings type-checked and the shadow made the wrong read impossible to see.
+
+No tape byte, no wire byte and no consumer-visible string a test reads moves:
+the two refusal bodies the round reworded are asserted on by symbol and by
+"sharing key", never by the swept phrase. The gated check reports 1340 workspace
+and 468 instrumented tests, unchanged.
+
+What the close pass found in the half no cold reviewer reads:
+
+- Three sentences the substitution left FALSE OR UNGRAMMATICAL, all of them in
+  the same shape - a word swapped without re-reading the sentence it landed in.
+  `clear_venue_arms` came out promising that a clear "keeps a minted ledger
+  identical to a minted one", which is vacuously true and states nothing; it now
+  says a ledger minted after the clear is identical to one already open.
+  `http.rs` twice produced "a existing", one of them inside a dash clause the
+  swap had also broken open.
+- The half-swept emphasis of round 3, in the other direction: the pass
+  LOWERCASED emphasis whose contrast was the whole point of the sentence, and
+  left the other half of the phrase capitalised. `docs/cli.md` read "a boated
+  RIVER's tape", `/health`'s doc lost "A FAULTED TAPE ON ANY BOATED RIVER, not
+  merely on the boot one", and `reference/architecture.md` lost the EVERY and
+  the SKIPS that carried the two rules. Restored where the emphasis was the
+  meaning.
+- `ws.rs` mixed BOTH SENSES IN ONE SENTENCE and kept the retired one: "TAKEN ON
+  THE EXISTING LEDGER, BEFORE THE SEAT ... a reset ledger holds no seat at all"
+  used the claim sense and the glossary sense four words apart. The claim half
+  is now spelled as a claim, and the "pre-seat check" beside it is the pre-claim
+  check.
+- THE SWEEP STOPPED AT THE VENUE CRATE, and the live siblings were in the other
+  three. `mogwai-engine`'s `rebase_scans` doc, `mogwai-adapter`'s `config.rs`,
+  `client/exec.rs`, `adapter_smoke.rs` and `havoc.rs`, and eight sites in
+  `mogwai-cli`'s `serving.rs` all still carried a moved sense. Two of them were
+  the same false sentence the round-4 close pass had corrected in
+  `reference/architecture.md` and nowhere else: "a venue does seat several
+  ledgers, KEYED BY ACCOUNT PLUS CALLSIGN". A ledger is keyed by account alone -
+  the callsign keys the claim, not the book - so both copies now say the venue
+  holds several ledgers, one per account id. Grep the sentence, not the file.
+
+Raised and DECLINED, recorded so it is not re-filed: the glossary's Eviction
+entry says "a socket claiming a seated account id", which reads at first like
+the retired run-method sense surviving in the end-state document. It is not. An
+account the venue holds was claimed by a connection, and every `/ws` connection
+boards a boat, so the account genuinely does hold a seat - the adjective is the
+glossary's own sense and the entry stands.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.

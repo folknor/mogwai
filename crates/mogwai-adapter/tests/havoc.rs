@@ -810,7 +810,7 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
 /// onto the stranger's state" because the adapter disclosed none - its `/ws`
 /// query carried only an optional `symbol` and the id was a nautilus-side
 /// label. That stopped being true when the adapter started naming its ledger,
-/// which it must, or every worker attached to a shared venue seats one book.
+/// which it must, or every worker attached to a shared venue trades one book.
 ///
 /// So the exposure of a blind dial is now what the client REVEALS as well as
 /// what it consumes: dialling a stranger OPENS AN ACCOUNT THERE under this

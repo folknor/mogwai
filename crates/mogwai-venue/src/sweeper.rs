@@ -60,7 +60,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
         // (per-boat `to_ns` and per-boat `last_swept_ns` already carry that).
         //
         // Keyed by `BoatKey`, not by the `Arc`'s address: an address is reused
-        // after the last ticket drops a boat, so a newly seated boat could
+        // after the last ticket drops a boat, so a newly placed boat could
         // inherit a departed one's due instant.
         let mut next_due: HashMap<crate::boatyard::BoatKey, (Arc<crate::boatyard::Boat>, Instant)> =
             HashMap::new();
@@ -69,12 +69,12 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
         // sweeper would keep walking a completed run forever.
         'passes: loop {
             // Re-derived every pass: boats appear and leave under this task. A
-            // boat seated mid-pass is due immediately on the next one, which is
+            // boat placed mid-pass is due immediately on the next one, which is
             // the latency it had under the old shared cadence too.
             let now = Instant::now();
             let boats = sweep.run.boatyard.boats();
-            let seated: HashSet<_> = boats.iter().map(|boat| boat.key()).collect();
-            next_due.retain(|key, _| seated.contains(key));
+            let placed_boats: HashSet<_> = boats.iter().map(|boat| boat.key()).collect();
+            next_due.retain(|key, _| placed_boats.contains(key));
             for boat in boats {
                 next_due.entry(boat.key()).or_insert((boat, now));
             }
@@ -122,7 +122,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             // account is the only way an order can end up on a river nobody
             // reads - and a frozen account is skipped here rather than swept
             // against a clock that no longer exists.
-            let seated: Vec<_> = sweep
+            let attached_passengers: Vec<_> = sweep
                 .run
                 .passengers()
                 .into_iter()
@@ -142,7 +142,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             let mut scans: Vec<(usize, PendingScan)> = Vec::new();
             let mut mark_symbols = Vec::new();
             let venue_now = sim_now_ns(sweep.run.sim);
-            for (index, passenger) in seated.iter().enumerate() {
+            for (index, passenger) in attached_passengers.iter().enumerate() {
                 let mut engine = passenger.engine.lock().await;
                 // Stamped on the VENUE clock, which is the only one that
                 // answers here: the order being cancelled is on a river with no
@@ -198,11 +198,12 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let boat_scans: Vec<(usize, PendingScan)> = scans
                     .iter()
                     .filter(|(index, scan)| {
-                        scan.symbol.as_ref() == symbol && seated[*index].is_seated_on(&boat_key)
+                        scan.symbol.as_ref() == symbol
+                            && attached_passengers[*index].is_seated_on(&boat_key)
                     })
                     .cloned()
                     .collect();
-                let mut results: Vec<Vec<ScanResult>> = vec![Vec::new(); seated.len()];
+                let mut results: Vec<Vec<ScanResult>> = vec![Vec::new(); attached_passengers.len()];
                 let rivers = Arc::clone(&sweep.rivers);
                 let scans_for_walk: Vec<PendingScan> =
                     boat_scans.iter().map(|(_, scan)| scan.clone()).collect();
@@ -345,7 +346,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         )]
                     })
                     .unwrap_or_default();
-                for (index, passenger) in seated.iter().enumerate() {
+                for (index, passenger) in attached_passengers.iter().enumerate() {
                     if !passenger.is_seated_on(&boat_key) {
                         continue;
                     }
@@ -401,7 +402,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // On a shared exchange one subagent breaching must not take
                     // down the batch, and the count is the only thing that
                     // distinguishes the two modes at runtime.
-                    if terminated && seated.len() == 1 {
+                    if terminated && attached_passengers.len() == 1 {
                         tracing::warn!(
                             account = %passenger.account_id.as_str(),
                             "the venue's only account terminated; ending the run",

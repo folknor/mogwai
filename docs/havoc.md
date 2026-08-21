@@ -19,7 +19,7 @@ speed, and it carries the clock every answer about that river is dated on.
 
 The venue does keep one wall-to-sim reference, for the answers that have no boat
 - a boatless river, the venue deadline, the venue-scoped account ledger - and it
-is labelled as such on the wire. What it is not is authoritative for a seated
+is labelled as such on the wire. What it is not is authoritative for a boated
 river, whose answers are dated on its boat. So a havoc window cannot be an
 interval on one clock.
 
@@ -67,11 +67,11 @@ river's own origin, and the `202` body names that origin so you can see which
 span was armed. A generator arm on a river that already has a boat is refused
 with `400` naming that river: mid-run mutation of shared live water is not
 supported, so arm the surge before any socket binds that symbol. An arm without
-a symbol is refused too while any boat is seated, naming those rivers; with no
+a symbol is refused too while any boat is placed, naming those rivers; with no
 boat anywhere it falls to the run's boot symbol. `ClearDivergences` follows the
-same rule from the other side - naming a seated river refuses, while an
+same rule from the other side - naming a boated river refuses, while an
 unqualified clear lifts the transport windows run-wide and clears the surge on
-every boatless river, skipping seated ones rather than refusing.
+every boatless river, skipping boated ones rather than refusing.
 
 Transport controls remain runtime-armable and are ARMED PER ACCOUNT. `GoDark`,
 `StallData`, `DelayAcks` and `CommandLatency` all take an optional `account` on

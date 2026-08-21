@@ -1451,7 +1451,7 @@ impl Engine {
     /// preferred over identifying the cursor. [`Self::rebase_scans`] is applied
     /// when an account is found FROZEN, and freezing was always standing in for
     /// "the cursor this book was marked on is gone". That proxy has a hole: a
-    /// newcomer claiming a seated account is counted on before the incumbent is
+    /// newcomer claiming an existing account is counted on before the incumbent is
     /// closed, deliberately, so the account never freezes - and if the newcomer
     /// boards a DIFFERENT river, the departed one's boat is torn down with its
     /// worker, and a boat placed over that river again starts at the yard's

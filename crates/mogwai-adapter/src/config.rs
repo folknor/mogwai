@@ -23,8 +23,8 @@ pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 /// This process's presented identity, carried on `/ws?callsign=` by every
 /// adapter object built in the process.
 ///
-/// The venue compares only the presented identity when an already-seated
-/// account is claimed. A nautilus host holds two sockets on one ledger by
+/// The venue compares only the presented identity when an account it already
+/// holds is claimed. A nautilus host holds two sockets on one ledger by
 /// construction - the data client and the execution client - so
 /// without a shared identity the second dial would evict the first and the host
 /// would disconnect itself before it ever traded.
@@ -625,7 +625,7 @@ mod tests {
 
     /// The ledger is NAMED, and it is the configured one rather than whatever
     /// the venue calls default. This is the whole of the consumer-visible fix:
-    /// without it every attached worker seated one shared book.
+    /// without it every attached worker traded one shared book.
     #[test]
     fn ws_url_names_the_configured_account_on_both_legs() {
         let data = MogwaiDataClientConfig {

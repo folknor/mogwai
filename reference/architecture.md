@@ -31,7 +31,7 @@ serves one ledger per run has no reason to read it. If a consumer's own adapter
 skips that comparison on the strength of the one-ledger-per-run premise, the
 shared-venue topology breaks the premise, so the venue is what has to be right.
 
-AN ACCOUNT IS READ UNDER ONE CALLSIGN. A second socket presenting a seated
+AN ACCOUNT IS READ UNDER ONE CALLSIGN. A second socket presenting an existing
 account id under a DIFFERENT or ABSENT callsign EVICTS the incumbent, because a
 ledger read and written by two unrelated parties is one ledger with two notions
 of its own state. Sockets presenting the same callsign coexist instead, which is
@@ -111,7 +111,7 @@ reading the account, which is the same statement the freeze makes.
 
 RETIREMENT DOES NOT APPLY TO AN EVICTION, and the boundary is the freeze rather
 than the reconnection. Retirement runs only for a RETURNING account - one the
-venue found frozen - and a newcomer that claims a seated account is counted onto
+venue found frozen - and a newcomer that claims an existing account is counted onto
 it before the incumbent is closed, so the account never freezes in that window
 and the newcomer resumes a LIVE ledger. That is deliberate: retiring off it
 would cancel resting orders and close positions the incumbent connection had every
@@ -166,9 +166,8 @@ name an id would be ceremony; it is not a venue-wide account every connection
 shares.
 
 THE ACCOUNT ID ON A SNAPSHOT IS A LABEL, AND A CONSUMER KEEPS ITS OWN. A venue
-may seat several ledgers - `/ws?account=` names one, and the seat is keyed by
-that account plus the callsign - but ONE CONNECTION SEES EXACTLY ONE OF THEM.
-The account a connection carries is the only account on that socket, so nothing
+may hold several ledgers, and `/ws?account=` names one, but ONE CONNECTION SEES
+EXACTLY ONE OF THEM. The account a connection carries is the only account on that socket, so nothing
 can be misrouted onto it, and the id the venue writes on an `AccountState`
 therefore identifies nothing a consumer has to resolve. The
 adapter reads it exactly once, at connect, where `note_account_label` logs the
@@ -649,11 +648,11 @@ Concurrent first boarders share one placement through a semaphore handoff
 rather than each placing a boat, and a reader asking a river's now while a
 placement is in flight WAITS for it instead of falling through to the venue
 clock - falling through would hand back a well-formed answer off a clock ahead
-of the boat about to be seated, which is the look-ahead per-boat clocks exist
+of the boat about to be placed, which is the look-ahead per-boat clocks exist
 to remove. `/health` keeps the non-blocking form, because it must never block
 on a placement.
 
-`/health`'s tape fault reads EVERY seated river on those same non-blocking
+`/health`'s tape fault reads EVERY boated river on those same non-blocking
 terms, not the boot river alone. It read only the boot river until 2026-08-16,
 which was right when a run had one paced tape and became a hole under the open
 instrument set: a consumer bound to any other river got a healthy answer while
@@ -663,9 +662,9 @@ and it is the faulted river with the smallest symbol - deterministic across
 polls, unchanged in wire shape, and enough to answer whether any river faulted.
 `docs/cli.md` states what a poller should do with it.
 
-The venue also retains a wall-to-sim reference, but it is not a seated boat's
+The venue also retains a wall-to-sim reference, but it is not a placed boat's
 clock. It bounds history for a boatless river, drives the venue deadline, and
-stamps the venue-scoped pulled account ledger. A seated river instead answers
+stamps the venue-scoped pulled account ledger. A boated river instead answers
 only through the instant its own boat has published.
 
 The ledger stays venue-scoped because one engine serves every river, so a
@@ -681,21 +680,21 @@ Each boat has its own settlement watermark and its own ring. Market water is
 exogenous: orders never move it and there is no queue competition. Fifty agents
 submitting the same buy against the same water receive the same fill without
 changing one another's result. Generator-level havoc belongs to river identity
-and cannot mutate a seated boat; transport havoc remains a property of what a
+and cannot mutate a placed boat; transport havoc remains a property of what a
 passenger sees. So `FlowSurge` and the generator half of `ClearDivergences` are
-refused with a 400 on a river that has a seated boat, and unqualified
-`FlowSurge` is refused outright while any boat sits, naming the seated symbols;
+refused with a 400 on a river that has a placed boat, and unqualified
+`FlowSurge` is refused outright while any boat sits, naming the boated symbols;
 an unqualified clear reaches every materialized river that is boatless and
-SKIPS the seated ones, because the transport half of that control is run-wide
+SKIPS the boated ones, because the transport half of that control is run-wide
 and must stay reachable while a boat is sitting. A timed havoc window carries a
 wall arming instant and a
 simulated span rather than one boat's absolute deadline, and every passenger
 judges it on its own clock.
 
-The fill sweeper is ONE task on an earliest-deadline schedule over the seated
+The fill sweeper is one task on an earliest-deadline schedule over the placed
 boats, keyed by boat identity rather than by allocation address, each boat
 re-armed on its own clock and floored in wall time so an accelerated run cannot
-turn the pass into a hot loop. The consequence to know: a river with no seated
+turn the pass into a hot loop. The consequence to know: a river with no placed
 boat is not swept, because a sweep needs a clock to sample, so resting orders
 on a wound-down river stay unscanned until someone boards again.
 

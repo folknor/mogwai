@@ -3099,7 +3099,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
     // The drop guarded against adopting a MISROUTED snapshot back when the
     // account was an addressable SLOT a venue could route one to the wrong one
     // of. THE SCOPE THAT SURVIVES IS THE CONNECTION, not the venue: a venue does
-    // seat several ledgers, keyed by account plus callsign, but a socket names
+    // hold several ledgers, one per account id, but a socket names
     // exactly one on its `/ws?account=` upgrade and only that one's state comes
     // back down it. So there is nothing to be misrouted from HERE, and a dropped
     // snapshot can only lose state that was correct. The configured id is

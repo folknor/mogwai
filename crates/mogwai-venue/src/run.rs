@@ -453,7 +453,7 @@ struct ArmRecord {
     fee_surcharge: Option<(Decimal, u64, u64)>,
     /// Engine-armed divergences in arming order, capped and shed from the OLDEST
     /// end exactly as `Engine::arm` does, so replaying this onto a fresh ledger
-    /// reproduces the queue a seated one holds.
+    /// reproduces the queue an existing one holds.
     engine: Vec<mogwai_protocol::control::Divergence>,
 }
 
@@ -581,8 +581,8 @@ fn apply_transport_arm(arm: &VenueArm, passenger: &Passenger) {
 /// AN ARM DOES NOT WAIT FOR A CONNECTION. Whatever the control plane has posted
 /// that a ledger minted later still owes.
 ///
-/// THE ARMS BELONG TO THE RUN, NOT TO THE SEATED SET. The control plane is an
-/// operator surface, and an unqualified arm is a statement about the venue -
+/// THE ARMS BELONG TO THE RUN, NOT TO THE LEDGERS THAT HAPPEN TO EXIST. The
+/// control plane is an operator surface, and an unqualified arm is a statement about the venue -
 /// `docs/havoc.md` says so twice, once for the transport windows ("naming none
 /// arms every account") and once for the late boarder ("a passenger that boards
 /// after the arm receives the full declared span from its own boarding
@@ -607,9 +607,9 @@ fn apply_transport_arm(arm: &VenueArm, passenger: &Passenger) {
 /// minted now must be indistinguishable from one minted at boot that received
 /// every control request since - see `Run::arm` for the exact scope of that
 /// claim. `ClearDivergences` lifts the transport windows and the fee surcharge
-/// off every seated ledger and does NOT drain the engine's armed queue, so
+/// off every existing ledger and does NOT drain the engine's armed queue, so
 /// `all` does the same. `pending` is dropped WHOLE by a clear, engine entries
-/// included: those arms were never applied to anything, so there is no seated
+/// included: those arms were never applied to anything, so there is no existing
 /// ledger for them to stay consistent with.
 #[derive(Default)]
 struct VenueArms {
@@ -749,7 +749,7 @@ pub(crate) struct Run {
     pub(crate) seeds: RunSeeds,
     pub(crate) boatyard: Arc<Boatyard>,
     boot_ticket: Mutex<Option<crate::boatyard::Ticket>>,
-    /// The VENUE clock, and not the now of any seated river. It is the venue's
+    /// The VENUE clock, and not the now of any boated river. It is the venue's
     /// one wall-to-sim reference, kept for the three answers no boat can give:
     /// a boatless river's history ceiling, the venue deadline, and the
     /// venue-scoped account ledger. Owned HERE rather than beside the router
@@ -949,13 +949,13 @@ impl Run {
             .passengers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(seated) = passengers.get(account_id.as_str()) {
-            return Arc::clone(seated);
+        if let Some(existing) = passengers.get(account_id.as_str()) {
+            return Arc::clone(existing);
         }
         let mut engine = self.template_engine(account_id, self.template.opening_balances.clone());
         // Opened with whatever the operator has armed - venue-wide, and against
         // this account by name before it existed - so this ledger is
-        // indistinguishable from one that was seated when the arm arrived. Held
+        // indistinguishable from one that existed when the arm arrived. Held
         // across the passenger insert below, under the `passengers` lock this
         // call already holds, so an arm cannot interleave between the replay and
         // the moment `Run::arm` can see this passenger.
@@ -969,7 +969,7 @@ impl Run {
             pending.open_engine(&mut engine);
         }
         let opening = opening_equity(&self.template.opening_balances);
-        let seated = Arc::new(Passenger {
+        let minted = Arc::new(Passenger {
             account_id: account_id.clone(),
             engine: AsyncMutex::new(engine),
             // Unpoliced: an account nobody stated rules for is enforced against
@@ -996,13 +996,13 @@ impl Run {
             modify_ack_ms: AtomicU64::new(0),
             cancel_ack_ms: AtomicU64::new(0),
         });
-        arms.all.open_transport(&seated);
+        arms.all.open_transport(&minted);
         if let Some(pending) = &pending {
-            pending.open_transport(&seated);
+            pending.open_transport(&minted);
         }
         drop(arms);
-        passengers.insert(account_id.as_str().to_owned(), Arc::clone(&seated));
-        seated
+        passengers.insert(account_id.as_str().to_owned(), Arc::clone(&minted));
+        minted
     }
 
     /// The ledger an account nobody has opened WOULD open with, built here and
@@ -1057,7 +1057,7 @@ impl Run {
     ///
     /// THE RECORD AND THE LIVE APPLICATION ARE ONE CALL, deliberately. Written
     /// as two - store it here, walk the passengers there - they drift, and the
-    /// drift is invisible: the seated set behaves and the next account to
+    /// drift is invisible: the existing set behaves and the next account to
     /// connect does not. `VenueArms` says why this is owed at all.
     ///
     /// The record is taken while HOLDING THE PASSENGER MAP, which is what
@@ -1066,10 +1066,10 @@ impl Run {
     /// passenger is either already in the list this walks or was opened from a
     /// record that includes this arm - never neither.
     ///
-    /// WHAT "INDISTINGUISHABLE FROM A SEATED LEDGER" DOES NOT COVER: the engine
+    /// WHAT "INDISTINGUISHABLE FROM AN EXISTING LEDGER" DOES NOT COVER: the engine
     /// half is applied after both locks drop, because the engine sits behind an
     /// async mutex. Two engine arms posted CONCURRENTLY can therefore land on
-    /// two seated ledgers in opposite orders, and a ledger minted between them
+    /// two existing ledgers in opposite orders, and a ledger minted between them
     /// holds the record's order. The control plane is operator-driven and
     /// serialized in every scenario the venue is used from, so this is stated
     /// rather than closed - but it is a real limit on the claim, not a rounding
@@ -1079,7 +1079,7 @@ impl Run {
         account: Option<&str>,
         arm: VenueArm,
     ) -> Option<mogwai_protocol::control::Divergence> {
-        let seated: Vec<Arc<Passenger>> = {
+        let existing: Vec<Arc<Passenger>> = {
             let passengers = self
                 .passengers
                 .lock()
@@ -1120,7 +1120,7 @@ impl Run {
                 armed_ns,
                 span_ns,
             } => {
-                for passenger in seated {
+                for passenger in existing {
                     passenger
                         .engine
                         .lock()
@@ -1129,7 +1129,7 @@ impl Run {
                 }
             }
             VenueArm::Engine(div) => {
-                for passenger in seated {
+                for passenger in existing {
                     let evicted = passenger.engine.lock().await.arm(div.clone());
                     shed = shed.or(evicted);
                 }
@@ -1144,17 +1144,18 @@ impl Run {
     }
 
     /// `ClearDivergences`: lift the transport windows and the fee surcharge off
-    /// every seated ledger AND off the venue record, so an account connecting
+    /// every existing ledger AND off the venue record, so an account connecting
     /// after a clear is not re-armed from a stale record.
     ///
     /// The engine's armed queue is untouched on the venue record and on every
-    /// seated ledger. That is not an oversight - a clear has never drained it -
-    /// and mirroring the omission is what keeps a minted ledger identical to a
-    /// seated one. The PENDING per-account records are dropped whole, engine
+    /// existing ledger. That is not an oversight - a clear has never drained it -
+    /// and mirroring the omission is what keeps a ledger minted after the clear
+    /// identical to one that was already open. The PENDING per-account records
+    /// are dropped whole, engine
     /// entries included: nothing was ever applied from them, so there is no
-    /// seated ledger for them to stay consistent with.
+    /// existing ledger for them to stay consistent with.
     pub(crate) async fn clear_venue_arms(&self) {
-        let seated: Vec<Arc<Passenger>> = {
+        let existing: Vec<Arc<Passenger>> = {
             let passengers = self
                 .passengers
                 .lock()
@@ -1167,7 +1168,7 @@ impl Run {
             arms.pending.clear();
             passengers.values().map(Arc::clone).collect()
         };
-        for passenger in seated {
+        for passenger in existing {
             // EVERY account's transport arms, whatever the request named: a
             // clear is an operator saying "stop everything".
             passenger.clear_transport_havoc();
@@ -1175,11 +1176,12 @@ impl Run {
         }
     }
 
-    /// Seat a CONNECTION on an account: evict whoever holds it, then hand over
-    /// the ledger or a clean one.
+    /// Claim an account for a CONNECTION: evict whoever holds it, then hand
+    /// over the ledger or a clean one.
     ///
-    /// The whole reconnection story in one call. A second socket presenting a
-    /// seated id under a different callsign is indistinguishable from an incumbent
+    /// The whole reconnection story in one call. A second socket presenting an
+    /// id the venue already holds, under a different callsign, is
+    /// indistinguishable from an incumbent
     /// returning, so the venue does not try to tell them apart: the incumbent is
     /// closed and the newcomer gets the account. Whether it gets that account's
     /// HISTORY is the operator's `reset_account_on_reconnect` choice, reported
@@ -1192,7 +1194,7 @@ impl Run {
     /// on, which is the reset knob eating a live book rather than a stale one.
     ///
     /// `resetting` IS PASSED IN RATHER THAN RE-DERIVED, from
-    /// `seat_discards_ledger`. `/ws` has to know the answer BEFORE it seats -
+    /// `claim_discards_ledger`. `/ws` has to know the answer before it claims -
     /// the funding refusal is a statement about the ledger the connection will
     /// actually get - and computing it a second time here would evaluate the
     /// same predicate against a LATER state of the venue: `has_matching_identity_on` reads
@@ -1200,7 +1202,7 @@ impl Run {
     /// between the two reads. The two values would then disagree about whether
     /// the ledger `/ws` funding-checked and cadence-checked is the ledger this
     /// call returns. One evaluation, one decision, one reader.
-    pub(crate) fn seat(
+    pub(crate) fn claim_account(
         &self,
         account_id: &mogwai_protocol::AccountId,
         claimed: bool,
@@ -1226,7 +1228,7 @@ impl Run {
                 account = %account_id.as_str(),
                 displaced,
                 reset = self.reset_account_on_reconnect,
-                "a new connection claimed a seated account",
+                "a new connection claimed an existing account",
             );
         }
         if resetting {
@@ -1235,17 +1237,17 @@ impl Run {
         self.passenger(account_id)
     }
 
-    /// Whether seating this connection will DISCARD the account's ledger.
+    /// Whether claiming this account will discard its ledger.
     ///
     /// THE ONE HOME OF THE RESET RULE, and asked ONCE per upgrade: `/ws` asks
     /// it before it refuses anything - the funding refusal is a statement about
     /// the ledger the connection will actually get, and under the reset knob
     /// that is a fresh one built from the venue template rather than whatever
-    /// the account holds now - and then hands the answer to `seat`. It must be
+    /// the account holds now - and then hands the answer to `claim_account`. It must be
     /// asked before any eviction, because `has_matching_identity_on` reads the lane table
     /// and an eviction prunes exactly the lanes that answer "is this identity
     /// already here".
-    pub(crate) fn seat_discards_ledger(
+    pub(crate) fn claim_discards_ledger(
         &self,
         account_id: &mogwai_protocol::AccountId,
         claimed: bool,
@@ -1285,7 +1287,7 @@ impl Run {
     /// line in `currency`.
     ///
     /// PRESENCE, never sufficiency - see `Engine::is_funded_in`. Asked of the
-    /// prospective ledger rather than of the current one, because a seat that
+    /// prospective ledger rather than of the current one, because a claim that
     /// resets replaces the account's balances with the venue template's, and an
     /// account opened through `/account` with consumer-named balances can differ
     /// from that template in exactly which currencies it carries.
@@ -1412,7 +1414,7 @@ impl Run {
             })
     }
 
-    /// The account a connection naming none is seated on.
+    /// The account a connection naming none claims.
     pub(crate) fn default_account_id(&self) -> mogwai_protocol::AccountId {
         self.default_account_id.clone()
     }
@@ -1601,7 +1603,7 @@ impl Run {
     /// property of the VENUE, so it is decided before a connection claims an
     /// account and can therefore refuse without having evicted anybody;
     /// registration is a property of the LEDGER, cannot fail, and has to happen
-    /// on whichever passenger the seat actually produced - which under the reset
+    /// on whichever passenger the claim actually returned, which under the reset
     /// knob is not the one that existed when the shape was resolved.
     pub(crate) async fn register_instrument(
         &self,
@@ -2634,17 +2636,17 @@ mod tests {
         );
     }
 
-    /// Seat a claimed account the way `/ws` does: derive `resetting` ONCE,
-    /// before anything is evicted, and hand it to `seat`. A test that spelled
+    /// Claim an account the way `/ws` does: derive `resetting` once,
+    /// before anything is evicted, and hand it to `claim_account`. A test that spelled
     /// the predicate out for itself would be pinning the rule against its own
     /// copy of it rather than against the venue's.
-    fn seat(
+    fn claim_account(
         run: &Arc<Run>,
         account_id: &mogwai_protocol::AccountId,
         callsign: Option<&str>,
     ) -> Arc<Passenger> {
-        let resetting = run.seat_discards_ledger(account_id, true, callsign);
-        run.seat(account_id, true, callsign, resetting)
+        let resetting = run.claim_discards_ledger(account_id, true, callsign);
+        run.claim_account(account_id, true, callsign, resetting)
     }
 
     fn boat_key(run: &Run, symbol: &str, speed: f64) -> crate::boatyard::BoatKey {
@@ -2758,7 +2760,7 @@ mod tests {
         let symbol = Symbol::from("BTCUSDT");
         let key = boat_key(&run, "BTCUSDT", 1.0);
 
-        let passenger = seat(&run, &account, Some("alpha"));
+        let passenger = claim_account(&run, &account, Some("alpha"));
         let incumbent_admission = run.admit(&passenger);
         passenger
             .try_sit(key.clone())
@@ -2871,14 +2873,14 @@ mod tests {
 
         let (data, _data_rx) = crate::admission::ExecLanes::detached();
         let (exec, _exec_rx) = crate::admission::ExecLanes::detached();
-        seat(&run, &account, Some("worker-1"));
+        claim_account(&run, &account, Some("worker-1"));
         run.bind_lanes(data, account.as_str(), Some("worker-1"));
         assert_eq!(
             run.evict_account(account.as_str(), Some("worker-1")),
             0,
             "the host's second leg presents the same callsign, not a claim"
         );
-        seat(&run, &account, Some("worker-1"));
+        claim_account(&run, &account, Some("worker-1"));
         run.bind_lanes(exec, account.as_str(), Some("worker-1"));
         assert_eq!(
             run.bound_lanes()
@@ -2916,7 +2918,7 @@ mod tests {
     ///
     /// THE ENGINE QUEUE IS OBSERVED THROUGH THE CAP, which is the only reader
     /// `mogwai-engine` exposes: fill the venue record to
-    /// `MAX_ARMED_DIVERGENCES` with nobody seated, mint a ledger, and arm once
+    /// `MAX_ARMED_DIVERGENCES` with no ledger open at all, mint one, and arm once
     /// more. A ledger that replayed the record is AT the cap and sheds its
     /// oldest entry, so the arm reports one; a ledger opened empty has room and
     /// reports nothing. That also pins the mirroring the eviction report's
@@ -2952,7 +2954,7 @@ mod tests {
         assert!(
             shed.is_some(),
             "the minted ledger must open holding the venue's armed queue, at the cap with the \
-             ledgers that were already seated"
+             ledgers that already existed"
         );
     }
 
@@ -2996,7 +2998,7 @@ mod tests {
         assert!(
             shed.is_some(),
             "a consumer-opened ledger must hold the venue's armed queue, at the cap with the \
-             ledgers that were already seated"
+             ledgers that already existed"
         );
     }
 
@@ -3069,7 +3071,7 @@ mod tests {
 
     /// A clear lifts the venue RECORD and every pending named one too, or an
     /// account connecting after it would be opened from arms the operator
-    /// already lifted. The engine queue is deliberately untouched on the seated
+    /// already lifted. The engine queue is deliberately untouched on the existing
     /// ledgers and on the venue record, which is `Engine::clear_armed`'s
     /// documented split.
     #[tokio::test]
