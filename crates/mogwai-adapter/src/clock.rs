@@ -17,7 +17,7 @@ use mogwai_protocol::{ServerClock, SimClock};
 use nautilus_common::{
     clock::{CallbackRegistry, Clock, validate_and_prepare_time_alert, validate_and_prepare_timer},
     runner::{TimeEventMessage, TimeEventSender, try_get_time_event_sender},
-    timer::{TimeEvent, TimeEventCallback, TimeEventHandler, create_valid_interval},
+    timer::{TimeEvent, TimeEventCallback, create_valid_interval},
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_network::http::HttpClient;
@@ -121,10 +121,6 @@ impl Clock for MogwaiClock {
 
     fn cancel_callbacks(&mut self) {
         self.callbacks.clear();
-    }
-
-    fn get_handler(&self, event: TimeEvent) -> TimeEventHandler {
-        self.callbacks.get_handler(event)
     }
 
     fn set_time_alert_ns(

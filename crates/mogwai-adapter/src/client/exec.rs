@@ -881,18 +881,25 @@ impl ExecutionClient for MogwaiExecutionClient {
         margins: Vec<MarginBalance>,
         reported: bool,
         ts_event: UnixNanos,
+        info: Option<nautilus_core::Params>,
     ) -> anyhow::Result<()> {
-        self.emitter.send_account_state(NautilusAccountState::new(
-            self.core.account_id,
-            self.config.account_type,
-            balances,
-            margins,
-            reported,
-            UUID4::new(),
-            ts_event,
-            now_unix_nanos(self.sim),
-            None,
-        ));
+        self.emitter.send_account_state(
+            NautilusAccountState::new(
+                self.core.account_id,
+                self.config.account_type,
+                balances,
+                margins,
+                reported,
+                UUID4::new(),
+                ts_event,
+                now_unix_nanos(self.sim),
+                None,
+            )
+            // The venue-specific `info` bag is the caller's, not ours: pass it
+            // through rather than dropping it, so a host that attaches account
+            // metadata sees it on the emitted event.
+            .with_info(info),
+        );
         Ok(())
     }
 

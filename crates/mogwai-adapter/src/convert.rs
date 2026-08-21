@@ -58,8 +58,8 @@ pub(crate) fn money(d: Decimal, currency: Currency) -> anyhow::Result<Money> {
 pub(crate) fn aggressor(a: MogwaiAggressorSide) -> AggressorSide {
     match a {
         MogwaiAggressorSide::NoAggressor => AggressorSide::NoAggressor,
-        MogwaiAggressorSide::Buyer => AggressorSide::Buyer,
-        MogwaiAggressorSide::Seller => AggressorSide::Seller,
+        MogwaiAggressorSide::Buyer => AggressorSide::Buy,
+        MogwaiAggressorSide::Seller => AggressorSide::Sell,
     }
 }
 

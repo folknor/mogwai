@@ -137,7 +137,7 @@ resolves a different version - or path-depends a checkout - cargo compiles two
 distinct sets of nautilus types, and registering the factories fails with
 errors of the form `expected ExecutionClient, found ExecutionClient`. Pin the
 same version on both sides; a `[patch.crates-io]` cannot bridge a minor-version
-gap, because `0.61` means `>=0.61.0, <0.62.0`.
+gap, because `0.62.0` means `>=0.62.0, <0.63.0`.
 
 ```rust
 use std::time::Duration;

@@ -15,8 +15,10 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 async-trait = "0.1.91"
-chrono = "0.4.45"
 futures-util.workspace = true
+# The request bounds nautilus hands the data client are `jiff::Timestamp` as of
+# 0.62, so mapping them onto the u64 nanosecond axis needs jiff by name.
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 rand = "0.10.2"
 rust_decimal.workspace = true
 tokio.workspace = true
@@ -33,11 +35,11 @@ tokio-tungstenite = "0.30.0"
 tracing = { workspace = true, features = ["log"] }
 ustr = "1.1.0"
 
-nautilus-common = { version = "0.61", default-features = false }
-nautilus-core = { version = "0.61", default-features = false }
-nautilus-live = { version = "0.61", default-features = false }
-nautilus-model = { version = "0.61", default-features = false }
-nautilus-network = { version = "0.61", default-features = false }
+nautilus-common = { version = "0.62.0", default-features = false }
+nautilus-core = { version = "0.62.0", default-features = false }
+nautilus-live = { version = "0.62.0", default-features = false }
+nautilus-model = { version = "0.62.0", default-features = false }
+nautilus-network = { version = "0.62.0", default-features = false }
 
 [dev-dependencies]
 serde_urlencoded = "0.7"

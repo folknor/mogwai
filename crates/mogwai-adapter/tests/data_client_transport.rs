@@ -133,7 +133,7 @@ async fn subscribe_and_request_drive_data_events() {
             assert_eq!(trade.instrument_id, instrument_id());
             assert_eq!(trade.price, Price::from("100.00"));
             assert_eq!(trade.size, Quantity::from("1"));
-            assert_eq!(trade.aggressor_side, AggressorSide::Buyer);
+            assert_eq!(trade.aggressor_side, AggressorSide::Buy);
             assert_eq!(trade.ts_event, UnixNanos::from(10));
         }
         other => panic!("expected a trade data event, got {other:?}"),
@@ -163,12 +163,12 @@ async fn subscribe_and_request_drive_data_events() {
             let first = &resp.data[0];
             assert_eq!(first.price, Price::from("100.00"));
             assert_eq!(first.size, Quantity::from("1"));
-            assert_eq!(first.aggressor_side, AggressorSide::Buyer);
+            assert_eq!(first.aggressor_side, AggressorSide::Buy);
             assert_eq!(first.ts_event, UnixNanos::from(10));
             let second = &resp.data[1];
             assert_eq!(second.price, Price::from("101.00"));
             assert_eq!(second.size, Quantity::from("2"));
-            assert_eq!(second.aggressor_side, AggressorSide::Seller);
+            assert_eq!(second.aggressor_side, AggressorSide::Sell);
             assert_eq!(second.ts_event, UnixNanos::from(20));
             assert!(
                 first.ts_event < second.ts_event,
@@ -497,7 +497,7 @@ async fn an_undecodable_clock_is_retried_then_falls_back_without_refusing() {
     client
         .request_trades(RequestTrades::new(
             instrument_id(),
-            Some(chrono::DateTime::from_timestamp_nanos(1)),
+            Some(jiff::Timestamp::from_nanosecond(1).expect("in range")),
             None,
             None,
             Some(ClientId::from("MOGWAI-DATA")),
@@ -966,7 +966,8 @@ async fn off_tape_window_still_answers_the_request() {
     client.connect().await.expect("connect opens the socket");
 
     // One nanosecond below the floor: as off-tape as it gets.
-    let off_tape = chrono::DateTime::from_timestamp_nanos((ORIGIN - 1) as i64);
+    let off_tape =
+        jiff::Timestamp::from_nanosecond(i128::from(ORIGIN - 1)).expect("the floor is in range");
     let timeout = Duration::from_secs(5);
 
     client

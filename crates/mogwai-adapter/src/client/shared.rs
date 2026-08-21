@@ -582,22 +582,17 @@ pub(crate) fn symbol_from_instrument(instrument_id: InstrumentId) -> mogwai_prot
 /// out-of-range datetimes at the axis bounds instead of dropping them to
 /// `None`. `None` means "unbounded" to every caller, so silently mapping a
 /// pre-epoch end to `None` would widen the request (an end of 1950 becoming
-/// "until forever") and a post-2262 start would become "from origin"; clamping
+/// "until forever") and a far-future start would become "from origin"; clamping
 /// preserves the requester's intent (a pre-epoch bound is the epoch, a
 /// far-future bound is the axis ceiling) and lets a nonsense range come back
 /// loudly empty rather than quietly full.
-pub(crate) fn date_to_unix_nanos(date: Option<chrono::DateTime<chrono::Utc>>) -> Option<UnixNanos> {
-    date.map(|dt| {
-        // `timestamp_nanos_opt` is `None` outside ~1677..=2262; pick the side
-        // by comparing against the epoch, then clamp negatives to zero.
-        let ns = dt.timestamp_nanos_opt().unwrap_or_else(|| {
-            if dt >= chrono::DateTime::<chrono::Utc>::UNIX_EPOCH {
-                i64::MAX
-            } else {
-                i64::MIN
-            }
-        });
-        UnixNanos::from(u64::try_from(ns).unwrap_or(0))
+pub(crate) fn date_to_unix_nanos(date: Option<jiff::Timestamp>) -> Option<UnixNanos> {
+    date.map(|ts| {
+        // jiff spans years -9999..=9999 in i128 nanoseconds, far wider on both
+        // sides than the u64 axis (which ends in 2554), so pick the side by the
+        // sign and clamp to the near or far bound accordingly.
+        let ns = ts.as_nanosecond();
+        UnixNanos::from(u64::try_from(ns).unwrap_or(if ns < 0 { 0 } else { u64::MAX }))
     })
 }
 /// Refuse an off-tape warmup BEFORE spending a round trip on it. A `start`
@@ -649,8 +644,6 @@ pub(crate) async fn wait_connected(
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-
     use super::*;
 
     /// `ConnHavoc.request_timeout_secs == 0` is documented as "keeps 30s", and
@@ -703,7 +696,7 @@ mod tests {
 
     #[test]
     fn date_to_unix_nanos_maps_in_range_datetimes_exactly() {
-        let dt = chrono::Utc.timestamp_nanos(1_234_567_890_123_456_789);
+        let dt = jiff::Timestamp::from_nanosecond(1_234_567_890_123_456_789).expect("in range");
         assert_eq!(
             date_to_unix_nanos(Some(dt)),
             Some(UnixNanos::from(1_234_567_890_123_456_789u64))
@@ -713,27 +706,28 @@ mod tests {
 
     #[test]
     fn date_to_unix_nanos_saturates_out_of_range_instead_of_unbounding() {
-        // Pre-epoch (in i64-nanos range but negative): clamps to the epoch, so
-        // an end of 1950 stays an empty range rather than becoming "forever".
-        let pre_epoch = chrono::Utc.with_ymd_and_hms(1950, 1, 1, 0, 0, 0).unwrap();
+        // Pre-epoch: clamps to the epoch, so an end of 1950 stays an empty
+        // range rather than becoming "forever".
+        let pre_epoch: jiff::Timestamp = "1950-01-01T00:00:00Z".parse().expect("parses");
         assert_eq!(
             date_to_unix_nanos(Some(pre_epoch)),
             Some(UnixNanos::from(0u64))
         );
 
-        // Pre-1677 (outside i64-nanos range entirely): same clamp to epoch.
-        let ancient = chrono::Utc.with_ymd_and_hms(1500, 1, 1, 0, 0, 0).unwrap();
+        // Far pre-epoch, well outside the axis entirely: same clamp to epoch.
+        let ancient: jiff::Timestamp = "1500-01-01T00:00:00Z".parse().expect("parses");
         assert_eq!(
             date_to_unix_nanos(Some(ancient)),
             Some(UnixNanos::from(0u64))
         );
 
-        // Post-2262: clamps to the axis ceiling, so a far-future start stays a
-        // loud empty range rather than becoming "from origin".
-        let far_future = chrono::Utc.with_ymd_and_hms(3000, 1, 1, 0, 0, 0).unwrap();
+        // Past 2554, where the u64 nanosecond axis ends: clamps to the ceiling,
+        // so a far-future start stays a loud empty range rather than becoming
+        // "from origin".
+        let far_future: jiff::Timestamp = "3000-01-01T00:00:00Z".parse().expect("parses");
         assert_eq!(
             date_to_unix_nanos(Some(far_future)),
-            Some(UnixNanos::from(u64::try_from(i64::MAX).expect("fits")))
+            Some(UnixNanos::from(u64::MAX))
         );
     }
 

@@ -492,8 +492,9 @@ or broadarrow APIs) has two distinct access paths - never conflate them:
 
 The adapter previously path-depended a sibling `../nautilus_trader` checkout
 because the published release carried bugs this project hits. Those fixes landed
-in 0.61, so the manifest now pins that release and the build is reproducible
-from a fresh clone.
+in 0.61, so the manifest pins a published release - 0.62.0 as of 2026-08-21 -
+and the build is reproducible from a fresh clone. The `research/` copy is kept
+at the matching upstream ref, so what you read there is what compiles.
 
 Every implementation spec that references these APIs states both paths: the
 implementer reads from `research/` and builds against the pinned release. The
