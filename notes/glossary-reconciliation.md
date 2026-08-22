@@ -481,6 +481,49 @@ fully trust until it reconciles, and nautilus has no typed channel to carry that
 - so the adapter's error-level logging stays the mitigation, and the upstream
 half recorded in `notes/todo.md` stays owed.
 
+**A passenger is one per connection. Owner, 2026-08-22. Supersedes the
+2026-08-21 passenger ruling above.**
+
+A passenger is one connected trader: a single WebSocket under an account,
+boarded onto one boat, holding its own lane, byte budgets, declared duration
+and view of the water. It dies with its socket. The superseded ruling defended
+per-account on the ground that the account-lifetime object would otherwise be
+unnamed; it was never unnamed - it is the Account, whose entry already held the
+ledger, the risk state and the freeze stamp. The Seat and Connection entries
+are deleted with the re-cut: a seat's rules restate over Account (one cadence
+per river ridden), Boatyard (wind-down when the last passenger leaves) and
+Freeze (off-river retirement on a frozen account's return), and `connection`
+recedes to ordinary English for the transport. Round 5's rider vocabulary
+inverts: a count of riders on a boat is a count of passengers. The code sweep
+for this re-cut is its own round and replaces the queued seat follow-ups; the
+unruled tenure sense of `session` resolves inside it, taking passenger or
+connection wording per the new entries.
+
+**The boot river is deleted. Owner, 2026-08-22.**
+
+No river is warmed at boot, in either mode; every river is synthesized when a
+boarding or a history poll first names it, and its first requester pays the
+warmup inside its own request. This extends the 2026-08-20 riverless-server
+ruling to transient mode. Boot's remaining job is validation: a config that
+cannot serve what its run exists for refuses to start. The glossary's boot
+entry is gone; the riverless boot itself is engineering, filed as roadmap, not
+a rename round. Open, recorded in `notes/todo.md`: what a request naming no
+symbol binds once no boot river exists to fall to - presumptively the default
+preset resolved on demand.
+
+**Entries are admitted by the owner alone. Owner, 2026-08-22.**
+
+The glossary's preamble now carries the admission test: a word earns an entry
+when using it plainly would leave two people believing they agreed. Being
+load-bearing is not the test, and neither is being undefined. The Admission,
+History slot, Attach, Hold, Posted margin, Variation margin, ReadyRecord and
+RunComplete entries were deleted under it; the renames those rounds landed
+stand, only the entries are gone. No round adds an entry - a missing word
+escalates to the owner. Entry prose states the meaning, never the change that
+produced it, never an argument for a ruling, and never a rule that belongs to
+another entry; a sentence legible only as a reply to this arc's conversation
+does not belong in the document.
+
 ### Rounds landed
 
 **Round 1, the `server` family, 2026-08-21.** `ServerMessage` to `VenueMessage`,
@@ -1051,8 +1094,6 @@ Recorded per scope in the scope reports until the merge collects them.
   closing now.
 - The `RunComplete` overload: one frame announcing both a run ending and one
   connection's own deadline elapsing.
-- `passenger`: the glossary says one per account, and several sites count
-  connections.
 
 ## What the rename rounds keep getting wrong
 
@@ -1095,3 +1136,14 @@ compile, pass and read fluently.
 - **Subagents are foreground, never nested.** Never worktrees. The orchestrator
   validates between agents; agents do not run the build.
 - **Commit on master, never a branch. Never push.**
+- **The tape is not this arc's subject, and neither is its version.** Owner
+  ruling, 2026-08-21. `TAPE_PROTOCOL_VERSION`, what it has or has not
+  identified, the version narrative in `reference/architecture.md`, and the
+  unconditional bump rule are all outside the scope of vocabulary
+  reconciliation. This arc exists so that everyone uses the same word for the
+  same job in future; it does not adjudicate anything about tape generation.
+  Raised three times in the arc's first day and declined each time, so a round
+  that finds itself reasoning about a tape identity has left its scope. The
+  `tape` round renames the word where it does four jobs; it says nothing about
+  the constant beyond the per-round statement of whether a byte moved, which
+  every round already owes.

@@ -5,6 +5,24 @@ account-side (the traders and their money). Each entry states what the word
 means here and, where the meaning is load-bearing, the one fact that makes it
 so.
 
+This document exists so that a conversation about the difficult parts of mogwai
+- the rivers, the boats, the passengers and what they owe each other - can be
+had without the parties meaning different things. That is the admission test,
+and it is narrow on purpose: a word earns an entry when using it plainly would
+leave two people believing they agreed. The river, boat and passenger machinery
+is the core of it, and a few words grew out of that core because the core
+cannot be stated without them - venue, boarding, callsign.
+
+Being load-bearing is not the test. Neither is being undefined. Most of this
+project's nouns are internal mechanism that no discussion turns on, and writing
+them down here does not make the vocabulary sharper - it buries the words that
+do the work among words that never confused anyone. An entry describing how a
+mechanism currently behaves is worse than none, because this document states
+the end state and the code moves toward it; a description of the present, once
+written here, quietly becomes the target.
+
+Only the owner adds an entry.
+
 ## The venue and its modes
 
 - **Venue**: one running instance of mogwai, serving the `MOGWAI` venue over
@@ -32,8 +50,8 @@ so.
   statement about isolation, determinism or test fidelity, and the venue's
   semantics are identical in both.
 - **Run**: one foreground mogwai process, many ledgers, many keyed rivers and
-  as many boats as distinct (river, speed) seats. A run may declare a simulated
-  duration, and so may an individual passenger.
+  as many boats as its passengers' distinct (river, speed) boardings. A run may
+  declare a simulated duration, and so may an individual passenger.
 
 ## The water
 
@@ -47,51 +65,39 @@ so.
   History reads a river directly; nothing has to be boarded for `/trades` or
   `/quotes` to answer.
 - **Boat**: the paced reader of one river, placed on demand when the first
-  socket boards and carrying its own `SimClock`, its own broadcast ring and its
-  own market-reading memo. Sockets asking for the same river and the same speed
-  share one boat; a different quantized speed places a second boat on the same
-  water, because speed is not part of river identity - it changes delivery
-  cadence and never a generated value, so two boats at two speeds are reading
-  one river. One ledger still carries one cadence. A boat is an implementation
-  cache with no semantics of its own: the tape is deterministic and exogenous,
-  so nothing a consumer can measure reveals whether it shares a hull.
+  passenger boards and carrying its own `SimClock`, its own broadcast ring and
+  its own market-reading memo. Passengers asking for the same river and the
+  same speed share one boat; a different quantized speed places a second boat
+  on the same water, because speed is not part of river identity - it changes
+  delivery cadence and never a generated value, so two boats at two speeds are
+  reading one river. One ledger still carries one cadence. A boat is
+  an implementation cache with no semantics of its own: the tape is
+  deterministic and exogenous, so nothing a consumer can measure reveals
+  whether it shares a hull.
 - **Boatyard**: the run-owned registry of keyed boats and the tickets that keep
   them alive. A boat winds down when its last passenger leaves.
-- **Boarding**: the act, at connect, by which one connection's resolved config
+- **Boarding**: the act, at connect, by which a passenger's resolved config
   selects its water. It is the one moment when identity is decided, and every
-  other entry here depends on it. It is per connection rather than per
-  passenger, because an account's several connections may each want different
-  water: they
-  board separately, and the passenger they belong to is what their orders and
-  money land on, never what selects their river. Two things follow, and both are
-  easy to get wrong without them written down. The carrier decides nothing: a
-  knob posted to the control plane and one read from the venue's config are the
-  same input by the time boarding happens, so when or how a knob arrived says
-  nothing about whether it is part of a river's identity. And the river key is
-  whatever in that resolved config can mutate the water: a key naming a river
-  that already exists boards the connection onto it, sharing the boat already
-  reading it, and a key naming none creates the river and places a boat for it.
-  So a connection boarding later is not joining a river's past or altering it -
-  it resolves a key like every other connection and gets the water that key
-  names.
+  other entry here depends on it. Each passenger boards alone: an account's
+  several passengers may each want different water, and the account they belong
+  to is what their orders and money land on, never what selects their river.
+  The carrier decides nothing: a knob posted to the control plane and one read
+  from the venue's config are the same input by the time boarding happens, so
+  when or how a knob arrived says nothing about whether it is part of a river's
+  identity. And the river key is whatever in that resolved config can mutate
+  the water: a key naming a river that already exists boards the passenger onto
+  it, sharing the boat already reading it, and a key naming none creates the
+  river and places a boat for it. So a passenger boarding later is not joining
+  a river's past or altering it - it resolves a key like every other passenger
+  and gets the water that key names.
 - **Tape**: what a boat publishes - the paced frame stream broadcast to that
-  boat's passengers only. Materialization cost is paid at two different
-  moments: the boot river's warmup is synthesized before the venue writes its
-  readiness line, so its cost lands inside boot, while every other river does
-  not exist until a socket bind or history poll first names it and is
-  synthesized then - so the first requester of a non-boot symbol pays that
-  river's warmup latency inside its own request.
-- **Boot symbol / boot river**: the shape the run places a boat on before it
-  writes its readiness line - the run boards nothing, because boarding is a
-  passenger's act and a run takes no seat - and the river a request that names
-  no symbol binds. It is the only river warmed eagerly and the only boat that never winds
-  down; every other river is boatless until someone boards it.
+  boat's passengers only. No river exists until a boarding or a history poll
+  first names it, and it is synthesized then.
 - **Warmup**: the uniformly servable simulated history from `data_origin_ns`
   through `run_start_ns`. `warmup_ns` is their distance, and every river owes
   the whole span before it can be served: it is what history queries answer
-  from and where a strategy's warmup bars come from. When it is paid is the
-  Tape entry's split - the boot river before readiness, every other river on
-  first read.
+  from and where a strategy's warmup bars come from, paid by the river's first
+  requester inside its own request.
 - **Served symbol**: any symbol a request names that resolves to a legal,
   fundable shape. A symbol with a preset gets that preset's shape; one without
   gets the default shape under its own label, memoized per run. A request can
@@ -120,13 +126,6 @@ so.
   printable size, derived from the instrument's own sizing. Spot is a 1e-8
   grid; a future is whole contracts floored at one, which is what keeps a
   precision-0 quantity from being zero.
-- **Posted margin**: the collateral the account currently has committed on one
-  instrument - maintenance for the open position, initial for the resting
-  non-reduce-only orders. Account state the venue is authoritative for, as
-  distinct from the instrument's margin parameter, which stays venue-side.
-- **Variation margin**: the daily settlement transfer. At the settlement
-  instant the accumulated difference between the settlement price and the
-  position's VWAP moves in actual cash, and the VWAP resets to that price.
 - **Session calendar**: the weekly open windows in exchange-local time. A
   scheduled close is configuration and the market is genuinely shut inside it,
   as distinct from `ReopenGap`, which is unscheduled havoc.
@@ -139,37 +138,32 @@ so.
   requested name, else the default policy. The id is the consumer's, not minted,
   because a stable id is what makes a returning socket a continuation - and it
   is a bearer token: anyone who names it claims it, which is acceptable on a
-  loopback venue and written down so it is not assumed to be more.
+  loopback venue and written down so it is not assumed to be more. An account
+  outlives every passenger that speaks for it, and rides as many rivers as its
+  passengers have boarded - many strategies, one ledger, one cadence per
+  river.
 - **Ledger**: one `mogwai-engine` instance, owned by one account and created on
   first sight of that account id. A run holds as many as it has accounts and
   they share nothing: positions, balances, order history and armed divergences
   are all per ledger. Every socket a consumer opens under one account id acts on
   that account's ledger, whatever symbol each bound, so a consumer trading two
   instruments is trading one book. Order entry is WebSocket-only - there is no
-  HTTP order carrier. A ledger outlives the connection that named it, which is
-  what makes a reconnect a continuation.
-- **Hold**: the portion of a balance tied up by a resting order. An order places
-  a hold when it comes to rest and frees that hold when it leaves the book; a
-  held order-list child places no hold until its parent releases it, and a
-  reduce-only order places none at all. The consumer-visible `locked` balance is
-  wider than the order holds alone: it also carries the maintenance collateral
-  of open marked positions and the unsettled proceeds of an equity sale, and it
-  distinguishes none of the three. The word is the funds sense only - the
-  per-connection byte budget is a reservation, see Admission.
-- **Passenger**: the venue-side object for one account riding the run: the
-  account id, its engine, its risk ledger, its freeze stamp and its seats. One
-  per account, not per connection, and it outlives every connection that speaks
-  for it - which is the whole reason it exists, since something has to hold the
-  book across a reconnect. What is per connection belongs to Connection and
-  Seat: a connection boards, holds a lane and a declared duration, and rides one
-  seat; a passenger holds as many seats as its connections have boarded boats.
-  A count of riders on a boat is therefore a count of connections and never of
-  passengers. Passengers on a river owe each other
-  non-interference (which the tape's exogeneity gives - order flow never feeds
-  back into the water) and invisibility (which attribution and per-account
-  ledgers give: every order is claimed for its account - a venue-originated
-  liquidation by the ledger that produced it - so every frame is delivered to
-  the account it concerns).
+  HTTP order carrier. A ledger outlives every passenger that writes to it,
+  which is what makes a reconnect a continuation.
+- **Passenger**: one connected trader - a single WebSocket under an account,
+  boarded onto one boat, holding its own lane, its own byte budgets, its own
+  declared duration and its own view of the water. Many passengers may ride
+  under one account, and what a passenger owns is the ride, never the money:
+  orders and funds always land on the account's ledger, so two passengers of
+  one account are one trader's two presences, not two traders. A passenger
+  survives nothing - it dies with its socket, and what outlives it is the
+  Account. An HTTP history poll or a control-plane POST is a wire interaction,
+  not a passenger: it boards nothing, holds no lane, and survives nothing.
+  Passengers of different accounts owe each other non-interference (which the
+  tape's exogeneity gives - order flow never feeds back into the water) and
+  invisibility (which attribution and per-account ledgers give: every order is
+  claimed for its account - a venue-originated liquidation by the ledger that
+  produced it - so every frame is delivered to the account it concerns).
 - **Account policy**: the rules an account is enforced under - opening balance
   plus risk rules, named inline or as a policy preset. A risk rule is a triple:
   what it measures, on what basis, and what it does on breach - flatten and
@@ -178,30 +172,19 @@ so.
   because a strategy that would have been liquidated must actually be
   liquidated or the forward claim is worth nothing.
 - **Consumer**: the program or system driving the venue - broadarrow is the
-  known one. It is not a single process, and defining it as one is the mistake
-  this entry exists to prevent: it may
-  be one process, several that share nothing but the wire, or the very process
-  the venue is embedded in. So the venue never perceives a consumer at all. What
-  it perceives is a callsign, an account and that account's connections, and
+  known one. It is not a single process: it may be one, several that share
+  nothing but the wire, or the very process the venue is embedded in. So the
+  venue never perceives a consumer at all. What
+  it perceives is a callsign, an account and that account's passengers, and
   the word for the party on one socket is therefore Callsign, never Consumer.
   `client` is not used for anything this project owns. It survives in two
   inherited spellings and nowhere else: nautilus's adapter objects (the
   `MogwaiDataClient` / `MogwaiExecutionClient` pair a consumer registers), and
   the wire field `client_order_id`, which names the submitting side's own id
   namespace as opposed to ids the venue mints.
-- **Connection**: one WebSocket under an account, bound to one river at one
-  speed. Delivery, transport havoc and byte budgets are per connection;
-  ownership of orders and money is per account. The word covers WebSockets
-  only: an HTTP history poll or a control-plane POST is a wire interaction
-  but not a connection, holds no lane and no seat, and survives nothing.
-- **Attach**: one live connection's claim to be reading an account, acquired
-  before its WebSocket upgrade completes and released after its lane is gone.
-  The account freezes only when it has neither a bound lane nor an attach, so
-  an abandoned or racing upgrade cannot leave it swept while unattended. This
-  is a refcount of readers, not a capacity gate.
 - **Callsign**: the self-asserted identity carried on the upgrade as
-  `/ws?callsign=`. It is announced by the party itself, conventionally honoured,
-  and nothing stands behind it - which is what the word is for. It is also the
+  `/ws?callsign=`. It is announced by the party itself, conventionally
+  honoured, and nothing stands behind it. It is also the
   only identity the venue has, so every rule about who may coexist and who
   evicts whom is stated over it rather than over the consumer, which the venue
   cannot perceive. Sockets presenting the same account and callsign coexist -
@@ -210,19 +193,8 @@ so.
   a claim to be the incumbent. The adapter mints one per process, so a consumer
   spread across several processes is several callsigns unless it supplies one
   deliberately: sharing a book across processes is a consumer's own act, not
-  something the venue infers. The word `session` is never used for this, because
-  it belongs to the trading day - see Session calendar.
-- **Seat**: an account's riding of one boat, counted per connection - the seat
-  is vacated by its last rider. An account holds as many seats as the distinct
-  boats its sockets have bound, so one account trades many rivers at once (many
-  strategies, one ledger). The one refusal is a second speed of a river the
-  account is already riding: one ledger carries one cadence. A freeze clears
-  every seat, and when a frozen account returns, what its book holds off the
-  river the returning socket joins is retired - resting orders cancelled,
-  positions closed at their last mark - because the returning connection could
-  neither see nor close it. A live account binding a second symbol retires nothing;
-  that is the supported many-rivers shape, not a return.
-- **Eviction**: a socket claiming a seated account id under a different
+  something the venue infers.
+- **Eviction**: a socket claiming a ridden account id under a different
   callsign, or none, closes the incumbent and inherits the account: ledger,
   orders, risk state. Sockets sharing a callsign coexist instead, which is what
   lets one leg pair trade several symbols under one account without evicting
@@ -235,62 +207,40 @@ so.
   indistinguishable, so handing the account over is the only behaviour that
   lets a killed worker come back to its own book. A consumer must not treat it
   as a reason to redial, or it evicts whatever evicted it.
-- **Freeze**: the state of an account whose last connection went away. A frozen
+- **Freeze**: the state of an account whose last passenger left. A frozen
   account is not swept, not marked, not funded and not judged against its
-  policy until a socket returns - a deliberate departure from a real venue,
+  policy until a passenger returns - a deliberate departure from a real venue,
   where being away is no defence against liquidation, and a gap any claim over
-  the run must state. Bounded by `account_ttl_ms`: an account nobody reclaims
-  inside it is collected.
+  the run must state. When a frozen account returns, what its book holds off
+  the river the returning passenger boards is retired - resting orders
+  cancelled, positions closed at their last mark - because the returning
+  passenger could neither see nor close it. A live account boarding a second
+  river retires nothing; that is the supported many-rivers shape, not a
+  return. Bounded by `account_ttl_ms`: an account nobody reclaims inside it is
+  collected.
 - **Strategy**: the consumer's unit of work - one trading program, driving one
   account over one instrument (single-instrument by settled premise). The venue
-  never sees a strategy; it sees an account and its connections, which is why
+  never sees a strategy; it sees an account and its passengers, which is why
   everything a strategy needs must be expressible per account or per
-  connection.
+  passenger.
 
 ## Havoc
 
 - **Divergence**: one armed havoc injection. It reaches the venue either from
   config or on `POST /control/divergence`, and which carrier it came by decides
   nothing: a divergence is resolved with the rest of a passenger's config at
-  boarding, and is constant for that connection. Reading the post as a runtime
-  mutation of a venue already serving is the standing misreading of this entry,
-  and it is what the Boarding entry exists to foreclose. The classification
+  boarding, and is constant for that passenger. The classification
   test for any arm is whether it changes the water or the view. Generator arms
   (`VolStorm`, `FlowSurge`, `LiquidityDrought` and kin) change the water, so
   they are part of river identity: a passenger whose resolved config carries
   one boards a different river than a passenger without it, and that is all
   "forking the river" means. Nothing mutates water someone is already reading.
   Transport arms (`GoDark`, `StallData`, `DelayAcks`, `CommandLatency`)
-  corrupt what one account's connections receive, so they ride the passenger.
+  corrupt what an account's passengers receive - the view, never the water -
+  so they are armed per account and blur each of its passengers alike.
   Engine arms (`PartialFillNext`, `RejectNextSubmit`, `RejectNextCancel`,
   `DuplicateNextFill`, `DropNextAccountUpdate`) queue one-shot execution
   divergences on the account's own ledger, and windowed account-side arms
   (`FeeSurcharge`) apply to the ledger for their span. `FaultTape` stands
   alone: it is terminal, taking the whole venue down through its fault
   channel.
-
-## The wire
-
-- **Admission**: the per-connection outbound execution budget. The held lane
-  accounts for produced bytes and the priority lane preserves refusal truth;
-  a command whose worst-case output cannot be reserved never reaches the
-  engine and receives `AdmissionRejected`, including its machine-readable
-  retry hint. This is the venue's only backpressure sense of the word:
-  inbound history capacity is a History slot, and a connection's claim on an
-  account is an Attach. `mogwai-engine` uses "admission" for a separate thing,
-  an order or linked group being accepted onto the book, which is the industry
-  reading and is not a capacity statement.
-- **History slot**: one of the run-wide permits bounding whole-page synthesis
-  and serialization for `/trades` and `/quotes`. A request first takes a
-  bounded waiter place, then waits up to the slot deadline; exhaustion is an
-  HTTP `503` with a plain-text body and no retry hint. A slot rides the
-  blocking synthesis and the response body, so it is held for exactly as long
-  as that page remains resident. It is inbound request capacity, not a
-  connection's outbound admission budget.
-- **ReadyRecord**: one versioned JSON line describing the venue, its only
-  stdout output. It names no symbol; what identifies the venue a consumer
-  connects to is `addr` plus `run_seed`.
-- **RunComplete**: the terminal WebSocket announcement for a planned duration
-  completion, followed by a normal close. A socket may carry its own
-  `duration_ms`, measured in simulated milliseconds on its boat's clock from
-  its own boarding instant, so passengers on one boat complete independently.

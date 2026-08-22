@@ -198,6 +198,11 @@ The last is the interesting one: River is the sequence, Tape is the delivery, an
 the process that manufactures the sequence is unnamed while carrying the
 workspace's most load-bearing constant.
 
+The question that row asks is a naming one and only a naming one: what to call
+the thing the constant identifies. Owner ruling, 2026-08-21: the constant's
+value, its history, the version narrative and the bump rule are out of this
+arc's scope entirely. Do not reason about them in the `tape` round.
+
 ## B10. The rest, in one table
 
 Each is real, each is smaller, and each was found by at least one scope with a
