@@ -7,7 +7,7 @@
 //! (`/ws`) lives in `ws.rs`; both share `AppState` and the order-entry
 //! validation gate (`process_order_cmd`) defined here.
 
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -861,82 +861,42 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
 }
 
 impl AppState {
-    /// The venue's one wall-to-sim reference. The only callers left are the
-    /// answers no boat can give: a boatless river, the venue deadline, and the
-    /// venue-scoped account ledger. Anything about a symbol calls `river_now`.
+    /// The venue's one wall-to-sim reference, and the only time axis a request
+    /// that boards nothing is answered on.
     pub(crate) fn venue_sim(&self) -> SimClock {
         self.run.sim
     }
 
-    /// How far a request about `symbol` may be answered, and on whose clock.
+    /// How far a request that owns no boat may be answered: one snapshot of the
+    /// run clock, taken when the request is admitted.
     ///
-    /// Async because it AWAITS an in-flight placement rather than falling
-    /// through to the venue clock. A request racing a boarding would otherwise
-    /// receive a well-formed answer off a clock strictly ahead of the boat that
-    /// is about to be boated - invisible precisely because it is well-formed.
-    pub(crate) async fn river_now(&self, symbol: &str, speed: Option<f64>) -> RiverNow {
-        // Wait out an in-flight placement so a racing poll does not answer off
-        // the venue clock for a river about to have a boat. BEFORE the named
-        // speed is resolved too: the placement being awaited may be exactly
-        // the cadence that was asked for, and answering "no such boat" off the
-        // venue clock is the same well-formed lie in either shape.
-        let _ = self
-            .run
-            .boatyard
-            .boat_for_symbol_awaiting_placement(symbol)
-            .await;
-        if let Some(speed) = speed {
-            return match self.run.boatyard.boat_at(symbol, speed) {
-                Some(boat) => RiverNow {
-                    ns: boat.published_ns.load(Ordering::Acquire),
-                    sim: boat.sim,
-                    from_boat: true,
-                },
-                None => RiverNow::venue(self.venue_sim()),
-            };
-        }
-        // Several cadences: the lead. `/clock?symbol=&speed=` names one.
-        let boat = self
-            .run
-            .boatyard
-            .boats_for_symbol(symbol)
-            .into_iter()
-            .max_by_key(|boat| boat.published_ns.load(Ordering::Acquire));
-        match boat {
-            Some(boat) => RiverNow {
-                ns: boat.published_ns.load(Ordering::Acquire),
-                sim: boat.sim,
-                from_boat: true,
-            },
-            None => RiverNow::venue(self.venue_sim()),
-        }
-    }
-}
-
-/// How a river's now was resolved, and on what clock.
-///
-/// A boated river answers with what its boat has PUBLISHED; a boatless river
-/// answers with the venue clock, which is the only ceiling water nobody is
-/// carrying has. Never the boat's affine projection: a boat is deliberately
-/// behind its own map, and a ceiling above the published tape is a look-ahead.
-pub(crate) struct RiverNow {
-    /// The ceiling a request about this symbol may be answered as of.
-    pub(crate) ns: u64,
-    /// The clock that instant lives on - the boat's when boated, the venue's
-    /// otherwise. `/clock` renders this whole value.
-    pub(crate) sim: SimClock,
-    /// True when `sim` is a boat's. Renders as `VenueClock::boat_clock`.
-    pub(crate) from_boat: bool,
-}
-
-impl RiverNow {
-    /// The venue's own answer, for the questions that name no river at all.
-    pub(crate) fn venue(sim: SimClock) -> Self {
-        Self {
-            ns: sim_now_ns(sim),
-            sim,
-            from_boat: false,
-        }
+    /// IT CONSULTS NO BOAT, and that is the whole of the rule. This used to
+    /// reduce over every boat on the river and take the furthest-published one,
+    /// which reported one passenger's delivery frontier to another: board the
+    /// same river at a faster cadence and you moved somebody else's history
+    /// ceiling, which they could watch move. The Boat entry forbids exactly
+    /// that - nothing a consumer can measure may reveal whether it shares a
+    /// hull.
+    ///
+    /// The reduction was incoherent on its own terms too. Speed is not part of
+    /// a river's identity but it IS part of a boat's, and a tape is what one
+    /// boat publishes - so a maximum over boats is a maximum across DIFFERENT
+    /// TAPES, reported as if it were a property of the water. A river has no
+    /// present: it is deterministic water with no cursor of its own. Only a tape
+    /// has a delivery frontier, and every tape belongs to a boat.
+    ///
+    /// WHAT THIS COSTS, stated because it is a surrender rather than a free win.
+    /// A delivery-shaped ceiling and a boat-free one cannot both exist: a
+    /// firehose that has delivered through some instant and a river nobody has
+    /// generated past are indistinguishable to anything that does not consult a
+    /// boat. So on an unpaced run, where the tape outruns the run clock, history
+    /// trails what a socket has already received and a consumer cannot re-fetch
+    /// that water here. Look-ahead prevention is worth more: this venue exists
+    /// so a forward claim is worth something, and what makes it safe is that no
+    /// request crosses the run present. Repairing one passenger's own gap would
+    /// need tape identity this route does not carry.
+    pub(crate) fn run_now(&self) -> u64 {
+        sim_now_ns(self.venue_sim())
     }
 }
 
@@ -1176,7 +1136,13 @@ pub(crate) async fn arm_divergence(
                     ),
                 );
             }
-            let ts = state.river_now(&order_symbol, None).await.ns;
+            // The run clock, then clamped per order inside the engine. It used
+            // to be the furthest-published boat on the order's river, which let
+            // an unrelated account's faster boat decide the timestamp recorded
+            // in this account's ledger. The engine makes it non-decreasing
+            // against what the orders it closes already say, because only the
+            // engine knows what that is.
+            let ts = state.run_now();
             if let Err(reason) = holder
                 .engine
                 .lock()
@@ -1598,43 +1564,52 @@ pub(crate) async fn open_account(
     }
 }
 
-#[derive(Default, Deserialize)]
-pub(crate) struct ClockQuery {
-    #[serde(default)]
-    symbol: Option<String>,
-    #[serde(default)]
-    speed: Option<f64>,
-}
+/// The venue clock, and nothing about any boat.
+///
+/// IT TAKES NO PARAMETERS, and it took `symbol` and `speed` and answered on a
+/// boat's clock until that turned out to be a boat-discovery surface on a route
+/// that cannot tell who is asking. The `boat_clock` flag was an existence bit,
+/// the returned map carried another passenger's cadence and placement anchor,
+/// the instant carried its delivery progress, and with no speed named a faster
+/// boat placed by somebody else moved every field. None of that is knowledge a
+/// caller has about its own hull; all of it is knowledge about another
+/// passenger's.
+///
+/// The clocks that really are per-boat still reach the people entitled to them,
+/// on the interactions that carry an identity: live frames are stamped on the
+/// boat that published them, a passenger's completion is derived on its own
+/// boat, and sweeps are paced there. What is gone is projecting any of it
+/// through a route that cannot attribute the question.
+///
+/// This is also the axis a caller needs for what this route is FOR - history
+/// admissibility, request validation, the run duration - because anonymous
+/// history is answered on exactly this clock. A consumer paginating history
+/// reads this once and passes the instant as `end` on every page, which is what
+/// makes one logical window stop moving under it.
+/// Deliberately empty, and `deny_unknown_fields` is the point: a consumer still
+/// sending `?symbol=` or `?speed=` is REFUSED rather than quietly handed a venue
+/// clock it will read as a boat's. Accepted-and-ignored is the failure mode this
+/// venue's carriers exist to prevent, and it is the worst available reading here
+/// - the caller would pace against an axis it did not ask for and never learn.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClockQuery {}
 
 pub(crate) async fn clock(
-    Query(query): Query<ClockQuery>,
+    Query(_): Query<ClockQuery>,
     State(state): State<AppState>,
 ) -> Json<VenueClock> {
     // Publish the tape boundary alongside the affine map so a consumer can guard
     // its own warmup against `data_origin_ns` rather than issuing a doomed
-    // off-river fetch. `venue_now_ns` is sampled here so the consumer gets sim-now
-    // and the floor from one round trip, without reading its own (skewable) wall
-    // clock. `data_origin_ns` is the fixed floor; the horizon is echoed so
-    // the consumer can report the floor in its own terms.
-    //
-    // `?symbol=` answers for that river's lead boat when more than one
-    // cadence is placed; `?speed=` names one.
-    // For a boat, `venue_now_ns` is the sim instant of the last tick it
-    // PUBLISHED rather than the affine map evaluated at the wall: a boat placed
-    // mid-run is deliberately behind its own clock's projection, and a consumer
-    // pacing against a projection the feed has not reached would ask for water
-    // that has not been delivered. With no boat the two coincide.
-    let now = if let Some(symbol) = query.symbol.as_deref() {
-        state.river_now(symbol, query.speed).await
-    } else {
-        RiverNow::venue(state.venue_sim())
-    };
+    // off-river fetch. `venue_now_ns` is sampled here so the consumer gets
+    // sim-now and the floor from one round trip, without reading its own
+    // (skewable) wall clock. `data_origin_ns` is the fixed floor; the horizon is
+    // echoed so the consumer can report the floor in its own terms.
     Json(VenueClock {
-        sim: now.sim,
-        venue_now_ns: now.ns,
+        sim: state.venue_sim(),
+        venue_now_ns: state.run_now(),
         data_origin_ns: state.run.data_origin_ns(),
         warmup_ns: state.run.warmup_ns,
-        boat_clock: now.from_boat,
     })
 }
 
@@ -1774,9 +1749,11 @@ pub(crate) async fn trades(
     if let Err(error) = rivers.materialize(&symbol) {
         return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
-    // The ceiling is the NAMED RIVER's now, not the venue's.
-    let river_now = state.river_now(&symbol, None).await.ns;
-    if let Some(body) = history_start_refusal(start, data_origin, river_now) {
+    // ONE SNAPSHOT OF THE RUN CLOCK, taken here and used for both bounds below,
+    // so a single request cannot be answered against a moving present. It
+    // consults no boat: see `AppState::run_now`.
+    let run_now = state.run_now();
+    if let Some(body) = history_start_refusal(start, data_origin, run_now) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
 
@@ -1787,21 +1764,19 @@ pub(crate) async fn trades(
     // ordinary "give me everything up to now" request, which a consumer writes
     // by stamping a clock of its own.
     //
-    // That gap is NOT a hair. The ceiling here is the river's own now - what
-    // its boat has PUBLISHED - and a boat placed `T` wall-nanoseconds after
-    // boot sits `T * speed` simulated nanoseconds behind the venue clock,
-    // permanently and by construction. So a consumer that reads `/clock` with no
-    // `?symbol=` and passes that instant as `end` is routinely far ahead of
-    // this answer, and refusing it would fail every honest warmup fetch to
-    // prevent nothing: the clamp serves exactly the data that exists and no
-    // more, so nothing is silently short about it. A consumer that needs to know
-    // where the tail actually is reads `/clock?symbol=`.
+    // AN EXPLICIT END IS A BOUND, NEVER AN AUTHORIZATION. It is clamped exactly
+    // like an absent one, so no request of any shape crosses the run present.
+    // That is what keeps a wrong sign in a window computation, an over-eager
+    // backfill, or a plain request for tomorrow from being served real generated
+    // water - this venue exists so a forward claim is worth something, and a run
+    // that read its own future looks clean and is not.
     //
-    // Clamping the served tail also stops a no-`end` request - which otherwise
-    // grinds out the full `limit` however far past the ceiling that lands -
-    // from streaming ticks the river has not published. The bound is
-    // inclusive, so a tick landing exactly at the ceiling is still served.
-    let end = Some(end.map_or(river_now, |end| end.min(river_now)));
+    // A paginating consumer that wants a window which cannot move under it pins
+    // its own end by reading `/clock` once before its first page and passing
+    // that instant on every page; the clamp here is the venue's own defence
+    // against a caller that does not. The bound is inclusive, so a tick landing
+    // exactly at the cutoff is still served.
+    let end = Some(end.map_or(run_now, |end| end.min(run_now)));
 
     // Synthesizing up to `MAX_HISTORY_LIMIT` ticks is pure CPU work against the
     // generator (the source never blocks on IO), and `next_tick` never returns
@@ -1871,14 +1846,18 @@ pub(crate) async fn quotes(
     if let Err(error) = rivers.materialize(&symbol) {
         return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
-    // The ceiling is the NAMED RIVER's now, not the venue's.
-    let river_now = state.river_now(&symbol, None).await.ns;
-    if let Some(body) = history_start_refusal(start, data_origin, river_now) {
+    // ONE SNAPSHOT OF THE RUN CLOCK, taken here and used for both bounds below,
+    // so a single request cannot be answered against a moving present. It
+    // consults no boat: see `AppState::run_now`.
+    let run_now = state.run_now();
+    if let Some(body) = history_start_refusal(start, data_origin, run_now) {
         return Err((StatusCode::BAD_REQUEST, body));
     }
     // A future start is impossible, while a future end is the ordinary
-    // caller-clock spelling of "everything through now", so clamp the latter.
-    let end = Some(end.map_or(river_now, |end| end.min(river_now)));
+    // caller-clock spelling of "everything through now", so clamp the latter -
+    // whether it was named or not. An explicit end bounds the window and never
+    // authorizes crossing the run present.
+    let end = Some(end.map_or(run_now, |end| end.min(run_now)));
     // The permit rides the blocking task for the same reason as `/trades`: a
     // a dropped connection drops this future, and only the closure outlives that.
     let named = truncated_symbol(&symbol);

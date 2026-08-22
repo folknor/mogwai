@@ -726,7 +726,23 @@ impl DataClient for MogwaiDataClient {
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
-        let end = date_to_unix_nanos(request.end);
+        // PINNED ONCE, BEFORE ANY PAGE GOES OUT. The venue answers history as of
+        // the run clock when each request is admitted, so a paged window with no
+        // stated end would be cut against a LATER present on every page and the
+        // logical window would grow as the pages were fetched. Naming the end up
+        // front makes one logical request one fixed window; the venue clamps it
+        // against its own snapshot regardless, so a pin slightly ahead converges
+        // rather than reaching past the run present.
+        //
+        // ONLY WHEN THE CLOCK IS AUTHORITATIVE. `data_origin_ns` is `Some`
+        // exactly when `/clock` was actually fetched; when it was not, `sim` is
+        // an IDENTITY projection standing in for an axis this client never read,
+        // and pinning from it would cut every window against a wall-clock instant
+        // that has nothing to do with the run - silently returning less than the
+        // caller asked for. Leaving the end absent hands the choice to the venue,
+        // which is the only party that knows its own present.
+        let end = date_to_unix_nanos(request.end)
+            .or_else(|| self.data_origin_ns.is_some().then(|| now_unix_nanos(sim)));
         // Refuse an off-river window at the boundary, loudly - but ANSWER it.
         // Returning the error to nautilus is not a refusal the requester ever
         // sees: `DataEngine::execute` log::error!s a synchronous client error
@@ -932,7 +948,10 @@ impl DataClient for MogwaiDataClient {
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
-        let end = date_to_unix_nanos(request.end);
+        // Pinned before the first page, and only from an authoritative clock, for
+        // the reasons spelled out in `request_trades`.
+        let end = date_to_unix_nanos(request.end)
+            .or_else(|| self.data_origin_ns.is_some().then(|| now_unix_nanos(sim)));
         // Refuse an off-river history window at the boundary, naming the floor -
         // but ANSWER it, for the reason spelled out in `request_trades`: a
         // synchronous `Err` is logged by the data engine and never turned into

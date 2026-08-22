@@ -699,8 +699,11 @@ boat makes it ahead of or behind a push from another. `GET /account` therefore
 keeps the venue stamp and LABELS it, adding a `clock: "venue"` field beside the
 otherwise unchanged `AccountState` so a consumer can never mistake that
 `ts_event` for boat time; pushes are ordered against pulls by sequence.
-`/clock` answers the same way - `?symbol=` renders that river's boat clock and
-sets `boat_clock`, and without a symbol it renders the venue's.
+`/clock` goes further and renders only the venue's: it named a river and rendered
+that river's boat clock until that made an anonymous route a boat-discovery
+surface, so the parameters are refused now and the per-boat instant reaches a
+passenger the only way it honestly can, stamped on the frames its own boat
+publishes.
 
 Each boat has its own settlement watermark and its own ring. Market water is
 exogenous: orders never move it and there is no queue competition. Fifty agents
@@ -981,14 +984,29 @@ cap. A synthesis failure is a 500 naming the symbol and the window. There is no
 MATERIALIZES the river it names, which is also what makes it advertise through
 `/instruments`.
 
-The ceiling is the NAMED RIVER's now - what its boat has published - and only a
-boatless river answers with venue sim-now. An `end` past that ceiling is
-CLAMPED rather than refused, deliberately asymmetric with the start: a boat
-placed `T` wall-nanoseconds after boot sits `T * speed` simulated nanoseconds
-behind the venue clock by construction, so a consumer stamping its `end` from
-`/clock` with no `?symbol=` is routinely ahead of this answer, and refusing it
-would fail every honest warmup fetch. A consumer that needs to know where the
-tail actually is reads `/clock?symbol=`.
+THE CEILING IS THE RUN CLOCK, one snapshot per request, and it consults no boat.
+It was the furthest-published boat on the named river, which made one
+passenger's delivery frontier decide another's window: board the same water at a
+faster cadence and you moved somebody else's ceiling, which they could watch
+move. That is the observation the Boat entry forbids, and it was not a property
+of the river in any case - speed belongs to a boat's identity, a tape is what one
+boat publishes, so a maximum over boats is a maximum across different tapes. A
+river has no present of its own; it is deterministic water with no cursor.
+
+An `end` past the ceiling is CLAMPED rather than refused, deliberately asymmetric
+with the start, and it is clamped whether it was stated or not: an explicit end
+bounds a window and never authorizes crossing the run present. A consumer paging
+a window pins its own end by reading `/clock` once before its first page.
+
+The surrender is stated because it is real. A boat-free bound and a
+delivery-shaped bound cannot both exist - a firehose that has delivered through
+some instant and a river nobody has generated past are indistinguishable to
+anything that does not consult a boat - so on an unpaced run history trails what
+a socket already holds, and that water cannot be re-fetched here. Preventing
+look-ahead is worth more than reproducing delivery: this venue exists so a
+forward claim is worth something, and a run that read its own future would look
+clean and not be. Repairing one passenger's own gap would need tape identity an
+anonymous route does not carry.
 
 The protocol crate owns every JSON type shared by venue and adapter. The
 adapter uses WebSocket streaming only for market data and execution; `/trades`

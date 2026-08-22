@@ -1390,7 +1390,7 @@ impl Engine {
     }
 
     /// Every still-held child of this order, by client order id.
-    fn held_children_of(&self, parent: &str) -> Vec<ClientOrderId> {
+    pub(crate) fn held_children_of(&self, parent: &str) -> Vec<ClientOrderId> {
         self.open
             .iter()
             .filter(|order| {

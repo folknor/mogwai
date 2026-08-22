@@ -46,13 +46,19 @@ operational bound for trusted consumers belonging to the run's owner, not a
 hostile-consumer defence.
 
 The history endpoints `GET /trades` and `GET /quotes` both REQUIRE `symbol`;
-`start`, `end` and `limit` are optional. They are bounded by the named river's
-now. For a boated river that is the last instant its boat published; for a
-boatless river it is the venue clock. An omitted or future `end` is clamped to
-that ceiling, and a `start` above it - or below the tape origin - is refused
-with HTTP 400. A consumer must therefore read `/clock?symbol=<symbol>` before
-constructing a history window. Using boatless `/clock` as the `start` for a
-boated river can be ahead of that river and is refused.
+`start`, `end` and `limit` are optional. They are bounded by the RUN CLOCK, taken
+as one snapshot when the request is admitted and consulting no boat. An omitted
+end is clamped to it and so is a stated one - an explicit `end` is a bound on the
+window, never permission to cross the run present - and a `start` above it, or
+below the tape origin, is refused with HTTP 400. Read `GET /clock` once and pass
+its `venue_now_ns` as `end` on every page of a paginated window, or the window
+grows as you read it.
+
+On an unpaced run (`speed = 0.0`) the tape outruns the run clock, so history can
+trail what your socket has already been delivered live. That is deliberate: a
+boat-free bound and a delivery-shaped bound cannot both exist, and refusing to
+serve past the run present is what keeps a strategy from reading its own
+future.
 
 A history poll materializes the named river, so the only refusals left are
 about the SHAPE rather than about the symbol being unknown: a label that is not
@@ -60,11 +66,14 @@ a legal symbol, a shape whose settlement currency this run does not fund, a
 shape the resolved configuration makes invalid, and an exhausted river cap.
 Each is a 400 naming its reason.
 
-`GET /clock` takes an optional `?symbol=`. Naming a BOATED river answers on its
-boat's clock: `venue_now_ns` is the last instant that boat published, and
-`boat_clock` is true. Naming a boatless river, or omitting the parameter,
-answers on the venue clock with `boat_clock` false. `data_origin_ns` and `warmup_ns` are venue facts either
-way, identical for every river.
+`GET /clock` takes no parameters and always answers on the run's clock:
+`venue_now_ns` is the affine map read at the wall, and `data_origin_ns` and
+`warmup_ns` are venue facts identical for every river. It took `symbol` and
+`speed` and answered on a named river's boat, and both are now REFUSED with a
+400 rather than ignored - a route that cannot tell who is asking must not report
+whether a boat exists, what cadence it runs, or how far it has delivered, since
+none of that is knowledge a caller has about its own connection. Your own
+delivery instant arrives stamped on the frames your socket receives.
 
 `GET /account` returns the venue-wide ledger. Its `ts_event` is venue time and
 the top-level `clock` field is `"venue"`. Pushed account events are stamped on

@@ -2053,6 +2053,32 @@ impl Engine {
             return Err(self.not_resting_reason(client_order_id));
         };
         let order = self.open[pos].clone();
+        // CAUSALLY MONOTONE, and clamped here rather than in `record_closed`.
+        // The caller stamps this with the run clock, which is the honest
+        // request-time instant but is not on the same axis as the boat clocks
+        // that dated this order's acceptance and amends - so a raw stamp could
+        // record a cancellation BEFORE the amend it follows, inside one ledger,
+        // and `QueryOrders` reports both as `ts_last`. The floor covers the
+        // children too, because they go terminal in the same call and each has
+        // its own history; clamping only against the parent would still backdate
+        // a child amended later.
+        //
+        // NOT MOVED INTO `record_closed`, though every terminal transition runs
+        // through it: a fill sweep closes an order at the instant of the PRINT
+        // that closed it, and forcing that forward would misreport when the
+        // market hit. Only this control-plane path has no market instant of its
+        // own to be truthful about.
+        let ts = std::iter::once(order.ts_last)
+            .chain(
+                self.held_children_of(&order.submit.client_order_id)
+                    .into_iter()
+                    .filter_map(|child| {
+                        self.open
+                            .position(child.as_str())
+                            .map(|pos| self.open[pos].ts_last)
+                    }),
+            )
+            .fold(ts, u64::max);
         // The children go with it, and they go silently too. A held child of an
         // order that will now never fill is waiting on a release nothing can
         // perform; the fault class here is "the venue cancelled and the consumer

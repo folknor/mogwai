@@ -181,15 +181,26 @@ async fn a_ws_upgrade_for_a_configured_non_boot_symbol_is_served() {
     );
 }
 
-/// A boated river answers history only as far as ITS BOAT has published, never
-/// as far as the venue clock has run. A boat placed `T` after boot sits
-/// `T * speed` behind that clock permanently, so the venue clock is a
-/// look-ahead oracle for every river but the boot one - which is why this test
-/// must use a SECOND symbol: the boot river carries a boat from boot and lags
-/// by nothing, so a boot-symbol test would pass under both ceilings.
+/// History is bounded by the RUN CLOCK, and no boat moves that bound.
+///
+/// THE INVERSE OF WHAT THIS ONCE PINNED. The ceiling used to be the furthest
+/// boat on the river, which made one passenger's delivery frontier decide
+/// another's history window: board the same water at a faster cadence and you
+/// moved somebody else's ceiling, which they could watch move. The Boat entry
+/// forbids that - nothing a consumer can measure may reveal whether it shares a
+/// hull - and a maximum over boats was never a property of the river anyway,
+/// since speed belongs to a boat's identity and a tape is what one boat
+/// publishes.
+///
+/// A LATE BOAT IS THE DISCRIMINATOR, and it is why this uses a SECOND symbol.
+/// The boot river carries a boat from boot, so a boot-symbol test would pass
+/// under either rule. A boat placed well after boot has published almost
+/// nothing, so a window sitting far above ITS frontier but below the run present
+/// separates the two rules exactly: the retired ceiling refused it, the run
+/// clock serves it.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn history_is_bounded_by_the_rivers_own_boat_not_the_venue_clock() {
+async fn history_is_bounded_by_the_run_clock_and_no_boat_moves_it() {
     let venue = spawn(&["--config", &two_symbols_config()]);
     tokio::time::sleep(Duration::from_millis(250)).await;
     let (socket, _) =
@@ -197,47 +208,39 @@ async fn history_is_bounded_by_the_rivers_own_boat_not_the_venue_clock() {
             .await
             .expect("place the second river late");
 
-    let (_, boat) = http_get(&venue.http_base(), "/clock?symbol=MNQ");
-    let boat: mogwai_protocol::VenueClock = serde_json::from_str(&boat).unwrap();
-    let (_, venue_clock) = http_get(&venue.http_base(), "/clock");
-    let venue_clock: mogwai_protocol::VenueClock = serde_json::from_str(&venue_clock).unwrap();
+    let (_, clock) = http_get(&venue.http_base(), "/clock");
+    let clock: mogwai_protocol::VenueClock = serde_json::from_str(&clock).unwrap();
+    let run_now = clock.venue_now_ns;
     assert!(
-        venue_clock.venue_now_ns > boat.venue_now_ns,
-        "the test must construct a late boat"
+        run_now > venue.record.data_origin_ns,
+        "the run clock must have left the tape floor for this test to say anything"
     );
 
-    // START-ANCHORED, deliberately: an unanchored request breaks at `limit`
-    // from the history source's default position, so it can fill its page with
-    // old rows and never reach either ceiling. Anchored one nanosecond above
-    // the boat but far below the venue clock, the two ceilings give different
-    // answers and only one of them can be right.
-    let start = boat.venue_now_ns.saturating_add(1);
-    assert!(
-        start < venue_clock.venue_now_ns,
-        "the anchor must sit between the two ceilings"
-    );
+    // JUST BELOW THE RUN PRESENT, and far above anything a boat placed a moment
+    // ago can have published - such a boat starts at the river's origin and
+    // climbs from there. Under the retired ceiling this was a 400.
+    let start = run_now.saturating_sub(1_000_000);
     let (status, body) = http_get(
         &venue.http_base(),
         &format!("/trades?symbol=MNQ&start={start}&limit=5"),
     );
     assert_eq!(
-        status, 400,
-        "history admitted a start beyond the boat: {body}"
+        status, 200,
+        "history below the run present must be served whatever any boat has published: {body}"
     );
 
-    // And the ceiling did not collapse onto nothing: a start BELOW what the
-    // boat published is still served. A test asserting only the refusal cannot
-    // tell a correct bound from one that refuses everything.
+    // And the bound did not collapse onto nothing: past the run present is still
+    // refused. A test asserting only the admission cannot tell a correct bound
+    // from one that admits everything, and that is the direction which would let
+    // a run read its own future.
+    let future = run_now.saturating_add(60_000_000_000);
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!(
-            "/trades?symbol=MNQ&start={}&limit=5",
-            venue.record.data_origin_ns
-        ),
+        &format!("/trades?symbol=MNQ&start={future}&limit=5"),
     );
     assert_eq!(
-        status, 200,
-        "history below the boat is still served: {body}"
+        status, 400,
+        "history past the run present must be refused: {body}"
     );
     drop(socket);
 }
@@ -1508,25 +1511,40 @@ async fn two_accounts_at_different_speeds_both_stay_open() {
     .await
     .expect("an unserved speed is a second boat, not a 400");
 
-    let (status, body) = http_get(
-        &venue.http_base(),
-        &format!("/clock?symbol={}&speed=2", venue.symbol),
-    );
-    assert_eq!(status, 200, "the slow boat's clock answers: {body}");
-    let slow_clock: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(slow_clock["sim"]["speed"], 2.0);
-
-    let (status, body) = http_get(
-        &venue.http_base(),
-        &format!("/clock?symbol={}&speed=3", venue.symbol),
-    );
-    assert_eq!(status, 200, "the fast boat's clock answers: {body}");
-    let fast_clock: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(fast_clock["sim"]["speed"], 3.0);
-
-    // Keep the sockets in scope so the boats stay placed while we read.
-    drop(slow);
-    drop(fast);
+    // EACH SOCKET'S OWN DELIVERY IS THE OBSERVABLE. This used to read
+    // `/clock?symbol=&speed=` for each boat and assert the two cadences back,
+    // which is precisely the boat-discovery the route no longer performs - and
+    // it proved the registry held two entries rather than that either passenger
+    // was being served. Being served is the property the test is named for, and
+    // a socket is entitled to know its own frames arrived.
+    let mut slow = slow;
+    let mut fast = fast;
+    for (label, socket) in [
+        ("the slow cursor", &mut slow),
+        ("the fast cursor", &mut fast),
+    ] {
+        let deadline = common::deadline(common::TEST_WALL_BUDGET);
+        let mut served = false;
+        while !served {
+            let message = tokio::time::timeout_at(deadline, socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("{label} was given no market data before the deadline"));
+            match message {
+                Some(Ok(Message::Text(text))) => {
+                    served = matches!(
+                        serde_json::from_str::<VenueMessage>(&text),
+                        Ok(VenueMessage::Trade(_) | VenueMessage::Quote(_))
+                    );
+                }
+                Some(Ok(Message::Close(frame))) => {
+                    panic!("{label} was closed rather than served: {frame:?}")
+                }
+                Some(Ok(_)) => {}
+                Some(Err(err)) => panic!("{label} failed in transport: {err}"),
+                None => panic!("{label} ended without a close frame"),
+            }
+        }
+    }
 }
 
 /// One ledger still carries one cadence. A second socket on the same account
@@ -2075,36 +2093,21 @@ async fn an_armed_divergence_reaches_every_connection() {
     // against an account, so it must gate this socket's market data.
     let armed = post_divergence(&venue.http_base(), r#"{"type":"StallData","ms":180000}"#);
     assert_eq!(armed, 202, "the divergence is accepted");
-    // The ceiling comes from THIS RIVER'S BOAT, and is read AFTER the ack.
+    // NO CEILING, AND NO CLOCK READ. This used to read `/clock?symbol=` for the
+    // boat's own published instant and assert that nothing arriving was stamped
+    // past it. That route no longer answers on a boat - a per-boat clock on an
+    // anonymous endpoint was a boat-discovery channel - and the venue clock
+    // cannot stand in for it: it runs AHEAD of what a boat has published, so it
+    // is a generous ceiling that post-arm water can pass under.
     //
-    // Read from the UNNAMED `/clock` it was the venue-clock fallback, which is
-    // a look-ahead oracle for every boat: a boat publishes the last tick it
-    // actually delivered, so the venue clock runs ahead of it and the ceiling
-    // was systematically generous - post-arm water could still be stamped below
-    // it and pass. `?symbol=` answers for the boat, and `boat_clock` is asserted
-    // so a fallback answer cannot quietly reinstate the generous ceiling.
-    //
-    // AFTER the ack rather than before it, and NOT because in-flight tape needs
-    // slack: `ws.rs` gates at SEND time, not at publish time, so a frame
-    // published before the arm and still queued when it lands is dropped too.
-    // Nothing is legitimately in flight past an armed blackout. Reading after
-    // the ack is instead about the CEILING'S OWN FRESHNESS - the boat has moved
-    // during the round trip, and a ceiling read before it would be lower than
-    // the last instant the venue was entitled to publish at, failing a working
-    // blackout on its own last pre-arm frame. The slack that buys is one round
-    // trip; a blackout that failed outright keeps publishing for the whole
-    // two-second window, which at speed 60 is two sim MINUTES past this ceiling.
-    let (_, arm_clock_body) = http_get(
-        &venue.http_base(),
-        &format!("/clock?symbol={}", venue.symbol),
-    );
-    let arm_clock: mogwai_protocol::VenueClock =
-        serde_json::from_str(&arm_clock_body).expect("arm clock");
-    assert!(
-        arm_clock.boat_clock,
-        "the ceiling must be the boat's own instant, not the venue clock: {arm_clock_body}"
-    );
-    let armed_at = arm_clock.venue_now_ns;
+    // What replaces it is stronger rather than weaker. A blackout is gated at
+    // SEND time, so the venue chooses to write nothing at all once the arm
+    // lands, and the honest assertion is silence rather than an ordering bound.
+    // The only frames that may still arrive are bytes already on the wire when
+    // the ack came back, so they are drained explicitly and named as such
+    // instead of being admitted by a comparison.
+    let settle_until = tokio::time::Instant::now() + Duration::from_millis(250);
+    while let Ok(Some(Ok(_))) = tokio::time::timeout_at(settle_until, data_socket.next()).await {}
 
     // Within the window no market data may arrive on this socket.
     //
@@ -2123,9 +2126,10 @@ async fn an_armed_divergence_reaches_every_connection() {
                 _ => None,
             };
             assert!(
-                event_ts.is_none_or(|ts| ts <= armed_at),
-                "market data generated after an armed StallData window arrived: \
-                 ts_event {event_ts:?} is past the boat's arming instant {armed_at}"
+                event_ts.is_none(),
+                "market data arrived inside an armed StallData window, stamped \
+                 {event_ts:?}; the venue gates at send time, so it should have \
+                 written nothing at all"
             );
         }
     }
@@ -2297,24 +2301,21 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
         let mut attempts: Vec<(String, bool)> = Vec::new();
         for attempt in 0..ATTEMPTS {
             let id = format!("MKT-{path}-{attempt}");
-            // The LOWER end of the bracket the floor below is taken over, read
-            // before the submit goes out. The boat's published instant is
-            // monotone and lags its own projection, so the instant the handler
-            // reads the tape at is at or after this - which is what makes the
-            // floor a real bound rather than a guess. Anchoring the window on
-            // the ACCEPTANCE instant instead, which is what this did, put the
-            // window's start AFTER prints the reading could legitimately have
-            // been taken at, and the floor then rejected honest fills.
-            let (_, before_body) = http_get(
-                &venue.http_base(),
-                &format!("/clock?symbol={}", venue.symbol),
-            );
-            let before: mogwai_protocol::VenueClock =
-                serde_json::from_str(&before_body).expect("the pre-submit clock");
-            assert!(
-                before.boat_clock,
-                "the bracket needs this river's boat, not the venue clock: {before_body}"
-            );
+            // The LOWER end of the bracket the floor below is taken over: the
+            // last market instant THIS SOCKET has actually been given before the
+            // submit goes out. Delivery is monotone and the handler reads a tape
+            // at or beyond what it has already published, so this is a true
+            // lower bound. Anchoring the window on the ACCEPTANCE instant
+            // instead, which is what this did, put the window's start AFTER
+            // prints the reading could legitimately have been taken at, and the
+            // floor then rejected honest fills.
+            //
+            // NOT `/clock`, and not because the read is expensive: that route is
+            // a run fact now and the run clock runs AHEAD of what any boat has
+            // published, so it is not a lower bound at all and would reinstate
+            // exactly the too-late anchor described above. What the socket has
+            // been handed is its own knowledge and needs no route.
+            let before_ns = drain_last_market_ts(&mut socket).await;
             let submit = format!(
                 r#"{{"type":"SubmitOrder","client_order_id":"{id}","symbol":"{}","side":"Buy","order_type":"Market","quantity":"0.01"{price},"time_in_force":"Gtc"}}"#,
                 venue.symbol
@@ -2391,7 +2392,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
             let trades = trade_window(
                 &venue.http_base(),
                 &venue.symbol,
-                before.venue_now_ns.saturating_sub(60_000_000_000),
+                before_ns.saturating_sub(60_000_000_000),
                 reading_ts,
             );
             let last = trades
@@ -2644,15 +2645,14 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     // failure: the clock poll would keep polling, and if the boat went with the
     // connection `venue_sim_now` would panic about a river carrying no boat.
     let drain = BackgroundDrain::spawn(reader);
-    let clock_path = format!("/clock?symbol={}", venue.symbol);
-    let sim_at_acceptance = venue_sim_now(&venue.http_base(), &clock_path);
+    let sim_at_acceptance = venue_sim_now(&venue.http_base(), "/clock");
     let target = sim_at_acceptance + 50_000_000_000;
     let deadline = common::deadline(common::TEST_WALL_BUDGET);
-    while venue_sim_now(&venue.http_base(), &clock_path) < target {
+    while venue_sim_now(&venue.http_base(), "/clock") < target {
         drain.assert_still_serving("the order socket");
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the boat's clock did not advance 50 sim-seconds in 60 s of wall time, so no sweep \
+            "the run clock did not advance 50 sim-seconds in 60 s of wall time, so no sweep \
              pass can be claimed to have run over the resting conditionals"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3028,14 +3028,41 @@ fn a_paged_tape_window_equals_the_same_window_read_in_one_query() {
     }
 }
 
-/// The named boat's own `venue_now_ns`, so a test can wait on the venue's clock
-/// instead of on the host's.
+/// The last market instant this socket has actually been handed, draining
+/// whatever is already queued on it.
+///
+/// A SOCKET'S OWN DELIVERY IS ITS OWN KNOWLEDGE, which is why this exists rather
+/// than a clock read. `/clock` is a run fact and the run clock runs AHEAD of what
+/// any boat has published, so it is not a lower bound on what a handler could
+/// have read; the frames this socket already holds are. Returns the tape origin
+/// when nothing has arrived yet, which is a true lower bound too.
+async fn drain_last_market_ts(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> u64 {
+    let mut last = 0;
+    let until = tokio::time::Instant::now() + Duration::from_millis(50);
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(until, socket.next()).await {
+        if let Message::Text(text) = message {
+            match serde_json::from_str::<VenueMessage>(&text) {
+                Ok(VenueMessage::Trade(trade)) => last = last.max(trade.ts_event),
+                Ok(VenueMessage::Quote(quote)) => last = last.max(quote.ts_event),
+                _ => {}
+            }
+        }
+    }
+    last
+}
+
+/// The run's own `venue_now_ns`, so a test can wait on the venue's clock instead
+/// of on the host's. `/clock` is a run fact and names no river, so callers pass
+/// the bare path.
 fn venue_sim_now(base: &str, clock_path: &str) -> u64 {
     let (status, body) = http_get(base, clock_path);
-    assert_eq!(status, 200, "the boat's clock answers: {body}");
+    assert_eq!(status, 200, "the venue clock answers: {body}");
     let clock: mogwai_protocol::VenueClock =
         serde_json::from_str(&body).expect("the clock answer parses");
-    assert!(clock.boat_clock, "the boot river carries a boat: {body}");
     clock.venue_now_ns
 }
 
@@ -3738,32 +3765,65 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
     );
 }
 
-/// `/clock` answers for the named river's boat, and LABELS the venue-clock
-/// fallback so a caller cannot read it as a boat's own time.
-#[test]
+/// `/clock` is a RUN fact and says nothing about any boat.
+///
+/// The property under test is opacity, not the payload: a caller must not be
+/// able to learn from this route that a boat exists, what cadence it runs, or
+/// how far it has delivered. It used to answer on a named river's boat, which
+/// made the route a boat-discovery surface - and with no speed named, another
+/// account placing a faster boat moved every field of somebody else's answer.
+///
+/// So the two halves here are that the retired parameters are REFUSED rather
+/// than ignored, and that placing a second boat at a different cadence does not
+/// move the answer at all.
+#[tokio::test]
 #[ignore = "binds a loopback listener"]
-fn clock_answers_per_boat_when_a_symbol_is_named() {
+async fn the_clock_is_a_run_fact_and_no_boat_moves_it() {
     let venue = spawn(&["--config", &two_symbols_config()]);
-    let (status, boated) = http_get(
-        &venue.http_base(),
-        &format!("/clock?symbol={}", venue.symbol),
-    );
-    assert_eq!(status, 200, "the boot river answers: {boated}");
-    let boated: mogwai_protocol::VenueClock = serde_json::from_str(&boated).unwrap();
-    assert!(boated.boat_clock, "the boot river carries a boat");
 
-    let (status, unboated) = http_get(&venue.http_base(), "/clock?symbol=MNQ");
-    assert_eq!(status, 200, "an unboated river still answers: {unboated}");
-    let unboated: mogwai_protocol::VenueClock = serde_json::from_str(&unboated).unwrap();
-    assert!(
-        !unboated.boat_clock,
-        "the venue-clock fallback is labelled as such"
-    );
+    for retired in [
+        "/clock?symbol=MNQ",
+        "/clock?speed=2",
+        "/clock?symbol=MNQ&speed=2",
+    ] {
+        let (status, body) = http_get(&venue.http_base(), retired);
+        assert_eq!(
+            status, 400,
+            "a retired clock parameter must be refused, not ignored: {retired} gave {body}"
+        );
+    }
 
-    let (status, unnamed) = http_get(&venue.http_base(), "/clock");
-    assert_eq!(status, 200, "an unnamed clock still answers: {unnamed}");
-    let unnamed: mogwai_protocol::VenueClock = serde_json::from_str(&unnamed).unwrap();
-    assert!(!unnamed.boat_clock, "no symbol names no boat");
+    let (status, before) = http_get(&venue.http_base(), "/clock");
+    assert_eq!(status, 200, "the clock answers: {before}");
+    let before: mogwai_protocol::VenueClock = serde_json::from_str(&before).unwrap();
+
+    // A SECOND CADENCE ON THE SAME WATER is the case that used to be visible.
+    // This socket boards at a speed nobody else is riding, so under the old
+    // reducer it would have become the lead boat and moved the ceiling every
+    // other caller was answered on.
+    let (_socket, _) = tokio_tungstenite::connect_async(format!(
+        "{}?symbol={}&speed=8",
+        venue.ws_url(),
+        venue.symbol
+    ))
+    .await
+    .expect("a second cadence boards");
+
+    let (status, after) = http_get(&venue.http_base(), "/clock");
+    assert_eq!(status, 200, "the clock still answers: {after}");
+    let after: mogwai_protocol::VenueClock = serde_json::from_str(&after).unwrap();
+    assert_eq!(
+        before.sim, after.sim,
+        "the affine map is the run's and a boarding must not change it"
+    );
+    assert_eq!(
+        before.data_origin_ns, after.data_origin_ns,
+        "the tape floor is a run fact"
+    );
+    assert_eq!(
+        before.warmup_ns, after.warmup_ns,
+        "the warmup span is a run fact"
+    );
 }
 
 /// A duration is a property of the PASSENGER. One passenger's deadline closes

@@ -20,8 +20,12 @@ the run's one pacing rate: a `/ws` upgrade may name its own `speed`, and the
 boat it boards is keyed by river and by that speed quantized to micro-multiples.
 An unserved speed is a second boat on the same river, not a refusal. An
 absent `speed` means the configured one and is what every consumer that predates
-the carrier sends. `/clock?symbol=` answers the lead boat when a river carries
-more than one cadence; `/clock?symbol=&speed=` names one.
+the carrier sends. `/clock` reports the RUN's clock and nothing about any boat:
+it took `symbol` and `speed` and answered on a named river's boat until that was
+found to be a boat-discovery channel on a route that cannot tell who is asking,
+and both parameters are now refused rather than ignored. A passenger's own
+delivery instant reaches it where it always did, stamped on the frames its boat
+publishes.
 `speed = 0.0` is unpaced
 delivery, not a stopped clock: the sim axis still advances at wall rate so the
 deadline task, the fill sweeper and the trailing-volatility window keep
@@ -86,13 +90,11 @@ clock. Holding the run open until every boat's affine clock had also passed the
 deadline would let a socket connecting near the deadline extend the run by
 another whole duration, which is why nothing does.
 `data_origin_ns` is its earliest servable instant, always `TAPE_ORIGIN_NS`.
-`/clock` reports both the clock and the current simulated time. It takes an
-optional `?symbol=`, and answers for that river's boat: a boat carries its own
-clock, anchored at ITS placement, and `venue_now_ns` is then the sim instant of
-the last tick that boat published rather than the affine map read at the wall.
-With no symbol, or for a river carrying no boat, the venue clock answers
-instead and `boat_clock` is `false`, so a caller cannot mistake the fallback for
-a boat's own time. A clock-neutral havoc window stores its wall arming instant
+`/clock` reports the run's clock and the current simulated time, and takes no
+parameters at all. It is also the axis anonymous history is answered on, so a
+consumer paginating `/trades` or `/quotes` reads it once and passes that instant
+as `end` on every page, which is what stops one logical window from growing
+while it is being read. A clock-neutral havoc window stores its wall arming instant
 and simulated span. Each reader judges the span on its own clock; a boat placed
 after the arm opens the window at its own epoch and receives the full span.
 The pulled `/account` snapshot is venue-scoped and labels its axis as

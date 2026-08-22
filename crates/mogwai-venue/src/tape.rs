@@ -34,7 +34,6 @@ pub(crate) struct TapeSpawn {
     pub(crate) speed: f64,
     pub(crate) fanout_depth: usize,
     pub(crate) fault_tx: mpsc::Sender<TickFault>,
-    pub(crate) published_ns: Arc<std::sync::atomic::AtomicU64>,
     /// Where this thread records the high and low of the span since the sweeper
     /// last looked. See `crate::extremes`: it is what gives peak equity and a
     /// trailing stop tick resolution without evaluating either here.
@@ -89,7 +88,6 @@ impl Tape {
                     break;
                 }
                 let ts_event = tick.ts_event();
-                spawn.published_ns.store(ts_event, Ordering::Release);
                 // TRADES only, and that is the same rule the mark reads follow:
                 // a mark is a last-PRINT read, so an extreme drawn from quotes
                 // would be an extreme no fill or valuation could ever have been

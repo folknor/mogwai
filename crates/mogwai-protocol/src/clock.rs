@@ -107,9 +107,18 @@ impl SimClock {
 /// richer envelope publishes where the synthetic tape begins so a consumer can
 /// guard its own warmup window instead of issuing a doomed off-river fetch.
 ///
+/// ALWAYS THE RUN'S OWN CLOCK, never a boat's. It carried a `boat_clock` flag and
+/// answered on a named river's boat until that was found to be a boat-discovery
+/// channel on a route that cannot tell who is asking - the flag was an existence
+/// bit and the map exposed another passenger's cadence and placement. Per-boat
+/// clocks still reach the passengers entitled to them, stamped on the frames
+/// their own boat publishes.
+///
 /// `venue_now_ns` is `sim.sim_ns(wall)` sampled when the request is served, so
 /// a consumer gets sim-now and the tape floor from one round trip without having
-/// to read its own (possibly skewed) wall clock. `data_origin_ns` is the
+/// to read its own (possibly skewed) wall clock. It is also the axis anonymous
+/// history is answered on, so a paginating consumer can pin one window by
+/// reading this once and passing it as `end` on every page. `data_origin_ns` is the
 /// earliest `ts_event` any source can serve (`run_start_ns - warmup_ns`); a
 /// request for a `start` below it is refused. The span is echoed so the consumer
 /// can report the floor in its own terms.
@@ -125,14 +134,6 @@ pub struct VenueClock {
     /// The boot river is materialized before readiness; other rivers
     /// materialize it on first read.
     pub warmup_ns: u64,
-    /// True when this answer belongs to a placed boat, false when it is the
-    /// venue clock served as a fallback because the named river carries no
-    /// boat (or because no river was named). The two are not interchangeable -
-    /// a boat's clock is anchored at ITS placement - so the fallback is
-    /// labelled rather than left to look like a boat's answer. Defaulted on
-    /// decode so a payload predating the boatyard still parses.
-    #[serde(default)]
-    pub boat_clock: bool,
 }
 
 /// API-boundary guard for `SimClock`, mirroring `validate_conn_havoc` /
@@ -296,13 +297,12 @@ mod tests {
             venue_now_ns: 1_900_000_799_000_000_000,
             data_origin_ns: 1_899_913_600_000_000_000,
             warmup_ns: 86_400_000_000_000,
-            boat_clock: true,
         };
 
         let json = serde_json::to_string(&clock).unwrap();
         assert_eq!(
             json,
-            r#"{"sim":{"sim_epoch_ns":1900000000000000000,"wall_anchor_ns":1782000000000000000,"speed":120.0},"venue_now_ns":1900000799000000000,"data_origin_ns":1899913600000000000,"warmup_ns":86400000000000,"boat_clock":true}"#,
+            r#"{"sim":{"sim_epoch_ns":1900000000000000000,"wall_anchor_ns":1782000000000000000,"speed":120.0},"venue_now_ns":1900000799000000000,"data_origin_ns":1899913600000000000,"warmup_ns":86400000000000}"#,
             "the /clock snapshot's byte form is a wire contract"
         );
         let decoded: VenueClock = serde_json::from_str(&json).unwrap();

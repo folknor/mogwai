@@ -81,7 +81,6 @@ pub(crate) struct Boat {
     key: BoatKey,
     pub(crate) sim: SimClock,
     pub(crate) tape: Arc<Tape>,
-    pub(crate) published_ns: Arc<AtomicU64>,
     pub(crate) last_swept_ns: AtomicU64,
     /// This river's acceptance-time market reading, memoized per sweep-interval
     /// bucket on THIS boat's clock. Per boat because the bucket is a function
@@ -186,7 +185,6 @@ impl Boatyard {
             .map_err(|err| BoardRefusal::Placement(anyhow::anyhow!(err)))
             .and_then(|result| result.map_err(BoardRefusal::Placement));
         let boat = cursor.map(|cursor| {
-            let published_ns = Arc::new(AtomicU64::new(self.origin_ns));
             let sim = SimClock {
                 sim_epoch_ns: self.origin_ns,
                 wall_anchor_ns: now_ns(),
@@ -200,7 +198,6 @@ impl Boatyard {
                     speed,
                     fanout_depth: self.fanout_depth,
                     fault_tx: self.fault_tx.clone(),
-                    published_ns: Arc::clone(&published_ns),
                     extremes: Arc::clone(&extremes),
                 },
             );
@@ -209,7 +206,6 @@ impl Boatyard {
                 key: key.clone(),
                 sim,
                 tape,
-                published_ns,
                 last_swept_ns: AtomicU64::new(self.origin_ns),
                 market_readings: crate::fills::MarketReadingCache::for_symbol(req.river.symbol()),
                 extremes,
@@ -273,56 +269,6 @@ impl Boatyard {
 
     /// The boat on `symbol` at this quantized speed, if one is placed.
     ///
-    /// Quantized through `BoatKey::new`, the same call `board` keys by, and
-    /// compared against the KEY, so a caller naming `100.0000001` finds the
-    /// boat placed for `100` by construction rather than by two roundings
-    /// happening to agree.
-    pub(crate) fn boat_at(&self, symbol: &str, speed: f64) -> Option<Arc<Boat>> {
-        let speed_micros = quantize_speed(speed).ok()?;
-        self.boats_for_symbol(symbol)
-            .into_iter()
-            .find(|boat| boat.key.speed_micros == speed_micros)
-    }
-    /// As `boat_for_symbol`, but WAITS on a placement already in flight rather
-    /// than reporting the river boatless.
-    ///
-    /// `Slot::Placing` is not an absence: a caller that reads through it gets a
-    /// well-formed answer off the venue clock for a river that is about to have
-    /// a boat, which is exactly the look-ahead per-boat clocks exist to remove
-    /// and is invisible because the answer is well-formed. The wait is bounded
-    /// by the placement itself - `board` closes the handoff semaphore under the
-    /// registry mutex with the boat already placed or the placeholder
-    /// already removed, so the re-read below always makes progress, and a
-    /// FAILED placement re-reads to `None` and answers boatless truthfully. A
-    /// river with no slot at all returns immediately.
-    ///
-    /// `boat_for_symbol` keeps the non-blocking form for the callers that must
-    /// never block on a placement - the history routes' materialization
-    /// pre-check, and `health`, which reads the whole placed set through
-    /// `boats` on the same non-blocking terms.
-    pub(crate) async fn boat_for_symbol_awaiting_placement(
-        &self,
-        symbol: &str,
-    ) -> Option<Arc<Boat>> {
-        loop {
-            let wait = {
-                let boats = self.locked();
-                let mut placing = None;
-                for (key, slot) in boats.iter() {
-                    if key.river.symbol() != symbol {
-                        continue;
-                    }
-                    match slot {
-                        Slot::Placed(placed) => return Some(Arc::clone(&placed.boat)),
-                        Slot::Placing(handoff) => placing = Some(Arc::clone(handoff)),
-                    }
-                }
-                placing
-            };
-            let wait = wait?;
-            drop(wait.acquire().await);
-        }
-    }
     pub(crate) fn placed_symbols(&self) -> Vec<String> {
         let mut symbols: Vec<String> = self
             .locked()
@@ -628,110 +574,6 @@ mod tests {
             "a failed placement left a placeholder behind"
         );
     }
-
-    /// Install a placement-in-flight placeholder over a river that already has
-    /// a placed boat, so the handoff can be driven deterministically instead of raced.
-    /// Returns the displaced boat and the handoff a completing placement would
-    /// close.
-    fn hold_placement_open(yard: &Boatyard, key: &BoatKey) -> (Arc<Boat>, Arc<Semaphore>) {
-        let handoff = Arc::new(Semaphore::new(0));
-        let mut boats = yard.locked();
-        let boat = match boats.insert(key.clone(), Slot::Placing(Arc::clone(&handoff))) {
-            Some(Slot::Placed(placed)) => placed.boat,
-            _ => panic!("the river had no placed boat"),
-        };
-        (boat, handoff)
-    }
-
-    /// A reader racing a placement must WAIT for it, not be told the river is
-    /// boatless. Falling through returns a well-formed answer off the venue
-    /// clock for a river that is about to have a boat - the exact look-ahead
-    /// per-boat clocks exist to remove, and invisible because it is well-formed.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_reader_racing_a_placement_waits_for_the_boat() {
-        let (yard, river) = yard();
-        let _ticket = yard
-            .board(&BoardRequest {
-                river: river.clone(),
-                speed: 1.0,
-            })
-            .await
-            .unwrap();
-        let key = _ticket.boat().key();
-        let (boat, handoff) = hold_placement_open(&yard, &key);
-
-        let reading = {
-            let yard = Arc::clone(&yard);
-            tokio::spawn(async move { yard.boat_for_symbol_awaiting_placement("BTCUSDT").await })
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            !reading.is_finished(),
-            "the reader answered while the placement was still in flight"
-        );
-        // `health` keeps the non-blocking form, and this is what it sees.
-        assert!(yard.boat_for_symbol("BTCUSDT").is_none());
-
-        // Exactly what `board` does on success: place the boat and close the
-        // handoff, both under the registry mutex.
-        {
-            let mut boats = yard.locked();
-            boats.insert(
-                key,
-                Slot::Placed(PlacedBoat {
-                    boat: Arc::clone(&boat),
-                    passengers: 1,
-                }),
-            );
-            handoff.close();
-        }
-        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), reading)
-            .await
-            .expect("the reader was never woken by the handoff")
-            .unwrap()
-            .expect("the reader saw no boat after the placement completed");
-        assert!(Arc::ptr_eq(&answered, &boat));
-    }
-
-    /// The other half: a placement that FAILS leaves no boat, and the waiting
-    /// reader must fall through to boatless rather than wedge on a handoff
-    /// nobody will ever hand off.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_reader_waiting_on_a_failed_placement_answers_boatless() {
-        let (yard, river) = yard();
-        let ticket = yard
-            .board(&BoardRequest {
-                river: river.clone(),
-                speed: 1.0,
-            })
-            .await
-            .unwrap();
-        let key = ticket.boat().key();
-        let (boat, handoff) = hold_placement_open(&yard, &key);
-        drop(boat);
-
-        let reading = {
-            let yard = Arc::clone(&yard);
-            tokio::spawn(async move { yard.boat_for_symbol_awaiting_placement("BTCUSDT").await })
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!reading.is_finished(), "the reader did not wait at all");
-        {
-            let mut boats = yard.locked();
-            boats.remove(&key);
-            handoff.close();
-        }
-        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), reading)
-            .await
-            .expect("the reader wedged on a failed placement")
-            .unwrap();
-        assert!(
-            answered.is_none(),
-            "a failed placement must answer boatless"
-        );
-        drop(ticket);
-    }
-
     /// The placement HANDOFF, which the sequential tests cannot reach: every
     /// boarder but one finds a placeholder, and each of them clones the
     /// handoff under the registry mutex and only then awaits it. A handoff
