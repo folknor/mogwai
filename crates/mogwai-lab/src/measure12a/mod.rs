@@ -14,7 +14,7 @@
 //! implementations - `analysis/mnq_fit.py`'s `_M12aSession`/`_m12a_block*`
 //! and `crates/mogwai-cli/src/measure12a.rs`'s `Measure12aAcc` - whose
 //! agreement was checked only by comparing artifacts. That is the
-//! cross-language float-divergence defect class the rewrite exists to kill.
+//! cross-language float-mismatch defect class the rewrite exists to kill.
 //! Both originals stay on disk and authoritative until phase 2c: where this
 //! port and the Python disagree on the OBSERVED side the Python wins; where
 //! it disagrees with `measure12a.rs` on the GENERATED side, `measure12a.rs`
@@ -30,7 +30,7 @@
 //!   is formed in exact integers, halved in `f64`, and only then logged. Log
 //!   differences are not invariant under rescaling of the input, so feeding
 //!   `ln` a mid in points rather than in nano-units shifts every block-3 and
-//!   block-4 statistic by a term that does not cancel. A divergence of that
+//!   block-4 statistic by a term that does not cancel. A mismatch of that
 //!   class (3.55e-15 relative) was caught here once already.
 //! - **Tick ranges are exact integer divisions that refuse off-grid.** The
 //!   trade range divides by the full tick; the quote-mid range divides the

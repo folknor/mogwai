@@ -2453,7 +2453,7 @@ mod tests {
         assert_eq!(got["eligible_gaps"], serde_json::json!(gaps));
         // EXACT equality on the float moments: both accumulators traverse
         // identical values in identical order, so their sums are bitwise
-        // equal - a tolerance here would hide an ordering divergence.
+        // equal - a tolerance here would hide an ordering mismatch.
         assert_eq!(got["mid_return_count"], serde_json::json!(ret_count));
         let got_sum = got["mid_return_sum"].as_f64().unwrap();
         let got_sumsq = got["mid_return_sumsq"].as_f64().unwrap();

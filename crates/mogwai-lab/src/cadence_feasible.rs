@@ -408,7 +408,7 @@ mod gap_cv2_parity {
     ///
     /// Slower than the rest of this module by a wide margin, and deliberately
     /// not skipped: an unpinned default path is exactly how an unstated
-    /// divergence survived here once already.
+    /// mismatch survived here once already.
     #[test]
     fn the_default_three_million_event_run_matches_cpython_field_for_field() {
         let (cadence, fingerprint) = committed_inputs();

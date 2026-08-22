@@ -117,14 +117,20 @@ fn run_stage0() -> anyhow::Result<()> {
             .as_array()
             .and_then(|rows| rows.iter().find(|row| row["seed"].as_u64() == Some(*seed)))
             .ok_or_else(|| anyhow!("committed artifact is missing seed {seed}"))?;
-        if let Some(divergence) = first_divergence(
+        if let Some(mismatch) = first_mismatch(
             Some(*seed),
             &expected_seed["blocks"]["block2"],
             &blocks["block2"],
         )? {
             write_artifact(
                 Path::new(OUT),
-                &json!({"binding": binding, "verdict": "generated_identity_mismatch_unattributed", "first_divergence": divergence}),
+                // The artifact key stays `first_divergence`: the spelling is fixed by the
+                // frozen preregistration this measurement answers, so every record
+                // already written under it still reads. The Rust name beside it is
+                // not frozen. Nothing gates the spelling - the artifact is written to
+                // an untracked output directory and no test reads the key - so this
+                // comment is the whole of the pin.
+                &json!({"binding": binding, "verdict": "generated_identity_mismatch_unattributed", "first_divergence": mismatch}),
             )?;
             return report("generated_identity_mismatch_unattributed");
         }
@@ -165,12 +171,15 @@ fn run_full() -> anyhow::Result<()> {
     let observed_sessions = array_at(&observed, "per_session")?;
     let observed_blocks = mogwai_lab::aggregate::monthly::blocks_from_sessions(observed_sessions)
         .map_err(|e| anyhow!(e.to_string()))?;
-    if let Some(divergence) = first_divergence(
+    if let Some(mismatch) = first_mismatch(
         None,
         &reference["observed"]["monthly"]["block2"],
         &observed_blocks["block2"],
     )? {
-        let artifact = json!({"stage0": stage0, "verdict": "observed_method_mismatch", "first_divergence": divergence});
+        // The artifact key stays `first_divergence`, frozen by the
+        // preregistration exactly as at the stage-0 site above; the Rust name
+        // beside it is not.
+        let artifact = json!({"stage0": stage0, "verdict": "observed_method_mismatch", "first_divergence": mismatch});
         write_artifact(Path::new(OUT), &artifact)?;
         return report("observed_method_mismatch");
     }
@@ -570,7 +579,7 @@ fn binding_json(exposure: &Exposure, commit: &str, actual: &InputIdentity) -> Va
     })
 }
 
-fn first_divergence(
+fn first_mismatch(
     seed: Option<u64>,
     expected: &Value,
     actual: &Value,
@@ -650,11 +659,11 @@ mod tests {
         let expected = json!({"20":{"1":{"scheduled_windows":2,"zero_windows":1,"count_hist":{"0":1,"1":1}},"5":{"scheduled_windows":1,"zero_windows":0,"count_hist":{"2":1}},"60":{"scheduled_windows":1,"zero_windows":0,"count_hist":{"3":1}}}});
         let mut actual = expected.clone();
         actual["20"]["1"]["zero_windows"] = json!(0);
-        let divergence = first_divergence(None, &expected, &actual)
+        let mismatch = first_mismatch(None, &expected, &actual)
             .expect("comparison")
-            .expect("divergence");
-        assert_eq!(divergence["hour"], 20);
-        assert_eq!(divergence["field"], "zero_windows");
+            .expect("mismatch");
+        assert_eq!(mismatch["hour"], 20);
+        assert_eq!(mismatch["field"], "zero_windows");
     }
 
     #[test]

@@ -317,7 +317,7 @@ fn tree_median_preserves_leaf_types_and_refuses_shape_drift() {
     // Any null centralizes the leaf to null - no median over fewer seeds.
     let n = json!({"k": null, "s": "x"});
     assert!(tree_median(&[&a, &n]).expect("a median")["k"].is_null());
-    // A key-set divergence refuses, and so does a disagreeing string.
+    // A key-set mismatch refuses, and so does a disagreeing string.
     let d = json!({"k": 1});
     assert!(tree_median(&[&a, &d]).is_err());
     let e = json!({"k": 1, "s": "y"});

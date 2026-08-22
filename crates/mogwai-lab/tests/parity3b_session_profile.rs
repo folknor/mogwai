@@ -182,13 +182,13 @@ fn parity3b_session_profile_reproduces_the_preset_dow_weight() {
     assert_eq!(
         format!(
             "{:.4}",
-            report["era_stability"]["divergent_share"]
+            report["era_stability"]["mismatch_share"]
                 .as_f64()
                 .expect("share")
         ),
         "0.2283"
     );
-    assert_eq!(report["era_stability"]["divergent_cells"], 26);
+    assert_eq!(report["era_stability"]["mismatch_cells"], 26);
     assert_eq!(report["era_stability"]["verdict"], "ERA-DEPENDENT");
     assert_eq!(
         report["outcome"],

@@ -793,7 +793,7 @@ pub fn reduced_blocks_from_sessions(per_session: &[Value]) -> LabResult<Value> {
 // -- Central blocks (the 8-seed median tree) --------------------------------
 
 /// `tree_median`: the recursive 8-seed median over IDENTICALLY SHAPED JSON
-/// trees. A key-set divergence refuses (the seeds run one code path over one
+/// trees. A key-set mismatch refuses (the seeds run one code path over one
 /// calendar, so shape drift is a defect); a numeric leaf where ANY seed is
 /// null centralizes to null - never a median over fewer than the full seed
 /// set; strings, booleans and arrays must agree exactly.

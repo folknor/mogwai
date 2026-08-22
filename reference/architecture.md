@@ -173,7 +173,7 @@ EXACTLY ONE OF THEM. The account a connection carries is the only account on tha
 can be misrouted onto it, and the id the venue writes on an `AccountState`
 therefore identifies nothing a consumer has to resolve. The
 adapter reads it exactly once, at connect, where `note_account_label` logs the
-divergence if the venue's name for the ledger differs from the configured one -
+mismatch if the venue's name for the ledger differs from the configured one -
 and then stamps the CONFIGURED id onto every snapshot it publishes
 (`handle_account_state`). Both halves of this used to be an equality check, and
 both were per-account-slot invariants that outlived the slots: the connect-time
@@ -314,7 +314,7 @@ path ask that one function, so a refusal added to only one of them is the whole
 defect family in a single line. Three atomicity bugs came from it being
 unwritten: a hedging `position_id` rule that lived outside the validator, a link
 validated without the group's own ids on the second pass, and a non-idempotent
-`Ouo` applied twice. Because nothing can detect the NEXT such divergence by
+`Ouo` applied twice. Because nothing can detect the NEXT such mismatch by
 construction, the group checks itself instead: a member refused on pass two
 re-asks the dry question against the state as it now stands, and a dry pass that
 would ADMIT what the real path just refused is a defect rather than the funds
@@ -1130,7 +1130,7 @@ gate passing on the committed fixtures is evidence about those fixtures, not
 proof of equivalence over the contract. So a Rust refusal where the original
 proceeded is a loud narrowing and needs only to be recorded; a Rust result
 that differs on some valid input the fixtures happen not to contain is a
-silent divergence and must be fixed or approved; and a Rust default where the
+silent mismatch and must be fixed or approved; and a Rust default where the
 original raised is silent acceptance of malformed input, the worst of the
 three, because it manufactures an answer. Fixing the third class by making
 the committed artifact pass again is not a fix - the repair needs a fixture

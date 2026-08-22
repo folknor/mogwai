@@ -198,7 +198,7 @@ fn run_final_walk(seed: u64) -> serde_json::Value {
 
 /// One seed's gate. Split per seed rather than looped inside one test so no
 /// single test carries eight month-long walks (the runner caps a test's wall
-/// time), and so a divergence names its seed in the failure itself.
+/// time), and so a mismatch names its seed in the failure itself.
 fn assert_seed_parity(seed: u64) {
     let root = repo_root();
     let cache_dir = root.join(GENERATED_CACHE);

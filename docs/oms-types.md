@@ -89,7 +89,7 @@ subject to the time in force above.
 
 That is a change of behaviour as of 2026-08-19, and it is stated rather than
 quietly corrected because a consumer testing against the old venue saw the
-divergence: the fill used to take the WHOLE quantity at the order's own stated
+mismatch: the fill used to take the WHOLE quantity at the order's own stated
 limit with no reference to the tape - a buy limited at 200 against a last print
 of 100 filled at 200 - so no remainder arose on the clean path at all, and where
 an armed `PartialFillNext` manufactured one, the kept remainder rested inert,

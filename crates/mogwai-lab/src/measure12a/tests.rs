@@ -115,7 +115,7 @@ fn the_log_mid_is_ln_of_the_nano_unit_price_sum_halved() {
     // price sum is formed in EXACT integer 1e-9 units, halved in f64, and
     // only then logged. Logging a mid expressed in POINTS instead shifts the
     // value by ln(1e9), and every difference-based statistic downstream by a
-    // term that does not cancel across segments - the 3.55e-15 divergence
+    // term that does not cancel across segments - the 3.55e-15 mismatch
     // class this port exists to kill.
     let seg = SessionSegment {
         session_start_ns: OPEN_NS,

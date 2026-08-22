@@ -25,7 +25,7 @@
 //! integer divisions go through `py_int_div`. But `ret2` and the hourly buckets
 //! are NOT those: they are naive `+=` accumulations, because the Python
 //! accumulates them in a loop rather than through `sum()`, and a compensated
-//! sum there would be the divergence. So the claim is not "everything is
+//! sum there would be the mismatch. So the claim is not "everything is
 //! compensated" - it is that each site matches the CPython construct it was
 //! ported from, which is why anything less than bit equality is a defect rather
 //! than a tolerance question.
@@ -304,7 +304,7 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
 /// depends on - and that is exactly where the squaring deviation lives. This
 /// re-derives the difference set against the Python's own cache and asserts it
 /// is EXACTLY the recorded manifest: no fewer, so a correction cannot silently
-/// disappear, and no more, so a new divergence cannot hide among the approved
+/// disappear, and no more, so a new mismatch cannot hide among the approved
 /// ones.
 ///
 /// Needs the archives, so it keeps the local-data caveat of the gate above -

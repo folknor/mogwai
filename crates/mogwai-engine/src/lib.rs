@@ -2122,7 +2122,7 @@ impl Engine {
     /// MEMBERS HAVE ALREADY RESTED. Without that, the group's dry pass (nothing
     /// resting) and its real pass (earlier members resting) would compute
     /// different numbers, and a check reading it could admit a member on pass
-    /// one and refuse it on pass two - an admission divergence
+    /// one and refuse it on pass two - an admission mismatch
     /// `report_group_member_refusal` would then have misfiled as the disclosed
     /// funds carve-out, because re-running the dry question after the refusal
     /// refuses again.

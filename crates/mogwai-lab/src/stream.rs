@@ -218,7 +218,7 @@ pub fn classify_book(bid_px: i64, ask_px: i64) -> &'static str {
 /// retires, so its behaviour is still available as the reference this diverges
 /// from knowingly.
 ///
-/// The divergence is safe by construction for the parity gates: they compare
+/// The mismatch is safe by construction for the parity gates: they compare
 /// output over WELL-FORMED corpora, where no conversion fails and nothing is
 /// reached. What changes is only the behaviour on input the Python crashes on,
 /// which is the class the refusal contract in `reference/architecture.md`

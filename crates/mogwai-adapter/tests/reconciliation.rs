@@ -542,7 +542,7 @@ async fn a_stop_report_carries_its_trigger_price_and_status() {
 
     // Carrier two: the singular, targeted query the execution manager's
     // in-flight probe uses. It builds its report through the same converter, so
-    // a divergence between the two would be a converter that lost a field on
+    // a mismatch between the two would be a converter that lost a field on
     // one path only.
     let targeted = client
         .generate_order_status_report(&GenerateOrderStatusReport::new(

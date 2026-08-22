@@ -76,7 +76,7 @@ pub fn nearest_rank_list(sorted_values: &[f64], q: f64) -> Option<f64> {
 /// `nearest_rank_p`: the same rule with BOTH ends clamped (the Python
 /// `min(max(rank, 1), len)`), returning `None` on an empty list rather than
 /// refusing. The two exist separately in the Python and are kept separate
-/// here so a future divergence stays visible.
+/// here so a future mismatch stays visible.
 #[must_use]
 pub fn nearest_rank_p(sorted_vals: &[f64], q: f64) -> Option<f64> {
     if sorted_vals.is_empty() {
@@ -500,7 +500,7 @@ pub fn first_canon_difference(
 
 /// Up to `limit` differing paths, in canonical (sorted-key, index) order. The
 /// parity gates report a handful rather than one, because a single reported
-/// leaf tells you nothing about whether the divergence is a lone last-ulp
+/// leaf tells you nothing about whether the mismatch is a lone last-ulp
 /// float or a whole block off its convention.
 #[must_use]
 pub fn canon_differences(
@@ -751,7 +751,7 @@ mod tests {
         // The `float_roundtrip` feature on serde_json (workspace Cargo.toml)
         // is load-bearing for every parity gate: WITHOUT it serde_json's fast
         // float parser lands one ULP off the correctly rounded value for
-        // inputs like these, and the gate reports divergences that exist only
+        // inputs like these, and the gate reports mismatches that exist only
         // in the reader. Each literal below is a real block-2/block-3 value
         // from the committed 12a records that the default parser gets wrong.
         for s in [

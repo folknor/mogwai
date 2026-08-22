@@ -241,7 +241,7 @@ pub fn run_measure_with(
 
     // -- Observed pass, LIVE (the authoritative input). The pre-existing
     // observed cache is a MANDATORY structural cross-check: absence or
-    // divergence refuses.
+    // mismatch refuses.
     mogwai_lab::sidecar::marker("observed");
     let t0 = std::time::Instant::now();
     let observed = run_measure12a_observed(&cfg.corpus, &cfg.ledger, &cfg.preflight_path)?;

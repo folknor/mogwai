@@ -736,8 +736,8 @@ pub fn assess(grid: &Grid, fit: &Fit) -> Separability {
 }
 
 pub struct EraStability {
-    pub divergent_share: f64,
-    pub divergent_cells: u64,
+    pub mismatch_share: f64,
+    pub mismatch_cells: u64,
     pub passes: bool,
 }
 
@@ -746,9 +746,9 @@ pub struct EraStability {
 /// threshold enters after results exist.
 #[must_use]
 pub fn era_stability(full: &Fit, designated: &Fit, designated_grid: &Grid) -> EraStability {
-    let mut divergent_exposure = 0.0f64;
+    let mut mismatch_exposure = 0.0f64;
     let mut total_exposure = 0.0f64;
-    let mut divergent_cells = 0u64;
+    let mut mismatch_cells = 0u64;
     for h in 0..HOURS {
         for d in 0..DAYS {
             let exposure = designated_grid.exposure[h][d];
@@ -763,19 +763,19 @@ pub fn era_stability(full: &Fit, designated: &Fit, designated_grid: &Grid) -> Er
             }
             let ratio = candidate / reference;
             if ratio > INTERACTION_RATIO_LIMIT || ratio < 1.0 / INTERACTION_RATIO_LIMIT {
-                divergent_exposure += exposure;
-                divergent_cells += 1;
+                mismatch_exposure += exposure;
+                mismatch_cells += 1;
             }
         }
     }
     let share = if total_exposure > 0.0 {
-        divergent_exposure / total_exposure
+        mismatch_exposure / total_exposure
     } else {
         0.0
     };
     EraStability {
-        divergent_share: share,
-        divergent_cells,
+        mismatch_share: share,
+        mismatch_cells,
         passes: share <= MAX_MATERIAL_EXPOSURE_SHARE,
     }
 }
@@ -928,8 +928,8 @@ pub fn fit_report(
         },
         "scopes": Value::Object(outcomes),
         "era_stability": {
-            "divergent_share": stability.divergent_share,
-            "divergent_cells": stability.divergent_cells,
+            "mismatch_share": stability.mismatch_share,
+            "mismatch_cells": stability.mismatch_cells,
             "verdict": if stability.passes { "STABLE" } else { "ERA-DEPENDENT" },
         },
         "outcome": outcome,

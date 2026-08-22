@@ -1225,6 +1225,76 @@ third `run.rs` instance of the doc-attached-to-the-wrong-item family the
 cross-cutting section records, after `evict_account` and `session_guard`. It is
 moved onto `passenger_guard`, which it has always been about.
 
+**Round 10, the `divergence` split, 2026-08-22.** A split, and the fourth round
+whose ruling leaves the word on one of its senses. THE ARMED-HAVOC SENSE KEEPS
+THE WORD - everything reached from `mogwai_protocol::control::Divergence` is
+untouched: the catalog, `MAX_DIVERGENCE_MS`, `mogwai-engine`'s `divergence.rs`
+and its `apply_divergences` parameter, `POST /control/divergence`,
+`validate_divergence`, `docs/havoc.md`, `README.md` and the glossary entry.
+That is the shape a correct classification produces, and it is why the round is
+almost entirely comments and doc prose. The float-disagreement sense - two
+numbers, shapes or outputs disagreeing against a reference - becomes `mismatch`,
+chosen over `drift` because drift implies gradual movement where these are
+point comparisons. `first_divergence` became `first_mismatch` in
+`mogwai-cli`'s `count_curve.rs`, and `mogwai-lab`'s `era_stability` gave up the
+last identifiers in the retired sense: `divergent_share`, `divergent_cells` and
+`divergent_exposure` are `mismatch_share`, `mismatch_cells` and
+`mismatch_exposure`, which also stops the era-stability quantity from being
+named differently than the separability quantity computed by the same rule two
+functions above it. No tape byte and no wire byte moves, so no
+`TAPE_PROTOCOL_VERSION` bump is owed. The gated check reports 1341 workspace and
+469 instrumented tests, unchanged from round 9.
+
+TWO SERIALIZED SPELLINGS DID NOT MOVE, and both were verified rather than
+accepted as claimed. The exposure records' `"divergence": null` member is the
+armed sense - it states that the measured window had no havoc armed - so it
+keeps the word on its merits and not as an exemption, and the two committed
+provenance artifacts `analysis/mnq-arrival-control.json` and
+`analysis/mnq-arrival-screen.json` still carry it. The count-curve artifact's
+`"first_divergence"` key stays as an inherited seam: the spelling is fixed by
+the frozen preregistration the measurement answers, and the Rust identifier
+beside it is not. The round-8 precedent of pinning such a key with a test is
+NOT available here and the record says so rather than pretending otherwise -
+the artifact is written to an untracked output directory, no committed artifact
+and no hash carries the key, and a constant asserted equal to its own literal
+would be a vacuous gate. The comment at both write sites is the whole of the
+pin, and the round-8 comment claiming the key was "inherited from the committed
+artifact format" was false in the word "committed" and now says what is true.
+
+What the close pass found in the half no cold reviewer reads:
+
+- EMPHASIS HALF-SWEPT, seventeen sites, all of them outside the rename's
+  mandate and none of them on the moved word. `monthly.rs` lowercased
+  IDENTICALLY SHAPED JSON - taking the acronym with it, which is round 8's ARCH
+  failure exactly - and the ANY that carried the never-a-median-over-fewer-seeds
+  rule; `kernel.rs` lost WITHOUT and turned ULP into "ulp"; `measure12a/tests.rs`
+  lowercased the EXACT and POINTS whose contrast is the entire convention the
+  test pins, while leaving its own capitalised lead-in standing;
+  `parity_select_windows.rs` lost the NOT that marks the two accumulators that
+  are deliberately uncompensated and the EXACTLY that makes the manifest a
+  two-sided assertion; `measure.rs` lost LIVE and MANDATORY, `gen.rs` EXACT,
+  `stream.rs` WELL-FORMED, `stream_refusals.rs` BEFORE, `docs/oms-types.md`
+  WHOLE, and `reference/architecture.md` CONFIGURED, NEXT and ADMIT. Restored.
+- ONE SENTENCE LEFT UNGRAMMATICAL AROUND A CORRECT SUBSTITUTION: the adapter
+  test stub was "copy-pasted across the three files with subtle mismatch", where
+  the retired word was a mass noun and the new one is not. Plural.
+- A LIVE SIBLING IN THE CRATE THE SWEEP DID NOT OPEN, which is the recurring
+  failure again: `session_profile.rs`'s era-stability trio above. It is the
+  ruled sense by its own code - a `candidate` compared against a `reference`
+  ratio outside a band - and it was the last of it in the workspace.
+
+RAISED AND DELIBERATELY LEFT, so a later round does not re-file it: the VERB
+`diverge` and the adjective `divergent` survive as ordinary English where no
+quantity is named. `stream.rs` and `stream_refusals.rs` say the port "knowingly
+diverges from" the Python reference, and `characterize`'s two tie-break
+comments say a `HashMap` made the tie-break "not merely divergent from
+`characterize.py` but nondeterministic". Only the NOUN naming a disagreement was
+retired; forcing `mismatch` into those clauses produces worse prose and no
+clearer word. The phase-5 conformance scan's allowlist owes them a line.
+`notes/protocol-landings.md` records a past era-stability measurement as
+"22.83 percent divergent"; it is a historical record of a landing and is not a
+sweep target.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
@@ -1296,6 +1366,13 @@ These belong to no single scope, so nothing else holds them.
   key, the measurement artifact, the sub-contract tree and the screen's
   provenance string, where the identifiers around it carry the new word and the
   serialized bytes do not.
+- `divergence` as a name for two numbers, shapes or outputs disagreeing against
+  a reference. That is a mismatch. The word survives, undiminished, for one
+  armed havoc injection - the whole of `mogwai_protocol::control::Divergence`
+  and everything reached from it - and, inherited and frozen, as the
+  `first_divergence` key of the count-curve artifact, whose spelling the
+  preregistration fixed. The verb `diverge` and the adjective `divergent` stay
+  available as ordinary English where they name no quantity.
 
 ### Left as inherited
 
@@ -1313,9 +1390,10 @@ Recorded per scope in the scope reports until the merge collects them.
 
 ## What the rename rounds keep getting wrong
 
-Nine rounds in, four failures recur often enough to belong in every brief.
+Ten rounds in, five failures recur often enough to belong in every brief.
 Round 6 produced the first three at once, round 8 did it again and added the
-fourth, and round 9 produced all four.
+fourth, round 9 produced all four, and round 10 - a round of almost nothing but
+comments - still produced two.
 
 Round 9 adds a fifth, and it belongs to any round that MOVES A WORD FROM ONE
 JOB TO ANOTHER rather than retiring it. **THE SWAP HAZARD: when a rename gives
@@ -1357,7 +1435,7 @@ the sentence existed to draw. Whatever the house style for emphasis, both halves
 move together or neither does.
 
 The evidence for all of them is that the cold review found something in three
-rounds of nine and the fix-and-commit stage found something in nine of nine. That is not
+rounds of ten and the fix-and-commit stage found something in ten of ten. That is not
 a criticism of the cold review, which catches what a reader without the arc's
 priors sees. It is that a rename arc's defects live in prose, and prose defects
 compile, pass and read fluently.
@@ -1370,6 +1448,17 @@ compile, pass and read fluently.
 - **Every naming fork goes to the owner.** No adjudicator.
 - **The glossary is not presumptively right.** Direction 2 is real, and three of
   its entries have already been corrected rather than renamed toward.
+- **A frozen document is never a sweep target.** Preregistrations and closed
+  specs record what was decided before the result was known, and a rename that
+  edits one destroys the only thing it was for. Round 10's pass edited
+  `notes/count-curve-preregistration.md`,
+  `notes/pair-test-preregistration.md` and
+  `notes/protocol-12b-arrival-composition-spec.md`; all three were reverted. The
+  12b spec states its own form of the rule - amendments go in section 17, never
+  edits to the body - and the two preregistrations state theirs by being
+  preregistrations. A word retired by this arc stays spelled the old way inside
+  them, and where such a document fixes a serialized key, that key is frozen for
+  the code too.
 - **Markdown never commits alone.** It rides with the code change it describes.
 - **Subagents are foreground, never nested.** Never worktrees. The orchestrator
   validates between agents; agents do not run the build.

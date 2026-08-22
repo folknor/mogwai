@@ -17,9 +17,9 @@
 //! Both were mirrored deliberately from `analysis/mnq_fit.py`'s `parse_stream`,
 //! which dies the same way, and both are fixed here BEFORE the Python retires -
 //! the order the review signature is conditional on, so the reference this
-//! knowingly diverges from is still runnable while the divergence lands.
+//! knowingly diverges from is still runnable while the mismatch lands.
 //!
-//! The divergence is confined to malformed input: the parity gates compare
+//! The mismatch is confined to malformed input: the parity gates compare
 //! output over well-formed corpora, where neither refusal is reachable.
 //!
 //! The fixtures are real `.csv.zst` files rather than synthesized in-process,

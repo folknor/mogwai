@@ -883,7 +883,7 @@ pub fn plan(months: &[(String, MonthRow)]) -> LabResult<Plan> {
     // month absent from the features silently extends the pool further back.
     // On the committed archives the two coincide, so the Python states this
     // rather than fixing it - and prints the pool's true span precisely so a
-    // divergence is visible rather than assumed away.
+    // mismatch is visible rather than assumed away.
     let recent: Vec<&str> = eligible.iter().rev().take(30).rev().copied().collect();
     let mut ranked = recent.clone();
     // `sorted` is STABLE, so ties keep the ascending month order `recent`

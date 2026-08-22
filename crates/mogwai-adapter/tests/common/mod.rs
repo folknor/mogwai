@@ -6,7 +6,7 @@
 //! All three adapter test binaries (`adapter_smoke`, `data_client_transport`,
 //! `havoc`) drive the public adapter path against a self-contained HTTP +
 //! WebSocket stub that speaks just enough of the mogwai protocol. The stub used
-//! to be copy-pasted across the three files with subtle divergence (only the
+//! to be copy-pasted across the three files with subtle mismatches (only the
 //! havoc copy parsed `Content-Length`, `respond_json` had two different
 //! signatures, `serve_ws` was fixed-frame in two and data-driven in one). This
 //! module is the single, most-capable variant; each test still drives its own
