@@ -2185,6 +2185,13 @@ pub(crate) fn audience(event: &mogwai_protocol::VenueMessage) -> Audience<'_> {
         // it and it never enters a swept batch; classifying it venue-wide would
         // make this classifier lie today and broadcast one passenger's
         // completion to the whole run if it ever reached the sweep.
+        // A page answers the socket that asked for it, and only that one. It
+        // carries the requester's own river, which after the fork need not be
+        // the river any other passenger on the same label is reading, so
+        // broadcasting it would hand one consumer another's water as well as
+        // another's correlation id.
+        | M::HistoryPage { .. }
+        | M::HistoryRejected { .. }
         | M::PassengerDurationComplete { .. } => Audience::Requester,
     }
 }

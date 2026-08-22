@@ -1870,6 +1870,14 @@ impl Engine {
                 client_order_id.as_deref(),
                 ts,
             ))],
+            // Venue-owned and never routed here, like the transport controls.
+            // A history request reads the passenger's RIVER, and the engine
+            // holds a book rather than water - it has no river to read and no
+            // key to read one with. Enumerated rather than caught by a wildcard
+            // so that a future command classified venue-owned at the routing
+            // site and forwarded here fails this crate's build instead of
+            // silently producing nothing.
+            Command::QueryHistory { .. } => Vec::new(),
         };
         if cfg!(debug_assertions) {
             self.reconcile_order_holds();

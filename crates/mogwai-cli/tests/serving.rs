@@ -3365,6 +3365,177 @@ async fn a_neutral_generator_arm_upgrades_like_no_arm_at_all() {
     .expect("a neutral arm is a legal request that boards the clean river");
 }
 
+/// A passenger reads its own history over its own socket, and pages through it.
+///
+/// This is the whole point of moving history off the symbol-keyed HTTP routes:
+/// the request carries no symbol, so it cannot name the wrong river once one
+/// label names several. What it proves end to end is the paging contract - the
+/// cutoff is fixed at the first page and carried, the continuation resumes
+/// strictly after the last row rather than at it, and a completed session says
+/// so rather than trailing off.
+///
+/// A SOCKET IS ATTACHED TO THE LIVE TAPE AT UPGRADE, so live market frames are
+/// already arriving while this runs. The loop therefore drains to a deadline
+/// looking for the correlated reply rather than asserting on the next frame,
+/// which would be asserting on whatever the tape happened to publish.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_passenger_pages_its_own_history_over_its_own_socket() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("board");
+
+    let mut seen = 0usize;
+    let mut cutoff: Option<u64> = None;
+    let mut last_ts: Option<u64> = None;
+    let mut continuation: Option<String> = None;
+    let mut pages = 0usize;
+    loop {
+        let request = continuation.as_ref().map_or_else(
+            || r#"{"type":"QueryHistory","request_id":"H-1","kind":"Trades"}"#.to_owned(),
+            |token| {
+                format!(
+                    r#"{{"type":"QueryHistory","request_id":"H-1","kind":"Trades","continuation":"{token}"}}"#
+                )
+            },
+        );
+        socket
+            .send(Message::Text(request.into()))
+            .await
+            .expect("ask for a page of this passenger's own history");
+
+        let deadline = common::deadline(common::TEST_WALL_BUDGET);
+        let page = loop {
+            let message = tokio::time::timeout_at(deadline, socket.next())
+                .await
+                .expect("the history request is answered")
+                .expect("the socket stays open")
+                .expect("a well-formed frame");
+            let Message::Text(text) = message else {
+                continue;
+            };
+            match serde_json::from_str::<VenueMessage>(&text) {
+                Ok(VenueMessage::HistoryPage {
+                    request_id,
+                    rows,
+                    cutoff,
+                    continuation,
+                    complete,
+                    ..
+                }) => {
+                    assert_eq!(request_id, "H-1", "the reply is correlated to the request");
+                    break (rows, cutoff, continuation, complete);
+                }
+                Ok(VenueMessage::HistoryRejected { reason, .. }) => {
+                    panic!("the venue refused a history page: {reason}")
+                }
+                _ => continue,
+            }
+        };
+        let (rows, page_cutoff, next, complete) = page;
+        pages += 1;
+
+        // ONE CUTOFF FOR THE WHOLE SESSION. Recomputed per page it would move
+        // with the run present, and a consumer paginating a live river would
+        // never reach the end because each page pushed the finish line out.
+        match cutoff {
+            None => cutoff = Some(page_cutoff),
+            Some(fixed) => assert_eq!(
+                page_cutoff, fixed,
+                "the session's cutoff moved between pages"
+            ),
+        }
+
+        for row in &rows {
+            let ts = row.ts_event();
+            assert!(
+                ts <= page_cutoff,
+                "a row at {ts} is past the session's cutoff {page_cutoff}"
+            );
+            if let Some(previous) = last_ts {
+                // STRICTLY increasing across the page boundary too, which is
+                // what the continuation resuming after - rather than at - the
+                // last row buys. Resuming at it would re-deliver one row per
+                // page, and that duplicate is invisible to a consumer folding
+                // bars.
+                assert!(
+                    ts > previous,
+                    "history went backwards or repeated a row at {ts} after {previous}"
+                );
+            }
+            last_ts = Some(ts);
+        }
+        seen += rows.len();
+
+        if complete {
+            assert!(
+                next.is_none(),
+                "a completed session hands back no continuation"
+            );
+            break;
+        }
+        continuation = Some(next.expect("an incomplete page carries a continuation"));
+        assert!(pages < 64, "the session never completed");
+    }
+
+    assert!(
+        seen > 0,
+        "the warmup span must hold trades, or this test asserts nothing about paging"
+    );
+}
+
+/// A continuation the venue did not issue is refused, correlated, rather than
+/// answered from a position read out of it.
+#[tokio::test]
+#[ignore = "binds a loopback listener"]
+async fn a_fabricated_history_continuation_is_refused() {
+    let venue = spawn(&["--config", &fast_config()]);
+    let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("board");
+    socket
+        .send(Message::Text(
+            r#"{"type":"QueryHistory","request_id":"H-2","kind":"Trades","continuation":"nonsense"}"#
+                .into(),
+        ))
+        .await
+        .expect("send a token the venue never minted");
+
+    let deadline = common::deadline(common::TEST_WALL_BUDGET);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the request is answered")
+            .expect("the socket stays open")
+            .expect("a well-formed frame");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<VenueMessage>(&text) {
+            Ok(VenueMessage::HistoryRejected {
+                request_id,
+                retryable,
+                ..
+            }) => {
+                assert_eq!(request_id, "H-2", "the refusal names the request");
+                assert!(
+                    !retryable,
+                    "an unreadable token cannot succeed by being asked again"
+                );
+                return;
+            }
+            // The failure this shape exists to prevent: an unreadable token
+            // must not become a page, and least of all an empty one, which a
+            // consumer cannot tell from a quiet market.
+            Ok(VenueMessage::HistoryPage { .. }) => {
+                panic!("a fabricated continuation was answered with a page")
+            }
+            _ => continue,
+        }
+    }
+}
+
 /// A malformed arm is refused BEFORE the account is claimed.
 ///
 /// The ordering matters and is not incidental: an upgrade that evicted the

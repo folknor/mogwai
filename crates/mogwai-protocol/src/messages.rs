@@ -683,6 +683,84 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_order_id: Option<ClientOrderId>,
     },
+    /// Read this passenger's own history, one bounded page at a time.
+    ///
+    /// It carries no symbol, and that absence is the point. The upgrade already
+    /// resolved this connection to one river, so a request made here names
+    /// nothing and cannot name it wrong. Over HTTP a poll names a symbol and no
+    /// passenger, which once a label names several rivers names none of them: a
+    /// passenger reading surged water would backfill the clean river's prints
+    /// and fold bars from a market it is not in, silently. Every selector that
+    /// would fix that restates at the history call what the upgrade settled,
+    /// which is a second place for identity to live and therefore to drift.
+    ///
+    /// One page per request, pulled. The consumer asks for the next page only
+    /// after accepting the previous one, which bounds resident output per
+    /// connection, work wasted after a disconnect, and how far a slow reader can
+    /// fall behind. A server-pushed multi-page response would need its own
+    /// queue and cancellation protocol and could still outrun the reader.
+    QueryHistory {
+        /// Correlation id echoed verbatim on the reply, so a requester sharing
+        /// the socket with unsolicited market and execution frames can match
+        /// replies to requests. A history refusal is correlated for the same
+        /// reason: an untargeted error would leave a consumer unable to resolve
+        /// which of its own requests failed.
+        request_id: String,
+        kind: HistoryKind,
+        /// The window's inclusive start. Absent means the river's origin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<u64>,
+        /// The window's requested end, clamped to the cutoff the venue fixes at
+        /// the first page. Absent means "everything up to now".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<u64>,
+        /// The token from the previous page of this session, echoed verbatim.
+        ///
+        /// OPAQUE ON PURPOSE. It is the venue's own bookkeeping - which river,
+        /// which kind, the immutable cutoff, the next position - and a consumer
+        /// that treats it as anything but a token to hand back is relying on
+        /// something the venue has not promised. Keeping it opaque is what lets
+        /// the position move from a timestamp to something stronger if the
+        /// generator ever permits two rows at one instant, without a wire
+        /// change and without a consumer having encoded the old assumption.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<String>,
+    },
+}
+
+/// Which of a river's two streams a history page reads.
+///
+/// Separate streams with separate cutoffs, which is what makes a shared instant
+/// between a quote and its first child trade harmless: a tie across the kinds
+/// cannot cut either page. Within one kind a river never prints two rows at one
+/// instant, and that is gated in `mogwai-data` by
+/// `a_river_never_prints_two_trades_at_one_instant` and
+/// `a_river_never_prints_two_quotes_at_one_instant`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HistoryKind {
+    Trades,
+    Quotes,
+}
+
+/// One row of a history page: the same tick shape the live stream carries.
+///
+/// Untagged, because a page already states its `kind` and repeating it per row
+/// would put the same fact in two places that could disagree. A page never
+/// mixes the two.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HistoryRow {
+    Trade(TradeTick),
+    Quote(QuoteTick),
+}
+impl HistoryRow {
+    #[must_use]
+    pub fn ts_event(&self) -> u64 {
+        match self {
+            Self::Trade(trade) => trade.ts_event,
+            Self::Quote(quote) => quote.ts_event,
+        }
+    }
 }
 
 /// Which order command produced an execution frame, so the outbound path can
@@ -1381,11 +1459,29 @@ impl Serialize for AdmissionSubject {
 }
 
 /// Which venue-truth query a refused `Query` subject refers to. Mirrors a
-/// consumer's two waiter maps one-for-one.
+/// consumer's waiter maps one-for-one.
+///
+/// The two history spellings are here rather than in a subject of their own so
+/// that every correlated refusal reaches a consumer through one vocabulary. A
+/// history request that is refused for capacity has to name which request it
+/// refused, exactly as an order query does - an untargeted diagnostic would
+/// leave the consumer holding a pending backfill it can never resolve, which is
+/// the same quiet-window failure an empty page would be.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum QueryKind {
     Orders,
     Fills,
+    HistoryTrades,
+    HistoryQuotes,
+}
+impl QueryKind {
+    #[must_use]
+    pub fn of_history(kind: HistoryKind) -> Self {
+        match kind {
+            HistoryKind::Trades => Self::HistoryTrades,
+            HistoryKind::Quotes => Self::HistoryQuotes,
+        }
+    }
 }
 
 /// API-boundary guard for a `Command::ModifyOrder`'s `price`/`quantity`
@@ -1608,6 +1704,53 @@ pub enum VenueMessage {
     OrderStatusSnapshot(OrderStatusSnapshot),
     /// Truthful venue fill history answering a `QueryFills`.
     FillSnapshot(FillSnapshot),
+    /// One bounded page of this passenger's own history, answering a
+    /// `QueryHistory`.
+    ///
+    /// The rows are this connection's river, never a label's. That is the whole
+    /// reason history moved onto the socket, and it is why the page names no
+    /// symbol: the connection already did.
+    ///
+    /// SPLICING ONTO LIVE, which is the part a consumer has to get right. A
+    /// socket is attached to the live tape at upgrade, so live frames keep
+    /// crossing while a history session paginates. The venue fixes `cutoff` at
+    /// the first page and every later page of that session uses the same one,
+    /// so pagination cannot chase a moving present and never finish. The
+    /// consumer starts buffering live rows BEFORE it sends the first
+    /// `QueryHistory` - otherwise a frame can arrive between deciding to
+    /// backfill and the command reaching the venue - and once the session
+    /// completes it drops buffered rows of that kind at or below `cutoff` and
+    /// keeps the rest. That deliberately admits overlap and forbids gaps:
+    /// overlap is removable because a river never prints two rows of one kind at
+    /// one instant, and a gap is not recoverable at all.
+    HistoryPage {
+        request_id: String,
+        kind: HistoryKind,
+        /// Trades or quotes, ascending, never both. Empty only when the window
+        /// genuinely holds nothing, never because the venue gave up - a short
+        /// success would be indistinguishable from a quiet market, which is the
+        /// failure this whole shape exists to avoid.
+        rows: Vec<HistoryRow>,
+        /// The session's immutable inclusive end, fixed at the first page. Per
+        /// kind, because a combined market cutoff would name an instant at
+        /// which one stream had a row and the other did not.
+        cutoff: u64,
+        /// Hand this back to read the next page. Absent when `complete`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<String>,
+        /// Every row through `cutoff` has now been delivered.
+        complete: bool,
+    },
+    /// A `QueryHistory` that will not be answered, correlated to the request
+    /// that asked. Distinct from an empty page, deliberately: representing
+    /// unavailable history as a quiet market is the defect, not the fallback.
+    HistoryRejected {
+        request_id: String,
+        reason: String,
+        /// Whether asking again could succeed - a capacity refusal can, a
+        /// malformed window cannot.
+        retryable: bool,
+    },
     AccountState(AccountState),
     Trade(TradeTick),
     Quote(QuoteTick),
@@ -1790,6 +1933,11 @@ impl VenueMessage {
             | VenueMessage::HavocDiagnostic { .. }
             | VenueMessage::RunComplete { .. }
             | VenueMessage::PassengerDurationComplete { .. } => EventKind::Admission,
+            // Its own class, so neither of the two obvious homes decides a
+            // contract by accident - see `EventKind::History`.
+            VenueMessage::HistoryPage { .. } | VenueMessage::HistoryRejected { .. } => {
+                EventKind::History
+            }
         }
     }
 

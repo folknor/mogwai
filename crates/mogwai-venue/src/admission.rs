@@ -298,11 +298,21 @@ pub(crate) struct Ticket {
 /// its declared duration is not venue output a scenario armed away, and
 /// dropping it would make a planned completion indistinguishable from the death
 /// a blackout is imitating - the exact confusion `RunComplete` exists to end.
+/// `History` is a pulled read of the same river, and its suppression contract
+/// is stated rather than inherited. `GoDark` drops it, because a blackout is
+/// the whole socket going quiet and a page is output like any other - the
+/// consumer armed that and its request timeout is the path being exercised,
+/// exactly as for a query reply. `StallData` does NOT, because that arm
+/// withholds the channel feed to make a stalled feed distinguishable from a
+/// dead venue, and a correlated request-response is not the channel: silently
+/// eating it would leave the consumer with a backfill it can never resolve and
+/// no way to tell that from an empty window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FrameClass {
     MarketData,
     Execution,
     Terminal,
+    History,
 }
 
 /// A frame already rendered to its wire bytes, plus the facts the writer needs.
@@ -604,6 +614,29 @@ impl ExecLanes {
             .send(Outbound::Frame(OutboundFrame {
                 payload: Arc::from(payload),
                 class: FrameClass::Execution,
+                charge: None,
+                slot: Some(slot),
+            }))
+            .map_err(|_| LaneClosed)
+    }
+
+    /// Emit an already-serialized history frame against a queue slot.
+    ///
+    /// Takes BYTES rather than a `VenueMessage` because a page is serialized on
+    /// the blocking task that synthesized it, beside the walk that produced the
+    /// rows. That keeps the JSON cost off the single writer task and off this
+    /// caller, and it is what makes the frame's charge its true length rather
+    /// than an estimate - the same reason every other producer serializes at
+    /// the point of production.
+    ///
+    /// Stamped `FrameClass::History`, so the suppression contract is the one
+    /// that class states rather than whatever the priority lane's other
+    /// occupants happen to get.
+    pub(crate) fn emit_history(&self, slot: Ticket, payload: String) -> Result<(), LaneClosed> {
+        self.prio_tx
+            .send(Outbound::Frame(OutboundFrame {
+                payload: Arc::from(payload),
+                class: FrameClass::History,
                 charge: None,
                 slot: Some(slot),
             }))

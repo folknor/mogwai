@@ -2851,6 +2851,14 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                     mogwai_protocol::QueryKind::Fills => {
                         pending.fills.remove(&request_id).is_some()
                     }
+                    // History waiters live on the DATA leg, which owns the
+                    // river and is the only half that asks for a page. An
+                    // execution socket holds no such waiter, so there is
+                    // nothing here to wake - and probing the order or fill maps
+                    // for a history id could wake the wrong waiter, which is
+                    // the exact collision the discriminator exists to prevent.
+                    mogwai_protocol::QueryKind::HistoryTrades
+                    | mogwai_protocol::QueryKind::HistoryQuotes => false,
                 };
                 drop(pending);
                 tracing::warn!(
@@ -2906,9 +2914,13 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 "venue declared a market-view gap on the execution socket; the execution stream is unaffected and no reconciliation is owed"
             );
         }
-        // Market data is handled by the data client.
+        // Market data is handled by the data client, and so is history: the
+        // execution leg never asks for a page, so one arriving here would be a
+        // reply to a request this half did not make.
         VenueMessage::Trade(_)
         | VenueMessage::Quote(_)
+        | VenueMessage::HistoryPage { .. }
+        | VenueMessage::HistoryRejected { .. }
         | VenueMessage::HavocDiagnostic { .. }
         // A clean completion is a transport concern, whether the RUN ended or
         // this passenger's own duration did. The reader owns reconnect policy;

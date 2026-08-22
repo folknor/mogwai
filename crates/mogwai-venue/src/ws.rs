@@ -525,6 +525,16 @@ struct QueuedCommand {
     global_slot: OwnedSemaphorePermit,
 }
 
+/// One history page in flight per connection.
+///
+/// The global synthesis slots and their waiter queue already bound the venue,
+/// but they bound it ACROSS connections: without a per-connection cap one
+/// passenger can hold every slot and every waiter, and the command queue's own
+/// bound does not help because a queued history command is cheap to accept and
+/// expensive to serve. One is the right number because pagination is a pull -
+/// a consumer has no use for a second page before it has taken the first.
+const HISTORY_PAGES_IN_FLIGHT: usize = 1;
+
 async fn dispatch_command(
     cmd: Command,
     state: &AppState,
@@ -532,7 +542,18 @@ async fn dispatch_command(
     symbol: &mogwai_protocol::Symbol,
     boat: &Arc<crate::boatyard::Boat>,
     account_state: &Arc<crate::run::Account>,
+    history_permits: &Arc<tokio::sync::Semaphore>,
 ) {
+    // INTERCEPTED BEFORE THE ORDER PATH, and spawned rather than awaited. This
+    // dispatcher is sequential per connection, which is what stops a cancel
+    // from overtaking the submit it cancels - and that same sequencing would
+    // put a multi-thousand-row generator walk in front of every cancel, modify,
+    // reconciliation query and heartbeat behind it. The connection would then
+    // fill its command queue and close for what is really history contention.
+    if let Command::QueryHistory { .. } = cmd {
+        spawn_history_page(cmd, state, lanes, boat, history_permits);
+        return;
+    }
     let class = CommandClass::of(&cmd);
     match process_order_cmd(cmd, state, &state.run, lanes, symbol, boat, account_state).await {
         OrderOutcome::Produced {
@@ -580,6 +601,141 @@ async fn dispatch_command(
     }
 }
 
+/// Serve one history page off the dispatcher, on a task of its own.
+///
+/// THE PERMIT DISCIPLINE IS THE CORRECTNESS PROPERTY, and it is the one the
+/// HTTP handlers already pay for: a dropped connection drops the awaiting
+/// future, but a running blocking task cannot be cancelled, so a permit held by
+/// the future would be released while the synthesis it covers was still
+/// resident. The global synthesis slot is therefore acquired INSIDE the spawned
+/// task and moved into the blocking closure, and the per-connection permit
+/// travels with it. Both are given up by dropping, wherever that turns out to
+/// happen - which on every path is after the work ends.
+fn spawn_history_page(
+    cmd: Command,
+    state: &AppState,
+    lanes: &ExecLanes,
+    boat: &Arc<crate::boatyard::Boat>,
+    history_permits: &Arc<tokio::sync::Semaphore>,
+) {
+    let Command::QueryHistory {
+        request_id,
+        kind,
+        start,
+        end,
+        continuation,
+    } = cmd
+    else {
+        return;
+    };
+    let reject = |lanes: &ExecLanes, reason: String, retryable: bool| {
+        drop(send_admission(
+            lanes,
+            VenueMessage::HistoryRejected {
+                request_id: request_id.clone(),
+                reason,
+                retryable,
+            },
+        ));
+    };
+    // Refused rather than queued when this connection already has a page in
+    // flight, and correlated so the consumer can resolve the request it just
+    // made. Silently queueing would let a consumer that ignores its own
+    // pagination discipline accumulate work the venue then has to finish.
+    let Ok(connection_permit) = Arc::clone(history_permits).try_acquire_owned() else {
+        reject(
+            lanes,
+            "this connection already has a history page in flight".to_owned(),
+            true,
+        );
+        return;
+    };
+    // The passenger's own river, taken from its boat. This is the line the
+    // whole decision is about: nothing here consults a symbol, so nothing here
+    // can name the wrong river.
+    let key = boat.key().river().clone();
+    let rivers = Arc::clone(&state.rivers);
+    let slots = Arc::clone(&state.history_slots);
+    let waiters = Arc::clone(&state.history_slot_waiters);
+    let run_now = state.run_now();
+    let run_start_ns = state.run.started_ns;
+    let lanes = lanes.clone();
+    tokio::spawn(async move {
+        let Ok(synthesis_slot) = crate::http::acquire_history_slot(&slots, &waiters).await else {
+            drop(send_admission(
+                &lanes,
+                VenueMessage::HistoryRejected {
+                    request_id,
+                    reason: "venue history capacity exhausted".to_owned(),
+                    retryable: true,
+                },
+            ));
+            return;
+        };
+        let page = tokio::task::spawn_blocking(move || {
+            // Both permits move in here and die here, after the walk and the
+            // serialization they cover.
+            let _synthesis_slot = synthesis_slot;
+            let _connection_permit = connection_permit;
+            crate::history::serve_page(
+                &rivers,
+                &crate::history::PageRequest {
+                    key: &key,
+                    kind,
+                    start,
+                    end,
+                    continuation: continuation.as_deref(),
+                    run_now,
+                    run_start_ns,
+                },
+            )
+            .map(|page| {
+                serde_json::to_string(&VenueMessage::HistoryPage {
+                    request_id: request_id.clone(),
+                    kind,
+                    rows: page.rows,
+                    cutoff: page.cutoff,
+                    continuation: page.continuation,
+                    complete: page.complete,
+                })
+            })
+            .map_err(|refusal| (request_id, refusal))
+        })
+        .await;
+        match page {
+            Ok(Ok(Ok(payload))) => {
+                let Some(slot) = lanes.reserve_admission() else {
+                    // The lane is saturated, which means the peer is not
+                    // reading. Nothing useful can be sent, including a refusal.
+                    return;
+                };
+                drop(lanes.emit_history(slot, payload));
+            }
+            // Unreachable by construction - every field is a number, a string
+            // or a plain enum - and logged rather than given a wire meaning for
+            // the same reason the other producers do it.
+            Ok(Ok(Err(error))) => {
+                tracing::error!(%error, "could not serialize a history page");
+            }
+            Ok(Err((request_id, refusal))) => {
+                drop(send_admission(
+                    &lanes,
+                    VenueMessage::HistoryRejected {
+                        request_id,
+                        reason: refusal.reason,
+                        retryable: refusal.retryable,
+                    },
+                ));
+            }
+            // A panicked synthesis is a venue fault, not an empty window, and
+            // the consumer is told so rather than left waiting out its timeout.
+            Err(error) => {
+                tracing::error!(%error, "history synthesis task failed");
+            }
+        }
+    });
+}
+
 fn spawn_command_dispatcher(
     mut commands: mpsc::Receiver<QueuedCommand>,
     state: AppState,
@@ -588,6 +744,9 @@ fn spawn_command_dispatcher(
     boat: Arc<crate::boatyard::Boat>,
     account_state: Arc<crate::run::Account>,
 ) -> tokio::task::JoinHandle<()> {
+    // Per CONNECTION, minted here so it lives exactly as long as the dispatcher
+    // that hands pages out.
+    let history_permits = Arc::new(tokio::sync::Semaphore::new(HISTORY_PAGES_IN_FLIGHT));
     tokio::spawn(async move {
         // The permit's scope is the correctness property: the process-wide
         // slot may return only after the command has been ACTED ON, or the
@@ -595,8 +754,24 @@ fn spawn_command_dispatcher(
         // therefore EXPLICIT, sequenced after the awaited dispatch, rather
         // than left to a destructure binding whose lifetime an underscore
         // pattern would silently end early.
+        //
+        // A history command is the one that does not finish inside the
+        // dispatch: it is handed to a task of its own, so the global command
+        // slot is released once the request has been ACCEPTED rather than once
+        // the page has been produced. That is deliberate, and it is why the
+        // page has bounds of its own - a per-connection permit and the global
+        // synthesis slots - rather than leaning on this one.
         while let Some(queued) = commands.recv().await {
-            dispatch_command(queued.cmd, &state, &lanes, &symbol, &boat, &account_state).await;
+            dispatch_command(
+                queued.cmd,
+                &state,
+                &lanes,
+                &symbol,
+                &boat,
+                &account_state,
+                &history_permits,
+            )
+            .await;
             drop(queued.global_slot);
         }
     })

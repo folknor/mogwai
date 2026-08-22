@@ -425,7 +425,12 @@ impl HavocLatency {
             // admission traffic is exempt from.
             EventKind::Exec | EventKind::Admission => self.exec_event_nanos,
             EventKind::Fill => self.fill_nanos,
-            EventKind::Data => self.data_nanos,
+            // History buckets with data because that is what it IS - a read of
+            // the same river the data knob covers, differing only in being
+            // pulled rather than pushed. This is the adapter's own inbound
+            // simulation, so bucketing it here says nothing about the venue's
+            // outbound classes, where history is exempt from the ack delay.
+            EventKind::Data | EventKind::History => self.data_nanos,
         };
         std::time::Duration::from_nanos(self.base_nanos.saturating_add(extra))
     }
@@ -475,6 +480,31 @@ pub enum EventKind {
     /// `docs/havoc.md`. `is_execution()` is FALSE for this kind, which is
     /// what implements that exemption in one place.
     Admission,
+    /// A pulled history page or its refusal.
+    ///
+    /// A CLASS OF ITS OWN, because both of the obvious homes decide something
+    /// by accident. Calling it execution would hand `DelayAcks` authority over
+    /// market history, which is a data question wearing an order-path knob.
+    /// Calling it market data would enrol it in `FeedLagged` and the broadcast
+    /// ring's frontier, which it never passed through - a page is synthesized
+    /// on request and delivered once, so it can neither be overwritten in the
+    /// ring nor leave a hole in it, and reporting it as either would be a lie
+    /// about a loss that did not happen.
+    ///
+    /// It is `is_execution() == false`, so the ack delay does not reach a
+    /// market read, and `is_admission() == true`, so it bypasses the execution
+    /// delay pump and rides the priority lane.
+    ///
+    /// Riding that lane means a page can reach the socket ahead of live frames
+    /// the passenger has not read yet, and that is IMMATERIAL rather than
+    /// tolerated: the splice is decided by the session's cutoff, not by arrival
+    /// order. A consumer buffers live rows from before it sent the request and
+    /// drops those at or below the cutoff once the session completes, so which
+    /// order the two streams interleave in changes nothing about which rows
+    /// survive. What would matter is a page held BEHIND an ack delay, since
+    /// that is an order-path knob reaching a data read, and that is what the
+    /// execution exemption prevents.
+    History,
 }
 
 impl EventKind {
@@ -497,7 +527,7 @@ impl EventKind {
     pub fn is_execution(self) -> bool {
         match self {
             EventKind::Exec | EventKind::Fill => true,
-            EventKind::Data | EventKind::Admission => false,
+            EventKind::Data | EventKind::Admission | EventKind::History => false,
         }
     }
     /// Whether this kind rides the priority lane on the venue and bypasses the
@@ -506,7 +536,7 @@ impl EventKind {
     #[must_use]
     pub fn is_admission(self) -> bool {
         match self {
-            EventKind::Admission => true,
+            EventKind::Admission | EventKind::History => true,
             EventKind::Exec | EventKind::Fill | EventKind::Data => false,
         }
     }
@@ -891,6 +921,7 @@ mod tests {
             EventKind::Fill,
             EventKind::Data,
             EventKind::Admission,
+            EventKind::History,
         ] {
             // (is_execution, is_admission, latency bucket)
             let expected: (bool, bool, u128) = match kind {
@@ -901,6 +932,13 @@ mod tests {
                 // truth, and being outside `is_execution` is exactly what
                 // exempts it from the venue's `DelayAcks` hold.
                 EventKind::Admission => (false, true, 1),
+                // History is exempt from the ack delay for the same reason and
+                // rides the same priority lane, but buckets with DATA on the
+                // adapter's own inbound knob, because it is the same river
+                // pulled rather than pushed. That split - admission on the
+                // venue's outbound classes, data on the adapter's inbound
+                // simulation - is the row worth pinning here.
+                EventKind::History => (false, true, 3),
             };
             assert_eq!(
                 (

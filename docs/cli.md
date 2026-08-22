@@ -45,14 +45,50 @@ A run retains at most 256 materialized rivers and never evicts them. This is an
 operational bound for trusted consumers belonging to the run's owner, not a
 hostile-consumer defence.
 
-The history endpoints `GET /trades` and `GET /quotes` both REQUIRE `symbol`;
-`start`, `end` and `limit` are optional. They are bounded by the RUN CLOCK, taken
-as one snapshot when the request is admitted and consulting no boat. An omitted
-end is clamped to it and so is a stated one - an explicit `end` is a bound on the
-window, never permission to cross the run present - and a `start` above it, or
-below the tape origin, is refused with HTTP 400. Read `GET /clock` once and pass
-its `venue_now_ns` as `end` on every page of a paginated window, or the window
-grows as you read it.
+A CONSUMER READS ITS HISTORY OVER ITS OWN SOCKET, not over these routes. Send
+`QueryHistory` with a `request_id` and a `kind` of `Trades` or `Quotes`; the
+venue answers a `HistoryPage` carrying that `request_id`, one bounded page of
+rows, the session's `cutoff`, and a `continuation` to hand back for the next
+page until `complete` is true. A refusal comes back as a correlated
+`HistoryRejected` rather than as an empty page, because a consumer cannot tell
+an empty page from a quiet market.
+
+The request names no symbol, and that is the point: your connection already
+resolved one river at upgrade, so a request carried on it cannot name the wrong
+one. Once generator havoc entered river identity a label names several rivers,
+and a poll naming a symbol names none of them - a passenger reading surged water
+would backfill the clean river's prints and fold bars from a market it is not in.
+
+To splice a backfill onto live: start buffering the live frames your socket is
+already receiving BEFORE you send the first `QueryHistory` - a frame can arrive
+between your decision to backfill and the command reaching the venue - then,
+once the session completes, drop buffered rows of that kind at or below `cutoff`
+and keep the rest. That admits overlap and forbids gaps, which is the right way
+round: a river never prints two rows of one kind at one instant, so an overlap is
+removable and a gap is not.
+
+The `cutoff` is fixed at the first page and every later page of the session
+carries the same one, so pagination cannot chase a moving present. The
+`continuation` is opaque - hand it back unread. It is the venue's own
+bookkeeping, and treating it as anything else is relying on something the venue
+has not promised.
+
+`GET /trades` and `GET /quotes` remain as the OPERATOR's view. They both require
+`symbol`; `start`, `end` and `limit` are optional. They are bounded by the RUN
+CLOCK, taken as one snapshot when the request is admitted and consulting no boat.
+An omitted end is clamped to it and so is a stated one - an explicit `end` is a
+bound on the window, never permission to cross the run present - and a `start`
+above it, or below the tape origin, is refused with HTTP 400. Read `GET /clock`
+once and pass its `venue_now_ns` as `end` on every page of a paginated window, or
+the window grows as you read it.
+
+DO NOT WARM A PASSENGER FROM THEM. They serve the UNARMED river of a label, on
+the run clock, and three things follow that a consumer must not inherit: a
+passenger carrying a generator arm is on different water entirely; a passenger on
+a slow boat is behind the run clock, so these routes can hand it rows that are
+still its future; and a passenger under `GoDark`, `StallData` or a ring overrun
+has an observed market that deliberately differs from the clean river, which an
+HTTP fetch would silently repair.
 
 On an unpaced run (`speed = 0.0`) the tape outruns the run clock, so history can
 trail what your socket has already been delivered live. That is deliberate: a

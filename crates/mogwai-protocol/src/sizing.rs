@@ -291,6 +291,16 @@ pub fn worst_case_output_bytes(cmd: &Command, shape: &BookShape) -> usize {
         Command::QueryFills { .. } => {
             SNAPSHOT_ENVELOPE_MAX_BYTES + shape.recorded_fills * FILL_ROW_MAX_BYTES
         }
+        // ZERO, and not because history is small. This function bounds what
+        // `Engine::process` produces, and the engine never sees a history
+        // request: it is venue-owned, like the transport controls, and reads
+        // the river rather than the book. Its bytes are real but they are
+        // charged where they are produced - one bounded page at a time, against
+        // the history class, by the task that serialized it - rather than
+        // reserved here against a book shape that says nothing about a river.
+        // Folding a history bound into the order-entry reservation would make
+        // every submit reserve for a warmup it is not going to send.
+        Command::QueryHistory { .. } => 0,
     }
 }
 

@@ -2366,8 +2366,19 @@ fn dwell_is_bounded_across_run_seeds() {
 /// that made ties possible - collapsing the child stride, stamping a burst at
 /// one instant - would be a legitimate-looking generator change that breaks a
 /// consumer nowhere near it, and this is the only thing that would say so. The
-/// quote stream ties with its first child by design and that is fine: `/trades`
-/// and `/quotes` are separate pages, so a tie ACROSS them can never cut either.
+/// quote stream ties with its first child by design and that is fine: trades
+/// and quotes are separate pages with separate cutoffs, so a tie ACROSS them
+/// can never cut either. Quote against quote is gated separately, by
+/// `a_river_never_prints_two_quotes_at_one_instant`.
+///
+/// WHAT DEPENDS ON THIS, named so a future generator change can see the cost:
+/// socket history paginates by an inclusive per-kind cutoff, and a consumer
+/// splices its buffered live rows onto a completed history by dropping those at
+/// or below that cutoff. Two trades at one instant across a page boundary
+/// therefore lose a row or duplicate one, with neither side able to tell which.
+/// A generator change that permits trade ties owes the wire a splice identity
+/// stronger than a timestamp, in the same landing, on top of the tape-version
+/// bump it already owes.
 #[test]
 fn a_river_never_prints_two_trades_at_one_instant() {
     let fp = Fingerprint::from_repo_json();
@@ -4381,18 +4392,51 @@ fn every_trade_has_a_governing_quote_at_or_before_it() {
     }
 }
 
+/// A river never prints two quotes at one instant either, and this is strict
+/// for the same reason the trade gate is.
+///
+/// It used to assert non-decreasing, which permits a tie - and a tie on the
+/// quote stream is exactly what a socket history page cannot survive. History
+/// paginates by an inclusive per-kind cutoff and the consumer splices live rows
+/// by dropping those at or below it, so two quotes sharing an instant across a
+/// page boundary either lose one row or duplicate it, with no way for either
+/// side to tell which happened. The trade stream has carried that guarantee for
+/// a while; the quote stream was merely believed to.
+///
+/// Cross-kind ties stay legal and harmless: a quote and its first child trade
+/// share an instant by design, and the two kinds are separate streams with
+/// separate cutoffs, so a tie across them can never cut either.
+///
+/// Walked over EVERY shipped preset rather than one river, because the property
+/// is a claim about what this venue serves and a single-river witness would not
+/// notice a preset whose cadence collapses the quote stride.
 #[test]
-fn quote_timestamps_are_nondecreasing() {
+fn a_river_never_prints_two_quotes_at_one_instant() {
     let fp = Fingerprint::from_repo_json();
-    let mut src = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 32, 0, &fp, None);
-    let mut prior = 0;
-    let mut quotes = 0;
-    while quotes < 20_000 {
-        if let TickEvent::Quote(quote) = src.next_tick().unwrap() {
-            assert!(quote.ts_event >= prior);
-            prior = quote.ts_event;
-            quotes += 1;
+    for def in mogwai_protocol::default_instruments() {
+        let mut scalars = GeneratorScalars::from_fingerprint_medians(&def.symbol, &fp);
+        scalars.modal_tick = def.price_increment;
+        scalars.price_decimals = u32::from(def.price_precision);
+        let seed = mogwai_protocol::RunSeeds::from_run_seed(32).tape_for(&def.symbol);
+        let mut src = GeneratedSource::new(scalars, seed, 0, &fp, None);
+        let mut prior: Option<u64> = None;
+        let mut quotes = 0;
+        while quotes < 20_000 {
+            let Some(tick) = src.next_tick() else { break };
+            if let TickEvent::Quote(quote) = tick {
+                if let Some(prior) = prior {
+                    assert!(
+                        quote.ts_event > prior,
+                        "{} printed two quotes at {}",
+                        def.symbol,
+                        quote.ts_event
+                    );
+                }
+                prior = Some(quote.ts_event);
+                quotes += 1;
+            }
         }
+        assert_eq!(quotes, 20_000, "{} must produce a full sample", def.symbol);
     }
 }
 

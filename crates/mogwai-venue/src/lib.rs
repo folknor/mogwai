@@ -16,6 +16,7 @@ mod boatyard;
 pub mod config;
 mod extremes;
 mod fills;
+mod history;
 mod http;
 mod risk;
 mod run;

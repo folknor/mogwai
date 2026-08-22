@@ -142,6 +142,12 @@ pub(crate) fn admission_subject(cmd: &Command) -> AdmissionSubject {
             request_id: request_id.clone(),
             query: mogwai_protocol::QueryKind::Fills,
         },
+        Command::QueryHistory {
+            request_id, kind, ..
+        } => AdmissionSubject::Query {
+            request_id: request_id.clone(),
+            query: mogwai_protocol::QueryKind::of_history(*kind),
+        },
     }
 }
 
@@ -202,6 +208,35 @@ pub(crate) fn boundary_error(cmd: &Command) -> Option<&'static str> {
                 .as_ref()
                 .and_then(|id| validate_client_order_id(id).err())
         }),
+        // The window is checked against the river later, where the run clock
+        // and the passenger's key are both in hand; what is decidable HERE is
+        // the shape of the request itself. A start after its own end is a
+        // caller error rather than an empty window, and saying so at the
+        // boundary keeps it from becoming a page that completes with nothing.
+        Command::QueryHistory {
+            request_id,
+            start,
+            end,
+            continuation,
+            ..
+        } => validate_request_id(request_id)
+            .err()
+            .or_else(|| match (start, end) {
+                (Some(start), Some(end)) if start > end => {
+                    Some("QueryHistory start must not be after end")
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                // A continuation is the venue's own token handed back. An
+                // over-length one is malformed rather than merely unknown, and
+                // bounding it here is what stops a fabricated token from
+                // becoming an unbounded allocation on the decode path.
+                continuation
+                    .as_ref()
+                    .is_some_and(|token| token.len() > mogwai_protocol::MAX_CONTINUATION_LEN)
+                    .then_some("QueryHistory continuation exceeds MAX_CONTINUATION_LEN")
+            }),
     }
 }
 
@@ -1936,7 +1971,11 @@ pub(crate) const MAX_QUEUED_HISTORY_REQUESTS: usize = 128;
 /// The queue permit is dropped as soon as a slot is won: it counts callers
 /// still QUEUEING, and a caller holding a slot has stopped. The returned
 /// permit is the SLOT, which travels with the finished bytes.
-async fn acquire_history_slot(
+/// Shared with the socket's history path deliberately: the synthesis slots
+/// bound the VENUE's concurrent generator walks, so an operator poke and a
+/// passenger's page have to contend for the same four rather than for four
+/// each.
+pub(crate) async fn acquire_history_slot(
     gate: &Arc<tokio::sync::Semaphore>,
     queue: &Arc<tokio::sync::Semaphore>,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, String)> {

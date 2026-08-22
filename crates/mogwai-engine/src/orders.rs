@@ -3408,6 +3408,8 @@ pub(crate) fn account_changed(out: &[VenueMessage]) -> bool {
         | VenueMessage::Heartbeat { .. }
         | VenueMessage::FeedLagged { .. }
         | VenueMessage::HavocDiagnostic { .. }
+        | VenueMessage::HistoryPage { .. }
+        | VenueMessage::HistoryRejected { .. }
         | VenueMessage::ProtocolError { .. } => false,
     })
 }
