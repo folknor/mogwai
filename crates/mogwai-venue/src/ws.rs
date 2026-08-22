@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! A websocket passenger on one boat, plus its run-wide command ledger.
+//! A websocket passenger on one boat, plus its account's run-wide command
+//! ledger.
 
 use std::{sync::Arc, time::Instant};
 
@@ -57,7 +58,7 @@ pub(crate) struct SocketQuery {
     /// `100.0000001` board the same boat. An unserved speed PLACES a second
     /// boat on the same water rather than being refused - speed mutates no
     /// generated value, so it is a second cursor, not a second river. The one
-    /// refusal left is per LEDGER: an account already seated on this river at
+    /// refusal left is per ledger: an account already riding this river at
     /// another speed would be judged on two clocks.
     #[serde(default)]
     speed: Option<f64>,
@@ -100,20 +101,22 @@ pub(crate) struct SocketQuery {
     callsign: Option<String>,
 }
 
-/// What one connection is bound to, decided before the upgrade completes and
-/// owned by the socket for its whole life.
+/// One connected trader: a single websocket under an account, boarded onto one
+/// boat, decided before the upgrade completes and owned by the socket for its
+/// whole life. It dies with that socket; the ledger, the risk state and the
+/// freeze stamp stay on the `Account` it trades under.
 ///
 /// It exists as a struct rather than a bare `Symbol` because boat placement,
 /// the per-boat clock and the ledger attach here, and because every downstream
 /// signature then changes exactly once.
 #[derive(Debug)]
-pub(crate) struct SocketSession {
+pub(crate) struct Passenger {
     pub(crate) symbol: mogwai_protocol::Symbol,
     pub(crate) ticket: Ticket,
     pub(crate) duration_ms: Option<u64>,
-    /// The ledger this connection trades on. Resolved before the upgrade, so a
+    /// The account this passenger trades under. Resolved before the upgrade, so a
     /// frame cannot reach a handler before the account it books into exists.
-    pub(crate) passenger: Arc<crate::run::Passenger>,
+    pub(crate) account_state: Arc<crate::run::Account>,
     /// The identity this socket presented, kept on the bound lane so a later
     /// claim on the same account can tell related sockets
     /// from a stranger's. See `Run::evict_account`.
@@ -124,8 +127,8 @@ pub(crate) struct SocketSession {
     /// teardown - the boat ticket above must outlive the writer's close frame,
     /// and the account must not be swept for that long.
     pub(crate) attach: Option<crate::run::Attach>,
-    /// THIS SESSION'S CLAIM ON THE PROCESS, taken in `ws_upgrade` BEFORE the
-    /// 101 is returned and dropped with the session, after the writer has
+    /// This passenger's claim on the process, taken in `ws_upgrade` before the
+    /// 101 is returned and dropped with the passenger, after the writer has
     /// flushed its close.
     ///
     /// Taken in the upgrade handler rather than at the top of `handle_socket`,
@@ -133,14 +136,14 @@ pub(crate) struct SocketSession {
     /// runs in the task `on_upgrade` spawns, which is polled only AFTER hyper's
     /// connection future has already resolved at the 101 - so a guard taken
     /// there is not yet held when `axum::serve` can complete, and a completion
-    /// landing in that gap sees `sessions_drained` answer with this session
+    /// landing in that gap sees `passengers_drained` answer with this passenger
     /// counted at zero and the runtime drops the task before its first poll.
-    /// That is the same defect `sessions_tx` closes, one window smaller. Taken
+    /// That is the same defect `passengers_tx` closes, one window smaller. Taken
     /// here it is held before the 101 exists, so there is no instant at which
     /// this connection is upgraded and uncounted.
     ///
     /// Never read. It is a `watch::Receiver` whose LIVENESS is the whole
-    /// signal; see `Run::sessions_tx`.
+    /// signal; see `Run::passengers_tx`.
     #[expect(
         dead_code,
         reason = "its LIVENESS is the signal; reading it would be meaningless"
@@ -148,16 +151,16 @@ pub(crate) struct SocketSession {
     pub(crate) alive: tokio::sync::watch::Receiver<()>,
 }
 
-/// THE SEAT IS RELEASED HERE, and it has to be here rather than at the freeze.
+/// THE RIDE ENDS HERE, and it has to be here rather than at the freeze.
 ///
 /// A freeze needs every socket on the account gone, so an account riding two
-/// rivers that loses one socket never freezes and would hold that seat
-/// forever. `BoatKey` carries no placement nonce, so the held seat is
+/// rivers that loses one passenger never freezes and would hold that ride
+/// forever. `BoatKey` carries no placement nonce, so a stale ride is
 /// indistinguishable from a live one as soon as any account boards that river
 /// at that speed again - and the sweeper would then drive this ledger off a
 /// boat it never boarded.
 ///
-/// `Drop` rather than a call at the end of `handle_socket`: the session is
+/// `Drop` rather than a call at the end of `handle_socket`: the passenger is
 /// also dropped when an upgrade is abandoned before the handler ever runs.
 ///
 /// The `Attach` it carries rides along for the same reason and is the half
@@ -165,9 +168,9 @@ pub(crate) struct SocketSession {
 /// before the 101, so an upgrade that never reaches `handle_socket` still ends
 /// with nothing reading the account - and the departure then freezes it, which
 /// is what makes it TTL-collectable and takes it back out of the sweep.
-impl Drop for SocketSession {
+impl Drop for Passenger {
     fn drop(&mut self) {
-        self.passenger.unsit(&self.ticket.boat().key());
+        self.account_state.unsit(&self.ticket.boat().key());
     }
 }
 
@@ -190,7 +193,7 @@ pub(crate) async fn ws_upgrade(
         Err(body) => return (StatusCode::BAD_REQUEST, body).into_response(),
     };
     // Resolved before the instrument, because the instrument is registered on
-    // THIS passenger's ledger. A malformed id is refused here rather than at
+    // THIS account's ledger. A malformed id is refused here rather than at
     // first order: nautilus cannot construct an `AccountId` from a bare word, so
     // a venue that accepted one would be refused by every consumer later.
     //
@@ -237,7 +240,7 @@ pub(crate) async fn ws_upgrade(
     //
     // RESOLVED, not yet registered. Resolution is a property of the venue and
     // is the only fallible half, so it answers here where nothing has been
-    // taken from anybody; the ledger-side install happens on the passenger the
+    // taken from anybody; the ledger-side install happens on the account the
     // claim returns, further down.
     let profile = match state.rivers.resolve_profile(&symbol) {
         Ok(profile) => profile,
@@ -304,23 +307,24 @@ pub(crate) async fn ws_upgrade(
     // two rivers, but two speeds on one river would give that ledger two
     // clocks.
     //
-    // UNCONDITIONAL, including for a frozen account. A reseat at a new speed
-    // still passes, because a freeze released every seat; routing the frozen
+    // UNCONDITIONAL, including for a frozen account. A return at a new speed
+    // still passes, because a frozen account has no passengers left; routing
+    // the frozen
     // case around the check instead would reopen the race the check exists to
     // close, since an account is CREATED frozen and does not attach until its
     // socket reaches `resume` further down - so two first connections would
-    // both read themselves frozen and both sit.
+    // both read themselves frozen and both board.
     //
     // TAKEN ON THE EXISTING LEDGER, BEFORE THE CLAIM, and skipped entirely when
-    // the claim is going to reset: a reset ledger holds no seat at all, so
+    // the claim is going to reset: a reset ledger has no passengers at all, so
     // asking the outgoing one would refuse exactly the reconnect-at-a-new-speed
-    // the reset knob exists to serve. Where the check does apply, the seat is
-    // TAKEN here rather than merely tested, so nothing can slip between the
-    // test and the claim - and this is the last fallible step, so a seat taken
+    // the reset knob exists to serve. Where the check does apply, the ride is
+    // recorded here rather than merely tested, so nothing can slip between the
+    // test and the claim, and this is the last fallible step, so a ride recorded
     // here is never abandoned.
-    let mut prepared_existing: Option<(Arc<crate::run::Passenger>, crate::run::Attach)> = None;
+    let mut prepared_existing: Option<(Arc<crate::run::Account>, crate::run::Attach)> = None;
     if !resetting {
-        // The passenger `claim_account` is about to return, resolved before the eviction so
+        // The account `claim_account` is about to return, resolved before the eviction so
         // this socket can be COUNTED ON to the account before the incumbent is
         // closed. Without that the incumbent's teardown could win the race to
         // an account with no lane and no attach, freeze it, and make the
@@ -328,7 +332,7 @@ pub(crate) async fn ws_upgrade(
         // would be a nondeterministic behaviour change, not a refusal. The
         // resetting branch needs none of this: the ledger it produces is a
         // fresh one, so a freeze in that window retires nothing.
-        let existing = state.run.passenger(&account_id);
+        let existing = state.run.account(&account_id);
         if let Err(sitting) = existing.try_sit(ticket.boat().key()) {
             let sitting_speed = sitting.speed();
             return (
@@ -353,22 +357,22 @@ pub(crate) async fn ws_upgrade(
     // re-derived there, so this call cannot decide to reset an account the
     // funding and cadence checks were taken against on the assumption that it
     // would not.
-    let passenger = state
+    let account_state = state
         .run
         .claim_account(&account_id, claimed, callsign, resetting);
     let attach = match prepared_existing {
         // The ordinary non-resetting path: the ledger checked above is the one
-        // the claim returned, so its seat and its attach carry straight into
-        // the session.
-        Some((existing, attach)) if Arc::ptr_eq(&existing, &passenger) => Some(attach),
+        // the claim returned, so its ride and its attach carry straight into
+        // the passenger.
+        Some((existing, attach)) if Arc::ptr_eq(&existing, &account_state) => Some(attach),
         // The ledger MOVED OUT FROM UNDER THE CHECK. `resetting` is false here,
         // so `claim_account` did not reopen the account itself: only another upgrade
         // racing this same account inside this window can have replaced the map
         // entry. The attach is given up right here - dropping the guard
         // departs the account it was taken on, so nothing is stranded counted-in
-        // - and the SEAT taken on `existing` is left behind deliberately, since
-        // `existing` is no longer reachable through the passenger map and dies
-        // with this Arc. That is stated rather than relied on: the seat is
+        // - and the ride recorded on `existing` is left behind deliberately, since
+        // `existing` is no longer reachable through the account map and dies
+        // with this Arc. That is stated rather than relied on: the ride is
         // harmless because the ledger holding it is unreachable, not because
         // anything releases it.
         //
@@ -379,47 +383,50 @@ pub(crate) async fn ws_upgrade(
     let attach = match attach {
         Some(attach) => attach,
         None => {
-            // A ledger this call minted or reset holds no seat, so this cannot
+            // A ledger this call minted or reset has no passengers, so this cannot
             // refuse for the cadence rule. It can still lose to another upgrade
             // racing the same account, which is a refusal AFTER the eviction and
             // the one case the ordering above cannot reach - it needs two
             // upgrades interleaved inside this window, where the pre-claim check
             // needs none.
-            if let Err(sitting) = passenger.try_sit(ticket.boat().key()) {
+            if let Err(sitting) = account_state.try_sit(ticket.boat().key()) {
                 let sitting_speed = sitting.speed();
                 return (
                     StatusCode::BAD_REQUEST,
                     format!(
                         "account {account} is already seated on {symbol} at speed \
                          {sitting_speed}; a ledger carries one cadence",
-                        account = passenger.account_id.as_str()
+                        account = account_state.account_id.as_str()
                     ),
                 )
                     .into_response();
             }
             // Counted onto the account here instead, since the branch above
             // never ran. Either way the socket is counted on BEFORE the upgrade
-            // completes and off it when its session drops, which is what keeps
+            // completes and off it when its passenger drops, which is what keeps
             // the account attached across the gap before `bind_lanes` and what
             // freezes it if this upgrade is abandoned and never binds anything.
-            state.run.attach(&passenger)
+            state.run.attach(&account_state)
         }
     };
-    // The ledger-side install, on the passenger the claim actually returned.
-    state.run.register_instrument(&passenger, &profile).await;
-    let session = SocketSession {
+    // The ledger-side install, on the account the claim actually returned.
+    state
+        .run
+        .register_instrument(&account_state, &profile)
+        .await;
+    let passenger = Passenger {
         symbol,
         ticket,
         duration_ms: query.duration_ms,
-        passenger,
+        account_state,
         presented_identity: query.callsign.clone(),
         attach: Some(attach),
         // Before the 101, not inside the spawned handler. See the field.
-        alive: state.run.session_guard(),
+        alive: state.run.passenger_guard(),
     };
     ws.max_message_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
         .max_frame_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state, session))
+        .on_upgrade(move |socket| handle_socket(socket, state, passenger))
 }
 
 fn send_admission(lanes: &ExecLanes, msg: VenueMessage) -> Result<(), CloseSpec> {
@@ -448,10 +455,10 @@ async fn dispatch_command(
     lanes: &ExecLanes,
     symbol: &mogwai_protocol::Symbol,
     boat: &Arc<crate::boatyard::Boat>,
-    passenger: &Arc<crate::run::Passenger>,
+    account_state: &Arc<crate::run::Account>,
 ) {
     let class = CommandClass::of(&cmd);
-    match process_order_cmd(cmd, state, &state.run, lanes, symbol, boat, passenger).await {
+    match process_order_cmd(cmd, state, &state.run, lanes, symbol, boat, account_state).await {
         OrderOutcome::Produced {
             mut events,
             reservation,
@@ -486,7 +493,7 @@ async fn dispatch_command(
             // await here and that window becomes a scheduling decision instead,
             // at which point the fix is to enqueue while still holding the engine
             // guard rather than to hope.
-            let account = passenger.account_id.as_str();
+            let account = account_state.account_id.as_str();
             state.run.track_ownership(&events, account);
             state.run.scope_query_rows(&mut events, account);
             drop(lanes.submit_produced(reservation, Instant::now(), class, events));
@@ -503,7 +510,7 @@ fn spawn_command_dispatcher(
     lanes: ExecLanes,
     symbol: mogwai_protocol::Symbol,
     boat: Arc<crate::boatyard::Boat>,
-    passenger: Arc<crate::run::Passenger>,
+    account_state: Arc<crate::run::Account>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The permit's scope is the correctness property: the process-wide
@@ -513,7 +520,7 @@ fn spawn_command_dispatcher(
         // than left to a destructure binding whose lifetime an underscore
         // pattern would silently end early.
         while let Some(queued) = commands.recv().await {
-            dispatch_command(queued.cmd, &state, &lanes, &symbol, &boat, &passenger).await;
+            dispatch_command(queued.cmd, &state, &lanes, &symbol, &boat, &account_state).await;
             drop(queued.global_slot);
         }
     })
@@ -544,7 +551,7 @@ fn current_completion(
 
 pub(crate) fn spawn_exec_pump(
     mut exec_rx: mpsc::UnboundedReceiver<HeldFrame>,
-    passenger: Arc<crate::run::Passenger>,
+    account_state: Arc<crate::run::Account>,
     sim: mogwai_protocol::SimClock,
     out: mpsc::Sender<Outbound>,
 ) -> tokio::task::JoinHandle<()> {
@@ -555,10 +562,10 @@ pub(crate) fn spawn_exec_pump(
             frame,
         }) = exec_rx.recv().await
         {
-            let delay = passenger
+            let delay = account_state
                 .delay_ms
                 .load(std::sync::atomic::Ordering::Relaxed)
-                .saturating_add(class.map_or(0, |class| passenger.ack_ms(class)));
+                .saturating_add(class.map_or(0, |class| account_state.ack_ms(class)));
             if delay > 0 {
                 let hold = sim.wall_duration(sim_duration_from_millis(delay));
                 let remaining = hold.saturating_sub(arrived.elapsed());
@@ -577,7 +584,7 @@ async fn run_writer(
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
     mut prio_rx: mpsc::UnboundedReceiver<Outbound>,
     mut out_rx: mpsc::Receiver<Outbound>,
-    passenger: Arc<crate::run::Passenger>,
+    account_state: Arc<crate::run::Account>,
     sim: mogwai_protocol::SimClock,
 ) {
     let mut priority_open = true;
@@ -605,15 +612,17 @@ async fn run_writer(
                 // `FrameClass`. Everything else is gated - `GoDark` wholesale,
                 // `StallData` on market data alone.
                 //
-                // THIS PASSENGER'S windows, not the venue's: transport havoc
+                // THIS ACCOUNT'S windows, not the venue's: transport havoc
                 // corrupts what one connection receives, so arming a blackout on
                 // one account must not black out every other account on the
                 // exchange.
                 if frame.class != FrameClass::Terminal {
-                    if passenger.dark.open_at(sim, now) {
+                    if account_state.dark.open_at(sim, now) {
                         continue;
                     }
-                    if frame.class == FrameClass::MarketData && passenger.stall.open_at(sim, now) {
+                    if frame.class == FrameClass::MarketData
+                        && account_state.stall.open_at(sim, now)
+                    {
                         continue;
                     }
                 }
@@ -629,10 +638,10 @@ async fn run_writer(
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSession) {
-    tracing::info!(symbol = %session.symbol, "socket bound to river");
-    // The session's claim on the process - `SocketSession::alive` - is already
-    // held, taken before the 101 rather than here. `session` lives to the end
+async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passenger) {
+    tracing::info!(symbol = %passenger.symbol, "socket bound to river");
+    // The passenger's claim on the process, `Passenger::alive`, is already
+    // held, taken before the 101 rather than here. `passenger` lives to the end
     // of this function, past the writer's close flush, which is where the claim
     // is given up.
     let (sink, mut stream) = socket.split();
@@ -641,20 +650,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
     let (prio_tx, prio_rx) = mpsc::unbounded_channel();
     let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
     let (command_tx, command_rx) = mpsc::channel(state.cfg.pending_command_acts);
-    let boat_sim = session.ticket.boat().sim;
+    let boat_sim = passenger.ticket.boat().sim;
     let dispatcher = spawn_command_dispatcher(
         command_rx,
         state.clone(),
         lanes.clone(),
-        Arc::clone(&session.symbol),
-        Arc::clone(session.ticket.boat()),
-        Arc::clone(&session.passenger),
+        Arc::clone(&passenger.symbol),
+        Arc::clone(passenger.ticket.boat()),
+        Arc::clone(&passenger.account_state),
     );
     let writer = tokio::spawn(run_writer(
         sink,
         prio_rx,
         out_rx,
-        Arc::clone(&session.passenger),
+        Arc::clone(&passenger.account_state),
         boat_sim,
     ));
     // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
@@ -662,8 +671,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
     // as long as this connection lives.
     let lane_id = state.run.bind_lanes(
         lanes.clone(),
-        session.passenger.account_id.as_str(),
-        session.presented_identity.as_deref(),
+        passenger.account_state.account_id.as_str(),
+        passenger.presented_identity.as_deref(),
     );
     // ATTACHED from here, which is what un-freezes the account and puts it back
     // in the sweep. Bound AFTER the lane, so anything the resume retires has a
@@ -672,20 +681,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
     let resumed = state
         .run
         .resume(
-            &session.passenger,
-            &session.symbol,
+            &passenger.account_state,
+            &passenger.symbol,
             crate::config::sim_now_ns(boat_sim),
         )
         .await;
     if !resumed.is_empty() {
-        let shape = session.passenger.engine.lock().await.book_shape();
+        let shape = passenger.account_state.engine.lock().await.book_shape();
         if let Some(reservation) = lanes.reserve_swept(&shape, resumed.len(), resumed.len()) {
             drop(lanes.submit_produced(reservation, Instant::now(), None, resumed));
         }
     }
     let pump = spawn_exec_pump(
         held_rx,
-        Arc::clone(&session.passenger),
+        Arc::clone(&passenger.account_state),
         boat_sim,
         out_tx.clone(),
     );
@@ -693,7 +702,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
         // This connection's own boat, and its own ring: a busy river cannot
         // lag a passenger subscribed to a quiet one, and a lag here is a
         // property of the water this socket asked for.
-        let (mut tape, snapshot) = session.ticket.boat().tape.subscribe_with_snapshot();
+        let (mut tape, snapshot) = passenger.ticket.boat().tape.subscribe_with_snapshot();
         let out_tx = out_tx.clone();
         // The ONE diagnostic this feed can ever emit is `FeedLagged`, and it is
         // emitted precisely when the connection is already drowning in market
@@ -838,7 +847,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
     });
     let mut completion = state.run.completion();
     let already_complete = current_completion(&mut completion);
-    let duration = session
+    let duration = passenger
         .duration_ms
         .map(|ms| tokio::time::sleep(boat_sim.wall_duration(sim_duration_from_millis(ms))));
     tokio::pin!(duration);
@@ -875,8 +884,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
         // THE VENUE'S OWN CLOSE ENDS THIS LOOP, without waiting on the peer.
         // Every other exit below needs the consumer to act - its close frame, its
         // EOF, or the run ending - so an evicted socket whose peer ignores the
-        // close frame stayed here, and its `SocketSession` held the account's
-        // SEAT on that boat. The connection that evicted it was then refused
+        // close frame stayed here, and its `Passenger` kept the account riding
+        // that boat. The passenger that evicted it was then refused
         // its own reconnect at a different speed. See `ExecLanes::closed`.
         let closed = lanes.closed();
         loop {
@@ -892,7 +901,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
                     break;
                 }
                 () = async { if let Some(timer) = duration.as_mut().as_pin_mut() { timer.await } }, if duration.is_some() => {
-                    let elapsed_ns = session.duration_ms.unwrap_or(0).saturating_mul(1_000_000);
+                    let elapsed_ns = passenger.duration_ms.unwrap_or(0).saturating_mul(1_000_000);
                     let now = sim_now_ns(boat_sim);
                     drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&VenueMessage::RunComplete { sim_now_ns: now, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
                     drop(out_tx.send(Outbound::Close(CloseSpec { code: mogwai_protocol::close::NORMAL, reason: mogwai_protocol::close::DURATION_COMPLETE.into() })).await);
@@ -930,13 +939,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut session: SocketSe
         }
     }
     state.run.release_lanes(lane_id);
-    // Given up HERE rather than with the session, which outlives this for as
+    // Given up here rather than with the passenger, which outlives this for as
     // long as the writer needs to flush its close frame: the account is no
     // longer being read the moment its lane is gone, and leaving it counted-in
     // for the writer's grace would keep it in the sweep for that long. The
-    // session still carries the guard, so an abandoned upgrade that never got
+    // passenger still carries the guard, so an abandoned upgrade that never got
     // here is covered by the drop.
-    drop(session.attach.take());
+    drop(passenger.attach.take());
     feed.abort();
     pump.abort();
     dispatcher.abort();

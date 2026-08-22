@@ -40,7 +40,8 @@ pub(crate) struct DivergenceRequest {
     /// and what every existing scenario file already writes.
     ///
     /// Only the transport arms honour it. `GoDark` and `StallData` change what
-    /// one connection RECEIVES, so they are the passenger's own eyesight;
+    /// one connection RECEIVES, so they blur the eyesight of every passenger
+    /// under that account;
     /// generator arms change the WATER, which is a property of the river and
     /// reaches everyone reading it whatever account they trade.
     #[serde(default)]
@@ -49,7 +50,7 @@ pub(crate) struct DivergenceRequest {
     divergence: Divergence,
 }
 
-/// The passengers one control-plane request applies to: the named account, or
+/// The accounts one control-plane request applies to: the named account, or
 /// every account when it names none.
 ///
 /// The account a control request targets, as `Run::arm` takes it.
@@ -402,7 +403,7 @@ pub(crate) async fn process_order_cmd(
     lanes: &ExecLanes,
     socket_symbol: &mogwai_protocol::Symbol,
     boat: &Arc<crate::boatyard::Boat>,
-    passenger: &crate::run::Passenger,
+    account_state: &crate::run::Account,
 ) -> OrderOutcome {
     let sim = boat.sim;
     // Sampled at entry for the boundary rejections below: they return before
@@ -456,7 +457,7 @@ pub(crate) async fn process_order_cmd(
     // can value. What does not qualify is a shape that would leave a holding
     // nothing prices in the policy currency, and asking for one is a consumer
     // error with a reason that says why.
-    if let Some(currency) = passenger
+    if let Some(currency) = account_state
         .risk
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -477,7 +478,7 @@ pub(crate) async fn process_order_cmd(
                 "account {account} is policed in {currency} and {echoed} would make it hold \
                  another currency; the venue has no rate to state its equity with, so a policed \
                  account trades only shapes settling in its own currency",
-                account = passenger.account_id.as_str()
+                account = account_state.account_id.as_str()
             ),
             ts,
         );
@@ -492,7 +493,7 @@ pub(crate) async fn process_order_cmd(
     // still be able to see and tidy its own book, and refusing a query would
     // make a locked account indistinguishable from a broken one.
     if let Some(order) = submitted_orders(&order_cmd).first()
-        && passenger
+        && account_state
             .risk
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -504,7 +505,7 @@ pub(crate) async fn process_order_cmd(
             &order.client_order_id.clone(),
             &format!(
                 "account {account} breached its risk policy and may not open a position",
-                account = passenger.account_id.as_str()
+                account = account_state.account_id.as_str()
             ),
             ts,
         );
@@ -518,7 +519,7 @@ pub(crate) async fn process_order_cmd(
     // A group names ONE symbol - `validate_submit_group` refuses anything else -
     // so registering the first member's registers the group's.
     if let Some(order) = submitted_orders(&order_cmd).first() {
-        let _configured = run.ensure_instrument(passenger, &order.symbol).await;
+        let _configured = run.ensure_instrument(account_state, &order.symbol).await;
     }
     // A POSITION CAP is refused here, by name, before the act delay. An
     // oversized submit is a consumer error: the firm would not have taken the
@@ -528,7 +529,7 @@ pub(crate) async fn process_order_cmd(
     // The risk guard is dropped BEFORE the engine await: holding a
     // `std::sync::Mutex` across `.await` makes this future `!Send`, and the
     // socket task has to be Send.
-    let position_cap = passenger
+    let position_cap = account_state
         .risk
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -552,7 +553,7 @@ pub(crate) async fn process_order_cmd(
         if let Some(order) = submitted_orders(&order_cmd).first()
             && !additional.is_zero()
         {
-            let projected = passenger
+            let projected = account_state
                 .engine
                 .lock()
                 .await
@@ -565,7 +566,7 @@ pub(crate) async fn process_order_cmd(
                     &format!(
                         "account {account} may not carry more than {cap} of {symbol}; this order \
                          would take the book to {projected}",
-                        account = passenger.account_id.as_str(),
+                        account = account_state.account_id.as_str(),
                         symbol = order.symbol,
                     ),
                     ts,
@@ -586,7 +587,7 @@ pub(crate) async fn process_order_cmd(
     // before `boundary_outcome`, which contradicted this paragraph and delayed
     // refusals that are not acts.
     let class = CommandClass::of(&order_cmd);
-    let act_ms = class.map_or(0, |class| passenger.act_ms(class));
+    let act_ms = class.map_or(0, |class| account_state.act_ms(class));
     if act_ms > 0 {
         tokio::time::sleep(sim.wall_duration(sim_duration_from_millis(act_ms))).await;
     }
@@ -650,7 +651,7 @@ pub(crate) async fn process_order_cmd(
             ts,
         );
     }
-    let mut engine = passenger.engine.lock().await;
+    let mut engine = account_state.engine.lock().await;
     let shape = engine.book_shape();
     let Some(reservation) = lanes.reserve(&order_cmd, &shape) else {
         // The engine has NOT been asked to process anything, so nothing
@@ -1011,7 +1012,7 @@ pub(crate) async fn arm_divergence(
         // its own boat clock.
         //
         // TARGETED at one account when the request names one, and at the VENUE
-        // otherwise. Transport havoc rides the PASSENGER, so blacking out one
+        // otherwise. Transport havoc rides the ACCOUNT, so blacking out one
         // subagent on a shared exchange must not black out the batch - and an
         // operator on a single-account venue still writes what it always did,
         // because naming no account still means everyone, now including the
@@ -1091,9 +1092,9 @@ pub(crate) async fn arm_divergence(
             // VENUE-WIDE WHATEVER THE REQUEST NAMED, which is why this passes
             // `None` rather than `target`: a surcharge is a statement about the
             // venue's fees, not about one trader's connection, and the wire has
-            // never let a consumer be charged differently. A passenger connecting
+            // never let a consumer be charged differently. An account opened
             // later gets it too - that is what `Run::arm`'s record is for. This
-            // used to walk `run.passengers()` while a comment here claimed the
+            // used to walk `run.accounts()` while a comment here claimed the
             // arm was "stored on the template", which it was not, so an account
             // minted after the request paid the unmodified fee.
             run.arm(
@@ -1123,10 +1124,9 @@ pub(crate) async fn arm_divergence(
             // search on a multi-account exchange can silently cancel a
             // stranger's resting order; naming the account is how a scenario
             // driving fifty subagents says which book it meant.
-            let Some((holder, order_symbol)) =
-                run.passenger_holding(target, &client_order_id).await
+            let Some((holder, order_symbol)) = run.account_holding(target, &client_order_id).await
             else {
-                // No passenger rests this id. Let a ledger say WHY - unknown id
+                // No account rests this id. Let a ledger say WHY - unknown id
                 // and already-terminal are different diagnoses, and this arm
                 // must not flatten them into one message.
                 //
@@ -1154,7 +1154,7 @@ pub(crate) async fn arm_divergence(
                     Some(named) => mogwai_protocol::AccountId::parse(named).ok(),
                     None => Some(run.default_account_id()),
                 };
-                let reason = match diagnosed.as_ref().and_then(|id| run.peek_passenger(id)) {
+                let reason = match diagnosed.as_ref().and_then(|id| run.peek_account(id)) {
                     Some(ledger) => ledger
                         .engine
                         .lock()
@@ -1386,7 +1386,7 @@ enum ClockAxis {
 /// WOULD carry, which is what a consumer asking before its first order expects.
 ///
 /// A READ DOES NOT ALLOCATE, and it used to. This resolved through
-/// `Run::passenger`, which is create-on-first-sight, so an unauthenticated GET
+/// `Run::account`, which is create-on-first-sight, so an unauthenticated GET
 /// minted a ledger for any id in the query string - born frozen and collectable
 /// only when `account_ttl_ms > 0`, and the default is to keep accounts forever.
 /// The answer is unchanged, because `Run::unopened_ledger` builds exactly what
@@ -1394,7 +1394,7 @@ enum ClockAxis {
 /// about an account is no longer the same act as opening one.
 ///
 /// STAMPED ON THE VENUE CLOCK, deliberately. A ledger spans every river its
-/// passenger has touched, so there is no boat axis to put it on: stamp from one
+/// account's passengers have boarded, so there is no boat axis to put it on: stamp from one
 /// boat and a push from a later-placed boat on another river is AHEAD of the
 /// pull; stamp from the newest and it is behind. No choice can keep a
 /// cross-clock monotonicity promise, so the answer keeps the venue stamp and
@@ -1417,16 +1417,16 @@ pub(crate) async fn account(
         None => state.run.default_account_id(),
     };
     let ts = sim_now_ns(state.venue_sim());
-    let (account, risk) = match state.run.peek_passenger(&account_id) {
-        Some(passenger) => {
-            let mut engine = passenger.engine.lock().await;
+    let (account, risk) = match state.run.peek_account(&account_id) {
+        Some(account_state) => {
+            let mut engine = account_state.engine.lock().await;
             let account = engine.account_snapshot(ts);
             // Published for the EVALUATOR, not for the strategy. A real trader
             // reads its remaining drawdown off the firm's dashboard; mogwai
             // presents none, so a run that ended flat having spent 90 percent
             // of its budget would be indistinguishable from one that never came
             // close.
-            let ledger = passenger
+            let ledger = account_state
                 .risk
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1450,7 +1450,7 @@ pub(crate) async fn account(
 }
 
 /// The risk half of an account snapshot, over whichever ledger produced the
-/// account half, an existing passenger's or a preview of an unopened one.
+/// account half, an existing account's or a preview of an unopened one.
 ///
 /// An unpoliced account still reports its equity, which is the one number an
 /// evaluator wants whether or not anything is enforced against it. With no

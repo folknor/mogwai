@@ -36,12 +36,12 @@ async fn connect(venue: &Venue) -> WsSocket {
 }
 
 /// A `--duration`-bounded run, watched to completion on sockets that were
-/// PROVABLY live sessions on it.
+/// PROVABLY live passengers on it.
 struct WatchedRun {
     venue: Venue,
     /// One entry per requested url, in that order.
     seen: Vec<Watched>,
-    /// Runs no socket of this test was ever a session on. KEPT ALIVE rather than
+    /// Runs no socket of this test was ever a passenger on. KEPT ALIVE rather than
     /// dropped as they are discarded, and that is load-bearing rather than
     /// laziness: `common`'s wall budget re-anchors when the LAST live venue goes
     /// away, so releasing a loser mid-test would restart this test's budget and
@@ -87,25 +87,25 @@ fn boat_skew_floor(declared_ns: u64) -> u64 {
 
 /// Launches a `--duration`-bounded venue, opens the named sockets and drains
 /// every one of them to completion - relaunching until each socket was a LIVE
-/// SESSION on the run it is reporting about.
+/// PASSENGER on the run it is reporting about.
 ///
 /// THE WRONG ANSWER THIS REMOVES. A declared duration is a WALL sleep started at
 /// readiness (`serve.rs` sleeps `sim.wall_duration(remaining)` and then completes
 /// the run) and the launcher returns AT readiness, so every test of this family
 /// connects into a span already running down. Under parallel execution the
 /// connect can lose: the venue is already tearing down, the connection is
-/// accepted and dropped without a session ever running, and the test then fails
+/// accepted and dropped without a passenger ever running, and the test then fails
 /// on "the run announces its completion on the wire". That is a WRONG ANSWER
 /// about the venue rather than a timeout, which is exactly why it read like a
 /// real regression - measured at `test_threads = 16`, where the test finished
 /// EARLY, at 2.016s against its usual 2.215s, having never seen the frame.
 ///
-/// THE PREMISE IS "THIS SOCKET WAS A SESSION", NOT "THIS SOCKET ATTACHED IN
+/// THE PREMISE IS "THIS SOCKET WAS A PASSENGER", NOT "THIS SOCKET ATTACHED IN
 /// TIME", and the difference is not pedantry - the first version of this helper
 /// used the second and STILL FAILED under the gate. Attaching late is not the
-/// defect: `ws.rs` checks `already_complete` when the session starts and
+/// defect: `ws.rs` checks `already_complete` when the passenger starts and
 /// announces to a socket that arrived after the run finished, so a late attach
-/// is served. What produces nothing is a connection that never became a session
+/// is served. What produces nothing is a connection that never became a passenger
 /// at all, and the only sound evidence either way is the venue having written
 /// SOMETHING on that socket. A run where some socket saw no frame is DISCARDED,
 /// so the test can only ever make a statement about a run it was actually
@@ -120,7 +120,7 @@ fn boat_skew_floor(declared_ns: u64) -> u64 {
 /// UPGRADE, so the race really is gone - but it closes ONE SOCKET and leaves the
 /// run going, which is the property
 /// `a_passenger_duration_closes_one_socket_and_leaves_the_boat_running` in
-/// `serving.rs` exists to pin. No test here is about a passenger. One asserts
+/// `serving.rs` exists to pin. No test here is about ONE passenger. One asserts
 /// that the VENUE exits 0 at its declared deadline, which a passenger duration
 /// does not cause, and another that the run-wide announcement reaches EVERY open
 /// socket, which a per-socket deadline cannot express at all. Substituting it
@@ -180,7 +180,7 @@ async fn watch_a_bounded_run(
         };
 
         // TWO CONDITIONS, AND THE SECOND WAS MISSING FOR A ROUND. The first is
-        // the premise: every socket was a live session, evidenced by a content
+        // the premise: every socket was a live passenger, evidenced by a content
         // frame. The second is that every drain got to WATCH THE RUN END -
         // `drain_to_completion`'s deadline is clamped to this test's remaining
         // wall budget, so an attempt begun late enough is cut off mid-run and
@@ -233,20 +233,20 @@ struct Watched {
     /// Whether the venue closed the socket.
     closed: bool,
     /// HOW MANY CONTENT FRAMES THE VENUE WROTE - `Text` only, which is the
-    /// venue's entire vocabulary for a session. Zero separates "this connection
-    /// was never a session" from "the venue served this socket and never
+    /// venue's entire vocabulary for a passenger. Zero separates "this connection
+    /// was never a passenger" from "the venue served this socket and never
     /// announced", which is the whole difference between a loaded host and a
     /// defect. See [`watch_a_bounded_run`].
     ///
-    /// CONTROL FRAMES ARE NOT SESSION EVIDENCE and counting them broke the
+    /// CONTROL FRAMES ARE NOT PASSENGER EVIDENCE and counting them broke the
     /// premise the counter exists to establish: a connection upgraded and then
     /// CLOSED by a venue already tearing down writes exactly one frame, the
     /// close, and a peer Ping does the same, so an all-frames count reported the
-    /// losing branch as a live session and the caller then panicked asserting
-    /// "the venue had already served 1 frames on, so this was a live session" -
+    /// losing branch as a live passenger and the caller then panicked asserting
+    /// "the venue had already served 1 frames on, so this was a live passenger" -
     /// the exact falsehood the counter rules out.
     content_frames: usize,
-    /// HOW THE DRAIN ENDED, and it is the second half of the session premise
+    /// HOW THE DRAIN ENDED, and it is the second half of the passenger premise
     /// rather than diagnostics. A drain cut off by [`common::deadline`]'s clamp
     /// has not observed the end of the run at all, so an absent announcement in
     /// that reading says nothing about the venue - and the caller reports it as
@@ -375,7 +375,7 @@ async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadlin
     let (_, elapsed_ns) = watched.announcement.unwrap_or_else(|| {
         panic!(
             "the run announced no completion on a socket the venue had already served {} content \
-             frames on and whose drain ended {:?}, so this was a live session watched to the end \
+             frames on and whose drain ended {:?}, so this was a live passenger watched to the end \
              and not a connect that lost a race",
             watched.content_frames, watched.ending
         )
@@ -667,7 +667,7 @@ async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
     // speed 100 is 0.3 s of wall, so this had the least margin of any of them
     // and was never parked only because it had not yet lost. The premise is
     // established by the watcher instead, and a run no socket of this test was a
-    // session on is discarded rather than reported as the deadline epoch being
+    // passenger on is discarded rather than reported as the deadline epoch being
     // wrong.
     let mut run =
         watch_a_bounded_run(&accelerated_config(), "30s", |venue| vec![venue.ws_url()]).await;
@@ -684,7 +684,7 @@ async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
     let (sim_now_ns, elapsed_ns) = watched.announcement.unwrap_or_else(|| {
         panic!(
             "the run announced no completion on a socket the venue had already served {} content \
-             frames on and whose drain ended {:?}, so this was a live session watched to the end \
+             frames on and whose drain ended {:?}, so this was a live passenger watched to the end \
              and not a connect that lost a race",
             watched.content_frames, watched.ending
         )

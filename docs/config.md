@@ -506,11 +506,12 @@ speed uses the configured default. Speed is finite and non-negative, capped at
 A different quantized speed places a second boat on the same river. Two
 sockets on one account cannot ride two cadences of one river: that would give
 the ledger two clocks, and the second upgrade is a `400` naming the sitting
-speed. That seat belongs to the SOCKET, so it is given up when that socket
-closes and the account may then take the river at a new cadence - no
-disconnect of the whole account required. Duration is simulated milliseconds
-from boarding and belongs
-to the passenger, not the boat, so passengers with different durations share.
+speed. The one-cadence rule belongs to the ACCOUNT and holds for as long as any
+of its passengers is riding that river. Once the last of them has gone the
+account may take the river at a new cadence, and no other passenger of that
+account has to disconnect for it. Duration is simulated milliseconds from
+boarding and belongs to the passenger, not the boat, so passengers with
+different durations share.
 
 Generator admission is based on mechanism constraints: positive finite values,
 grid representability, coherent sweep probabilities, size units compatible with

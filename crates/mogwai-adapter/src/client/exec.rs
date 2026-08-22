@@ -956,9 +956,9 @@ impl ExecutionClient for MogwaiExecutionClient {
         // command channel), then clear the reconciliation mirror. Without this
         // the default no-op `reset` leaves ExecState.orders and the account
         // staleness watermark populated across a stop/start, so a prior
-        // session's orders leak into the next session's status/fill reports and
-        // its watermark makes the new session's first account snapshot look
-        // stale.
+        // passenger's orders leak into the next passenger's status/fill reports
+        // and its watermark makes the new passenger's first account snapshot
+        // look stale.
         self.stop()?;
         let mut state = self
             .state

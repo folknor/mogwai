@@ -209,7 +209,7 @@ skip = [
     # what a crowded host takes away. `completion.rs` establishes the PREMISE
     # instead - `watch_a_bounded_run` drains every socket and DISCARDS the whole
     # run unless each of them saw a frame, relaunching until it has one this test
-    # was demonstrably a live session on - so a lost race is no longer a
+    # was demonstrably a live passenger on - so a lost race is no longer a
     # statement about the venue. The same treatment went to the two siblings that
     # had the identical shape and had simply not lost yet.
     #

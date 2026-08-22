@@ -5,20 +5,22 @@ receives a versioned readiness record as one JSON line on the child's stdout.
 The process binds one endpoint and owns an open set of resolved instruments,
 generated river tapes, and one ledger PER ACCOUNT.
 
-A RIVER is a tape and is shared; a PASSENGER is one connected trader - its own
-account, its own ledger, its own orders - and is never shared. The engine is
-per passenger for that reason: one engine per process meant every consumer's
+A RIVER is a tape and is shared; an ACCOUNT owns its ledger, risk state and
+freeze stamp; a PASSENGER is one connected trader riding one boat and dying
+with its socket. The
+engine is per account: one engine per process meant every consumer's
 fills moved every other consumer's net, which is right for a venue owned by one
-run and wrong for an exchange serving a batch. A `Passenger` is created on
-demand, keyed by account id, and the id is the consumer's: it outlives the
-connection, so a socket presenting it again resumes that ledger rather than
+run and wrong for an exchange serving a batch. An `Account` is created on
+demand, keyed by account id, and the id is the consumer's: it outlives every
+passenger, so a socket presenting it again resumes that ledger rather than
 opening a fresh one. The venue cannot distinguish a reconnect from a stranger
 claiming the id and does not try, so an account id is effectively a bearer
 token.
 
-DELIVERY IS ATTRIBUTED, NOT BROADCAST, which is what makes the per-passenger
+DELIVERY IS ATTRIBUTED, NOT BROADCAST, which is what makes the per-account
 ledger worth having on the wire as well as in memory. A sweep executes one engine
-pass per passenger, and each frame it produces reaches only the connections it is
+pass per account, and each frame it produces reaches only the passengers of the
+account it is
 about: an order-scoped frame goes to the account that submitted the order, and an
 `AccountState` goes to the account it NAMES. What reaches every connection is
 what is genuinely about the venue - a fault, a run completion, a feed gap.
@@ -85,20 +87,20 @@ exists to exercise a consumer's live path rather than to simulate an account
 nobody is trading. THE CONSEQUENCE TO STATE IN ANY CLAIM is that a run spanning
 a disconnect has a gap in its risk history.
 
-"ITS LAST CONNECTION" IS COUNTED FROM THE ATTACH, not from the outbound lane a
+"ITS LAST PASSENGER" IS COUNTED FROM THE ATTACH, not from the outbound lane a
 socket binds after its upgrade completes. The lane table alone cannot answer
 whether anybody is reading an account: an eviction retires the incumbent's lane
 immediately, while the newcomer binds its own only once its handler runs - and
 never at all if it abandons the upgrade. A socket is therefore counted onto its
 account before the 101 and off it when its lane is released - or when its
-session is dropped, if it never bound one, which is what covers the abandoned
+passenger is dropped, if it never bound one, which is what covers the abandoned
 upgrade. The two are deliberately not the same instant: the writer's close
 frame outlives the lane, and holding the account counted-in for that grace would
 keep it in the sweep after nothing is reading it. The freeze fires when neither
 a lane nor an attach is left. Without that count the evicted incumbent's
 teardown found no lane, resolved no account and simply returned, leaving the
-ledger attached with zero connections: never TTL-collected, and still swept
-while holding no seat, which cancelled the very resting orders the freeze
+ledger attached with zero passengers: never TTL-collected, and still swept
+while riding no boat, which cancelled the very resting orders the freeze
 exists to preserve.
 
 RESUMING RE-BASES THE BOOK, because a returning boat is not the one that left. A
@@ -558,7 +560,7 @@ before the first frame. The query carrier is the seam where river-keyed state,
 boat placement, and per-boat clocks attach. `ws_upgrade` resolves the query
 symbol, registers its instrument on the engine, resolves its `RiverKey`, and
 boards a boat on that river, all before the 101; `handle_socket` then owns the
-already-bound session. Every resolved shape owns a lazily created checkpoint
+already-bound passenger. Every resolved shape owns a lazily created checkpoint
 chain, keyed and locked independently, and is servable through history. Consumers
 do not send subscribe frames or an account identity. The bounded fanout
 ring remains; a lagging consumer receives
@@ -624,13 +626,13 @@ in the sharing key. Duration is passenger-local and is therefore not in that
 key. An unserved speed is a second cursor on the same water, not a refusal:
 speed mutates no generated value. One ledger still carries one cadence - two
 sockets on the default account may ride two rivers, but a second speed on a
-river that account is already seated on is refused, because that would be two
-clocks judging one book. That account-side seat is COUNTED and is released
-when the session ends rather than when the account freezes: an account riding
-two rivers never freezes on losing one socket, and a boat key is only
-(river, speed), so a seat left behind would be indistinguishable from a live
-one as soon as anybody boarded that cadence again. The last ticket of a given
-cadence removes that seat,
+river that account is already riding is refused, because that would be two
+clocks judging one book. The account COUNTS its passengers per boat, and the
+count falls when a passenger ends rather than when the account freezes: an
+account riding two rivers never freezes on losing one socket, and a boat key is
+only (river, speed), so a ride left behind would be indistinguishable from a
+live one as soon as anybody boarded that cadence again. Dropping the last
+ticket of a given cadence winds that boat down: it
 cancels its worker and joins it away from the registry mutex. Other cadences
 on the same river stay. Rivers and their bounded checkpoint sets remain for
 process life so later history does not depend on eviction timing.
@@ -638,8 +640,8 @@ process life so later history does not depend on eviction timing.
 The BOOT river is the exception to placement on demand: `serve` places a boat on
 it before it writes the readiness line, at the configured `speed`, and the run
 retains that ticket for process life. The run boards nothing - boarding is a
-connection's act and a run takes no seat - so what it holds is a keepalive
-ticket rather than a seat. The boot river therefore always has a boat at the
+passenger's act and a run has no passengers - so what it holds is a keepalive
+ticket rather than a ride. The boot river therefore always has a boat at the
 configured speed and that boat never winds down. A socket asking for a
 different speed on the boot symbol gets a second boat. Every other river is
 boatless until a connection boards it.

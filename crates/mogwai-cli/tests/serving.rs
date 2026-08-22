@@ -4,7 +4,7 @@
 //! The serving gates: what the venue answers over HTTP and `/ws` while a run is
 //! in flight - the history ceilings and floor, the boot river's warmup span
 //! servable at readiness, the subscription-free feed, the per-account ledgers
-//! and their policies, the seat and eviction rules, and the divergence control
+//! and their policies, the cadence and eviction rules, and the divergence control
 //! plane.
 //!
 //! IT USED TO SAY "L3-L6 gates" AND THAT MEANT NOTHING ANY MORE, which is worth
@@ -1355,7 +1355,8 @@ async fn an_oversized_submit_is_refused_by_the_position_cap() {
 /// A blackout armed on one account does not blind another.
 ///
 /// Transport havoc corrupts what one connection RECEIVES rather than what the
-/// generator produces, so it rides the passenger. Run-wide was the old shape,
+/// generator produces, so it is armed on the ACCOUNT and blurs each of its
+/// passengers alike. Run-wide was the old shape,
 /// and on a shared exchange it meant one subagent arming a blackout blacked out
 /// the whole batch.
 #[tokio::test]
@@ -1538,7 +1539,7 @@ async fn a_second_speed_on_the_same_account_is_refused() {
     // The REASON, not merely a 400. `contains("400") || contains("already
     // seated")` admitted any bad request on this route - the illegal-symbol
     // refusal, an unfunded-account refusal, a malformed speed - so a venue that
-    // had stopped checking the seat entirely could still turn this green by
+    // had stopped checking the cadence entirely could still turn this green by
     // refusing for some other reason. The status and the body are read off the
     // structured refusal instead.
     let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
@@ -1552,7 +1553,7 @@ async fn a_second_speed_on_the_same_account_is_refused() {
     let body = String::from_utf8_lossy(response.body().as_deref().unwrap_or_default()).into_owned();
     assert!(
         body.contains("already seated"),
-        "the refusal is the seat check rather than some other 400: {body}"
+        "the refusal is the cadence check rather than some other 400: {body}"
     );
     assert!(
         body.contains(&*venue.symbol) && body.contains("speed 2"),
@@ -1564,7 +1565,7 @@ async fn a_second_speed_on_the_same_account_is_refused() {
 /// replacing.
 ///
 /// `/ws` used to claim the account first - which closes every socket of the
-/// incumbent session and,
+/// incumbent callsign and,
 /// under the reset knob, discards its ledger - and only then run its five
 /// refusals, so `?account=X&speed=NaN` was a one-request, unauthenticated way
 /// to disconnect a live consumer while never connecting at all.
@@ -1572,7 +1573,7 @@ async fn a_second_speed_on_the_same_account_is_refused() {
 /// TWO PHASES, AND THE SECOND IS THE POINT. The refusal path and the admission
 /// path differ in exactly one character of the query string, so the incumbent
 /// surviving phase one can only mean the refusal spared it: phase two runs the
-/// same claim on the same account under the same new session with a legal
+/// same claim on the same account under the same new callsign with a legal
 /// speed, and the incumbent must then be evicted. Without it, a venue that had
 /// stopped evicting altogether - or one whose eviction never reached this
 /// socket - would pass phase one for the wrong reason.
@@ -1606,7 +1607,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
         }
     }
 
-    // A DIFFERENT session, so this is a stranger claiming the id - the shape
+    // A DIFFERENT callsign, so this is a stranger claiming the id - the shape
     // that evicts - and it is refused for the speed alone.
     let refused = while_draining(
         &mut incumbent,
@@ -1680,14 +1681,14 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
 /// being released.
 ///
 /// A socket is counted onto its account before the 101 and off it when its
-/// session is done, because the lane table alone cannot answer whether anybody
+/// passenger is done, because the lane table alone cannot answer whether anybody
 /// is reading an account: an eviction retires the incumbent's lane immediately,
 /// and a newcomer binds its own only once its handler runs. The consequence
 /// that matters here is one of ORDER. `handle_socket` releases its lane while
 /// still holding its attach, so the lane release finds the account still
 /// counted-in and declines to freeze; the freeze is owed by the attach's own
 /// departure a moment later. An account that never freezes is never
-/// TTL-collected and is still swept while holding no seat.
+/// TTL-collected and is still swept while riding no boat.
 ///
 /// THE OBSERVABLE IS COLLECTION, not a flag. `POST /accounts` refuses an id the
 /// venue still holds a ledger for with a 409 and answers 201 once that ledger
@@ -1761,22 +1762,22 @@ async fn a_departing_socket_freezes_its_account_into_collection() {
     assert!(
         reopened,
         "the account outlived the socket that was reading it: nothing froze it when that socket \
-         departed, so it is never TTL-collected and is still swept while holding no seat (last \
+         departed, so it is never TTL-collected and is still swept while riding no boat (last \
          answer {last})"
     );
 }
 
-/// A seat is given up when the SOCKET ends, not when the account freezes.
+/// A passenger's ride ends with its socket, not when the account freezes.
 ///
 /// Two unnamed sockets share the default account, so closing one leaves the
-/// account attached and never freezes it. If the departed socket's seat
+/// account attached and never freezes it. If the departed passenger's ride
 /// survived, a reconnect on that river at a new cadence would be refused
 /// against a cadence nobody is riding - and, because a boat key is just
 /// (river, speed), the ledger would be handed the next boat placed there
 /// whether or not it ever boarded.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn a_seat_is_released_when_its_socket_goes_even_though_the_account_stays() {
+async fn a_ride_ends_with_its_passenger_while_the_account_stays() {
     let venue = spawn(&["--config", &two_symbols_config()]);
     // The second river keeps the default account attached throughout, so
     // nothing here is explained by a freeze.
@@ -1791,8 +1792,8 @@ async fn a_seat_is_released_when_its_socket_goes_even_though_the_account_stays()
             .expect("board the river being tested");
     drop(leaving);
 
-    // Poll: the close is asynchronous, and the seat is released as the
-    // session unwinds rather than as the consumer's socket drops.
+    // Poll: the close is asynchronous, and the ride ends as the
+    // passenger unwinds rather than as the consumer's socket drops.
     let deadline = common::deadline(Duration::from_secs(10));
     loop {
         let reconnect = tokio_tungstenite::connect_async(format!(
@@ -1808,7 +1809,7 @@ async fn a_seat_is_released_when_its_socket_goes_even_though_the_account_stays()
             Err(error) => {
                 assert!(
                     tokio::time::Instant::now() < deadline,
-                    "the vacated seat still refuses a new cadence: {error}"
+                    "the ended ride still refuses a new cadence: {error}"
                 );
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -3375,29 +3376,29 @@ fn a_generator_arm_on_an_unboated_river_is_accepted() {
     );
 }
 
-/// AN EVICTED SOCKET RELEASES ITS SEAT WITHOUT THE PEER'S COOPERATION.
+/// AN EVICTED PASSENGER ENDS ITS RIDE WITHOUT THE PEER'S COOPERATION.
 ///
 /// `evict_account` writes a close frame and retires the lane, but the evicted
 /// socket's own read loop used to leave only on the peer's close, the peer's
 /// EOF, or the run ending. A consumer that ignores its close frame - or is merely
-/// slow to act on it - therefore kept its `SocketSession`, and with it the
-/// account's SEAT on that boat's cadence, for as long as it liked. The next
+/// slow to act on it - therefore kept its `Passenger`, and with it the
+/// account's RIDE on that boat's cadence, for as long as it liked. The next
 /// connection wanting that account at a DIFFERENT speed was then refused with
-/// "already seated", by a socket the venue had already thrown off.
+/// "already seated", by a passenger the venue had already thrown off.
 ///
 /// THE EVICTED SOCKET IS NEVER READ AFTER THE EVICTION, deliberately: reading
 /// it is what a cooperative consumer does, and a test that reads it is testing
 /// the cooperative path. It is held in scope so its TCP connection stays up.
 ///
-/// THE FINAL CONNECT IS POLLED, because the seat is released by the evicted
-/// session's teardown and there is no venue surface that reports it. The
-/// distinction the poll rests on is not a margin: under the defect the seat is
+/// The final connect is polled because the ride ends in the evicted
+/// passenger's teardown and there is no venue surface that reports it. The
+/// distinction the poll rests on is not a margin: under the defect the ride is
 /// held until the peer acts and no amount of waiting frees it, so a bounded
 /// retry separates "released" from "held forever" rather than betting on how
 /// fast a host is.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() {
+async fn an_evicted_passenger_gives_up_its_cadence_without_the_peer_reading() {
     let venue = spawn(&["--config", &fast_config()]);
     let at = |callsign: &str, speed: &str| {
         format!(
@@ -3421,7 +3422,7 @@ async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() 
 
     let (mut ignored, _) = tokio_tungstenite::connect_async(at("alpha", "1"))
         .await
-        .expect("the first socket seats the account at speed 1");
+        .expect("the first passenger boards at speed 1");
     served(&mut ignored).await;
 
     let (mut evicting, _) = tokio_tungstenite::connect_async(at("beta", "1"))
@@ -3430,7 +3431,7 @@ async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() 
     served(&mut evicting).await;
 
     // The evicting socket leaves properly, so the only thing that can still be
-    // holding the speed-1 seat is the socket that was thrown off.
+    // holding the speed-1 ride is the passenger that was thrown off.
     evicting
         .close(None)
         .await
@@ -3444,7 +3445,7 @@ async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() 
             Err(refusal) => assert!(
                 std::time::Instant::now() < deadline,
                 "the account never came free at a new cadence, so the socket the venue evicted is \
-                 still holding its seat: {refusal}"
+                 still holding its ride: {refusal}"
             ),
         }
     };
@@ -3456,7 +3457,7 @@ async fn an_evicted_socket_gives_up_its_cadence_seat_without_the_peer_reading() 
 /// OTHER.
 ///
 /// Client order ids are CONSUMER-CHOSEN, so two subagents numbering their orders
-/// from one collide on a shared exchange. The lookup walked every passenger and
+/// from one collide on a shared exchange. The lookup walked every account and
 /// took the first match, so a scenario cancelling `ORD-1` on one subagent could
 /// cancel a stranger's `ORD-1` instead - and a silent cancel emits no lifecycle
 /// event by design, so the victim would learn of it only by querying.

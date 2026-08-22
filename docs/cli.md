@@ -31,7 +31,7 @@ with older consumers. A socket owns exactly one river. A supplied symbol is 1 to
 32 ASCII letters, digits, dot, dash, or underscore, and matching is case exact.
 Malformed symbols are refused with HTTP 400 before the upgrade. Every legal
 symbol is resolved; the only other pre-upgrade refusals are a shape this run
-cannot fund or make valid, and an account already seated on that river at a
+cannot fund or make valid, and an account already riding that river at a
 different speed. The upgrade also accepts `?speed=` (absent means the configured
 `speed`) and `?duration_ms=`. The first passenger at a given speed places that
 cursor; later passengers at the same speed share it; a different speed places a
@@ -188,26 +188,26 @@ closes with no line - so no special handling is needed for them.
 
 A port identifies nothing over time. It is ephemeral, and this venue frees it
 BEFORE it exits: a declared completion stops the accept loop first, then drains
-live connections for up to the shutdown grace, so the address is available while
+live passengers for up to the shutdown grace, so the address is available while
 the process is still alive. A consumer watching for child exit sees nothing
 during that window, and a consumer that only knows where to dial cannot tell its
 own run from whatever answers there next.
 
-THAT DRAIN COVERS WEBSOCKET SESSIONS, and saying so is not redundant: an
+THAT DRAIN COVERS PASSENGERS, and saying so is not redundant: an
 upgraded connection stops being an HTTP connection at the 101, so a venue that
-waited only on its accept loop would consider itself drained while sessions were
+waited only on its accept loop would consider itself drained while passengers were
 still mid-frame - and it did, which is how a completed run's `RunComplete` and
 its WS 1000 close went missing on a loaded host, leaving the peer with a reset
-instead of an announcement. A DECLARED COMPLETION now waits for the sessions
+instead of an announcement. A DECLARED COMPLETION now waits for the passengers
 themselves, inside the same grace.
 
 A SIGNAL DOES NOT, and that is the deliberate difference. A signal means the
 launcher ended the run rather than the run completing, so no `RunComplete` is
-published and nothing tells a session to end; waiting for one would idle out
+published and nothing tells a passenger to end; waiting for one would idle out
 the whole grace on any venue with a socket attached. A signalled venue takes its
 sockets with it.
 
-A venue whose live connections do NOT drain within that grace exits NONZERO. It
+A venue whose live passengers do NOT drain within that grace exits NONZERO. It
 used to log a warning and exit 0, which made an abandoned connection
 indistinguishable from a clean teardown to a launcher inspecting exit status. A
 consumer that holds `/ws` open past the venue's completion is what produces it, so

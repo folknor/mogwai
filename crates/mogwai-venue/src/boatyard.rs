@@ -108,7 +108,7 @@ enum Slot {
 }
 struct PlacedBoat {
     boat: Arc<Boat>,
-    riders: u32,
+    passengers: u32,
 }
 
 pub(crate) struct Boatyard {
@@ -162,7 +162,7 @@ impl Boatyard {
                 let mut boats = self.locked();
                 match boats.get_mut(&key) {
                     Some(Slot::Placed(placed)) => {
-                        placed.riders += 1;
+                        placed.passengers += 1;
                         return Ok(Ticket {
                             yard: Arc::clone(self),
                             boat: Arc::clone(&placed.boat),
@@ -236,7 +236,7 @@ impl Boatyard {
                     key,
                     Slot::Placed(PlacedBoat {
                         boat: Arc::clone(&boat),
-                        riders: 1,
+                        passengers: 1,
                     }),
                 );
                 Ok(Ticket {
@@ -379,8 +379,8 @@ impl Drop for Ticket {
             let mut boats = self.yard.locked();
             let remove = match boats.get_mut(&self.boat.key) {
                 Some(Slot::Placed(placed)) => {
-                    placed.riders -= 1;
-                    placed.riders == 0
+                    placed.passengers -= 1;
+                    placed.passengers == 0
                 }
                 _ => false,
             };
@@ -685,7 +685,7 @@ mod tests {
                 key,
                 Slot::Placed(PlacedBoat {
                     boat: Arc::clone(&boat),
-                    riders: 1,
+                    passengers: 1,
                 }),
             );
             handoff.close();

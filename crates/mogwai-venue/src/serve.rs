@@ -323,8 +323,8 @@ async fn serve_async(
     };
     let completing_run = Arc::clone(&state.run);
     // The run, kept past `with_state` below, for `serve_until_drained`'s
-    // session wait.
-    let sessions = Arc::clone(&state.run);
+    // passenger wait.
+    let passengers = Arc::clone(&state.run);
     let (fault_shutdown_tx, mut fault_shutdown_rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         if let Ok(fault) = fault_rx.recv() {
@@ -455,7 +455,7 @@ async fn serve_async(
     };
     let terminal_fault = Arc::new(std::sync::Mutex::new(None));
     let terminal_fault_for_shutdown = Arc::clone(&terminal_fault);
-    serve_until_drained(listener, app, sessions, planned_completion, async move {
+    serve_until_drained(listener, app, passengers, planned_completion, async move {
         tokio::select! {
             // A signal means the launcher ended the run, not that its declared
             // simulated duration completed. Do not publish a false RunComplete.
@@ -521,13 +521,13 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// AXUM'S DRAIN IS NOT THE WHOLE DRAIN, and that gap is what `run` and
 /// `planned_completion` close. `axum::serve` waits on hyper CONNECTION futures,
 /// and an upgraded connection's resolves at the 101 - so its serve future can
-/// complete while every websocket session is still mid-frame. Returning there
-/// drops the runtime and every session with it, which is how a planned
+/// complete while every passenger is still mid-frame. Returning there
+/// drops the runtime and every passenger with it, which is how a planned
 /// completion's `RunComplete` and its WS 1000 close went missing on a loaded
-/// host. On a planned completion this therefore also waits for the sessions
+/// host. On a planned completion this therefore also waits for the passengers
 /// themselves, still inside `SHUTDOWN_GRACE`; on a signal or a fault it does
-/// not, because nothing has told those sessions to end and the wait would only
-/// idle out the grace. See `Run::sessions_drained`.
+/// not, because nothing has told those passengers to end and the wait would only
+/// idle out the grace. See `Run::passengers_drained`.
 async fn serve_until_drained(
     listener: tokio::net::TcpListener,
     app: Router,
@@ -546,7 +546,7 @@ async fn serve_until_drained(
         result = async {
             let served = (&mut serve).await;
             if planned_completion.load(std::sync::atomic::Ordering::Acquire) {
-                run.sessions_drained().await;
+                run.passengers_drained().await;
             }
             served
         } => result?,

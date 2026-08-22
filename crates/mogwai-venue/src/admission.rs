@@ -3,7 +3,7 @@
 
 //! Per-connection admission control for the outbound execution path.
 //!
-//! A session's outbound machinery is two lanes with explicit accounting, not
+//! A passenger's outbound machinery is two lanes with explicit accounting, not
 //! one bounded channel both the engine and the socket read loop push into:
 //!
 //! - the HELD lane carries engine output through the `DelayAcks` shift, is
@@ -107,7 +107,7 @@ pub(crate) const CLOSE_EVICTED: u16 = mogwai_protocol::close::NORMAL;
 /// nature, but releasing the connection's resources is not.
 pub(crate) const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The three per-connection budget sizes, together, so a session can be built
+/// The three per-connection budget sizes, together, so a passenger can be built
 /// with something other than the defaults.
 ///
 /// They exist as a value rather than as the three constants read directly
@@ -435,7 +435,7 @@ pub(crate) struct HeldFrame {
     pub(crate) frame: OutboundFrame,
 }
 
-/// The session's outbound execution machinery: one value threaded through the
+/// The passenger's outbound execution machinery: one value threaded through the
 /// read loop, the replay spawns and the pump, replacing the bare
 /// `mpsc::Sender<(Instant, VenueMessage)>` that both stalled the reader and
 /// hid the two lanes behind one channel. Every method is non-blocking.
@@ -457,14 +457,14 @@ pub(crate) struct ExecLanes {
     /// Fires once `send_close` has been called on this connection, so the
     /// socket's own read loop can end rather than waiting on a peer.
     ///
-    /// WRITING THE CLOSE IS NOT ENDING THE SESSION, which is the gap this
+    /// WRITING THE CLOSE IS NOT ENDING THE PASSENGER, which is the gap this
     /// closes. `run_writer` writes the frame and breaks, but `handle_socket`'s
     /// loop only leaves on the peer's close, the peer's EOF or the run's
     /// completion - so a consumer that ignores its close frame (or is simply
-    /// slow to act on it) kept its `SocketSession` alive, and with it the
-    /// account's SEAT on that boat. The newcomer that evicted it was then
+    /// slow to act on it) kept its `Passenger` alive, and with it the
+    /// account's RIDE on that boat. The newcomer that evicted it was then
     /// refused its own reconnect at a different speed, because the account
-    /// still sat on the old one. The venue must not need the evicted peer's
+    /// was still riding the old cadence. The venue must not need the evicted peer's
     /// cooperation to finish evicting it.
     ///
     /// Shared across clones, because every clone is the same connection.
@@ -682,10 +682,10 @@ impl ExecLanes {
     /// reasoned close turns into a bare socket teardown.
     /// NOTIFIED AS WELL AS QUEUED, and both halves of that are load-bearing.
     /// The frame is handed to the writer FIRST, so a reader woken by the
-    /// notification cannot tear the session down before the close it is
+    /// notification cannot tear the passenger down before the close it is
     /// reacting to was queued. And `notify_one`, never `notify_waiters`,
     /// because `notify_waiters` wakes only tasks ALREADY parked: a close that
-    /// beats the reader to its own `select!` would be lost and the seat held
+    /// beats the reader to its own `select!` would be lost and the ride held
     /// exactly as before. `notify_one` stores a permit for a reader that is not
     /// there yet, and tokio returns the permit if the `Notified` holding it is
     /// dropped - which a `select!` arm losing to another arm does every poll.
@@ -738,7 +738,7 @@ mod tests {
 
         let reservation = budget
             .try_reserve(10)
-            .expect("reserve for disconnected session");
+            .expect("reserve for disconnected passenger");
         drop(reservation);
         assert!(
             budget.try_reserve(10).is_some(),

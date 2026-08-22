@@ -90,17 +90,18 @@ impl HavocWindow {
     }
 }
 
-/// One connected trader: its own account, its own ledger, its own orders.
+/// One account: an id plus everything the venue holds under it.
 ///
-/// This is the noun the venue serves. A river is the tape and is shared; a
-/// passenger is never shared, because the moment a ledger hangs off something
-/// two connections have in common they share a balance and a position book.
+/// The engine, the risk ledger, the freeze stamp and the boat counts all belong
+/// here, and this outlives every passenger that speaks for the account. A
+/// passenger is one socket riding one boat and dies with that socket; the money
+/// and the book stay here.
 ///
-/// The engine is per passenger for exactly that reason. It was one per PROCESS,
-/// which is right while a venue serves one run and wrong the moment an
-/// orchestrator points fifty subagents at one exchange: every subagent's fills
-/// moved every other subagent's net.
-pub(crate) struct Passenger {
+/// The engine is per account, not per process. It was one per PROCESS, which is
+/// right while a venue serves one run and wrong the moment an orchestrator
+/// points fifty subagents at one exchange: every subagent's fills moved every
+/// other subagent's net.
+pub(crate) struct Account {
     pub(crate) account_id: mogwai_protocol::AccountId,
     pub(crate) engine: AsyncMutex<Engine>,
     /// The rules this account is enforced under, and what enforcing them has
@@ -128,21 +129,21 @@ pub(crate) struct Passenger {
     /// is no simulated clock while frozen: the boat that carried one wound down
     /// with the last socket. This is what the TTL is measured against.
     pub(crate) frozen_since: Mutex<Option<std::time::Instant>>,
-    /// Which boats this account is currently riding, and HOW MANY CONNECTIONS
-    /// ride each. One connection sits on one boat; the default account can
+    /// Which boats this account is currently riding, and HOW MANY PASSENGERS
+    /// ride each. One passenger rides one boat; the default account can
     /// have two unnamed sockets on two symbols and therefore two boats. The
-    /// sweeper applies a boat's walk only to passengers seated on it, so two
+    /// sweeper applies a boat's walk only to accounts riding it, so two
     /// cadences on one river cannot double-fill one ledger.
     ///
     /// COUNTED RATHER THAN A SET, because two unnamed sockets may share one
     /// river at one speed and therefore one boat. A set would let the first of
-    /// them to close vacate the seat out from under the second, which stops
+    /// them to close take the ride away from under the second, which stops
     /// the sweeper applying that boat to a ledger somebody is still trading.
     ///
-    /// A seat is released when the SESSION drops, not when the account
+    /// A ride ends when the PASSENGER drops, not when the account
     /// freezes: a freeze needs every socket gone, and the two-socket shape
-    /// above would otherwise leave a seat held by a connection that ended.
-    /// The key carries no placement nonce, so a stale seat would be
+    /// above would otherwise leave a ride held by a passenger that ended.
+    /// The key carries no placement nonce, so a stale ride would be
     /// indistinguishable from a live one the moment any account boarded that
     /// river at that speed again.
     seated_on: Mutex<HashMap<crate::boatyard::BoatKey, usize>>,
@@ -160,15 +161,15 @@ pub(crate) struct Passenger {
     /// and un-collectable for the life of the process.
     ///
     /// Raised by `Run::attach` before the upgrade completes and lowered by
-    /// `SocketSession`'s `Drop`, which runs on the abandoned-upgrade path too.
+    /// `Passenger`'s `Drop`, which runs on the abandoned-upgrade path too.
     /// So it counts ATTACHES, and every attach has exactly one departure.
     attachments: AtomicUsize,
     /// TRANSPORT havoc, per account rather than per venue.
     ///
     /// These corrupt what one connection RECEIVES rather than what the
-    /// generator produces, so under the river-and-passenger model they ride the
-    /// passenger by construction: the river is untouched and there is nothing to
-    /// scope. They were run-wide, which meant one subagent arming a blackout
+    /// generator produces, so they are scoped to the account and blur each of
+    /// its passengers alike: the river is untouched and there is nothing to
+    /// scope on the water side. They were run-wide, which meant one subagent arming a blackout
     /// blacked out every other subagent on the exchange.
     pub(crate) dark: HavocWindow,
     pub(crate) stall: HavocWindow,
@@ -188,7 +189,7 @@ pub(crate) struct Passenger {
     pub(crate) cancel_ack_ms: AtomicU64,
 }
 
-impl Passenger {
+impl Account {
     /// How long this account has been unattended, or `None` while a connection
     /// is reading it.
     pub(crate) fn frozen_for(&self) -> Option<std::time::Duration> {
@@ -232,16 +233,17 @@ impl Passenger {
         }
     }
 
-    /// Take a seat on `key`, or name the seat this account already holds on
-    /// that river at a different speed.
+    /// Record one passenger riding `key`, or name the boat this account already
+    /// rides on that river at a different speed.
     ///
-    /// THE ONLY WAY TO SIT, and unconditional on the freeze state on purpose.
-    /// A frozen account has an empty map - the seats went with the sessions -
-    /// so a reseat at a new speed passes the check anyway, and routing a
+    /// THE ONLY WAY TO RECORD A RIDE, and unconditional on the freeze state on
+    /// purpose. A frozen account has an empty map - its passengers all died with
+    /// their sockets -
+    /// so a return at a new speed passes the check anyway, and routing a
     /// frozen account past it instead would reopen the race this lock exists
     /// to close: an account is created frozen and only attaches once its
     /// socket reaches `resume`, so two first connections would both find
-    /// themselves frozen and both sit unchecked.
+    /// themselves frozen and both board unchecked.
     ///
     /// The check and the insert share the lock, so of two sockets racing two
     /// speeds exactly one wins.
@@ -266,20 +268,20 @@ impl Passenger {
         Ok(())
     }
 
-    /// Give up one connection's seat on `key`.
+    /// Give up one passenger's ride on `key`.
     ///
-    /// The seat itself is only vacated by the LAST rider, which is why the map
-    /// counts. Tolerant of a key it does not hold: a freeze clears the map,
-    /// and the freeze fires from lane release while the session that held the
-    /// seat is still unwinding.
+    /// The boat stays ridden until the LAST passenger leaves, which is why the
+    /// map counts. Tolerant of a key it does not hold: a freeze clears the map,
+    /// and the freeze fires from lane release while the passenger that held the
+    /// ride is still unwinding.
     pub(crate) fn unsit(&self, key: &crate::boatyard::BoatKey) {
         let mut seated = self
             .seated_on
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(riders) = seated.get_mut(key) {
-            *riders -= 1;
-            if *riders == 0 {
+        if let Some(passengers) = seated.get_mut(key) {
+            *passengers -= 1;
+            if *passengers == 0 {
                 seated.remove(key);
             }
         }
@@ -304,7 +306,7 @@ impl Passenger {
         self.attachments.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Count one socket out. Called from `SocketSession`'s `Drop`, so it runs
+    /// Count one socket out. Called from `Passenger`'s `Drop`, so it runs
     /// for an abandoned upgrade as well as for a socket that traded.
     fn depart(&self) {
         // SATURATING RATHER THAN WRAPPING, which is why this is a loop and not
@@ -388,12 +390,12 @@ impl Passenger {
     }
 }
 
-impl std::fmt::Debug for Passenger {
+impl std::fmt::Debug for Account {
     /// The account only. A ledger's contents are not something a diagnostic
     /// should splice into a log line, and the engine is behind an async mutex a
     /// formatter cannot take.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Passenger")
+        f.debug_struct("Account")
             .field("account_id", &self.account_id.as_str())
             .finish_non_exhaustive()
     }
@@ -518,19 +520,21 @@ impl ArmRecord {
         self.fee_surcharge = None;
     }
 
-    /// Replay the transport-side record onto a passenger being opened.
-    fn open_transport(&self, passenger: &Passenger) {
+    /// Replay the transport-side record onto an account being opened.
+    fn open_transport(&self, account_state: &Account) {
         if let Some(span) = self.dark {
-            passenger.dark.arm(span.wall_armed_ns, span.sim_span_ns);
+            account_state.dark.arm(span.wall_armed_ns, span.sim_span_ns);
         }
         if let Some(span) = self.stall {
-            passenger.stall.arm(span.wall_armed_ns, span.sim_span_ns);
+            account_state
+                .stall
+                .arm(span.wall_armed_ns, span.sim_span_ns);
         }
         if let Some(ms) = self.delay_ms {
-            passenger.delay_ms.store(ms, Ordering::Relaxed);
+            account_state.delay_ms.store(ms, Ordering::Relaxed);
         }
         if let Some(latency) = self.latency {
-            for (knob, ms) in passenger.latency_knobs().into_iter().zip(latency) {
+            for (knob, ms) in account_state.latency_knobs().into_iter().zip(latency) {
                 knob.store(ms, Ordering::Relaxed);
             }
         }
@@ -547,15 +551,15 @@ impl ArmRecord {
     }
 }
 
-/// Apply the transport half of ONE arm to a passenger that already exists.
+/// Apply the transport half of one arm to an account that already exists.
 ///
 /// It reads the ARM'S OWN FIELDS and nothing else. An earlier draft read
 /// `CommandLatency` out of the record it had just written, which was correct
 /// only because the caller recorded first - exactly the ordering coupling a
 /// later edit breaks without a test going red.
-fn apply_transport_arm(arm: &VenueArm, passenger: &Passenger) {
+fn apply_transport_arm(arm: &VenueArm, account_state: &Account) {
     match arm {
-        VenueArm::DelayAcks { ms } => passenger.delay_ms.store(*ms, Ordering::Relaxed),
+        VenueArm::DelayAcks { ms } => account_state.delay_ms.store(*ms, Ordering::Relaxed),
         VenueArm::CommandLatency {
             submit_act_ms,
             modify_act_ms,
@@ -572,12 +576,12 @@ fn apply_transport_arm(arm: &VenueArm, passenger: &Passenger) {
                 *modify_ack_ms,
                 *cancel_ack_ms,
             ];
-            for (knob, ms) in passenger.latency_knobs().into_iter().zip(armed) {
+            for (knob, ms) in account_state.latency_knobs().into_iter().zip(armed) {
                 knob.store(ms, Ordering::Relaxed);
             }
         }
-        VenueArm::GoDark { armed_ns, span_ns } => passenger.dark.arm(*armed_ns, *span_ns),
-        VenueArm::StallData { armed_ns, span_ns } => passenger.stall.arm(*armed_ns, *span_ns),
+        VenueArm::GoDark { armed_ns, span_ns } => account_state.dark.arm(*armed_ns, *span_ns),
+        VenueArm::StallData { armed_ns, span_ns } => account_state.stall.arm(*armed_ns, *span_ns),
         VenueArm::FeeSurcharge { .. } | VenueArm::Engine(_) => {}
     }
 }
@@ -590,7 +594,7 @@ fn apply_transport_arm(arm: &VenueArm, passenger: &Passenger) {
 /// `docs/havoc.md` says so twice, once for the transport windows ("naming none
 /// arms every account") and once for the late boarder ("a passenger that boards
 /// after the arm receives the full declared span from its own boarding
-/// instant"). The arming code walked the passengers that existed at the instant
+/// instant"). The arming code walked the accounts that existed at the instant
 /// of the request, so an operator who armed a `PartialFillNext` and then started
 /// a subagent got a run that believed it was perturbed and was not - and the
 /// eviction report's "every ledger holds the same arms and hits the cap
@@ -667,13 +671,13 @@ impl VenueArms {
     }
 }
 
-/// What every passenger's ledger is opened from. Held on the run because a
-/// passenger is created on demand - when a connection first names an account -
+/// What every account's ledger is opened from. Held on the run because a
+/// an account is created on demand - when a connection first names one -
 /// and the values it is built from are venue configuration.
 ///
 /// This is the venue-wide `[balances]` seed, which the account-policy design
 /// retires in favour of a consumer-named opening balance and risk policy. Until
-/// that lands it is the OPENING balance applied to each passenger rather than
+/// that lands it is the OPENING balance applied to each account rather than
 /// the balance of one shared ledger, which is the same value doing a different
 /// job.
 struct LedgerTemplate {
@@ -689,7 +693,7 @@ struct LedgerTemplate {
 /// A GUARD OBJECT rather than a pair of calls, because the failure it closes is
 /// the one where the release never runs: an upgrade abandoned after the 101
 /// never reaches `handle_socket`, and an account left counted-in forever is
-/// never frozen, never TTL-collected and swept while holding no seat.
+/// never frozen, never TTL-collected and swept while riding no boat.
 ///
 /// MINTED ONLY BY `Run::attach`, which raises the count and constructs this in
 /// one expression. `Run::depart` is private to this module, so there is no way
@@ -697,7 +701,7 @@ struct LedgerTemplate {
 /// lower it twice.
 pub(crate) struct Attach {
     run: Arc<Run>,
-    passenger: Arc<Passenger>,
+    account: Arc<Account>,
 }
 
 /// The account only: the run behind it holds every ledger on the venue, which
@@ -705,14 +709,14 @@ pub(crate) struct Attach {
 impl std::fmt::Debug for Attach {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Attach")
-            .field("account_id", &self.passenger.account_id.as_str())
+            .field("account_id", &self.account.account_id.as_str())
             .finish_non_exhaustive()
     }
 }
 
 impl Drop for Attach {
     fn drop(&mut self) {
-        self.run.depart(&self.passenger);
+        self.run.depart(&self.account);
     }
 }
 
@@ -720,7 +724,7 @@ pub(crate) struct Run {
     /// The shape this run placed its BOOT boat on, and the river a `/ws`
     /// upgrade binds when it names no symbol. Every configured shape has a
     /// river in `rivers`, is servable for history, and gets a boat of its own
-    /// when a passenger boards it; this one is only distinguished by carrying
+    /// when an account boards it; this one is only distinguished by carrying
     /// a boat from boot, and therefore by never lagging the venue clock.
     pub(crate) boot_symbol: Symbol,
     /// Every configured river, created on first use and keyed independently, so
@@ -731,11 +735,11 @@ pub(crate) struct Run {
     /// account id. An id is the consumer's to choose and outlives its connection,
     /// so a returning socket finds its own ledger rather than a fresh one; that
     /// is what makes a reconnect a continuation instead of a new trader.
-    passengers: Mutex<std::collections::HashMap<String, Arc<Passenger>>>,
+    accounts: Mutex<std::collections::HashMap<String, Arc<Account>>>,
     template: LedgerTemplate,
     /// Every venue-wide arm the control plane has posted. Read whenever a
     /// ledger is minted, so a late-connecting account carries what the operator
-    /// armed. LOCK ORDER: `passengers` FIRST, then this - both `passenger` and
+    /// armed. LOCK ORDER: `accounts` FIRST, then this - both `Run::account` and
     /// `arm_venue_wide` take them that way, which is what makes an arm racing a
     /// mint land in exactly one of the two paths rather than in neither.
     venue_arms: Mutex<VenueArms>,
@@ -771,8 +775,8 @@ pub(crate) struct Run {
     /// materialized before readiness; other rivers materialize it on first read.
     pub(crate) warmup_ns: u64,
     complete_tx: watch::Sender<Option<(u64, u64)>>,
-    /// One receiver per LIVE WEBSOCKET SESSION, held from BEFORE THE 101 until
-    /// after that session's writer has flushed its close, so the process can
+    /// One receiver per live passenger, held from before the 101 until
+    /// after that passenger's writer has flushed its close, so the process can
     /// tell whether anything is still being served.
     ///
     /// THE ACCEPT LOOP IS NOT THE ANSWER TO THAT QUESTION, which is the whole
@@ -780,18 +784,18 @@ pub(crate) struct Run {
     /// CONNECTIONS, and an upgraded connection's hyper future resolves at the
     /// 101 rather than when the websocket ends - `serve/mod.rs` drops its
     /// `close_rx` the moment `serve_connection_with_upgrades` returns. So a
-    /// venue that waited only on axum was racing its own sessions: the run's
+    /// venue that waited only on axum was racing its own passengers: the run's
     /// completion was published on a watch channel, the accept loop stopped, the
     /// serve future resolved, `main` returned, and the runtime dropped every
-    /// session task mid-flight - taking the `RunComplete` frame and the WS 1000
+    /// passenger task mid-flight, taking the `RunComplete` frame and the WS 1000
     /// close with it. The peer then saw a reset rather than a completed run,
     /// intermittently and only on a loaded host, which is exactly the shape the
     /// two lifecycle leads reported.
     ///
     /// Nothing else may take a receiver. The count is the number of live
-    /// sessions, and a holder that is not one makes `sessions_drained` a wait on
+    /// passengers, and a holder that is not one makes `passengers_drained` a wait on
     /// something other than what it names.
-    sessions_tx: watch::Sender<()>,
+    passengers_tx: watch::Sender<()>,
     /// The venue's terminal-fault channel, kept here as well as inside the
     /// boatyard so the CONTROL PLANE can reach it.
     ///
@@ -812,7 +816,7 @@ pub(crate) struct Run {
     /// to all of them.
     lanes: Mutex<Vec<BoundLane>>,
     /// Which connection submitted each live order, so a sweep-produced fill goes
-    /// to the passenger that owns it and to nobody else.
+    /// to the account that owns it and to nobody else.
     ///
     /// Keyed by `VenueOrderId` because that is what every sweep-produced frame
     /// and every query row carries; the value is the ACCOUNT ID the order
@@ -822,7 +826,7 @@ pub(crate) struct Run {
     /// ledger produced them. An order absent from this table is therefore a
     /// BUG in whoever built the batch, and the fallback - delivered to every
     /// lane, visible to every query, with a warning naming the id - is the
-    /// conservative direction to fail in while that bug lives: a passenger
+    /// conservative direction to fail in while that bug lives: an account
     /// seeing a stray frame is a smaller wrong than one missing its own fill.
     ///
     /// BY ACCOUNT, NOT BY CONNECTION, and the difference is not cosmetic. A
@@ -870,12 +874,12 @@ impl Run {
             started_ns,
         );
         let (complete_tx, _) = watch::channel(None);
-        let (sessions_tx, _) = watch::channel(());
-        // No engine is built here. A ledger belongs to a PASSENGER, and no
-        // passenger exists until a connection arrives, so the run carries only
-        // what one is opened from.
+        let (passengers_tx, _) = watch::channel(());
+        // No engine is built here. A ledger belongs to an ACCOUNT, and no
+        // account exists until a connection first names one, so the run carries
+        // only what one is opened from.
         Arc::new(Self {
-            passengers: Mutex::new(std::collections::HashMap::new()),
+            accounts: Mutex::new(std::collections::HashMap::new()),
             template: LedgerTemplate {
                 opening_balances: balances,
                 fill_seed: seeds.fill,
@@ -897,7 +901,7 @@ impl Run {
             deadline_ns: run_duration_ns.map(|duration| started_ns.saturating_add(duration)),
             warmup_ns,
             complete_tx,
-            sessions_tx,
+            passengers_tx,
             fault_tx,
             lanes: Mutex::new(Vec::new()),
             order_owners: Mutex::new(std::collections::HashMap::new()),
@@ -927,7 +931,7 @@ impl Run {
     ) -> Engine {
         // The ledger starts EMPTY of instruments. One becomes tradable when a
         // passenger binds a symbol or names it on an order, through
-        // `ensure_instrument` - which is per passenger for the same reason the
+        // `ensure_instrument` - which is per account for the same reason the
         // engine is.
         let mut engine = Engine::build(EngineConfig {
             account_id: account_id.clone(),
@@ -940,7 +944,7 @@ impl Run {
         engine
     }
 
-    /// The passenger trading under `account_id`, created on first sight.
+    /// The account trading under `account_id`, created on first sight.
     ///
     /// Creation is the whole lifecycle: an account outlives the connection that
     /// named it, so a second connection presenting the same id gets the SAME
@@ -948,21 +952,21 @@ impl Run {
     /// reconnect is from the venue's side, and it is indistinguishable from a
     /// stranger claiming the id, which is why nothing here tries to tell them
     /// apart.
-    pub(crate) fn passenger(&self, account_id: &mogwai_protocol::AccountId) -> Arc<Passenger> {
-        let mut passengers = self
-            .passengers
+    pub(crate) fn account(&self, account_id: &mogwai_protocol::AccountId) -> Arc<Account> {
+        let mut accounts = self
+            .accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = passengers.get(account_id.as_str()) {
+        if let Some(existing) = accounts.get(account_id.as_str()) {
             return Arc::clone(existing);
         }
         let mut engine = self.template_engine(account_id, self.template.opening_balances.clone());
         // Opened with whatever the operator has armed - venue-wide, and against
         // this account by name before it existed - so this ledger is
         // indistinguishable from one that existed when the arm arrived. Held
-        // across the passenger insert below, under the `passengers` lock this
+        // across the account insert below, under the `accounts` lock this
         // call already holds, so an arm cannot interleave between the replay and
-        // the moment `Run::arm` can see this passenger.
+        // the moment `Run::arm` can see this account.
         let mut arms = self
             .venue_arms
             .lock()
@@ -973,7 +977,7 @@ impl Run {
             pending.open_engine(&mut engine);
         }
         let opening = opening_equity(&self.template.opening_balances);
-        let minted = Arc::new(Passenger {
+        let minted = Arc::new(Account {
             account_id: account_id.clone(),
             engine: AsyncMutex::new(engine),
             // Unpoliced: an account nobody stated rules for is enforced against
@@ -1005,7 +1009,7 @@ impl Run {
             pending.open_transport(&minted);
         }
         drop(arms);
-        passengers.insert(account_id.as_str().to_owned(), Arc::clone(&minted));
+        accounts.insert(account_id.as_str().to_owned(), Arc::clone(&minted));
         minted
     }
 
@@ -1013,8 +1017,8 @@ impl Run {
     /// retained nowhere.
     ///
     /// THIS IS NOT A THIRD MINT SITE, and the difference is exactly that
-    /// nothing survives the call: no passenger is inserted, no pending named
-    /// arm is consumed, no seat and no freeze clock start. The CONSTRUCTION is
+    /// nothing survives the call: no account is inserted, no pending named
+    /// arm is consumed, no passenger boards and no freeze clock starts. The CONSTRUCTION is
     /// nevertheless shared with both real mint sites, through
     /// `template_engine`, because "not a mint" is a claim about lifecycle and
     /// says nothing about whether a preview is built the same way as the thing
@@ -1060,14 +1064,14 @@ impl Run {
     /// has, from the pending record if it has not.
     ///
     /// THE RECORD AND THE LIVE APPLICATION ARE ONE CALL, deliberately. Written
-    /// as two - store it here, walk the passengers there - they drift, and the
+    /// as two - store it here, walk the accounts there - they drift, and the
     /// drift is invisible: the existing set behaves and the next account to
     /// connect does not. `VenueArms` says why this is owed at all.
     ///
-    /// The record is taken while HOLDING THE PASSENGER MAP, which is what
-    /// resolves the race with a concurrent mint. `Run::passenger` and
-    /// `Run::open_account` read the record under the same map lock, so a
-    /// passenger is either already in the list this walks or was opened from a
+    /// The record is taken while HOLDING THE ACCOUNT MAP, which is what
+    /// resolves the race with a concurrent mint. `Run::account` and
+    /// `Run::open_account` read the record under the same map lock, so an
+    /// account is either already in the list this walks or was opened from a
     /// record that includes this arm - never neither.
     ///
     /// WHAT "INDISTINGUISHABLE FROM AN EXISTING LEDGER" DOES NOT COVER: the engine
@@ -1083,9 +1087,9 @@ impl Run {
         account: Option<&str>,
         arm: VenueArm,
     ) -> Option<mogwai_protocol::control::Divergence> {
-        let existing: Vec<Arc<Passenger>> = {
-            let passengers = self
-                .passengers
+        let existing: Vec<Arc<Account>> = {
+            let accounts = self
+                .accounts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut arms = self
@@ -1095,15 +1099,15 @@ impl Run {
             match account {
                 None => {
                     arms.all.record(&arm);
-                    for passenger in passengers.values() {
-                        apply_transport_arm(&arm, passenger);
+                    for account_state in accounts.values() {
+                        apply_transport_arm(&arm, account_state);
                     }
-                    passengers.values().map(Arc::clone).collect()
+                    accounts.values().map(Arc::clone).collect()
                 }
-                Some(named) => match passengers.get(named) {
-                    Some(passenger) => {
-                        apply_transport_arm(&arm, passenger);
-                        vec![Arc::clone(passenger)]
+                Some(named) => match accounts.get(named) {
+                    Some(account_state) => {
+                        apply_transport_arm(&arm, account_state);
+                        vec![Arc::clone(account_state)]
                     }
                     // NOT MINTED HERE. Recording leaves the consumer's own
                     // `POST /account` free to open the ledger on its own terms
@@ -1124,8 +1128,8 @@ impl Run {
                 armed_ns,
                 span_ns,
             } => {
-                for passenger in existing {
-                    passenger
+                for account_state in existing {
+                    account_state
                         .engine
                         .lock()
                         .await
@@ -1133,8 +1137,8 @@ impl Run {
                 }
             }
             VenueArm::Engine(div) => {
-                for passenger in existing {
-                    let evicted = passenger.engine.lock().await.arm(div.clone());
+                for account_state in existing {
+                    let evicted = account_state.engine.lock().await.arm(div.clone());
                     shed = shed.or(evicted);
                 }
             }
@@ -1159,9 +1163,9 @@ impl Run {
     /// entries included: nothing was ever applied from them, so there is no
     /// existing ledger for them to stay consistent with.
     pub(crate) async fn clear_venue_arms(&self) {
-        let existing: Vec<Arc<Passenger>> = {
-            let passengers = self
-                .passengers
+        let existing: Vec<Arc<Account>> = {
+            let accounts = self
+                .accounts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut arms = self
@@ -1170,13 +1174,13 @@ impl Run {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             arms.all.clear_transport_and_fee();
             arms.pending.clear();
-            passengers.values().map(Arc::clone).collect()
+            accounts.values().map(Arc::clone).collect()
         };
-        for passenger in existing {
+        for account_state in existing {
             // EVERY account's transport arms, whatever the request named: a
             // clear is an operator saying "stop everything".
-            passenger.clear_transport_havoc();
-            passenger.engine.lock().await.clear_fee_surcharge();
+            account_state.clear_transport_havoc();
+            account_state.engine.lock().await.clear_fee_surcharge();
         }
     }
 
@@ -1212,7 +1216,7 @@ impl Run {
         claimed: bool,
         callsign: Option<&str>,
         resetting: bool,
-    ) -> Arc<Passenger> {
+    ) -> Arc<Account> {
         // ONLY A CLAIMED ACCOUNT EVICTS. Naming an id is a statement about
         // identity - "this ledger is mine, hand it over" - and eviction is the
         // answer to it. Naming NONE is not: it means the consumer has no opinion,
@@ -1238,7 +1242,7 @@ impl Run {
         if resetting {
             self.reopen(account_id);
         }
-        self.passenger(account_id)
+        self.account(account_id)
     }
 
     /// Whether claiming this account will discard its ledger.
@@ -1262,13 +1266,13 @@ impl Run {
             && !self.has_matching_identity_on(account_id.as_str(), callsign)
     }
 
-    /// The account's ledger IF IT ALREADY EXISTS. Unlike `passenger`, this
+    /// The account's ledger IF IT ALREADY EXISTS. Unlike `Run::account`, this
     /// never mints one, which is what lets the funding check ask about an
     /// account nobody has opened without opening it.
     ///
     /// THIS DOES NOT MAKE A REFUSED UPGRADE ALLOCATION-FREE, and saying so
     /// would be the over-claim this comment used to make. `/ws` calls
-    /// `Run::passenger` on the non-resetting path - to take the seat before the
+    /// `Run::account` on the non-resetting path, to record the ride before the
     /// eviction - and the cadence refusal comes after it, so a refused upgrade
     /// can still leave a fresh ledger behind. That is now the ONLY such site:
     /// `GET /account` used to mint the same way on an unauthenticated read and
@@ -1276,11 +1280,11 @@ impl Run {
     /// `unopened_ledger` when there is nothing to find. Whether a REFUSAL may
     /// allocate an account remains open; what this method promises is only that
     /// IT does not mint.
-    pub(crate) fn peek_passenger(
+    pub(crate) fn peek_account(
         &self,
         account_id: &mogwai_protocol::AccountId,
-    ) -> Option<Arc<Passenger>> {
-        self.passengers
+    ) -> Option<Arc<Account>> {
+        self.accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(account_id.as_str())
@@ -1304,8 +1308,8 @@ impl Run {
         if resetting {
             return self.template.opening_balances.contains_key(currency);
         }
-        match self.peek_passenger(account_id) {
-            Some(passenger) => passenger.engine.lock().await.is_funded_in(currency),
+        match self.peek_account(account_id) {
+            Some(account_state) => account_state.engine.lock().await.is_funded_in(currency),
             // An account nobody has opened yet is minted from the template, so
             // the template is the honest answer and no ledger is created to
             // give it.
@@ -1330,11 +1334,11 @@ impl Run {
     /// Returns the ids collected, so the caller can say which.
     pub(crate) fn collect_expired_accounts(&self, ttl: std::time::Duration) -> Vec<String> {
         let expired: Vec<String> = self
-            .passengers
+            .accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|(_, passenger)| {
+            .filter(|(_, account_state)| {
                 // AN ATTACH IS THE SECOND HALF OF "NOBODY IS READING THIS", and
                 // asking only the freeze clock left the two predicates able to
                 // disagree. `freeze_if_unattended` refuses to freeze an account
@@ -1347,8 +1351,8 @@ impl Run {
                 // handed a fresh one instead of the book it came back for. The
                 // window is the whole upgrade, which is the 101, a task spawn
                 // and an instrument registration wide.
-                passenger.attachments() == 0
-                    && passenger
+                account_state.attachments() == 0
+                    && account_state
                         .frozen_for()
                         .is_some_and(|unattended| unattended >= ttl)
             })
@@ -1376,7 +1380,7 @@ impl Run {
     /// its frames. The claims must go with it, or a fresh ledger's frames would
     /// be attributed using a discarded one's history.
     fn discard_account(&self, account_id: &str) {
-        self.passengers
+        self.accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(account_id);
@@ -1452,16 +1456,16 @@ impl Run {
         balances: std::collections::HashMap<String, Decimal>,
         policy: mogwai_protocol::risk::AccountPolicy,
     ) -> Result<(), AccountRefusal> {
-        let mut passengers = self
-            .passengers
+        let mut accounts = self
+            .accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if passengers.contains_key(account_id.as_str()) {
+        if accounts.contains_key(account_id.as_str()) {
             return Err(AccountRefusal::AlreadyOpen);
         }
         let opening = opening_equity(&balances);
         let mut engine = self.template_engine(account_id, balances);
-        // Under the `passengers` lock this call already holds, in the same lock
+        // Under the `accounts` lock this call already holds, in the same lock
         // order `Run::arm` takes, so an arm racing this open lands in exactly
         // one of the two paths.
         let mut arms = self
@@ -1473,10 +1477,10 @@ impl Run {
         if let Some(pending) = &pending {
             pending.open_engine(&mut engine);
         }
-        let opened = Arc::new(Passenger {
+        let opened = Arc::new(Account {
             account_id: account_id.clone(),
             engine: AsyncMutex::new(engine),
-            // Anchored at the OPENING balance rather than at the first
+            // Anchored at the opening balance rather than at the first
             // observed equity: a trailing floor is stated relative to what
             // the account started with, and anchoring it at the first mark
             // would silently forgive whatever was lost before it.
@@ -1507,11 +1511,11 @@ impl Run {
             pending.open_transport(&opened);
         }
         drop(arms);
-        passengers.insert(account_id.as_str().to_owned(), opened);
+        accounts.insert(account_id.as_str().to_owned(), opened);
         Ok(())
     }
 
-    /// The passenger whose book holds `client_order_id` as a RESTING order, and
+    /// The account whose book holds `client_order_id` as a resting order, and
     /// the symbol it rests on.
     ///
     /// `account` IS THE REQUEST'S OWN `account` FIELD, and naming it is how a
@@ -1519,7 +1523,7 @@ impl Run {
     /// are CONSUMER-CHOSEN, so they are unique within one trader's book and not
     /// across a venue serving fifty of them: two subagents that both number
     /// their orders from one collide, and an unqualified search returns
-    /// whichever passenger the map iterated first. That is a scenario control
+    /// whichever account the map iterated first. That is a scenario control
     /// cancelling a stranger's resting order - silently, since a silent cancel
     /// emits no lifecycle event by design, so the victim learns of it only by
     /// querying. With an account named, exactly one book is searched and a miss
@@ -1529,39 +1533,39 @@ impl Run {
     /// naming no account means everywhere else on this plane - the venue - and
     /// on the single-account venue an operator usually drives, it is the only
     /// book there is.
-    pub(crate) async fn passenger_holding(
+    pub(crate) async fn account_holding(
         &self,
         account: Option<&str>,
         client_order_id: &str,
-    ) -> Option<(Arc<Passenger>, Symbol)> {
+    ) -> Option<(Arc<Account>, Symbol)> {
         let candidates = match account {
             Some(named) => self
-                .passengers
+                .accounts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(named)
                 .map(Arc::clone)
                 .into_iter()
                 .collect(),
-            None => self.passengers(),
+            None => self.accounts(),
         };
-        for passenger in candidates {
-            let symbol = passenger
+        for account_state in candidates {
+            let symbol = account_state
                 .engine
                 .lock()
                 .await
                 .open_order_symbol(client_order_id);
             if let Some(symbol) = symbol {
-                return Some((passenger, symbol));
+                return Some((account_state, symbol));
             }
         }
         None
     }
 
-    /// Every passenger this venue has served, for the venue-wide walks: the fill
+    /// Every account this venue has served, for the venue-wide walks: the fill
     /// sweeper, and the control plane's reach into every ledger.
-    pub(crate) fn passengers(&self) -> Vec<Arc<Passenger>> {
-        self.passengers
+    pub(crate) fn accounts(&self) -> Vec<Arc<Account>> {
+        self.accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
@@ -1576,13 +1580,13 @@ impl Run {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ticket);
     }
 
-    /// Make `symbol` tradable on ONE PASSENGER'S ledger: register the def and
+    /// Make `symbol` tradable on ONE ACCOUNT'S ledger: register the def and
     /// install the margin policy and fee schedule from its profile. Called when
     /// a socket binds a symbol and before an order for it is admitted. An `Err`
     /// means no profile resolves it, and the caller lets the engine produce its
     /// own unknown-instrument rejection rather than inventing a second wording.
     ///
-    /// Per passenger because the engine is: two traders on one venue each keep
+    /// Per account because the engine is: two traders on one venue each keep
     /// their own registered instruments, margin policy and fee schedule, and
     /// nothing one of them binds is visible in the other's ledger.
     ///
@@ -1592,11 +1596,11 @@ impl Run {
     /// resets its configuration.
     pub(crate) async fn ensure_instrument(
         &self,
-        passenger: &Passenger,
+        account_state: &Account,
         symbol: &str,
     ) -> Result<Arc<crate::source::InstrumentProfile>, crate::source::ResolveRefusal> {
         let profile = self.rivers.resolve_profile(symbol)?;
-        self.register_instrument(passenger, &profile).await;
+        self.register_instrument(account_state, &profile).await;
         Ok(profile)
     }
 
@@ -1608,14 +1612,14 @@ impl Run {
     /// property of the VENUE, so it is decided before a connection claims an
     /// account and can therefore refuse without having evicted anybody;
     /// registration is a property of the LEDGER, cannot fail, and has to happen
-    /// on whichever passenger the claim actually returned, which under the reset
+    /// on whichever account the claim actually returned, which under the reset
     /// knob is not the one that existed when the shape was resolved.
     pub(crate) async fn register_instrument(
         &self,
-        passenger: &Passenger,
+        account_state: &Account,
         profile: &Arc<crate::source::InstrumentProfile>,
     ) {
-        let mut engine = passenger.engine.lock().await;
+        let mut engine = account_state.engine.lock().await;
         if !engine.ensure_instrument(profile.def.clone()) {
             return;
         }
@@ -1700,19 +1704,19 @@ impl Run {
         };
         // A lane this call did not find was retired by an EVICTION, and the
         // freeze that owes is the departing socket's rather than this one's -
-        // see `freeze_if_unattended` and `SocketSession`'s `Drop`. Retiring a
+        // see `freeze_if_unattended` and `Passenger`'s `Drop`. Retiring a
         // lane is therefore an opportunity to freeze, never the only one.
         let Some(account) = account else {
             return;
         };
-        let passenger = self
-            .passengers
+        let account_state = self
+            .accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(account.as_str())
             .map(Arc::clone);
-        if let Some(passenger) = passenger {
-            self.freeze_if_unattended(&passenger);
+        if let Some(account_state) = account_state {
+            self.freeze_if_unattended(&account_state);
         }
     }
 
@@ -1733,17 +1737,17 @@ impl Run {
     /// a departing socket's freeze decision: the two questions
     /// `freeze_if_unattended` asks are answered against one state of the venue
     /// rather than two.
-    pub(crate) fn attach(self: &Arc<Self>, passenger: &Arc<Passenger>) -> Attach {
+    pub(crate) fn attach(self: &Arc<Self>, account: &Arc<Account>) -> Attach {
         let lanes = self.locked_lanes();
-        passenger.attach();
+        account.attach();
         drop(lanes);
         Attach {
             run: Arc::clone(self),
-            passenger: Arc::clone(passenger),
+            account: Arc::clone(account),
         }
     }
 
-    /// Freeze `passenger` if nothing is reading it any more.
+    /// Freeze `account` if nothing is reading it any more.
     ///
     /// TWO CONDITIONS, AND BOTH ARE LOAD-BEARING. No lane is bound to the
     /// account, AND no attached socket is still on its way to binding one. The
@@ -1755,29 +1759,29 @@ impl Run {
     /// account and returned without freezing, and a newcomer that never bound
     /// left the account attached with zero connections. That account is then
     /// never TTL-collected (`collect_expired_accounts` filters on
-    /// `frozen_for()`) and is still swept while holding no seat, which cancels
+    /// `frozen_for()`) and is still swept while riding no boat, which cancels
     /// its resting orders - the exact opposite of the contract that a frozen
     /// account's book survives for the socket that returns.
     ///
     /// Idempotent: `freeze` is a no-op on an account already frozen, so every
     /// path that could be the last one may call this.
-    fn freeze_if_unattended(&self, passenger: &Passenger) {
+    fn freeze_if_unattended(&self, account: &Account) {
         let lanes = self.locked_lanes();
-        let account = passenger.account_id.as_str();
-        if passenger.attachments() > 0 || lanes.iter().any(|bound| bound.account_id == account) {
+        let account_id = account.account_id.as_str();
+        if account.attachments() > 0 || lanes.iter().any(|bound| bound.account_id == account_id) {
             return;
         }
-        passenger.freeze();
+        account.freeze();
         drop(lanes);
     }
 
-    /// One socket has finished with `passenger`: give up its attach and
+    /// One socket has finished with `account`: give up its attach and
     /// freeze the account if it was the last thing reading it.
     ///
     /// Private, and reached only by dropping an `Attach`: see `attach`.
-    fn depart(&self, passenger: &Passenger) {
-        passenger.depart();
-        self.freeze_if_unattended(passenger);
+    fn depart(&self, account: &Account) {
+        account.depart();
+        self.freeze_if_unattended(account);
     }
 
     /// Attach an account to the river a socket has just bound, and put it in a
@@ -1810,12 +1814,12 @@ impl Run {
     /// Returns the events the retirement produced, for the caller to deliver.
     pub(crate) async fn resume(
         &self,
-        passenger: &Passenger,
+        account_state: &Account,
         symbol: &mogwai_protocol::Symbol,
         now_ns: u64,
     ) -> Vec<mogwai_protocol::VenueMessage> {
-        let returning = passenger.is_frozen();
-        passenger.clear_freeze();
+        let returning = account_state.is_frozen();
+        account_state.clear_freeze();
         if !returning {
             // NOT A FIRST BIND, NECESSARILY. An eviction-reconnect lands here
             // too: the newcomer is counted onto the account before the incumbent
@@ -1824,11 +1828,11 @@ impl Run {
             // Step 3 is therefore owed on this path as well, and asked as the
             // state itself rather than through the freeze - see
             // `Engine::rebase_future_scans`.
-            let mut engine = passenger.engine.lock().await;
+            let mut engine = account_state.engine.lock().await;
             let rebased = engine.rebase_future_scans(now_ns);
             if rebased > 0 {
                 tracing::debug!(
-                    account = passenger.account_id.as_str(),
+                    account = account_state.account_id.as_str(),
                     rebased,
                     now_ns,
                     "re-based scan frontiers that led the binding cursor; the book was marked on a \
@@ -1837,7 +1841,7 @@ impl Run {
             }
             return Vec::new();
         }
-        let mut engine = passenger.engine.lock().await;
+        let mut engine = account_state.engine.lock().await;
         let events = engine.retire_off_river(symbol, now_ns);
         engine.rebase_scans(now_ns);
         events
@@ -1955,12 +1959,12 @@ impl Run {
     /// liquidation the venue mints under the reserved id prefixes - to the
     /// account whose ledger it acts on. Such an order has no submitting
     /// connection, so before this existed its frames fell to the broadcast
-    /// fallback and every passenger saw them, which is the one hole the
+    /// fallback and every account saw them, which is the one hole the
     /// invisibility property had. The account IS knowable, and it is knowable
-    /// HERE, at production time: every engine pass is per passenger, so a
-    /// frame in the pass's batch is about that passenger's book by
+    /// HERE, at production time: every engine pass is per account, so a
+    /// frame in the pass's batch is about that account's book by
     /// construction. Claiming at production keeps delivery a pure function of
-    /// the batch - the ambient passenger context is used where it is truthful
+    /// the batch - the ambient account context is used where it is truthful
     /// (booking) and never at delivery, which is the rule the `AccountState`
     /// broadcast defect taught.
     ///
@@ -2052,13 +2056,6 @@ impl Run {
         self.complete_tx.subscribe()
     }
 
-    /// A live-session token. Taken by `ws::ws_upgrade` BEFORE the 101 is
-    /// returned, carried on the `SocketSession`, and dropped only after that
-    /// session's writer has flushed - so the token's lifetime strictly contains
-    /// the session's, and strictly contains the hyper connection's, which ends
-    /// at the 101. Taking it inside the spawned handler instead would leave a
-    /// window in which the connection is upgraded and this count has not yet
-    /// risen. See `sessions_tx`.
     /// Fault the venue terminally, at the operator's request.
     ///
     /// Reports whether the fault was DELIVERED. A closed channel means the
@@ -2082,25 +2079,32 @@ impl Run {
         self.fault_tx.send(mogwai_data::TickFault::Injected).is_ok()
     }
 
-    pub(crate) fn session_guard(&self) -> watch::Receiver<()> {
-        self.sessions_tx.subscribe()
+    /// A live-passenger token. Taken by `ws::ws_upgrade` BEFORE the 101 is
+    /// returned, carried on the `Passenger`, and dropped only after that
+    /// passenger's writer has flushed - so the token's lifetime strictly
+    /// contains the passenger's, and strictly contains the hyper connection's,
+    /// which ends at the 101. Taking it inside the spawned handler instead
+    /// would leave a window in which the connection is upgraded and this count
+    /// has not yet risen. See `passengers_tx`.
+    pub(crate) fn passenger_guard(&self) -> watch::Receiver<()> {
+        self.passengers_tx.subscribe()
     }
 
-    /// Resolves once no websocket session is live. Immediately, when none is.
+    /// Resolves once no passenger is live. Immediately, when none is.
     ///
     /// Awaited on the PLANNED-COMPLETION shutdown only, and that limit is
     /// deliberate rather than an oversight. A planned completion is a promise
     /// the venue made about its declared duration - every open socket is told,
-    /// and each session ends itself the moment it hears - so waiting here is
-    /// bounded by the sessions' own teardown and is the difference between an
+    /// and each passenger ends itself the moment it hears, so waiting here is
+    /// bounded by the passengers' own teardown and is the difference between an
     /// announced run and a reset one. A SIGNAL is not that promise: the
     /// launcher ended the run, `RunComplete` is deliberately NOT published, and
-    /// nothing tells a session to stop - so waiting would idle out the whole
+    /// nothing tells a passenger to stop, so waiting would idle out the whole
     /// shutdown grace on any venue with a socket attached and turn a clean stop
     /// into a bailed one. The signal path therefore keeps its abrupt teardown,
     /// which is what `sigterm_closes_without_announcing_run_complete` observes.
-    pub(crate) async fn sessions_drained(&self) {
-        self.sessions_tx.closed().await;
+    pub(crate) async fn passengers_drained(&self) {
+        self.passengers_tx.closed().await;
     }
 }
 
@@ -2163,7 +2167,7 @@ pub(crate) struct BoundLane {
 /// variant does not compile until someone decides who it belongs to. That is
 /// the whole point. Delivery used to attribute by two chained lookups whose
 /// shared default was "unrecognized means everyone", and `AccountState` rode
-/// that default silently - the sweep runs one engine pass PER PASSENGER, so an
+/// that default silently - the sweep runs one engine pass PER ACCOUNT, so an
 /// N-account venue handed every socket N snapshots per pass, N-1 of them
 /// somebody else's balances and positions. A consumer had no way to tell: the
 /// snapshot names its account, but a consumer promised one ledger per run has no
@@ -2176,7 +2180,7 @@ pub(crate) enum Audience<'a> {
     /// data - and belongs to every connection.
     Venue,
     /// Owned by the account the frame itself names. Attribution by the frame's
-    /// OWN field rather than by which passenger the sweep was iterating,
+    /// own field rather than by which account the sweep was iterating,
     /// deliberately: delivery is a pure function of the batch, and a frame that
     /// can say who it belongs to must not be attributed by ambient context
     /// that a later refactor can silently change.
@@ -2439,13 +2443,13 @@ mod tests {
         ));
     }
 
-    /// The planned-completion shutdown waits on a LIVE SESSION and not merely
+    /// The planned-completion shutdown waits on a live passenger and not merely
     /// on the accept loop.
     ///
     /// THE DIFFERENTIAL IS THE POINT, and both halves are asserted because the
-    /// second alone passes against the broken shape too. `sessions_drained`
+    /// second alone passes against the broken shape too. `passengers_drained`
     /// must NOT resolve while a guard is held - that is the whole defect: the
-    /// venue's serve future can complete while a websocket session is still
+    /// venue's serve future can complete while a passenger is still
     /// mid-announcement, because axum stops tracking an upgraded connection at
     /// the 101 - and it must resolve promptly once the last guard drops, or a
     /// clean completion would idle out the shutdown grace and bail.
@@ -2456,47 +2460,47 @@ mod tests {
     /// three orders of magnitude of margin, and losing it means the guard was
     /// ignored outright rather than that the host was slow.
     #[tokio::test]
-    async fn a_live_session_guard_holds_the_shutdown_open() {
+    async fn a_live_passenger_guard_holds_the_shutdown_open() {
         let run = run(1_000, 400, None);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(200),
-                run.sessions_drained()
+                run.passengers_drained()
             )
             .await
             .is_ok(),
-            "with no session live the venue owes nobody an announcement and must not wait"
+            "with no passenger live the venue owes nobody an announcement and must not wait"
         );
 
-        let session = run.session_guard();
+        let passenger = run.passenger_guard();
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(200),
-                run.sessions_drained()
+                run.passengers_drained()
             )
             .await
             .is_err(),
-            "a live session still owes its RunComplete and its close; exiting here is what \
+            "a live passenger still owes its RunComplete and its close; exiting here is what \
              reset the peer instead of announcing to it"
         );
 
-        drop(session);
+        drop(passenger);
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(200),
-                run.sessions_drained()
+                run.passengers_drained()
             )
             .await
             .is_ok(),
-            "the last session ended, so the wait must release rather than run out the grace"
+            "the last passenger ended, so the wait must release rather than run out the grace"
         );
     }
 
     /// A query reply carries the asking connection's orders and nobody else's.
     ///
     /// The engine answers from one book because there is one ledger, so without
-    /// this scoping a passenger polling `QueryOrders` reads every other
-    /// passenger's order history - including their terminal rows, which is why
+    /// this scoping an account polling `QueryOrders` reads every other
+    /// account's order history - including their terminal rows, which is why
     /// ownership outlives an order's end. Deleting the `retain` in
     /// `scope_query_rows` makes the count assertion fail at 2.
     #[test]
@@ -2547,16 +2551,16 @@ mod tests {
     fn an_account_freezes_when_its_last_connection_goes_and_thaws_when_one_returns() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("FREEZE-001").unwrap();
-        let passenger = run.passenger(&account);
+        let account_state = run.account(&account);
         assert!(
-            passenger.is_frozen(),
+            account_state.is_frozen(),
             "an account nobody has connected to is unattended like any other"
         );
 
         let (first, _first_rx) = crate::admission::ExecLanes::detached();
         let first_id = run.bind_lanes(first, account.as_str(), None);
-        passenger.clear_freeze();
-        assert!(!passenger.is_frozen());
+        account_state.clear_freeze();
+        assert!(!account_state.is_frozen());
 
         // A SECOND connection on the same account: retiring the first must not
         // freeze an account somebody is still reading. This is the eviction
@@ -2565,12 +2569,12 @@ mod tests {
         let second_id = run.bind_lanes(second, account.as_str(), None);
         run.release_lanes(first_id);
         assert!(
-            !passenger.is_frozen(),
+            !account_state.is_frozen(),
             "a connection is still reading this account"
         );
 
         run.release_lanes(second_id);
-        assert!(passenger.is_frozen(), "the last one left");
+        assert!(account_state.is_frozen(), "the last one left");
     }
 
     /// AN EVICTED INCUMBENT STILL OWES THE FREEZE. Eviction retires the
@@ -2578,17 +2582,17 @@ mod tests {
     /// to match its id - and a freeze that keyed off finding one simply
     /// returned. The account was then left attached with zero connections:
     /// never TTL-collected, because `collect_expired_accounts` filters on
-    /// `frozen_for()`, and still swept while holding no seat, which cancels its
+    /// `frozen_for()`, and still swept while riding no boat, which cancels its
     /// resting orders.
     #[test]
     fn an_evicted_account_freezes_when_the_incumbent_finishes_tearing_down() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("FREEZE-002").unwrap();
-        let passenger = run.passenger(&account);
-        let incumbent_attach = run.attach(&passenger);
+        let account_state = run.account(&account);
+        let incumbent_attach = run.attach(&account_state);
         let (lanes, _rx) = crate::admission::ExecLanes::detached();
         let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        passenger.clear_freeze();
+        account_state.clear_freeze();
 
         // A stranger claims the account and then never binds anything - the
         // refused upgrade, and the upgrade abandoned after the 101 - so the
@@ -2598,12 +2602,12 @@ mod tests {
         drop(incumbent_attach);
 
         assert!(
-            passenger.is_frozen(),
+            account_state.is_frozen(),
             "nothing is reading this account, so it must be frozen: collectable, and out of the \
              sweep"
         );
         assert!(
-            passenger.frozen_for().is_some(),
+            account_state.frozen_for().is_some(),
             "and the TTL reaper reads exactly that"
         );
     }
@@ -2617,26 +2621,26 @@ mod tests {
     fn an_attached_socket_holds_the_account_open_before_it_binds_a_lane() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("FREEZE-003").unwrap();
-        let passenger = run.passenger(&account);
-        let incumbent_attach = run.attach(&passenger);
+        let account_state = run.account(&account);
+        let incumbent_attach = run.attach(&account_state);
         let (lanes, _rx) = crate::admission::ExecLanes::detached();
         let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        passenger.clear_freeze();
+        account_state.clear_freeze();
 
         // The newcomer is counted on before the upgrade completes, exactly as
         // `/ws` does it.
-        let newcomer_attach = run.attach(&passenger);
+        let newcomer_attach = run.attach(&account_state);
         assert_eq!(run.evict_account(account.as_str(), Some("beta")), 1);
         run.release_lanes(incumbent);
         drop(incumbent_attach);
         assert!(
-            !passenger.is_frozen(),
+            !account_state.is_frozen(),
             "the newcomer is on its way in, so the account is still being read"
         );
 
         drop(newcomer_attach);
         assert!(
-            passenger.is_frozen(),
+            account_state.is_frozen(),
             "and when that newcomer goes without ever binding, the account freezes"
         );
     }
@@ -2649,7 +2653,7 @@ mod tests {
         run: &Arc<Run>,
         account_id: &mogwai_protocol::AccountId,
         callsign: Option<&str>,
-    ) -> Arc<Passenger> {
+    ) -> Arc<Account> {
         let resetting = run.claim_discards_ledger(account_id, true, callsign);
         run.claim_account(account_id, true, callsign, resetting)
     }
@@ -2660,43 +2664,47 @@ mod tests {
             .expect("a legal speed")
     }
 
-    /// Two sockets may share one boat - the default account, one symbol, one
-    /// speed - so the seat is COUNTED. The first to leave must not vacate a
-    /// seat the second is still riding, or the sweeper stops applying that
+    /// Two passengers may share one boat under the default account, one symbol
+    /// and one speed, so the account counts them. The first to leave must not
+    /// remove the ride the second still holds, or the sweeper stops applying that
     /// boat to a ledger somebody is still trading.
     #[test]
-    fn a_seat_shared_by_two_connections_survives_the_first_leaving() {
+    fn a_ride_shared_by_two_passengers_survives_the_first_leaving() {
         let run = run(1_000, 400, None);
-        let passenger = run.passenger(&mogwai_protocol::AccountId::parse("SEAT-001").unwrap());
+        let account_state = run.account(&mogwai_protocol::AccountId::parse("SEAT-001").unwrap());
         let key = boat_key(&run, "BTCUSDT", 2.0);
 
-        passenger.try_sit(key.clone()).expect("the first sits");
-        passenger
+        account_state.try_sit(key.clone()).expect("the first sits");
+        account_state
             .try_sit(key.clone())
             .expect("the second shares it");
-        passenger.unsit(&key);
+        account_state.unsit(&key);
         assert!(
-            passenger.is_seated_on(&key),
-            "one connection left, one is still riding"
+            account_state.is_seated_on(&key),
+            "one passenger left, one is still riding"
         );
-        passenger.unsit(&key);
-        assert!(!passenger.is_seated_on(&key), "the last rider vacated it");
+        account_state.unsit(&key);
+        assert!(
+            !account_state.is_seated_on(&key),
+            "the last passenger left the boat"
+        );
     }
 
-    /// The one-cadence rule holds while the account is FROZEN, which is the
+    /// The one-cadence rule belongs to the account and holds while it is FROZEN,
+    /// which is the
     /// state every account is created in and stays in until its first socket
     /// reaches `resume`. Two first connections racing two speeds therefore
     /// both meet this check, and exactly one may win it.
     #[test]
-    fn a_frozen_account_may_not_sit_on_two_cadences_of_one_river() {
+    fn a_frozen_account_may_not_ride_two_cadences_of_one_river() {
         let run = run(1_000, 400, None);
-        let passenger = run.passenger(&mogwai_protocol::AccountId::parse("SEAT-002").unwrap());
-        assert!(passenger.is_frozen(), "a fresh account is unattended");
+        let account_state = run.account(&mogwai_protocol::AccountId::parse("SEAT-002").unwrap());
+        assert!(account_state.is_frozen(), "a fresh account is unattended");
 
-        passenger
+        account_state
             .try_sit(boat_key(&run, "BTCUSDT", 2.0))
             .expect("the first cadence sits");
-        let refused = passenger
+        let refused = account_state
             .try_sit(boat_key(&run, "BTCUSDT", 3.0))
             .expect_err("a second cadence on one ledger is refused");
         assert_eq!(
@@ -2706,24 +2714,26 @@ mod tests {
         );
     }
 
-    /// A seat is released by the SESSION, not by the freeze - an account
+    /// A ride ends when its PASSENGER does, not at the freeze - an account
     /// riding two rivers that loses one socket never freezes. The key carries
-    /// no placement nonce, so a held seat would be indistinguishable from a
+    /// no placement nonce, so a stale ride would be indistinguishable from a
     /// live one and would both refuse a legitimate new cadence and hand this
     /// ledger a boat it never boarded.
     #[test]
-    fn leaving_one_river_frees_that_seat_while_another_is_still_ridden() {
+    fn leaving_one_river_frees_that_ride_while_another_is_still_ridden() {
         let run = run(1_000, 400, None);
-        let passenger = run.passenger(&mogwai_protocol::AccountId::parse("SEAT-003").unwrap());
+        let account_state = run.account(&mogwai_protocol::AccountId::parse("SEAT-003").unwrap());
         let slow = boat_key(&run, "BTCUSDT", 2.0);
 
-        passenger.try_sit(slow.clone()).expect("board the slow one");
-        passenger.unsit(&slow);
+        account_state
+            .try_sit(slow.clone())
+            .expect("board the slow one");
+        account_state.unsit(&slow);
         assert!(
-            !passenger.is_seated_on(&slow),
-            "the seat went with the session, no freeze required"
+            !account_state.is_seated_on(&slow),
+            "the ride ended with the passenger, no freeze required"
         );
-        passenger
+        account_state
             .try_sit(boat_key(&run, "BTCUSDT", 3.0))
             .expect("a new cadence on a river nobody is riding is not a conflict");
     }
@@ -2765,25 +2775,25 @@ mod tests {
         let symbol = Symbol::from("BTCUSDT");
         let key = boat_key(&run, "BTCUSDT", 1.0);
 
-        let passenger = claim_account(&run, &account, Some("alpha"));
-        let incumbent_attach = run.attach(&passenger);
-        passenger
+        let account_state = claim_account(&run, &account, Some("alpha"));
+        let incumbent_attach = run.attach(&account_state);
+        account_state
             .try_sit(key.clone())
             .expect("the incumbent boards");
         let (lanes, _rx) = ExecLanes::detached();
         let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        passenger.clear_freeze();
+        account_state.clear_freeze();
 
         // A limit far below the tape, so it RESTS rather than filling: the
         // frontier only exists on an order the sweeper still has to judge.
         // Accepted at 5_000 on the incumbent's cursor, which is what puts the
         // frontier there.
         let accepted_ns = 5_000;
-        run.ensure_instrument(&passenger, "BTCUSDT")
+        run.ensure_instrument(&account_state, "BTCUSDT")
             .await
             .expect("the boot river's own symbol resolves");
         {
-            let mut engine = passenger.engine.lock().await;
+            let mut engine = account_state.engine.lock().await;
             let events = engine.process(
                 mogwai_protocol::Command::SubmitOrder(mogwai_protocol::SubmitOrder {
                     client_order_id: "FRONTIER-ORDER".into(),
@@ -2823,34 +2833,34 @@ mod tests {
 
         // The newcomer is counted on BEFORE the eviction, which is the ordering
         // `ws_upgrade` takes and the reason the freeze never fires.
-        let newcomer_attach = run.attach(&passenger);
+        let newcomer_attach = run.attach(&account_state);
         assert_eq!(
             run.evict_account(account.as_str(), Some("beta")),
             1,
             "the incumbent is displaced by a claim under a different callsign"
         );
-        // The incumbent's teardown: its lane goes, and its `SocketSession` drop
-        // vacates the seat on the river it was riding. That is the step that
-        // takes the last passenger off that boat.
+        // The incumbent's teardown: its lane goes, and its `Passenger` drop
+        // ends the ride on the river it was riding. That is the step that
+        // takes this account's last passenger off that boat.
         run.release_lanes(incumbent);
-        passenger.unsit(&key);
+        account_state.unsit(&key);
         drop(incumbent_attach);
         assert!(
-            !passenger.is_frozen(),
+            !account_state.is_frozen(),
             "the newcomer was already counted on, so the account never went unattended - which is \
              precisely what makes `resume` treat this as a first bind"
         );
 
         // The newcomer binds a river of its own, on a cursor at the origin.
         let resumed_ns = 1_000;
-        let events = run.resume(&passenger, &symbol, resumed_ns).await;
+        let events = run.resume(&account_state, &symbol, resumed_ns).await;
         assert!(
             events.is_empty(),
             "an unfrozen account is not retired, which is the behaviour under test rather than a \
              surprise: {events:?}"
         );
 
-        let engine = passenger.engine.lock().await;
+        let engine = account_state.engine.lock().await;
         let frontier = engine.open_orders()[0].scanned_ns;
         assert_eq!(
             frontier, resumed_ns,
@@ -2912,7 +2922,7 @@ mod tests {
     }
 
     /// A LEDGER MINTED AFTER AN UNQUALIFIED ARM CARRIES IT. This is the whole of
-    /// finding 5: the control plane walked the passengers that existed at the
+    /// finding 5: the control plane walked the accounts that existed at the
     /// instant of the request, so an operator who armed a `PartialFillNext` and
     /// then started a subagent got a run that believed it was perturbed and was
     /// not - while `docs/havoc.md` and `arm_divergence`'s own comment both said
@@ -2939,7 +2949,7 @@ mod tests {
         fill_venue_record(&run).await;
 
         // The subagent that started after the operator armed.
-        let late = run.passenger(&mogwai_protocol::AccountId::parse("LATE-001").unwrap());
+        let late = run.account(&mogwai_protocol::AccountId::parse("LATE-001").unwrap());
 
         assert!(
             late.dark.open_at(SimClock::identity(), 1_000),
@@ -2983,7 +2993,7 @@ mod tests {
             mogwai_protocol::risk::AccountPolicy::default(),
         )
         .expect("a fresh id opens");
-        let opened = run.peek_passenger(&posted).expect("just opened");
+        let opened = run.peek_account(&posted).expect("just opened");
 
         assert!(
             opened.dark.open_at(SimClock::identity(), 1_000),
@@ -3041,7 +3051,7 @@ mod tests {
             mogwai_protocol::risk::AccountPolicy::default(),
         )
         .expect("an arm against an account is not an account");
-        let opened = run.peek_passenger(&named).expect("just opened");
+        let opened = run.peek_account(&named).expect("just opened");
         assert!(
             opened.dark.open_at(SimClock::identity(), 1_000),
             "the arm posted before the consumer existed must be standing on the ledger it opened"
@@ -3062,12 +3072,12 @@ mod tests {
         )
         .await;
 
-        let stranger = run.passenger(&mogwai_protocol::AccountId::parse("SUB-03").unwrap());
+        let stranger = run.account(&mogwai_protocol::AccountId::parse("SUB-03").unwrap());
         assert!(
             !stranger.dark.open_at(SimClock::identity(), 1_000),
             "an arm naming one account must not black out another"
         );
-        let named = run.passenger(&mogwai_protocol::AccountId::parse("SUB-02").unwrap());
+        let named = run.account(&mogwai_protocol::AccountId::parse("SUB-02").unwrap());
         assert!(
             named.dark.open_at(SimClock::identity(), 1_000),
             "an arm naming an account that had not connected must be standing when it does"
@@ -3101,7 +3111,7 @@ mod tests {
         .await;
         run.clear_venue_arms().await;
 
-        let late = run.passenger(&mogwai_protocol::AccountId::parse("LATE-002").unwrap());
+        let late = run.account(&mogwai_protocol::AccountId::parse("LATE-002").unwrap());
         assert!(
             !late.dark.open_at(SimClock::identity(), 1_000),
             "a cleared blackout must not be re-armed onto a ledger minted after the clear"
@@ -3111,7 +3121,7 @@ mod tests {
             0,
             "a cleared ack delay must not be re-armed either"
         );
-        let named = run.passenger(&mogwai_protocol::AccountId::parse("SUB-04").unwrap());
+        let named = run.account(&mogwai_protocol::AccountId::parse("SUB-04").unwrap());
         assert!(
             !named.stall.open_at(SimClock::identity(), 1_000),
             "a clear stops everything, including an arm waiting for an account to arrive"
@@ -3173,11 +3183,11 @@ mod tests {
         let run = run(1_000, 400, None);
         let abandoned = mogwai_protocol::AccountId::parse("GONE-001").unwrap();
         let held = mogwai_protocol::AccountId::parse("HELD-001").unwrap();
-        run.passenger(&abandoned);
-        let held_passenger = run.passenger(&held);
+        run.account(&abandoned);
+        let held_account = run.account(&held);
         let (lanes, _rx) = crate::admission::ExecLanes::detached();
         run.bind_lanes(lanes, held.as_str(), None);
-        held_passenger.clear_freeze();
+        held_account.clear_freeze();
 
         // A TTL nothing has outlived yet spares even the unattended account,
         // which is what makes the collection about the SPAN rather than about
@@ -3197,15 +3207,15 @@ mod tests {
             "only the unattended account is collected: {collected:?}"
         );
         assert!(
-            !run.passengers()
+            !run.accounts()
                 .iter()
-                .any(|passenger| passenger.account_id.as_str() == "GONE-001"),
+                .any(|account_state| account_state.account_id.as_str() == "GONE-001"),
             "and it is gone from the registry"
         );
         assert!(
-            run.passengers()
+            run.accounts()
                 .iter()
-                .any(|passenger| passenger.account_id.as_str() == "HELD-001"),
+                .any(|account_state| account_state.account_id.as_str() == "HELD-001"),
             "the attached account survives"
         );
     }
@@ -3224,13 +3234,13 @@ mod tests {
     fn an_attached_socket_spares_the_account_it_is_reclaiming() {
         let run = run(1_000, 400, None);
         let returning = mogwai_protocol::AccountId::parse("BACK-001").unwrap();
-        let passenger = run.passenger(&returning);
+        let account_state = run.account(&returning);
         assert!(
-            passenger.is_frozen(),
+            account_state.is_frozen(),
             "an account nobody has connected to is unattended, and this test is about that state"
         );
 
-        let attach = run.attach(&passenger);
+        let attach = run.attach(&account_state);
         assert!(
             run.collect_expired_accounts(std::time::Duration::ZERO)
                 .is_empty(),

@@ -150,7 +150,7 @@ pub struct Config {
     /// inter-tick wall delay = (tick gap) / speed.
     pub(crate) speed: f64,
     /// Optional venue-originated heartbeat cadence in milliseconds. `0`
-    /// disables it. When enabled, each websocket session receives liveness
+    /// disables it. When enabled, each passenger receives liveness
     /// frames that survive `StallData` but not `GoDark`. Formerly
     /// `server_heartbeat_ms`; the old key is no longer accepted.
     pub(crate) venue_heartbeat_ms: u64,
@@ -486,7 +486,7 @@ pub(crate) fn validate_fill_band(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The per-connection budget sizes every websocket session is built with.
+/// The per-connection budget sizes every passenger is built with.
 pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
     AdmissionLimits {
         held_budget_bytes: cfg.exec_held_budget_bytes,

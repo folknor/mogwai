@@ -720,7 +720,7 @@ async fn trade_history_does_not_advance_past_a_full_same_nanosecond_page() {
 /// The SEEDED SET IS NOT AN ADMISSION LIST. The venue resolves any wire-legal
 /// symbol and registers it at bind, so a label absent from the connect-time
 /// seed is routinely one this run will serve; the guard that refused it here
-/// refused exactly the sessions piece 13 exists to support. The bound-symbol
+/// refused exactly the passengers piece 13 exists to support. The bound-symbol
 /// check is the surviving local gate and is pinned by
 /// `subscribe_refuses_an_instrument_outside_the_bound_symbol`.
 #[tokio::test(flavor = "current_thread")]

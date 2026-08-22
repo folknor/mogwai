@@ -1114,6 +1114,117 @@ which record the pre-rename state and are historical by construction.
 untouched under the 2026-08-21 ruling; the exposure keys the CLI writes were
 kept at `warmup` partly so those records and any new one still agree.
 
+**Round 9, the passenger re-cut, 2026-08-22.** The 2026-08-22 ruling applied to
+the code: a passenger is one connected trader, one socket, one boat, dying with
+its socket, and the account-lifetime object is the Account. The swap is the
+round's whole shape and its whole risk - `Passenger` now names what
+`SocketSession` was - so `run.rs`'s account-lifetime `Passenger` becomes
+`Account` and `ws.rs`'s socket-owned `SocketSession` becomes `Passenger`. With
+them: `Run::passenger` / `peek_passenger` / `passengers` / `passenger_holding`
+become `account` / `peek_account` / `accounts` / `account_holding`, the map
+field `passengers` becomes `accounts`, `Attach::passenger` becomes `account`,
+and the tenure machinery takes the word the callsign round left unruled -
+`sessions_tx`, `session_guard` and `sessions_drained` become `passengers_tx`,
+`passenger_guard` and `passengers_drained`. The boatyard's rider vocabulary
+inverts as the ruling says it must: `PlacedBoat::riders` becomes `passengers`,
+because a count of riders on a boat is now a count of passengers.
+
+THE ACCOUNT NAMING WAS CHECKED, NOT ASSUMED. `mogwai_engine::Account` is not in
+scope in `mogwai-venue`'s `run.rs` - the engine type reached from there is
+`Engine` - and the protocol snapshot type stays `mogwai_protocol::AccountState`,
+which the venue names in full at its two use sites. So `Account` is free in
+that module and collides with nothing a reader of `run.rs` meets.
+
+The value bindings of the renamed type are spelled `account_state` where the
+enclosing scope already binds `account` to an id or an `Option<&str>`, which is
+most of `http.rs`, `ws.rs` and `run.rs`; that is a binding name and the prose
+never uses it as an actor. THE COLD REVIEW FOUND EXACTLY THAT DEFECT and it was
+the round's largest: the sweep had introduced `account_state` as a THIRD NOUN in
+about twenty comment and doc sites, several of them stating lifecycle - "a
+websocket account_state on one boat", "a account_state borrows this state for one
+socket tenure and dies with that socket", "the last account_state has left", "a
+account_state may board afterwards". Every one is now the account or the
+passenger, whichever the sentence is true of.
+
+Mechanism identifiers keep the retired word by design: `try_sit`, `unsit`,
+`is_seated_on`, `seated_on` and the wire-visible "already seated on {symbol} at
+speed" refusal are crate-local mechanism or a consumer-visible string, and no
+round took a wire break here - the refusal body, its two tests, the close
+reasons and every JSON field are byte-identical. The test for that choice is
+whether the prose around them reads correctly without the deleted Seat entry,
+and it did not: `reference/architecture.md` still said a run "takes no seat" and
+"what it holds is a keepalive ticket rather than a seat", and `serving.rs`'s
+eviction test still headed itself "AN EVICTED SOCKET RELEASES ITS SEAT". Both
+now state the ride over Boatyard and Passenger. `docs/config.md` states the
+one-cadence rule over the account and its passengers, `reference/architecture.md`
+states wind-down as the last ticket of a cadence, and Freeze keeps its
+off-river retirement wording, so no durable sentence presents Seat as
+vocabulary any more.
+
+No tape byte and no wire byte moves, so no `TAPE_PROTOCOL_VERSION` bump is
+owed. The gated check reports 1341 workspace and 469 instrumented tests,
+unchanged from round 8. The socket suites were run by name because the round
+touched the serving path: `mogwai-adapter` all four binaries green in both
+sweeps, `mogwai-cli socket` green in both.
+
+What the close pass found in the half no cold reviewer reads, which is the four
+recurring failures again:
+
+- THE SWAP HAZARD BIT, in the crates the sweep did not re-read. Sentences that
+  were true of the old per-account Passenger became false the moment the word
+  changed hands: `sweeper.rs` bound `attached_passengers` to a vector of
+  ACCOUNTS and documented "one acquisition PER PASSENGER" and "one pass PER
+  PASSENGER" over it (now `attached_accounts`, per account); `run.rs` promised
+  to make a symbol tradable "on ONE PASSENGER'S ledger" and described the sweep
+  as "one engine pass PER PASSENGER"; `sweeper.rs`'s `policed_passenger` and
+  `run.rs`'s `held_passenger` were bindings of the account type. A ledger is
+  never a passenger's, and a sweep pass is never per passenger.
+- SENTENCES LEFT FALSE OR UNGRAMMATICAL AROUND A CORRECT SUBSTITUTION.
+  `exec.rs` came out with "so a prior a prior passenger's orders leak"; `run.rs`
+  said an account's boat map counts "how many accounts ride each";
+  `serving.rs`'s blackout test said transport havoc "rides the passenger", which
+  the same ruling makes false - it is armed on the ACCOUNT and blurs each of its
+  passengers alike, which is what `http.rs`'s own `DivergenceRequest` doc and
+  `ws.rs`'s writer gate say. `docs/config.md` said the account may re-cadence
+  "when the passenger on that cadence leaves", which is wrong for the two
+  sockets sharing one cadence the count exists for; it is the last of them.
+- A QUOTATION WAS SWEPT. `run.rs`'s `VenueArms` doc quotes `docs/havoc.md`
+  verbatim on the late boarder, and the sweep rewrote the quote to "an account
+  that boards" while the quoted document still says "a passenger that boards".
+  A quoted sentence is a serialized field name in the sense round 8 named: the
+  bytes belong to somebody else.
+- EMPHASIS HALF-SWEPT, about twenty-five sites, in both directions and all of
+  them outside the rename's mandate. `docs/cli.md` lost RUN, BEFORE, the whole
+  of "THAT DRAIN COVERS WEBSOCKET SESSIONS", "A DECLARED COMPLETION", "A SIGNAL
+  DOES NOT" and the NOT/NONZERO pair; `reference/architecture.md` lost the
+  RIVER/PASSENGER contrast in its opening paragraph, "DELIVERY IS ATTRIBUTED,
+  NOT BROADCAST" and "ITS LAST CONNECTION IS COUNTED FROM THE ATTACH";
+  `completion.rs` lost PROVABLY, KEPT ALIVE and HOW THE DRAIN ENDED; `havoc.rs`
+  lost FULL SESSION and SURVIVING; `run.rs` and `ws.rs` lost UNCONDITIONAL,
+  TAKEN ON THE EXISTING LEDGER, COUNTED RATHER THAN A SET and the OPENING
+  balance. Restored where the emphasis carried the meaning.
+
+THE TENURE SENSE OF `session` IS CLOSED, which round 4 left open. Every site
+that report inventoried has moved to passenger wording - `mogwai-venue`'s
+`SocketSession` and the three tenure members, `mogwai-cli`'s `completion.rs`
+and `serving.rs`, `mogwai-adapter`'s `exec.rs`, `havoc.rs`, `data.rs` and
+`data_client_transport.rs`, and the drain paragraphs of `docs/cli.md` and
+`reference/architecture.md`. `sweeper.rs`'s module doc, which no inventory
+listed, said the sweep is owned by the run "rather than by an account or a
+session"; it now says passenger. What survives the workspace-wide grep is the
+trading day, the `SessionProfile` and `SessionCalendar` families, the
+session-profile subcommands, and `ws.rs`'s `the_retired_session_query_key_is_refused`
+with the two doc sentences that name the retired key - which is the shape a
+correct classification produces.
+
+AND ONE DEFECT THE ROUND EXPOSED RATHER THAN CAUSED, fixed here because the
+round rewrote the prose it lives in. The doc block opening "A live-session
+token" had been glued to the front of `fault_venue`'s own doc, so the rename
+pass rewrote it in place and left it describing the wrong item - this is the
+third `run.rs` instance of the doc-attached-to-the-wrong-item family the
+cross-cutting section records, after `evict_account` and `session_guard`. It is
+moved onto `passenger_guard`, which it has always been about.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
@@ -1149,9 +1260,24 @@ These belong to no single scope, so nothing else holds them.
   survives only as the name of Server mode.
 - `client` as a name for anything this project owns. It survives only in
   inherited nautilus and FIX spellings.
-- `session` as a name for the socket identity, on the wire and everywhere else.
-  It survives only for the trading day, which is the operator surface's
-  overwhelming majority usage and is not ours to rename.
+- `session` as a name for the socket identity, on the wire and everywhere else,
+  and - since the passenger re-cut - as a name for a socket's served tenure,
+  which is a Passenger. It survives only for the trading day, which is the
+  operator surface's overwhelming majority usage and is not ours to rename, and
+  in the two regression sentences naming the retired `?session=` query key.
+- `passenger` as a name for anything account-lifetime. A passenger is one
+  connected trader on one socket, riding one boat and dying with that socket;
+  the ledger, the risk state, the freeze stamp, the boat counts and the havoc
+  arms are the Account's, and a per-account walk, a per-account engine pass and
+  a per-account ledger are never per passenger. A count of riders on a boat is
+  a count of passengers, which inverts the round-5 rider ruling.
+- `seat` as defined vocabulary anywhere in durable prose. The rules it carried
+  are stated over Account (one cadence per river ridden), Boatyard (wind-down
+  when the last passenger leaves) and Freeze (off-river retirement on a frozen
+  account's return). It survives as crate-local mechanism spelling -
+  `try_sit`, `unsit`, `is_seated_on`, `seated_on` - and inside the
+  consumer-visible "already seated on {symbol} at speed" refusal, neither of
+  which any round has taken a break on.
 - `admission` as a name for the history concurrency gate or for a connection's
   claim on an account. It survives for the per-connection outbound execution
   budget, which the wire publishes, and - unruled, and not to be swept as
@@ -1187,10 +1313,22 @@ Recorded per scope in the scope reports until the merge collects them.
 
 ## What the rename rounds keep getting wrong
 
-Eight rounds in, three failures recur often enough to belong in every brief.
-Round 6 produced all three at once, and round 8 did it again.
+Nine rounds in, four failures recur often enough to belong in every brief.
+Round 6 produced the first three at once, round 8 did it again and added the
+fourth, and round 9 produced all four.
 
-Round 8 adds a fourth, and it is the one with teeth. **A SERIALIZED FIELD NAME
+Round 9 adds a fifth, and it belongs to any round that MOVES A WORD FROM ONE
+JOB TO ANOTHER rather than retiring it. **THE SWAP HAZARD: when a rename gives
+an existing word a new referent, every sentence already using that word is a
+site of the rename.** The compiler is no help at all - both meanings are the
+same spelling - and the sentences read fluently either way. Round 9 handed
+`Passenger` from the account-lifetime object to the socket, and the survivors
+were not near the renamed types: a vector of accounts named
+`attached_passengers` in another module, a doc promising a ledger "on ONE
+PASSENGER'S ledger", a sweep documented "PER PASSENGER". Grep the word after
+the swap and read every hit against the NEW entry, not the diff.
+
+Round 8's fourth, and it is the one with teeth. **A SERIALIZED FIELD NAME
 IS NOT AN IDENTIFIER.** A rename pass sweeps a word through a crate and takes
 the string literals with it, and where one of those literals is a key in a
 committed artifact, a content-addressed cache, a hashed constant tree or a
@@ -1218,8 +1356,8 @@ a pass will lowercase one half and leave the other, destroying the distinction
 the sentence existed to draw. Whatever the house style for emphasis, both halves
 move together or neither does.
 
-The evidence for all three is that the cold review found something in two rounds
-of seven and the fix-and-commit stage found something in seven of seven. That is not
+The evidence for all of them is that the cold review found something in three
+rounds of nine and the fix-and-commit stage found something in nine of nine. That is not
 a criticism of the cold review, which catches what a reader without the arc's
 priors sees. It is that a rename arc's defects live in prose, and prose defects
 compile, pass and read fluently.

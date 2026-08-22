@@ -7,8 +7,8 @@
 //! carries a trigger only a tape walk can advance. A pass with nothing resting
 //! is still just one lock acquisition and a `continue`.
 //!
-//! Owned by the RUN rather than by an account or a session: one process is one
-//! ledger now, and a session-owned sweep would freeze a disconnected consumer's
+//! Owned by the RUN rather than by an account or a passenger: one process is one
+//! ledger now, and a passenger-owned sweep would freeze a disconnected consumer's
 //! book mid-window, make the `QueryOrders` truth store honestly report a venue
 //! that cannot execute, and double the tape walk when two sockets are open on
 //! the one run.
@@ -99,13 +99,13 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
                 _ = completion.changed() => break 'passes,
             }
-            // One acquisition PER PASSENGER, so each ledger's scans and mark
+            // One acquisition PER ACCOUNT, so each ledger's scans and mark
             // symbols come from one consistent read of it.
             //
-            // Gathered across every passenger BEFORE the walk, deliberately: the
+            // Gathered across every account before the walk, deliberately: the
             // tape walk is the expensive part of a pass and is a property of the
-            // river, not of any ledger, so N passengers resting orders on one
-            // symbol still walk it ONCE. Results are grouped back per passenger
+            // river, not of any ledger, so N accounts resting orders on one
+            // symbol still walk it ONCE. Results are grouped back per account
             // afterwards.
             // ATTACHED accounts only. An account nobody is reading is FROZEN:
             // its orders do not rest, its positions do not mark, its funding
@@ -122,11 +122,11 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             // account is the only way an order can end up on a river nobody
             // reads - and a frozen account is skipped here rather than swept
             // against a clock that no longer exists.
-            let attached_passengers: Vec<_> = sweep
+            let attached_accounts: Vec<_> = sweep
                 .run
-                .passengers()
+                .accounts()
                 .into_iter()
-                .filter(|passenger| !passenger.is_frozen())
+                .filter(|account_state| !account_state.is_frozen())
                 .collect();
             // What a cursor is actually reading right now. An ATTACHED account's
             // order outside this set rests on a river with no clock: nothing can
@@ -142,8 +142,8 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             let mut scans: Vec<(usize, PendingScan)> = Vec::new();
             let mut mark_symbols = Vec::new();
             let venue_now = sim_now_ns(sweep.run.sim);
-            for (index, passenger) in attached_passengers.iter().enumerate() {
-                let mut engine = passenger.engine.lock().await;
+            for (index, account_state) in attached_accounts.iter().enumerate() {
+                let mut engine = account_state.engine.lock().await;
                 // Stamped on the VENUE clock, which is the only one that
                 // answers here: the order being cancelled is on a river with no
                 // boat, so there is no river clock to date it by.
@@ -152,7 +152,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     let shape = engine.book_shape();
                     deliver_produced(
                         &sweep.run,
-                        passenger.account_id.as_str(),
+                        account_state.account_id.as_str(),
                         &shape,
                         &cancelled,
                         cancelled.len(),
@@ -189,21 +189,21 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             for boat in due_boats {
                 let symbol = boat.symbol().to_owned();
                 let to_ns = sim_now_ns(boat.sim);
-                // Scans on this river from passengers actually RIDING this
+                // Scans on this river from accounts actually riding this
                 // boat. The walk is a property of the water, but the clock is
                 // a property of the cursor: applying a fast boat's now to a
-                // slow passenger (or the reverse) would fill one ledger twice
+                // slow account (or the reverse) would fill one ledger twice
                 // against two clocks.
                 let boat_key = boat.key();
                 let boat_scans: Vec<(usize, PendingScan)> = scans
                     .iter()
                     .filter(|(index, scan)| {
                         scan.symbol.as_ref() == symbol
-                            && attached_passengers[*index].is_seated_on(&boat_key)
+                            && attached_accounts[*index].is_seated_on(&boat_key)
                     })
                     .cloned()
                     .collect();
-                let mut results: Vec<Vec<ScanResult>> = vec![Vec::new(); attached_passengers.len()];
+                let mut results: Vec<Vec<ScanResult>> = vec![Vec::new(); attached_accounts.len()];
                 let rivers = Arc::clone(&sweep.rivers);
                 let scans_for_walk: Vec<PendingScan> =
                     boat_scans.iter().map(|(_, scan)| scan.clone()).collect();
@@ -325,7 +325,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // `last_swept_ns..to_ns`.
                     continue;
                 };
-                // One pass PER PASSENGER over the shared reading. Each ledger
+                // One pass PER ACCOUNT over the shared reading. Each ledger
                 // books its own fills, settles its own positions and marks its
                 // own exposure against the same prices - which is what makes the
                 // tape common and the money private. Deliveries are separate
@@ -333,7 +333,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // is about - by the frame's own account id where it has one, and
                 // by order ownership otherwise.
                 //
-                // The settlement marks are cloned per passenger rather than
+                // The settlement marks are cloned per account rather than
                 // moved: a settlement instant belongs to the CALENDAR, so every
                 // ledger holding that symbol crosses it.
                 let symbol_key = mogwai_protocol::Symbol::from(symbol.as_str());
@@ -346,11 +346,11 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         )]
                     })
                     .unwrap_or_default();
-                for (index, passenger) in attached_passengers.iter().enumerate() {
-                    if !passenger.is_seated_on(&boat_key) {
+                for (index, account_state) in attached_accounts.iter().enumerate() {
+                    if !account_state.is_seated_on(&boat_key) {
                         continue;
                     }
-                    let mut engine = passenger.engine.lock().await;
+                    let mut engine = account_state.engine.lock().await;
                     let (events, emitted, originated) = apply_engine_pass_on_clock(
                         &mut engine,
                         &results[index],
@@ -369,7 +369,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // when both describe the same instant.
                     let mut events = events;
                     let (emitted, originated, terminated) = enforce_policy(
-                        passenger,
+                        account_state,
                         &mut engine,
                         &mut events,
                         &symbol_key,
@@ -383,7 +383,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     if !events.is_empty() {
                         deliver_produced(
                             &sweep.run,
-                            passenger.account_id.as_str(),
+                            account_state.account_id.as_str(),
                             &shape,
                             &events,
                             emitted,
@@ -402,9 +402,9 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // On a shared exchange one subagent breaching must not take
                     // down the batch, and the count is the only thing that
                     // distinguishes the two modes at runtime.
-                    if terminated && attached_passengers.len() == 1 {
+                    if terminated && attached_accounts.len() == 1 {
                         tracing::warn!(
-                            account = %passenger.account_id.as_str(),
+                            account = %account_state.account_id.as_str(),
                             "the venue's only account terminated; ending the run",
                         );
                         sweep
@@ -639,7 +639,7 @@ fn apply_engine_pass_on_clock(
 ///
 /// THE ACCOUNT SNAPSHOT WAS THE RESIDUAL HOLE, and it was the expensive one.
 /// Order attribution alone left `AccountState` unaddressed, so it fanned to
-/// every lane - and the sweep takes one engine pass per passenger, so an
+/// every lane - and the sweep takes one engine pass per account, so an
 /// N-account venue sent each socket N snapshots per pass, N-1 of them somebody
 /// else's balances and positions. Attribution is now [`crate::run::audience`],
 /// an exhaustive classification with no catch-all, so the next ledger-owned
@@ -650,13 +650,13 @@ fn apply_engine_pass_on_clock(
 /// sizing per connection would mean walking the ownership table once per lane
 /// before knowing what to reserve, and a refusal costs the consumer only a
 /// requery.
-/// Claim and then deliver a batch one passenger's ledger just produced.
+/// Claim and then deliver a batch one account's ledger just produced.
 ///
 /// The claim is fused to the delivery so no production site can take one
 /// without the other: a venue-originated order in the batch (a liquidation
 /// the venue minted) has no submitting connection, and the only instant its
 /// account is knowable without ambient delivery context is here, where the
-/// batch is still attached to the passenger whose engine pass produced it.
+/// batch is still attached to the account whose engine pass produced it.
 /// See [`Run::claim_produced_orders`] for the whole argument.
 fn deliver_produced(
     run: &Arc<Run>,
@@ -699,7 +699,7 @@ fn deliver(
             // `deliver_produced` claims venue-originated orders for the
             // ledger that produced them. A miss is therefore a BUG in whoever
             // built the batch, not a class of order - reported, then routed
-            // to everyone, because a passenger missing its own fill is still
+            // to everyone, because an account missing its own fill is still
             // the worse wrong while the bug lives.
             crate::run::Audience::Order(id) => run.order_owner(id).map_or_else(
                 || {
@@ -799,7 +799,7 @@ fn deliver(
     reason = "one account's judgement needs the ledger, the batch it rides on, the span the tape covered and the admission counts it may grow"
 )]
 fn enforce_policy(
-    passenger: &crate::run::Passenger,
+    account_state: &crate::run::Account,
     engine: &mut mogwai_engine::Engine,
     events: &mut Vec<VenueMessage>,
     symbol: &mogwai_protocol::Symbol,
@@ -808,7 +808,7 @@ fn enforce_policy(
     emitted: usize,
     originated: usize,
 ) -> (usize, usize, bool) {
-    let mut ledger = passenger
+    let mut ledger = account_state
         .risk
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -824,7 +824,7 @@ fn enforce_policy(
         // partial, say. Enforcing against a wrong number would be worse than
         // not enforcing, so this warns loudly and declines rather than guessing.
         tracing::warn!(
-            account = %passenger.account_id.as_str(),
+            account = %account_state.account_id.as_str(),
             %currency,
             "cannot value this account in its policy currency; risk is not enforced this pass",
         );
@@ -854,7 +854,7 @@ fn enforce_policy(
         return (emitted, originated, false);
     };
     tracing::warn!(
-        account = %passenger.account_id.as_str(),
+        account = %account_state.account_id.as_str(),
         rule = ?breach.rule,
         action = ?breach.action,
         equity = %breach.equity,
@@ -909,7 +909,7 @@ mod tests {
     /// A fill on one connection's order must not reach another connection.
     ///
     /// The whole point of the attribution in `deliver`: before it, every bound
-    /// lane received every sweep-produced frame, so a passenger was told about
+    /// lane received every sweep-produced frame, so an account was told about
     /// orders it never placed. Reverting the filter makes the second assertion
     /// fail - the unrelated connection receives the fill.
     #[tokio::test(flavor = "current_thread")]
@@ -1039,8 +1039,8 @@ mod tests {
     ///
     /// The residual half of the same attribution: `AccountState` names no order,
     /// so order-only attribution read it as venue-wide and fanned one
-    /// passenger's balances and positions to every other passenger. The sweep
-    /// takes a pass per passenger, so this happened on every pass rather than at
+    /// account's balances and positions to every other account. The sweep
+    /// takes a pass per account, so this happened on every pass rather than at
     /// some edge. Asserting on the FRAME rather than on receipt is the point -
     /// the wrong lane receiving something is only a bug because of what the
     /// something is.
@@ -1296,10 +1296,7 @@ mod tests {
 
     /// The account for the tick-resolution tests: long one MNQ at 21,000 under
     /// a trailing drawdown, on a venue whose engine already holds the position.
-    async fn policed_passenger(
-        run: &Arc<crate::run::Run>,
-        amount: u64,
-    ) -> Arc<crate::run::Passenger> {
+    async fn policed_account(run: &Arc<crate::run::Run>, amount: u64) -> Arc<crate::run::Account> {
         let account = AccountId::parse("RISK-001").unwrap();
         run.open_account(
             &account,
@@ -1318,9 +1315,9 @@ mod tests {
             },
         )
         .expect("a fresh account opens");
-        let passenger = run.passenger(&account);
-        *passenger.engine.lock().await = engine_with_position();
-        passenger
+        let account_state = run.account(&account);
+        *account_state.engine.lock().await = engine_with_position();
+        account_state
     }
 
     /// THE GAP THIS CLOSES. A spike that opened and closed entirely between two
@@ -1333,8 +1330,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_spike_between_two_passes_spends_drawdown_budget() {
         let run = crate::run::test_run();
-        let passenger = policed_passenger(&run, 500).await;
-        let mut engine = passenger.engine.lock().await;
+        let account_state = policed_account(&run, 500).await;
+        let mut engine = account_state.engine.lock().await;
         let mut events = Vec::new();
         let symbol = mogwai_protocol::Symbol::from("MNQ");
         // The tape spiked to 21,100 and came back to 21,000, which is the only
@@ -1353,7 +1350,7 @@ mod tests {
             low_ns: 9,
         };
         let (_, _, terminated) = enforce_policy(
-            &passenger,
+            &account_state,
             &mut engine,
             &mut events,
             &symbol,
@@ -1363,7 +1360,7 @@ mod tests {
             0,
         );
         assert!(!terminated, "the spike breaches nothing on its own");
-        let state = passenger
+        let state = account_state
             .risk
             .lock()
             .unwrap()
@@ -1386,8 +1383,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_collapse_that_recovered_before_the_pass_still_breaches() {
         let run = crate::run::test_run();
-        let passenger = policed_passenger(&run, 500).await;
-        let mut engine = passenger.engine.lock().await;
+        let account_state = policed_account(&run, 500).await;
+        let mut engine = account_state.engine.lock().await;
         let mut events = Vec::new();
         let symbol = mogwai_protocol::Symbol::from("MNQ");
         engine.mark(
@@ -1406,7 +1403,7 @@ mod tests {
             low_ns: 5,
         };
         let (_, _, terminated) = enforce_policy(
-            &passenger,
+            &account_state,
             &mut engine,
             &mut events,
             &symbol,
@@ -1420,7 +1417,7 @@ mod tests {
             "the account crossed its floor inside the span and is dead",
         );
         assert!(
-            passenger.risk.lock().unwrap().is_locked(),
+            account_state.risk.lock().unwrap().is_locked(),
             "a terminating breach locks the account"
         );
     }

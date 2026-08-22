@@ -161,7 +161,7 @@ impl MogwaiDataClient {
         // THE SEEDED INSTRUMENT SET IS NOT AN ADMISSION LIST. The venue resolves
         // any wire-legal symbol and registers it on BIND, so a symbol absent
         // from the seed is routinely one this run will serve; refusing on the
-        // seed refused exactly the sessions piece 13 exists to support. The
+        // seed refused exactly the passengers piece 13 exists to support. The
         // bound-symbol check above stays, because a subscription for a symbol
         // this connection did not bind genuinely can never be delivered.
         {

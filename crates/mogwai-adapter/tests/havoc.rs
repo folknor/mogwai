@@ -799,7 +799,7 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
 /// closed, so nothing past the dial was ever demonstrated.
 ///
 /// The stranger here speaks the wire. With NO `expected_run_seed` the client
-/// dials blind and establishes a FULL SESSION against a venue serving an
+/// dials blind and establishes a LIVE PASSENGER against a venue serving an
 /// entirely different run, and nothing notices. That is the cost of the blind
 /// default, now measured rather than assumed: not a dial that fails fast, but a
 /// live client consuming a stranger's market data as though it were its own
@@ -821,7 +821,7 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
 /// rather than the assumption.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
+async fn dialing_blind_establishes_a_full_passenger_with_a_stranger() {
     let state = Arc::new(StubState::default());
     // A stranger serving some other run. A client that checked would refuse it.
     state.run_seed.store(4242, Ordering::Relaxed);
@@ -855,13 +855,13 @@ async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
         !requests.is_empty(),
         "the stranger completed at least one upgrade"
     );
-    // A FULL SESSION, not an upgrade that completes and then dies. THIS IS A
+    // A LIVE PASSENGER, not an upgrade that completes and then dies. THIS IS A
     // WINDOW, NOT A SNAPSHOT, and that is what the deleted `sleep(600ms)` was
     // buying: `ws_requests` is pushed at the TOP of `serve_ws`, before the
     // upgrade bytes are even written, and `connect` returns as soon as the
     // client reports connected - so a stranger that completes the handshake and
     // immediately drops the socket satisfies both of the checks above. The
-    // session has to be observed SURVIVING, which is the stub's own
+    // passenger has to be observed SURVIVING, which is the stub's own
     // `active_ws` (decremented by the handler's drop guard) plus the client not
     // having fallen back into its reconnect loop.
     let held = Instant::now() + Duration::from_millis(200);
@@ -873,7 +873,7 @@ async fn dialing_blind_establishes_a_full_session_with_a_stranger() {
         );
         assert!(
             !client.is_disconnected(),
-            "dialing blind establishes a session against a stranger"
+            "dialing blind establishes a passenger against a stranger"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
