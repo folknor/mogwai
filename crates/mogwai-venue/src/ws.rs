@@ -657,7 +657,13 @@ fn spawn_history_page(
     let rivers = Arc::clone(&state.rivers);
     let slots = Arc::clone(&state.history_slots);
     let waiters = Arc::clone(&state.history_slot_waiters);
-    let run_now = state.run_now();
+    // THE TIGHTER OF THE TWO PRESENTS. The run clock bounds any caller against
+    // the venue's own present; the boat clock bounds THIS passenger against its
+    // own. On a paced run at speed 1 they are nearly the same and the second
+    // buys nothing visible, which is exactly why it was missing: on an unpaced
+    // or slow-boat run the boat trails the run clock, and serving the span
+    // between them would hand this passenger water it has not been delivered.
+    let present = state.run_now().min(sim_now_ns(boat.sim));
     let run_start_ns = state.run.started_ns;
     let lanes = lanes.clone();
     tokio::spawn(async move {
@@ -685,7 +691,7 @@ fn spawn_history_page(
                     start,
                     end,
                     continuation: continuation.as_deref(),
-                    run_now,
+                    present,
                     run_start_ns,
                 },
             )

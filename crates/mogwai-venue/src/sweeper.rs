@@ -122,9 +122,14 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             // account is the only way an order can end up on a river nobody
             // reads - and a frozen account is skipped here rather than swept
             // against a clock that no longer exists.
-            let attached_accounts: Vec<_> = sweep
-                .run
-                .accounts()
+            let all_accounts = sweep.run.accounts();
+            // Whether this run holds exactly one ledger, which is what the
+            // terminating breach below is conditioned on. Asked BEFORE the
+            // frozen filter, and asked through a named function so the question
+            // has one implementation a test can read rather than an expression
+            // buried in a loop.
+            let sole_ledger = holds_one_ledger(&all_accounts);
+            let attached_accounts: Vec<_> = all_accounts
                 .into_iter()
                 .filter(|account_state| !account_state.is_frozen())
                 .collect();
@@ -417,7 +422,18 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // On a shared exchange one subagent breaching must not take
                     // down the batch, and the count is the only thing that
                     // distinguishes the two modes at runtime.
-                    if terminated && attached_accounts.len() == 1 {
+                    //
+                    // ACCOUNTS HELD, NOT ACCOUNTS ATTACHED, and the difference
+                    // is the whole gate. A frozen account has no boat and is
+                    // filtered out of the sweep above, so counting the attached
+                    // set let one breaching account end a run whose other
+                    // ledgers were merely between sockets - the shared-exchange
+                    // case this is written to protect, failing exactly when the
+                    // other passengers happened to be away. The venue holds
+                    // those ledgers and a passenger can return to any of them,
+                    // so they are the run, whether or not anyone is reading
+                    // them this instant.
+                    if terminated && sole_ledger {
                         tracing::warn!(
                             account = %account_state.account_id.as_str(),
                             "the venue's only account terminated; ending the run",
@@ -924,6 +940,25 @@ fn refuse(
     )
 }
 
+/// Whether this run holds exactly one ledger.
+///
+/// A FROZEN ACCOUNT COUNTS, and that is the whole of what this function is for.
+/// The sweep skips frozen accounts because they have no boat and therefore no
+/// clock to be swept against, so every other question in that loop is asked of
+/// the attached set - and asking THIS one of the attached set is what let a
+/// breaching account end a run whose other ledgers were merely between sockets.
+/// The venue still holds those ledgers, with their positions, orders and
+/// balances, and a returning passenger can claim any of them; they are the run
+/// whether or not anyone is reading them at this instant.
+///
+/// It is a function rather than an expression in the loop so the question has
+/// one implementation, with a name, that a test can read. Written inline it was
+/// indistinguishable from the half-dozen other things that loop legitimately
+/// asks of the attached set.
+fn holds_one_ledger(accounts: &[Arc<crate::run::Account>]) -> bool {
+    accounts.len() == 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,6 +968,64 @@ mod tests {
         TimeInForce, WireAssetClass,
     };
     use rust_decimal::Decimal;
+
+    /// A terminating breach ends the run only when the run holds ONE ledger,
+    /// and a frozen account is one the run still holds.
+    ///
+    /// The gate reads `accounts_held`, taken before the frozen filter. Reading
+    /// the attached set instead - which is what it did - made the
+    /// shared-exchange protection fail exactly when the other passengers
+    /// happened to be between sockets: their accounts are skipped by the sweep,
+    /// so the breaching one looks like the only account and completes a run
+    /// whose other ledgers are still holding positions, orders and balances a
+    /// returning socket can claim.
+    ///
+    /// What is asserted is the DISCRIMINATOR rather than the sweep, because the
+    /// two counts differing is the whole of the defect: if a frozen account
+    /// could never make them differ, the fix would be vacuous and this test
+    /// would pass against the old code.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_frozen_account_is_still_an_account_this_run_holds() {
+        let run = crate::run::test_run();
+        let (mine, _my_rx) = ExecLanes::detached();
+        let (theirs, _their_rx) = ExecLanes::detached();
+        let mine_id = run.bind_lanes(mine, "MOGWAI-001", None);
+        run.bind_lanes(theirs, "MOGWAI-002", None);
+        // An account is minted FROZEN and thawed when a passenger resumes it,
+        // so both are resumed and only one is then released. A test that
+        // resumed neither would find both frozen and prove nothing about the
+        // split the gate turns on.
+        let first = run.account(&AccountId::parse("MOGWAI-001").unwrap());
+        let second = run.account(&AccountId::parse("MOGWAI-002").unwrap());
+        let symbol = mogwai_protocol::Symbol::from(run.default_symbol.as_ref());
+        drop(run.resume(&first, &symbol, 1).await);
+        drop(run.resume(&second, &symbol, 1).await);
+
+        // The first passenger leaves. Its ledger survives - that is what makes
+        // a reconnect a continuation - but it stops being attached.
+        run.release_lanes(mine_id);
+
+        let held = run.accounts();
+        // THE FIXTURE'S OWN PREMISE FIRST. If the release did not actually
+        // freeze anything, the two sets below are equal and the assertion that
+        // matters would hold for a reason that has nothing to do with the gate.
+        assert_eq!(
+            held.iter().filter(|account| !account.is_frozen()).count(),
+            1,
+            "exactly one of the two accounts must be frozen, or this fixture \
+             cannot tell the two counts apart"
+        );
+
+        // Read through the gate's OWN function rather than recomputed here. A
+        // test that counted `accounts()` itself would pass whatever the gate
+        // did, which is how the first version of this test came to pass against
+        // the defect it names.
+        assert!(
+            !holds_one_ledger(&held),
+            "a run holding two ledgers must not end on one account's breach, \
+             even while the other is between sockets"
+        );
+    }
 
     /// A fill on one connection's order must not reach another connection.
     ///

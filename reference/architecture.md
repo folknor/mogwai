@@ -785,9 +785,14 @@ changes as a result of being looked at - but the glossary settles it: nothing
 has to be boarded for history to answer, so refusing a label no passenger had
 boarded would make cold history unservable.
 
-What the socket route does NOT yet carry is the splice a consumer needs against
-a boat's own frontier: the pages are bounded by the run clock, so a passenger on
-a slow boat can be handed rows that are still its own future. Owed:
+A page's cutoff is the tighter of the run clock and the asking passenger's own
+boat clock. The run bound keeps any caller from reading past the venue's
+present; the boat bound keeps THIS passenger from reading past its own, which on
+an unpaced or slow-boat run is earlier. Without the second, a strategy warming
+from its own history would read water it had not been delivered - the look-ahead
+the first bound exists to prevent, arriving one level down.
+
+Still owed:
 
 ONE ACCOUNT RIDING TWO RIVERS OF ONE SYMBOL IS UNPOLICED OPERATOR ERROR. A
 resting order and a position are recorded per INSTRUMENT, so such an account has

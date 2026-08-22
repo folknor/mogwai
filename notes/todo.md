@@ -239,41 +239,16 @@ group by any other route has no API for it, and none is owed until one is wanted
   the close carry it - both are protocol changes with consumers to consider, so
   they were not made inside a bug-fix round. Nothing detects this regressing
   further, because the two arms are correct in isolation.
-- SOCKET HISTORY IS BOUNDED BY THE RUN CLOCK, NOT BY THE ASKING PASSENGER'S BOAT
-  FRONTIER, so a passenger on a slow boat can be handed rows that are still in
-  its own future. `history::serve_page` clamps its cutoff to `AppState::run_now`,
-  which consults no boat by design, and the request carries no boat instant of
-  its own. On a paced run at speed 1 the two are close enough that nothing shows;
-  on an unpaced or slow-boat run they diverge, and a strategy warming from its
-  own history reads water it has not been delivered yet - which is the
-  look-ahead this venue exists to prevent, arriving through the route that was
-  supposed to fix it. Filed 2026-08-23 out of the history-on-socket landing,
-  where the cold review named the clock split and only the RIVER half was
-  closed. The fix wants the passenger's boat frontier as a second clamp
-  alongside the run clock, and it is a real design question rather than an
-  oversight: history reads a river directly and a boat's frontier is a delivery
-  fact, so clamping to it makes history mean something different for two
-  passengers on one river at two speeds. Nothing detects this today, and the
-  end-to-end paging test cannot: it runs on a boat at the venue's default speed,
-  where the gap is invisible.
-- THE SOLE-ATTACHED-ACCOUNT TERMINATION GATE COUNTS ATTACHMENT, NOT EXISTENCE.
-  `sweeper.rs`'s `terminated && attached_accounts.len() == 1` ends the whole run,
-  and its own comment states the intent - "on a shared exchange one subagent
-  breaching must not take down the batch, and the count is the only thing that
-  distinguishes the two modes at runtime". The count does not distinguish them:
-  a frozen account has no boat and is therefore not attached, so a run holding
-  several ledgers whose other passengers are momentarily disconnected lets one
-  breaching account complete the run for all of them. Already catalogued as a
-  vacuous gate in the glossary arc's cross-cutting findings; filed here because
-  the river fork made it REACHABLE BY A SECOND ROUTE. An account riding two
-  rivers of one symbol is unpoliced operator error by owner ruling of
-  2026-08-22, and its racing mark can produce a false policy breach - which is
-  account-local on every other axis (marks, settlement, margin, funding,
-  liquidation) and escapes only here. The ruling was made on the premise that
-  the wound is self-inflicted, so either this gate counts accounts that EXIST
-  rather than accounts attached at this instant, or the operator-error ruling is
-  documented as potentially run-terminal. The gate is wrong on its own terms
-  regardless of the fork.
+- WHAT REMAINS OF THE HISTORY SPLICE, after the boat-frontier clamp landed. The
+  cutoff is now the tighter of the run clock and the asking passenger's own boat
+  clock, so a slow boat is no longer served its own future. What is still
+  untested is the case that motivated it: every socket test runs at the venue's
+  default speed, where the two clocks agree, so nothing exercises the branch
+  where they differ. A test wants a passenger on a deliberately slow boat
+  reading history past the point its own tape has reached, and it needs the
+  boat's frontier as an observable rather than a sleep. Filed 2026-08-23. The
+  code is right; the coverage is a hole, and this is the shape that passes for
+  the wrong reason later.
 - `await_account_registered` AND `wait_connected` ARE BUSY-WAIT SHIMS INSIDE
   `connect()`. Both poll on a 10 ms sleep for up to 5 s -
   `await_account_registered` against the nautilus cache, `wait_connected`
