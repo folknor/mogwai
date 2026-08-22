@@ -1258,8 +1258,11 @@ async fn handle_market_message(
             );
         }
         VenueMessage::FeedLagged {
+            episode,
             skipped,
-            sim_now_ns,
+            skipped_total,
+            after_ts_event,
+            resumed_ts_event,
         } => {
             // ERROR, not warn, and the level is a RULING rather than taste.
             // `FeedLagged` is the venue declaring that this client's tape has
@@ -1278,10 +1281,20 @@ async fn handle_market_message(
             // honest channel is the log, at the level a host alerts on. The
             // real fix is a declared feed-gap event upstream; see the
             // cross-repo entry in `notes/todo.md`.
+            //
+            // THE BOUNDARIES ARE THE ACTIONABLE PART for whoever reads this
+            // log: they delimit the affected span, so a bar folded across it or
+            // a cursor advanced through it can be identified rather than
+            // guessed at. `episode` and `skipped_total` separate a client that
+            // fell behind once from one that cannot keep up at all - the second
+            // is a sizing problem, not an incident.
             tracing::error!(
+                episode,
                 skipped,
-                sim_now_ns,
-                "venue dropped market-data frames for this client; the feed has a visible gap and downstream aggregation is wrong for the missing span"
+                skipped_total,
+                after_ts_event,
+                resumed_ts_event,
+                "venue declared a gap in this client's market view; downstream aggregation is wrong between the two boundaries"
             );
         }
         VenueMessage::RunComplete {

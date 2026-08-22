@@ -858,7 +858,6 @@ impl Run {
         run_duration_ns: Option<u64>,
         seeds: RunSeeds,
         fanout_depth: usize,
-        zero_speed_stall_ms: u64,
         oms_type: mogwai_protocol::OmsType,
         fill_band_max_ticks: u32,
         account_id: mogwai_protocol::AccountId,
@@ -869,7 +868,6 @@ impl Run {
         let boatyard = Boatyard::new(
             Arc::clone(&rivers),
             fanout_depth,
-            zero_speed_stall_ms,
             fault_tx.clone(),
             started_ns,
         );
@@ -2357,7 +2355,6 @@ mod tests {
             run_duration_ns,
             RunSeeds::from_run_seed(42),
             8,
-            1,
             mogwai_protocol::OmsType::Netting,
             200,
             mogwai_protocol::AccountId::parse(crate::config::DEFAULT_ACCOUNT_ID)
@@ -2392,8 +2389,11 @@ mod tests {
         ));
         assert!(matches!(
             audience(&M::FeedLagged {
+                episode: 1,
                 skipped: 1,
-                sim_now_ns: 1
+                skipped_total: 1,
+                after_ts_event: Some(1),
+                resumed_ts_event: Some(2),
             }),
             Audience::Venue
         ));

@@ -2875,27 +2875,33 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
             }
         }
         VenueMessage::FeedLagged {
+            episode,
             skipped,
-            sim_now_ns,
+            skipped_total,
+            ..
         } => {
-            // ERROR for the same reason as the data client's arm: a drop on
-            // the EXECUTION socket can have taken order events with it, so
-            // the nautilus order state may now disagree with venue truth.
-            // Recovery exists - the venue-truth report generators re-derive
-            // the order, fill and position sets - but it cannot be triggered
-            // FROM HERE, and that is structural rather than an omission: this
-            // translator runs as `handler(msg).await` inside the reader's own
-            // frame loop, so a venue-truth query issued here would wait for a
-            // reply only this blocked loop can read, and the client is `!Send`
-            // (it owns an `Rc<RefCell<Cache>>` through `ExecutionClientCore`)
-            // so the query cannot be spawned off either. Rebuilding a report
-            // from the local mirror would assert as truth the very frames the
-            // venue just said it dropped. The log is therefore what tells a
-            // host to reconcile; the upstream half is in notes/todo.md.
-            tracing::error!(
+            // NOT an execution signal, and it used to be logged as one. This
+            // frame reports that the boat's MARKET ring overwrote frames before
+            // this socket read them. Execution output never travels that ring:
+            // it is queued on the held lane and pumped into the same writer, so
+            // a ring overrun cannot drop, reorder or overwrite an order event.
+            // Claiming the mirror might disagree with venue truth here asked a
+            // host to reconcile a book that was never in doubt.
+            //
+            // The venue DOES have a signal for genuinely lost execution output,
+            // and it is the `AdmissionSubject::Frame` arm above: a whole
+            // outbound batch the venue refused. That one means what this one was
+            // saying.
+            //
+            // WARN rather than ERROR: this socket consumes the market tape only
+            // to discard it, so the loss costs the execution leg nothing. What
+            // it indicates is that this connection is not draining fast enough,
+            // which is worth knowing and is not a fault.
+            tracing::warn!(
+                episode,
                 skipped,
-                sim_now_ns,
-                "venue dropped frames on the execution socket; order events may be missing and the mirror should be reconciled against venue truth"
+                skipped_total,
+                "venue declared a market-view gap on the execution socket; the execution stream is unaffected and no reconciliation is owed"
             );
         }
         // Market data is handled by the data client.

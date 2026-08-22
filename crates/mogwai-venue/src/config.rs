@@ -182,13 +182,6 @@ pub struct Config {
     /// `broadcast::channel(0)` panics, so `validate()` rejects it at load.
     pub(crate) fanout_depth: usize,
     // (see `DEFAULT_FANOUT_DEPTH` for the shipped value and its derivation)
-    /// How long a `speed = 0` tape parks waiting for ring headroom before
-    /// giving up on its slowest subscriber and letting that subscriber lag.
-    /// Only consulted when `speed == 0.0`, where the throttle moves from the
-    /// connection to the tape: long enough that a healthy in-process consumer is
-    /// never the reason a firehose stalls, short enough that a dead consumer
-    /// costs one stall and is then refused.
-    pub(crate) zero_speed_stall_ms: u64,
     /// Per-connection byte ceiling on execution output that has been produced
     /// but not yet written to the socket, i.e. the HELD lane's budget. See
     /// `admission::EXEC_HELD_BUDGET_BYTES`, which is this field's default and
@@ -285,7 +278,6 @@ impl Default for Config {
             // Keeping the later 4,194,304 run-wide allocation per boat would
             // multiply roughly 170 to 270 MiB of eager state by boat count.
             fanout_depth: DEFAULT_FANOUT_DEPTH,
-            zero_speed_stall_ms: 5000,
             exec_held_budget_bytes: crate::admission::EXEC_HELD_BUDGET_BYTES,
             admission_lane_frames: crate::admission::ADMISSION_LANE_FRAMES,
             pending_command_acts: crate::admission::PENDING_COMMAND_SLOTS,
@@ -491,7 +483,6 @@ pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
     AdmissionLimits {
         held_budget_bytes: cfg.exec_held_budget_bytes,
         lane_frames: cfg.admission_lane_frames,
-        promise_tickets: crate::admission::ADMISSION_PROMISE_TICKETS,
     }
 }
 
@@ -1981,6 +1972,21 @@ mod tests {
         let err = toml::from_str::<Config>("sim_epoch_ns = 1")
             .expect_err("removed clock key must be refused");
         assert!(err.to_string().contains("sim_epoch_ns"), "{err}");
+    }
+
+    /// The knob governed how long an unpaced tape parked for its slowest
+    /// subscriber, and that behaviour is GONE rather than retuned: a lagging
+    /// passenger is now told about its hole instead of waited for, so nothing
+    /// remains for the number to mean.
+    ///
+    /// Refusing is the point. Silently ignoring it would leave an operator
+    /// believing slow readers still get grace, which is the one reading the
+    /// removal makes false.
+    #[test]
+    fn a_config_naming_the_removed_zero_speed_stall_key_is_refused() {
+        let err = toml::from_str::<Config>("zero_speed_stall_ms = 5000")
+            .expect_err("the removed headroom knob must be refused");
+        assert!(err.to_string().contains("zero_speed_stall_ms"), "{err}");
     }
 
     /// The heartbeat knob was `server_heartbeat_ms` until the venue ruling

@@ -46,9 +46,17 @@ modelling a venue that ships bars natively, which mogwai is not. It follows the
 same principle as the rest of the surface: mogwai injects faults and declines to
 repair them downstream.
 
+AN OVERRUN RING IS NOT HAVOC, and the venue keeps the two apart on the wire. A
+window you armed withholds frames deliberately and is never reported as loss; a
+passenger that falls behind the bounded fanout ring has lost frames nobody armed,
+and that is declared with `FeedLagged` before the next market frame it receives.
+A hole discovered while a blackout is open waits for the blackout to lift rather
+than being announced into it. The venue does not close the socket for either.
+
 WHAT A CONSUMER CAN DO ABOUT IT DEPENDS ON THE CONSUMER, and the nautilus case is
 the constrained one. The venue declares the hole on the wire: `FeedLagged`
-carries the skipped count, so a consumer reading the protocol directly can tell a
+carries the skipped count and the two boundaries of the affected span, so a
+consumer reading the protocol directly can tell a
 quiet feed from a lossy one rather than inferring it from bar shape. A nautilus
 host cannot: `DataEvent` has no gap or degradation variant, the adapter object
 reaches the host as a `dyn DataClient` with no downcast, and fabricating an

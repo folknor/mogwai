@@ -7,4 +7,3 @@
 
 warmup_ns = 300000000000
 speed = 0.0
-zero_speed_stall_ms = 10

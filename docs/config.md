@@ -449,8 +449,15 @@ lists them; `mogwai presets MNQ` prints one with its provenance.
 
 The replay and admission settings remain run-wide defaults. `fanout_depth` is
 applied to each boat's own ring; the remaining settings are run-wide:
-`zero_speed_stall_ms`, `exec_held_budget_bytes`, `admission_lane_frames`,
+`exec_held_budget_bytes`, `admission_lane_frames`,
 `pending_command_acts`, and `global_pending_command_acts`.
+
+`zero_speed_stall_ms` is GONE and a file still naming it is refused. It set how
+long an unpaced tape parked waiting for its slowest subscriber to catch up, and
+nothing does that any more: parking on ring occupancy let one slow passenger
+pace a boat other accounts were sharing. A passenger that cannot keep up is now
+told what it missed instead of waited for, so `fanout_depth` is the only knob
+governing how much slack a passenger has before that happens.
 `pending_command_acts` bounds one socket's sequential command queue;
 `global_pending_command_acts` bounds queued or executing
 commands across the run. A full bound produces a visible `AdmissionRejected`

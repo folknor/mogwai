@@ -52,7 +52,9 @@ window cannot bite.
 So the only way a connection sees a market older than the one it is filled against
 is that it has not drained its socket. Everything the engine can price from was
 published already; unread frames are the connection's own backlog, every real venue
-behaves this way, and `FeedLagged` is the signal for it.
+behaves this way, and `FeedLagged` is the signal for it - the venue names the span
+the connection lost and goes on serving it, because being behind is the
+connection's condition to act on rather than a fault of the venue's.
 
 What is worth knowing is the ACCELERATION MULTIPLIER. At speed 100, every 10 ms
 a connection spends not reading - aggregating bars, evaluating a strategy - is a

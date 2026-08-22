@@ -115,7 +115,6 @@ pub(crate) struct Boatyard {
     rivers: Arc<Rivers>,
     boats: Mutex<HashMap<BoatKey, Slot>>,
     fanout_depth: usize,
-    zero_speed_stall_ms: u64,
     fault_tx: mpsc::Sender<mogwai_data::TickFault>,
     origin_ns: u64,
 }
@@ -138,7 +137,6 @@ impl Boatyard {
     pub(crate) fn new(
         rivers: Arc<Rivers>,
         fanout_depth: usize,
-        zero_speed_stall_ms: u64,
         fault_tx: mpsc::Sender<mogwai_data::TickFault>,
         origin_ns: u64,
     ) -> Arc<Self> {
@@ -146,7 +144,6 @@ impl Boatyard {
             rivers,
             boats: Mutex::new(HashMap::new()),
             fanout_depth,
-            zero_speed_stall_ms,
             fault_tx,
             origin_ns,
         })
@@ -202,7 +199,6 @@ impl Boatyard {
                     sim,
                     speed,
                     fanout_depth: self.fanout_depth,
-                    zero_speed_stall_ms: self.zero_speed_stall_ms,
                     fault_tx: self.fault_tx.clone(),
                     published_ns: Arc::clone(&published_ns),
                     extremes: Arc::clone(&extremes),
@@ -431,7 +427,7 @@ mod tests {
         let key = rivers.resolve_key(&rivers.resolve_profile("BTCUSDT").unwrap());
         let (fault_tx, _fault_rx) = mpsc::channel();
         (
-            Boatyard::new(rivers, 64, 10, fault_tx, crate::source::TAPE_ORIGIN_NS),
+            Boatyard::new(rivers, 64, fault_tx, crate::source::TAPE_ORIGIN_NS),
             key,
         )
     }
@@ -449,7 +445,6 @@ mod tests {
             Boatyard::new(
                 Arc::clone(&rivers),
                 64,
-                10,
                 fault_tx,
                 crate::source::TAPE_ORIGIN_NS,
             ),

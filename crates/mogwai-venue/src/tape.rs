@@ -33,7 +33,6 @@ pub(crate) struct TapeSpawn {
     pub(crate) sim: SimClock,
     pub(crate) speed: f64,
     pub(crate) fanout_depth: usize,
-    pub(crate) zero_speed_stall_ms: u64,
     pub(crate) fault_tx: mpsc::Sender<TickFault>,
     pub(crate) published_ns: Arc<std::sync::atomic::AtomicU64>,
     /// Where this thread records the high and low of the span since the sweeper
@@ -62,6 +61,10 @@ impl Tape {
             // comparison is per tick and must not take a lock, so the shared
             // slot is written only when an extreme actually moves.
             let mut span = crate::extremes::SpanWriter::default();
+            // Ticks published since this thread last offered the host a
+            // scheduling point. Only an unpaced tape uses it; a paced one sleeps
+            // to a wall deadline and yields by doing so.
+            let mut since_yield: u32 = 0;
             while !worker.cancel.load(Ordering::Relaxed) {
                 let Some(tick) = cursor.next_tick() else {
                     if let Some(fault) = cursor.fault() {
@@ -80,6 +83,7 @@ impl Tape {
                     tick.ts_event(),
                     wall_anchor,
                     instant_anchor,
+                    &mut since_yield,
                 );
                 if worker.cancel.load(Ordering::Relaxed) {
                     break;
@@ -174,48 +178,45 @@ impl Tape {
 /// inter-tick gap.
 const TAPE_SLEEP_POLL: Duration = Duration::from_millis(20);
 
-/// Poll slice of the `speed == 0.0` headroom park.
-const TAPE_HEADROOM_POLL: Duration = Duration::from_millis(5);
-
-/// Pace one tick against the run clock, or skip delivery pacing for a firehose.
-fn pace(tape: &Tape, spawn: &TapeSpawn, ts: u64, wall_anchor: u64, instant_anchor: Instant) {
-    let target = if spawn.speed == 0.0 {
-        await_headroom(tape, spawn);
-        None
-    } else {
-        Some(spawn.sim.wall_ns(ts))
-    };
-    if let Some(target) = target {
-        sleep_until_wall_cancellable(tape, target, wall_anchor, instant_anchor);
-    }
-}
-
-/// Park an unpaced (`speed == 0.0`) tape while the ring is more than half full,
-/// so it does not overwrite frames its readers are actively draining. A
-/// subscriber that is not merely slow but STOPPED never drains, so the park
-/// times out at `zero_speed_stall_ms` and the tape resumes: one dead consumer
-/// costs one stall and is then ejected by the ring as `FeedLagged`, rather than
-/// stalling the whole run forever.
-fn await_headroom(tape: &Tape, spawn: &TapeSpawn) {
-    if tape.tx.receiver_count() == 0 {
+/// Pace one tick against the run clock, or, for a firehose, yield to the host
+/// often enough that one river cannot capture a core.
+fn pace(
+    tape: &Tape,
+    spawn: &TapeSpawn,
+    ts: u64,
+    wall_anchor: u64,
+    instant_anchor: Instant,
+    since_yield: &mut u32,
+) {
+    if spawn.speed == 0.0 {
+        *since_yield += 1;
+        if *since_yield >= UNPACED_YIELD_TICKS {
+            *since_yield = 0;
+            thread::yield_now();
+        }
         return;
     }
-    let lead = (spawn.fanout_depth / 2).max(1);
-    let deadline = Instant::now() + Duration::from_millis(spawn.zero_speed_stall_ms);
-    loop {
-        if tape.cancel.load(Ordering::Relaxed) || tape.tx.receiver_count() == 0 {
-            return;
-        }
-        if tape.tx.len() <= lead {
-            return;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return;
-        }
-        thread::sleep((deadline - now).min(TAPE_HEADROOM_POLL));
-    }
+    sleep_until_wall_cancellable(tape, spawn.sim.wall_ns(ts), wall_anchor, instant_anchor);
 }
+
+/// How many ticks an unpaced tape publishes between scheduling points.
+///
+/// RECEIVER-BLIND, AND THAT IS THE POINT. An unpaced tape used to park while the
+/// ring was more than half full, which made the SLOWEST subscriber the thing
+/// that decided when a SHARED boat published. That was tolerable only while a
+/// lagging passenger was ejected: one dead consumer cost one stall and then
+/// left. A declared hole is no longer fatal, so the ejection is gone - and a
+/// passenger whose sustainable read rate is below the publish rate would then
+/// have parked the boat every stall interval for the whole run, imposing its own
+/// slowness on every other account sharing that hull. That is exactly the
+/// non-interference passengers of different accounts are owed.
+///
+/// What replaces it depends on production work alone, never on ring occupancy
+/// or the slowest cursor: a fixed cadence bounds how long one unpaced river can
+/// hold a core, without letting any consumer influence the tape. The ring is now
+/// the only delivery slack a passenger has, and overrunning it is DECLARED
+/// rather than waited out.
+const UNPACED_YIELD_TICKS: u32 = 64;
 
 fn sleep_until_wall_cancellable(
     tape: &Tape,

@@ -562,13 +562,27 @@ symbol, registers its instrument on the engine, resolves its `RiverKey`, and
 boards a boat on that river, all before the 101; `handle_socket` then owns the
 already-bound passenger. Every resolved shape owns a lazily created checkpoint
 chain, keyed and locked independently, and is servable through history. Consumers
-do not send subscribe frames or an account identity. The bounded fanout
-ring remains; a lagging consumer receives
-`FeedLagged` on the priority lane. The frame is advisory by ruling - it carries
-the skipped count and the simulated instant so the reader can decide its own
-response - but the serving path today still closes the connection with WS 1011
-after delivering it, which is a standing code gap against that ruling, never a
-licence to restore the fatal reading.
+do not send subscribe frames or an account identity. The bounded fanout ring remains, and it is the only delivery slack a passenger
+has. A passenger that falls behind it is told what it missed and goes on being
+served: `FeedLagged` carries an episode counter, the skipped count, a cumulative
+total and the two event-time boundaries of the hole, written immediately before
+the first market frame delivered after it. The declaration is positional, which
+is why it rides the market stream rather than the priority lane - a diagnostic
+that overtook the backlog would name a boundary the reader had not reached.
+
+Only UNARMED loss is declared. A frame withheld by an armed `GoDark` or
+`StallData` window is not loss, so a hole discovered while one is open is held
+back until delivery resumes rather than announced into a blackout. The venue does
+not claim the converse: it cannot know whether a frame the ring overwrote would
+have been suppressed, because suppression is a question about a delivery attempt
+that never happened, so a hole spanning a blackout is declared rather than
+assumed away. A sink failure can leave an owed declaration undeliverable, and
+socket termination is then the only observable.
+
+The venue never ends a connection for lag. What to do about a lossy view is the
+consumer's decision, and a rising episode count with no close is how a passenger
+that fell behind once is told apart from one whose sustainable read rate is below
+its boat's publish rate.
 
 A river's tape root is derived from the run seed and the REQUESTED symbol
 label, not from the shape the label resolves to, so a run serving several
@@ -576,7 +590,13 @@ symbols serves several genuinely different rivers. A run stays a pure function
 of `(seed, config)`; a river is a pure function of `(seed, label, resolved
 bundle)`. The seeding rules are set out with the run seed below.
 
-Execution output that no command asked for reaches every open socket. A
+Execution output that no command asked for is delivered to the ACCOUNT it
+concerns, not broadcast: a submitting connection claims its order at acceptance,
+and a venue-originated order - a risk or margin liquidation the venue mints - is
+claimed for the account whose ledger produced it. An order absent from that table
+is a bug in whoever built the batch, and the fallback of delivering it everywhere
+with a warning naming the id is the conservative direction to fail in while such
+a bug lives, not the ordinary path. A
 resting order is one of three explicit states: a live limit, an
 untriggered conditional, or an inert market remainder left by a partial fill
 that is never scanned again and ends only on cancel. Every resting limit

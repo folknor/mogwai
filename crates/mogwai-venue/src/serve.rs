@@ -189,10 +189,11 @@ async fn serve_async(
     );
     // Boot projections. Both are advisory - warmup length and ring depth are
     // the operator's call - but an extreme warmup must fail LOUDLY rather than
-    // look like a hung boot, and a ring sized for the old cadence is a
-    // correctness problem (`FeedLagged` closes the socket with WS 1011), not a
-    // tuning one. A missing profile is not fatal here: the run has already been
-    // validated against the instrument set, so this only skips the advice.
+    // look like a hung boot, and an undersized ring costs every passenger on
+    // that boat declared holes in its market view, which is worth a warning at
+    // boot rather than a stream of them at run time. A missing profile is not
+    // fatal here: the run has already been validated against the instrument set,
+    // so this only skips the advice.
     if let Some(profile) = profiles.configured(&instrument.symbol) {
         let projected_ticks =
             cfg.warmup_ns as f64 / 1_000_000_000.0 / profile.scalars.mean_event_duration_s
@@ -248,7 +249,6 @@ async fn serve_async(
         run_duration_ns,
         seeds,
         cfg.fanout_depth,
-        cfg.zero_speed_stall_ms,
         cfg.oms_type,
         cfg.fill_band_max_ticks,
         // Validated at load, so this cannot fail here.

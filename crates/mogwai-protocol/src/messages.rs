@@ -1578,14 +1578,50 @@ pub enum VenueMessage {
     Heartbeat {
         ts_event: u64,
     },
-    /// The bounded tape fanout overwrote frames for this connection. Advisory
-    /// by ruling: it carries the skipped count and the simulated instant so the
-    /// reader can measure the gap and decide its own response. The serving path
-    /// today still closes with WS 1011 after delivering it; that close is a
-    /// standing code gap against the advisory contract, not part of it.
+    /// The bounded tape fanout overwrote market frames before they reached this
+    /// connection, so this passenger's view of the water has a hole. Advisory:
+    /// the venue declares the loss and keeps serving, and the reader decides its
+    /// own response.
+    ///
+    /// POSITIONAL, which is why it rides the market lane rather than the
+    /// priority lane. It is written immediately before the first market frame
+    /// delivered after the loss, so the hole it names is the one the reader is
+    /// about to read across. A diagnostic that overtook the market backlog would
+    /// name a boundary the reader had not reached.
+    ///
+    /// THE BOUNDARIES ARE AGGREGATION BOUNDS, NOT FRAME IDENTITIES. Several
+    /// trades and quotes can share one `ts_event`, so these delimit the affected
+    /// span for a reader folding bars or advancing a cursor; they do not say
+    /// which frames were lost. `after_ts_event` is the last market frame that
+    /// actually crossed this socket, absent when the loss preceded the first
+    /// one; `resumed_ts_event` is the first frame delivered after it, absent
+    /// when the tape ended inside the hole.
+    ///
+    /// EVERY DECLARED LOSS IS UNARMED. A frame the venue deliberately withheld
+    /// under `GoDark` or `StallData` is not loss - the consumer armed it - and a
+    /// hole discovered while such a window is open is held back until delivery
+    /// resumes rather than announced into a blackout. The venue does not claim
+    /// the converse: it cannot know whether a frame the ring overwrote would
+    /// have been suppressed, because suppression is a question about a delivery
+    /// attempt that never happened, so a hole spanning a blackout is declared
+    /// rather than assumed away.
+    ///
+    /// The counters are what distinguish a passenger that fell behind once from
+    /// one whose sustainable read rate is below the boat's publish rate:
+    /// `episode` rises per declared hole and `skipped_total` accumulates over
+    /// the passenger's life. The venue never ends a connection for either - what
+    /// to do about a lossy view is the consumer's decision, not the venue's.
+    ///
+    /// DELIVERY IS NOT GUARANTEED WHEN THE TRANSPORT FAILS. This declares
+    /// recoverable loss while the connection is still writable; a sink failure
+    /// can leave an already-owed declaration undeliverable, and socket
+    /// termination is then the only observable.
     FeedLagged {
+        episode: u64,
         skipped: u64,
-        sim_now_ns: u64,
+        skipped_total: u64,
+        after_ts_event: Option<u64>,
+        resumed_ts_event: Option<u64>,
     },
     /// A non-fatal run-level havoc observation. It replaces the old
     /// subscription-attributed diagnostic because a run-level observation has
@@ -2488,11 +2524,16 @@ mod tests {
             (
                 // Formerly SubscriptionIssue::FeedLagged. There is no
                 // subscription to attribute it to, so it is a top-level frame.
+                // Both boundaries present is the ordinary resumption shape; the
+                // absent cases are pinned separately below.
                 VenueMessage::FeedLagged {
+                    episode: 2,
                     skipped: 7,
-                    sim_now_ns: 8,
+                    skipped_total: 19,
+                    after_ts_event: Some(100),
+                    resumed_ts_event: Some(400),
                 },
-                r#"{"type":"FeedLagged","skipped":7,"sim_now_ns":8}"#,
+                r#"{"type":"FeedLagged","episode":2,"skipped":7,"skipped_total":19,"after_ts_event":100,"resumed_ts_event":400}"#,
             ),
             (
                 // Formerly SubscriptionIssue::ReopenGapUnfireable.
@@ -2521,6 +2562,54 @@ mod tests {
             assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
             let decoded = VenueMessage::from_json_slice(json.as_bytes()).expect("decode bytes");
             assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), json);
+        }
+    }
+
+    /// Both `FeedLagged` boundaries are OPTIONAL, and each absence means a
+    /// distinct thing a consumer has to be able to tell apart: no lower bound
+    /// says the loss preceded the first frame this passenger was ever given, so
+    /// there is no instant to aggregate back to; no upper bound says the tape
+    /// ended inside the hole, so nothing resumed and the span is open.
+    ///
+    /// Pinned as WIRE SHAPE rather than left to the round-trip list above,
+    /// because `null` versus an absent key is the kind of thing a serde
+    /// attribute changes silently. A consumer branching on the absence would
+    /// read a skipped key as "no gap boundary" and a `null` as the same, but
+    /// only if the venue keeps emitting the key at all.
+    #[test]
+    fn a_feed_lagged_boundary_is_absent_rather_than_dropped() {
+        let unbounded_below = serde_json::to_string(&VenueMessage::FeedLagged {
+            episode: 1,
+            skipped: 3,
+            skipped_total: 3,
+            after_ts_event: None,
+            resumed_ts_event: Some(70),
+        })
+        .expect("serialize");
+        assert_eq!(
+            unbounded_below,
+            r#"{"type":"FeedLagged","episode":1,"skipped":3,"skipped_total":3,"after_ts_event":null,"resumed_ts_event":70}"#
+        );
+
+        let unbounded_above = serde_json::to_string(&VenueMessage::FeedLagged {
+            episode: 4,
+            skipped: 9,
+            skipped_total: 12,
+            after_ts_event: Some(70),
+            resumed_ts_event: None,
+        })
+        .expect("serialize");
+        assert_eq!(
+            unbounded_above,
+            r#"{"type":"FeedLagged","episode":4,"skipped":9,"skipped_total":12,"after_ts_event":70,"resumed_ts_event":null}"#
+        );
+
+        for json in [&unbounded_below, &unbounded_above] {
+            let decoded = VenueMessage::from_json_str(json).expect("decode");
+            assert_eq!(
+                &serde_json::to_string(&decoded).expect("re-serialize"),
+                json
+            );
         }
     }
 

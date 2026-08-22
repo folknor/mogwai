@@ -589,59 +589,65 @@ async fn a_venue_without_warmup_still_publishes_its_tape() {
 }
 
 /// The lag policy STAYS through the tenancy rip - it bounds one connection's
-/// memory, not one tenant's share - and it must be re-pinned against the new
-/// top-level frame, since `SubscriptionIssue::FeedLagged` no longer exists to
-/// carry it. A connection that falls behind the ring is told so and killed as a
-/// venue fault, never served a silent hole.
+/// memory, not one tenant's share - but the policy itself changed: a connection
+/// that falls behind the ring is TOLD what it missed and keeps being served,
+/// where it used to be told and then killed with WS 1011.
+///
+/// WHAT THIS HAS TO PROVE IS THE HARD PART. "No close" is not the contract and
+/// would pass against a venue that simply stopped noticing holes. So this pins
+/// three things a silent venue cannot fake: the declaration arrives, the socket
+/// goes on delivering market frames AFTER it, and a SECOND hole is declared with
+/// a higher episode number - which is what says the venue can still speak about
+/// loss once it has spoken once. The old one-shot promise pool could not have
+/// passed the third.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn a_slow_connection_is_dropped_with_feed_lagged() {
+async fn a_slow_connection_is_told_its_gap_and_keeps_being_served() {
     let venue = spawn(&["--config", &tiny_fanout_config()]);
     let (mut socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("open a socket");
 
-    // Read SLOWLY rather than not at all. A peer that never reads wedges the
-    // venue's writer, and the lag report rides that same outbound path - so a
-    // fully stopped reader could not observe its own ejection. A slow reader is
-    // both the realistic case and the one the policy is written for: it drains
-    // just enough for the venue to tell it what it missed.
-    // The slow reading is only needed to INDUCE the lag: a handful of 50 ms
-    // stalls against an unpaced raw-fill tape overruns an 8-frame ring many
-    // times over. After that the consumer drains flat out, because the report it
-    // is waiting for sits BEHIND every frame the venue queued in the socket
-    // before it noticed - and at ~8.5 raw fills per parent event that is far
-    // more frames than a one-per-50-ms reader gets through inside the deadline.
-    // Keeping the stall for the whole loop made this gate pass alone and fail
-    // under load, which is a property of the reader, not of the venue.
-    //
-    // THE PER-READ BOUND IS THE TEST'S DEADLINE, not a fixed two seconds inside
-    // it. A short inner timeout is a second, unnamed budget: the venue stalling
-    // past it under parallel load broke the loop with `lagged` still `None`, and
-    // the `expect` below then reported "the venue serves a hole" - a wrong answer
-    // about the policy on a run where the venue was merely slow. There is one
-    // budget here and it is the deadline; crossing it says so.
-    const STALLED_READS: usize = 10;
-    let mut lagged: Option<u64> = None;
+    // Read SLOWLY rather than not at all, for the same reason as before: a peer
+    // that never reads wedges the writer, and the declaration rides that same
+    // outbound path. Unlike the old test the stalling never stops - a second
+    // episode needs the reader to fall behind twice, so it must keep being slow.
+    const STALL: Duration = Duration::from_millis(20);
+    let mut episodes: Vec<u64> = Vec::new();
+    let mut market_after_first_gap = 0_usize;
     let mut close_code = None;
     let mut reads = 0;
     let deadline = common::deadline(common::TEST_WALL_BUDGET);
-    while tokio::time::Instant::now() < deadline {
-        if reads < STALLED_READS {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    while tokio::time::Instant::now() < deadline && episodes.len() < 2 {
+        tokio::time::sleep(STALL).await;
         reads += 1;
         // HOW THE READ LOOP ENDED IS RECORDED, for the same reason a drain
         // records how its stream ended: a timeout, a transport error and a clean
-        // `None` are three different stories and only one of them is about the
-        // lag policy.
+        // `None` are three different stories and only one is about the policy.
         let ending = match tokio::time::timeout_at(deadline, socket.next()).await {
             Ok(Some(Ok(message))) => match message {
                 Message::Text(text) => {
-                    if let Ok(VenueMessage::FeedLagged { skipped, .. }) =
-                        serde_json::from_str::<VenueMessage>(&text)
-                    {
-                        lagged = Some(skipped);
+                    match serde_json::from_str::<VenueMessage>(&text) {
+                        Ok(VenueMessage::FeedLagged {
+                            episode,
+                            skipped,
+                            skipped_total,
+                            ..
+                        }) => {
+                            assert!(skipped > 0, "a declared hole names a non-zero skip count");
+                            assert!(
+                                skipped_total >= skipped,
+                                "the cumulative total cannot be below this episode: \
+                                 {skipped_total} < {skipped}"
+                            );
+                            episodes.push(episode);
+                        }
+                        Ok(VenueMessage::Trade(_) | VenueMessage::Quote(_))
+                            if !episodes.is_empty() =>
+                        {
+                            market_after_first_gap += 1;
+                        }
+                        _ => {}
                     }
                     continue;
                 }
@@ -654,29 +660,34 @@ async fn a_slow_connection_is_dropped_with_feed_lagged() {
             Err(_) => "the read deadline expired before the venue said anything more",
             Ok(None) => "the venue ended the stream without a close frame",
             Ok(Some(Err(err))) => {
-                panic!("the socket failed in transport rather than being ejected: {err}")
+                panic!("the socket failed in transport rather than being served: {err}")
             }
         };
-        assert!(
-            lagged.is_some(),
-            "{ending}, with no FeedLagged seen after {reads} reads - so this says nothing \
-             about whether the venue names the frames it drops"
+        panic!(
+            "{ending}, after {reads} reads with {} declared gaps - so this says nothing about \
+             whether the venue keeps serving a passenger it has told about a hole",
+            episodes.len()
         );
-        break;
     }
 
-    let skipped = lagged.unwrap_or_else(|| {
-        panic!(
-            "no FeedLagged in {reads} reads and no close: either the venue served a hole \
-             where it should have named what it dropped, or this reader never fell behind \
-             the ring at all"
-        )
-    });
-    assert!(skipped > 0, "a lag report names a non-zero skip count");
+    assert!(
+        close_code.is_none(),
+        "a declared hole is advisory: the venue must not close the socket, got {close_code:?}"
+    );
     assert_eq!(
-        close_code,
-        Some(1011),
-        "losing promised market data is a VENUE fault, not a consumer refusal"
+        episodes.len(),
+        2,
+        "expected two declared gaps in {reads} reads; a venue that declares once and goes quiet \
+         looks identical to one that stopped noticing"
+    );
+    assert!(
+        episodes[1] > episodes[0],
+        "each declaration carries a rising episode: {episodes:?}"
+    );
+    assert!(
+        market_after_first_gap > 0,
+        "the venue must go on delivering market frames after declaring a hole; none arrived \
+         between the first declaration and the second"
     );
 }
 
@@ -1120,9 +1131,10 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
     // Sequencing them shared one 30 s instant across two phases, so a slow
     // eviction ate the query's budget and the timeout fired with a message about
     // the ledger. Worse, `second` sat unread for the whole of the first phase:
-    // this venue's fanout is a bounded ring, so a socket nobody reads is ejected
-    // with `FeedLagged`, and the resulting `None` would have been reported as
-    // the resumed ledger failing to answer. Each arm below therefore names its
+    // this venue's fanout is a bounded ring, so a socket nobody reads loses
+    // market frames and is told so - it is no longer closed for it, but a
+    // `None` here would still have been reported as the resumed ledger failing
+    // to answer. Each arm below therefore names its
     // OWN failure, and a venue-side close is spelled out as a close rather than
     // folded into "the query went unanswered".
     second
@@ -1398,9 +1410,9 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
     // than a bool. Both properties are load-bearing:
     //
     // - Draining one while the other sits unread let the unread one rot. This
-    //   venue's fanout is a bounded ring, so a socket nobody reads is eventually
-    //   ejected with `FeedLagged` and closed, and the eviction would then be
-    //   read as the blackout's doing.
+    //   venue's fanout is a bounded ring, so a socket nobody reads accumulates
+    //   declared holes in its market view, and the quiet that follows would then
+    //   be read as the blackout's doing.
     // - A two-valued "did it go quiet" CANNOT SEE that ejection at all. A closed
     //   stream answers `next()` with `None` immediately, which is not a timeout,
     //   so a bool observer reports "still receiving" for a socket that is gone -
@@ -2214,9 +2226,11 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
             Ok(VenueMessage::ProtocolError { reason, .. }) => {
                 panic!("the venue read the submit as malformed: {reason}")
             }
-            Ok(VenueMessage::FeedLagged { skipped, .. }) => {
-                panic!("this socket dropped {skipped} frames, so the fill may never arrive")
-            }
+            // Everything else is ignored, `FeedLagged` included. A declared
+            // market-view hole says NOTHING about the fill: order events ride
+            // the held lane, which is unbounded and pumped into the writer, and
+            // only the market ring overruns. This used to panic on it, on the
+            // assumption the two shared a fate.
             _ => {}
         }
     }
@@ -2460,8 +2474,8 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
     // The socket is SPLIT and drained while the submits go out. Pushing a
     // hundred submits with nothing reading left the socket unread for the whole
     // burst, and this venue's fanout is a bounded ring: an unread socket on a
-    // live tape is ejected with `FeedLagged` and closed, which the drain below
-    // then reported as if the tape-purity property had broken.
+    // live tape loses market frames and is told so, which the drain below then
+    // reported as if the tape-purity property had broken.
     let (mut writer, mut reader) = socket.split();
     let submitting = async {
         for index in 0..100 {
@@ -3771,9 +3785,9 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
 
     // `staying` is read CONTINUOUSLY from here, not left parked while the
     // bounded passenger runs its 1.5 s down. This venue's fanout is a bounded
-    // ring: a socket nobody reads is ejected with `FeedLagged` and closed, so
-    // the old shape - drain `leaving` for 1.5 s, then ask whether `staying` has
-    // a frame - could observe an eviction and report it as "one passenger's
+    // ring: a socket nobody reads loses market frames, so the old shape - drain
+    // `leaving` for 1.5 s, then ask whether `staying` has a frame - could
+    // observe that loss and report it as "one passenger's
     // deadline wound down the boat under another", sending the reader after a
     // serving defect that is not there. The reader task also reports HOW the
     // socket ended, so a close is named as a close.

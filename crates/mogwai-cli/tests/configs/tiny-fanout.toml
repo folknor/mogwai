@@ -18,4 +18,3 @@ fanout_depth = 8
 # effective enough that with it on, a merely-slow reader is never ejected at
 # all. Zero removes it, which is what puts the ring's own overrun policy - one
 # stall, then ejection - one stalled read away instead of hours of tape away.
-zero_speed_stall_ms = 0

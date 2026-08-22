@@ -865,15 +865,18 @@ async fn recv_command<Cmd>(rx: &mut Option<UnboundedReceiver<Cmd>>) -> Option<Cm
 ///
 /// The close CODE is reported, never acted on HERE - the one close this loop
 /// acts on is classified upstream by `mogwai_protocol::close::classify`, from
-/// the close REASON, and never reaches this function. A venue fault closes the socket
-/// with WS 1011 after a `FeedLagged` frame naming it, and that is deliberately
-/// treated here as an ordinary disconnect: the adapter reconnects, resubscribes,
-/// and carries on with a hole in its history. Making a venue fault terminal end
-/// to end is the CONSUMER's decision, not the adapter's - mogwai's job is to
-/// state the fault as clearly as it can and decline to repair it downstream, the
-/// same principle that governs reconnect account staleness above. An adapter
-/// that unilaterally killed the run would be making a policy call on behalf of
-/// whoever embedded it.
+/// the close REASON, and never reaches this function. A venue fault closes the
+/// socket with WS 1011, and that is deliberately treated here as an ordinary
+/// disconnect: the adapter reconnects, resubscribes, and carries on. Making a
+/// venue fault terminal end to end is the CONSUMER's decision, not the
+/// adapter's - mogwai's job is to state the fault as clearly as it can and
+/// decline to repair it downstream, the same principle that governs reconnect
+/// account staleness above. An adapter that unilaterally killed the run would be
+/// making a policy call on behalf of whoever embedded it.
+///
+/// A LAGGED FEED IS NOT ONE OF THESE, and used to be. The venue declares a
+/// market-view hole with `FeedLagged` and keeps serving, so no disconnect
+/// happens at all and this function never sees it.
 fn disconnect_cause(
     inbound: &Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
 ) -> Option<String> {

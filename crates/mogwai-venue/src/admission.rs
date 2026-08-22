@@ -42,16 +42,6 @@ pub(crate) const EXEC_HELD_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 /// `ADMISSION_FRAME_MAX_BYTES` = 256 KiB, a real bound.
 pub(crate) const ADMISSION_LANE_FRAMES: usize = 64;
 
-/// Outstanding PROMISES of a future priority frame - one per live replay, held
-/// for the replay's whole life. Accounted separately from queue depth: drawn
-/// from the same 64-slot pool, 64 healthy replays would leave zero capacity
-/// for any actual refusal, and a connection whose priority lane is completely
-/// empty cannot state why it is closing.
-///
-/// One connection owns one unconditional replay, for the one river named on
-/// its upgrade, hence exactly one future refusal promise. Deliberately no
-/// longer tied to a wire subscribe cap: there is no wire subscribe.
-pub(crate) const ADMISSION_PROMISE_TICKETS: usize = 1;
 /// Per-connection capacity of the sequential command queue.
 pub(crate) const PENDING_COMMAND_SLOTS: usize = 256;
 /// Process-wide ceiling on queued or executing websocket commands.
@@ -65,27 +55,29 @@ pub(crate) const GLOBAL_PENDING_COMMAND_SLOTS: usize = 4096;
 pub(crate) const CLOSE_ADMISSION_OVERLOAD: u16 = 1013;
 
 /// WS 1011 "Internal Error": the venue itself failed, in a way no consumer
-/// behavior caused and none can plan for. Reserved for exactly one condition
-/// today - a subscriber's tape ring turned over, so the venue no longer holds
-/// market data it already promised to deliver in ascending order.
+/// behavior caused and none can plan for. Reserved for one condition today - the
+/// tape moved BACKWARD in event time, which breaks the ascending order every
+/// reader of this protocol is entitled to assume and leaves the venue with no
+/// honest way to continue the stream.
 ///
-/// This is NOT a divergence. Every modeled pathology in this venue is armed
-/// deliberately and the honest floor is that nothing perturbs the stream unless
-/// it was asked for (see `docs/havoc.md`). A lagged ring is an unarmed
-/// hole, which makes it a venue fault rather than a scenario: the exchange
-/// crashed. It ends the connection instead of continuing with a gap, because a
-/// forward-validation run that keeps streaming past silently-missing data
-/// produces a result that looks fine and is not.
+/// A LAGGED RING IS NOT THIS, and used to be. Losing frames to an overrun ring
+/// is loss the consumer can be told about and reason over, so it is declared
+/// with `VenueMessage::FeedLagged` and the connection keeps serving; only a
+/// contradiction in the venue's own output ends a socket here. The difference is
+/// whether the venue can still make a true statement about what it is sending:
+/// after an overrun it can (a named hole, then ordered frames), after a backward
+/// step it cannot.
 pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
 
 /// A newer connection presented this connection's ACCOUNT ID, so the venue
 /// handed the ledger over and closed this one.
 ///
-/// An account is on at most one river at a time and is never shared, so a second
-/// socket claiming an id is not a second trader - from the venue's side it is
-/// indistinguishable from that trader RECONNECTING, and the venue does not try
-/// to tell them apart. Handing the account to the newcomer is what makes a
-/// reconnect work at all.
+/// The venue perceives a callsign, not a consumer, so a socket presenting a
+/// seated account id under a different callsign or none is indistinguishable
+/// from that trader RECONNECTING, and the venue does not try to tell them apart.
+/// Handing the account to the newcomer is what makes a reconnect work at all.
+/// Sockets sharing a callsign coexist instead, which is what lets one leg pair
+/// trade several rivers under one account without evicting itself.
 ///
 /// `1000` (normal closure) rather than a fault code: nothing failed, and the
 /// distinction is what stops a consumer's reconnect ladder from firing. A consumer
@@ -128,7 +120,6 @@ pub(crate) const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_se
 pub(crate) struct AdmissionLimits {
     pub(crate) held_budget_bytes: usize,
     pub(crate) lane_frames: usize,
-    pub(crate) promise_tickets: usize,
 }
 
 impl Default for AdmissionLimits {
@@ -136,7 +127,6 @@ impl Default for AdmissionLimits {
         Self {
             held_budget_bytes: EXEC_HELD_BUDGET_BYTES,
             lane_frames: ADMISSION_LANE_FRAMES,
-            promise_tickets: ADMISSION_PROMISE_TICKETS,
         }
     }
 }
@@ -290,12 +280,10 @@ impl FrameBudget {
     }
 }
 
-/// One reserved frame slot. Single-use BY TYPE: spending it consumes it, which
-/// is what pins the "a replay can emit at most one diagnostic in its life"
-/// claim that a promise's correctness rests on. A ticket may outlive its
-/// producer - the subscribe path reserves one for a replay's possible dead-seek
-/// diagnostic and hands it to the fanout task, which releases it on exit if
-/// it never fires - so the slot is released by dropping, wherever that happens.
+/// One reserved frame slot. Single-use BY TYPE: spending it consumes it. A
+/// ticket may outlive the call that took it - it travels with the frame it
+/// reserved and is released when the writer drops that frame - so the slot is
+/// given up by dropping, wherever that turns out to happen.
 pub(crate) struct Ticket {
     /// Never read: the permit's whole job is to be RELEASED when this value is
     /// dropped, wherever that turns out to be.
@@ -453,7 +441,6 @@ pub(crate) struct ExecLanes {
     held_budget: ByteBudget,
     prio_tx: mpsc::UnboundedSender<Outbound>,
     prio_budget: FrameBudget,
-    promise_budget: FrameBudget,
     /// Fires once `send_close` has been called on this connection, so the
     /// socket's own read loop can end rather than waiting on a peer.
     ///
@@ -499,7 +486,6 @@ impl ExecLanes {
             prio_tx,
             held_budget: ByteBudget::new(limits.held_budget_bytes),
             prio_budget: FrameBudget::new(limits.lane_frames),
-            promise_budget: FrameBudget::new(limits.promise_tickets),
             closed: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -573,13 +559,6 @@ impl ExecLanes {
         self.prio_budget.try_ticket()
     }
 
-    /// Reserve a PROMISE of future priority capacity, held for a replay's whole
-    /// life. Drawn from its own pool: a promise is not a queued frame, it is
-    /// capacity that is only ever spent by converting the ticket into a queued
-    /// frame, and that conversion re-checks the queue budget.
-    pub(crate) fn reserve_promise(&self) -> Option<Ticket> {
-        self.promise_budget.try_ticket()
-    }
     /// Emit an admission frame against a queue slot. Never blocks.
     ///
     /// The slot travels with the frame and is released when the writer drops
@@ -832,40 +811,6 @@ mod tests {
         };
         assert_eq!(close.code, CLOSE_ADMISSION_OVERLOAD);
         assert!(!close.reason.is_empty());
-    }
-
-    #[test]
-    fn many_live_replays_do_not_exhaust_the_priority_queue() {
-        let (lanes, _rx) = ExecLanes::detached();
-        let promises: Vec<_> = (0..ADMISSION_PROMISE_TICKETS)
-            .map(|_| lanes.reserve_promise().expect("live replay promise"))
-            .collect();
-        assert_eq!(promises.len(), ADMISSION_PROMISE_TICKETS);
-        assert!(
-            lanes.reserve_admission().is_some(),
-            "promises do not consume queue slots"
-        );
-    }
-
-    #[test]
-    fn the_promise_pool_covers_the_one_run_replay() {
-        let (lanes, _rx) = ExecLanes::detached();
-        let promises: Vec<_> = (0..ADMISSION_PROMISE_TICKETS)
-            .map(|_| {
-                lanes
-                    .reserve_promise()
-                    .expect("one promise per live replay")
-            })
-            .collect();
-        assert!(
-            lanes.reserve_promise().is_none(),
-            "the promise pool is bounded"
-        );
-        drop(promises);
-        assert!(
-            lanes.reserve_promise().is_some(),
-            "an ending replay returns its promise"
-        );
     }
 
     #[test]

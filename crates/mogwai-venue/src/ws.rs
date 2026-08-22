@@ -23,7 +23,25 @@ use crate::{
     boatyard::{BoardRefusal, BoardRequest, Ticket},
     config::{build_admission_limits, sim_duration_from_millis, sim_now_ns},
     http::{AppState, OrderOutcome, process_order_cmd, resolve_socket_symbol},
+    tape::TapeFrame,
 };
+
+/// Market-view loss this passenger has not been told about yet.
+///
+/// It exists because the venue cannot always speak at the moment it discovers a
+/// hole: the declaration is positional, so it waits for the boundary it
+/// describes - the next market frame that actually reaches the consumer.
+/// Further loss discovered while one is outstanding folds into it, which is what
+/// keeps a passenger that is continuously behind from being told once per
+/// overwritten frame.
+struct PendingGap {
+    /// Frames the ring overwrote, across every lag folded into this episode.
+    skipped: u64,
+    /// The last market frame that CROSSED THE SOCKET before the loss. `None`
+    /// when the loss preceded this passenger's first delivered frame, which is
+    /// why it is not merely the last frame the venue read.
+    after_ts_event: Option<u64>,
+}
 
 /// The upgrade's query string, exactly as the consumer wrote it.
 ///
@@ -581,23 +599,72 @@ pub(crate) fn spawn_exec_pump(
     })
 }
 
+/// The one task that owns this socket's sink, and therefore the only place that
+/// knows what a consumer actually received.
+///
+/// IT READS THE BOAT DIRECTLY rather than being fed by a separate task, and that
+/// is the whole reason the gap declaration below can be honest. A feed task can
+/// only report what it took off the ring and handed on; whether those frames
+/// were then suppressed by an armed window, lost to a failed write, or overtaken
+/// by a close is knowledge that lives HERE. Splitting the two put the frontier
+/// in one task and the truth in another, so a declaration composed upstream
+/// could name a boundary the consumer never reached.
+///
+/// It also makes the two writes that must not be separated - a declaration and
+/// the frame it precedes - ordinary sequential statements rather than a protocol
+/// between tasks.
+///
+/// One consequence worth stating: execution output no longer shares a queue with
+/// market data, so a fill can now overtake market frames still on the ring.
+/// Their relative order was never a guarantee - the two producers raced on one
+/// channel - and separate execution and market streams are what a real venue
+/// gives a consumer anyway.
 async fn run_writer(
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
     mut prio_rx: mpsc::UnboundedReceiver<Outbound>,
     mut out_rx: mpsc::Receiver<Outbound>,
+    mut tape: tokio::sync::broadcast::Receiver<TapeFrame>,
+    snapshot: Option<TapeFrame>,
     account_state: Arc<crate::run::Account>,
     sim: mogwai_protocol::SimClock,
 ) {
+    let mut writer = Writer {
+        account_state,
+        sim,
+        delivered_market_ts: None,
+        last_seen_market_ts: None,
+        pending: None,
+        episode: 0,
+        skipped_total: 0,
+    };
     let mut priority_open = true;
     let mut held_open = true;
+    let mut tape_open = true;
+    if let Some(frame) = snapshot
+        && writer.write_market(&mut sink, frame).await.is_err()
+    {
+        return;
+    }
     while priority_open || held_open {
-        let outbound = tokio::select! {
+        let event = tokio::select! {
             biased;
-            message = prio_rx.recv(), if priority_open => match message { Some(message) => message, None => { priority_open = false; continue; } },
-            message = out_rx.recv(), if held_open => match message { Some(message) => message, None => { held_open = false; continue; } },
+            message = prio_rx.recv(), if priority_open => match message {
+                Some(message) => WriterEvent::Outbound(message),
+                None => { priority_open = false; continue; }
+            },
+            message = out_rx.recv(), if held_open => match message {
+                Some(message) => WriterEvent::Outbound(message),
+                None => { held_open = false; continue; }
+            },
+            result = tape.recv(), if tape_open => WriterEvent::Tape(result),
         };
-        match outbound {
-            Outbound::Close(close) => {
+        match event {
+            WriterEvent::Outbound(Outbound::Close(close)) => {
+                // A close the VENUE chose, on a socket it can still write. The
+                // owed declaration goes out ahead of it: the terminal frame
+                // already reveals that the venue is alive, so stating a hole
+                // first discloses nothing the close does not.
+                drop(writer.settle_pending(&mut sink).await);
                 drop(
                     sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: close.code,
@@ -605,37 +672,216 @@ async fn run_writer(
                     })))
                     .await,
                 );
-                break;
+                return;
             }
-            Outbound::Frame(frame) => {
-                let now = sim_now_ns(sim);
-                // A terminal announcement outranks every armed window: see
-                // `FrameClass`. Everything else is gated - `GoDark` wholesale,
-                // `StallData` on market data alone.
-                //
-                // THIS ACCOUNT'S windows, not the venue's: transport havoc
-                // corrupts what one connection receives, so arming a blackout on
-                // one account must not black out every other account on the
-                // exchange.
-                if frame.class != FrameClass::Terminal {
-                    if account_state.dark.open_at(sim, now) {
-                        continue;
-                    }
-                    if frame.class == FrameClass::MarketData
-                        && account_state.stall.open_at(sim, now)
-                    {
-                        continue;
-                    }
+            WriterEvent::Outbound(Outbound::Frame(frame)) => {
+                if writer.write_lane_frame(&mut sink, &frame).await.is_err() {
+                    return;
                 }
-                if sink
-                    .send(Message::Text(frame.payload.as_ref().into()))
-                    .await
-                    .is_err()
-                {
-                    break;
+            }
+            WriterEvent::Tape(Ok(frame)) => {
+                if writer.write_market(&mut sink, frame).await.is_err() {
+                    return;
+                }
+            }
+            // The ring turned over before this passenger read it. Not a fault
+            // and not a divergence: it is loss, and the only thing owed is that
+            // the consumer be told where. Folded into any outstanding
+            // declaration rather than announced here, because the boundary it
+            // names has not arrived yet.
+            WriterEvent::Tape(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+                writer.record_loss(skipped);
+            }
+            // The boat wound down. The socket may still be serving execution
+            // output, so this is not a teardown - but an owed declaration will
+            // never get the resumption boundary it was waiting for, so it is
+            // stated now with the upper bound open.
+            WriterEvent::Tape(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                tape_open = false;
+                if writer.settle_pending(&mut sink).await.is_err() {
+                    return;
                 }
             }
         }
+    }
+}
+
+/// What the writer is woken by. The tape is a third source rather than another
+/// producer on the outbound lane, which is what keeps market delivery out of a
+/// queue whose depth would be a second, unnamed buffer in front of the ring.
+enum WriterEvent {
+    Outbound(Outbound),
+    Tape(Result<TapeFrame, tokio::sync::broadcast::error::RecvError>),
+}
+
+/// The sink is gone. Every write path returns this rather than breaking, so no
+/// exit can skip the pending-declaration settlement by construction.
+struct SinkGone;
+
+struct Writer {
+    account_state: Arc<crate::run::Account>,
+    /// This socket's BOAT clock, which is the only clock its armed windows are
+    /// judged on.
+    sim: mogwai_protocol::SimClock,
+    /// The last market frame that CROSSED THE SOCKET. Advanced only by a write
+    /// that returned `Ok`, never by reading a frame, suppressing one, or
+    /// queueing one - which is what makes it the consumer's frontier rather than
+    /// the venue's.
+    delivered_market_ts: Option<u64>,
+    /// The last market frame READ, delivered or not. Separate from the frontier
+    /// because the backward-time guard is about the tape's own ordering, which a
+    /// suppressed frame still participates in.
+    last_seen_market_ts: Option<u64>,
+    pending: Option<PendingGap>,
+    episode: u64,
+    skipped_total: u64,
+}
+
+impl Writer {
+    /// Is venue output being withheld from this account right now?
+    ///
+    /// THIS ACCOUNT'S windows, not the venue's: transport havoc corrupts what one
+    /// connection receives, so arming a blackout on one account must not black
+    /// out every other account on the exchange.
+    fn suppressed(&self, class: FrameClass) -> bool {
+        // A terminal announcement outranks every armed window: see `FrameClass`.
+        if class == FrameClass::Terminal {
+            return false;
+        }
+        let now = sim_now_ns(self.sim);
+        // `GoDark` wholesale, `StallData` on market data alone.
+        self.account_state.dark.open_at(self.sim, now)
+            || (class == FrameClass::MarketData && self.account_state.stall.open_at(self.sim, now))
+    }
+
+    async fn send(
+        &self,
+        sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+        payload: &str,
+    ) -> Result<(), SinkGone> {
+        sink.send(Message::Text(payload.into()))
+            .await
+            .map_err(|_| SinkGone)
+    }
+
+    /// An execution, heartbeat or terminal frame from the outbound lanes.
+    async fn write_lane_frame(
+        &self,
+        sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+        frame: &OutboundFrame,
+    ) -> Result<(), SinkGone> {
+        if self.suppressed(frame.class) {
+            return Ok(());
+        }
+        self.send(sink, frame.payload.as_ref()).await
+    }
+
+    /// One market frame, and the declaration that must precede it if this
+    /// passenger has an unstated hole.
+    ///
+    /// THE TWO WRITES ARE ONE STATEMENT. Nothing returns to the select between
+    /// them, so no close, completion or execution frame can be interleaved
+    /// between a declaration and the frame whose arrival it dates.
+    async fn write_market(
+        &mut self,
+        sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+        frame: TapeFrame,
+    ) -> Result<(), SinkGone> {
+        if self
+            .last_seen_market_ts
+            .is_some_and(|prior| frame.ts_event < prior)
+        {
+            tracing::error!(
+                prior_ts_event = self.last_seen_market_ts,
+                frame_ts_event = frame.ts_event,
+                "VENUE FAULT: tape feed moved backward in event time; killing the connection \
+                 rather than silently ending market data"
+            );
+            let close = CloseSpec::venue_fault(format!(
+                "venue fault: tape event time moved backward from {:?} to {}",
+                self.last_seen_market_ts, frame.ts_event
+            ));
+            drop(
+                sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: close.code,
+                    reason: close.reason.into(),
+                })))
+                .await,
+            );
+            return Err(SinkGone);
+        }
+        self.last_seen_market_ts = Some(frame.ts_event);
+        // A withheld frame is not loss and does not move the frontier: the
+        // consumer armed this, and what it is owed is the silence it asked for.
+        if self.suppressed(FrameClass::MarketData) {
+            return Ok(());
+        }
+        if let Some(gap) = self.pending.take() {
+            let declaration = self.declaration(&gap, Some(frame.ts_event));
+            self.send(sink, &declaration).await?;
+        }
+        self.send(sink, frame.payload.as_ref()).await?;
+        self.delivered_market_ts = Some(frame.ts_event);
+        Ok(())
+    }
+
+    /// Fold loss into the outstanding declaration, or open one.
+    ///
+    /// The lower bound is taken from the DELIVERED frontier at the moment the
+    /// first loss of an episode is recorded, so a hole that opened while an
+    /// armed window was withholding frames still names the last instant this
+    /// consumer actually saw.
+    fn record_loss(&mut self, skipped: u64) {
+        self.skipped_total = self.skipped_total.saturating_add(skipped);
+        match &mut self.pending {
+            Some(gap) => gap.skipped = gap.skipped.saturating_add(skipped),
+            None => {
+                self.pending = Some(PendingGap {
+                    skipped,
+                    after_ts_event: self.delivered_market_ts,
+                });
+            }
+        }
+    }
+
+    /// State an owed declaration when no resumption boundary is coming.
+    ///
+    /// Called on tape closure and ahead of a venue-chosen close. It is a no-op
+    /// when nothing is owed, and it declines to speak into an armed blackout -
+    /// the frames the consumer is not receiving right now are the ones it asked
+    /// not to receive.
+    async fn settle_pending(
+        &mut self,
+        sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    ) -> Result<(), SinkGone> {
+        if self.suppressed(FrameClass::MarketData) {
+            return Ok(());
+        }
+        let Some(gap) = self.pending.take() else {
+            return Ok(());
+        };
+        let declaration = self.declaration(&gap, None);
+        self.send(sink, &declaration).await
+    }
+
+    fn declaration(&mut self, gap: &PendingGap, resumed_ts_event: Option<u64>) -> String {
+        self.episode = self.episode.saturating_add(1);
+        tracing::warn!(
+            episode = self.episode,
+            skipped = gap.skipped,
+            skipped_total = self.skipped_total,
+            after_ts_event = gap.after_ts_event,
+            resumed_ts_event,
+            "declaring a hole in this passenger's market view; the venue keeps serving"
+        );
+        serde_json::to_string(&VenueMessage::FeedLagged {
+            episode: self.episode,
+            skipped: gap.skipped,
+            skipped_total: self.skipped_total,
+            after_ts_event: gap.after_ts_event,
+            resumed_ts_event,
+        })
+        .expect("FeedLagged serializes")
     }
 }
 
@@ -660,10 +906,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
         Arc::clone(passenger.ticket.boat()),
         Arc::clone(&passenger.account_state),
     );
+    // This connection's own boat, and its own cursor on that boat's ring: a busy
+    // river cannot lag a passenger subscribed to a quiet one, and loss here is a
+    // property of the water this socket asked for.
+    let (tape, snapshot) = passenger.ticket.boat().tape.subscribe_with_snapshot();
     let writer = tokio::spawn(run_writer(
         sink,
         prio_rx,
         out_rx,
+        tape,
+        snapshot,
         Arc::clone(&passenger.account_state),
         boat_sim,
     ));
@@ -699,109 +951,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
         boat_sim,
         out_tx.clone(),
     );
-    let feed = {
-        // This connection's own boat, and its own ring: a busy river cannot
-        // lag a passenger subscribed to a quiet one, and a lag here is a
-        // property of the water this socket asked for.
-        let (mut tape, snapshot) = passenger.ticket.boat().tape.subscribe_with_snapshot();
-        let out_tx = out_tx.clone();
-        // The ONE diagnostic this feed can ever emit is `FeedLagged`, and it is
-        // emitted precisely when the connection is already drowning in market
-        // data. Reserving the priority-lane capacity for it up front, and
-        // spending it on the priority lane rather than queueing it behind the
-        // backlog that caused it, is the whole reason the promise pool exists.
-        let mut fault_promise = lanes.reserve_promise();
-        let fault_lanes = lanes.clone();
-        tokio::spawn(async move {
-            let mut last_market_ts = snapshot.as_ref().map(|frame| frame.ts_event);
-            if let Some(frame) = snapshot
-                && out_tx
-                    .send(Outbound::Frame(OutboundFrame {
-                        payload: frame.payload,
-                        class: FrameClass::MarketData,
-                        charge: None,
-                        slot: None,
-                    }))
-                    .await
-                    .is_err()
-            {
-                return;
-            }
-            loop {
-                match tape.recv().await {
-                    Ok(frame) => {
-                        if last_market_ts.is_some_and(|prior| frame.ts_event < prior) {
-                            tracing::error!(
-                                prior_ts_event = last_market_ts,
-                                frame_ts_event = frame.ts_event,
-                                "VENUE FAULT: tape feed moved backward in event time; killing \
-                                 the connection rather than silently ending market data"
-                            );
-                            drop(fault_lanes.send_close(CloseSpec::venue_fault(format!(
-                                "venue fault: tape event time moved backward from {:?} to {}",
-                                last_market_ts, frame.ts_event
-                            ))));
-                            break;
-                        }
-                        last_market_ts = Some(frame.ts_event);
-                        if out_tx
-                            .send(Outbound::Frame(OutboundFrame {
-                                payload: frame.payload,
-                                class: FrameClass::MarketData,
-                                charge: None,
-                                slot: None,
-                            }))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    // A VENUE FAULT, not a divergence and not a refusal the
-                    // consumer could have planned for: the ring turned over, so
-                    // the venue has lost market data it already promised to
-                    // deliver in ascending order. The connection dies rather
-                    // than serving past the hole, because a forward-validation
-                    // run that keeps streaming with silently-missing ticks
-                    // yields a result that looks clean and is not.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::error!(
-                            skipped,
-                            "VENUE FAULT: tape ring turned over and the venue lost market \
-                             data it had promised; killing the connection rather than \
-                             serving a hole"
-                        );
-                        // Both frames ride the PRIORITY lane: the held lane is
-                        // full of exactly the backlog that caused this, so a
-                        // diagnostic queued behind it arrives after the socket
-                        // is gone, if at all.
-                        if let Some(promise) = fault_promise.take() {
-                            drop(promise);
-                            if let Some(slot) = fault_lanes.reserve_admission() {
-                                drop(fault_lanes.emit_admission(
-                                    slot,
-                                    VenueMessage::FeedLagged {
-                                        skipped,
-                                        sim_now_ns: sim_now_ns(boat_sim),
-                                    },
-                                ));
-                            } else {
-                                tracing::warn!(
-                                    "priority lane full; feed-lag diagnostic undeliverable"
-                                );
-                            }
-                        }
-                        drop(fault_lanes.send_close(CloseSpec::venue_fault(format!(
-                            "venue fault: lost {skipped} ticks; the tape ring turned over \
-                             and this feed has an unarmed gap"
-                        ))));
-                        break;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        })
-    };
     // Venue-originated liveness. Survives `StallData` (it is not market data)
     // but not `GoDark` (which gates the writer wholesale), which is exactly the
     // distinction it exists to make observable: a stalled feed and a dead venue
@@ -947,7 +1096,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
     // passenger still carries the guard, so an abandoned upgrade that never got
     // here is covered by the drop.
     drop(passenger.attach.take());
-    feed.abort();
     pump.abort();
     dispatcher.abort();
     if let Some(heartbeat) = heartbeat {
