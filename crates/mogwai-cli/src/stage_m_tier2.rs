@@ -305,7 +305,7 @@ fn commit(args: &CommitArgs) -> anyhow::Result<()> {
         &json!({
             "record":"candidate_committed", "candidate_id":spec.id,
             "search_order":records.iter().filter(|x|x["record"]=="candidate_committed").count()+1,
-            "specification":spec, "specification_sha256":mogwai_lab::ledger::sha256_file(&args.specification).map_err(|e|anyhow!(e.to_string()))?,
+            "specification":spec, "specification_sha256":mogwai_lab::delivery::sha256_file(&args.specification).map_err(|e|anyhow!(e.to_string()))?,
             "state":"committed_before_evaluation"
         }),
     )?;

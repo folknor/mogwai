@@ -68,7 +68,7 @@ impl ProvenanceToken {
         );
         let mut hasher = Sha256::new();
         hasher.update(blob.as_bytes());
-        Self(crate::ledger::hex_digest(&hasher.finalize()))
+        Self(crate::delivery::hex_digest(&hasher.finalize()))
     }
 
     pub fn as_str(&self) -> &str {

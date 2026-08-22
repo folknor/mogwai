@@ -15,7 +15,7 @@ use anyhow::{Context, anyhow, bail};
 use clap::Args;
 use mogwai_lab::arrival_envelope::predictive_envelopes;
 use mogwai_lab::arrival_screen::{A2_SHAPE_BASE, A2_SHAPE_CAP, Cell, ScreenContext};
-use mogwai_lab::ledger::{fresh_tree_state, sha256_file};
+use mogwai_lab::delivery::{fresh_tree_state, sha256_file};
 use serde_json::{Map, Value, json};
 
 const DEFAULT_SCREEN: &str = "analysis/mnq-arrival-screen.json";

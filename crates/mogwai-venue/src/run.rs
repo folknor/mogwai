@@ -671,16 +671,16 @@ impl VenueArms {
     }
 }
 
-/// What every account's ledger is opened from. Held on the run because a
-/// an account is created on demand - when a connection first names one -
-/// and the values it is built from are venue configuration.
+/// The four venue settings used when an account's engine is built. Held on the
+/// run because an account is created on demand, when a connection first names
+/// one, and each new engine needs the same settings.
 ///
 /// This is the venue-wide `[balances]` seed, which the account-policy design
 /// retires in favour of a consumer-named opening balance and risk policy. Until
 /// that lands it is the OPENING balance applied to each account rather than
 /// the balance of one shared ledger, which is the same value doing a different
 /// job.
-struct LedgerTemplate {
+struct AccountOpeningTerms {
     opening_balances: std::collections::HashMap<String, Decimal>,
     fill_seed: u64,
     oms_type: mogwai_protocol::OmsType,
@@ -736,7 +736,7 @@ pub(crate) struct Run {
     /// so a returning socket finds its own ledger rather than a fresh one; that
     /// is what makes a reconnect a continuation instead of a new trader.
     accounts: Mutex<std::collections::HashMap<String, Arc<Account>>>,
-    template: LedgerTemplate,
+    account_opening_terms: AccountOpeningTerms,
     /// Every venue-wide arm the control plane has posted. Read whenever a
     /// ledger is minted, so a late-connecting account carries what the operator
     /// armed. LOCK ORDER: `accounts` FIRST, then this - both `Run::account` and
@@ -880,7 +880,7 @@ impl Run {
         // only what one is opened from.
         Arc::new(Self {
             accounts: Mutex::new(std::collections::HashMap::new()),
-            template: LedgerTemplate {
+            account_opening_terms: AccountOpeningTerms {
                 opening_balances: balances,
                 fill_seed: seeds.fill,
                 oms_type,
@@ -908,23 +908,23 @@ impl Run {
         })
     }
 
-    /// An engine built from the venue template, for `account_id`, holding
-    /// `balances`.
+    /// An engine built from the account opening terms, for `account_id`,
+    /// holding `balances`.
     ///
-    /// THE ONE PLACE THE TEMPLATE IS APPLIED. Three callers build an engine -
-    /// the mint on first sight, the consumer's own `open_account`, and the
-    /// throwaway preview `unopened_ledger` - and each carried its own copy of
-    /// `Engine::build` plus the two `set_*` calls. Those copies are the
+    /// THE ONE PLACE THE OPENING TERMS ARE APPLIED. Three callers build an
+    /// engine - the mint on first sight, the consumer's own `open_account`, and
+    /// the throwaway preview `unopened_ledger` - and each carried its own copy
+    /// of `Engine::build` plus the two `set_*` calls. Those copies are the
     /// two-implementations-without-a-gate shape: the next setting added to the
-    /// template would be owed at three sites, nothing would notice two of them,
-    /// and the preview would then answer for a ledger the venue would never
-    /// actually open. Lifecycle still differs per caller - only this
+    /// opening terms would be owed at three sites, nothing would notice two of
+    /// them, and the preview would then answer for a ledger the venue would
+    /// never actually open. Lifecycle still differs per caller - only this
     /// construction is shared.
     ///
-    /// `balances` is a parameter rather than read from the template because
-    /// `open_account` is the consumer stating its own; the other two pass the
-    /// template's.
-    fn template_engine(
+    /// `balances` is a parameter rather than read from the opening terms
+    /// because `open_account` is the consumer stating its own; the other two
+    /// pass the configured opening balances.
+    fn engine_from_account_opening_terms(
         &self,
         account_id: &mogwai_protocol::AccountId,
         balances: std::collections::HashMap<String, Decimal>,
@@ -937,10 +937,10 @@ impl Run {
             account_id: account_id.clone(),
             instruments: Vec::new(),
             balances,
-            fill_seed: self.template.fill_seed,
+            fill_seed: self.account_opening_terms.fill_seed,
         });
-        engine.set_oms_type(self.template.oms_type);
-        engine.set_liquidation_band_ticks(self.template.fill_band_max_ticks);
+        engine.set_oms_type(self.account_opening_terms.oms_type);
+        engine.set_liquidation_band_ticks(self.account_opening_terms.fill_band_max_ticks);
         engine
     }
 
@@ -960,7 +960,10 @@ impl Run {
         if let Some(existing) = accounts.get(account_id.as_str()) {
             return Arc::clone(existing);
         }
-        let mut engine = self.template_engine(account_id, self.template.opening_balances.clone());
+        let mut engine = self.engine_from_account_opening_terms(
+            account_id,
+            self.account_opening_terms.opening_balances.clone(),
+        );
         // Opened with whatever the operator has armed - venue-wide, and against
         // this account by name before it existed - so this ledger is
         // indistinguishable from one that existed when the arm arrived. Held
@@ -976,7 +979,7 @@ impl Run {
         if let Some(pending) = &pending {
             pending.open_engine(&mut engine);
         }
-        let opening = opening_equity(&self.template.opening_balances);
+        let opening = opening_equity(&self.account_opening_terms.opening_balances);
         let minted = Arc::new(Account {
             account_id: account_id.clone(),
             engine: AsyncMutex::new(engine),
@@ -1018,11 +1021,11 @@ impl Run {
     ///
     /// THIS IS NOT A THIRD MINT SITE, and the difference is exactly that
     /// nothing survives the call: no account is inserted, no pending named
-    /// arm is consumed, no passenger boards and no freeze clock starts. The CONSTRUCTION is
-    /// nevertheless shared with both real mint sites, through
-    /// `template_engine`, because "not a mint" is a claim about lifecycle and
-    /// says nothing about whether a preview is built the same way as the thing
-    /// it previews. It exists so a READ
+    /// arm is consumed, no passenger boards and no freeze clock starts. The
+    /// CONSTRUCTION is nevertheless shared with both real mint sites, through
+    /// `engine_from_account_opening_terms`, because "not a mint" is a claim
+    /// about lifecycle and says nothing about whether a preview is built the
+    /// same way as the thing it previews. It exists so a READ
     /// can answer for an unknown account without allocating one -
     /// `GET /account?account=<anything>` is unauthenticated, and creating a
     /// ledger per id anybody names makes an endpoint that changes nothing into
@@ -1044,10 +1047,13 @@ impl Run {
         &self,
         account_id: &mogwai_protocol::AccountId,
     ) -> (Engine, crate::risk::RiskLedger) {
-        let engine = self.template_engine(account_id, self.template.opening_balances.clone());
+        let engine = self.engine_from_account_opening_terms(
+            account_id,
+            self.account_opening_terms.opening_balances.clone(),
+        );
         let ledger = crate::risk::RiskLedger::new(
             mogwai_protocol::risk::AccountPolicy::default(),
-            opening_equity(&self.template.opening_balances),
+            opening_equity(&self.account_opening_terms.opening_balances),
             self.started_ns,
         );
         (engine, ledger)
@@ -1250,9 +1256,10 @@ impl Run {
     /// THE ONE HOME OF THE RESET RULE, and asked ONCE per upgrade: `/ws` asks
     /// it before it refuses anything - the funding refusal is a statement about
     /// the ledger the connection will actually get, and under the reset knob
-    /// that is a fresh one built from the venue template rather than whatever
-    /// the account holds now - and then hands the answer to `claim_account`. It must be
-    /// asked before any eviction, because `has_matching_identity_on` reads the lane table
+    /// that is a fresh one built from the account opening terms rather than
+    /// whatever the account holds now - and then hands the answer to
+    /// `claim_account`. It must be asked before any eviction, because
+    /// `has_matching_identity_on` reads the lane table
     /// and an eviction prunes exactly the lanes that answer "is this identity
     /// already here".
     pub(crate) fn claim_discards_ledger(
@@ -1296,9 +1303,9 @@ impl Run {
     ///
     /// PRESENCE, never sufficiency - see `Engine::is_funded_in`. Asked of the
     /// prospective ledger rather than of the current one, because a claim that
-    /// resets replaces the account's balances with the venue template's, and an
-    /// account opened through `/account` with consumer-named balances can differ
-    /// from that template in exactly which currencies it carries.
+    /// resets replaces the account's balances with the opening terms' balances,
+    /// and an account opened through `/account` with consumer-named balances
+    /// can differ from those in exactly which currencies it carries.
     pub(crate) async fn funded_in(
         &self,
         account_id: &mogwai_protocol::AccountId,
@@ -1306,14 +1313,20 @@ impl Run {
         currency: &str,
     ) -> bool {
         if resetting {
-            return self.template.opening_balances.contains_key(currency);
+            return self
+                .account_opening_terms
+                .opening_balances
+                .contains_key(currency);
         }
         match self.peek_account(account_id) {
             Some(account_state) => account_state.engine.lock().await.is_funded_in(currency),
-            // An account nobody has opened yet is minted from the template, so
-            // the template is the honest answer and no ledger is created to
-            // give it.
-            None => self.template.opening_balances.contains_key(currency),
+            // An account nobody has opened yet is minted from the account
+            // opening terms, so their balances are the honest answer and no
+            // ledger is created to give it.
+            None => self
+                .account_opening_terms
+                .opening_balances
+                .contains_key(currency),
         }
     }
 
@@ -1464,7 +1477,7 @@ impl Run {
             return Err(AccountRefusal::AlreadyOpen);
         }
         let opening = opening_equity(&balances);
-        let mut engine = self.template_engine(account_id, balances);
+        let mut engine = self.engine_from_account_opening_terms(account_id, balances);
         // Under the `accounts` lock this call already holds, in the same lock
         // order `Run::arm` takes, so an arm racing this open lands in exactly
         // one of the two paths.

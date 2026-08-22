@@ -16,12 +16,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow, bail};
 use clap::Args;
 use mogwai_lab::aggregate::artifact::write_json_atomic;
+use mogwai_lab::delivery::{fresh_tree_state, require_clean_tree};
 use mogwai_lab::fit::driver::{FitConfig, run_fit};
-use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree};
 use mogwai_lab::storage::{ScratchDir, artifact_path, cache_root};
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
-const DEFAULT_LEDGER: &str = "analysis/databento-jobs.json";
+const DEFAULT_JOBS_MANIFEST: &str = "analysis/databento-jobs.json";
 const DEFAULT_PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
 /// The Python-era scratch directory whose `cache/` subdirectory holds the
 /// protocol-11 run's walk summaries.
@@ -46,9 +46,9 @@ pub struct FitArgs {
     /// The delivered corpus directory.
     #[arg(long, value_name = "DIR")]
     corpus: Option<PathBuf>,
-    /// The Databento job ledger. Read-only.
+    /// The Databento jobs manifest. Read-only.
     #[arg(long, value_name = "PATH")]
-    ledger: Option<PathBuf>,
+    jobs_manifest: Option<PathBuf>,
     /// The committed preflight artifact this run's file hashes must match.
     #[arg(long, value_name = "PATH")]
     preflight: Option<PathBuf>,
@@ -152,10 +152,10 @@ pub fn resolve(
             .corpus
             .clone()
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CORPUS)),
-        ledger: args
-            .ledger
+        jobs_manifest: args
+            .jobs_manifest
             .clone()
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_LEDGER)),
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_JOBS_MANIFEST)),
         preflight: args
             .preflight
             .clone()
@@ -177,12 +177,12 @@ mod tests {
 
     use std::rc::Rc;
 
-    use mogwai_lab::ledger::{ScriptedTree, TreeQuery, install_tree_oracle};
+    use mogwai_lab::delivery::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     fn missing_inputs(out: &str) -> FitArgs {
         FitArgs {
             corpus: Some("no/such/fit-corpus".into()),
-            ledger: Some("no/such/fit-ledger.json".into()),
+            jobs_manifest: Some("no/such/fit-jobs-manifest.json".into()),
             preflight: Some("no/such/fit-preflight.json".into()),
             cache_dir: None,
             cache_commit: None,
@@ -191,7 +191,7 @@ mod tests {
     }
 
     /// The N1 fit-side gate: `fit` is a call site of the SHARED
-    /// `mogwai_lab::ledger::require_clean_tree`, and moving it must not change
+    /// `mogwai_lab::delivery::require_clean_tree`, and moving it must not change
     /// what an operator sees.
     ///
     /// BOTH VERDICTS ARE INJECTED, and that is the whole design. This test

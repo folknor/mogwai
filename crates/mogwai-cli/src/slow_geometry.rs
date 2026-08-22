@@ -124,7 +124,7 @@ impl SlowGeometryRun {
 
 pub fn run_with(config: &SlowGeometryRun) -> anyhow::Result<()> {
     let actual =
-        mogwai_lab::ledger::sha256_file(&config.input).map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_lab::delivery::sha256_file(&config.input).map_err(|e| anyhow!(e.to_string()))?;
     let commit = executing_commit()?;
     if actual != config.expected_sha256 {
         let artifact = base(

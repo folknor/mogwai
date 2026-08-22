@@ -83,7 +83,7 @@ fn parity3b_fit_matches_the_committed_artifact_over_the_python_walk_cache() {
 
     let cfg = mogwai_lab::fit::driver::FitConfig {
         corpus: root.join("research/market-data/databento/mnqv/2026-07.full.tbbo"),
-        ledger: root.join("analysis/databento-jobs.json"),
+        jobs_manifest: root.join("analysis/databento-jobs.json"),
         preflight: root.join("analysis/out/mnq-fit-preflight.json"),
         python_cache_dir: Some(root.join("analysis/out/mnq-fit-scratch")),
         python_cache_commit: cache_commit,

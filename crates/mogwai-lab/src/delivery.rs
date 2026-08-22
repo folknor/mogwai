@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Identity binding (`analysis/mnq_fit.py` spec 4.1): ledger + manifest +
-//! rehash, before a byte of CSV. The lab reads `analysis/databento-jobs.json`
-//! READ-ONLY (per AGENTS.md/the phase-1 brief) - nothing here ever writes it.
+//! Delivery identity binding (`analysis/mnq_fit.py` spec 4.1): jobs manifest +
+//! delivered manifest + rehash, before a byte of CSV. The lab reads
+//! `analysis/databento-jobs.json` READ-ONLY (per AGENTS.md/the phase-1 brief) -
+//! nothing here ever writes it.
 
 #[cfg(any(test, feature = "test-seam"))]
 use std::cell::RefCell;
@@ -15,7 +16,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::error::{LabError, LabResult};
-use crate::subcontract::{JOB_ID, LEDGER_KEY};
+use crate::subcontract::{DELIVERY_KEY, JOB_ID};
 
 /// Which of the two git reads the tree gate performs. The gate's whole
 /// contract is expressed in the ORDER of these: a run that reads `Head`
@@ -212,7 +213,7 @@ impl ScriptedTree {
     #[must_use]
     pub fn dirty(head: &str) -> Self {
         Self::new(
-            status_ok(" M crates/mogwai-lab/src/ledger.rs\n"),
+            status_ok(" M crates/mogwai-lab/src/delivery.rs\n"),
             head_ok(head),
         )
     }
@@ -354,13 +355,13 @@ pub fn sha256_file(path: &Path) -> LabResult<String> {
 }
 
 #[derive(Deserialize)]
-struct LedgerFile {
+struct JobsManifest {
     #[serde(default)]
-    jobs: BTreeMap<String, LedgerJobEntry>,
+    jobs: BTreeMap<String, DeliveryEntry>,
 }
 
 #[derive(Deserialize)]
-struct LedgerJobEntry {
+struct DeliveryEntry {
     state: Option<String>,
     job_id: Option<String>,
     #[serde(default)]
@@ -417,57 +418,59 @@ impl ManifestFiles {
     }
 }
 
-/// `verify_input`: ledger-entry state and job-id checks, ledger/manifest
-/// inventory agreement, on-disk presence (a REGULAR file, not a directory or
-/// dangling symlink), then a rehash of every `.csv.zst` against the ledger.
-/// Returns the verified `{filename: sha256}` map.
-pub fn verify_input(directory: &Path, ledger_path: &Path) -> LabResult<BTreeMap<String, String>> {
-    verify_input_bound(directory, ledger_path, LEDGER_KEY, Some(JOB_ID))
+/// `verify_input`: delivery state and job-id checks, agreement between the jobs
+/// manifest's inventory and the delivered manifest's, on-disk presence (a
+/// REGULAR file, not a directory or dangling symlink), then a rehash of every
+/// `.csv.zst` against the jobs manifest. Returns the verified
+/// `{filename: sha256}` map.
+pub fn verify_input(directory: &Path, jobs_manifest: &Path) -> LabResult<BTreeMap<String, String>> {
+    verify_input_bound(directory, jobs_manifest, DELIVERY_KEY, Some(JOB_ID))
 }
 
-/// Month-generic ledger verification for Stage M. The caller supplies the
-/// exact seal-ledger entry key; the entry's job id is then bound to the
-/// delivered manifest rather than to July's subcontract constant.
+/// Month-generic delivery verification for Stage M. The caller supplies the
+/// exact jobs-manifest delivery key - the Stage M preregistration calls it the
+/// seal-ledger entry - and the delivery's job id is then bound to the delivered
+/// manifest rather than to July's sub-contract constant.
 pub fn verify_input_entry(
     directory: &Path,
-    ledger_path: &Path,
-    ledger_key: &str,
+    jobs_manifest: &Path,
+    delivery_key: &str,
 ) -> LabResult<BTreeMap<String, String>> {
-    verify_input_bound(directory, ledger_path, ledger_key, None)
+    verify_input_bound(directory, jobs_manifest, delivery_key, None)
 }
 
-/// Return the job id carried by a verified ledger entry. Call this only after
-/// [`verify_input_entry`] has established the ledger/manifest binding.
-pub fn input_entry_job_id(ledger_path: &Path, ledger_key: &str) -> LabResult<String> {
-    let ledger: LedgerFile = serde_json::from_str(&std::fs::read_to_string(ledger_path)?)?;
-    ledger
-        .jobs
-        .get(ledger_key)
+/// Return the job id carried by a verified delivery. Call this only after
+/// [`verify_input_entry`] has established the manifest binding.
+pub fn input_entry_job_id(jobs_manifest: &Path, delivery_key: &str) -> LabResult<String> {
+    let jobs: JobsManifest = serde_json::from_str(&std::fs::read_to_string(jobs_manifest)?)?;
+    jobs.jobs
+        .get(delivery_key)
         .and_then(|entry| entry.job_id.clone())
-        .ok_or_else(|| LabError::refusal(format!("ledger entry {ledger_key} carries no job id")))
+        .ok_or_else(|| LabError::refusal(format!("delivery {delivery_key} carries no job id")))
 }
 
 fn verify_input_bound(
     directory: &Path,
-    ledger_path: &Path,
-    ledger_key: &str,
+    jobs_manifest: &Path,
+    delivery_key: &str,
     expected_job: Option<&str>,
 ) -> LabResult<BTreeMap<String, String>> {
-    let ledger_text = std::fs::read_to_string(ledger_path)?;
-    let ledger: LedgerFile = serde_json::from_str(&ledger_text)?;
-    let entry = ledger
-        .jobs
-        .get(ledger_key)
-        .ok_or_else(|| LabError::refusal(format!("ledger carries no entry for {ledger_key}")))?;
+    let jobs_text = std::fs::read_to_string(jobs_manifest)?;
+    let jobs: JobsManifest = serde_json::from_str(&jobs_text)?;
+    let entry = jobs.jobs.get(delivery_key).ok_or_else(|| {
+        LabError::refusal(format!(
+            "jobs manifest carries no delivery for {delivery_key}"
+        ))
+    })?;
     if entry.state.as_deref() != Some("downloaded") {
         return Err(LabError::refusal(format!(
-            "ledger entry state is {:?}, not downloaded",
+            "delivery state is {:?}, not downloaded",
             entry.state
         )));
     }
     if expected_job.is_some_and(|job| entry.job_id.as_deref() != Some(job)) {
         return Err(LabError::refusal(format!(
-            "ledger names job {:?}, the sub-contract binds {}",
+            "jobs manifest names job {:?}, the sub-contract binds {}",
             entry.job_id,
             expected_job.unwrap_or_default()
         )));
@@ -477,43 +480,41 @@ fn verify_input_bound(
     let manifest: Manifest = serde_json::from_str(&manifest_text)?;
     if manifest.job_id != entry.job_id {
         return Err(LabError::refusal(format!(
-            "manifest names job {:?}, not ledger job {:?}",
+            "delivered manifest names job {:?}, not jobs-manifest job {:?}",
             manifest.job_id, entry.job_id
         )));
     }
-    let ledger_files = &entry.files;
+    let delivery_files = &entry.files;
     let mut manifest_files = manifest.files.normalized();
     if manifest.files.is_vendor_list() {
         manifest_files.insert("manifest.json".to_string(), sha256_file(&manifest_path)?);
     }
-    if ledger_files.is_empty() {
-        return Err(LabError::refusal(
-            "the ledger entry carries no file inventory",
-        ));
+    if delivery_files.is_empty() {
+        return Err(LabError::refusal("the delivery carries no file inventory"));
     }
-    if ledger_files != &manifest_files {
-        let ledger_keys: HashSet<&String> = ledger_files.keys().collect();
+    if delivery_files != &manifest_files {
+        let delivery_keys: HashSet<&String> = delivery_files.keys().collect();
         let manifest_keys: HashSet<&String> = manifest_files.keys().collect();
-        let only_ledger: Vec<&&String> = {
-            let mut v: Vec<&&String> = ledger_keys.difference(&manifest_keys).collect();
+        let only_jobs_manifest: Vec<&&String> = {
+            let mut v: Vec<&&String> = delivery_keys.difference(&manifest_keys).collect();
             v.sort();
             v
         };
         let only_manifest: Vec<&&String> = {
-            let mut v: Vec<&&String> = manifest_keys.difference(&ledger_keys).collect();
+            let mut v: Vec<&&String> = manifest_keys.difference(&delivery_keys).collect();
             v.sort();
             v
         };
-        let mut moved: Vec<&String> = ledger_keys
+        let mut moved: Vec<&String> = delivery_keys
             .intersection(&manifest_keys)
-            .filter(|n| ledger_files.get(**n) != manifest_files.get(**n))
+            .filter(|n| delivery_files.get(**n) != manifest_files.get(**n))
             .copied()
             .collect();
         moved.sort();
         return Err(LabError::refusal(format!(
-            "ledger and manifest inventories disagree (only ledger: {only_ledger:?}; only \
-             manifest: {only_manifest:?}; hash mismatch: {moved:?}); the landing is not the \
-             delivery the ledger recorded"
+            "jobs and delivered manifests disagree (only jobs manifest: {only_jobs_manifest:?}; only \
+             delivered manifest: {only_manifest:?}; hash mismatch: {moved:?}); the landing is \
+             not the delivery the jobs manifest recorded"
         )));
     }
     let on_disk: HashSet<String> = std::fs::read_dir(directory)?
@@ -521,14 +522,14 @@ fn verify_input_bound(
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
-    let mut absent: Vec<&String> = ledger_files
+    let mut absent: Vec<&String> = delivery_files
         .keys()
         .filter(|n| !on_disk.contains(n.as_str()))
         .collect();
     absent.sort();
     if !absent.is_empty() {
         return Err(LabError::refusal(format!(
-            "ledger inventory file(s) missing from disk: {absent:?}; the delivery is incomplete \
+            "delivery inventory file(s) missing from disk: {absent:?}; the delivery is incomplete \
              and hashing the remainder proves nothing"
         )));
     }
@@ -539,13 +540,13 @@ fn verify_input_bound(
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_string();
-        let expected = ledger_files.get(&name).ok_or_else(|| {
-            LabError::refusal(format!("{name} is on disk but not in the ledger inventory"))
+        let expected = delivery_files.get(&name).ok_or_else(|| {
+            LabError::refusal(format!("{name} is on disk but not in the jobs manifest"))
         })?;
         let actual = sha256_file(&path)?;
         if &actual != expected {
             return Err(LabError::refusal(format!(
-                "{name}: sha256 {actual} does not match the ledger's {expected}; the bytes on \
+                "{name}: sha256 {actual} does not match the jobs manifest's {expected}; the bytes on \
                  disk are not the delivery"
             )));
         }

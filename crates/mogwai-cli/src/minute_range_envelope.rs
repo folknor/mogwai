@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail};
 use clap::Args;
 use mogwai_lab::{
+    delivery::{fresh_tree_state, require_clean_tree, verify_input},
     fit::observe::observe,
-    ledger::{fresh_tree_state, require_clean_tree, verify_input},
     preflight::require_preflight,
     stream::{data_files, parse_stream},
     subcontract::{RESAMPLE_ENVELOPE_LEVEL, RESAMPLE_REPLICATES, RESAMPLE_SEED},
@@ -19,7 +19,7 @@ use mogwai_lab::{
 use serde_json::{Value, json};
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
-const DEFAULT_LEDGER: &str = "analysis/databento-jobs.json";
+const DEFAULT_JOBS_MANIFEST: &str = "analysis/databento-jobs.json";
 const DEFAULT_PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
 const DEFAULT_OUT: &str = "analysis/mnq-minute-range-envelope.json";
 
@@ -28,7 +28,7 @@ pub struct MinuteRangeEnvelopeArgs {
     #[arg(long)]
     corpus: Option<PathBuf>,
     #[arg(long)]
-    ledger: Option<PathBuf>,
+    jobs_manifest: Option<PathBuf>,
     #[arg(long)]
     preflight: Option<PathBuf>,
     #[arg(long)]
@@ -41,18 +41,20 @@ pub struct MinuteRangeEnvelopeArgs {
 pub fn run(args: MinuteRangeEnvelopeArgs) -> anyhow::Result<Value> {
     let commit = require_clean_tree().map_err(|e| anyhow!("{e}"))?;
     let corpus = args.corpus.unwrap_or_else(|| DEFAULT_CORPUS.into());
-    let ledger = args.ledger.unwrap_or_else(|| DEFAULT_LEDGER.into());
+    let jobs_manifest = args
+        .jobs_manifest
+        .unwrap_or_else(|| DEFAULT_JOBS_MANIFEST.into());
     let preflight = args.preflight.unwrap_or_else(|| DEFAULT_PREFLIGHT.into());
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
 
-    // The refusal names the ledger it was verifying against: a bare io error
+    // The refusal names the jobs manifest it was verifying against: a bare io error
     // here reads as an unattributed "No such file or directory", which is
     // also indistinguishable from every other read this command performs.
-    let hashes = verify_input(&corpus, &ledger).map_err(|e| {
+    let hashes = verify_input(&corpus, &jobs_manifest).map_err(|e| {
         anyhow!(
             "verifying {} against {}: {e}",
             corpus.display(),
-            ledger.display()
+            jobs_manifest.display()
         )
     })?;
     let (preflight_json, preflight_hash) =
@@ -126,12 +128,12 @@ mod tests {
 
     use std::rc::Rc;
 
-    use mogwai_lab::ledger::{ScriptedTree, TreeQuery, install_tree_oracle};
+    use mogwai_lab::delivery::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     fn missing_inputs(out: &str) -> MinuteRangeEnvelopeArgs {
         MinuteRangeEnvelopeArgs {
             corpus: Some("no/such/envelope-corpus".into()),
-            ledger: Some("no/such/envelope-ledger.json".into()),
+            jobs_manifest: Some("no/such/envelope-jobs-manifest.json".into()),
             preflight: Some("no/such/envelope-preflight.json".into()),
             out: Some(out.into()),
         }
@@ -156,11 +158,12 @@ mod tests {
             err.to_string().contains("the working tree is dirty"),
             "{err}"
         );
-        // The refusal names the tree and NOT the ledger, and the query log
+        // The refusal names the tree and NOT the jobs manifest, and the query log
         // says why: the run stopped on the status read, so the inputs below
         // were never opened.
         assert!(
-            !err.to_string().contains("no/such/envelope-ledger.json"),
+            !err.to_string()
+                .contains("no/such/envelope-jobs-manifest.json"),
             "the inputs were reached before the tree was checked: {err}"
         );
         assert_eq!(dirty.queries(), vec![TreeQuery::Status]);
@@ -174,7 +177,8 @@ mod tests {
             .expect_err("the corpus is not there either")
         };
         assert!(
-            err.to_string().contains("no/such/envelope-ledger.json"),
+            err.to_string()
+                .contains("no/such/envelope-jobs-manifest.json"),
             "a clean tree must be bound and the run carried into the inputs: {err}"
         );
         assert_eq!(clean.queries(), vec![TreeQuery::Status, TreeQuery::Head]);

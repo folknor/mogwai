@@ -19,9 +19,9 @@ pub(crate) struct PreflightArgs {
     /// path, relative to the current directory.
     #[arg(long, value_name = "DIR")]
     corpus: Option<PathBuf>,
-    /// The Databento job ledger. Read-only: this never writes it.
+    /// The Databento jobs manifest. Read-only: this never writes it.
     #[arg(long, value_name = "PATH")]
-    ledger: Option<PathBuf>,
+    jobs_manifest: Option<PathBuf>,
     /// Where to write the preflight artifact. An ARTIFACT (storage policy):
     /// never cached, never auto-deleted.
     #[arg(long, value_name = "PATH")]
@@ -29,16 +29,18 @@ pub(crate) struct PreflightArgs {
 }
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
-const DEFAULT_LEDGER: &str = "analysis/databento-jobs.json";
+const DEFAULT_JOBS_MANIFEST: &str = "analysis/databento-jobs.json";
 const DEFAULT_OUT: &str = "analysis/out/mnq-fit-preflight.json";
 
 pub(crate) fn run(args: PreflightArgs) -> anyhow::Result<()> {
     let corpus = args.corpus.unwrap_or_else(|| PathBuf::from(DEFAULT_CORPUS));
-    let ledger = args.ledger.unwrap_or_else(|| PathBuf::from(DEFAULT_LEDGER));
+    let jobs_manifest = args
+        .jobs_manifest
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_JOBS_MANIFEST));
     let out = artifact_path(args.out.as_deref(), DEFAULT_OUT);
 
-    let artifact =
-        run_preflight(&corpus, &ledger).map_err(|e| anyhow::anyhow!("preflight refused: {e}"))?;
+    let artifact = run_preflight(&corpus, &jobs_manifest)
+        .map_err(|e| anyhow::anyhow!("preflight refused: {e}"))?;
     write_json_atomic(&out, &artifact)
         .map_err(|e| anyhow::anyhow!("writing {}: {e}", out.display()))?;
 

@@ -1295,6 +1295,118 @@ clearer word. The phase-5 conformance scan's allowlist owes them a line.
 "22.83 percent divergent"; it is a historical record of a landing and is not a
 sweep target.
 
+**Round 11, the `ledger` split, 2026-08-22.** A split, and the fifth round whose
+ruling leaves the word on one of its senses. THE ACCOUNT SENSE KEEPS THE WORD -
+the glossary's Ledger entry, `mogwai-engine`, the venue's ledger prose, the
+adapter, `README.md`, `docs/config.md`, `docs/havoc.md`, `docs/oms-types.md`
+and `reference/architecture.md` are untouched, which is the shape a correct
+classification produces. The Databento delivery manifest gives the word up:
+`mogwai_lab::ledger` is `mogwai_lab::delivery`, `LedgerFile` and
+`LedgerJobEntry` are `JobsManifest` and `DeliveryEntry`, every `ledger_path`
+parameter is `jobs_manifest`, every `ledger_key` parameter is `delivery_key`,
+`subcontract::LEDGER_KEY` is `DELIVERY_KEY`, the `DEFAULT_LEDGER` / `LEDGER`
+path constants across six `mogwai-cli` modules are `DEFAULT_JOBS_MANIFEST` /
+`JOBS_MANIFEST`, and the refusal bodies of the verification path name the jobs
+manifest and the delivered manifest rather than "the ledger" and "the
+manifest", which were the two things a reader could not tell apart. The
+operator flags follow: `--ledger` is `--jobs-manifest` and `--ledger-key` is
+`--delivery-key`, on `preflight`, `measure`, `fit`, `minute-range-envelope` and
+both `stage-m` subcommands. The fourth sense, `mogwai-venue`'s `LedgerTemplate`
+- which the ledger row records as neither a ledger nor a template of one -
+becomes `AccountOpeningTerms`, with `template_engine` becoming
+`engine_from_account_opening_terms`. No tape byte and no wire byte moves, so no
+`TAPE_PROTOCOL_VERSION` bump is owed. The gated check reports 1342 workspace and
+470 instrumented tests, one more than round 10, and that one is the frozen-key
+test below.
+
+THE OPERATOR BREAK IS LOUD, and it was measured rather than reasoned about.
+`target/debug/mogwai preflight --ledger analysis/databento-jobs.json` exits 2
+with "error: unexpected argument '--ledger' found" and the usage line; clap
+rejects an unknown long flag and no arg struct on the path carries an alias or
+`allow_hyphen_values`, so there is no reading on which the retired spelling is
+silently absorbed.
+
+THE SERIALIZED SPELLINGS DID NOT MOVE, and each is anchored where a reader meets
+it. The sub-contract tree keeps `"LEDGER_KEY"` under an inherited-format
+comment, and `the_hashed_tree_keeps_the_inherited_ledger_key` now holds it
+beside round 8's warmup sibling, in the same shape and for the same reason: a
+pass respelling the map key otherwise fails only on an opaque digest.
+Bite-checked by respelling the `tree()` insert as a text edit - the test fails on
+its own named assertion, in all three sweeps. `analysis/databento-seal-ledger.json`,
+its committed path references, `analysis/databento_seal_ledger.py` and the
+seal-ledger vocabulary of the frozen purchase and preregistration documents are
+untouched, which the frozen-document rule requires.
+
+What the close pass found in the half no cold reviewer reads, which is the five
+recurring failures again, four of them:
+
+- THE SWEEP STOPPED AT THE CRATE IT OWNED. `mogwai-lab`'s own `Cargo.toml`
+  named "the tree-state seam in `ledger`" and pointed at "the module comment in
+  `ledger.rs`", a file that no longer exists, and its crate doc and manifest
+  header both said "ledger-bound input verification"; `mogwai-cli`'s
+  `count_curve.rs` still declared `const LEDGER` for the jobs manifest and
+  passed it by that name; `.gitignore` called the lock's neighbour "the
+  committed job ledger"; `brokkr.toml` and `reference/performance.md` both
+  described `measure` as verifying "against the ledger", the same sentence in
+  two files, which is the grep-the-sentence rule again.
+- THE SWAP HAZARD, in the `template` half. The rename gave the venue a new noun
+  and left three live sentences using the old one: `ws.rs` on "the venue
+  template's balances", and `serving.rs` twice, once saying the preview "is
+  built from the same template the mint uses" and once "the venue template a
+  mint on the read path would have handed it". `http.rs`'s "stored on the
+  template" is NOT one of them and was left: it quotes a comment that used to
+  be there, in a sentence whose whole subject is that the claim was false.
+- SENTENCES LEFT FALSE OR REPETITIVE AROUND A CORRECT SUBSTITUTION. `funded_in`
+  came out saying a resetting claim "replaces the account's balances with the
+  account opening terms", which replaces balances with a settings struct, and
+  its `None` arm said the terms "are the honest answer" to a question about
+  currencies; both now name the balances. The
+  `engine_from_account_opening_terms` doc had the new phrase four times in one
+  paragraph and was rewrapped to say it twice.
+- EMPHASIS HALF-SWEPT, three sites. The pass lowercased `LedgerTemplate`'s
+  OPENING, whose contrast with "the balance of one shared ledger" is the
+  sentence's whole point; lowercased "THE ONE PLACE THE TEMPLATE IS APPLIED",
+  the capitalised lead-in that marks the premise of the paragraph under it, in
+  a file that still shouts CONSTRUCTION and READ six lines later; and turned
+  `minute_range_envelope.rs`'s "names the tree and NOT the ledger" into a
+  lower-case "not". Restored.
+
+AND ONE DEFECT THE ROUND EXPOSED RATHER THAN CAUSED, which is round 10's
+count-curve finding recurring on a different key. The rename pass anchored the
+preflight artifact's `ledger_key` with a comment calling it the spelling of
+"committed and on-disk preflight artifacts". No committed artifact carries it:
+`analysis/mnq-measure-12a.json` does not, the twenty committed
+`analysis/preflight/BTCUSDT-*.json` do not, and the field is
+`skip_serializing_if = "Option::is_none"` on a path only the Databento months
+take. The comment now says what is true - the artifacts on disk carry it,
+nothing committed pins it, and the comment is the whole of the pin - and the
+Stage M refusal artifact's `ledger_key` gets the same honest anchor, which it
+had none of.
+
+RAISED AND NOT ACTED ON, recorded so a later round does not re-file it:
+
+- **THE GIT-CLEANLINESS ORACLE IS STILL IN `delivery.rs`**, and the ledger row
+  named that as a third unrelated job under one file name. The rename pass
+  declined the split as not cheap - `TreeOracle`, `TreeQuery`, `TreeReading`,
+  `ScriptedTree`, `install_tree_oracle`, `require_clean_tree`,
+  `fresh_tree_state` and `tree_readings_are_production` are a cfg-sensitive
+  seam behind the lab's `test-seam` feature with consumers in five
+  `mogwai-cli` modules plus `attestation.rs`'s runtime guard - and the coupling
+  is confirmed as remaining. A module named for the delivery manifest still
+  owns the reproducibility gate, which is a naming defect the round did not
+  close.
+- **`mogwai-cli`'s `stage_m_tier2.rs` has a sixth sense**: `fn ledger` and "an
+  append-only candidate ledger", a record of evaluation entries that is neither
+  an account's engine nor a delivery manifest. Nobody ruled on it and it was
+  not swept.
+- **The Stage M preregistration binds its inputs to the SEAL LEDGER while the
+  code reads the jobs manifest.** `verify_input_entry` indexes
+  `analysis/databento-jobs.json` by the key the frozen document calls a
+  seal-ledger entry. Both docs now name the jobs-manifest key and mention the
+  preregistration's word, rather than asserting a seal-ledger read the function
+  does not perform, but whether the two artifacts should agree is a data
+  question this arc has no ruling on.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
@@ -1373,6 +1485,25 @@ These belong to no single scope, so nothing else holds them.
   `first_divergence` key of the count-curve artifact, whose spelling the
   preregistration fixed. The verb `diverge` and the adjective `divergent` stay
   available as ordinary English where they name no quantity.
+- `ledger` as a name for the Databento delivery manifest, for one delivery in
+  it, or for the operator flag naming either. The manifest is a jobs manifest,
+  one entry in it is a delivery, and the flags are `--jobs-manifest` and
+  `--delivery-key`. The word survives, undiminished, for the glossary's own
+  sense - one `mogwai-engine` instance owned by one account - and, inherited
+  and frozen, as the `LEDGER_KEY` member of the hashed sub-contract tree, the
+  `ledger_key` member of the preflight and Stage M refusal artifact formats,
+  and the whole seal-ledger vocabulary of `analysis/databento-seal-ledger.json`,
+  `analysis/databento_seal_ledger.py` and the frozen purchase and
+  preregistration documents. Unruled and not swept: `stage_m_tier2.rs`'s
+  append-only candidate ledger.
+- `template` as a name for what an account's engine is opened from. Those are
+  the account opening terms - opening balances, fill seed, OMS type and
+  fill-band limit - and a venue that holds them holds settings rather than a
+  prototype ledger. The word has no surviving sense this project owns; it
+  stands in durable prose only inside `http.rs`'s quotation of a comment that
+  used to make the claim; `analysis/plot_tape.py`'s HTML page template and
+  `notes/todo.md`'s proposed per-passenger config template are the ordinary
+  English sense.
 
 ### Left as inherited
 
@@ -1390,10 +1521,10 @@ Recorded per scope in the scope reports until the merge collects them.
 
 ## What the rename rounds keep getting wrong
 
-Ten rounds in, five failures recur often enough to belong in every brief.
+Eleven rounds in, five failures recur often enough to belong in every brief.
 Round 6 produced the first three at once, round 8 did it again and added the
-fourth, round 9 produced all four, and round 10 - a round of almost nothing but
-comments - still produced two.
+fourth, round 9 produced all four, round 10 - a round of almost nothing but
+comments - still produced two, and round 11 produced four of the five.
 
 Round 9 adds a fifth, and it belongs to any round that MOVES A WORD FROM ONE
 JOB TO ANOTHER rather than retiring it. **THE SWAP HAZARD: when a rename gives
@@ -1435,7 +1566,7 @@ the sentence existed to draw. Whatever the house style for emphasis, both halves
 move together or neither does.
 
 The evidence for all of them is that the cold review found something in three
-rounds of ten and the fix-and-commit stage found something in ten of ten. That is not
+rounds of eleven and the close pass found something in eleven of eleven. That is not
 a criticism of the cold review, which catches what a reader without the arc's
 priors sees. It is that a rename arc's defects live in prose, and prose defects
 compile, pass and read fluently.

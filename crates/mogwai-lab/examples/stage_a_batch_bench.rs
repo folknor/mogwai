@@ -10,7 +10,7 @@ use mogwai_lab::arrival_screen::{
     Family, STAGE_A_BUDGET_S, STAGE_A_SEEDS, ScheduledCell, ScreenContext, evaluate_cells_parallel,
     measure_cell_walks,
 };
-use mogwai_lab::ledger::sha256_file;
+use mogwai_lab::delivery::sha256_file;
 use mogwai_lab::sampler::ResourceSampler;
 use mogwai_lab::sidecar;
 use mogwai_lab::stage_a_batch::{

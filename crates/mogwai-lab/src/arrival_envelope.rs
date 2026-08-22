@@ -23,9 +23,9 @@ use crate::arrival_screen::{
     A3_GATED_HOURS, Cell, ENVELOPE_CELL_BUDGET_S, ENVELOPE_ORDER, ENVELOPE_PROBE_MONTHS,
     ENVELOPE_REPLICATES, ENVELOPE_STREAM_TAG, EnvelopeDemand, Family,
 };
+use crate::delivery::sha256_bytes;
 use crate::error::{LabError, LabResult};
 use crate::kernel::tuple_mix;
-use crate::ledger::sha256_bytes;
 
 const NS_PER_SECOND: u64 = 1_000_000_000;
 const NS_PER_HOUR: u64 = 3_600 * NS_PER_SECOND;

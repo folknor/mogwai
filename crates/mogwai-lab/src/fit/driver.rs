@@ -45,7 +45,7 @@ use crate::subcontract::{
 /// Everything `run_fit` needs from its caller.
 pub struct FitConfig {
     pub corpus: PathBuf,
-    pub ledger: PathBuf,
+    pub jobs_manifest: PathBuf,
     pub preflight: PathBuf,
     /// The Python-era `mnq-fit-scratch` directory, read-only.
     pub python_cache_dir: Option<PathBuf>,
@@ -404,7 +404,7 @@ fn as_list24(curve: Option<&BTreeMap<usize, f64>>) -> Value {
               record shapes are its structure"
 )]
 pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
-    let hashes = crate::ledger::verify_input(&cfg.corpus, &cfg.ledger)?;
+    let hashes = crate::delivery::verify_input(&cfg.corpus, &cfg.jobs_manifest)?;
     let (preflight, preflight_hash) = crate::preflight::require_preflight(&hashes, &cfg.preflight)?;
     let usable: Vec<String> = preflight["usable_sessions"]
         .as_array()

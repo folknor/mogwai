@@ -88,7 +88,7 @@ struct AuthorityTransition {
 impl ScheduleFrame {
     pub fn stage_m(path: &Path) -> LabResult<Self> {
         let bytes = std::fs::read(path)?;
-        let hash = crate::ledger::sha256_bytes(&bytes);
+        let hash = crate::delivery::sha256_bytes(&bytes);
         if hash != STAGE_M_TZ_AUTHORITY_SHA256 {
             return Err(LabError::refusal(format!(
                 "timezone authority hash mismatch: expected {STAGE_M_TZ_AUTHORITY_SHA256}, got {hash}"

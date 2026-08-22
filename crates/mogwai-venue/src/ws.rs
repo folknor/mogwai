@@ -259,7 +259,8 @@ pub(crate) async fn ws_upgrade(
     // rejection on a served shape must keep meaning that and only that.
     //
     // Asked of the ledger this connection will get: a claim that resets serves
-    // the venue template's balances rather than whatever the account holds now.
+    // the configured opening balances rather than whatever the account holds
+    // now.
     let settlement = profile.def.class.settlement_currency();
     let resetting = state
         .run

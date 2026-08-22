@@ -31,6 +31,10 @@ struct SessionState {
 #[derive(Serialize)]
 pub struct PreflightArtifact {
     pub job_id: String,
+    /// The serialized spelling every preflight artifact on disk already
+    /// carries. Nothing committed pins it - no committed artifact and no hash
+    /// holds the key - so this comment is the whole of the pin, and the reader
+    /// of those artifacts is a person rather than a gate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ledger_key: Option<String>,
     pub file_hashes: BTreeMap<String, String>,
@@ -80,8 +84,8 @@ pub struct SessionRecord {
 /// `run_preflight`: `verify_input` then the single streaming pass building
 /// row/book/session/parent tallies, then the fail-closed contract checks in
 /// the same order as the Python reference.
-pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<PreflightArtifact> {
-    let hashes = crate::ledger::verify_input(directory, ledger_path)?;
+pub fn run_preflight(directory: &Path, jobs_manifest: &Path) -> LabResult<PreflightArtifact> {
+    let hashes = crate::delivery::verify_input(directory, jobs_manifest)?;
     let inventory: Vec<(String, String)> = SESSION_INVENTORY
         .iter()
         .map(|(date, status)| ((*date).to_string(), (*status).to_string()))
@@ -105,12 +109,12 @@ pub fn run_preflight(directory: &Path, ledger_path: &Path) -> LabResult<Prefligh
 pub fn run_month_preflight(
     month: u64,
     directory: &Path,
-    ledger_path: &Path,
-    ledger_key: &str,
+    jobs_manifest: &Path,
+    delivery_key: &str,
     calendar_path: &Path,
 ) -> LabResult<PreflightArtifact> {
-    let hashes = crate::ledger::verify_input_entry(directory, ledger_path, ledger_key)?;
-    let job_id = crate::ledger::input_entry_job_id(ledger_path, ledger_key)?;
+    let hashes = crate::delivery::verify_input_entry(directory, jobs_manifest, delivery_key)?;
+    let job_id = crate::delivery::input_entry_job_id(jobs_manifest, delivery_key)?;
     let calendar_bytes = std::fs::read(calendar_path)?;
     let calendar: Value = serde_json::from_slice(&calendar_bytes)?;
     let month_label = format!("{:04}-{:02}", month / 100, month % 100);
@@ -168,12 +172,12 @@ pub fn run_month_preflight(
         directory,
         hashes,
         job_id,
-        Some(ledger_key.to_string()),
+        Some(delivery_key.to_string()),
         &inventory,
         false,
         Some(InventoryProvenance {
             calendar_artifact: calendar_path.display().to_string(),
-            calendar_artifact_hash: crate::ledger::sha256_bytes(&calendar_bytes),
+            calendar_artifact_hash: crate::delivery::sha256_bytes(&calendar_bytes),
             month: month_label,
         }),
         Some((frame, schedule_record)),
@@ -188,7 +192,7 @@ fn run_preflight_with_inventory(
     directory: &Path,
     hashes: BTreeMap<String, String>,
     job_id: String,
-    ledger_key: Option<String>,
+    delivery_key: Option<String>,
     inventory: &[(String, String)],
     enforce_july_session_floors: bool,
     inventory_provenance: Option<InventoryProvenance>,
@@ -334,7 +338,7 @@ fn run_preflight_with_inventory(
 
     Ok(PreflightArtifact {
         job_id,
-        ledger_key,
+        ledger_key: delivery_key,
         file_hashes: hashes,
         inventory_provenance,
         subcontract_hash: subcontract::subcontract_hash(),
@@ -368,7 +372,7 @@ pub fn require_preflight(
         ));
     }
     let bytes = std::fs::read(artifact_path)?;
-    let artifact_hash = crate::ledger::sha256_bytes(&bytes);
+    let artifact_hash = crate::delivery::sha256_bytes(&bytes);
     let artifact: Value = serde_json::from_slice(&bytes)?;
     let got_hashes = artifact.get("file_hashes").cloned().unwrap_or(Value::Null);
     let want_hashes = serde_json::to_value(hashes)?;

@@ -62,9 +62,9 @@ pub struct PreflightArgs {
     #[arg(long)]
     corpus: PathBuf,
     #[arg(long)]
-    ledger: PathBuf,
+    jobs_manifest: PathBuf,
     #[arg(long)]
-    ledger_key: String,
+    delivery_key: String,
     #[arg(long, default_value = "analysis/databento-calendar.json")]
     calendar: PathBuf,
     /// Defaults to `<output-root>/<YYYYMM>/preflight.json`.
@@ -81,10 +81,10 @@ pub struct MonthArgs {
     #[arg(long)]
     corpus: PathBuf,
     #[arg(long)]
-    ledger: PathBuf,
-    /// Exact seal-ledger job key for this month.
+    jobs_manifest: PathBuf,
+    /// Exact jobs-manifest delivery key for this month.
     #[arg(long)]
-    ledger_key: String,
+    delivery_key: String,
     /// Defaults to `<output-root>/<YYYYMM>/preflight.json`.
     #[arg(long)]
     preflight: Option<PathBuf>,
@@ -162,9 +162,9 @@ fn run_promote_july(args: &BackcheckArgs) -> anyhow::Result<()> {
     let promoted = dir.join("slow-geometry.recomputed.json");
     std::fs::copy(&candidate, &promoted)?;
     let original_hash =
-        mogwai_lab::ledger::sha256_file(&original).map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_lab::delivery::sha256_file(&original).map_err(|e| anyhow!(e.to_string()))?;
     let promoted_hash =
-        mogwai_lab::ledger::sha256_file(&promoted).map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_lab::delivery::sha256_file(&promoted).map_err(|e| anyhow!(e.to_string()))?;
     let implementing_commit = String::from_utf8(
         std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -262,8 +262,8 @@ fn run_preflight(args: PreflightArgs) -> anyhow::Result<()> {
     let artifact = mogwai_lab::preflight::run_month_preflight(
         args.month,
         &args.corpus,
-        &args.ledger,
-        &args.ledger_key,
+        &args.jobs_manifest,
+        &args.delivery_key,
         &args.calendar,
     )
     .map_err(|e| anyhow!("stage-m preflight refused: {e}"))?;
@@ -612,17 +612,17 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
     let count_config = CountCurveMonthRun {
         month: args.month,
         corpus: args.corpus.clone(),
-        ledger: args.ledger.clone(),
+        jobs_manifest: args.jobs_manifest.clone(),
         preflight: preflight.clone(),
         output: count_path,
     };
     let pass = run_observed_with_count_windows_ordered(
         args.month,
         &args.corpus,
-        &args.ledger,
+        &args.jobs_manifest,
         &preflight,
         &[1, 5, 15, 60, 300],
-        &args.ledger_key,
+        &args.delivery_key,
     );
     let (observed, rows) = match pass {
         Ok(x) => x,
@@ -633,7 +633,10 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
             } else {
                 "recorded_refusal"
             };
-            let artifact = json!({"outcome":outcome,"month":args.month,"ledger_key":args.ledger_key,"reason":reason});
+            // `ledger_key` is the spelling the Stage M refusal artifacts on
+            // disk already carry; the identifier beside it is not. Nothing
+            // committed pins it, so this comment is the whole of the pin.
+            let artifact = json!({"outcome":outcome,"month":args.month,"ledger_key":args.delivery_key,"reason":reason});
             write_json_atomic(&dir.join("refusal.json"), &artifact)
                 .map_err(|e| anyhow!(e.to_string()))?;
             return Err(error);
@@ -655,7 +658,7 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
         &OrderedCountsRun {
             month: args.month,
             corpus: args.corpus,
-            ledger: args.ledger,
+            jobs_manifest: args.jobs_manifest,
             preflight,
             sequence: sequence_path.clone(),
             summary: panels_path,
@@ -677,13 +680,13 @@ fn run_month(args: MonthArgs) -> anyhow::Result<()> {
             "reason":error.to_string(),
             "authority":"Stage M month-generic refusal rule: a frozen document that cannot be applied month-generically refuses and is never adapted silently",
             "sequence":sequence_path,
-            "sequence_sha256":mogwai_lab::ledger::sha256_file(&sequence_path).map_err(|e| anyhow!(e.to_string()))?
+            "sequence_sha256":mogwai_lab::delivery::sha256_file(&sequence_path).map_err(|e| anyhow!(e.to_string()))?
         });
         write_json_atomic(&dir.join("ordered-counts-panels.json"), &refusal)
             .map_err(|e| anyhow!(e.to_string()))?;
     }
     let hash =
-        mogwai_lab::ledger::sha256_file(&sequence_path).map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_lab::delivery::sha256_file(&sequence_path).map_err(|e| anyhow!(e.to_string()))?;
     slow_geometry::run_with(&SlowGeometryRun {
         month: args.month,
         input: sequence_path,
@@ -734,9 +737,10 @@ fn write_amendment4_invalidation(month: u64, dir: &Path) -> anyhow::Result<()> {
         if !replacement.exists() {
             bail!("missing replacement for superseded {month} {name}");
         }
-        let old_hash = mogwai_lab::ledger::sha256_file(&old).map_err(|e| anyhow!(e.to_string()))?;
+        let old_hash =
+            mogwai_lab::delivery::sha256_file(&old).map_err(|e| anyhow!(e.to_string()))?;
         let replacement_hash =
-            mogwai_lab::ledger::sha256_file(&replacement).map_err(|e| anyhow!(e.to_string()))?;
+            mogwai_lab::delivery::sha256_file(&replacement).map_err(|e| anyhow!(e.to_string()))?;
         let former_outcome = if name.ends_with(".json") {
             read_json(&old)
                 .ok()
@@ -794,12 +798,12 @@ fn run_backcheck(args: &BackcheckArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)?;
     let sequence = PathBuf::from("analysis/out/ordered-counts.jsonl");
     let sequence_hash =
-        mogwai_lab::ledger::sha256_file(&sequence).map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_lab::delivery::sha256_file(&sequence).map_err(|e| anyhow!(e.to_string()))?;
     let panels = out_dir.join("ordered-counts-panels.recomputed.json");
     ordered_counts::run_with(&OrderedCountsRun {
         month: JULY,
         corpus: "research/market-data/databento/mnqv/2026-07.full.tbbo".into(),
-        ledger: "analysis/databento-jobs.json".into(),
+        jobs_manifest: "analysis/databento-jobs.json".into(),
         preflight: "analysis/out/mnq-fit-preflight.json".into(),
         sequence: sequence.clone(),
         summary: panels.clone(),
@@ -950,7 +954,7 @@ fn run_amendment2_reverification(args: &BackcheckArgs) -> anyhow::Result<()> {
             )
         };
         let hash =
-            mogwai_lab::ledger::sha256_file(&sequence).map_err(|e| anyhow!(e.to_string()))?;
+            mogwai_lab::delivery::sha256_file(&sequence).map_err(|e| anyhow!(e.to_string()))?;
         slow_geometry::run_with(&SlowGeometryRun {
             month,
             input: sequence.clone(),

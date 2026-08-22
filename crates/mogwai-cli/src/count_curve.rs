@@ -21,7 +21,7 @@ use crate::measure::{
 
 const OUT: &str = "analysis/out/count-curve-measurement.json";
 const CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
-const LEDGER: &str = "analysis/databento-jobs.json";
+const JOBS_MANIFEST: &str = "analysis/databento-jobs.json";
 const PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
 const PRESET_PATH: &str = "crates/mogwai-venue/presets/mnq.toml";
 const FINGERPRINT_PATH: &str = "analysis/fingerprint.json";
@@ -164,7 +164,7 @@ fn run_full() -> anyhow::Result<()> {
 
     let observed = run_observed_with_count_windows(
         Path::new(CORPUS),
-        Path::new(LEDGER),
+        Path::new(JOBS_MANIFEST),
         Path::new(PREFLIGHT),
         CURVE_WINDOWS,
     )?;
@@ -258,7 +258,7 @@ fn observed_traded_hours(sessions: &[Value]) -> anyhow::Result<Vec<i64>> {
 pub struct CountCurveMonthRun {
     pub month: u64,
     pub corpus: PathBuf,
-    pub ledger: PathBuf,
+    pub jobs_manifest: PathBuf,
     pub preflight: PathBuf,
     pub output: PathBuf,
 }
@@ -272,7 +272,7 @@ pub fn run_month(config: &CountCurveMonthRun) -> anyhow::Result<()> {
     }
     let observed = run_observed_with_count_windows(
         &config.corpus,
-        &config.ledger,
+        &config.jobs_manifest,
         &config.preflight,
         CURVE_WINDOWS,
     )?;

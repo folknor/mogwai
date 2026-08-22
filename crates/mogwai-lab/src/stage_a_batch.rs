@@ -11,8 +11,8 @@ use crate::arrival_screen::{
     Cell, Family, LATTICE_SCALE, LatticeCell, REFINEMENT_CELL_CAP, STAGE_A_GEN_REFINE_CAP,
     STAGE_A_SEEDS, axis_grids, cell_from_coordinates, probe_cell,
 };
+use crate::delivery::sha256_bytes;
 use crate::error::{LabError, LabResult};
-use crate::ledger::sha256_bytes;
 
 pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 pub const PILOT_SCHEMA_VERSION: u32 = 1;

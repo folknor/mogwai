@@ -699,8 +699,8 @@ impl ScreenContext {
         let hours = gate_hours(&profile)?;
         let fingerprint_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../analysis/fingerprint.json");
-        let fingerprint_hash = crate::ledger::sha256_file(&fingerprint_path)?;
-        let measure_hash = crate::ledger::sha256_bytes(&measure_bytes);
+        let fingerprint_hash = crate::delivery::sha256_file(&fingerprint_path)?;
+        let measure_hash = crate::delivery::sha256_bytes(&measure_bytes);
         // The burn-in prefix keeps its frozen `warmup` spelling here: this
         // string is a provenance key over stored screen state, so respelling
         // it would orphan every entry already written under it.
@@ -846,7 +846,8 @@ impl ScreenContext {
 }
 
 fn cache_key(cell: &Cell, seed: u64) -> String {
-    crate::ledger::sha256_bytes(format!("cell={}\nseed={seed}\n", cell.key()).as_bytes()) + ".json"
+    crate::delivery::sha256_bytes(format!("cell={}\nseed={seed}\n", cell.key()).as_bytes())
+        + ".json"
 }
 
 /// The one thing the projection of spec 3.3 needs from a walk: the next

@@ -4,7 +4,7 @@
 //! THE SECOND OF THE TWO GUARDS on the tree-state seam, in one place so the
 //! set of artifact writers that carry it is countable.
 //!
-//! `mogwai_lab::ledger`'s `TreeOracle` seam is compiled out of a production
+//! `mogwai_lab::delivery`'s `TreeOracle` seam is compiled out of a production
 //! build - it lives behind the lab's `test-seam` feature, which `mogwai-cli`
 //! enables only in `[dev-dependencies]`. That is the first guard. It is not
 //! the only one needed, because an `--all-features` build switches the seam
@@ -46,7 +46,7 @@ use anyhow::{Result, bail};
 /// In a production build this is a call to a `const`-true function and
 /// optimizes away; it costs a branch only in a build that compiled the seam.
 pub fn refuse_scripted_tree_attestation() -> Result<()> {
-    if !mogwai_lab::ledger::tree_readings_are_production() {
+    if !mogwai_lab::delivery::tree_readings_are_production() {
         bail!(
             "a scripted tree reader is installed; an artifact binding may only be attested by git \
              itself"
@@ -59,7 +59,7 @@ pub fn refuse_scripted_tree_attestation() -> Result<()> {
 mod tests {
     use std::rc::Rc;
 
-    use mogwai_lab::ledger::{ScriptedTree, install_tree_oracle};
+    use mogwai_lab::delivery::{ScriptedTree, install_tree_oracle};
 
     /// The guard itself, in both directions.
     #[test]

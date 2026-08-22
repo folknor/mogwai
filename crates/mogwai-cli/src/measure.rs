@@ -24,8 +24,8 @@ use mogwai_lab::aggregate::artifact::{
     measure12a_semantic_errors, write_json_atomic,
 };
 use mogwai_lab::aggregate::bootstrap::bootstrap_multiplicities;
+use mogwai_lab::delivery::{fresh_tree_state, require_clean_tree, verify_input};
 use mogwai_lab::kernel::typed_canon;
-use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree, verify_input};
 use mogwai_lab::measure12a::generated::GeneratedAcc;
 use mogwai_lab::measure12a::observed;
 use mogwai_lab::preflight::require_preflight;
@@ -37,7 +37,7 @@ use mogwai_lab::subcontract::{
 use serde_json::Value;
 
 const DEFAULT_CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
-const DEFAULT_LEDGER: &str = "analysis/databento-jobs.json";
+const DEFAULT_JOBS_MANIFEST: &str = "analysis/databento-jobs.json";
 const DEFAULT_PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
 const DEFAULT_CACHE_DIR: &str = "analysis/out";
 const DEFAULT_OUT: &str = "analysis/mnq-measure-12a.json";
@@ -49,9 +49,9 @@ pub struct MeasureArgs {
     /// The delivered corpus directory.
     #[arg(long, value_name = "DIR")]
     corpus: Option<PathBuf>,
-    /// The Databento job ledger. Read-only.
+    /// The Databento jobs manifest. Read-only.
     #[arg(long, value_name = "PATH")]
-    ledger: Option<PathBuf>,
+    jobs_manifest: Option<PathBuf>,
     /// The committed preflight artifact this run's file hashes must match.
     #[arg(long, value_name = "PATH")]
     preflight: Option<PathBuf>,
@@ -70,7 +70,7 @@ pub struct MeasureArgs {
 
 pub struct MeasureConfig {
     pub corpus: PathBuf,
-    pub ledger: PathBuf,
+    pub jobs_manifest: PathBuf,
     pub preflight_path: PathBuf,
     pub walk_cache_dir: PathBuf,
     pub observed_cache_path: PathBuf,
@@ -81,7 +81,7 @@ impl MeasureConfig {
     #[must_use]
     pub fn resolve(
         corpus: Option<PathBuf>,
-        ledger: Option<PathBuf>,
+        jobs_manifest: Option<PathBuf>,
         preflight: Option<PathBuf>,
         cache_dir: Option<PathBuf>,
         out: Option<PathBuf>,
@@ -96,7 +96,7 @@ impl MeasureConfig {
         });
         Self {
             corpus: corpus.unwrap_or_else(|| PathBuf::from(DEFAULT_CORPUS)),
-            ledger: ledger.unwrap_or_else(|| PathBuf::from(DEFAULT_LEDGER)),
+            jobs_manifest: jobs_manifest.unwrap_or_else(|| PathBuf::from(DEFAULT_JOBS_MANIFEST)),
             preflight_path: preflight.unwrap_or_else(|| PathBuf::from(DEFAULT_PREFLIGHT)),
             walk_cache_dir: cache_dir.join(WALK_CACHE_SUBDIR),
             observed_cache_path: cache_dir.join(OBSERVED_CACHE_NAME),
@@ -153,7 +153,7 @@ pub enum WalkSource {
 pub fn run(args: MeasureArgs) -> anyhow::Result<()> {
     let cfg = MeasureConfig::resolve(
         args.corpus,
-        args.ledger,
+        args.jobs_manifest,
         args.preflight,
         args.cache_dir,
         args.out,
@@ -244,7 +244,7 @@ pub fn run_measure_with(
     // mismatch refuses.
     mogwai_lab::sidecar::marker("observed");
     let t0 = std::time::Instant::now();
-    let observed = run_measure12a_observed(&cfg.corpus, &cfg.ledger, &cfg.preflight_path)?;
+    let observed = run_measure12a_observed(&cfg.corpus, &cfg.jobs_manifest, &cfg.preflight_path)?;
     let observed_s = t0.elapsed().as_secs_f64();
     if !cfg.observed_cache_path.exists() {
         bail!(
@@ -466,11 +466,11 @@ fn session_dates_are_23_sorted_unique(per_session: &[Value]) -> anyhow::Result<(
 /// sub-contract hashes.
 pub(crate) fn run_measure12a_observed(
     corpus: &Path,
-    ledger: &Path,
+    jobs_manifest: &Path,
     preflight_path: &Path,
 ) -> anyhow::Result<Value> {
-    let hashes: BTreeMap<String, String> =
-        verify_input(corpus, ledger).map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
+    let hashes: BTreeMap<String, String> = verify_input(corpus, jobs_manifest)
+        .map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
     let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
         .map_err(|e| anyhow!("checking the preflight artifact: {e}"))?;
     let usable: Vec<String> = preflight["usable_sessions"]
@@ -525,12 +525,12 @@ pub(crate) fn run_measure12a_observed(
 
 pub(crate) fn run_observed_with_count_windows(
     corpus: &Path,
-    ledger: &Path,
+    jobs_manifest: &Path,
     preflight_path: &Path,
     windows: &'static [i64],
 ) -> anyhow::Result<Value> {
-    let hashes: BTreeMap<String, String> =
-        verify_input(corpus, ledger).map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
+    let hashes: BTreeMap<String, String> = verify_input(corpus, jobs_manifest)
+        .map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
     let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
         .map_err(|e| anyhow!("checking the preflight artifact: {e}"))?;
     let usable = preflight["usable_sessions"]
@@ -551,13 +551,13 @@ pub(crate) fn run_observed_with_count_windows(
 pub(crate) fn run_observed_with_count_windows_ordered(
     month: u64,
     corpus: &Path,
-    ledger: &Path,
+    jobs_manifest: &Path,
     preflight_path: &Path,
     windows: &'static [i64],
-    ledger_key: &str,
+    delivery_key: &str,
 ) -> anyhow::Result<(Value, Vec<mogwai_lab::measure12a::OrderedCount>)> {
     let hashes: BTreeMap<String, String> =
-        mogwai_lab::ledger::verify_input_entry(corpus, ledger, ledger_key)
+        mogwai_lab::delivery::verify_input_entry(corpus, jobs_manifest, delivery_key)
             .map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
     let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
         .map_err(|e| anyhow!("checking the preflight artifact: {e}"))?;
@@ -587,11 +587,11 @@ pub(crate) fn run_observed_with_count_windows_ordered(
 
 pub(crate) fn run_observed_ordered(
     corpus: &Path,
-    ledger: &Path,
+    jobs_manifest: &Path,
     preflight_path: &Path,
 ) -> anyhow::Result<(Value, Vec<mogwai_lab::measure12a::OrderedCount>)> {
-    let hashes: BTreeMap<String, String> =
-        verify_input(corpus, ledger).map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
+    let hashes: BTreeMap<String, String> = verify_input(corpus, jobs_manifest)
+        .map_err(|e| anyhow!("verifying the delivered corpus: {e}"))?;
     let (preflight, preflight_hash) = require_preflight(&hashes, preflight_path)
         .map_err(|e| anyhow!("checking the preflight artifact: {e}"))?;
     let usable = preflight["usable_sessions"]

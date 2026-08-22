@@ -104,8 +104,8 @@ fn dump(v: &PyValue, out: &mut String) {
 
 /// `JOB_ID` - also the preflight artifact's `job_id` field.
 pub const JOB_ID: &str = "GLBX-20260805-HAPEWPABKG";
-/// `LEDGER_KEY` - the ledger entry this job binds to.
-pub const LEDGER_KEY: &str = "mnqv|2026-07.full|tbbo";
+/// `DELIVERY_KEY` - the delivery this job binds to.
+pub const DELIVERY_KEY: &str = "mnqv|2026-07.full|tbbo";
 
 pub const MAX_UNSIDED_SHARE: f64 = 0.01;
 pub const MAX_INVALID_WIDTH_SHARE: f64 = 0.001;
@@ -364,7 +364,8 @@ impl PyValue {
 fn tree() -> PyValue {
     let mut m: BTreeMap<&'static str, PyValue> = BTreeMap::new();
     m.insert("JOB_ID", PyValue::Str(JOB_ID));
-    m.insert("LEDGER_KEY", PyValue::Str(LEDGER_KEY));
+    // Inherited hash-bound spelling from the frozen subcontract format.
+    m.insert("LEDGER_KEY", PyValue::Str(DELIVERY_KEY));
     m.insert("MAX_UNSIDED_SHARE", PyValue::Float(MAX_UNSIDED_SHARE));
     m.insert(
         "MAX_INVALID_WIDTH_SHARE",
@@ -676,7 +677,7 @@ pub fn subcontract_dumps_for(mode: Mode) -> String {
 pub fn subcontract_hash_for(mode: Mode) -> String {
     let mut hasher = Sha256::new();
     hasher.update(subcontract_dumps_for(mode).as_bytes());
-    crate::ledger::hex_digest(&hasher.finalize())
+    crate::delivery::hex_digest(&hasher.finalize())
 }
 
 /// The exact bytes `analysis/mnq_fit.py`'s `subcontract_hash()` hashes.
@@ -690,7 +691,7 @@ pub fn subcontract_dumps() -> String {
 pub fn subcontract_hash() -> String {
     let mut hasher = Sha256::new();
     hasher.update(subcontract_dumps().as_bytes());
-    crate::ledger::hex_digest(&hasher.finalize())
+    crate::delivery::hex_digest(&hasher.finalize())
 }
 
 #[cfg(test)]
@@ -718,6 +719,19 @@ mod tests {
         let dumps = subcontract_dumps();
         assert!(dumps.contains("\"SUMMARY_WARMUP\": \"3d\""));
         assert!(!dumps.contains("SUMMARY_BURN_IN"));
+    }
+
+    /// The delivery rename moved the Rust constant and deliberately left the
+    /// hashed key alone, for the same reason the burn-in rename did: the tree
+    /// transcribes the Python's own names and its bytes are the
+    /// `subcontract_hash` every committed measurement and preflight artifact
+    /// records. Without this, a pass respelling the map key fails only on an
+    /// opaque digest.
+    #[test]
+    fn the_hashed_tree_keeps_the_inherited_ledger_key() {
+        let dumps = subcontract_dumps();
+        assert!(dumps.contains("\"LEDGER_KEY\": \"mnqv|2026-07.full|tbbo\""));
+        assert!(!dumps.contains("DELIVERY_KEY"));
     }
 
     /// TWO CONSTANTS ENCODE ONE QUANTITY, so one of them must be derived from

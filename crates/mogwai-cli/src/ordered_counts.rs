@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use crate::measure::run_observed_ordered;
 
 const CORPUS: &str = "research/market-data/databento/mnqv/2026-07.full.tbbo";
-const LEDGER: &str = "analysis/databento-jobs.json";
+const JOBS_MANIFEST: &str = "analysis/databento-jobs.json";
 const PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
 const SEQUENCE: &str = "analysis/out/ordered-counts.jsonl";
 const SUMMARY: &str = "analysis/out/ordered-counts-panels.json";
@@ -78,7 +78,7 @@ pub fn run() -> anyhow::Result<()> {
 pub struct OrderedCountsRun {
     pub month: u64,
     pub corpus: PathBuf,
-    pub ledger: PathBuf,
+    pub jobs_manifest: PathBuf,
     pub preflight: PathBuf,
     pub sequence: PathBuf,
     pub summary: PathBuf,
@@ -92,7 +92,7 @@ impl OrderedCountsRun {
         Self {
             month: 202_607,
             corpus: CORPUS.into(),
-            ledger: LEDGER.into(),
+            jobs_manifest: JOBS_MANIFEST.into(),
             preflight: PREFLIGHT.into(),
             sequence: SEQUENCE.into(),
             summary: SUMMARY.into(),
@@ -130,7 +130,7 @@ pub fn run_with(config: &OrderedCountsRun) -> anyhow::Result<()> {
         )
     } else {
         let (observed, rows) =
-            run_observed_ordered(&config.corpus, &config.ledger, &config.preflight)?;
+            run_observed_ordered(&config.corpus, &config.jobs_manifest, &config.preflight)?;
         (observed, rows)
     };
     finish(config, &reference, &observed, &mut rows)
@@ -179,7 +179,7 @@ fn finish(
         write_sequence(&config.sequence, rows)?;
     }
     let sequence_sha256 =
-        mogwai_lab::ledger::sha256_file(&config.sequence).map_err(|e| anyhow!(e.to_string()))?;
+        mogwai_lab::delivery::sha256_file(&config.sequence).map_err(|e| anyhow!(e.to_string()))?;
 
     if config.require_july_backcheck
         && let Some(mismatch) = backcheck(rows, reference)?

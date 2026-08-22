@@ -26,7 +26,7 @@ use mogwai_lab::arrival_control::{
     gate_b3, gate_b4, gate_b6, gate_b7, gate_hours, hourly_mean_parents, normalizer_drift,
     recentred_curve, seed_median,
 };
-use mogwai_lab::ledger::{fresh_tree_state, require_clean_tree, sha256_bytes, sha256_file};
+use mogwai_lab::delivery::{fresh_tree_state, require_clean_tree, sha256_bytes, sha256_file};
 use mogwai_lab::sampler::ResourceSampler;
 use mogwai_lab::storage::{ScratchDir, cache_root};
 use serde_json::{Value, json};
@@ -544,7 +544,7 @@ mod tests {
 
     use std::rc::Rc;
 
-    use mogwai_lab::ledger::{ScriptedTree, TreeQuery, install_tree_oracle};
+    use mogwai_lab::delivery::{ScriptedTree, TreeQuery, install_tree_oracle};
 
     fn missing_inputs(out: &str) -> ArrivalControlArgs {
         ArrivalControlArgs {

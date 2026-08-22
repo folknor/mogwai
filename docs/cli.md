@@ -455,15 +455,15 @@ python3 analysis/plot_tape.py --csv analysis/out/asia-endless.csv --out analysis
 
 `preflight` runs the fail-closed TBBO corpus contract check against a
 delivered corpus directory and writes a hash-bound preflight artifact -
-`--corpus`, `--ledger` (read-only) and `--out` all default to the paths
+`--corpus`, `--jobs-manifest` (read-only) and `--out` all default to the paths
 `analysis/mnq_fit.py` used. This command is the frozen July parity path.
 
 For a Stage M new-design month, produce its calendar-bound inventory and then
 run Tier 1a with the matching arguments:
 
 ```text
-brokkr run mogwai -- stage-m preflight --month 202509 --corpus research/market-data/databento/mnqv/2025-09.manifest.tbbo --ledger analysis/databento-jobs.json --ledger-key 'mnqv|2025-09.manifest|tbbo'
-brokkr run mogwai -- stage-m month --month 202509 --corpus research/market-data/databento/mnqv/2025-09.manifest.tbbo --ledger analysis/databento-jobs.json --ledger-key 'mnqv|2025-09.manifest|tbbo'
+brokkr run mogwai -- stage-m preflight --month 202509 --corpus research/market-data/databento/mnqv/2025-09.manifest.tbbo --jobs-manifest analysis/databento-jobs.json --delivery-key 'mnqv|2025-09.manifest|tbbo'
+brokkr run mogwai -- stage-m month --month 202509 --corpus research/market-data/databento/mnqv/2025-09.manifest.tbbo --jobs-manifest analysis/databento-jobs.json --delivery-key 'mnqv|2025-09.manifest|tbbo'
 ```
 
 Both commands default to `analysis/out/stage-m/<YYYYMM>/preflight.json` and

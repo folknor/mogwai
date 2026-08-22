@@ -529,10 +529,10 @@ example = "tag_decode_probe"
 # The delivered corpus, per host. This records WHICH delivery a row was measured
 # against so a cross-month comparison can tell two corpora apart. It does NOT
 # replace the run's own verification: `measure` refuses a corpus whose SHA-256
-# hashes disagree with the ledger and the committed preflight artifact, and that
-# check is about the CONTENTS being the ones the method was fitted to. This
-# digest is about DRIFT - the file under this path not being the file it was
-# last time - which is a different question and is why the two hashes are
+# hashes disagree with the jobs manifest and the committed preflight artifact,
+# and that check is about the CONTENTS being the ones the method was fitted to.
+# This digest is about DRIFT - the file under this path not being the file it
+# was last time - which is a different question and is why the two hashes are
 # allowed to be different algorithms over different scopes.
 #
 # The digest is over the DIRECTORY - two `.csv.zst` archives beside

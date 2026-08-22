@@ -3602,7 +3602,8 @@ async fn a_missed_silent_cancel_diagnoses_without_cancelling_the_default_account
 ///
 /// THE OBSERVABLE IS `POST /accounts`, NOT THE SNAPSHOT, and that is the whole
 /// design of this test. The snapshot's CONTENT is identical either way, by
-/// construction - the preview is built from the same template the mint uses -
+/// construction - the preview is built from the same opening terms the mint
+/// uses -
 /// so asserting on the body would pass against both shapes and prove nothing.
 /// `POST /accounts` refuses an id that is already open with a 409, so a 201
 /// after the read is the venue stating that the read left nothing behind. The
@@ -3641,8 +3642,8 @@ fn a_pulled_snapshot_does_not_open_the_account_it_reports_on() {
         "and `/accounts` does refuse an id that IS open, so the 201 above is evidence: {body}"
     );
 
-    // The consumer's own balance is what the account carries, not the venue
-    // template a mint on the read path would have handed it.
+    // The consumer's own balance is what the account carries, not the venue's
+    // configured opening balance a mint on the read path would have handed it.
     let (_, body) = http_get(&venue.http_base(), "/account?account=WYRD-READ");
     assert!(
         body.contains("1000"),

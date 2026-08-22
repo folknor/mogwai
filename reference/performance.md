@@ -490,7 +490,7 @@ The delivered July corpus is registered per host under
 delivery DIRECTORY, not over its manifest. The two hashes on that corpus answer
 different questions and neither replaces the other: this digest is a DRIFT check
 - the delivery under that path not being the one it was last time - while
-`measure`'s own SHA-256 verification against the ledger and the committed
+`measure`'s own SHA-256 verification against the jobs manifest and the committed
 preflight is about the CONTENTS being the ones the method was fitted to.
 
 **The two output channels.** Every benched command emits its work size beside

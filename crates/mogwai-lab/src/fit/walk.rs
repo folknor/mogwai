@@ -119,7 +119,7 @@ pub fn walk_cache_key(
     s.push('}');
     let mut h = Sha256::new();
     h.update(s.as_bytes());
-    crate::ledger::hex_digest(&h.finalize())
+    crate::delivery::hex_digest(&h.finalize())
 }
 
 /// `scratch_config_text`: the config the Python handed `gen --config`, and
@@ -396,7 +396,7 @@ mod tests {
         h.update(s.as_bytes());
         assert_eq!(
             walk_cache_key(&ov, 1, 5, "7d", "3d", "abc"),
-            crate::ledger::hex_digest(&h.finalize())
+            crate::delivery::hex_digest(&h.finalize())
         );
     }
 

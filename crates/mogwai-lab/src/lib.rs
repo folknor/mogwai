@@ -8,7 +8,7 @@
 
 //! `mogwai-lab`: the corpus and measurement layer of the Python-to-Rust
 //! rewrite (the retired rewrite plan, phases 1 and 2) - the TBBO stream
-//! contract, the session/segment math, ledger-bound input verification,
+//! contract, the session/segment math, manifest-bound input verification,
 //! preflight, the storage policy (artifact/cache/scratch), the deterministic
 //! kernel ([`kernel`]) and the unified protocol-12a block engine
 //! ([`measure12a`]), and from phase 3b the protocol-11 fit ([`fit`]) with the
@@ -57,12 +57,12 @@ pub mod arrival_screen;
 pub mod cadence;
 pub mod cadence_feasible;
 pub mod characterize;
+pub mod delivery;
 pub mod error;
 pub mod exact;
 pub mod fingerprint;
 pub mod fit;
 pub mod kernel;
-pub mod ledger;
 pub mod measure12a;
 pub mod preflight;
 pub mod sampler;
