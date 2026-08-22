@@ -383,7 +383,7 @@ fn measure12a_matches_independent_recompute() {
     assert!((got - robust60).abs() <= 1e-15_f64.max(robust60 * 1e-12));
 
     // Block 4: 41 adjacent-mid returns, every one below the 1000-return
-    // history floor - all warmup, no residuals.
+    // history floor - all burn-in, no residuals.
     assert_eq!(s["block4"]["23"]["warmup_excluded"], 41);
     assert_eq!(s["block4"]["23"]["residual_count"], 0);
     assert_eq!(s["block4"]["all"]["warmup_excluded"], 41);

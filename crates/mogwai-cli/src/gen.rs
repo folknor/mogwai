@@ -86,13 +86,14 @@ pub(crate) struct GenArgs {
     /// Mutually exclusive with an explicit --symbol.
     #[arg(long, value_name = "PATH", conflicts_with = "symbol")]
     config: Option<PathBuf>,
-    /// Warm-up span generated BEFORE --start, same grammar as --length.
-    /// Summary mode only: the walk begins at `start - warmup`, and every
-    /// accumulator covers exactly `[start, start + length)` - warm-up
+    /// Burn-in span generated before --start, same grammar as --length.
+    /// Summary and measure12a modes only: the walk begins at
+    /// `start - burn-in`, and every accumulator covers exactly
+    /// `[start, start + length)`. Burn-in
     /// observations are discarded, so the measurement window is the intended
     /// calendar interval with full session weighting.
     #[arg(long)]
-    warmup: Option<String>,
+    burn_in: Option<String>,
     /// Trace window opening instant, unix ns. Trace mode only; must satisfy
     /// start <= trace-from < trace-until <= start + length.
     #[arg(long)]
@@ -169,8 +170,8 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
         }
         (GenType::Trades | GenType::Summary | GenType::Trace | GenType::Measure12a, None) => None,
     };
-    if args.warmup.is_some() && !matches!(args.kind, GenType::Summary | GenType::Measure12a) {
-        bail!("--warmup is only valid with --type summary or --type measure12a");
+    if args.burn_in.is_some() && !matches!(args.kind, GenType::Summary | GenType::Measure12a) {
+        bail!("--burn-in is only valid with --type summary or --type measure12a");
     }
     if (args.trace_from.is_some() || args.trace_until.is_some())
         && !matches!(args.kind, GenType::Trace)
@@ -200,13 +201,13 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
     }
 
     if matches!(args.kind, GenType::Summary | GenType::Measure12a) {
-        let warmup_ns = match &args.warmup {
-            Some(raw) => parse_duration(raw).context("parsing --warmup")?,
+        let burn_in_ns = match &args.burn_in {
+            Some(raw) => parse_duration(raw).context("parsing --burn-in")?,
             None => 0,
         };
-        let walk_start = args.start.checked_sub(warmup_ns).with_context(|| {
+        let walk_start = args.start.checked_sub(burn_in_ns).with_context(|| {
             format!(
-                "--warmup {warmup_ns}ns underflows --start {}; the walk must begin at exactly start - warmup",
+                "--burn-in {burn_in_ns}ns underflows --start {}; the walk must begin at exactly start - burn-in",
                 args.start
             )
         })?;
@@ -229,9 +230,9 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
         mogwai_lab::sidecar::marker("walk");
         let mut source = build_source(args, &profile, walk_start)?;
         let acc = summarize(&mut source, &profile, seed, args.start, end);
-        // The generated-walk benchmark's work size. Both counters are
-        // IDENTITY-BEARING: a summary walk is a pure function of (preset,
-        // window, warmup, seed), so a run that reports a different parent or
+        // The generated-walk benchmark's work size. Both counters carry
+        // identity: a summary walk is a pure function of (preset,
+        // window, burn-in, seed), so a run that reports a different parent or
         // row count than its baseline changed the tape, and any wall
         // comparison against that baseline is meaningless rather than
         // interesting. Emitted before the JSON is written so a run whose sink
@@ -797,7 +798,7 @@ mod tests {
                 start: 0,
                 start_price: None,
                 config: None,
-                warmup: None,
+                burn_in: None,
                 trace_from: None,
                 trace_until: None,
                 regime: None,
@@ -1073,7 +1074,7 @@ mod tests {
             start: 0,
             start_price: None,
             config: None,
-            warmup: None,
+            burn_in: None,
             trace_from: None,
             trace_until: None,
             regime: None,
@@ -1163,7 +1164,7 @@ mod tests {
             start: 0,
             start_price: None,
             config: None,
-            warmup: None,
+            burn_in: None,
             trace_from: None,
             trace_until: None,
             regime: None,
@@ -1237,7 +1238,7 @@ mod tests {
             start: 0,
             start_price: None,
             config: None,
-            warmup: None,
+            burn_in: None,
             trace_from: None,
             trace_until: None,
             regime: None,
@@ -1813,7 +1814,7 @@ mod tests {
             start,
             start_price: None,
             config: None,
-            warmup: None,
+            burn_in: None,
             trace_from: None,
             trace_until: None,
             regime: None,
@@ -2042,9 +2043,9 @@ mod tests {
     }
 
     #[test]
-    fn a_warmup_past_the_start_refuses_instead_of_saturating() {
-        // start - warmup must be EXACT: a saturated subtraction would
-        // silently shorten the warm-up and shift the walk, so underflow is a
+    fn a_burn_in_past_the_start_refuses_instead_of_saturating() {
+        // start - burn-in must be exact: a saturated subtraction would
+        // silently shorten the burn-in and shift the walk, so underflow is a
         // named refusal, not a clamp.
         let args = GenArgs {
             kind: GenType::Summary,
@@ -2055,7 +2056,7 @@ mod tests {
             start: 1_000,
             start_price: None,
             config: None,
-            warmup: Some("1s".to_string()),
+            burn_in: Some("1s".to_string()),
             trace_from: None,
             trace_until: None,
             regime: None,
@@ -2063,7 +2064,7 @@ mod tests {
             out: None,
         };
         let mut sink = Vec::new();
-        let err = run_into(&args, &mut sink).expect_err("underflowing warmup must refuse");
+        let err = run_into(&args, &mut sink).expect_err("underflowing burn-in must refuse");
         let text = format!("{err:#}");
         assert!(text.contains("underflows"), "names the underflow: {text}");
     }

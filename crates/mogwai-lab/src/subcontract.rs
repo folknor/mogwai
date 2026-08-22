@@ -158,7 +158,12 @@ pub const FINAL_START_NS: i64 = 1_782_856_800_000_000_000;
 pub const FINAL_END_NS: i64 = 1_785_531_600_000_000_000;
 pub const FINAL_LENGTH: &str = "2674800s";
 pub const FINAL_SEEDS: &[i64] = &[1, 2, 3, 4, 5, 6, 7, 8];
-pub const SUMMARY_WARMUP: &str = "3d";
+/// The estimator burn-in prefix a summary walk generates before `--start` and
+/// then discards. The constant's own name in [`tree`] stays `SUMMARY_WARMUP`,
+/// which is inherited and frozen: that map is a transcription of
+/// `analysis/mnq_fit.py`'s constant names, and its bytes are the sub-contract
+/// hash every committed measurement and preflight artifact records.
+pub const SUMMARY_BURN_IN: &str = "3d";
 
 pub const SOLVE_RELATIVE_STEP: f64 = 1e-3;
 pub const VOL_GRID_POINTS: i64 = 32;
@@ -425,7 +430,9 @@ fn tree() -> PyValue {
     m.insert("FINAL_END_NS", PyValue::Int(FINAL_END_NS));
     m.insert("FINAL_LENGTH", PyValue::Str(FINAL_LENGTH));
     m.insert("FINAL_SEEDS", PyValue::int_list(FINAL_SEEDS));
-    m.insert("SUMMARY_WARMUP", PyValue::Str(SUMMARY_WARMUP));
+    // Inherited and frozen: the key is the Python constant's name, and these
+    // bytes are hashed into every committed artifact's `subcontract_hash`.
+    m.insert("SUMMARY_WARMUP", PyValue::Str(SUMMARY_BURN_IN));
     m.insert("SOLVE_RELATIVE_STEP", PyValue::Float(SOLVE_RELATIVE_STEP));
     m.insert("VOL_GRID_POINTS", PyValue::Int(VOL_GRID_POINTS));
     m.insert("VOL_SCALAR_DOMAIN", band_pair(VOL_SCALAR_DOMAIN));
@@ -700,6 +707,17 @@ mod tests {
     #[test]
     fn hash_matches_the_python_reference() {
         assert_eq!(subcontract_hash(), EXPECTED_HASH);
+    }
+
+    /// The burn-in rename moved the Rust constant and deliberately left the
+    /// hashed key alone. The tree is a transcription of the Python's own
+    /// names, and every committed artifact records a hash of these bytes, so
+    /// the key is frozen where the identifier is free.
+    #[test]
+    fn the_hashed_tree_keeps_the_inherited_summary_warmup_key() {
+        let dumps = subcontract_dumps();
+        assert!(dumps.contains("\"SUMMARY_WARMUP\": \"3d\""));
+        assert!(!dumps.contains("SUMMARY_BURN_IN"));
     }
 
     /// TWO CONSTANTS ENCODE ONE QUANTITY, so one of them must be derived from

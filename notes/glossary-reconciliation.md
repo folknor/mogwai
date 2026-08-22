@@ -1032,6 +1032,88 @@ RAISED AND NOT ACTED ON:
   awkward "the reservation is not cosmetic" with "the restriction is not
   cosmetic", which is the same claim in plainer words.
 
+**Round 8, the `warmup` family, 2026-08-22.** A split, and the third round whose
+ruling leaves the word on one of its senses. THE SERVABLE-HISTORY SENSE KEEPS
+THE WORD - `warmup_ns`, the `/clock` envelope, the boot materialization, the
+tick-composition ceilings and every venue-side doc are untouched, which is the
+shape a correct classification produces. The estimator burn-in prefix takes
+`burn_in`: `SUMMARY_BURN_IN`, `GeneratedBinding::burn_in`, `HourAcc::burn_in_excluded`,
+the `walk_cache_key` / `run_summary_walk` / `WalkCache` parameters, the fit
+driver's `summary_for`, the screen's and control's projection locals and
+refusals, and the operator flag `mogwai gen --warmup`, which becomes
+`--burn-in`. The adapter's third sense - a consumer's history request window,
+which is neither servable history nor burn-in - becomes "history window" or
+"history request" across `data.rs`, `shared.rs` and `clock.rs`. No tape byte and
+no wire byte moves, so no `TAPE_PROTOCOL_VERSION` bump is owed. The gated check
+reports 1341 workspace and 469 instrumented tests, one more than round 7, and
+that one is the frozen-key test below.
+
+THE SERIALIZED SPELLINGS DID NOT MOVE, AND THAT IS THE ROUND'S WHOLE RESOLUTION.
+The rename pass respelled the burn-in sense inside four frozen formats at once,
+and each break was invisible to `brokkr check`:
+
+- the measurement artifact's `diagnostics.warmup_exclusions`, `block4[hour].warmup_excluded`
+  and `binding.generated.warmup`. The release parity gate assembles
+  `analysis/mnq-measure-12a.json` from the committed caches and compares it
+  typed-canonically, so a respelled key is a hard red - and the summation in
+  `aggregate/artifact.rs` was worse, because a missing `warmup_excluded` read as
+  zero and the artifact came out silently wrong rather than refused.
+- the walk cache key. `walk_cache_key` hashes a JSON object whose `warmup`
+  member is a field of the Python-era serialization; respelling it missed all
+  10,192 entries in the read-only cache directory and brought the multi-hour
+  recompute back, with nothing but a slow run to show for it.
+- the sub-contract tree. `subcontract_dumps` is a transcription of
+  `analysis/mnq_fit.py`'s own constant names, and its bytes are the
+  `subcontract_hash` recorded in every committed measurement and preflight
+  artifact, so respelling the map key would have unbound them all.
+- the arrival screen's provenance command string, which keys stored screen
+  state.
+
+TWO RESOLUTIONS WERE AVAILABLE and the conservative one was taken everywhere:
+keep the old spelling in the serialized format and rename only the Rust
+identifiers. The alternative - a frozen reader beside a live writer, two key
+functions per format - buys nothing here, because none of these formats has a
+second generation to read: there is one artifact family, one cache, one hash,
+and the port is the only writer. Two key functions would have written native
+entries under a key no reader wants, and dual-reading the artifact would have
+left the parity gate comparing an artifact spelled one way against a committed
+one spelled the other. So there is one `walk_cache_key`, one artifact spelling,
+one hashed tree, each carrying a comment saying the field is inherited and
+frozen while the identifiers around it are not. The cold review's proposed
+two-key resolution and its re-blessed hash are both superseded by this: no hash
+moved, so `hash_matches_the_python_reference` is restored intact rather than
+weakened to an `assert_ne!`, which had accepted every accidental change to every
+sub-contract constant. `the_hashed_tree_keeps_the_inherited_summary_warmup_key`
+is added beside it, so the next pass that respells the map key fails on the
+reason rather than on an opaque digest.
+
+Also corrected in the pass, which is the recurring failures again:
+
+- EMPHASIS HALF-SWEPT, eleven sites, all of them outside the rename's mandate.
+  `data.rs` lowercased ANSWER, ALWAYS, RESOLVES, SHORT and the BAR-count /
+  TRADE-page contrast, and turned a sentence-initial LOUD into a lower-case
+  "loud" that no longer parses as a sentence; `shared.rs` lost BEFORE;
+  `arrival_control_exposure.rs` lost five capitalised lead-ins whose whole job
+  was to mark the premise; `docs/cli.md` lost PRODUCED, `docs/config.md` lost
+  EMPTY and QUIET WINDOW, `reference/performance.md` lost RESIDENT and EMPTY.
+  Restored.
+- ARCH LOWERCASED TO "arch" in `measure12a/generated.rs`. It is an acronym, not
+  emphasis, and the sweep read it as the latter.
+- LIVE SIBLINGS THE SWEEP MISSED, in the crates it did not open:
+  `mogwai-cli`'s `stage_m_tier2.rs` refused with "control warmup underflow",
+  `mogwai-lab`'s `summary.rs` documented "a warm-up walk" and "a warm-up quote"
+  for the discarded prefix, `measure12a/tests.rs` said "all warmup, no
+  residuals", and `arrival_control_exposure.rs`'s module doc named the warmup
+  twice. All of them the burn-in sense.
+
+RAISED AND DECLINED: nothing in `docs/`, `reference/` or `notes/todo.md` spells
+`gen --warmup` as an instruction - the only surviving occurrences are the
+ledger's own B6 row and `notes/glossary-scope-7.md`'s inventory row, both of
+which record the pre-rename state and are historical by construction.
+`analysis/mnq-arrival-control.json` and `analysis/mnq-arrival-screen.json` stay
+untouched under the 2026-08-21 ruling; the exposure keys the CLI writes were
+kept at `warmup` partly so those records and any new one still agree.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
@@ -1080,6 +1162,14 @@ These belong to no single scope, so nothing else holds them.
   survives for the per-connection outbound byte budget, which is the sense the
   wire and the operator config already publish; `locked` survives as the
   consumer-visible balance field and nowhere else in that sense.
+- `warmup` as a name for an estimator's discarded burn-in prefix, or for a
+  consumer's history request window. That prefix is a burn-in and the request
+  window is a history window. The word survives for the servable simulated
+  history from `data_origin_ns` through `run_start_ns`, which is the glossary's
+  own entry - and, inherited and frozen, as a field name inside the walk cache
+  key, the measurement artifact, the sub-contract tree and the screen's
+  provenance string, where the identifiers around it carry the new word and the
+  serialized bytes do not.
 
 ### Left as inherited
 
@@ -1097,8 +1187,18 @@ Recorded per scope in the scope reports until the merge collects them.
 
 ## What the rename rounds keep getting wrong
 
-Seven rounds in, three failures recur often enough to belong in every brief.
-Round 6 produced all three at once, which is the first time one round has.
+Eight rounds in, three failures recur often enough to belong in every brief.
+Round 6 produced all three at once, and round 8 did it again.
+
+Round 8 adds a fourth, and it is the one with teeth. **A SERIALIZED FIELD NAME
+IS NOT AN IDENTIFIER.** A rename pass sweeps a word through a crate and takes
+the string literals with it, and where one of those literals is a key in a
+committed artifact, a content-addressed cache, a hashed constant tree or a
+provenance token, the sweep has broken a format rather than renamed a thing.
+Half of these fail silently: a missing key that reads as zero, a cache that
+misses every entry and merely runs for hours. The check at a string literal is
+"who else has already written bytes under this name", and the answer is almost
+never in the crate being swept.
 
 **The sweep stops at one crate.** A rename pass finds the family in the crate
 that owns it and leaves live siblings in the others. Twice now a false sentence

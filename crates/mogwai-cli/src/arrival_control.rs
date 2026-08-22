@@ -373,7 +373,7 @@ struct Seams {
     /// only
     /// in the re-attestation pin, which is about step 10, not about B1.
     run_b1: bool,
-    /// Replaces the 12a binding's measured window and warmup, so a pin about
+    /// Replaces the 12a binding's measured window and burn-in, so a pin about
     /// step ordering costs seconds instead of minutes.
     window: Option<(u64, String)>,
     /// Fires after the walks and before the gates - the widest part of the
@@ -424,9 +424,9 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
     let measure: Value = serde_json::from_slice(&std::fs::read(&measure_path)?)?;
     let envelope: Value = serde_json::from_slice(&std::fs::read(&envelope_path)?)?;
     let mut binding = GeneratedBinding::from_measure12a(&measure)?;
-    if let Some((length_ns, warmup)) = seams.window {
+    if let Some((length_ns, burn_in)) = seams.window {
         binding.window_length_ns = length_ns;
-        binding.warmup = warmup;
+        binding.burn_in = burn_in;
     }
     let per = measure["observed"]["per_session"]
         .as_array()
@@ -527,7 +527,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
         bail!("the tree changed during the arrival-control run; the artifact is unbound");
     }
     let out = args.out.unwrap_or_else(|| DEFAULT_OUT.into());
-    let artifact = json!({"binding":{"harness_tree_commit":commit,"clean_tree":true,"input_hashes":{measure_path.to_string_lossy().to_string():sha256_file(&measure_path)?,envelope_path.to_string_lossy().to_string():sha256_file(&envelope_path)?},"exposure":{"instrument":"MNQ","preset":"crates/mogwai-venue/presets/mnq.toml","window_start_ns":binding.window_start_ns,"window_length_ns":binding.window_length_ns,"warmup":binding.warmup,"divergence":Value::Null,"regime":"neutral"},"control_fit_seeds":CONTROL_FIT_SEEDS,"control_test_seeds":CONTROL_TEST_SEEDS,"gate_hours":hours,"unexposed_hours":unexposed,"tape_protocol_version":mogwai_data::TAPE_PROTOCOL_VERSION,"spec":"notes/protocol-12b-arrival-composition-spec.md section 5.5, brick N"},"ratios":ratio_json,"old_curve":old,"new_curve":new,"normalizer_drift":drift,"gates":gates,"verdict":if failing.is_empty(){"negative-control-passed"}else{"negative-control-failed"},"failing_gates":failing,"cost":{"fit_walk_s":fit_s,"test_walk_s":test_s,"b1_s":b1_s,"b5_s":b5_s,"total_s":total.elapsed().as_secs_f64(),"peak_rss_bytes":peak_rss}});
+    let artifact = json!({"binding":{"harness_tree_commit":commit,"clean_tree":true,"input_hashes":{measure_path.to_string_lossy().to_string():sha256_file(&measure_path)?,envelope_path.to_string_lossy().to_string():sha256_file(&envelope_path)?},"exposure":{"instrument":"MNQ","preset":"crates/mogwai-venue/presets/mnq.toml","window_start_ns":binding.window_start_ns,"window_length_ns":binding.window_length_ns,"warmup":binding.burn_in,"divergence":Value::Null,"regime":"neutral"},"control_fit_seeds":CONTROL_FIT_SEEDS,"control_test_seeds":CONTROL_TEST_SEEDS,"gate_hours":hours,"unexposed_hours":unexposed,"tape_protocol_version":mogwai_data::TAPE_PROTOCOL_VERSION,"spec":"notes/protocol-12b-arrival-composition-spec.md section 5.5, brick N"},"ratios":ratio_json,"old_curve":old,"new_curve":new,"normalizer_drift":drift,"gates":gates,"verdict":if failing.is_empty(){"negative-control-passed"}else{"negative-control-failed"},"failing_gates":failing,"cost":{"fit_walk_s":fit_s,"test_walk_s":test_s,"b1_s":b1_s,"b5_s":b5_s,"total_s":total.elapsed().as_secs_f64(),"peak_rss_bytes":peak_rss}});
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -764,7 +764,7 @@ mod tests {
             Seams {
                 read_b5: false,
                 run_b1: false,
-                // One hour, no warmup. Eight walks of two passes each run
+                // One hour, no burn-in. Eight walks of two passes each run
                 // here, so the window is an order shorter than the lab's
                 // one-day `the_control_walk_pair_replays_one_tape` pin: this
                 // is a pin about step ordering, and the shortest window that

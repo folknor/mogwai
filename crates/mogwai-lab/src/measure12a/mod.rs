@@ -764,11 +764,11 @@ impl SessionAcc {
                     per_hour
                         .entry(hour.to_string())
                         .or_default()
-                        .warmup_excluded += 1;
+                        .burn_in_excluded += 1;
                     per_hour
                         .entry("all".to_string())
                         .or_default()
-                        .warmup_excluded += 1;
+                        .burn_in_excluded += 1;
                 } else {
                     let mx = maxq.front().copied().unwrap_or(0.0);
                     #[expect(clippy::cast_precision_loss, reason = "count is at least 1000")]
@@ -840,7 +840,8 @@ impl SessionAcc {
                 key.clone(),
                 serde_json::json!({
                     "residual_count": rc,
-                    "warmup_excluded": acc.warmup_excluded,
+                    // Frozen artifact spelling of the burn-in exclusion count.
+                    "warmup_excluded": acc.burn_in_excluded,
                     "zero_fraction": frac(acc.zeros),
                     "nz_abs_p90": p90,
                     "nz_abs_p99": p99,
@@ -1249,7 +1250,7 @@ fn pearson(n: u64, acc: &[f64; 6]) -> Option<f64> {
 #[derive(Default, Debug)]
 struct HourAcc {
     residual_count: u64,
-    warmup_excluded: u64,
+    burn_in_excluded: u64,
     zeros: u64,
     nz_abs: Vec<f64>,
     exceed: [u64; 3],

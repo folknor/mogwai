@@ -62,7 +62,7 @@ struct Exposure {
     seeds: Vec<u64>,
     start_ns: u64,
     length_ns: u64,
-    warmup: String,
+    burn_in: String,
 }
 
 #[derive(Clone, Debug)]
@@ -529,7 +529,8 @@ impl Exposure {
             length_ns: generated["window_length_ns"]
                 .as_u64()
                 .ok_or_else(|| anyhow!("window_length_ns is absent"))?,
-            warmup: generated["warmup"]
+            // The burn-in prefix, under the binding's frozen `warmup` key.
+            burn_in: generated["warmup"]
                 .as_str()
                 .ok_or_else(|| anyhow!("warmup is absent"))?
                 .into(),
@@ -544,7 +545,7 @@ impl Exposure {
                     mogwai_lab::subcontract::FINAL_END_NS - mogwai_lab::subcontract::FINAL_START_NS,
                 )
                 .unwrap_or_default()
-            && self.warmup == mogwai_lab::subcontract::SUMMARY_WARMUP
+            && self.burn_in == mogwai_lab::subcontract::SUMMARY_BURN_IN
     }
 }
 
@@ -564,7 +565,7 @@ fn binding_json(exposure: &Exposure, commit: &str, actual: &InputIdentity) -> Va
         "blob_ids": {
             (PRESET_PATH): {"historical": HISTORICAL_PRESET, "stage0_bound": CURRENT_PRESET, "executed": actual.preset},
             (FINGERPRINT_PATH): {"historical": HISTORICAL_FINGERPRINT, "stage0_bound": CURRENT_FINGERPRINT, "executed": actual.fingerprint}},
-        "generated": {"seeds": exposure.seeds, "window_start_ns": exposure.start_ns, "window_length_ns": exposure.length_ns, "warmup": exposure.warmup},
+        "generated": {"seeds": exposure.seeds, "window_start_ns": exposure.start_ns, "window_length_ns": exposure.length_ns, "warmup": exposure.burn_in},
         "executing_commit": commit, "tape_protocol_version": mogwai_data::TAPE_PROTOCOL_VERSION,
     })
 }

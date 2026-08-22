@@ -53,7 +53,7 @@ fn price_nanos(value: Decimal) -> LabResult<i64> {
 }
 
 /// The previous MEASURED parent (first child in `[start, end)`), for
-/// `sigma_start` and the deferred ARCH share. Warmup parents never enter.
+/// `sigma_start` and the deferred ARCH share. Burn-in parents never enter.
 struct PrevParent {
     seq: u64,
     minute: u64,
@@ -92,7 +92,7 @@ pub struct GeneratedAcc {
 
 impl GeneratedAcc {
     /// `tick` is the instrument's modal tick; `[start, end)` is the MEASURED
-    /// window (the walk itself begins earlier, at `start - warmup`).
+    /// window (the walk itself begins earlier, at `start - burn_in`).
     #[must_use]
     pub fn new(seed: u64, start: u64, end: u64, offset: i32, tick: Decimal) -> Self {
         Self::new_with_count_windows(

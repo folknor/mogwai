@@ -32,7 +32,7 @@ use mogwai_lab::preflight::require_preflight;
 use mogwai_lab::sampler::ResourceSampler;
 use mogwai_lab::stream::{data_files, parse_stream};
 use mogwai_lab::subcontract::{
-    FINAL_END_NS, FINAL_LENGTH, FINAL_SEEDS, FINAL_START_NS, SUMMARY_WARMUP,
+    FINAL_END_NS, FINAL_LENGTH, FINAL_SEEDS, FINAL_START_NS, SUMMARY_BURN_IN,
 };
 use serde_json::Value;
 
@@ -352,7 +352,8 @@ pub fn run_measure_with(
             "seeds": FINAL_SEEDS,
             "window_start_ns": FINAL_START_NS,
             "window_length_ns": FINAL_END_NS - FINAL_START_NS,
-            "warmup": SUMMARY_WARMUP,
+            // Frozen artifact spelling of the burn-in prefix.
+            "warmup": SUMMARY_BURN_IN,
         },
     });
     let artifact =
@@ -614,7 +615,7 @@ pub(crate) fn run_observed_ordered(
 /// One FINAL walk, constructed exactly the way `gen.rs`'s `build_source`
 /// does and exactly as `crates/mogwai-cli/tests/parity12a.rs`'s
 /// `run_final_walk` does: the committed MNQ preset, no overrides, the walk
-/// starting at `FINAL_START_NS - SUMMARY_WARMUP` with the vol trace
+/// starting at `FINAL_START_NS - SUMMARY_BURN_IN` with the vol trace
 /// enabled, measuring `[FINAL_START_NS, FINAL_START_NS + FINAL_LENGTH)`.
 pub fn run_final_walk(seed: u64) -> anyhow::Result<Value> {
     run_final_walk_with_count_windows(seed, mogwai_lab::subcontract::COUNT_WINDOWS_S)
@@ -638,11 +639,11 @@ pub(crate) fn run_final_walk_with_count_windows(
         .parse()
         .map_err(|e| anyhow!("FINAL_LENGTH is not seconds: {e}"))?;
     let end = start + length_s * 1_000_000_000;
-    let warmup_days: u64 = SUMMARY_WARMUP
+    let burn_in_days: u64 = SUMMARY_BURN_IN
         .trim_end_matches('d')
         .parse()
-        .map_err(|e| anyhow!("SUMMARY_WARMUP is not days: {e}"))?;
-    let walk_start = start - warmup_days * 86_400 * 1_000_000_000;
+        .map_err(|e| anyhow!("SUMMARY_BURN_IN is not days: {e}"))?;
+    let walk_start = start - burn_in_days * 86_400 * 1_000_000_000;
 
     let mut source = mogwai_data::GeneratedSource::try_new_with_session_profile(
         profile.scalars.clone(),

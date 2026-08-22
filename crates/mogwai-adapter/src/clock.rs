@@ -492,7 +492,7 @@ pub async fn mogwai_clock_factory(
     )
     .context("create HTTP client")?;
     // The node clock only needs the affine map; the tape boundary in the
-    // `VenueClock` envelope is for the data client's warmup guard, not the clock.
+    // `VenueClock` envelope is for the data client's history guard, not the clock.
     let sim = fetch_clock(&http, http_base).await?.sim;
     Ok(move || {
         // `try_get_time_event_sender()` is re-read on EVERY clock creation (each

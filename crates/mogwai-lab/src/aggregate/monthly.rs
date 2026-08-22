@@ -665,6 +665,7 @@ pub fn aggregate_block4(sessions: &[&Value]) -> Value {
             serde_json::json!(present.iter().map(|c| ji(c, "residual_count")).sum::<i64>()),
         );
         rec.insert(
+            // The burn-in exclusion count, under its frozen artifact spelling.
             "warmup_excluded".into(),
             serde_json::json!(
                 present

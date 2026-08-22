@@ -520,7 +520,7 @@ EXCEPT the named one - the same pruning a cache write already does
 automatically, exposed for manual use. The token is named rather than derived,
 and `mogwai cache stats --entries` prints the ones present. A cache entry's
 provenance token binds the command that PRODUCED it (its kernel version, window
-start, length and warmup, and its own sub-contract hash), so a `cache`
+start, length and burn-in, and its own sub-contract hash), so a `cache`
 invocation has nothing to compute one from; `--stale` without `--keep` refuses
 rather than guessing. It used to guess - it folded its own argv into a token,
 matched nothing, and deleted the whole cache on the invocation meant to be the

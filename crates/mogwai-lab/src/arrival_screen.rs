@@ -701,12 +701,15 @@ impl ScreenContext {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../analysis/fingerprint.json");
         let fingerprint_hash = crate::ledger::sha256_file(&fingerprint_path)?;
         let measure_hash = crate::ledger::sha256_bytes(&measure_bytes);
+        // The burn-in prefix keeps its frozen `warmup` spelling here: this
+        // string is a provenance key over stored screen state, so respelling
+        // it would orphan every entry already written under it.
         let command = format!(
             "arrival-screen:kernel-version={}:start={}:length={}:warmup={}",
             mogwai_data::ARRIVAL_KERNEL_VERSION,
             binding.window_start_ns,
             binding.window_length_ns,
-            binding.warmup
+            binding.burn_in
         );
         let token = ProvenanceToken::compute(&ProvenanceInputs {
             crate_version: env!("CARGO_PKG_VERSION"),
@@ -778,7 +781,7 @@ impl ScreenContext {
             binding: GeneratedBinding {
                 window_start_ns: 0,
                 window_length_ns: 0,
-                warmup: "0s".into(),
+                burn_in: "0s".into(),
             },
             observed_projection,
             observed,
@@ -1514,11 +1517,11 @@ fn project_walk(
 ) -> Result<Projected, ProjectStop> {
     let start = binding.window_start_ns;
     let end = start.saturating_add(binding.window_length_ns);
-    let warmup_ns = u64::try_from(parse_duration(&binding.warmup).map_err(ProjectStop::Lab)?)
-        .map_err(|_| LabError::refusal("warmup duration is negative"))?;
+    let burn_in_ns = u64::try_from(parse_duration(&binding.burn_in).map_err(ProjectStop::Lab)?)
+        .map_err(|_| LabError::refusal("burn-in duration is negative"))?;
     let walk_start = start
-        .checked_sub(warmup_ns)
-        .ok_or_else(|| LabError::refusal("the warmup underflows the window start"))?;
+        .checked_sub(burn_in_ns)
+        .ok_or_else(|| LabError::refusal("the burn-in underflows the window start"))?;
     let mut scalars = profile.scalars.clone();
     let config = cell.config();
     // A refinement midpoint that leaves the section 16 domain is a refusal,
@@ -3601,15 +3604,15 @@ mod tests {
 
     #[test]
     fn the_mean_gap_counts_measured_parents_only() {
-        // Spec 3.3 step 6. Warmup parents are outside [start, end) and the
+        // Spec 3.3 step 6. Burn-in parents are outside [start, end) and the
         // terminal lookahead parent is never projected, so the realized gap is
         // (last measured - first measured) / (measured - 1).
         let day = 20_000_u64;
         let start = day * DAY_NS + OPEN_NS;
         let end = start + 60 * MINUTE_NS;
         let mut source = Scripted::of(vec![
-            (start - 10 * MINUTE_NS, 1), // warmup
-            (start - MINUTE_NS, 1),      // warmup
+            (start - 10 * MINUTE_NS, 1), // burn-in
+            (start - MINUTE_NS, 1),      // burn-in
             (start, 1),
             (start + 2 * MINUTE_NS, 1),
             (start + 6 * MINUTE_NS, 1),
@@ -3618,7 +3621,7 @@ mod tests {
         let projected = project_stream(&mut source, start, end, 0, 1).expect("a clean projection");
         assert_eq!(
             projected.parents, 3,
-            "warmup and lookahead are not measured"
+            "burn-in and lookahead are not measured"
         );
         assert!(
             projected
@@ -3675,7 +3678,7 @@ mod tests {
         ctx.binding = GeneratedBinding {
             window_start_ns: start,
             window_length_ns: 30 * MINUTE_NS,
-            warmup: "0s".into(),
+            burn_in: "0s".into(),
         };
         let cell = Cell::WallMmpp {
             occupancy: 0.3,

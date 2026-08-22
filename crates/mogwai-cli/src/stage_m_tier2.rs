@@ -1306,7 +1306,7 @@ fn controls(args: &ControlsArgs) -> anyhow::Result<()> {
         let seed = tuple_mix(INCUMBENT_SEED, &[i]);
         let walk_start = start
             .checked_sub(14 * 86_400_000_000_000)
-            .ok_or_else(|| anyhow!("control warmup underflow"))?;
+            .ok_or_else(|| anyhow!("control burn-in underflow"))?;
         let mut source = mogwai_data::GeneratedSource::try_new_with_session_profile(
             profile.scalars.clone(),
             seed,

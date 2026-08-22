@@ -38,7 +38,7 @@ use crate::subcontract::{
     FINAL_LENGTH, FINAL_SEEDS, FINAL_START_NS, GENERATED_SESSIONS_PER_SEED, JOB_ID,
     MIN_60S_CELL_RETURNS, MIN_300S_CELL_RETURNS, MIN_PARENT_CELL_RETURNS, MNQ_DOW_WEIGHT,
     SEARCH_LENGTH, SEARCH_SEEDS, SEARCH_START_NS, SESSION_ARRAY_DECIMALS, SESSION_HOUR_BAND,
-    SESSION_VOL_CORR_MIN, SUMMARY_WARMUP, TOP_MINUTE_RECORDS, VOL_GRID_POINTS, VOL_SCALAR_DOMAIN,
+    SESSION_VOL_CORR_MIN, SUMMARY_BURN_IN, TOP_MINUTE_RECORDS, VOL_GRID_POINTS, VOL_SCALAR_DOMAIN,
     subcontract_hash,
 };
 
@@ -470,7 +470,7 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
                     seed,
                     SEARCH_START_NS,
                     SEARCH_LENGTH,
-                    SUMMARY_WARMUP,
+                    SUMMARY_BURN_IN,
                 ) {
                     Ok(s) => raw.push(s),
                     // A failed walk is an infinite objective, exactly as the
@@ -722,7 +722,7 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
                     seed,
                     FINAL_START_NS,
                     FINAL_LENGTH,
-                    SUMMARY_WARMUP,
+                    SUMMARY_BURN_IN,
                 )?);
             }
             let p = pooled(&raw);
@@ -757,7 +757,7 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
                 seed,
                 FINAL_START_NS,
                 FINAL_LENGTH,
-                SUMMARY_WARMUP,
+                SUMMARY_BURN_IN,
             )?);
         }
         let p = pooled(&raw);
@@ -1254,13 +1254,13 @@ fn summary_for(
     seed: i64,
     start_ns: i64,
     length: &str,
-    warmup: &str,
+    burn_in: &str,
 ) -> LabResult<Value> {
-    if let Some(hit) = cache.get(overrides, seed, start_ns, length, warmup) {
+    if let Some(hit) = cache.get(overrides, seed, start_ns, length, burn_in) {
         return Ok(hit);
     }
-    let summary = run_summary_walk(scratch, overrides, seed, start_ns, length, warmup)?;
-    cache.put(overrides, seed, start_ns, length, warmup, &summary)?;
+    let summary = run_summary_walk(scratch, overrides, seed, start_ns, length, burn_in)?;
+    cache.put(overrides, seed, start_ns, length, burn_in, &summary)?;
     Ok(summary)
 }
 

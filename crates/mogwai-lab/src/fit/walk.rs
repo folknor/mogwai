@@ -16,6 +16,11 @@
 //!   re-walking them. Re-deriving the Python's key requires reproducing
 //!   `json.dumps(..., sort_keys=True)` byte-for-byte, floats included, which
 //!   is why `PyJson` below renders through `kernel::py_float_repr`.
+//!
+//! The hashed object's `warmup` member is therefore INHERITED AND FROZEN: it
+//! is a field of a historical serialization, and spelling it `burn_in` would
+//! miss all 10,192 entries. The Rust identifiers around it carry the burn-in
+//! vocabulary; the hashed bytes do not.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -73,16 +78,21 @@ fn dump_override(v: &OverrideValue, out: &mut String) {
     }
 }
 
-/// The Python-era cache key: `sha256` over
+/// The walk cache key: `sha256` over
 /// `json.dumps({"commit", "length", "overrides", "seed", "start_ns",
 /// "warmup"}, sort_keys=True)`. The key order below IS the sorted order.
+///
+/// The `warmup` member is the Python-era spelling and is frozen, because the
+/// same key resolves both cache layouts and the read-only one holds 10,192
+/// entries hashed under it. The parameter is the burn-in prefix; only the
+/// serialized field keeps the inherited name.
 #[must_use]
-pub fn python_cache_key(
+pub fn walk_cache_key(
     overrides: &Overrides,
     seed: i64,
     start_ns: i64,
     length: &str,
-    warmup: &str,
+    burn_in: &str,
     commit: &str,
 ) -> String {
     let mut s = String::from("{");
@@ -103,8 +113,9 @@ pub fn python_cache_key(
     s.push_str(&seed.to_string());
     s.push_str(", \"start_ns\": ");
     s.push_str(&start_ns.to_string());
+    // Inherited spelling, frozen: see this function's doc.
     s.push_str(", \"warmup\": ");
-    escape(warmup, &mut s);
+    escape(burn_in, &mut s);
     s.push('}');
     let mut h = Sha256::new();
     h.update(s.as_bytes());
@@ -189,14 +200,14 @@ impl WalkCache {
         seed: i64,
         start_ns: i64,
         length: &str,
-        warmup: &str,
+        burn_in: &str,
     ) -> Option<Value> {
-        let key = python_cache_key(
+        let key = walk_cache_key(
             overrides,
             seed,
             start_ns,
             length,
-            warmup,
+            burn_in,
             &self.python_commit,
         );
         if let Some(path) = self.python_path(&key)
@@ -226,18 +237,18 @@ impl WalkCache {
         seed: i64,
         start_ns: i64,
         length: &str,
-        warmup: &str,
+        burn_in: &str,
         summary: &Value,
     ) -> LabResult<()> {
         let Some(store) = &self.native else {
             return Ok(());
         };
-        let key = python_cache_key(
+        let key = walk_cache_key(
             overrides,
             seed,
             start_ns,
             length,
-            warmup,
+            burn_in,
             &self.python_commit,
         );
         store
@@ -246,7 +257,7 @@ impl WalkCache {
     }
 }
 
-/// `--length`/`--warmup` grammar: `<n><unit>`, unit one of s m h d w mo y.
+/// `--length`/`--burn-in` grammar: `<n><unit>`, unit one of s m h d w mo y.
 /// A faithful reading of `mogwai gen`'s own parser, which the Python drove
 /// through the CLI.
 pub fn parse_duration(s: &str) -> LabResult<i64> {
@@ -270,7 +281,7 @@ pub fn parse_duration(s: &str) -> LabResult<i64> {
 
 /// One in-process `gen --type summary` walk: resolve the scratch profile
 /// through the venue's own `Config::load` (the SAME path the Python's
-/// `--config` walks took), build the generator at `start - warmup`, and fold
+/// `--config` walks took), build the generator at `start - burn-in`, and fold
 /// the tick stream through `summary::summarize`.
 pub fn run_summary_walk(
     scratch_dir: &Path,
@@ -278,21 +289,21 @@ pub fn run_summary_walk(
     seed: i64,
     start_ns: i64,
     length: &str,
-    warmup: &str,
+    burn_in: &str,
 ) -> LabResult<Value> {
     let len_ns = parse_duration(length)?;
-    let warm_ns = parse_duration(warmup)?;
+    let burn_in_ns = parse_duration(burn_in)?;
     let end = start_ns + len_ns;
-    let walk_start = start_ns - warm_ns;
+    let walk_start = start_ns - burn_in_ns;
     if walk_start < 0 {
         return Err(LabError::refusal(
-            "the warmup underflows the start; the walk must begin at exactly start - warmup",
+            "the burn-in underflows the start; the walk must begin at exactly start - burn-in",
         ));
     }
     std::fs::create_dir_all(scratch_dir)?;
     let config_path = scratch_dir.join(format!(
         "candidate-{}.toml",
-        &python_cache_key(overrides, seed, start_ns, length, warmup, "in-process")[..16]
+        &walk_cache_key(overrides, seed, start_ns, length, burn_in, "in-process")[..16]
     ));
     std::fs::write(&config_path, scratch_config_text(overrides))?;
     let profile = profile_from_config(&config_path)?;
@@ -364,11 +375,11 @@ mod tests {
         assert_eq!(profile.def.symbol.as_ref(), "MNQ");
     }
 
-    /// The Python's key derivation, pinned on a small hand-checkable set.
-    /// The live proof is the parity gate, which resolves every one of the
-    /// protocol-11 run's cached walks by this key.
+    /// The key derivation, pinned on a small hand-checkable set, inherited
+    /// `warmup` member included. The live proof is the parity gate, which
+    /// resolves every one of the protocol-11 run's cached walks by this key.
     #[test]
-    fn the_python_cache_key_renders_sorted_keys_and_repr_floats() {
+    fn the_walk_cache_key_renders_sorted_keys_and_repr_floats() {
         let mut ov: Overrides = Overrides::new();
         ov.insert("generator.vol_scalar".into(), OverrideValue::Float(1e-8));
         ov.insert(
@@ -384,7 +395,7 @@ mod tests {
         let mut h = Sha256::new();
         h.update(s.as_bytes());
         assert_eq!(
-            python_cache_key(&ov, 1, 5, "7d", "3d", "abc"),
+            walk_cache_key(&ov, 1, 5, "7d", "3d", "abc"),
             crate::ledger::hex_digest(&h.finalize())
         );
     }

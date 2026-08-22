@@ -8,13 +8,13 @@
 //! is the 12a copy and lives in this crate; `mogwai_lab::arrival_control::control_generated_pass`
 //! is the control's copy and lives in the lab, which cannot depend on the CLI.
 //! Nothing in the type system holds them together, so this test does: it drives
-//! both at the SAME window, warmup and seed with no curve override, and asserts
+//! both at the SAME window, burn-in and seed with no curve override, and asserts
 //! the two `GeneratedAcc` records are equal once the wall-clock `cost` block -
 //! the one field that is legitimately allowed to differ between two runs of the
 //! same tape - is removed from each.
 //!
 //! ITS PREMISE IS A SEPARATE, UNIGNORED TEST. The equality pin's inputs - the
-//! window, its length and the warmup - are the half most likely to drift, and
+//! window, its length and the burn-in - are the half most likely to drift, and
 //! they are the half that is genuinely cross-checked here: the lab side reads
 //! them from the committed 12a artifact, `run_final_walk` from
 //! `mogwai_lab::subcontract`'s constants. Leaving that comparison inside the
@@ -66,11 +66,11 @@ fn committed_binding() -> GeneratedBinding {
 /// The equality pin is `#[ignore]`d at roughly ten minutes, so until this
 /// existed the only cross-check between the two sides' INPUTS lived inside a
 /// gate nobody runs by accident - and the inputs are the drift-prone half.
-/// The lab side takes its window, length and warmup from the COMMITTED
+/// The lab side takes its window, length and burn-in from the COMMITTED
 /// artifact; `run_final_walk` takes them from `mogwai_lab::subcontract`'s
 /// constants. So this is not two copies pinned against each other: it is
 /// committed bytes against code, and changing `FINAL_LENGTH` or
-/// `SUMMARY_WARMUP` without regenerating the artifact fires here in
+/// `SUMMARY_BURN_IN` without regenerating the artifact fires here in
 /// microseconds instead of surfacing ten minutes later as an opaque diff of
 /// two 20 KB accumulator records blaming the exposure contract.
 ///
@@ -102,9 +102,9 @@ fn the_committed_binding_carries_the_window_run_final_walk_measures() {
         "the committed binding's window length is not the one run_final_walk measures"
     );
     assert_eq!(
-        binding.warmup,
-        mogwai_lab::subcontract::SUMMARY_WARMUP,
-        "the committed binding's warmup is not the one run_final_walk walks"
+        binding.burn_in,
+        mogwai_lab::subcontract::SUMMARY_BURN_IN,
+        "the committed binding's burn-in is not the one run_final_walk walks"
     );
 }
 

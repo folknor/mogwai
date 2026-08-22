@@ -2422,7 +2422,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   the last parent's `child_count` truncated at the window close - with the mode
   carrying zero tests of any kind. It now has one, at the `write_trace` seam
   inside `gen.rs`; nothing exercises the argv (`--trace-from`/`--trace-until`
-  parsing, the four-part window validation, the `--interval`/`--warmup`
+  parsing, the four-part window validation, the `--interval`/`--burn-in`
   rejections) through the shipped binary the way `presets_cli.rs` does for
   `presets`. The window validation in particular admits `until == end`, which is
   the case the defect lived in, and no test states that it is legal.

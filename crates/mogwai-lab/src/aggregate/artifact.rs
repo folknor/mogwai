@@ -189,9 +189,12 @@ pub fn assemble_measure12a_body(
         }
     }
 
-    // diagnostics.warmup_exclusions: summed by hour (as a string key, the
-    // Python dict-with-int-keys JSON-serializes the same way), over every
-    // hour any session's block4 carries other than the literal "all".
+    // diagnostics.warmup_exclusions: the burn-in exclusion counts, summed by
+    // hour (as a string key, the Python dict-with-int-keys JSON-serializes the
+    // same way), over every hour any session's block4 carries other than the
+    // literal "all". The `warmup` spelling in this artifact and in the block4
+    // cells it reads is INHERITED AND FROZEN: every committed measurement
+    // carries it, and the parity gate reproduces those artifacts key for key.
     let mut hours: BTreeSet<i64> = BTreeSet::new();
     for rec in &per_session {
         if let Some(b4) = rec.get("block4").and_then(Value::as_object) {
@@ -204,7 +207,7 @@ pub fn assemble_measure12a_body(
             }
         }
     }
-    let mut warmup_exclusions = serde_json::Map::new();
+    let mut burn_in_exclusions = serde_json::Map::new();
     for h in hours {
         let key = h.to_string();
         let mut sum = 0i64;
@@ -216,7 +219,7 @@ pub fn assemble_measure12a_body(
                     .unwrap_or(0);
             }
         }
-        warmup_exclusions.insert(key, serde_json::json!(sum));
+        burn_in_exclusions.insert(key, serde_json::json!(sum));
     }
 
     // binding: observed's binding fields with binding_extra layered on top
@@ -247,7 +250,7 @@ pub fn assemble_measure12a_body(
         "ladder": measurement.ladder.ladder_json(),
         "cost": cost,
         "diagnostics": {
-            "warmup_exclusions": Value::Object(warmup_exclusions),
+            "warmup_exclusions": Value::Object(burn_in_exclusions),
             "refused_cells": refused_cells,
             "empty_bins": empty_bins,
             "worsening_23": measurement.worsening_23_json(),
@@ -426,6 +429,7 @@ const B3_CELL_KEYS: &[&str] = &["return_count", "robust_scale", "rms_scale"];
 const B3_PAIR_KEYS: &[&str] = &["window_count", "vr", "cov_contrib", "cov_contrib_norm"];
 const B4_CELL_KEYS: &[&str] = &[
     "residual_count",
+    // The burn-in exclusion count, under its frozen artifact spelling.
     "warmup_excluded",
     "zero_fraction",
     "nz_abs_p90",

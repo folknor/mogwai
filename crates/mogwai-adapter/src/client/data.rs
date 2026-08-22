@@ -803,7 +803,7 @@ impl DataClient for MogwaiDataClient {
                     tracing::warn!(
                         %symbol,
                         trades = trades.len(),
-                        "request_trades: window truncated before its end (trade limit reached or same-ts wedge); the warmup/live splice may not be contiguous"
+                        "request_trades: history window truncated before its end (trade limit reached or same-ts wedge); the requested history may not splice contiguously into live"
                     );
                 }
                 trades
@@ -933,12 +933,12 @@ impl DataClient for MogwaiDataClient {
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
         let end = date_to_unix_nanos(request.end);
-        // Refuse an off-tape warmup window at the boundary, naming the floor -
+        // Refuse an off-tape history window at the boundary, naming the floor -
         // but ANSWER it, for the reason spelled out in `request_trades`: a
         // synchronous `Err` is logged by the data engine and never turned into
-        // a response, so `?` here would hang the warmup rather than refuse it.
+        // a response, so `?` here would leave the history request unresolved.
         if let Err(err) = ensure_on_tape(start, self.data_origin_ns) {
-            tracing::error!(error = %err, "request_bars: refusing an off-tape warmup window; answering with an empty bar response so the request resolves");
+            tracing::error!(error = %err, "request_bars: refusing an off-tape history window; answering with an empty bar response so the request resolves");
             drop(
                 sink.send(DataEvent::Response(DataResponse::Bars(BarsResponse::new(
                     request.request_id,
@@ -958,18 +958,20 @@ impl DataClient for MogwaiDataClient {
             let symbol = symbol_from_instrument(instrument_id);
             // Page the window, translating nautilus's BAR-count limit into a
             // bar-span pagination target: the old single request applied a
-            // BAR-count limit as a TRADE-page limit, so a warmup for N bars
-            // fetched at most N trades (~N/5 bars on the fitted tape) covering
-            // only the oldest edge, under-delivering or timing out the warmup.
+            // BAR-count limit as a TRADE-page limit, so a history request for
+            // N bars fetched at most N trades (~N/5 bars on the fitted tape)
+            // covering only the oldest edge, under-delivering or timing out
+            // the history request.
             let bar_limit = request.limit.map(std::num::NonZeroUsize::get);
             let interval = get_bar_interval_ns(&request.bar_type).as_u64();
             // Every exit from this block yields bars, so the response below is
             // ALWAYS sent. A failure arm used to `return` straight out of the
             // task, which left the nautilus request unresolved forever: from the
             // consumer that is indistinguishable from a hang, and it burns the
-            // whole warmup timeout before dying with nothing but a line in the
-            // worker log to show for it. An empty response is a truthful answer
-            // that at least RESOLVES; the error detail rides the log.
+            // whole history-request timeout before dying with nothing but a
+            // line in the worker log to show for it. An empty response is a
+            // truthful answer that at least RESOLVES; the error detail rides
+            // the log.
             let bars: Vec<Bar> = 'bars: {
                 let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
                 {
@@ -1002,7 +1004,7 @@ impl DataClient for MogwaiDataClient {
                 if truncated {
                     tracing::warn!(
                         %symbol,
-                        "request_bars: window truncated before its end (bar limit reached or same-ts wedge); the warmup may not splice contiguously into live"
+                        "request_bars: history window truncated before its end (bar limit reached or same-ts wedge); the requested history may not splice contiguously into live"
                     );
                 }
                 let mut bars = aggregate_bars(&request.bar_type, &trades, &def, sim, end);
@@ -1036,9 +1038,9 @@ impl DataClient for MogwaiDataClient {
                         produced = bars.len(),
                         trades = trades.len(),
                         "request_bars: the window is on-tape but produced fewer bars than requested; \
-                         mogwai's synthetic tape has multi-hour arrival droughts, so a short warmup \
+                         mogwai's synthetic tape has multi-hour arrival droughts, so a short history \
                          window can legitimately be sparse or empty - widen the window, lower the bar \
-                         interval, or let the venue run further past its epoch before starting the warmup"
+                         interval, or let the venue run further past its epoch before starting the history request"
                     );
                 }
                 bars
@@ -1512,7 +1514,8 @@ fn aggregate_bars(
     // elapsed. A window's bar is otherwise emitted lazily, when a LATER trade
     // crosses its `close_ts` - but a historical request over a window that has
     // already passed gets no such trade, so the newest COMPLETE window would be
-    // silently dropped (the always-stale/missing last bar of every warmup). If
+    // silently dropped (the always-stale or missing last bar of every history
+    // request). If
     // `end >= acc.close_ts` the window closed within the requested range and
     // must be emitted; a genuinely-partial trailing window (`end` inside it, or
     // an unknown `end`) is still dropped, matching the live path.
@@ -1669,7 +1672,7 @@ async fn fetch_trades_windowed(
             // LOUD, because "visibly" was not true where it matters. This
             // returns a SHORT history with no error, and a consumer that folds
             // bars from trades cannot tell that from a window which legitimately
-            // ended - it reaches a strategy as a quiet warmup, which is the
+            // ended: it reaches a strategy as a quiet history response, which is the
             // shape this venue has been caught in twice already (the masked
             // history refusal, and `FeedLagged` having no channel but a log).
             // The venue's own tape cannot produce this - trades on one river are

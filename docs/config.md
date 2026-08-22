@@ -102,13 +102,15 @@ seconds. The cap bounds resident pages, and a waiter holds no page, so waiting
 costs the bound nothing - while refusing cost the consumer a great deal. This is
 not a preference about politeness: a nautilus host's historical-response types
 carry no error channel, so an adapter's only alternative to an unresolvable hang
-is to resolve the request EMPTY and log why. A refused warmup therefore reaches
-a strategy as a QUIET WINDOW, indistinguishable from a tape that genuinely
-printed nothing, and the run reasons about a market it was never shown.
+is to resolve the request EMPTY and log why. A refused history request therefore
+reaches a strategy as a QUIET WINDOW, indistinguishable from a tape that
+genuinely printed nothing, and the run reasons about a market it was never
+shown.
 
-That mattered more than the headline suggested, because one warmup is not one
-request: the venue serves no bars, so a consumer pages `/trades` and aggregates
-locally, and the attach topology exists to point tens of runs at one venue. A
+That mattered more than the headline suggested, because one history request is
+not one request: the venue serves no bars, so a consumer pages `/trades` and
+aggregates locally, and the attach topology exists to point tens of runs at one
+venue. A
 boot storm is dozens of runs taking dozens of sequential pages against four
 slots, so ordinary paging fired the gate constantly and silently.
 

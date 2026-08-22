@@ -134,11 +134,11 @@ fn parity12a_observed_per_session_matches_the_committed_artifact() {
 
 /// One FINAL walk, constructed exactly the way `gen.rs`'s `build_source`
 /// does: the committed MNQ preset, no overrides, the walk starting at
-/// `FINAL_START_NS - SUMMARY_WARMUP` with the vol trace enabled, measuring
+/// `FINAL_START_NS - SUMMARY_BURN_IN` with the vol trace enabled, measuring
 /// `[FINAL_START_NS, FINAL_START_NS + FINAL_LENGTH)`.
 fn run_final_walk(seed: u64) -> serde_json::Value {
     use mogwai_data::{TickEvent, TickSource};
-    use mogwai_lab::subcontract::{FINAL_LENGTH, FINAL_START_NS, SUMMARY_WARMUP};
+    use mogwai_lab::subcontract::{FINAL_LENGTH, FINAL_START_NS, SUMMARY_BURN_IN};
 
     let profile = mogwai_venue::config::profile_from_preset("MNQ")
         .expect("the committed MNQ preset resolves");
@@ -154,11 +154,11 @@ fn run_final_walk(seed: u64) -> serde_json::Value {
         .parse()
         .expect("FINAL_LENGTH is seconds");
     let end = start + length_s * 1_000_000_000;
-    let warmup_days: u64 = SUMMARY_WARMUP
+    let burn_in_days: u64 = SUMMARY_BURN_IN
         .trim_end_matches('d')
         .parse()
-        .expect("SUMMARY_WARMUP days");
-    let walk_start = start - warmup_days * 86_400 * 1_000_000_000;
+        .expect("SUMMARY_BURN_IN days");
+    let walk_start = start - burn_in_days * 86_400 * 1_000_000_000;
 
     let mut source = mogwai_data::GeneratedSource::try_new_with_session_profile(
         profile.scalars.clone(),

@@ -230,7 +230,7 @@ pub struct ControlWalk {
 pub struct GeneratedBinding {
     pub window_start_ns: u64,
     pub window_length_ns: u64,
-    pub warmup: String,
+    pub burn_in: String,
 }
 impl GeneratedBinding {
     pub fn from_measure12a(a: &Value) -> LabResult<Self> {
@@ -242,7 +242,8 @@ impl GeneratedBinding {
             window_length_ns: g["window_length_ns"].as_u64().ok_or_else(|| {
                 LabError::refusal("binding.generated.window_length_ns is missing")
             })?,
-            warmup: g["warmup"]
+            // The burn-in prefix, under the binding's frozen `warmup` key.
+            burn_in: g["warmup"]
                 .as_str()
                 .ok_or_else(|| LabError::refusal("binding.generated.warmup is missing"))?
                 .to_string(),
@@ -264,7 +265,7 @@ impl GeneratedBinding {
 /// (the ratio measurement) and `Some(new_curve)` for the corrected one (the
 /// judgement). The exposure is 12b section 8, read FROM the 12a binding rather
 /// than restated: MNQ, no divergence, regime neutral, vol trace on, the walk
-/// starting at `window_start - warmup` and the half-open measured window.
+/// starting at `window_start - burn_in` and the half-open measured window.
 pub fn control_walk(
     scratch_dir: &Path,
     binding: &GeneratedBinding,
@@ -290,7 +291,7 @@ pub fn control_walk(
         seed as i64,
         binding.window_start_ns as i64,
         &binding.length_arg()?,
-        &binding.warmup,
+        &binding.burn_in,
     )?;
     Ok(ControlWalk {
         seed,
@@ -313,7 +314,7 @@ pub fn control_walk(
 /// resolved through the shipped MNQ preset, with
 /// `calendar.utc_offset_minutes` as the accumulator's hour offset,
 /// `scalars.modal_tick` as its tick size, the vol trace enabled before the
-/// loop, the walk starting at `window_start - warmup` and the half-open
+/// loop, the walk starting at `window_start - burn_in` and the half-open
 /// measured window. The scratch `[instrument.override]` curve is the ONLY
 /// intended difference, and it applies to the corrected-curve pass alone.
 pub fn control_generated_pass(
@@ -347,13 +348,13 @@ pub fn control_generated_pass(
         .calendar
         .as_ref()
         .ok_or_else(|| LabError::refusal("the MNQ preset carries no session calendar"))?;
-    let warm_ns = u64::try_from(parse_duration(&binding.warmup)?)
-        .map_err(|_| LabError::refusal("the warmup is negative"))?;
+    let burn_in_ns = u64::try_from(parse_duration(&binding.burn_in)?)
+        .map_err(|_| LabError::refusal("the burn-in is negative"))?;
     let start = binding.window_start_ns;
     let end = start + binding.window_length_ns;
     let walk_start = start
-        .checked_sub(warm_ns)
-        .ok_or_else(|| LabError::refusal("the warmup underflows the start"))?;
+        .checked_sub(burn_in_ns)
+        .ok_or_else(|| LabError::refusal("the burn-in underflows the start"))?;
     let mut source = mogwai_data::GeneratedSource::try_new_with_session_profile(
         profile.scalars.clone(),
         seed,
@@ -652,7 +653,7 @@ mod tests {
         let whole = GeneratedBinding {
             window_start_ns: 0,
             window_length_ns: 2_674_800_000_000_000,
-            warmup: "3d".into(),
+            burn_in: "3d".into(),
         };
         assert_eq!(whole.length_arg().unwrap(), "2674800s");
         let partial = GeneratedBinding {
@@ -847,7 +848,7 @@ mod tests {
         let binding = GeneratedBinding {
             window_start_ns: 1_782_856_800_000_000_000,
             window_length_ns: 86_400_000_000_000,
-            warmup: "0s".into(),
+            burn_in: "0s".into(),
         };
         // The workspace scratch, not a relative `target/`: a unit test's
         // working directory is its crate, so the relative form wrote

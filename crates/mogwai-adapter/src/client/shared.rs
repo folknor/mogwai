@@ -592,11 +592,11 @@ pub(crate) fn date_to_unix_nanos(date: Option<jiff::Timestamp>) -> Option<UnixNa
         UnixNanos::from(u64::try_from(ns).unwrap_or(if ns < 0 { 0 } else { u64::MAX }))
     })
 }
-/// Refuse an off-tape warmup BEFORE spending a round trip on it. A `start`
-/// below the published `data_origin` can never be served (the tape begins at the
-/// origin), so the round trip can only end in a venue `400` - or, against a
-/// venue that does not refuse, an empty `200` the warmup cannot tell from "no
-/// trades happened". Failing here, naming both the requested start and the
+/// Refuse an off-tape history request BEFORE spending a round trip on it. A
+/// `start` below the published `data_origin` can never be served (the tape
+/// begins at the origin), so the round trip can only end in a venue `400` - or,
+/// against a venue that does not refuse, an empty `200` the history request
+/// cannot tell from "no trades happened". Failing here, naming both the requested start and the
 /// floor, turns that into a loud, surfaced error at the request boundary
 /// instead of a silent doomed fetch.
 ///

@@ -297,9 +297,9 @@ struct OpenParent {
 }
 
 /// Fold the tick stream into the summary. Accumulation covers exactly
-/// `[start, end)` by each parent's FIRST child timestamp; a warm-up walk
+/// `[start, end)` by each parent's FIRST child timestamp; a burn-in walk
 /// before `start` is consumed and discarded. The source must already sit at
-/// its walk start (possibly `start - warmup`).
+/// its walk start (possibly `start - burn_in`).
 pub fn summarize(
     source: &mut dyn TickSource,
     profile: &mogwai_venue::source::InstrumentProfile,
@@ -436,7 +436,7 @@ pub fn summarize(
         .collect();
     let mut last_mid: Option<f64> = None;
     // The as-of mid AT `start`, frozen when the first post-start quote
-    // arrives: the first boundary's window opens at `start`, and a warm-up
+    // arrives: the first boundary's window opens at `start`, and a burn-in
     // quote at or before it is its legitimate as-of observation. The flag
     // marks the freeze, because the frozen VALUE is legitimately None when
     // no quote precedes `start` - an Option's is_none cannot distinguish

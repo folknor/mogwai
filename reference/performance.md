@@ -397,11 +397,11 @@ all properties of what is RESIDENT, and a caller waiting for a slot holds no
 page - but a fifth request now blocks for up to `HISTORY_SLOT_WAIT` rather
 than taking a `503`. The reason is consumer-side and not a performance one: a
 refusal reaches a nautilus host as an EMPTY window, because its historical
-response types carry no error channel, so a refused warmup was indistinguishable
-from a quiet tape. The gate's own overhead figure above is the uncontended path
-and is unaffected; what a contended caller now pays is queueing latency bounded
-by the deadline, and nothing has measured that under a real mass-attach boot
-storm because nobody has run one. `MAX_QUEUED_HISTORY_REQUESTS` is the
+response types carry no error channel, so a refused history request was
+indistinguishable from a quiet tape. The gate's own overhead figure above is the
+uncontended path and is unaffected; what a contended caller now pays is queueing
+latency bounded by the deadline, and nothing has measured that under a real
+mass-attach boot storm because nobody has run one. `MAX_QUEUED_HISTORY_REQUESTS` is the
 fail-fast bound that keeps the queue itself from being unbounded, and it is
 chosen rather than measured for the same reason.
 
