@@ -520,15 +520,18 @@ group by any other route has no API for it, and none is owed until one is wanted
   SESSION is a three-way collision and the worst of the three cases: (1) the
   self-asserted socket identity, (2) the TRADING session - calendar,
   session classes, Asia session - which is domain-standard vocabulary and not
-  ours to rename, and (3) a socket's served TENURE (`SocketSession`,
-  `session_guard`, the completion family's "this socket was a live session").
+  ours to rename, and (3) a socket's served TENURE - the socket-owned state
+  object, its shutdown guard, and the completion family's "this socket was a
+  live session".
   SENSE 1 LANDED 2026-08-21 as round 4 of the arc: it is a `callsign`, and the
   wire parameter followed as a designed break, so the identity is carried on
   `/ws?callsign=` and the old key is refused rather than ignored. Sense 2 keeps
   the word, which is the ruling's own ground - the operator surface spends
   `session` on the trading day roughly sixty times against the socket sense's
-  six. SENSE 3 IS STILL OPEN and is internal and free, awaiting a word from the
-  owner; the sites are listed in `notes/glossary-reconciliation.md`.
+  six. SENSE 3 LANDED 2026-08-22 with the passenger re-cut: a socket's served
+  tenure is a `Passenger`, and `passenger_guard`, `passengers_tx` and
+  `passengers_drained` carry the tenure machinery. Nothing here is open; the
+  rounds are recorded in `notes/glossary-reconciliation.md`.
 
 - `reject_while_closed` JUDGES MARKETABILITY AGAINST THE STATED PRICE while the
   engine judges it against the BAND-DRAWN trigger, so the two can disagree by
@@ -647,9 +650,9 @@ group by any other route has no API for it, and none is owed until one is wanted
   `SubmitOrder` rather than a `Decimal`, which is a signature change through
   `http.rs`; stated at the site and left alone until the cap matters enough.
 
-- AN EQUITY SELL'S RESERVATION STILL HANDS THE SAME HELD SHARES TO EVERY RESTING
+- AN EQUITY SELL'S HOLD STILL HANDS THE SAME HELD SHARES TO EVERY RESTING
   SELL, filed by the `notes/bugs-engine.md` round-2 fix pass as the residual of
-  finding 9. `Engine::order_reservation`'s margin-equity sell arm computes
+  finding 9. `Engine::order_hold`'s margin-equity sell arm computes
   `uncovered = leaves - max(0, net_position)`, so a margin account holding 100
   shares with two resting sells of 100 posts collateral for neither, where the
   worst fill order leaves it short 100. ADMISSION IS NOW CORRECT -
@@ -657,16 +660,16 @@ group by any other route has no API for it, and none is owed until one is wanted
   is accepted that the account cannot post for - and what is left is
   the HOLD carried between acceptance and fill.
   NOT FIXED BECAUSE THE OBVIOUS FIX BREAKS A DIFFERENT INVARIANT.
-  `order_reservation` is per-order BY CONSTRUCTION: `Engine`'s incremental
-  `order_locked` cache adds and removes one order's entry at a time, and
-  `reconcile_order_locked` panics on any drift from a fresh fold. Any formula
-  that reads the OTHER resting sells makes one order's reservation a function of
+  `order_hold` is per-order BY CONSTRUCTION: `Engine`'s incremental
+  `order_holds` cache adds and removes one order's entry at a time, and
+  `reconcile_order_holds` panics on any drift from a fresh fold. Any formula
+  that reads the OTHER resting sells makes one order's hold a function of
   the book, so removing one order silently changes another's entry and the debug
   reconciliation fires. Closing this properly means moving the cover allocation
   out of the per-order derivation and into the aggregate, which is a redesign of
   the cache rather than an edit to the formula - and the report's own suggested
   expression does not do it either, since summing
-  `leaves - max(0, net - other_sells)` over both sells reserves for 200.
+  `leaves - max(0, net - other_sells)` over both sells holds for 200.
   There is also a product call inside it: what a venue SHOULD hold against a
   covered sell that another resting sell might consume first is a policy
   question, not only an arithmetic one.
@@ -1136,8 +1139,8 @@ group by any other route has no API for it, and none is owed until one is wanted
 - NAUTILUS HAS NO CHANNEL FOR A DECLARED FEED GAP, so mogwai's `FeedLagged`
   can only reach a host as a log line. CROSS-REPO, and written for a reader who
   has not seen the bug loop.
-  The MOGWAI venue tells a client, explicitly and with a count, when it dropped
-  market-data or execution frames for that client: `ServerMessage::FeedLagged`
+  The MOGWAI venue tells a consumer, explicitly and with a count, when it
+  dropped market-data or execution frames for it: `VenueMessage::FeedLagged`
   carries `skipped` and `sim_now_ns`. That is a strictly better signal than
   most real venues give, and the adapter has nowhere to put it. Nautilus's
   `DataEvent` enum (`common/src/messages/mod.rs`) is `Response`, `Data`,
@@ -2488,7 +2491,7 @@ the halt that a native Pine trailing leg used to cause is gone for both shapes.
 The venue derives the limit price from a `limit_offset`, so they must send that
 offset and NOT a price.
 ONE MORE BREAK FOR THE SAME MESSAGE, 2026-08-18: an expired order now reports
-`ServerMessage::OrderExpired` with a terminal `Expired` status where it reported
+`VenueMessage::OrderExpired` with a terminal `Expired` status where it reported
 `OrderCanceled` before. A consumer matching the wire enum exhaustively stops
 compiling, and one matching loosely stops seeing its `Day` and `Gtd` orders end
 at all - the second is the dangerous reading and the reason this belongs in the
@@ -2765,18 +2768,22 @@ over one river share the whole checkpoint chain underneath.
 
 #### What that costs, measured against this checkout
 
-THE PASSENGER SIDE. `SocketQuery` is exactly `symbol`, `speed`, `duration_ms` under
-`deny_unknown_fields`, so `?account=` is not ignored - it is a hard `400` that
-refuses the connection outright. `SocketSession` carries no account. `Engine`
-holds one `account_id` and one `Account`, with one balances map and one positions
-map for the whole process. So N subagents on one exchange today share one balance
-and one position book, and every subagent's fills move every other subagent's
-net. For broadarrow that is not merely untidy: an account move it cannot
+THE PASSENGER SIDE, AND THIS HALF HAS SINCE LANDED: `SocketQuery` now carries an
+`account`, and the socket's own state object carries the account it resolved
+before the upgrade. What follows is the measurement as it stood, kept because the
+cost argument below it is what bought the work. At that checkout `SocketQuery`
+was exactly `symbol`, `speed`, `duration_ms` under `deny_unknown_fields`, so
+`?account=` was not ignored - it was a hard `400` that refused the connection
+outright, and the socket-owned state carried no account. `Engine`
+held one `account_id` and one `Account`, with one balances map and one positions
+map for the whole process. So N subagents on one exchange then shared one balance
+and one position book, and every subagent's fills moved every other subagent's
+net. For broadarrow that was not merely untidy: an account move it cannot
 attribute to one of its own strategies is exactly what the per-bar attribution
-guard HALTS on, so the shared exchange currently fails closed rather than
-producing wrong numbers. That is the right failure and it costs nothing today,
-since the default mode never reaches it - one connection per venue has no second
-account to be confused with.
+guard HALTS on, so the shared exchange failed closed rather than producing wrong
+numbers. That was the right failure and it cost nothing at the time, since the
+default mode never reached it - one connection per venue has no second account
+to be confused with.
 
 FUNDING IS NAMED BY THE CLIENT. Recorded here as the consumer-side view; the
 ruling and its full surface are in the account-policy item above. `[balances]`

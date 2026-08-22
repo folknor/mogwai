@@ -1496,6 +1496,85 @@ RAISED AND DELIBERATELY LEFT, recorded so a later round does not re-file it:
   composer's own header comment invoke, and it charts both a composed river and
   a generated one. The tool name is established and no round took a break on it.
 
+**Phase 5, the conformance gate, 2026-08-22.**
+`crates/mogwai-data/tests/glossary_vocabulary_prose.rs` walks the repository for
+the spellings this arc retired and fails naming file, line, spelling and the
+word that replaced it. It is built beside `tape_version_prose.rs` and inherits
+that gate's shape: the document set is discovered by walking rather than listed,
+symlinks are not followed, an unreadable directory fails the gate rather than
+being skipped, and a walk that finds implausibly few files refuses instead of
+certifying a partial scan.
+
+It scans `.md`, `.rs`, `.toml`, `.py` and `.sh`, which is where every drift this
+arc found actually landed. Extensionless files are NOT scanned, so `.gitignore`
+- which carried a stale sentence in rounds 1 and 11 - is outside it; both of
+those were bare words no gate of this shape could have caught anyway.
+
+NEVER A BARE WORD. Every entry is an old identifier, an old operator spelling
+or a phrase whose former meaning has no live use. The sense-scoped words this
+arc deliberately left in place - `session`, `ledger`, `tape`, `warmup`,
+`reservation`, `admission`, `seat`, `template` - are not banned, because each
+still has a live sense and a bare-word ban would refuse the sense that won. For
+the same reason the verb `diverge` and the adjective `divergent` are not
+scanned: round 10 ruled they stay as ordinary English, and only the noun moved.
+
+THE EXEMPTIONS ARE CUT IN TWO SHAPES, and that is the cold review's finding
+rather than the first design. A whole-file exemption on a live production file
+is the vacuous-gate shape - it reads as gated while any retired spelling
+introduced anywhere in that file passes silently - and the first draft exempted
+`config.rs`, `ws.rs` and `count_curve.rs` outright. An exemption is now a PAIR
+of path and spelling, applied at match time: `config.rs` for
+`server_heartbeat_ms`, `ws.rs` for the retired identity query key,
+`count_curve.rs` for the frozen `first_divergence` artifact key, and for nothing
+else. Whole-file exemptions survive only where nothing in the file is live
+vocabulary: the three frozen documents the frozen-document rule names, the arc's
+own records, the owner's untracked probe, this gate's own data table, and the
+generated or vendored trees. `DATA-PURCHASE-REPORT.md` carries no retired
+spelling and therefore gets no exemption; giving it one pre-emptively would have
+been an exemption nobody could tell from a live one.
+
+AND A SCOPED EXEMPTION MUST STILL MATCH SOMETHING. A carve-out that matches
+nothing is indistinguishable from one that is load-bearing, and a mistyped path
+exempts nothing while reading as though it exempts something, so the gate fails
+on an exemption it never used.
+
+THE WALK SKIPS EVERY DOT-DIRECTORY, which is not tidiness. `.gitignore` puts
+`.agents`, `.brokkr`, `.claude`, `.codex` and `.plans` outside the repository
+while leaving them squarely inside a filesystem walk, and agent scratch state is
+exactly where a retired spelling lives legitimately.
+
+BITE-CHECKED FOUR WAYS, all as text edits, all three sweeps red each time.
+A `SocketSession` planted in `run.rs` fails on the drift assertion naming
+`crates/mogwai-venue/src/run.rs:3`. A `ServerMessage` planted in `config.rs` -
+a file exempt only for the heartbeat key, one line under the exempt site that
+went on passing - fails the same way, which is the whole of the P2 repair
+demonstrated. A scoped exemption pointed at a path that does not exist fails on
+drift at the real file. An exemption naming a real file that carries no such
+spelling fails on the unexercised-exemption assertion, which is the only one of
+the four the drift assertion cannot reach.
+
+THE GATE EARNED ITS PLACE ON DAY ONE: its first scan found six live drift sites,
+all in `notes/todo.md`. Adjudicated as real drift rather than history, on the
+ground that todo items are instructions to future workers and the file's own
+rule removes completed items, so it must be current. Two `SocketSession` sites -
+the session collision's sense-3 paragraph, which still called the tenure sense
+open when round 9 closed it, and a broadarrow cost paragraph. Two
+`order_reservation` sites in the equity-sell hold item, which took `order_hold`,
+`order_holds` and `reconcile_order_holds` with them. Two `ServerMessage` sites,
+one of them inside a message-to-broadarrow block: it states what the wire does
+NOW rather than recording a past rename, so sending it spelled the old way would
+hand a consumer a type that does not exist, and it took `VenueMessage`.
+
+ONE SITE WAS JUDGED HISTORICAL and reworded rather than swept, which is the
+option the brief allowed. The broadarrow cost paragraph said the socket state
+"carries no account", and the account carrier has since landed - `SocketQuery`
+takes an `account` and the socket's own state resolves one before the upgrade -
+so renaming the type would have made the sentence MORE false, not less. It now
+opens by saying the half has landed and states the measurement in the past
+tense, without spelling the retired identifier. That is the swap hazard read
+backwards: a sentence can be false about the new referent precisely because the
+rename succeeded.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
