@@ -715,7 +715,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   infinite source inherits the O(distance) default walk `mogwai-data`'s own
   `TickSource` doc warns about - the same shape `GeneratedSource` needed
   `CheckpointIndex` for. Harmless today because the only consumer,
-  `mogwai segments tape`, walks forward from the origin and never seeks; it
+  `mogwai segments compose`, walks forward from the origin and never seeks; it
   becomes a hang the moment anything serves a composed river or asks it for a
   window. `fault` is the harder half: the composer's one terminal condition,
   clock exhaustion, has no `TickFault` variant, and adding one ripples into
@@ -1095,7 +1095,7 @@ group by any other route has no API for it, and none is owed until one is wanted
 
   ```text
   brokkr run mogwai -- segments cut --symbol MNQ --month 2026-04 --window asia --out analysis/out/asia-mnq-2026-04.json
-  brokkr run mogwai -- segments tape --library analysis/out/asia-mnq-2026-04.json --type bars --interval-s 60 --ticks 3000000 --seed 42 --out analysis/out/asia-endless.csv
+  brokkr run mogwai -- segments compose --library analysis/out/asia-mnq-2026-04.json --type bars --interval-s 60 --ticks 3000000 --seed 42 --out analysis/out/asia-endless.csv
   python3 analysis/plot_tape.py --csv analysis/out/asia-endless.csv --out analysis/out/asia-endless.html --title "Endless Asia, MNQ 2026-04 segments, seed 42"
   ```
 

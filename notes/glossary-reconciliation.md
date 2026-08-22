@@ -1407,6 +1407,95 @@ RAISED AND NOT ACTED ON, recorded so a later round does not re-file it:
   does not perform, but whether the two artifacts should agree is a data
   question this arc has no ruling on.
 
+**Round 12, the `tape` split, 2026-08-22.** A split, and the sixth round whose
+ruling leaves the word on one of its senses. THE PACED-DELIVERY SENSE KEEPS THE
+WORD - the glossary's Tape entry, `mogwai-venue`'s `tape.rs` broadcast ring, the
+delivery-barrier comments in the adapter's `data.rs` and `exec.rs`, the backlog
+and the `tape_lateness` bench target are untouched, which is the shape a correct
+classification produces. The generated-sequence sense becomes river:
+`ensure_on_tape` is `ensure_on_river`, the off-tape and on-tape history
+diagnostics are off-river and on-river across `mogwai-adapter`,
+`mogwai-protocol` and `mogwai-venue`, and `off_tape_window_still_answers_the_request`
+follows. The offline dump becomes a composition: `mogwai segments tape` is
+`mogwai segments compose`, with `TapeArgs` and `TapeType` becoming `ComposeArgs`
+and `ComposeType`, and the composer prose in `mogwai-data`'s `segment.rs` and
+`mogwai-cli`'s `segments.rs` says river where it named the sequence and
+composition where it named the dump. `docs/cli.md`, `notes/segment-sampler.md`,
+`notes/todo.md` and AGENTS.md's workspace overview moved with it. No tape byte
+and no wire byte moves, so no `TAPE_PROTOCOL_VERSION` bump is owed. The gated
+check reports 1342 workspace and 470 instrumented tests, unchanged from round
+11.
+
+THE OPERATOR BREAK IS LOUD, and it was measured rather than reasoned about.
+`target/debug/mogwai segments tape --library /dev/null` exits 2 with
+"error: unrecognized subcommand 'tape'" and the usage line; no alias, no
+`allow_hyphen_values`, so there is no reading on which the retired spelling is
+silently absorbed.
+
+THE FOURTH SENSE WAS OUT OF SCOPE BY OWNER RULING and stayed out.
+`TAPE_PROTOCOL_VERSION`, its value, its history, the bump rule, the version
+narrative, `tape_version_prose.rs`, `TAPE_ORIGIN_NS` and every serialized
+`tape_protocol_version` key are untouched, and the round's diff contains no
+version prose at all.
+
+What the close pass found in the half no cold reviewer reads, which is the
+recurring failures again:
+
+- THE COLD REVIEW'S OWN FINDING, and it was a two-sided contract left pinned on
+  neither side. `http.rs`'s two history refusal bodies still told a consumer
+  "the tape cannot serve" before its origin and past the clock, one line under a
+  log message the same pass had moved to off-river, and the doc above them said
+  the function refuses "a history start outside the tape that exists now".
+  History reads a river directly, which is the glossary's own sentence. All
+  three now say river. Nothing reads either body: the workspace's only assertion
+  on them is `quote_history_refuses_below_a_nonzero_origin`, which matches
+  "precedes data_origin_ns 10", so the two sides did not have to move together
+  and the change is free.
+- EMPHASIS HALF-SWEPT, fifteen sites, all of them outside the rename's mandate.
+  `data.rs` lowercased the two ANSWER lead-ins that carry the whole reason the
+  refusal answers rather than erroring; `common/mod.rs` lost KNOWN, whose
+  contrast with "an unknown one" is the sentence; `data_client_transport.rs`
+  lost RESOLVES and GUARD; `segments.rs` lost SAME and NOT and turned Slice 1
+  into a lower-case slice; `segment.rs` lost ENDLESS and EXACTLY ZERO;
+  `docs/cli.md` lost REAL, REFUSED and NO; AGENTS.md lost DEFAULT and BETTER.
+  Restored.
+- THE CASE-SENSITIVE GREP MISSED THE SHOUTED SPELLING. `data_client_transport.rs`
+  headed the very test the round renamed with "An OFF-TAPE window must answer
+  too" and documented its fixture as "THE TAPE IS STOCKED" over "the stub's
+  default empty tape" - three live sites in the one file whose test name had
+  already moved, invisible to a sweep grepping the lower-case word.
+- HALF-SWEPT SENTENCES, where the new word and the old sat in one paragraph.
+  `segment.rs` said "a session that is not in this river" two words after "the
+  tape origin is not a seam", and repeated the retired phrase in a test name and
+  an assertion message; `config.rs`'s default comment said "one day of warmup
+  tape behind sim-now" on the line above its own off-river refusal note, and now
+  says warmup history.
+- A LOG LINE'S CONTINUATION LOST ITS INDENTATION in `data.rs`'s `request_bars`
+  warning, four columns short of the block it belongs to. `rustfmt` does not
+  reach inside the macro, so nothing would have moved it back.
+
+RAISED AND DELIBERATELY LEFT, recorded so a later round does not re-file it:
+
+- **THE `data_origin_ns` ORPHAN ROW IS NOT THIS ROUND'S.** "the tape boundary",
+  "where the synthetic tape begins" and "the tape floor" in
+  `mogwai-protocol`'s `clock.rs`, `mogwai-venue`'s `http.rs`, and the adapter's
+  `clock.rs`, `exec.rs` and `data.rs` all name the same field the ledger files
+  as its own orphan under section C, alongside `TAPE_ORIGIN_NS`, "tape anchor"
+  and "tape origin". The constant is out of scope by owner ruling and the prose
+  naming it is bound to it, so sweeping half that family here would pre-empt an
+  unruled row.
+- **The adapter stub's `trades_tape` and `quotes_tape` fixtures** are rows served
+  over history rather than anything a boat publishes, so they are the
+  generated-sequence sense by the entry's own reading. No ledger row names them,
+  they are test-local, and moving them is a churn across three test files with
+  no contract behind it.
+- **`analysis/asia_jump_probe.py` still says `segments tape --type bars`.** It is
+  the owner's untracked work in progress under the standing ruling, and it is
+  never swept into a commit.
+- **`analysis/plot_tape.py` keeps its filename**, which every doc and the
+  composer's own header comment invoke, and it charts both a composed river and
+  a generated one. The tool name is established and no round took a break on it.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.
@@ -1504,6 +1593,16 @@ These belong to no single scope, so nothing else holds them.
   used to make the claim; `analysis/plot_tape.py`'s HTML page template and
   `notes/todo.md`'s proposed per-passenger config template are the ordinary
   English sense.
+- `tape` as a name for the generated market-data sequence, and as a name for an
+  offline CSV dump of one. The sequence is a river, a history window outside it
+  is off-river, and the dump is a composition - `mogwai segments compose`. The
+  word survives, undiminished, for what a boat publishes: the glossary's own
+  entry, the broadcast ring, the delivery barrier, the backlog and the
+  `tape_lateness` bench target. Out of scope rather than retired, by owner
+  ruling: the version machinery - `TAPE_PROTOCOL_VERSION`, `TAPE_ORIGIN_NS`,
+  the serialized `tape_protocol_version` keys, the bump rule and the version
+  narrative - together with the `data_origin_ns` prose bound to it, and
+  `analysis/plot_tape.py`'s established filename.
 
 ### Left as inherited
 

@@ -289,7 +289,7 @@ the identity clock. 57 of the 59 connect, at ~400 ms each: about 24 s.
 
 The fix is in the harness, not the consumer. The stub now serves a real identity
 envelope (`common::IDENTITY_CLOCK_JSON`, speed 1, zero floor), which is
-behaviourally identical downstream - `ensure_on_tape` receives `Some(0)`
+behaviourally identical downstream - `ensure_on_river` receives `Some(0)`
 instead of `None` and no start can precede zero - and is a more honest fixture,
 since the real venue answers that route. 39.71 -> 15.93 s. The retry ladder
 kept its coverage deliberately, moving from 57 accidental traversals asserting

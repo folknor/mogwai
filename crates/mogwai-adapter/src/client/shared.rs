@@ -592,8 +592,8 @@ pub(crate) fn date_to_unix_nanos(date: Option<jiff::Timestamp>) -> Option<UnixNa
         UnixNanos::from(u64::try_from(ns).unwrap_or(if ns < 0 { 0 } else { u64::MAX }))
     })
 }
-/// Refuse an off-tape history request BEFORE spending a round trip on it. A
-/// `start` below the published `data_origin` can never be served (the tape
+/// Refuse an off-river history request before spending a round trip on it. A
+/// `start` below the published `data_origin` can never be served (the river
 /// begins at the origin), so the round trip can only end in a venue `400` - or,
 /// against a venue that does not refuse, an empty `200` the history request
 /// cannot tell from "no trades happened". Failing here, naming both the requested start and the
@@ -603,8 +603,8 @@ pub(crate) fn date_to_unix_nanos(date: Option<jiff::Timestamp>) -> Option<UnixNa
 /// `data_origin == 0` is the "floor unknown" sentinel (the `/clock` fetch failed
 /// and the client fell back to identity): the check is skipped so the venue's
 /// own refusal stays authoritative. A `None` start means "from origin" and is
-/// always on-tape.
-pub(crate) fn ensure_on_tape(
+/// always on-river.
+pub(crate) fn ensure_on_river(
     start: Option<UnixNanos>,
     data_origin: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -612,7 +612,7 @@ pub(crate) fn ensure_on_tape(
         && start.as_u64() < data_origin
     {
         anyhow::bail!(
-            "requested start {} precedes data_origin_ns {}; the mogwai tape cannot serve before its origin",
+            "requested start {} precedes data_origin_ns {}; the mogwai river cannot serve before its origin",
             start.as_u64(),
             data_origin
         );
@@ -684,9 +684,9 @@ mod tests {
 
     #[test]
     fn an_unknown_floor_skips_the_guard_but_a_zero_floor_enforces_it() {
-        ensure_on_tape(Some(UnixNanos::from(5)), None).expect("unknown floor skips guard");
-        ensure_on_tape(Some(UnixNanos::from(5)), Some(0)).expect("zero floor accepts five");
-        let err = ensure_on_tape(Some(UnixNanos::from(5)), Some(10))
+        ensure_on_river(Some(UnixNanos::from(5)), None).expect("unknown floor skips guard");
+        ensure_on_river(Some(UnixNanos::from(5)), Some(0)).expect("zero floor accepts five");
+        let err = ensure_on_river(Some(UnixNanos::from(5)), Some(10))
             .expect_err("known floor rejects an earlier start");
         assert!(err.to_string().contains("data_origin_ns 10"), "{err}");
     }

@@ -14,7 +14,7 @@
 //!   is recorded,
 //! - a `request_trades` fetch returns a matching `DataResponse::Trades` with the
 //!   two distinct trades in order,
-//! - a failed or off-tape history fetch still RESOLVES the nautilus request
+//! - a failed or off-river history fetch still RESOLVES the nautilus request
 //!   rather than hanging it, and
 //! - a subscribe for an instrument this run does not serve is refused locally
 //!   and loudly.
@@ -452,13 +452,13 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
 ///
 /// THE UNKNOWN FLOOR IS NOT PINNED HERE, AND CANNOT BE PINNED FROM ONE TEST.
 /// The fallback sets `data_origin_ns = None`; the success path against a stub
-/// serving `IDENTITY_CLOCK_JSON` sets `Some(0)`; and `ensure_on_tape` only
+/// serving `IDENTITY_CLOCK_JSON` sets `Some(0)`; and `ensure_on_river` only
 /// bails when `start < data_origin`, where `start` is a `u64`. Nothing can
 /// precede zero, so `Some(0)` and `None` are OBSERVATIONALLY IDENTICAL and a
 /// window assertion on this fixture passes whatever `floor_known` is. So this
 /// test asserts only what it CAN discriminate - the ladder and the non-refusal.
 /// The floor contrast needs a NONZERO known floor to have a false branch at
-/// all, and that is `off_tape_window_still_answers_the_request`'s job.
+/// all, and that is `off_river_window_still_answers_the_request`'s job.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn an_undecodable_clock_is_retried_then_falls_back_without_refusing() {
@@ -917,7 +917,7 @@ async fn failed_history_fetch_still_answers_the_request() {
     }
 }
 
-/// An OFF-TAPE window must answer too, for the same reason.
+/// An OFF-RIVER window must answer too, for the same reason.
 ///
 /// The adapter refuses a `start` below the venue's published `data_origin_ns`
 /// at the request boundary. Returning that refusal to nautilus does not reach
@@ -929,9 +929,9 @@ async fn failed_history_fetch_still_answers_the_request() {
 /// WIRE change, so this text and `clock_snapshot_round_trips` in
 /// `mogwai-protocol` move together or one of them fails.
 ///
-/// THE TAPE IS STOCKED AND `/trades` IS COUNTED, and both are load-bearing. An
+/// THE RIVER IS STOCKED AND `/trades` IS COUNTED, and both are load-bearing. An
 /// empty response is what a venue holding NO ROWS returns too, so on the stub's
-/// default empty tape `resp.data.is_empty()` passed whether or not the guard
+/// default empty river `resp.data.is_empty()` passed whether or not the guard
 /// fired - vacuous in exactly the way this crate spent a round sweeping for.
 /// A row at the floor makes the emptiness a consequence, and `trades_hits == 0`
 /// says the refusal happened at the CLIENT boundary rather than at the venue.
@@ -941,14 +941,14 @@ async fn failed_history_fetch_still_answers_the_request() {
 /// `u64` start precedes zero.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn off_tape_window_still_answers_the_request() {
+async fn off_river_window_still_answers_the_request() {
     use nautilus_common::messages::data::{RequestBars, RequestTrades};
 
     const ORIGIN: u64 = 2_000_000_000_000_000_000;
 
     let state = Arc::new(StubState::default());
     // Publish a real clock envelope: without one the client cannot decode a
-    // floor, falls back to "unknown" (0), and the off-tape guard never fires.
+    // floor, falls back to "unknown" (0), and the off-river guard never fires.
     *state.clock_body.lock().expect("clock body mutex") = Some(format!(
         r#"{{"sim":{{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0}},"venue_now_ns":{},"data_origin_ns":{ORIGIN},"warmup_ns":86400000000000}}"#,
         ORIGIN + 86_400_000_000_000
@@ -965,15 +965,15 @@ async fn off_tape_window_still_answers_the_request() {
     client.start().expect("start grabs the sink");
     client.connect().await.expect("connect opens the socket");
 
-    // One nanosecond below the floor: as off-tape as it gets.
-    let off_tape =
+    // One nanosecond below the floor: as off-river as it gets.
+    let off_river =
         jiff::Timestamp::from_nanosecond(i128::from(ORIGIN - 1)).expect("the floor is in range");
     let timeout = Duration::from_secs(5);
 
     client
         .request_trades(RequestTrades::new(
             instrument_id(),
-            Some(off_tape),
+            Some(off_river),
             None,
             None,
             Some(ClientId::from("MOGWAI-DATA")),
@@ -981,14 +981,14 @@ async fn off_tape_window_still_answers_the_request() {
             UnixNanos::default(),
             None,
         ))
-        .expect("an off-tape request must not error out of the handler");
+        .expect("an off-river request must not error out of the handler");
     loop {
         if let DataEvent::Response(DataResponse::Trades(resp)) =
             next_data_event(&mut sink_rx, timeout).await
         {
             assert!(
                 resp.data.is_empty(),
-                "an off-tape window answers empty, though the tape holds a row at the floor"
+                "an off-river window answers empty, though the river holds a row at the floor"
             );
             break;
         }
@@ -1002,7 +1002,7 @@ async fn off_tape_window_still_answers_the_request() {
     client
         .request_bars(RequestBars::new(
             bar_type(),
-            Some(off_tape),
+            Some(off_river),
             None,
             None,
             Some(ClientId::from("MOGWAI-DATA")),
@@ -1010,24 +1010,24 @@ async fn off_tape_window_still_answers_the_request() {
             UnixNanos::default(),
             None,
         ))
-        .expect("an off-tape request must not error out of the handler");
+        .expect("an off-river request must not error out of the handler");
     loop {
         if let DataEvent::Response(DataResponse::Bars(resp)) =
             next_data_event(&mut sink_rx, timeout).await
         {
-            assert!(resp.data.is_empty(), "an off-tape window answers empty");
+            assert!(resp.data.is_empty(), "an off-river window answers empty");
             break;
         }
     }
 
-    // Proves the empty responses above came from the off-tape GUARD and not
+    // Proves the empty responses above came from the off-river GUARD and not
     // merely from a stub that happens to serve no trades: a refused window is
     // never fetched at all. Without this the test passes vacuously whenever the
     // clock envelope fails to decode and the floor reads as unknown.
     assert_eq!(
         state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
         0,
-        "an off-tape window must be refused before any /trades fetch"
+        "an off-river window must be refused before any /trades fetch"
     );
 }
 

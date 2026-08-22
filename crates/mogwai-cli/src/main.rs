@@ -103,7 +103,7 @@ enum Command {
     /// Markov density feasibility gate.
     CadenceFeasible(synth::CadenceFeasibleArgs),
     /// The session-segment sampler: cut real session slices out of a delivered
-    /// TBBO month, and compose them into an endless single-session tape.
+    /// TBBO month, and realize them as an endless single-session river.
     Segments {
         #[command(subcommand)]
         command: segments::SegmentsCommand,

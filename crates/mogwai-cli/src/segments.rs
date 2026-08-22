@@ -4,12 +4,12 @@
 //! `mogwai segments` - the session-segment sampler's two offline halves.
 //!
 //! `cut` carves session slices out of a delivered TBBO month into a returns-space
-//! segment library; `tape` composes that library into an endless single-session
-//! tape and dumps it as CSV for charting. Together they are Slice 1 of
+//! segment library; `compose` realizes that library as an endless single-session
+//! river and dumps it as CSV for charting. Together they are Slice 1 of
 //! `notes/segment-sampler.md`: cut, re-anchor, loop, chart.
 //!
 //! The bars dump deliberately emits the SAME header `mogwai gen --type bars`
-//! does, so `analysis/plot_tape.py --csv <file>` charts a composed tape and a
+//! does, so `analysis/plot_tape.py --csv <file>` charts a composed river and a
 //! generated one with one tool and no flags in between. Comparing the two in
 //! the same viewer is the eyeball gate this whole direction is judged by.
 
@@ -28,8 +28,8 @@ use mogwai_lab::session::ScheduleFrame;
 pub(crate) enum SegmentsCommand {
     /// Cut a delivered TBBO month into a returns-space segment library.
     Cut(CutArgs),
-    /// Compose a segment library into an endless tape and dump it as CSV.
-    Tape(TapeArgs),
+    /// Realize a segment library as an endless river and dump it as CSV.
+    Compose(ComposeArgs),
 }
 
 #[derive(Args)]
@@ -99,19 +99,19 @@ impl WindowArg {
 }
 
 #[derive(Copy, Clone, ValueEnum)]
-pub(crate) enum TapeType {
+pub(crate) enum ComposeType {
     Trades,
     Bars,
 }
 
 #[derive(Args)]
-pub(crate) struct TapeArgs {
+pub(crate) struct ComposeArgs {
     /// Segment library written by `segments cut`.
     #[arg(long)]
     library: PathBuf,
     /// What to emit.
     #[arg(long = "type", value_enum, default_value = "bars")]
-    kind: TapeType,
+    kind: ComposeType,
     /// Bar interval in seconds. Bars mode only.
     #[arg(long, default_value_t = 60)]
     interval_s: u64,
@@ -125,8 +125,8 @@ pub(crate) struct TapeArgs {
     /// Draw-order seed.
     #[arg(long, default_value_t = 42)]
     seed: u64,
-    /// The tape's price level anchor. An integration constant: it scales the
-    /// whole tape and changes no return.
+    /// The river's price level anchor. An integration constant: it scales the
+    /// whole river and changes no return.
     #[arg(long, default_value_t = 20_000.0)]
     start_price: f64,
     /// First tick's timestamp, unix ns.
@@ -135,7 +135,7 @@ pub(crate) struct TapeArgs {
     /// Dead time inserted at each segment seam, in seconds.
     #[arg(long, default_value_t = 1)]
     seam_gap_s: u64,
-    /// Suppress each segment's measured reopen gap, yielding a continuous tape
+    /// Suppress each segment's measured reopen gap, yielding a continuous river
     /// with no gaps at all - the A/B against the fitted generator, which
     /// produces none.
     #[arg(long)]
@@ -151,7 +151,7 @@ pub(crate) struct TapeArgs {
 pub(crate) fn run(command: SegmentsCommand) -> anyhow::Result<()> {
     match command {
         SegmentsCommand::Cut(args) => cut(args),
-        SegmentsCommand::Tape(args) => tape(args),
+        SegmentsCommand::Compose(args) => compose(args),
     }
 }
 
@@ -232,7 +232,7 @@ fn cut(args: CutArgs) -> anyhow::Result<()> {
     clippy::needless_pass_by_value,
     reason = "matches the by-value dispatch site; the body only borrows args internally"
 )]
-fn tape(args: TapeArgs) -> anyhow::Result<()> {
+fn compose(args: ComposeArgs) -> anyhow::Result<()> {
     // Load and compose are timed separately because they scale differently: the
     // load is one parse of a whole month's library and grows with the corpus,
     // while the compose is linear in --ticks and does not. A single wall would
@@ -272,8 +272,8 @@ fn tape(args: TapeArgs) -> anyhow::Result<()> {
     };
 
     match args.kind {
-        TapeType::Trades => write_trades(&mut source, args.ticks, &mut sink)?,
-        TapeType::Bars => {
+        ComposeType::Trades => write_trades(&mut source, args.ticks, &mut sink)?,
+        ComposeType::Bars => {
             let interval = NonZeroU64::new(
                 args.interval_s
                     .checked_mul(1_000_000_000)
@@ -287,7 +287,7 @@ fn tape(args: TapeArgs) -> anyhow::Result<()> {
     eprintln!("composed_ticks={}", args.ticks);
     // A rail that fired is not a detail: past it the printed prices are the
     // clamp rather than the integrated walk, and a wall or a tick count alone
-    // cannot tell the two tapes apart.
+    // cannot tell the two river realizations apart.
     eprintln!("composed_price_clamps={}", source.clamps());
     eprintln!("library_load_seconds={load_seconds:.1}");
     eprintln!(
@@ -309,7 +309,7 @@ fn write_trades(
             // rather than reporting an "endless" source as merely exhausted.
             if source.clock_exhausted() {
                 bail!(
-                    "the composed tape ran the nanosecond clock out of range; \
+                    "the composed river ran the nanosecond clock out of range; \
                      lower --start or ask for fewer --ticks"
                 );
             }
@@ -324,11 +324,11 @@ fn write_trades(
     Ok(())
 }
 
-/// Bars over the composed tape, in the header `mogwai gen --type bars` emits so
+/// Bars over the composed river, in the header `mogwai gen --type bars` emits so
 /// `analysis/plot_tape.py` charts both without a flag.
 ///
 /// Unlike the generator's writer this does NOT fill empty windows: a composed
-/// endless tape has no calendar and therefore no scheduled desert to render -
+/// endless river has no calendar and therefore no scheduled desert to render -
 /// every gap in it is a real dwell inside a real session slice, or the seam,
 /// and both are bounded. A fill rule here would invent bars rather than expose
 /// deserts, which is the opposite of what that rule exists for.
@@ -349,7 +349,7 @@ fn write_bars(
             // rather than reporting an "endless" source as merely exhausted.
             if source.clock_exhausted() {
                 bail!(
-                    "the composed tape ran the nanosecond clock out of range; \
+                    "the composed river ran the nanosecond clock out of range; \
                      lower --start or ask for fewer --ticks"
                 );
             }

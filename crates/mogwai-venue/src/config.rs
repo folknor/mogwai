@@ -276,8 +276,8 @@ impl Default for Config {
             // of the acceleration axis.
             speed: 1.0,
             venue_heartbeat_ms: 0,
-            // 24h: one day of warmup tape behind sim-now. A wrong horizon is made
-            // loud (off-tape requests are refused, not silently under-served), so
+            // 24h: one day of warmup history behind sim-now. A wrong horizon is made
+            // loud (off-river requests are refused, not silently under-served), so
             // the default's exactness is low-stakes.
             warmup_ns: 86_400_000_000_000,
             // One ring PER BOAT. Protocol 8 measured 1,048,576 as the smallest

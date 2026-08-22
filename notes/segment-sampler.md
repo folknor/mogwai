@@ -53,8 +53,9 @@ own change and has not been made. Everything below is offline.
 - `mogwai_lab::segments` cuts a delivered TBBO month into a
   returns-space segment library; `mogwai segments cut` drives it.
 - `mogwai_data::segment` composes a library into an endless
-  `TickSource`; `mogwai segments tape` dumps it as trades or as bars
-  in `gen --type bars`'s header, so `analysis/plot_tape.py` charts it.
+  `TickSource`; `mogwai segments compose` dumps that composition as
+  trades or as bars in `gen --type bars`'s header, so
+  `analysis/plot_tape.py` charts it.
 - `analysis/segment_library_conformance.json` is the shared fixture
   pinning the two crates' readings of the format against each other -
   the writer cannot depend on the reader's type, since `mogwai-lab`

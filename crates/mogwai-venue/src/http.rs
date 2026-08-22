@@ -1612,7 +1612,7 @@ pub(crate) async fn clock(
 ) -> Json<VenueClock> {
     // Publish the tape boundary alongside the affine map so a consumer can guard
     // its own warmup against `data_origin_ns` rather than issuing a doomed
-    // off-tape fetch. `venue_now_ns` is sampled here so the consumer gets sim-now
+    // off-river fetch. `venue_now_ns` is sampled here so the consumer gets sim-now
     // and the floor from one round trip, without reading its own (skewable) wall
     // clock. `data_origin_ns` is the fixed floor; the horizon is echoed so
     // the consumer can report the floor in its own terms.
@@ -2132,7 +2132,7 @@ pub(crate) fn resolve_socket_symbol(
     Ok(Arc::from(requested))
 }
 
-/// Refuse a history start outside the tape that exists now.
+/// Refuse a history start outside the river that exists now.
 ///
 /// A start before `data_origin` can never be served, so naming the floor keeps
 /// that impossible request distinct from "no trades happened". With today's
@@ -2147,15 +2147,15 @@ pub(crate) fn resolve_socket_symbol(
 fn history_start_refusal(start: Option<u64>, data_origin: u64, river_now: u64) -> Option<String> {
     let start = start?;
     if start < data_origin {
-        tracing::warn!(start, data_origin, "refusing off-tape history window");
+        tracing::warn!(start, data_origin, "refusing off-river history window");
         return Some(format!(
-            "requested start {start} precedes data_origin_ns {data_origin}; the tape cannot serve before its origin"
+            "requested start {start} precedes data_origin_ns {data_origin}; the river cannot serve before its origin"
         ));
     }
     (start > river_now).then(|| {
         tracing::warn!(start, river_now, "refusing future history window");
         format!(
-            "requested start {start} exceeds this river's now {river_now} - what its boat has published, or venue sim-now if it carries none; the tape cannot serve past the clock"
+            "requested start {start} exceeds this river's now {river_now} - what its boat has published, or venue sim-now if it carries none; the river cannot serve past the clock"
         )
     })
 }
@@ -2306,7 +2306,7 @@ mod history_slot_tests {
 
     #[test]
     fn quote_history_refuses_below_a_nonzero_origin() {
-        let refusal = history_start_refusal(Some(9), 10, 20).expect("off-tape refusal");
+        let refusal = history_start_refusal(Some(9), 10, 20).expect("off-river refusal");
         assert!(refusal.contains("precedes data_origin_ns 10"));
         assert!(history_start_refusal(Some(10), 10, 20).is_none());
     }

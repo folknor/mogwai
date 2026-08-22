@@ -105,7 +105,7 @@ impl SimClock {
 /// The `/clock` payload: the affine `SimClock` plus the tape boundary the
 /// venue derived at boot. `SimClock` stays the pure wall-to-sim map; this
 /// richer envelope publishes where the synthetic tape begins so a consumer can
-/// guard its own warmup window instead of issuing a doomed off-tape fetch.
+/// guard its own warmup window instead of issuing a doomed off-river fetch.
 ///
 /// `venue_now_ns` is `sim.sim_ns(wall)` sampled when the request is served, so
 /// a consumer gets sim-now and the tape floor from one round trip without having
@@ -119,7 +119,7 @@ pub struct VenueClock {
     pub sim: SimClock,
     /// `sim.sim_ns(wall)` at the instant the `/clock` request was served.
     pub venue_now_ns: u64,
-    /// Earliest `ts_event` the tape can serve; a `start` below it is off-tape.
+    /// Earliest `ts_event` the river can serve; a `start` below it is off-river.
     pub data_origin_ns: u64,
     /// Uniform servable history span before `run_start_ns`, in nanoseconds.
     /// The boot river is materialized before readiness; other rivers

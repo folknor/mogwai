@@ -16,13 +16,13 @@ venue over this workspace's native JSON-over-WS protocol.
 
 The INSTRUMENT SET IS OPEN, and THE VENUE DOES NOT GATE ON IT. A symbol
 arrives and is served: if a tuned preset exists for that symbol, the preset
-drives the tape; if none exists, the DEFAULT tape is served under that symbol.
+drives the river; if none exists, the DEFAULT river is served under that symbol.
 Nothing refuses a symbol for wanting a fit, and no intake work is a
 precondition of serving one. The three shipped presets - MNQ, MES and
 BTCUSDT - are the current state, not the end state.
 
 The intake sequence - corpus, measurement, fit, preset - is therefore how a
-symbol's tape gets BETTER, never a gate on whether it can be served at all.
+symbol's river gets BETTER, never a gate on whether it can be served at all.
 Do not read it as an admission rule: earlier prose here and in `docs/presets.md`
 claimed that every instrument owes a corpus, a measurement and a fit before the
 venue serves it, and that claim was invented. It was back-derived from a
@@ -69,11 +69,12 @@ A Cargo workspace, seven crates under `crates/`:
   See `docs/cli.md`. It ships no binary: `serve`, `config` and `source` are its
   public surface and `mogwai-cli` calls them.
 - `mogwai-cli` - the `mogwai` BINARY. A clap dispatcher plus the offline
-  subcommands that never bind a socket: `gen` (the tape generator and its
+  subcommands that never bind a socket: `gen` (the river generator and its
   measurement consumers, including `measure12a`), `tick-composition`,
   `segments` - a subcommand tree of its own, `cut` turning a delivered TBBO
-  month into a returns-space segment library and `tape` composing that library
-  into an endless tape dumped as trades or bars in CSV - `presets` and `man`.
+  month into a returns-space segment library and `compose` realizing that
+  library as an endless river dumped as trades or bars in CSV - `presets` and
+  `man`.
   `serve` does no work here - it hands its three arguments to
   `mogwai_venue::serve`. The bin TARGET name is `mogwai`, not the package name,
   and that is load-bearing: `brokkr run mogwai` and the shipped launcher both

@@ -50,7 +50,7 @@ use crate::{
     client::shared::{
         HavocDelivery, HavocFilter, abort_tasks, cache_instruments, capped_limit, conn_havoc,
         date_to_unix_nanos, emit_seeded_instruments, enqueue_havoc, ensure_instrument,
-        ensure_on_tape, fetch_clock_or_identity, fetch_instruments, flush_havoc_into_pump,
+        ensure_on_river, fetch_clock_or_identity, fetch_instruments, flush_havoc_into_pump,
         inbound_havoc, instrument_any_or_warn, instrument_def, join_url, lock_recover,
         now_unix_nanos, run_identity_check, seed_instruments, spawn_latency_pump,
         symbol_from_instrument, track_task, wait_connected, warn_missing_instrument_once,
@@ -727,14 +727,14 @@ impl DataClient for MogwaiDataClient {
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
         let end = date_to_unix_nanos(request.end);
-        // Refuse an off-tape window at the boundary, loudly - but ANSWER it.
+        // Refuse an off-river window at the boundary, loudly - but ANSWER it.
         // Returning the error to nautilus is not a refusal the requester ever
         // sees: `DataEngine::execute` log::error!s a synchronous client error
         // and emits no correlated response, so `?` here leaves the request
         // outstanding forever and the consumer burns its whole timeout on what
         // looks like a hung venue. Log the named diagnostic and answer empty.
-        if let Err(err) = ensure_on_tape(start, self.data_origin_ns) {
-            tracing::error!(error = %err, "request_trades: refusing an off-tape window; answering with an empty trade response so the request resolves");
+        if let Err(err) = ensure_on_river(start, self.data_origin_ns) {
+            tracing::error!(error = %err, "request_trades: refusing an off-river window; answering with an empty trade response so the request resolves");
             drop(sink.send(DataEvent::Response(DataResponse::Trades(
                 TradesResponse::new(
                     request.request_id,
@@ -786,10 +786,10 @@ impl DataClient for MogwaiDataClient {
                     Ok(result) => result,
                     Err(err) => {
                         // Surface the failure instead of the old silent `if let Ok`
-                        // drop: a venue 400 (an off-tape window, or a symbol the
+                        // drop: a venue 400 (an off-river window, or a symbol the
                         // run does not serve) or any fetch error must be visible,
                         // not mistaken for "no trades in the window".
-                        tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed (the venue may have refused an off-tape window); answering with an empty trade response so the request resolves");
+                        tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed (the venue may have refused an off-river window); answering with an empty trade response so the request resolves");
                         break 'trades Vec::new();
                     }
                 };
@@ -847,8 +847,8 @@ impl DataClient for MogwaiDataClient {
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
         let end = date_to_unix_nanos(request.end);
-        if let Err(err) = ensure_on_tape(start, self.data_origin_ns) {
-            tracing::error!(error = %err, "request_quotes: refusing an off-tape window; answering empty");
+        if let Err(err) = ensure_on_river(start, self.data_origin_ns) {
+            tracing::error!(error = %err, "request_quotes: refusing an off-river window; answering empty");
             drop(sink.send(DataEvent::Response(DataResponse::Quotes(
                 QuotesResponse::new(
                     request.request_id,
@@ -933,12 +933,12 @@ impl DataClient for MogwaiDataClient {
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
         let end = date_to_unix_nanos(request.end);
-        // Refuse an off-tape history window at the boundary, naming the floor -
+        // Refuse an off-river history window at the boundary, naming the floor -
         // but ANSWER it, for the reason spelled out in `request_trades`: a
         // synchronous `Err` is logged by the data engine and never turned into
         // a response, so `?` here would leave the history request unresolved.
-        if let Err(err) = ensure_on_tape(start, self.data_origin_ns) {
-            tracing::error!(error = %err, "request_bars: refusing an off-tape history window; answering with an empty bar response so the request resolves");
+        if let Err(err) = ensure_on_river(start, self.data_origin_ns) {
+            tracing::error!(error = %err, "request_bars: refusing an off-river history window; answering with an empty bar response so the request resolves");
             drop(
                 sink.send(DataEvent::Response(DataResponse::Bars(BarsResponse::new(
                     request.request_id,
@@ -997,7 +997,7 @@ impl DataClient for MogwaiDataClient {
                 {
                     Ok(result) => result,
                     Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed (the venue may have refused an off-tape window); answering with an empty bar response so the request resolves");
+                        tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed (the venue may have refused an off-river window); answering with an empty bar response so the request resolves");
                         break 'bars Vec::new();
                     }
                 };
@@ -1014,7 +1014,7 @@ impl DataClient for MogwaiDataClient {
                     // from the window start) so the response honors the bar limit.
                     bars.truncate(m);
                 }
-                // An on-tape window that under-delivers is a real, reachable
+                // An on-river window that under-delivers is a real, reachable
                 // state, not an error: mogwai's fitted arrival process is
                 // heavy-tailed, and a measured sweep of the default 24h-horizon
                 // tape found stretches of 15+ SIMULATED HOURS running at 3-10
@@ -1037,8 +1037,8 @@ impl DataClient for MogwaiDataClient {
                         requested = ?bar_limit,
                         produced = bars.len(),
                         trades = trades.len(),
-                        "request_bars: the window is on-tape but produced fewer bars than requested; \
-                         mogwai's synthetic tape has multi-hour arrival droughts, so a short history \
+                        "request_bars: the window is on-river but produced fewer bars than requested; \
+                         mogwai's synthetic river has multi-hour arrival droughts, so a short history \
                          window can legitimately be sparse or empty - widen the window, lower the bar \
                          interval, or let the venue run further past its epoch before starting the history request"
                     );

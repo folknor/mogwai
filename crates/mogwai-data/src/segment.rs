@@ -16,18 +16,18 @@
 //! format.
 //!
 //! WHY RETURNS SPACE MAKES THE LOOP SEAMLESS. A segment carries no absolute
-//! price. Composing is therefore integration: the tape holds a running price,
+//! price. Composing is therefore integration: the river holds a running price,
 //! each stored log return multiplies it, and a segment boundary is just the
 //! point where the returns start coming from a different slice. There is no
 //! level to reconcile, so any segment follows any other without a
-//! discontinuity - which is the whole reason an endless single-session tape is
+//! discontinuity - which is the whole reason an endless single-session river is
 //! expressible at all. Absolute price level is an integration constant (owner
 //! ruling, 2026-08-12).
 //!
 //! WHAT LANDS AT THE SEAM. Each segment records `open_gap_ret`, the measured
 //! return from the last real print before its window to its own first print -
 //! for an Asia slice, the jump across the daily break. Applying it at the seam
-//! reproduces real reopen gaps in the composed tape, which the fitted generator
+//! reproduces real reopen gaps in the composed river, which the fitted generator
 //! does not produce at all (the owner's defect 2). It is a config knob because
 //! the direction calls for feature injectors that toggle: see
 //! [`SegmentCompose::reopen_gaps`].
@@ -136,7 +136,7 @@ impl SegmentLibrary {
             if n == 0 {
                 return Err(SegmentError::Refusal(format!(
                     "segment {} is empty; a zero-length draw would advance the loop \
-                     without advancing the tape",
+                     without advancing the river",
                     segment.trade_date
                 )));
             }
@@ -193,8 +193,8 @@ impl SegmentLibrary {
 pub struct SegmentCompose {
     /// Symbol the composed ticks are published under.
     pub symbol: String,
-    /// Where the tape's price level starts. An integration constant: it scales
-    /// the whole tape and changes no return.
+    /// Where the river's price level starts. An integration constant: it scales
+    /// the whole river and changes no return.
     pub start_price: f64,
     /// First tick's timestamp, unix ns.
     pub start_ns: u64,
@@ -202,7 +202,7 @@ pub struct SegmentCompose {
     pub seed: u64,
     /// Dead time inserted between the last trade of one segment and the window
     /// start of the next. Real calendar time between two Asia sessions is a
-    /// day; an ENDLESS-Asia tape deliberately elides it, so this is the visible
+    /// day; an ENDLESS-Asia river deliberately elides it, so this is the visible
     /// seam and one second is enough to separate two sessions without opening a
     /// hole on the chart.
     ///
@@ -210,13 +210,13 @@ pub struct SegmentCompose {
     /// segment the timestamps are the corpus's own: `dt_ns[i] == 0` is a normal
     /// row, because a sweep across several price levels prints several trades at
     /// one nanosecond and `mogwai_lab::segments` records the difference
-    /// verbatim. The composed tape is therefore non-decreasing, not strictly
+    /// verbatim. The composed river is therefore non-decreasing, not strictly
     /// increasing, and nothing here may be written as if it were - the loader
     /// does not refuse a zero `dt_ns`, and refusing one would throw away real
     /// sessions.
     pub seam_gap_ns: u64,
     /// Apply each segment's measured `open_gap_ret` at the seam. Off yields a
-    /// continuous tape with no reopen gaps - which is what the fitted generator
+    /// continuous river with no reopen gaps - which is what the fitted generator
     /// produces today, and therefore the useful A/B against it.
     pub reopen_gaps: bool,
     /// Sample segments uniformly with replacement (endless variety from a
@@ -225,7 +225,7 @@ pub struct SegmentCompose {
 }
 
 impl SegmentCompose {
-    /// Defaults for an endless single-session tape: real reopen gaps on,
+    /// Defaults for an endless single-session river: real reopen gaps on,
     /// sampling on, a one-second seam.
     pub fn new(symbol: impl Into<String>, seed: u64) -> Self {
         Self {
@@ -240,7 +240,7 @@ impl SegmentCompose {
     }
 }
 
-/// An endless tape composed from a segment library.
+/// An endless river composed from a segment library.
 ///
 /// Effectively infinite: like [`crate::GeneratedSource`] a caller bounds it by
 /// span rather than by exhaustion. It has exactly ONE terminal condition, the
@@ -266,12 +266,12 @@ pub struct SegmentSource {
     ts: u64,
     /// Set when the next tick opens a segment, so the seam work (gap return,
     /// seam dead time) happens exactly once per boundary. FALSE at
-    /// construction: the tape origin is not a seam, so the first segment's
+    /// construction: the river's origin is not a seam, so the first segment's
     /// `open_gap_ret` - a jump measured against a session that is not in this
-    /// tape - must not land there and silently displace `start_price`.
+    /// river - must not land there and silently displace `start_price`.
     at_seam: bool,
     /// How many times the running level hit a rail. Reported rather than
-    /// swallowed: a clamp that fires is the tape telling you the composed walk
+    /// swallowed: a clamp that fires is the river telling you the composed walk
     /// has drifted somewhere the library's returns cannot describe, and a
     /// silent rail is indistinguishable from a healthy one.
     clamps: u64,
@@ -349,7 +349,7 @@ impl SegmentSource {
         Ok(source)
     }
 
-    /// The window this tape is composed from, for provenance in a dump header.
+    /// The window this river is composed from, for provenance in a dump header.
     pub fn window(&self) -> &str {
         &self.library.window
     }
@@ -371,10 +371,10 @@ impl SegmentSource {
     /// band every emitted price must come from.
     ///
     /// WHY A BAND AT ALL. The composer integrates `price *= ret.exp()` forever,
-    /// and an endless tape has no re-anchoring event: a run of negative drift
+    /// and an endless river has no re-anchoring event: a run of negative drift
     /// walks the level toward zero and a run of positive drift toward infinity.
     /// Both ends are wrong in a way that is not merely inaccurate. Below half a
-    /// tick, `emit_price` rounds to EXACTLY ZERO and the tape carries
+    /// tick, `emit_price` rounds to EXACTLY ZERO and the river carries
     /// non-positive prices, which this crate's own Kraken parser refuses on the
     /// grounds that they poison downstream ln-return math; above `Decimal`'s
     /// range - about 7.9e28, far below `f64`'s - the level has no decimal image
@@ -395,7 +395,7 @@ impl SegmentSource {
         self.price = bounded;
     }
 
-    /// Advances the clock, or latches exhaustion. Returns false when the tape
+    /// Advances the clock, or latches exhaustion. Returns false when the river
     /// has to end.
     fn advance_clock(&mut self, by: u64) -> bool {
         match self.ts.checked_add(by) {
@@ -434,15 +434,15 @@ impl SegmentSource {
     ///
     /// The running price stays in f64 and only the EMITTED value is snapped:
     /// rounding the running level would accumulate the rounding error into
-    /// every subsequent return, which over an endless tape is a slow drift
+    /// every subsequent return, which over an endless river is a slow drift
     /// rather than a bounded one.
     fn emit_price(&self) -> Decimal {
         // ENFORCED, NOT ARGUED. This used to fall back to `self.tick_size` on a
-        // `None`, which printed a one-tick trade in the middle of a runaway tape
+        // `None`, which printed a one-tick trade in the middle of a runaway river
         // with no error and no log - and `None` is reachable well before `inf`,
         // because `Decimal` tops out around 7.9e28. `integrate` holds the level
         // inside [tick, MID_CEILING], which has a decimal image by construction,
-        // so a `None` here means that band was breached and the tape is wrong;
+        // so a `None` here means that band was breached and the river is wrong;
         // failing loudly beats printing a price nobody can trace.
         let level = Decimal::from_f64_retain(self.price).unwrap_or_else(|| {
             panic!(
@@ -586,7 +586,7 @@ mod tests {
         let run_b: Vec<Decimal> = (0..200)
             .map(|_| price_of(&second.next_tick().expect("endless")))
             .collect();
-        assert_eq!(run_a, run_b, "same seed, same tape");
+        assert_eq!(run_a, run_b, "same seed, same river");
         assert_eq!(run_a.len(), 200, "the source never exhausts");
         assert!(!a.is_empty());
     }
@@ -613,7 +613,7 @@ mod tests {
 
     /// The property that makes an endless loop possible at all: with reopen
     /// gaps OFF, a seam introduces no price move, because the incoming
-    /// segment's first return is zero and its level came from the running tape.
+    /// segment's first return is zero and its level came from the running river.
     #[test]
     fn a_seam_without_a_reopen_gap_moves_no_price() {
         let mut config = SegmentCompose::new("MNQ", 11);
@@ -633,7 +633,7 @@ mod tests {
             assert_eq!(
                 price_of(&source.next_tick().expect("endless")),
                 first,
-                "a zero-return tape must stay flat across seams when gaps are off"
+                "a zero-return river must stay flat across seams when gaps are off"
             );
         }
     }
@@ -754,7 +754,7 @@ mod tests {
             let price = price_of(&source.next_tick().expect("endless"));
             assert!(
                 price >= Decimal::from(20_000) && price <= ceiling,
-                "a monotonically rising tape printed {price}, outside \
+                "a monotonically rising river printed {price}, outside \
                  [20000, MID_CEILING]"
             );
             last = price;
@@ -785,7 +785,7 @@ mod tests {
     /// therefore BREAKS at a cap rather than asserting on the count, so the
     /// frozen-timestamp assertion is reached and fires under `saturating_add`.
     #[test]
-    fn a_clock_that_cannot_advance_ends_the_tape_instead_of_freezing_it() {
+    fn a_clock_that_cannot_advance_ends_the_river_instead_of_freezing_it() {
         let mut config = SegmentCompose::new("MNQ", 8);
         config.sample = false;
         config.start_ns = u64::MAX - 4_500_000;
@@ -841,10 +841,10 @@ mod tests {
         assert!(err.contains("outside the DBN alphabet"), "{err}");
     }
 
-    /// The tape origin is not a seam. A sampled first segment carrying an
-    /// `open_gap_ret` used to apply it before the first print, so the tape
+    /// The river's origin is not a seam. A sampled first segment carrying an
+    /// `open_gap_ret` used to apply it before the first print, so the river
     /// started somewhere other than `start_price` - a gap measured against a
-    /// session that is not in this tape.
+    /// session that is not in this river.
     #[test]
     fn the_first_print_sits_at_the_configured_start_price() {
         let mut config = SegmentCompose::new("MNQ", 2);
@@ -857,7 +857,7 @@ mod tests {
         assert_eq!(
             price_of(&source.next_tick().expect("endless")),
             Decimal::from(20_000),
-            "the first segment's gap must not displace the tape origin"
+            "the first segment's gap must not displace the river's origin"
         );
     }
 
@@ -942,7 +942,10 @@ mod tests {
         let mut source = SegmentSource::new(library, SegmentCompose::new("MNQ", 42))
             .expect("the fixture composes");
         for _ in 0..500 {
-            assert!(source.next_tick().is_some(), "the composed tape is endless");
+            assert!(
+                source.next_tick().is_some(),
+                "the composed river is endless"
+            );
         }
     }
 }

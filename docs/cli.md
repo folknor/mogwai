@@ -377,7 +377,7 @@ chooses between reading historical civil labels against the preset's fixed
 offset (`civil`, the default, so CST and CDT land on the same session phase)
 and reading them as instants.
 
-`segments` is the session-segment sampler: it builds a tape out of REAL
+`segments` is the session-segment sampler: it builds a river out of REAL
 session slices instead of synthesizing one. Two halves, both offline.
 
 `segments cut` carves one session window out of a delivered TBBO month into a
@@ -400,7 +400,7 @@ calendar:
 
 A window overlapping the 15:15 trading halt is REFUSED rather than cut: it
 would carry the halt's fifteen-minute hole invisibly into every loop of the
-composed tape. The corpus directory is
+composed river. The corpus directory is
 resolved under `--root` from the conventional
 `<symbol>v/<month>.<state>.tbbo` layout, or named outright with `--dir`. The
 library holds NO absolute prices: every segment is a sequence of log returns
@@ -416,17 +416,17 @@ as often as a full day. The 2026-04-03 `ny-morning` slice is the worked
 example - Good Friday, 4,408 ticks against a 400,000-tick typical day, non-empty
 and so invisible to every other rule. Pass 0 to keep every non-empty slice.
 
-`segments tape` composes that library into an endless single-session tape and
-dumps it as CSV:
+`segments compose` realizes that library as an endless single-session river and
+dumps that composition as CSV:
 
 ```text
-brokkr run mogwai -- segments tape --library analysis/out/asia-mnq-2026-04.json --type bars --interval-s 60 --ticks 3000000 --out analysis/out/asia-endless.csv
+brokkr run mogwai -- segments compose --library analysis/out/asia-mnq-2026-04.json --type bars --interval-s 60 --ticks 3000000 --out analysis/out/asia-endless.csv
 ```
 
-Because the library is in returns space, composing is integration: the tape
+Because the library is in returns space, composing is integration: the river
 carries a running price each stored return multiplies, so a segment boundary
 needs no level reconciliation and any slice can follow any other. `--start-price`
-is therefore an integration constant that scales the whole tape and changes no
+is therefore an integration constant that scales the whole river and changes no
 return. `--seed` fixes the draw order, `--in-order` cycles the library instead
 of sampling it with replacement, and `--no-reopen-gaps` suppresses the measured
 gap at each seam - which is the A/B against the fitted generator, since that
@@ -440,9 +440,9 @@ rather than restated here, so no third copy of the number can go stale - because
 an endless integration has nothing to re-anchor it, and an unbounded walk prints
 zeros at the bottom (a non-positive price) and blows up the decimal arithmetic at
 the top. `composed_price_clamps=` on stderr counts the hits: nonzero means the
-prices past that point are the rail rather than the walk, and the tape wants a
+prices past that point are the rail rather than the walk, and the river wants a
 different `--start-price` or a different library rather than a wider band. And
-the tape ends rather than freezing if `--start` plus the composed span leaves the
+the river ends rather than freezing if `--start` plus the composed span leaves the
 nanosecond clock no room, naming that as the reason; the composer has no other
 terminal condition.
 

@@ -165,7 +165,7 @@ pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
 /// no scaling, no `ts_init`, no havoc sleep and no backoff anywhere. What it
 /// changes is that the client SUCCEEDS at reading it, which is the whole
 /// saving. `data_origin_ns` of zero is a KNOWN floor rather than an unknown
-/// one, and no request start can precede it, so the off-tape guard admits
+/// one, and no request start can precede it, so the off-river guard admits
 /// exactly what it admitted before.
 pub const IDENTITY_CLOCK_JSON: &str = r#"{"sim":{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0},"venue_now_ns":0,"data_origin_ns":0,"warmup_ns":0}"#;
 
@@ -254,8 +254,8 @@ pub struct StubState {
     /// response rather than leaving the nautilus request unresolved.
     pub fail_trades: AtomicBool,
     /// JSON body of `GET /clock`. Unset serves [`IDENTITY_CLOCK_JSON`], a real
-    /// decodable envelope at speed 1 with a zero tape floor, which is what a
-    /// venue that has just booted looks like. A test exercising the off-tape
+    /// decodable envelope at speed 1 with a zero river floor, which is what a
+    /// venue that has just booted looks like. A test exercising the off-river
     /// window guard publishes an envelope with a real `data_origin_ns` here;
     /// a test exercising the UNDECODABLE path sets `fail_clock`.
     ///
@@ -269,7 +269,7 @@ pub struct StubState {
     /// a ~420 ms floor, while the two that never connect came in at 15 ms and
     /// 23 ms. The counts and the whole accounting are in
     /// `reference/performance.md` under 2026-08-19. Serving a decodable clock is behaviourally identical
-    /// downstream - `ensure_on_tape` is given `Some(0)` instead of `None`, and
+    /// downstream - `ensure_on_river` is given `Some(0)` instead of `None`, and
     /// no start can precede zero - and it is not a weaker fixture but a more
     /// honest one: the real venue answers this route.
     pub clock_body: Mutex<Option<String>>,
