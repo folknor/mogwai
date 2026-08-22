@@ -189,10 +189,10 @@ fn history_or_warn(
     }
 }
 
-/// Decide every scan on one symbol in one walk of the CLEAN tape.
+/// Decide every scan on one symbol in one walk of the CLEAN river.
 ///
 /// ONE walk per symbol, not per order: every resting limit on a symbol shares
-/// the same tape and the same pass span, so a per-order walk would pay a
+/// the same river and the same pass span, so a per-order walk would pay a
 /// checkpoint restore and a process-wide mutex acquisition per order per
 /// interval - fifty resting limits at 100 ms would be five hundred restores a
 /// second contending with `/trades` and market-price stamping. The scans'
@@ -344,9 +344,10 @@ pub(crate) fn read_last(symbol: &str, ts: u64, rivers: &source::Rivers) -> Optio
         })
 }
 
-/// The one deterministic profile set every in-crate test reaching the run tape
-/// shares. Lives outside the test module because the sweeper's tests need the
-/// same tape. Tests needing another identity construct another registry.
+/// The one deterministic profile set every in-crate test reaching the run's
+/// rivers shares. Lives outside the test module because the sweeper's tests
+/// need the same rivers. Tests needing another identity construct another
+/// registry.
 #[cfg(test)]
 pub(crate) fn test_profiles() -> InstrumentProfiles {
     InstrumentProfiles::from_profiles(vec![

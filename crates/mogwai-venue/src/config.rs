@@ -155,8 +155,8 @@ pub struct Config {
     /// `server_heartbeat_ms`; the old key is no longer accepted.
     pub(crate) venue_heartbeat_ms: u64,
     /// Uniform servable simulated-history span, in nanoseconds.
-    /// `data_origin = run_start_ns - warmup_ns` is the earliest instant the
-    /// tape can serve. The boot river is materialized before readiness; every
+    /// `data_origin = run_start_ns - warmup_ns` is the earliest instant a
+    /// river can serve. The boot river is materialized before readiness; every
     /// other river materializes the span on first read. A request below the
     /// floor is refused loudly rather than
     /// served short, so this default need not be exact - 24h covers a day's

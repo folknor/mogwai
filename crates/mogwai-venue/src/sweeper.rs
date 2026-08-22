@@ -7,8 +7,8 @@
 //! carries a trigger only a tape walk can advance. A pass with nothing resting
 //! is still just one lock acquisition and a `continue`.
 //!
-//! Owned by the RUN rather than by an account or a passenger: one process is one
-//! ledger now, and a passenger-owned sweep would freeze a disconnected consumer's
+//! Owned by the RUN rather than by an account or a passenger: the run holds
+//! every ledger, and a passenger-owned sweep would freeze a disconnected consumer's
 //! book mid-window, make the `QueryOrders` truth store honestly report a venue
 //! that cannot execute, and double the tape walk when two sockets are open on
 //! the one run.

@@ -16,7 +16,7 @@ venue over this workspace's native JSON-over-WS protocol.
 
 The INSTRUMENT SET IS OPEN, and THE VENUE DOES NOT GATE ON IT. A symbol
 arrives and is served: if a tuned preset exists for that symbol, the preset
-drives the river; if none exists, the DEFAULT river is served under that symbol.
+drives the river; if none exists, the DEFAULT shape is served under that symbol.
 Nothing refuses a symbol for wanting a fit, and no intake work is a
 precondition of serving one. The three shipped presets - MNQ, MES and
 BTCUSDT - are the current state, not the end state.

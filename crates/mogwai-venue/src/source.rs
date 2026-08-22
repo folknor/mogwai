@@ -1128,8 +1128,8 @@ mod river_tests {
             .expect("cold history");
     }
 
-    /// A second configured shape is realized under its OWN def, on its OWN
-    /// chain and tape path, locked independently of the boot river's.
+    /// A second configured shape is realized as its OWN river, under its OWN
+    /// def and chain, locked independently of the boot river's.
     #[test]
     fn a_second_river_is_realized_under_its_own_def_and_chain() {
         let rivers = crate::fills::test_rivers_with_a_second_symbol();
@@ -1166,7 +1166,7 @@ mod river_tests {
         assert_eq!(second_prints.len(), 32, "the second river prints");
         assert_ne!(
             boot_prints, second_prints,
-            "symbol labels select distinct tapes"
+            "symbol labels select distinct rivers"
         );
         // Materializing the second river leaves the boot river where it was:
         // the chains advance independently, which is the whole point of keying

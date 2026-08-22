@@ -1578,15 +1578,18 @@ pub enum VenueMessage {
     Heartbeat {
         ts_event: u64,
     },
-    /// The bounded tape fanout overwrote frames for this connection. This is a
-    /// venue fault, not a consumer refusal; the venue closes with WS 1011 after
-    /// delivering it.
+    /// The bounded tape fanout overwrote frames for this connection. Advisory
+    /// by ruling: it carries the skipped count and the simulated instant so the
+    /// reader can measure the gap and decide its own response. The serving path
+    /// today still closes with WS 1011 after delivering it; that close is a
+    /// standing code gap against the advisory contract, not part of it.
     FeedLagged {
         skipped: u64,
         sim_now_ns: u64,
     },
     /// A non-fatal run-level havoc observation. It replaces the old
-    /// subscription-attributed diagnostic because a run has one tape.
+    /// subscription-attributed diagnostic because a run-level observation has
+    /// no one subscription to attribute.
     HavocDiagnostic {
         reason: String,
         sim_now_ns: u64,

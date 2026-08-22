@@ -146,7 +146,7 @@ The launcher starts `mogwai serve` as its direct child with stdout captured,
 reads exactly one JSON `ReadyRecord` line, checks `version`, and uses `addr` for
 both clients. It takes any required river name from its own configuration. That
 read blocks for as long as warmup generation takes, which is
-proportional to `warmup_ns` and the tape's cadence; a launcher wanting a bound
+proportional to `warmup_ns` and the river's cadence; a launcher wanting a bound
 sets its own timeout and treats expiry as a boot failure. Stdout closing without
 a line is a boot failure, and the child's stderr and exit status say why. It keeps the child as a direct child: Linux parent-death
 handling terminates the venue if that launcher dies. On a `RunComplete` frame,
@@ -299,10 +299,10 @@ future rather than failing on an unknown symbol. `--config PATH` resolves the
 instrument from an operator TOML instead, through the same load path a served
 config takes; it is mutually exclusive with an explicit `--symbol`. A preset
 carries its session
-calendar into the dump, which is what makes a futures tape show its closed
+calendar into the dump, which is what makes a futures river show its closed
 weekend and its daily maintenance halt as zero-volume runs; before this the
 offline path dropped the calendar and printed straight through both, so a chart
-taken from it disagreed with the served tape it was supposed to illustrate.
+taken from it disagreed with the served river it was supposed to illustrate.
 
 `tick-composition` is the offline measurement the tape budget constants are
 derived from. It walks all three presets across eight seeds and four arrival

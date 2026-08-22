@@ -1,14 +1,14 @@
 # Choosing an instrument preset
 
-A symbol arrives and mogwai resolves its tape knobs. The symbol may come from
-the run config, from a websocket binding a river, or from a history query -
+A symbol arrives and mogwai resolves its instrument knobs. The symbol may come
+from the run config, from a websocket binding a river, or from a history query -
 resolution is the same either way, and it is TOTAL: every wire-legal symbol
 resolves to a shape, so nothing is refused for wanting a preset. Three presets
 ship inside the `mogwai` binary - no data directory, no network fetch, nothing
 outside the executable itself.
 
-A preset is a named bundle of tape knobs, not an admission record. Presets make
-a symbol's tape BETTER; they never decide whether it can be served.
+A preset is a named bundle of instrument knobs, not an admission record. Presets
+make a symbol's river BETTER; they never decide whether it can be served.
 
 ## Listing and inspecting presets
 
@@ -126,11 +126,11 @@ the MNQ knobs while remaining a different river and label from `MNQ`.
   cadence and size distribution fitted against 30 days of Binance
   trade-level archives. (ETHUSDT and SOLUSDT presets shipped for a while as
   thin overrides of this one, restating only the symbol and base currency -
-  identical generator paths, so a tape differing from BTCUSDT's only in the
+  identical generator paths, so a river differing from BTCUSDT's only in the
   symbol identity, at a BTC price level. They were retired 2026-08-09 because
   they added identity-only rows to the measurement oracle while contributing no
   distinct dynamics. That retirement says nothing about which symbols the venue
-  may serve: a symbol with no preset is served the default tape, and no fit is
+  may serve: a symbol with no preset is served the default shape, and no fit is
   a precondition of being served.)
 
 A preset can itself be built as an override of another preset (MES over
@@ -146,8 +146,8 @@ because it makes no calendar or margin claim about an unfitted symbol, its
 settlement currency is funded by the shipped balances, and its dynamics were
 fitted from trade-level archives. Name a futures preset explicitly when a
 future-shaped bundle is required. The unmatched symbol wears the default
-preset's shape, never its tape path, because its requested label enters the
-seed derivation - two symbols on the same bundle run different tapes.
+preset's shape, never its river, because its requested label enters the
+seed derivation - two symbols on the same bundle run different rivers.
 
 A symbol nobody configured materializes its own river the first time it is
 asked for, and from then on it appears in `/instruments` alongside the

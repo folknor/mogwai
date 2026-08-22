@@ -19,7 +19,7 @@ makes invalid, and a run that has already materialized its river cap.
 
 Symbols are LABELS and match case-exactly on the wire, even though
 `[symbols.*]` keys and preset names resolve case-insensitively - `mnq` and
-`MNQ` are two distinct rivers with two distinct tapes. The readiness record
+`MNQ` are two distinct rivers. The readiness record
 names no symbol, so a consumer takes the labels it wants from its own
 configuration; `/instruments` reports the configured shapes unioned with every
 river materialized so far. `/quotes`
@@ -31,15 +31,15 @@ setup sends the current BBO snapshot before later tape frames.
 
 `seed` (absent means a fresh `u64` is drawn at launch, capped at `i64::MAX` so
 it round-trips through TOML) is the run's single source of randomness. The fill
-band has one run-level stream, while every requested symbol gets its own tape
-path derived from the seed and label. Two symbols therefore have genuinely
-different tapes even when they resolve to the same shape. Nothing else in a run
+band has one run-level stream, while every requested symbol gets its own river,
+derived from the seed and label. Two symbols therefore have genuinely
+different rivers even when they resolve to the same shape. Nothing else in a run
 is random. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; the
 run proper begins one `warmup_ns` later on the same axis, so a run is a pure
 function of `(seed, config)` for a given build and fingerprint, and one served
-symbol's tape is a pure function of `(seed, config, label)`. There is no
+symbol's river is a pure function of `(seed, config, label)`. There is no
 wall-clock input to a run's identity left: every boat is placed at that same
-fixed origin whenever it boards, so a river's path does not depend on when, or
+fixed origin whenever it is placed, so a river's path does not depend on when, or
 whether, anyone connects to it. The only clock key is `speed`,
 which paces delivery against wall time but never decides which tick is
 served - a boat placed some way into a run is therefore permanently behind the

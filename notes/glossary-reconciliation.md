@@ -1575,6 +1575,67 @@ tense, without spelling the retired identifier. That is the swap hazard read
 backwards: a sentence can be false about the new referent precisely because the
 rename succeeded.
 
+**Phase 6, the close pass, 2026-08-22.** One Fable subagent over the whole
+thirteen-commit arc, `972e1af` through `6f276a3`, carte blanche. The phase-5
+gate read clean: every retired spelling, exemption and walk rule matches its
+recorded grounds, and every scoped exemption is exercised. What the pass found
+is the recurring failures again:
+
+- THE SWEEP STOPPED AT ONE FILE, round 12's family. AGENTS.md's overview took
+  river while README.md kept the same sentences on tape - "that preset drives
+  the tape", "the default tape is served", "draws the same tape", "dump a tape
+  offline" - and `docs/presets.md` kept the whole family: "tape knobs", makes
+  "a symbol's tape BETTER", "served the default tape", "run different tapes".
+  `docs/config.md`'s seed paragraph said a served symbol's tape is a pure
+  function of seed, config and label; `reference/architecture.md` opened with
+  "a RIVER is a tape", kept "the generated futures tape", "the generated tape
+  publishes", "serves several genuinely different tapes" and "makes a tape
+  better" (the same sentence AGENTS.md had moved to river); `docs/cli.md` said
+  a futures tape shows its closed weekend and warmup cost follows "the tape's
+  cadence". In the venue crate, `fills.rs`'s clean-tape walk doc, `source.rs`'s
+  "symbol labels select distinct tapes" assertion and `config.rs`'s "the
+  earliest instant the tape can serve" were the generated-sequence sense by
+  their own reading - the walk composes from `Rivers::history_source`. All
+  moved to river or shape. Where the glossary itself is the sharper word, the
+  fix took it: a presetless symbol is served the default SHAPE under its own
+  label, never "the default river", because its label enters the seed and its
+  river is its own - AGENTS.md's swept sentence said river and now says shape.
+- SENTENCES LEFT FALSE around the account model. README.md still said one
+  venue is one account and one ledger and "not a service you start once and
+  point many strategies at", against the glossary's many-account Venue and the
+  Server mode entry; it now states the account-id discriminator. `sweeper.rs`'s
+  module doc justified run ownership with "one process is one ledger now",
+  false since the per-account split; it now says the run holds every ledger.
+  `messages.rs`'s `HavocDiagnostic` doc said the run-level diagnostic exists
+  "because a run has one tape" - the exact pre-open-set claim
+  `architecture.md`'s `/health` paragraph records as a former hole.
+- A RULING'S OWED CORRECTIONS WERE NEVER MADE. The 2026-08-21 FeedLagged
+  ruling named `reference/architecture.md`'s "closed with WS 1011" and the
+  protocol doc's "the venue closes with WS 1011 after delivering it" as wrong
+  and owing correction, and both stood unchanged through five later rounds.
+  Both now state the advisory contract and record the close the serving path
+  still performs as a standing code gap against the ruling, which keeps the
+  reference true of the code without restating the fatal reading as the
+  contract.
+- THE SWAP HAZARD, in small instances: `architecture.md` had request symbols
+  "materialize and board their own rivers" - boarding is a passenger's act -
+  and `docs/config.md` had a boat placed at the origin "whenever it boards".
+  And `docs/havoc.md`'s opening said transport and engine havoc is armed
+  "against the one run, not against an account or a connection", contradicted
+  by its own armed-per-account paragraph and by the Divergence entry; it now
+  states the per-account arming, and the regime row's "baked into the run's
+  tape" is the run's rivers.
+
+RAISED AND DELIBERATELY LEFT, recorded so a later round does not re-file it:
+the generated-sequence sense of `tape` survives where it is entangled with the
+out-of-scope version and seed machinery - "tape root", "tape identity",
+`TapeIdentity`, "tape byte", `tick-composition`'s measured tapes and the whole
+version narrative - and untangling that family needs a ruling on the identity
+vocabulary, not a sweep. `reference/performance.md`'s tape wording is the
+durable record of past measurements and was not swept. `fills.rs`'s
+"tape-shaped `TriggerScan`" and its `reference/performance.md` mirror were
+left with it.
+
 ### Cross-cutting observations, recorded so they survive the merge
 
 These belong to no single scope, so nothing else holds them.

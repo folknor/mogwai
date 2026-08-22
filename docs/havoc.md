@@ -1,9 +1,9 @@
 # mogwai havoc
 
-Transport and engine havoc is armed against the one run, not against an account
-or a connection.
-Order-path divergences operate on the run ledger; data-path divergences operate
-on the selected river or on connected sockets. Admission and execution
+Transport and engine havoc is armed per account - a request naming none arms
+every account - and never per connection.
+Order-path divergences operate on the account's ledger; data-path divergences
+operate on the selected river or on the account's view. Admission and execution
 lanes remain connection-local memory bounds. Order-path arms apply only to
 consumer-originated orders, which reach the venue over the websocket carrier and
 nowhere else. Venue-originated maintenance, including forced
@@ -100,8 +100,8 @@ arm standing on the ledger that call returns.
 
 The market REGIMES - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are not
 runtime arms. They are a boot choice made by whoever launches the run, apply to
-the whole run's tape, and enter the tape identity, so a regime run is a
-different tape rather than a mutation of one. `LiquidityDrought` is the inverse
+the whole run's water, and enter every river's identity, so a regime run serves
+different rivers rather than mutating one. `LiquidityDrought` is the inverse
 rate control to a surge: it stretches parent gaps while leaving sweep shape
 unchanged. `mogwai gen` takes the same regimes offline.
 
@@ -193,4 +193,4 @@ carved out and no new arm exists for the trigger itself.
 | `CommandLatency` submit act/ack | The submit only. There is no trigger-act or trigger-ack knob - the trigger is venue-internal with no consumer command behind it, and the sweep interval already bounds how late it can fire. |
 | `DelayAcks` / `GoDark` / `StallData` | Transport, unchanged. `OrderTriggered` classifies as execution, so `DelayAcks` holds it and `GoDark` drops it; `StallData` never touches it. |
 | `CancelOpenOrderSilently` | An untriggered conditional is a resting order, so it works today's way - the venue silently kills the protective leg and only a `QueryOrders` poll reveals it. A silent cancel racing a trigger in the same sweep pass leaves the order canceled: the cancel takes the lock first and removes the order, so the in-flight trigger fails its lookup and is dropped. |
-| `VolStorm` / `LiquidityDrought` / `ReopenGap` | Not an arm at all - a boot regime baked into the run's tape, so the sweep and the consumer see the same water. A drought thins what a stop has to trigger on rather than hiding prints from the consumer. |
+| `VolStorm` / `LiquidityDrought` / `ReopenGap` | Not an arm at all - a boot regime baked into the run's rivers, so the sweep and the consumer see the same water. A drought thins what a stop has to trigger on rather than hiding prints from the consumer. |

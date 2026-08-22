@@ -3,11 +3,11 @@
 Mogwai is a fake venue. A direct launcher starts one foreground process and
 receives a versioned readiness record as one JSON line on the child's stdout.
 The process binds one endpoint and owns an open set of resolved instruments,
-generated river tapes, and one ledger PER ACCOUNT.
+generated rivers, and one ledger PER ACCOUNT.
 
-A RIVER is a tape and is shared; an ACCOUNT owns its ledger, risk state and
-freeze stamp; a PASSENGER is one connected trader riding one boat and dying
-with its socket. The
+A RIVER is a generated sequence and is shared; an ACCOUNT owns its ledger,
+risk state and freeze stamp; a PASSENGER is one connected trader riding one
+boat and dying with its socket. The
 engine is per account: one engine per process meant every consumer's
 fills moved every other consumer's net, which is right for a venue owned by one
 run and wrong for an exchange serving a batch. An `Account` is created on
@@ -564,11 +564,15 @@ already-bound passenger. Every resolved shape owns a lazily created checkpoint
 chain, keyed and locked independently, and is servable through history. Consumers
 do not send subscribe frames or an account identity. The bounded fanout
 ring remains; a lagging consumer receives
-`FeedLagged` on the priority lane and is closed with WS 1011.
+`FeedLagged` on the priority lane. The frame is advisory by ruling - it carries
+the skipped count and the simulated instant so the reader can decide its own
+response - but the serving path today still closes the connection with WS 1011
+after delivering it, which is a standing code gap against that ruling, never a
+licence to restore the fatal reading.
 
 A river's tape root is derived from the run seed and the REQUESTED symbol
 label, not from the shape the label resolves to, so a run serving several
-symbols serves several genuinely different tapes. A run stays a pure function
+symbols serves several genuinely different rivers. A run stays a pure function
 of `(seed, config)`; a river is a pure function of `(seed, label, resolved
 bundle)`. The seeding rules are set out with the run seed below.
 
@@ -834,14 +838,14 @@ against a measured maximum-strength envelope, not a fitted market quantity: as a
 log return it permits about +5.13 and -4.88 percent in a SINGLE event, and it
 does not bound cumulative movement over many events.
 
-Two structural fidelity limits of the generated futures tape are stated here
+Two structural fidelity limits of the generated futures river are stated here
 because no parameter can remove them. First, the calendar-driven baseline has
 no automatic reopen jump: a real session reopen prints a discrete gap where
 the closed-hours information arrives at once, while the generated mid resumes
 its random walk from where it halted. An explicitly armed `ReopenGap`
 divergence can inject such a jump on a subscription's view, but the clean
-baseline tape never produces one, so on it overnight gaps are absent and any
-large single-minute range the tape does produce is a volatility-cluster tail
+baseline river never produces one, so on it overnight gaps are absent and any
+large single-minute range the river does produce is a volatility-cluster tail
 inside a session, not a reopen - a different phenomenology occurring at a
 different time of day. Second, the session profile modulates intensity and
 volatility by HOURLY factors, so within-hour structure (the opening minutes'
@@ -969,7 +973,7 @@ can see it - behind a watch-gated readiness barrier that black-holes delivery
 until the reseed says go, and a failed reseed tears the connection down rather
 than wedging the delivery pump.
 
-The generated tape publishes BBO updates and raw fills, not aggregated trades. One parent
+The generated river carries BBO updates and raw fills, not aggregated trades. One parent
 match event updates the latent market once and emits a same-side sweep of one
 or more children, one microsecond apart, walking monotonically in the take
 direction. Its BBO is emitted first at the parent timestamp and remains the
@@ -1090,9 +1094,9 @@ Config declares no closed instrument set. It supplies a default knob overlay
 and optional case-insensitive per-symbol overlays for total symbol resolution.
 The top-level boot symbol selects the eagerly warmed boot river and remains the
 default for a request that carries no symbol; other request symbols materialize
-and board their own rivers in the same run.
+their own rivers in the same run.
 
-The intake sequence therefore makes a tape better and gates nothing:
+The intake sequence therefore makes a river better and gates nothing:
 survey what cheap data exists, decide whether a paid corpus is worth buying
 and which windows of it, buy, preflight, measure, characterize, fit, ship a
 preset with its provenance. The offline toolbox is that sequence made
