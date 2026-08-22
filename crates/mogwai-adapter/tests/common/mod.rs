@@ -249,10 +249,25 @@ pub struct StubState {
     pub trades_tape: Mutex<Option<Vec<mogwai_protocol::TradeTick>>>,
     /// The `start` query value of each `/trades` request, in arrival order.
     pub trades_starts: Mutex<Vec<Option<u64>>>,
-    /// When true, `GET /trades` answers `500`, modelling a venue that refuses
-    /// the history fetch. The request generators must still emit a (empty)
-    /// response rather than leaving the nautilus request unresolved.
+    /// When true, `GET /trades` answers `500`, and a socket `QueryHistory` is
+    /// answered with `HistoryRejected`, modelling a venue that refuses the
+    /// history read. The request generators must still emit an (empty) response
+    /// rather than leaving the nautilus request unresolved.
     pub fail_trades: AtomicBool,
+    /// Rows per socket history page. `0` serves the whole window in one page.
+    ///
+    /// Set it small to exercise pagination: the client must ask again with the
+    /// continuation it was handed and splice the pages without losing or
+    /// repeating a row at the seam.
+    pub history_page_rows: AtomicUsize,
+    /// Every `QueryHistory` this stub served, as (kind, continuation), in
+    /// arrival order.
+    ///
+    /// Recorded rather than merely counted so a test can assert the REQUEST
+    /// SEQUENCE - that the client resumed with the token it was given rather
+    /// than re-asking from the start, which a row-level assertion cannot
+    /// distinguish from a client that paged correctly by luck.
+    pub history_requests: Mutex<Vec<(mogwai_protocol::HistoryKind, Option<String>)>>,
     /// JSON body of `GET /clock`. Unset serves [`IDENTITY_CLOCK_JSON`], a real
     /// decodable envelope at speed 1 with a zero river floor, which is what a
     /// venue that has just booted looks like. A test exercising the off-river
@@ -998,6 +1013,11 @@ async fn serve_exec_message<S>(
                 drop(ws.send(Message::Text(json.into())).await);
             }
         }
+        Command::QueryHistory { .. } => {
+            let reply = history_reply(message, state);
+            let json = serde_json::to_string(&reply).expect("encode history reply");
+            drop(ws.send(Message::Text(json.into())).await);
+        }
         _ => {}
     }
 }
@@ -1012,6 +1032,113 @@ pub fn account_json(account_id: &str, positions: &str, ts_event: u64) -> String 
 /// One venue-truth BTCUSDT position row for an account snapshot.
 pub fn position_json(quantity: &str, avg_px: &str) -> String {
     format!(r#"{{"symbol":"BTCUSDT","quantity":"{quantity}","avg_px":"{avg_px}"}}"#)
+}
+
+/// Answers a socket history request from the seeded tapes, with the venue's own
+/// paging semantics rather than with whatever the calling test needs.
+///
+/// That distinction is the point of writing it this way. A double that replayed
+/// queued bodies whatever the client asked for could not detect a client that
+/// loses a row at a page seam, re-requests from the start, or ignores its
+/// continuation - the failures paging actually has. This one honours the
+/// inclusive start bound, fixes a cutoff at the first page and carries it,
+/// resumes strictly after the last row delivered, and reports completion only
+/// when the window is exhausted.
+pub fn history_reply(message: &Command, state: &StubState) -> VenueMessage {
+    let Command::QueryHistory {
+        request_id,
+        kind,
+        start,
+        end,
+        continuation,
+    } = message
+    else {
+        unreachable!("history_reply is only called for a QueryHistory")
+    };
+    state
+        .history_requests
+        .lock()
+        .expect("history requests mutex")
+        .push((*kind, continuation.clone()));
+
+    if state.fail_trades.load(Ordering::Relaxed) {
+        return VenueMessage::HistoryRejected {
+            request_id: request_id.clone(),
+            reason: "stub history refusal".to_owned(),
+            retryable: true,
+        };
+    }
+
+    // `stub:<cutoff>:<next_ts>` - opaque to the client, which only hands it
+    // back. The shape differs from the venue's on purpose: a client that had
+    // learned to parse the real one would be caught here.
+    let resumed: Option<(u64, u64)> = continuation.as_ref().and_then(|token| {
+        let mut parts = token.split(':');
+        (parts.next()? == "stub")
+            .then(|| Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?)))
+            .flatten()
+    });
+    let rows: Vec<mogwai_protocol::HistoryRow> = match kind {
+        mogwai_protocol::HistoryKind::Trades => state
+            .trades_tape
+            .lock()
+            .expect("trades tape mutex")
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(mogwai_protocol::HistoryRow::Trade)
+            .collect(),
+        mogwai_protocol::HistoryKind::Quotes => state
+            .quotes_tape
+            .lock()
+            .expect("quotes tape mutex")
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(mogwai_protocol::HistoryRow::Quote)
+            .collect(),
+    };
+    // Fixed at the first page and carried after it, so a growing tape cannot
+    // move the finish line under a paginating client.
+    let cutoff = resumed.map_or_else(
+        || {
+            end.unwrap_or_else(|| {
+                rows.last()
+                    .map_or(u64::MAX, mogwai_protocol::HistoryRow::ts_event)
+            })
+        },
+        |(cutoff, _)| cutoff,
+    );
+    let from = resumed.map_or(start.unwrap_or(0), |(_, next)| next);
+    let window: Vec<mogwai_protocol::HistoryRow> = rows
+        .into_iter()
+        .filter(|row| row.ts_event() >= from && row.ts_event() <= cutoff)
+        .collect();
+    let page_rows = state.history_page_rows.load(Ordering::Relaxed);
+    let (page, complete) = if page_rows == 0 || window.len() <= page_rows {
+        (window, true)
+    } else {
+        let mut window = window;
+        window.truncate(page_rows);
+        (window, false)
+    };
+    let continuation = (!complete)
+        .then(|| {
+            page.last().map(|last| {
+                // Strictly after the last row delivered, which is what stops a
+                // row being served twice at the seam.
+                format!("stub:{cutoff}:{}", last.ts_event().saturating_add(1))
+            })
+        })
+        .flatten();
+    VenueMessage::HistoryPage {
+        request_id: request_id.clone(),
+        kind: *kind,
+        rows: page,
+        cutoff,
+        continuation,
+        complete,
+    }
 }
 
 /// Answers a venue-truth query using rows seeded into the shared stub.

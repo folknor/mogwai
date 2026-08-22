@@ -48,12 +48,12 @@ use tokio::task::JoinHandle;
 use crate::{
     MOGWAI_VENUE, MogwaiDataClientConfig,
     client::shared::{
-        HavocDelivery, HavocFilter, abort_tasks, cache_instruments, capped_limit, conn_havoc,
-        date_to_unix_nanos, emit_seeded_instruments, enqueue_havoc, ensure_instrument,
-        ensure_on_river, fetch_clock_or_identity, fetch_instruments, flush_havoc_into_pump,
-        inbound_havoc, instrument_any_or_warn, instrument_def, join_url, lock_recover,
-        now_unix_nanos, run_identity_check, seed_instruments, spawn_latency_pump,
-        symbol_from_instrument, track_task, wait_connected, warn_missing_instrument_once,
+        HavocDelivery, HavocFilter, abort_tasks, cache_instruments, conn_havoc, date_to_unix_nanos,
+        emit_seeded_instruments, enqueue_havoc, ensure_instrument, ensure_on_river,
+        fetch_clock_or_identity, fetch_instruments, flush_havoc_into_pump, inbound_havoc,
+        instrument_any_or_warn, instrument_def, lock_recover, now_unix_nanos, request_timeout_secs,
+        run_identity_check, seed_instruments, spawn_latency_pump, symbol_from_instrument,
+        track_task, wait_connected, warn_missing_instrument_once,
     },
     convert,
     lifecycle::{HttpQuota, WsConnectionConfig, run_ws_connection},
@@ -84,6 +84,38 @@ pub struct MogwaiDataClient {
     /// HTTP requests (and racing the HttpQuota) or send into a dropped sink
     /// after the client stopped (AD17).
     task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// Outbound command channel for this leg.
+    ///
+    /// The data socket used to send nothing at all - its command receiver was
+    /// `Infallible` - because subscriptions are satisfied locally and the venue
+    /// pushes the tape unbidden. History changed that: a page is a correlated
+    /// request-response, and it is carried here rather than over HTTP because
+    /// this connection is the only thing that knows which river this client is
+    /// reading. A symbol does not: after the river fork one label names several,
+    /// so an HTTP poll would backfill whichever the label resolved to.
+    ws_cmd: Option<UnboundedSender<mogwai_protocol::Command>>,
+    /// In-flight history waiters, correlation id to reply sender.
+    pending_history: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HistoryReply>>>>,
+    /// Monotonic source of correlation ids for this client's own requests.
+    next_request: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// What the reader hands back to a waiting history request: a page, or the
+/// venue's correlated refusal.
+///
+/// A refusal is carried rather than turned into an empty page, because an empty
+/// page and a quiet market are indistinguishable to a consumer folding bars -
+/// which is the whole reason the venue refuses explicitly.
+#[derive(Debug)]
+enum HistoryReply {
+    Page {
+        rows: Vec<mogwai_protocol::HistoryRow>,
+        continuation: Option<String>,
+        complete: bool,
+    },
+    Rejected {
+        reason: String,
+    },
 }
 
 impl MogwaiDataClient {
@@ -118,6 +150,9 @@ impl MogwaiDataClient {
             quote_delivery: Arc::new(Mutex::new(())),
             bars: Arc::new(Mutex::new(HashMap::new())),
             task_handles: Arc::new(Mutex::new(Vec::new())),
+            ws_cmd: None,
+            pending_history: Arc::new(Mutex::new(HashMap::new())),
+            next_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -239,6 +274,25 @@ impl MogwaiDataClient {
             .as_ref()
             .cloned()
             .context("data event sink not initialized")
+    }
+
+    /// Gather what a paged history session needs off `&self`.
+    ///
+    /// Fails when this client is not connected, which is the honest answer
+    /// rather than an inconvenience: a page reads the river this socket
+    /// boarded, so with no socket there is no river to read and no label that
+    /// could stand in for one.
+    fn history_session(&self) -> anyhow::Result<HistorySession> {
+        let cmd = self
+            .ws_cmd
+            .clone()
+            .context("mogwai data client is not connected")?;
+        Ok(HistorySession {
+            cmd,
+            pending: Arc::clone(&self.pending_history),
+            next_request: Arc::clone(&self.next_request),
+            timeout_secs: request_timeout_secs(&self.config.havoc, self.sim),
+        })
     }
 
     /// Flush every completed-but-withheld bar window on teardown (AD19). A time
@@ -371,6 +425,13 @@ impl DataClient for MogwaiDataClient {
         let ws_url = self.config.ws_url();
 
         let connected = Arc::clone(&self.connected);
+        // Minted per connection: a reconnect gets a fresh channel, and the
+        // waiters of the old one are failed by the undelivered hook rather than
+        // left pointing at a socket that is gone.
+        let (cmd_tx, cmd_rx) = unbounded_channel::<mogwai_protocol::Command>();
+        self.ws_cmd = Some(cmd_tx);
+        let undelivered_history = Arc::clone(&self.pending_history);
+        let reply_history = Arc::clone(&self.pending_history);
         let instruments = Arc::clone(&self.instruments);
         let missing_instrument_warnings = Arc::clone(&self.missing_instrument_warnings);
         let subs = Arc::clone(&self.subs);
@@ -447,8 +508,11 @@ impl DataClient for MogwaiDataClient {
                     identity,
                     dial_timeout,
                 },
-                None::<tokio::sync::mpsc::UnboundedReceiver<std::convert::Infallible>>,
-                |never: &std::convert::Infallible| match *never {},
+                Some(cmd_rx),
+                // The client's command type IS the wire command here: this leg
+                // sends only history requests, which need no per-connection
+                // rewriting the way a resubscribe would.
+                mogwai_protocol::Command::clone,
                 // The venue pushes the one run's tape unbidden, so a reattach
                 // has no subscribe frames to replay: subscription state is
                 // satisfied locally in this client and never reaches the wire.
@@ -456,7 +520,18 @@ impl DataClient for MogwaiDataClient {
                 move |venue_msg| {
                     let handler_filter = Arc::clone(&handler_filter);
                     let handler_deliver = handler_deliver.clone();
+                    let reply_history = Arc::clone(&reply_history);
                     async move {
+                        // Resolved HERE rather than through the market pump. A
+                        // page is a correlated reply, not channel data: sending
+                        // it through the pump would hold it behind the delivery
+                        // barrier that exists to keep tape frames from
+                        // outrunning their instrument defs, and would subject a
+                        // request-response to the inbound data latency meant for
+                        // a pushed feed.
+                        let Some(venue_msg) = route_history(venue_msg, &reply_history) else {
+                            return;
+                        };
                         let mut filter = handler_filter.lock().await;
                         enqueue_havoc(&mut filter, venue_msg, sim, &handler_deliver);
                     }
@@ -469,10 +544,27 @@ impl DataClient for MogwaiDataClient {
                         flush_havoc_into_pump(&mut filter, sim, &disconnect_deliver);
                     }
                 },
-                // The data socket sends no commands at all - its command
-                // receiver is `Infallible` - so nothing can go undelivered on
-                // it. The callback is unreachable rather than merely unused.
-                |never: std::convert::Infallible| match never {},
+                // A history request that never reached the venue fails its
+                // waiter here rather than being left to time out. A consumer
+                // cannot tell a lost command from a slow one, and a backfill
+                // that hangs is indistinguishable from a quiet market - which
+                // is the failure the whole correlated shape exists to avoid.
+                {
+                    let undelivered = Arc::clone(&undelivered_history);
+                    move |cmd: mogwai_protocol::Command| {
+                        let mogwai_protocol::Command::QueryHistory { request_id, .. } = cmd else {
+                            return;
+                        };
+                        if let Ok(mut pending) = undelivered.lock()
+                            && let Some(waiter) = pending.remove(&request_id)
+                        {
+                            drop(waiter.send(HistoryReply::Rejected {
+                                reason:
+                                    "history request was never delivered to the venue".to_owned(),
+                            }));
+                        }
+                    }
+                },
             )
             .await;
         });
@@ -721,6 +813,7 @@ impl DataClient for MogwaiDataClient {
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
         let sink = self.sink()?;
+        let session = self.history_session()?;
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
@@ -787,41 +880,36 @@ impl DataClient for MogwaiDataClient {
                         break 'trades Vec::new();
                     }
                 };
-                let (mut trades, truncated) = match fetch_trades_windowed(
-                    &http,
-                    &http_quota,
-                    &base,
-                    TradeFetch {
-                        symbol: &symbol,
-                        start,
-                        end,
-                        limit: None,
-                    },
-                    |out| max_trades.is_some_and(|m| out.len() >= m),
-                )
-                .await
+                // Over this client's OWN socket, which is what makes the rows
+                // this passenger's river rather than whatever the label
+                // resolves to. The symbol is still used to find the instrument
+                // def above - that is instrument identity, which a label does
+                // name - but it selects no water here.
+                let (rows, truncated) = match session
+                    .collect(mogwai_protocol::HistoryKind::Trades, start, end, max_trades)
+                    .await
                 {
                     Ok(result) => result,
                     Err(err) => {
-                        // Surface the failure instead of the old silent `if let Ok`
-                        // drop: a venue 400 (an off-river window, or a symbol the
-                        // run does not serve) or any fetch error must be visible,
-                        // not mistaken for "no trades in the window".
-                        tracing::error!(%symbol, error = %err, "request_trades: trade fetch failed (the venue may have refused an off-river window); answering with an empty trade response so the request resolves");
+                        // Surfaced rather than silently emptied: a refusal, a
+                        // timeout or a dropped socket must be visible, not
+                        // mistaken for "no trades in the window".
+                        tracing::error!(%symbol, error = %err, "request_trades: history failed; answering with an empty trade response so the request resolves");
                         break 'trades Vec::new();
                     }
                 };
-                if let Some(m) = max_trades {
-                    // Paging overshoots the trade ceiling by up to one page; trim to
-                    // the requested count (from the oldest edge) so the response
-                    // honors the limit exactly.
-                    trades.truncate(m);
-                }
+                let trades: Vec<mogwai_protocol::TradeTick> = rows
+                    .into_iter()
+                    .filter_map(|row| match row {
+                        mogwai_protocol::HistoryRow::Trade(trade) => Some(trade),
+                        mogwai_protocol::HistoryRow::Quote(_) => None,
+                    })
+                    .collect();
                 if truncated {
                     tracing::warn!(
                         %symbol,
                         trades = trades.len(),
-                        "request_trades: history window truncated before its end (trade limit reached or same-ts wedge); the requested history may not splice contiguously into live"
+                        "request_trades: history window truncated before its end at the caller's own trade limit; the requested history may not splice contiguously into live"
                     );
                 }
                 trades
@@ -857,6 +945,7 @@ impl DataClient for MogwaiDataClient {
 
     fn request_quotes(&self, request: RequestQuotes) -> anyhow::Result<()> {
         let sink = self.sink()?;
+        let session = self.history_session()?;
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
@@ -892,20 +981,25 @@ impl DataClient for MogwaiDataClient {
                     }
                 };
                 let limit = request.limit.map(std::num::NonZeroUsize::get);
-                let (quotes, truncated) = match fetch_quotes_windowed(
-                    &http,
-                    &http_quota,
-                    &base,
-                    QuoteFetch { symbol: &symbol, start, end, limit: request.limit },
-                ).await {
-                    Ok(quotes) => quotes,
+                let (rows, truncated) = match session
+                    .collect(mogwai_protocol::HistoryKind::Quotes, start, end, limit)
+                    .await
+                {
+                    Ok(result) => result,
                     Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_quotes: history fetch failed; answering empty");
+                        tracing::error!(%symbol, error = %err, "request_quotes: history failed; answering empty");
                         break 'quotes Vec::new();
                     }
                 };
+                let quotes: Vec<mogwai_protocol::QuoteTick> = rows
+                    .into_iter()
+                    .filter_map(|row| match row {
+                        mogwai_protocol::HistoryRow::Quote(quote) => Some(quote),
+                        mogwai_protocol::HistoryRow::Trade(_) => None,
+                    })
+                    .collect();
                 if truncated {
-                    tracing::warn!(%symbol, "quote history truncated (limit reached or same-ts wedge)");
+                    tracing::warn!(%symbol, "quote history truncated at the caller's own limit");
                 }
                 quotes.into_iter().take(limit.unwrap_or(usize::MAX)).filter_map(|quote| {
                     convert::quote_tick(
@@ -943,6 +1037,7 @@ impl DataClient for MogwaiDataClient {
              use Day or finer"
         );
         let sink = self.sink()?;
+        let session = self.history_session()?;
         let http = self.http.clone();
         let http_quota = self.http_quota.clone();
         let base = self.config.http_base_url();
@@ -1002,30 +1097,37 @@ impl DataClient for MogwaiDataClient {
                         break 'bars Vec::new();
                     }
                 };
-                let (trades, truncated) = match fetch_trades_windowed(
-                    &http,
-                    &http_quota,
-                    &base,
-                    TradeFetch {
-                        symbol: &symbol,
+                // Bars are folded from trades, so this asks for the trade
+                // stream and stops when the span it has covers the bars the
+                // caller asked for. Taking the caller's BAR limit as a row
+                // limit would be the old defect: a request for N bars would
+                // fetch N trades and fold roughly a fifth of the bars wanted.
+                let (rows, truncated) = match session
+                    .collect_until(
+                        mogwai_protocol::HistoryKind::Trades,
                         start,
                         end,
-                        limit: None,
-                    },
-                    |out| bar_span_reached(out, interval, bar_limit),
-                )
-                .await
+                        |rows| bar_span_reached(rows, interval, bar_limit),
+                    )
+                    .await
                 {
                     Ok(result) => result,
                     Err(err) => {
-                        tracing::error!(%symbol, error = %err, "request_bars: trade fetch failed (the venue may have refused an off-river window); answering with an empty bar response so the request resolves");
+                        tracing::error!(%symbol, error = %err, "request_bars: history failed; answering with an empty bar response so the request resolves");
                         break 'bars Vec::new();
                     }
                 };
+                let trades: Vec<mogwai_protocol::TradeTick> = rows
+                    .into_iter()
+                    .filter_map(|row| match row {
+                        mogwai_protocol::HistoryRow::Trade(trade) => Some(trade),
+                        mogwai_protocol::HistoryRow::Quote(_) => None,
+                    })
+                    .collect();
                 if truncated {
                     tracing::warn!(
                         %symbol,
-                        "request_bars: history window truncated before its end (bar limit reached or same-ts wedge); the requested history may not splice contiguously into live"
+                        "request_bars: history window truncated before its end at the caller's own bar limit; the requested history may not splice contiguously into live"
                     );
                 }
                 let mut bars = aggregate_bars(&request.bar_type, &trades, &def, sim, end);
@@ -1221,6 +1323,180 @@ impl SubState {
 struct BarSubState {
     refs: usize,
     active: Option<BarAcc>,
+}
+
+/// Everything one paged history session needs, gathered off `&self` so the
+/// spawned task owns it.
+#[derive(Clone)]
+struct HistorySession {
+    cmd: UnboundedSender<mogwai_protocol::Command>,
+    pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HistoryReply>>>>,
+    next_request: Arc<std::sync::atomic::AtomicU64>,
+    timeout_secs: u64,
+}
+
+impl HistorySession {
+    /// Page a whole window off the socket, or fail saying why.
+    ///
+    /// Pulls: the next page is asked for only after this one is in hand, which
+    /// is what bounds how much of a window the venue has resident for a reader
+    /// that has stopped reading.
+    ///
+    /// `max_rows` bounds what the CALLER wanted; the venue bounds each page
+    /// independently. Reaching the caller's ceiling stops the session with rows
+    /// in hand rather than failing it, and the caller is told the window was
+    /// truncated - the same contract the HTTP pagination had.
+    async fn collect(
+        &self,
+        kind: mogwai_protocol::HistoryKind,
+        start: Option<UnixNanos>,
+        end: Option<UnixNanos>,
+        max_rows: Option<usize>,
+    ) -> anyhow::Result<(Vec<mogwai_protocol::HistoryRow>, bool)> {
+        self.collect_until(kind, start, end, move |rows| {
+            max_rows.is_some_and(|max| rows.len() >= max)
+        })
+        .await
+        .map(|(mut rows, truncated)| {
+            // Paging overshoots a row ceiling by up to one page, so the trim
+            // happens here rather than in the loop: the caller asked for a
+            // count and gets exactly that, from the oldest edge.
+            if let Some(max) = max_rows {
+                rows.truncate(max);
+            }
+            (rows, truncated)
+        })
+    }
+
+    /// The same session, stopping on a caller's own predicate rather than on a
+    /// row count - which is what a bar request needs, since it wants a SPAN of
+    /// trades rather than a number of them.
+    async fn collect_until(
+        &self,
+        kind: mogwai_protocol::HistoryKind,
+        start: Option<UnixNanos>,
+        end: Option<UnixNanos>,
+        enough: impl Fn(&[mogwai_protocol::HistoryRow]) -> bool + Send,
+    ) -> anyhow::Result<(Vec<mogwai_protocol::HistoryRow>, bool)> {
+        let start = start.map(|ts| ts.as_u64());
+        let end = end.map(|ts| ts.as_u64());
+        let mut out: Vec<mogwai_protocol::HistoryRow> = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let request_id = format!(
+                "mogwai-history-{}",
+                self.next_request
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            // Registered BEFORE the command goes out, so a reply racing back
+            // faster than this task resumes still finds its slot; removed again
+            // on a send failure so a dead socket does not leak the entry.
+            self.pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("history waiter mutex poisoned"))?
+                .insert(request_id.clone(), reply_tx);
+            let sent = self.cmd.send(mogwai_protocol::Command::QueryHistory {
+                request_id: request_id.clone(),
+                kind,
+                start,
+                end,
+                continuation: continuation.clone(),
+            });
+            if sent.is_err() {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&request_id);
+                }
+                anyhow::bail!("history request not sent: the data socket is gone");
+            }
+
+            let timeout = std::time::Duration::from_secs(self.timeout_secs.max(1));
+            let reply = match tokio::time::timeout(timeout, reply_rx).await {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(_)) => anyhow::bail!("history request abandoned: the data client stopped"),
+                Err(_) => {
+                    if let Ok(mut pending) = self.pending.lock() {
+                        pending.remove(&request_id);
+                    }
+                    anyhow::bail!(
+                        "history request {request_id} timed out after {}s",
+                        self.timeout_secs.max(1)
+                    )
+                }
+            };
+            let (rows, next, complete) = match reply {
+                HistoryReply::Page {
+                    rows,
+                    continuation,
+                    complete,
+                } => (rows, continuation, complete),
+                // Propagated rather than folded into an empty result: the
+                // caller decides what to tell nautilus, and it must not be able
+                // to mistake this for a window that held nothing.
+                HistoryReply::Rejected { reason } => {
+                    anyhow::bail!("venue refused a history page: {reason}")
+                }
+            };
+            out.extend(rows);
+            // The caller's own ceiling, checked before the venue's completion:
+            // stopping here means the window was cut short of its end, which
+            // the caller is told about rather than left to infer.
+            if enough(&out) {
+                return Ok((out, true));
+            }
+            if complete {
+                return Ok((out, false));
+            }
+            let Some(next) = next else {
+                anyhow::bail!("an incomplete history page carried no continuation")
+            };
+            continuation = Some(next);
+        }
+    }
+}
+
+/// Hand a history frame to whichever request is waiting on it, or give the
+/// message back so the market path can have it.
+///
+/// An uncorrelated page is dropped with a warning rather than delivered
+/// anywhere: it answers a request that has already timed out or been abandoned,
+/// and there is no consumer left to give it to.
+fn route_history(
+    msg: VenueMessage,
+    pending: &Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HistoryReply>>>>,
+) -> Option<VenueMessage> {
+    let (request_id, reply) = match msg {
+        VenueMessage::HistoryPage {
+            request_id,
+            rows,
+            continuation,
+            complete,
+            ..
+        } => (
+            request_id,
+            HistoryReply::Page {
+                rows,
+                continuation,
+                complete,
+            },
+        ),
+        VenueMessage::HistoryRejected {
+            request_id, reason, ..
+        } => (request_id, HistoryReply::Rejected { reason }),
+        other => return Some(other),
+    };
+    let waiter = pending
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.remove(&request_id));
+    match waiter {
+        Some(waiter) => drop(waiter.send(reply)),
+        None => tracing::warn!(
+            %request_id,
+            "history reply arrived for no waiting request; the requester timed out or went away"
+        ),
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1622,280 +1898,40 @@ impl From<&SubState> for SubStateSnapshot {
         }
     }
 }
-struct TradeFetch<'a> {
-    symbol: &'a str,
-    start: Option<UnixNanos>,
-    end: Option<UnixNanos>,
-    limit: Option<std::num::NonZeroUsize>,
-}
-/// Request-wide ceiling, in TRADES rather than in pages, on what one paged
-/// history request may accumulate. A page count would multiply badly: 256 pages
-/// at 50,000 each is 12.8M `TradeTick`s and ~1.8 GB of JSON for a single
-/// `request_bars`. 1,000,000 is 20 pages at the current page size, roughly seven
-/// simulated hours, ~140 MB transferred and a resident vector in the low
-/// hundreds of MB.
+// THE HTTP HISTORY CARRIER IS GONE FROM THIS CLIENT, and with it the whole
+// timestamp-cursor apparatus that made it survivable: the paged trade and quote
+// fetchers, the per-request trade ceiling and page cap, and
+// `final_ts_group_start`, which existed because a timestamp-only cursor cannot
+// prove a full page's trailing group complete and so had to cut before it. That
+// cut had a failure mode with no answer - a page that was one whole timestamp
+// could not advance at all, and returned a short history a bar-folding consumer
+// could not tell from a quiet window.
+//
+// None of it has an equivalent here. The venue issues an opaque continuation,
+// so the position is its own bookkeeping rather than a timestamp this side
+// reconstructs, and there is no trailing group for a consumer to reason about.
+/// Whether the rows in hand already span the bar intervals the caller asked
+/// for.
 ///
-/// It is sized against the fact that `request_bars` aggregates from a COMPLETE
-/// trade vector. Making bar aggregation incremental is the change that would let
-/// this be raised; until then the vector is what the bound is about.
-const MAX_TRADES_PER_REQUEST: usize = 1_000_000;
-/// Loop-safety backstop only. The real bound is `MAX_TRADES_PER_REQUEST`; this
-/// exists so a venue that kept answering full pages without advancing the
-/// cursor cannot spin forever.
-const MAX_TRADE_PAGES: usize = 64;
-async fn fetch_trades(
-    http: &HttpClient,
-    quota: &HttpQuota,
-    base: &str,
-    fetch: TradeFetch<'_>,
-) -> anyhow::Result<Vec<TradeTick>> {
-    let params = trade_query_params(fetch.symbol, fetch.start, fetch.end, fetch.limit)?;
-    quota.wait().await;
-    let response = http
-        .get(
-            join_url(base, "trades"),
-            Some(&params),
-            None,
-            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
-            None,
-        )
-        .await?;
-    ensure!(
-        response.status.is_success(),
-        "fetch trades returned {}",
-        response.status.as_u16()
-    );
-    Ok(serde_json::from_slice(&response.body)?)
-}
-async fn fetch_trades_windowed(
-    http: &HttpClient,
-    quota: &HttpQuota,
-    base: &str,
-    fetch: TradeFetch<'_>,
-    mut stop: impl FnMut(&[TradeTick]) -> bool,
-) -> anyhow::Result<(Vec<TradeTick>, bool)> {
-    let mut out = Vec::new();
-    let mut start = fetch.start;
-    // A caller-stated limit is a request-wide ceiling too, not a per-page one:
-    // it must bound the accumulation or paging would silently overrun it.
-    // Today's two callers pass `None` (their real stop condition is the `stop`
-    // closure), but honoring it keeps the field from becoming a lie.
-    let ceiling = fetch.limit.map_or(MAX_TRADES_PER_REQUEST, |limit| {
-        limit.get().min(MAX_TRADES_PER_REQUEST)
-    });
-    for _ in 0..MAX_TRADE_PAGES {
-        let remaining = ceiling.saturating_sub(out.len());
-        if remaining == 0 {
-            return Ok((out, true));
-        }
-        let page_limit = remaining.min(mogwai_protocol::MAX_HISTORY_LIMIT);
-        let page = fetch_trades(
-            http,
-            quota,
-            base,
-            TradeFetch {
-                symbol: fetch.symbol,
-                start,
-                end: fetch.end,
-                limit: std::num::NonZeroUsize::new(page_limit),
-            },
-        )
-        .await?;
-        let full = page.len() == page_limit;
-        if !full {
-            // A short page is the end of the window: every row at every
-            // timestamp it contains has been disclosed.
-            out.extend(page);
-            let stopped = stop(&out);
-            return Ok((out, stopped));
-        }
-        // A full page may have been cut inside a timestamp, so its final
-        // timestamp group is not known to be complete. The cursor is
-        // timestamp-only, so the only advance that cannot lose a row is one
-        // onto a timestamp whose rows have all been seen: keep the complete
-        // prefix, drop the trailing group, and re-request from that group's
-        // own timestamp, which the endpoint's start bound includes.
-        let mut page = page;
-        let group_start = final_ts_group_start(&page, |trade| trade.ts_event);
-        if group_start == 0 {
-            // The whole page shares one timestamp, so there is no complete
-            // prefix and no advance that discloses the rest. Stop visibly.
-            //
-            // LOUD, because "visibly" was not true where it matters. This
-            // returns a SHORT history with no error, and a consumer that folds
-            // bars from trades cannot tell that from a window which legitimately
-            // ended: it reaches a strategy as a quiet history response, which is the
-            // shape this venue has been caught in twice already (the masked
-            // history refusal, and `FeedLagged` having no channel but a log).
-            // The venue's own tape cannot produce this - trades on one river are
-            // strictly increasing at a 1 us child stride, pinned by
-            // `a_river_never_prints_two_trades_at_one_instant` in `mogwai-data` -
-            // so reaching here means either that invariant broke or the caller
-            // asked for a page of one row. Both are worth an operator seeing,
-            // and neither is worth failing the request over: the rows are real.
-            tracing::error!(
-                symbol = %fetch.symbol,
-                rows = out.len() + page.len(),
-                page_limit,
-                ts_event = page[0].ts_event,
-                "history page is one whole timestamp, so paging cannot advance without losing \
-                 rows; returning a SHORT history that will look like a quiet window"
-            );
-            out.extend(page);
-            return Ok((out, true));
-        }
-        let group_ts = page[group_start].ts_event;
-        page.truncate(group_start);
-        out.extend(page);
-        if stop(&out) {
-            return Ok((out, true));
-        }
-        start = Some(UnixNanos::from(group_ts));
-    }
-    Ok((out, true))
-}
-
-/// Index at which the final `ts_event` group of an ascending page begins, or
-/// `page.len()` for an empty page. A full page's trailing group is the only
-/// part a timestamp-only cursor cannot prove complete, so this is where the
-/// windowed fetchers cut before advancing.
-fn final_ts_group_start<T>(page: &[T], ts_of: impl Fn(&T) -> u64) -> usize {
-    let Some(last) = page.last() else {
-        return 0;
-    };
-    let last_ts = ts_of(last);
-    let mut idx = page.len();
-    while idx > 0 && ts_of(&page[idx - 1]) == last_ts {
-        idx -= 1;
-    }
-    idx
-}
-
-struct QuoteFetch<'a> {
-    symbol: &'a str,
-    start: Option<UnixNanos>,
-    end: Option<UnixNanos>,
-    limit: Option<std::num::NonZeroUsize>,
-}
-
-async fn fetch_quotes(
-    http: &HttpClient,
-    quota: &HttpQuota,
-    base: &str,
-    fetch: QuoteFetch<'_>,
-) -> anyhow::Result<Vec<mogwai_protocol::QuoteTick>> {
-    let params = trade_query_params(fetch.symbol, fetch.start, fetch.end, fetch.limit)?;
-    quota.wait().await;
-    let response = http
-        .get(
-            join_url(base, "quotes"),
-            Some(&params),
-            None,
-            Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
-            None,
-        )
-        .await?;
-    ensure!(
-        response.status.is_success(),
-        "fetch quotes returned {}",
-        response.status.as_u16()
-    );
-    Ok(serde_json::from_slice(&response.body)?)
-}
-
-async fn fetch_quotes_windowed(
-    http: &HttpClient,
-    quota: &HttpQuota,
-    base: &str,
-    fetch: QuoteFetch<'_>,
-) -> anyhow::Result<(Vec<mogwai_protocol::QuoteTick>, bool)> {
-    let ceiling = fetch.limit.map_or(MAX_TRADES_PER_REQUEST, |limit| {
-        limit.get().min(MAX_TRADES_PER_REQUEST)
-    });
-    let mut out = Vec::new();
-    let mut start = fetch.start;
-    for _ in 0..MAX_TRADE_PAGES {
-        let remaining = ceiling.saturating_sub(out.len());
-        if remaining == 0 {
-            return Ok((out, true));
-        }
-        let page_limit = remaining.min(mogwai_protocol::MAX_HISTORY_LIMIT);
-        let page = fetch_quotes(
-            http,
-            quota,
-            base,
-            QuoteFetch {
-                symbol: fetch.symbol,
-                start,
-                end: fetch.end,
-                limit: std::num::NonZeroUsize::new(page_limit),
-            },
-        )
-        .await?;
-        let full = page.len() == page_limit;
-        if !full {
-            out.extend(page);
-            // `false`, NOT the trade path's `stop(&out)`, and the difference is
-            // deliberate rather than drift: a short page means the venue has no
-            // more rows in the window, so nothing was truncated. The trade path
-            // consults its stop closure here because it can also be asked to
-            // stop EARLY - once enough bars are spanned - and stopping early
-            // genuinely does truncate. There is no such closure on this path.
-            // These two loops are near-duplicates and this line is the one
-            // place they must not be made identical.
-            return Ok((out, false));
-        }
-        // Same invariant as the trade path: only advance onto a timestamp
-        // whose rows have all been seen. See `final_ts_group_start`.
-        let mut page = page;
-        let group_start = final_ts_group_start(&page, |quote| quote.ts_event);
-        if group_start == 0 {
-            out.extend(page);
-            return Ok((out, true));
-        }
-        let group_ts = page[group_start].ts_event;
-        page.truncate(group_start);
-        out.extend(page);
-        start = Some(UnixNanos::from(group_ts));
-    }
-    Ok((out, true))
-}
-fn bar_span_reached(trades: &[TradeTick], interval: u64, limit: Option<usize>) -> bool {
-    match (trades.first(), trades.last(), limit) {
+/// Reads the history rows directly rather than a converted trade slice: the
+/// predicate runs once per page against everything collected so far, and
+/// converting the whole accumulation on each call would make the session
+/// quadratic in its own length for a question that only needs two timestamps.
+fn bar_span_reached(
+    rows: &[mogwai_protocol::HistoryRow],
+    interval: u64,
+    limit: Option<usize>,
+) -> bool {
+    match (rows.first(), rows.last(), limit) {
         (Some(first), Some(last), Some(limit)) if interval > 0 => {
-            usize::try_from((last.ts_event / interval).saturating_sub(first.ts_event / interval))
-                .unwrap_or(usize::MAX)
+            usize::try_from(
+                (last.ts_event() / interval).saturating_sub(first.ts_event() / interval),
+            )
+            .unwrap_or(usize::MAX)
                 >= limit
         }
         _ => false,
     }
-}
-fn trade_query_params(
-    symbol: &str,
-    start: Option<UnixNanos>,
-    end: Option<UnixNanos>,
-    limit: Option<std::num::NonZeroUsize>,
-) -> anyhow::Result<HashMap<String, Vec<String>>> {
-    let mut params = HashMap::new();
-    params.insert("symbol".into(), vec![symbol.into()]);
-    match (start, end) {
-        (Some(start), Some(end)) => {
-            params.insert("start".into(), vec![start.as_u64().to_string()]);
-            params.insert("end".into(), vec![end.as_u64().to_string()]);
-        }
-        (Some(start), None) => {
-            params.insert("start".into(), vec![start.as_u64().to_string()]);
-        }
-        (None, Some(end)) => {
-            params.insert("end".into(), vec![end.as_u64().to_string()]);
-        }
-        (None, None) => {}
-    }
-    params.insert("limit".into(), vec![capped_limit(limit).to_string()]);
-    // No `regime` parameter: the market regime is boot config on the venue
-    // now, chosen by whoever launches the run, so a client cannot select one
-    // per request.
-    Ok(params)
 }
 #[cfg(test)]
 mod quote_cache_tests {

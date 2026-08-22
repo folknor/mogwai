@@ -92,7 +92,10 @@ async fn subscribe_and_request_drive_data_events() {
         .lock()
         .expect("ws trades mutex")
         .push(r#"{"type":"Trade","symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":10}"#.to_string());
-    *state.trades_body.lock().expect("trades body mutex") = Some(TRADES_JSON.to_string());
+    // Seeded on the TAPE rather than as an HTTP body: history is pulled over
+    // the socket now, so the body the old carrier served would answer nobody.
+    *state.trades_tape.lock().expect("trades tape mutex") =
+        Some(serde_json::from_str(TRADES_JSON).expect("the trade fixture parses"));
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     // Install our own egress sink on this thread; start() grabs it.
@@ -324,8 +327,11 @@ async fn request_quotes_uses_the_live_history_route() {
     use nautilus_common::messages::data::RequestQuotes;
 
     let state = Arc::new(StubState::default());
-    *state.quotes_body.lock().expect("quotes body mutex") = Some(
-        r#"[{"symbol":"BTCUSDT","bid_px":"99.00","ask_px":"100.00","bid_sz":"2","ask_sz":"3","ts_event":9}]"#.to_string(),
+    *state.quotes_tape.lock().expect("quotes tape mutex") = Some(
+        serde_json::from_str(
+            r#"[{"symbol":"BTCUSDT","bid_px":"99.00","ask_px":"100.00","bid_sz":"2","ask_sz":"3","ts_event":9}]"#,
+        )
+        .expect("the quote fixture parses"),
     );
     let base_url = bound_stub(Arc::clone(&state)).await;
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
@@ -363,24 +369,22 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
     use nautilus_common::messages::data::RequestTrades;
 
     let state = Arc::new(StubState::default());
-    let mut first = Vec::with_capacity(mogwai_protocol::MAX_HISTORY_LIMIT);
-    for ts in 1..=mogwai_protocol::MAX_HISTORY_LIMIT as u64 {
-        first.push(mogwai_protocol::TradeTick {
+    let tape: Vec<mogwai_protocol::TradeTick> = (1..=7_u64)
+        .map(|ts| mogwai_protocol::TradeTick {
             symbol: "BTCUSDT".into(),
             price: rust_decimal::Decimal::new(10_000, 2),
             size: rust_decimal::Decimal::ONE,
             aggressor: mogwai_protocol::AggressorSide::Buyer,
             ts_event: ts,
-        });
-    }
-    first.push(mogwai_protocol::TradeTick {
-        symbol: "BTCUSDT".into(),
-        price: rust_decimal::Decimal::new(10_100, 2),
-        size: rust_decimal::Decimal::ONE,
-        aggressor: mogwai_protocol::AggressorSide::Seller,
-        ts_event: mogwai_protocol::MAX_HISTORY_LIMIT as u64 + 1,
-    });
-    *state.trades_tape.lock().expect("trades tape mutex") = Some(first);
+        })
+        .collect();
+    *state.trades_tape.lock().expect("trades tape mutex") = Some(tape);
+    // Three pages for seven rows, so the window is crossed twice and the last
+    // page is a short one. A tape that fitted in a single page would assert
+    // nothing about a seam.
+    state
+        .history_page_rows
+        .store(3, std::sync::atomic::Ordering::Relaxed);
     let base_url = bound_stub(Arc::clone(&state)).await;
     let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
     replace_data_event_sender(sink_tx);
@@ -408,22 +412,59 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
             break resp.data.clone();
         }
     };
-    assert_eq!(delivered.len(), mogwai_protocol::MAX_HISTORY_LIMIT + 1);
+    assert_eq!(
+        delivered.len(),
+        7,
+        "every row of the window is delivered exactly once across the seams"
+    );
     for pair in delivered.windows(2) {
         assert!(pair[0].ts_event < pair[1].ts_event);
     }
-    // READ AFTER THE LOOP, NOT INSIDE IT, and the move is about making the
-    // ordering argument visible rather than about fixing a race. `trades_hits`
-    // is incremented by the stub's `/trades` handler on another task, and this
-    // assertion is sound only because the response cannot exist until both
-    // fetches have been served - so the count is settled by the time the
-    // response is in hand. Asserting it from inside the loop stated that
-    // dependency nowhere and read as a cross-task counter poked at an arbitrary
-    // moment, which is the shape that IS a race everywhere else in these files.
+    // Read AFTER the loop rather than inside it, and the ordering argument is
+    // the reason: the stub records on another task, and this is sound only
+    // because the response cannot exist until every page has been served, so
+    // the sequence is settled by the time the response is in hand.
+    //
+    // The SEQUENCE, not a count. A count says the client asked three times; the
+    // sequence says it asked once with nothing and twice with the token it had
+    // just been handed. Those differ exactly where it matters - a client that
+    // re-requested from the start each time would produce three requests too,
+    // and would deliver duplicate rows that the ordering assertion above would
+    // catch only because the rows happen to be distinct.
+    let requests = state
+        .history_requests
+        .lock()
+        .expect("history requests mutex")
+        .clone();
+    assert_eq!(requests.len(), 3, "seven rows at three per page is 3 pages");
     assert_eq!(
-        state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
-        2,
-        "the seam is crossed in exactly two pages: one full page and its remainder"
+        requests[0].1, None,
+        "the first request opens the session with no continuation"
+    );
+    // The token is `stub:<cutoff>:<next_ts>`. The cutoff is whatever the client
+    // pinned as its window end - a wall instant it read off the clock, not
+    // something this test should hardcode - so what is asserted is that it does
+    // not MOVE between pages, and that the position advances strictly past the
+    // last row of the page just delivered.
+    let parsed: Vec<(String, u64)> = requests[1..]
+        .iter()
+        .map(|(_, token)| {
+            let token = token.as_deref().expect("a resumed page carries a token");
+            let mut parts = token.split(':');
+            assert_eq!(parts.next(), Some("stub"));
+            let cutoff = parts.next().expect("a cutoff").to_owned();
+            let next: u64 = parts.next().expect("a position").parse().expect("a number");
+            (cutoff, next)
+        })
+        .collect();
+    assert_eq!(
+        parsed[0].0, parsed[1].0,
+        "the session's cutoff must not move between pages"
+    );
+    assert_eq!(
+        (parsed[0].1, parsed[1].1),
+        (4, 7),
+        "each page resumes strictly after the last row of the one before"
     );
 }
 
@@ -524,8 +565,12 @@ async fn an_undecodable_clock_is_retried_then_falls_back_without_refusing() {
         UnixNanos::from(2_000_000_000_000_000_000)
     );
     assert!(
-        state.trades_hits.load(std::sync::atomic::Ordering::Relaxed) >= 1,
-        "the request must have reached /trades, not been answered empty at the boundary"
+        !state
+            .history_requests
+            .lock()
+            .expect("history requests mutex")
+            .is_empty(),
+        "the request must have reached the venue, not been answered empty at the boundary"
     );
 }
 
@@ -539,183 +584,22 @@ fn tape_trade(ts_event: u64, price_cents: i64) -> mogwai_protocol::TradeTick {
     }
 }
 
-/// Drives one `request_trades` against a cursor-honouring tape and returns the
-/// delivered rows.
-///
-/// THE COUNTERS MEAN "SINCE THIS CALL BEGAN", and that is the strongest thing
-/// the reset can buy. This binds a NEW stub on a NEW port while taking a
-/// `&Arc<StubState>` that a caller may already have used, so `trades_hits` and
-/// `trades_starts` would otherwise accumulate across calls and a second call's
-/// caller would assert a paging count that includes the first call's fetches.
-/// Every caller happens to call it once today; that is a property of the call
-/// sites, not of this helper, and it is exactly the kind of latency that turns
-/// into a wrong verdict the first time someone adds a second call.
-///
-/// IT IS NOT ISOLATION. The previous call's stub keeps its accept loop running
-/// on the SAME `Arc<StubState>` - nothing shuts it down - so a client still
-/// alive from an earlier call could in principle bump these counters after the
-/// reset. No caller holds one today. If one ever does, the reset stops being
-/// enough and the stubs need shutting down, not the counters rescoping.
-async fn request_whole_tape(
-    state: &Arc<StubState>,
-    tape: Vec<mogwai_protocol::TradeTick>,
-) -> Vec<nautilus_model::data::TradeTick> {
-    use nautilus_common::messages::data::RequestTrades;
-
-    state
-        .trades_hits
-        .store(0, std::sync::atomic::Ordering::Relaxed);
-    state
-        .trades_starts
-        .lock()
-        .expect("trades starts mutex")
-        .clear();
-    *state.trades_tape.lock().expect("trades tape mutex") = Some(tape);
-    let base_url = bound_stub(Arc::clone(state)).await;
-    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
-    replace_data_event_sender(sink_tx);
-    let mut client = data_client(base_url);
-    client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens the socket");
-    client
-        .request_trades(RequestTrades::new(
-            instrument_id(),
-            None,
-            None,
-            None,
-            Some(ClientId::from("MOGWAI-DATA")),
-            UUID4::new(),
-            UnixNanos::default(),
-            None,
-        ))
-        .expect("request trades");
-    loop {
-        if let DataEvent::Response(DataResponse::Trades(resp)) =
-            next_data_event(&mut sink_rx, Duration::from_secs(10)).await
-        {
-            return resp.data.clone();
-        }
-    }
-}
-
-/// A full page CUT INSIDE a timestamp group is the ordinary shape of the
-/// timestamp-only cursor's hazard, and the one a page-wide "every row shares a
-/// timestamp" check misses entirely. The cursor may only advance onto a
-/// timestamp whose rows have all been seen, so the trailing group is dropped
-/// and re-requested from its own instant. Advancing past the page's last row
-/// instead loses every undisclosed sibling of that row.
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn trade_history_keeps_the_rest_of_a_split_timestamp_group() {
-    let limit = mogwai_protocol::MAX_HISTORY_LIMIT;
-    let mut tape = (0..limit - 1)
-        .map(|i| tape_trade(7, 10_000 + i as i64))
-        .collect::<Vec<_>>();
-    // Three rows share the second timestamp, so a full first page carries
-    // exactly one of them and the other two are only reachable by re-asking
-    // at that instant.
-    tape.push(tape_trade(9, 1));
-    tape.push(tape_trade(9, 2));
-    tape.push(tape_trade(9, 3));
-
-    let state = Arc::new(StubState::default());
-    let delivered = request_whole_tape(&state, tape).await;
-    assert_eq!(delivered.len(), limit + 2);
-    let at_nine = delivered
-        .iter()
-        .filter(|trade| trade.ts_event.as_u64() == 9)
-        .count();
-    assert_eq!(at_nine, 3, "no row of the split group may be skipped");
-    assert_eq!(
-        *state.trades_starts.lock().expect("trades starts mutex"),
-        vec![None, Some(9)],
-        "the second page re-asks at the group's own instant, not past it"
-    );
-}
-
-/// The quote cursor carries the identical hazard and the identical invariant,
-/// so it is pinned identically rather than argued from the shared helper.
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn quote_history_keeps_the_rest_of_a_split_timestamp_group() {
-    use nautilus_common::messages::data::RequestQuotes;
-
-    let limit = mogwai_protocol::MAX_HISTORY_LIMIT;
-    let quote = |ts_event: u64, bid: i64| mogwai_protocol::QuoteTick {
-        symbol: "BTCUSDT".into(),
-        bid_px: rust_decimal::Decimal::new(bid, 2),
-        ask_px: rust_decimal::Decimal::new(bid + 100, 2),
-        bid_sz: rust_decimal::Decimal::ONE,
-        ask_sz: rust_decimal::Decimal::ONE,
-        ts_event,
-    };
-    let mut tape = (0..limit - 1)
-        .map(|i| quote(7, 9_900 + i as i64))
-        .collect::<Vec<_>>();
-    tape.push(quote(9, 1));
-    tape.push(quote(9, 2));
-    tape.push(quote(9, 3));
-
-    let state = Arc::new(StubState::default());
-    *state.quotes_tape.lock().expect("quotes tape mutex") = Some(tape);
-    let base_url = bound_stub(Arc::clone(&state)).await;
-    let (sink_tx, mut sink_rx) = unbounded_channel::<DataEvent>();
-    replace_data_event_sender(sink_tx);
-    let mut client = data_client(base_url);
-    client.start().expect("start grabs the sink");
-    client.connect().await.expect("connect opens the socket");
-    client
-        .request_quotes(RequestQuotes::new(
-            instrument_id(),
-            None,
-            None,
-            None,
-            Some(ClientId::from("MOGWAI-DATA")),
-            UUID4::new(),
-            UnixNanos::default(),
-            None,
-        ))
-        .expect("request quotes");
-    loop {
-        if let DataEvent::Response(DataResponse::Quotes(response)) =
-            next_data_event(&mut sink_rx, Duration::from_secs(10)).await
-        {
-            assert_eq!(response.data.len(), limit + 2);
-            let at_nine = response
-                .data
-                .iter()
-                .filter(|quote| quote.ts_event.as_u64() == 9)
-                .count();
-            assert_eq!(at_nine, 3, "no quote of the split group may be skipped");
-            assert_eq!(
-                *state.quotes_starts.lock().expect("quotes starts mutex"),
-                vec![None, Some(9)]
-            );
-            break;
-        }
-    }
-}
-
-/// The degenerate shape: a whole full page at one timestamp leaves no complete
-/// prefix, so there is no advance that discloses the remainder. Report the
-/// truncation instead of skipping the undisclosed rows.
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
-async fn trade_history_does_not_advance_past_a_full_same_nanosecond_page() {
-    let limit = mogwai_protocol::MAX_HISTORY_LIMIT;
-    let tape = (0..limit + 5)
-        .map(|i| tape_trade(7, 10_000 + i as i64))
-        .collect::<Vec<_>>();
-
-    let state = Arc::new(StubState::default());
-    let delivered = request_whole_tape(&state, tape).await;
-    assert_eq!(delivered.len(), limit);
-    assert_eq!(
-        state.trades_hits.load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "a wedged cursor stops rather than paging past the timestamp"
-    );
-}
+// THREE TESTS OF THE TIMESTAMP CURSOR ARE GONE, and what they pinned no longer
+// exists rather than merely moving. They covered a full page cut inside a
+// timestamp group, its quote twin, and the degenerate case of a whole page at
+// one instant - all consequences of the client reconstructing its own position
+// from a timestamp, which is why it had to drop a trailing group it could not
+// prove complete and had no advance at all when the page was one group.
+//
+// History is pulled over the socket now and the position is an opaque token the
+// venue issues, so there is no group for this side to cut and nothing it could
+// wedge on. The venue resumes strictly after the last row it delivered, which
+// is sound because a river never prints two rows of one kind at one instant -
+// gated in `mogwai-data` by `a_river_never_prints_two_trades_at_one_instant`
+// and `a_river_never_prints_two_quotes_at_one_instant`. What survives from
+// these three is the property that no row is lost or repeated at a seam, and
+// that is `trade_history_pages_without_duplicates_at_the_seam` above, which now
+// also asserts the client resumed with the token it was handed.
 
 /// The SEEDED SET IS NOT AN ADMISSION LIST. The venue resolves any wire-legal
 /// symbol and registers it at bind, so a label absent from the connect-time

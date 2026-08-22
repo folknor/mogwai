@@ -556,18 +556,6 @@ pub(crate) fn run_identity_check(
 pub(crate) fn duration_to_nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
-/// Resolves the effective row limit sent to the venue's bounded `/trades`
-/// scan. A missing limit defaults to the ceiling, and any requested limit is
-/// clamped to it so neither the response body nor the materialized nautilus
-/// response `Vec` can grow unbounded over a multi-GB dump.
-pub(crate) fn capped_limit(limit: Option<std::num::NonZeroUsize>) -> usize {
-    limit
-        .map_or(
-            mogwai_protocol::MAX_HISTORY_LIMIT,
-            std::num::NonZeroUsize::get,
-        )
-        .min(mogwai_protocol::MAX_HISTORY_LIMIT)
-}
 pub(crate) fn join_url(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path)
 }
