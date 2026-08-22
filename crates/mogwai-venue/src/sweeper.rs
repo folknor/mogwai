@@ -207,9 +207,14 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let rivers = Arc::clone(&sweep.rivers);
                 let scans_for_walk: Vec<PendingScan> =
                     boat_scans.iter().map(|(_, scan)| scan.clone()).collect();
-                let walk_symbol = symbol.clone();
+                // THE BOAT'S OWN RIVER, not a key re-derived from the label it
+                // carries. A sweep pass belongs to one boat, that boat holds
+                // the exact water its passengers are reading, and a scan
+                // decided against any other river would fill an order on prints
+                // its owner never saw.
+                let walk_river = boat.key().river().clone();
                 let walked = tokio::task::spawn_blocking(move || {
-                    fills::scan_triggers(&walk_symbol, &scans_for_walk, to_ns, &rivers)
+                    fills::scan_triggers(&walk_river, &scans_for_walk, to_ns, &rivers)
                 })
                 .await
                 .ok()
@@ -242,6 +247,16 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // actually names an index: it takes a mutex and allocates
                 // every river, and every non-perp would otherwise pay that
                 // on every pass.
+                //
+                // AN INDEX IS THE SECOND SELECTOR QUESTION the river fork has to
+                // answer, and it is worth naming beside the mark one below. A
+                // perpetual's boat names an index SYMBOL it does not itself
+                // ride, so it holds no key for that index and cannot hold one.
+                // While a label names one river the registry answers
+                // unambiguously; once generator havoc enters river identity,
+                // which fork of the index prices funding is a real choice with
+                // no passenger to ask. It differs from history in that it is
+                // internal configuration rather than necessarily a wire field.
                 let index = sweep
                     .rivers
                     .resolve_profile(&symbol)
@@ -447,16 +462,29 @@ fn read_marks(
     to_ns: u64,
     rivers: &Rivers,
 ) -> Option<MarkReads> {
+    // A MARK NAMES AN INSTRUMENT, NOT A RIVER, and this is where that becomes a
+    // problem the fork has to answer. These symbols come from the LEDGER - a
+    // position is aggregated per instrument - so nothing here carries the river
+    // the position was traded against. Today one label resolves to one river and
+    // the two are the same answer; once generator havoc enters river identity,
+    // one account can hold a position in a symbol while its passengers watch
+    // different realizations of it, and a single mark cannot be right for both.
+    // Resolved here, at one named boundary, rather than by letting the readers
+    // take labels: that keeps the ambiguity visible in one place instead of
+    // spread across every water read.
+    let key_for = |symbol: &mogwai_protocol::Symbol| rivers.key_for_symbol(symbol).ok();
     let marks: Vec<_> = symbols
         .iter()
         .filter_map(|symbol| {
-            fills::read_last(symbol, to_ns, rivers).map(|px| (std::sync::Arc::clone(symbol), px))
+            let river = key_for(symbol)?;
+            fills::read_last(&river, to_ns, rivers).map(|px| (std::sync::Arc::clone(symbol), px))
         })
         .collect();
     let settlement_marks: Option<Vec<_>> = settlements
         .iter()
         .map(|(symbol, instant)| {
-            fills::read_last(symbol, *instant, rivers)
+            let river = key_for(symbol)?;
+            fills::read_last(&river, *instant, rivers)
                 .map(|px| (std::sync::Arc::clone(symbol), *instant, px))
         })
         .collect();

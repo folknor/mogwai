@@ -297,9 +297,11 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
             // but it only positions the harness's price: the limit is placed
             // `offset_ticks` away from the very reading it is judged against, so
             // no order is ever marketable on arrival either way.
-            let market = fills::read_last(SYMBOL, ts, profiles)
+            let market = fills::read_last(&profiles.test_key(SYMBOL), ts, profiles)
                 .or_else(|| {
-                    let mut tape = profiles.history_source(SYMBOL, Some(ORIGIN)).ok()?;
+                    let mut tape = profiles
+                        .history_source(&profiles.test_key(SYMBOL), Some(ORIGIN))
+                        .ok()?;
                     // The tape's first PRINT, not its first FRAME. Protocol 7
                     // opens every parent burst with a quote, so reading one tick
                     // and giving up on a non-trade returned None for the
@@ -348,7 +350,13 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
             // Exactly what `http::market_reading` hands the engine on the real
             // path, refusals included: a refused reading is passed on as `None`
             // rather than papered over with a synthetic zero band.
-            let reading = fills::read_market(SYMBOL, ts, profiles, band_vol_mult, MAX_TICKS);
+            let reading = fills::read_market(
+                &profiles.test_key(SYMBOL),
+                ts,
+                profiles,
+                band_vol_mult,
+                MAX_TICKS,
+            );
             let submitted = engine.process_with_market(Command::SubmitOrder(order), ts, reading);
             record_fills(&submitted, &meta, &mut samples);
         }
@@ -356,7 +364,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
         if scans.is_empty() {
             continue;
         }
-        let walk = fills::scan_triggers(SYMBOL, &scans, ts, profiles)
+        let walk = fills::scan_triggers(&profiles.test_key(SYMBOL), &scans, ts, profiles)
             .expect("scenario starts on reachable clean tape");
         let results = scans
             .iter()

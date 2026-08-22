@@ -81,9 +81,15 @@ pub(crate) struct MarketReadingCache {
     /// The one river this memo is allowed to hold a reading for. Set at
     /// construction, never compared per read: it is the cache's identity, not
     /// a per-entry tag. Binding it here rather than taking it per read makes
-    /// mis-keying unrepresentable instead of merely unreachable, and saves the
-    /// owned symbol a miss used to allocate.
-    symbol: String,
+    /// mis-keying unrepresentable instead of merely unreachable.
+    ///
+    /// A KEY RATHER THAN A LABEL, and the difference is the whole claim. This
+    /// held a symbol, and a symbol will name several rivers once generator
+    /// havoc enters river identity - so the binding would have been to an
+    /// instrument rather than to water, and the memo could have answered a
+    /// passenger on the surged river with a reading taken from the clean one.
+    /// The doc above was already written as though it bound water; now it does.
+    river: source::RiverKey,
     entry: Mutex<Option<CachedMarketReading>>,
     #[cfg(test)]
     walks: std::sync::atomic::AtomicU64,
@@ -97,9 +103,9 @@ struct CachedMarketReading {
 }
 
 impl MarketReadingCache {
-    pub(crate) fn for_symbol(symbol: &str) -> Self {
+    pub(crate) fn for_river(river: source::RiverKey) -> Self {
         Self {
-            symbol: symbol.to_owned(),
+            river,
             entry: Mutex::new(None),
             #[cfg(test)]
             walks: std::sync::atomic::AtomicU64::new(0),
@@ -131,7 +137,7 @@ impl MarketReadingCache {
         #[cfg(test)]
         self.walks
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let reading = read_market(&self.symbol, bucket_ns, rivers, mult, max_ticks);
+        let reading = read_market(&self.river, bucket_ns, rivers, mult, max_ticks);
         *entry = Some(CachedMarketReading {
             bucket_ns,
             mult_bits,
@@ -173,11 +179,12 @@ impl MarketReadingCache {
 /// is logged at `warn` naming the symbol.
 fn history_or_warn(
     rivers: &source::Rivers,
-    symbol: &str,
+    river: &source::RiverKey,
     start: u64,
     what: &'static str,
 ) -> Option<Box<dyn mogwai_data::TickSource>> {
-    match rivers.history_source(symbol, Some(start)) {
+    let symbol = river.symbol();
+    match rivers.history_source(river, Some(start)) {
         Ok(source) => Some(source),
         Err(source::MaterializeRefusal::Resolve(source::ResolveRefusal::FundingBarred {
             ..
@@ -220,16 +227,16 @@ fn history_or_warn(
 /// runs the other way, through this crate) and the engine's scan additionally
 /// carries the order identity and revision the tape has no business seeing.
 pub(crate) fn scan_triggers(
-    symbol: &str,
+    river: &source::RiverKey,
     scans: &[PendingScan],
     to_ns: u64,
     rivers: &source::Rivers,
 ) -> Option<Walk> {
-    scan_triggers_with_budget(symbol, scans, to_ns, rivers, SWEEP_DRAIN_BUDGET)
+    scan_triggers_with_budget(river, scans, to_ns, rivers, SWEEP_DRAIN_BUDGET)
 }
 
 fn scan_triggers_with_budget(
-    symbol: &str,
+    river: &source::RiverKey,
     scans: &[PendingScan],
     to_ns: u64,
     rivers: &source::Rivers,
@@ -238,7 +245,7 @@ fn scan_triggers_with_budget(
     let earliest = scans.iter().map(|scan| scan.from_ns).min()?;
     let mut source = history_or_warn(
         rivers,
-        symbol,
+        river,
         earliest.saturating_add(1),
         "fill scan could not read its river",
     )?;
@@ -254,7 +261,7 @@ fn scan_triggers_with_budget(
     let walk = mogwai_data::scan_triggers(source.as_mut(), &mapped, to_ns, budget);
     if walk.drained > SWEEP_DRAIN_WARN_TICKS {
         tracing::warn!(
-            symbol,
+            symbol = river.symbol(),
             drained = walk.drained,
             budget,
             warning_threshold = SWEEP_DRAIN_WARN_TICKS,
@@ -287,7 +294,7 @@ fn scan_triggers_with_budget(
 ///
 /// Synchronous and CPU-bound; callers run it on `spawn_blocking`.
 pub(crate) fn read_market(
-    symbol: &str,
+    river: &source::RiverKey,
     ts: u64,
     rivers: &source::Rivers,
     mult: f64,
@@ -296,7 +303,7 @@ pub(crate) fn read_market(
     let from_ns = ts.saturating_sub(VOL_WINDOW_NS);
     let mut source = history_or_warn(
         rivers,
-        symbol,
+        river,
         from_ns.saturating_add(1),
         "market reading could not read its river",
     )?;
@@ -305,7 +312,7 @@ pub(crate) fn read_market(
     // a boat is serving, and after piece 13 that need not be one an operator
     // named. A configured-only lookup would silently drop the reading.
     let increment = rivers
-        .resolve_profile(symbol)
+        .resolve_profile(river.symbol())
         .ok()?
         .def
         .price_increment
@@ -335,10 +342,15 @@ pub(crate) fn read_market(
 /// at the exact instant instead of from `MarketReadingCache`'s per-interval
 /// bucket. It is NOT a second answer to "what is the market" that FILL
 /// decisions may consult - every one of those goes through `read_market`.
-pub(crate) fn read_last(symbol: &str, ts: u64, rivers: &source::Rivers) -> Option<Decimal> {
+pub(crate) fn read_last(
+    river: &source::RiverKey,
+    ts: u64,
+    rivers: &source::Rivers,
+) -> Option<Decimal> {
     rivers
-        .last_trade_at_or_before(symbol, ts)
+        .last_trade_at_or_before(river, ts)
         .unwrap_or_else(|error| {
+            let symbol = river.symbol();
             tracing::warn!(symbol, %error, "last-price reading could not read its river");
             None
         })
@@ -353,6 +365,24 @@ pub(crate) fn test_profiles() -> InstrumentProfiles {
     InstrumentProfiles::from_profiles(vec![
         crate::config::profile_for_symbol("BTCUSDT").expect("BTCUSDT preset must resolve"),
     ])
+}
+
+/// Test-only label-to-key resolution for the fill readers.
+///
+/// Named apart from the production entry points on purpose: those take a
+/// `RiverKey` so a fork cannot leave execution reading another river, and a
+/// fixture with one river per label is the only place where a label is a
+/// sufficient answer.
+#[cfg(test)]
+fn by_symbol(rivers: &source::Rivers, symbol: &str) -> source::RiverKey {
+    rivers.test_key(symbol)
+}
+
+#[cfg(test)]
+impl MarketReadingCache {
+    fn for_symbol(symbol: &str, rivers: &source::Rivers) -> Self {
+        Self::for_river(by_symbol(rivers, symbol))
+    }
 }
 
 #[cfg(test)]
@@ -409,9 +439,9 @@ mod tests {
     }
 
     fn tape(start: u64) -> Box<dyn TickSource> {
-        profiles()
-            .history_source("BTCUSDT", Some(start))
-            .expect("history")
+        let rivers = profiles();
+        let river = rivers.test_key("BTCUSDT");
+        rivers.history_source(&river, Some(start)).expect("history")
     }
 
     fn trades(start: u64, count: usize) -> Vec<(u64, Decimal)> {
@@ -456,7 +486,8 @@ mod tests {
             scan("below-buy", Side::Buy, tick_price - increment, from),
             scan("below-sell", Side::Sell, tick_price - increment, from),
         ];
-        let walk = scan_triggers("BTCUSDT", &probes, to, &profiles()).expect("walk");
+        let walk = scan_triggers(&by_symbol(&profiles(), "BTCUSDT"), &probes, to, &profiles())
+            .expect("walk");
         assert_eq!(
             walk.hits.iter().map(Option::is_some).collect::<Vec<_>>(),
             vec![false, false, true, false, false, true]
@@ -470,7 +501,13 @@ mod tests {
         let mut touch = scan("touch", Side::Buy, px, ts.saturating_sub(1));
         touch.kind = mogwai_protocol::ScanKind::TriggerTouch;
         let through = scan("through", Side::Buy, px, ts.saturating_sub(1));
-        let walk = scan_triggers("BTCUSDT", &[touch, through], ts, &profiles()).expect("walk");
+        let walk = scan_triggers(
+            &by_symbol(&profiles(), "BTCUSDT"),
+            &[touch, through],
+            ts,
+            &profiles(),
+        )
+        .expect("walk");
         assert!(walk.hits[0].is_some());
         assert!(walk.hits[1].is_none());
         // Three, not two: the quote opening the burst, the print, and then one
@@ -484,7 +521,7 @@ mod tests {
     fn a_span_the_tape_never_crossed_triggers_nothing() {
         let probes = [scan("far", Side::Buy, Decimal::ONE, TEST_ORIGIN)];
         let walk = scan_triggers(
-            "BTCUSDT",
+            &by_symbol(&profiles(), "BTCUSDT"),
             &probes,
             TEST_ORIGIN + 3_600_000_000_000,
             &profiles(),
@@ -497,7 +534,13 @@ mod tests {
     fn a_walk_stops_once_every_scan_has_triggered() {
         let ticks = trades(TEST_ORIGIN, 4);
         let probe = scan("one", Side::Buy, ticks[0].1 + Decimal::ONE, TEST_ORIGIN);
-        let walk = scan_triggers("BTCUSDT", &[probe], ticks[3].0, &profiles()).expect("walk");
+        let walk = scan_triggers(
+            &by_symbol(&profiles(), "BTCUSDT"),
+            &[probe],
+            ticks[3].0,
+            &profiles(),
+        )
+        .expect("walk");
         assert!(walk.hits[0].is_some());
         // Was `ticks[0].0`, the instant the hit printed at. The walk stops there
         // with every scan answered, but it never saw a later instant, so it has
@@ -518,8 +561,14 @@ mod tests {
         // 20k prints in that window, so a day does not actually exercise the
         // drain cap.
         let to = TEST_ORIGIN + 3_650 * 24 * 3_600_000_000_000;
-        let walk =
-            scan_triggers_with_budget("BTCUSDT", &probes, to, &profiles(), 1_024).expect("walk");
+        let walk = scan_triggers_with_budget(
+            &by_symbol(&profiles(), "BTCUSDT"),
+            &probes,
+            to,
+            &profiles(),
+            1_024,
+        )
+        .expect("walk");
         assert!(walk.reached_ns < to);
         assert!(walk.reached_ns > first.0);
         assert!(walk.hits[0].is_none());
@@ -534,13 +583,19 @@ mod tests {
             scan("c", Side::Buy, Decimal::ONE, ticks[3].0),
         ];
         let to = ticks[5].0;
-        let batched = scan_triggers("BTCUSDT", &probes, to, &profiles()).expect("batched");
+        let batched = scan_triggers(&by_symbol(&profiles(), "BTCUSDT"), &probes, to, &profiles())
+            .expect("batched");
         let singles: Vec<_> = probes
             .iter()
             .map(|probe| {
-                scan_triggers("BTCUSDT", std::slice::from_ref(probe), to, &profiles())
-                    .expect("single")
-                    .hits[0]
+                scan_triggers(
+                    &by_symbol(&profiles(), "BTCUSDT"),
+                    std::slice::from_ref(probe),
+                    to,
+                    &profiles(),
+                )
+                .expect("single")
+                .hits[0]
                     .is_some()
             })
             .collect();
@@ -554,7 +609,13 @@ mod tests {
     fn the_deciding_prints_are_the_prints_trades_serves() {
         let ticks = trades(TEST_ORIGIN, 8);
         let probe = scan("served", Side::Buy, ticks[0].1 + Decimal::ONE, TEST_ORIGIN);
-        let walk = scan_triggers("BTCUSDT", &[probe], ticks[7].0, &profiles()).expect("walk");
+        let walk = scan_triggers(
+            &by_symbol(&profiles(), "BTCUSDT"),
+            &[probe],
+            ticks[7].0,
+            &profiles(),
+        )
+        .expect("walk");
         let expected = ticks
             .iter()
             .filter(|(ts, price)| *ts > TEST_ORIGIN && *price < ticks[0].1 + Decimal::ONE)
@@ -567,7 +628,11 @@ mod tests {
         let ticks = trades(TEST_ORIGIN, 2);
         let before_second = ticks[1].0.saturating_sub(1);
         assert_eq!(
-            read_last("BTCUSDT", before_second, &profiles()),
+            read_last(
+                &by_symbol(&profiles(), "BTCUSDT"),
+                before_second,
+                &profiles()
+            ),
             Some(ticks[0].1)
         );
     }
@@ -596,7 +661,8 @@ mod tests {
 
     #[test]
     fn market_reading_cache_recovers_after_a_poisoned_lock() {
-        let cache = MarketReadingCache::for_symbol("BTCUSDT");
+        let rivers = profiles();
+        let cache = MarketReadingCache::for_symbol("BTCUSDT", &rivers);
         let poisoned = std::panic::catch_unwind(|| {
             let _guard = cache.entry.lock().unwrap();
             panic!("poison cache for test");
@@ -611,14 +677,14 @@ mod tests {
         // span rather than assuming an arbitrary wall interval contains one.
         let ticks = trades(TEST_ORIGIN, 4);
         let first = scan_triggers(
-            "BTCUSDT",
+            &by_symbol(&profiles(), "BTCUSDT"),
             &[scan("old", Side::Buy, Decimal::ONE, ticks[0].0)],
             ticks[1].0,
             &profiles(),
         )
         .expect("first pass");
         let second = scan_triggers(
-            "BTCUSDT",
+            &by_symbol(&profiles(), "BTCUSDT"),
             &[scan("old", Side::Buy, Decimal::ONE, first.reached_ns)],
             ticks[2].0,
             &profiles(),
@@ -635,7 +701,7 @@ mod tests {
     fn a_pass_costs_one_walk_per_symbol_not_per_order() {
         let to = TEST_ORIGIN + 100_000_000;
         let one = scan_triggers(
-            "BTCUSDT",
+            &by_symbol(&profiles(), "BTCUSDT"),
             &[scan("one", Side::Buy, Decimal::ONE, TEST_ORIGIN)],
             to,
             &profiles(),
@@ -644,7 +710,8 @@ mod tests {
         let many: Vec<_> = (0..50)
             .map(|i| scan(&format!("many-{i}"), Side::Buy, Decimal::ONE, TEST_ORIGIN))
             .collect();
-        let fifty = scan_triggers("BTCUSDT", &many, to, &profiles()).expect("fifty probes");
+        let fifty = scan_triggers(&by_symbol(&profiles(), "BTCUSDT"), &many, to, &profiles())
+            .expect("fifty probes");
         assert_eq!(fifty.drained, one.drained);
     }
 
@@ -796,7 +863,15 @@ mod tests {
             let ticks: Vec<f64> = instants
                 .iter()
                 .step_by(TABLE_STRIDE)
-                .filter_map(|&ts| read_market("BTCUSDT", ts, &profiles, mult, 10_000))
+                .filter_map(|&ts| {
+                    read_market(
+                        &by_symbol(&profiles, "BTCUSDT"),
+                        ts,
+                        &profiles,
+                        mult,
+                        10_000,
+                    )
+                })
                 .map(|reading| f64::from(reading.band_ticks))
                 .collect();
             let bps = |ticks: f64| {
@@ -841,7 +916,7 @@ mod tests {
         const INTERVAL_MS: u64 = 100;
         let profiles = profiles();
         let base_ts = TEST_ORIGIN + 3_600_000_000_000;
-        let cache = MarketReadingCache::for_symbol("BTCUSDT");
+        let cache = MarketReadingCache::for_symbol("BTCUSDT", &profiles);
         // The MISS path is what a submit pays, and it is the only thing worth
         // gating: a hit is a mutex acquisition and a struct copy. Every sample
         // therefore lands in its OWN bucket, so none of them can be served from

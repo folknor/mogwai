@@ -714,14 +714,32 @@ publishes.
 Each boat has its own settlement watermark and its own ring. Market water is
 exogenous: orders never move it and there is no queue competition. Fifty agents
 submitting the same buy against the same water receive the same fill without
-changing one another's result. Generator-level havoc belongs to river identity
-and cannot mutate a placed boat; transport havoc remains a property of what a
-passenger sees. So `FlowSurge` and the generator half of `ClearDivergences` are
-refused with a 400 on a river that has a placed boat, and unqualified
-`FlowSurge` is refused outright while any boat sits, naming the boated symbols;
-an unqualified clear reaches every materialized river that is boatless and
-SKIPS the boated ones, because the transport half of that control is run-wide
-and must stay reachable while a boat is sitting. A timed havoc window carries a
+changing one another's result. Transport havoc remains a property of what a
+passenger sees.
+
+GENERATOR HAVOC BELONGS TO RIVER IDENTITY AND DOES NOT YET LIVE THERE. The
+glossary says a passenger whose resolved config carries a generator arm boards a
+DIFFERENT river than one without it, and that nothing mutates water someone is
+already reading. What the code does instead is mutate the one river a symbol
+resolves to, in place, guarded by refusing the arm when that river has a boat -
+`FlowSurge` and the generator half of `ClearDivergences` are a 400 on a boated
+river, and an unqualified clear reaches every boatless materialized river while
+SKIPPING boated ones, because the transport half of that control is run-wide and
+must stay reachable. An arm naming no symbol takes the default label.
+
+WHAT THE FORK OWES, recorded because it is larger than adding a field to a key.
+Every water read now takes a `RiverKey` rather than a symbol - history, the
+order-time market reading, the trigger scans, marks and settlement - so a fork
+cannot land halfway and leave execution reading a river the passenger is not on.
+What remains unanswered is ownership rather than plumbing: a resting order and a
+position are recorded per INSTRUMENT, so an account whose passengers rode a clean
+and a surged river of one symbol would have orders that match both boats and a
+position that cannot carry two marks. A history poll names a symbol and no
+passenger, so once a label names several rivers it names none of them. A
+perpetual's funding index has the same problem and no passenger to ask. And an
+arm needs a tape coordinate rather than only parameters, or two passengers
+carrying the same arm and boarding a second apart would be asking for different
+water and every late boarding would fork a river of its own. A timed havoc window carries a
 wall arming instant and a
 simulated span rather than one boat's absolute deadline, and every passenger
 judges it on its own clock.

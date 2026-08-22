@@ -493,7 +493,9 @@ pub(crate) fn build_history_source(
     start: Option<u64>,
     rivers: &Rivers,
 ) -> Option<Box<dyn TickSource>> {
-    rivers.history_source(symbol, start).ok()
+    rivers
+        .history_source(&rivers.key_for_symbol(symbol).ok()?, start)
+        .ok()
 }
 
 impl Rivers {
@@ -633,13 +635,23 @@ impl Rivers {
     /// The symbols whose water actually exists right now. A control that means
     /// "everything" iterates THESE rather than the configured set, so clearing
     /// never materializes a chain nothing has asked for.
+    /// DEDUPLICATED, because it answers a question about SYMBOLS while iterating
+    /// RIVERS. One label resolves to one river today so the two counts agree,
+    /// and this looks redundant; the moment generator havoc enters river
+    /// identity a label names several rivers and an undeduplicated list would
+    /// report the same symbol once per fork - to `/instruments`, to the funding
+    /// index check, to anything else that reads it as a set.
     pub(crate) fn materialized_symbols(&self) -> Vec<String> {
-        self.rivers
+        let mut symbols: Vec<String> = self
+            .rivers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .keys()
             .map(|key| key.symbol().to_owned())
-            .collect()
+            .collect();
+        symbols.sort();
+        symbols.dedup();
+        symbols
     }
 
     /// What `/instruments` answers: the CONFIGURED shapes unioned with every
@@ -692,19 +704,21 @@ impl Rivers {
     /// sweeper passes `from_ns + 1` precisely to get a window that excludes the
     /// instant it already processed, which only works if the tick at the requested
     /// instant is emitted.
+    /// TAKES A KEY, NEVER A LABEL, like every other water read on this registry.
+    /// See `Rivers::key_for_symbol` for why the two are not interchangeable and
+    /// where the remaining label-to-key resolutions live.
     pub(crate) fn history_source(
         &self,
-        symbol: &str,
+        key: &RiverKey,
         start: Option<u64>,
     ) -> Result<Box<dyn TickSource>, MaterializeRefusal> {
         let target = start.unwrap_or(TAPE_ORIGIN_NS);
-        let profile = self.resolve_profile(symbol)?;
-        let key = self.resolve_key(&profile);
-        let river = self.river(&key)?;
+        let river = self.river(key)?;
         reach_river(&river, target).map_err(MaterializeRefusal::Reach)?;
         let Some(positioned) = locked(&river.checkpoints).try_source_at_or_before(target) else {
             return Err(MaterializeRefusal::Reach(anyhow::anyhow!(
-                "river {symbol} cannot reach {target}"
+                "river {} cannot reach {target}",
+                key.symbol()
             )));
         };
         Ok(Box::new(MergeSource::starting_at(
@@ -719,10 +733,47 @@ impl Rivers {
     /// of the synthesis task - and so a history poll ADVERTISES the shape it
     /// just spent a river on, which is the same event.
     pub(crate) fn materialize(&self, symbol: &str) -> Result<(), MaterializeRefusal> {
-        let profile = self.resolve_profile(symbol)?;
-        let key = self.resolve_key(&profile);
+        let key = self.key_for_symbol(symbol)?;
         self.river(&key)?;
         Ok(())
+    }
+
+    /// THE ONLY WAY A LABEL BECOMES WATER, and it is deliberately awkward to
+    /// reach.
+    ///
+    /// A SYMBOL IS INSTRUMENT IDENTITY AND NOT MARKET-REALIZATION IDENTITY. It
+    /// selects a price increment, a calendar, a settlement currency, a wire
+    /// field - and it must not select a river, because the end state has
+    /// generator havoc inside river identity, so one label will name SEVERAL
+    /// rivers: a passenger carrying an arm boards a different river than one
+    /// without it. Every water read therefore takes a `RiverKey`, and a
+    /// passenger always has one, because it holds a boat.
+    ///
+    /// WHAT THIS PROTECTS AGAINST is a fork that lands halfway. If pricing,
+    /// trigger scans, marks or settlement could still reach water with only a
+    /// label, adding the arm to the key would fork the delivered tape while
+    /// execution went on reading whichever river the label resolved to - the
+    /// passenger would watch surged prints and be filled against water it never
+    /// saw. There is now no function that will hand out water for a label
+    /// except this one.
+    ///
+    /// THE CALLERS THAT LEGITIMATELY HAVE NO KEY, each a named boundary rather
+    /// than a convenience:
+    ///
+    /// - `/trades` and `/quotes`, which name a symbol and no passenger. Once a
+    ///   label names several rivers a history poll names none of them, and
+    ///   which river it should read is an unresolved wire question.
+    /// - The generator control plane, until arms move into the key and stop
+    ///   mutating an existing chain.
+    /// - The perpetual funding index, which names an index symbol its boat does
+    ///   not ride and therefore has no key for.
+    ///
+    /// While one label resolves to exactly one river these are all the same
+    /// answer, which is why this lands as a refactor. They become real choices
+    /// the moment the fork does.
+    pub(crate) fn key_for_symbol(&self, symbol: &str) -> Result<RiverKey, MaterializeRefusal> {
+        let profile = self.resolve_profile(symbol)?;
+        Ok(self.resolve_key(&profile))
     }
 
     pub(crate) fn place_cursor(
@@ -755,12 +806,23 @@ impl Rivers {
     /// river pay only their new monotonic delta. Nothing pre-warms a non-boot
     /// river: doing so would multiply time-to-readiness by the number of
     /// configured shapes for a capability most runs never touch.
-    pub(crate) fn ensure_reach(&self, symbol: &str, target_ns: u64) -> anyhow::Result<usize> {
-        let profile = self.resolve_profile(symbol).map_err(anyhow::Error::new)?;
-        let river = self
-            .river(&self.resolve_key(&profile))
-            .map_err(anyhow::Error::new)?;
+    pub(crate) fn ensure_reach(&self, key: &RiverKey, target_ns: u64) -> anyhow::Result<usize> {
+        let river = self.river(key).map_err(anyhow::Error::new)?;
         reach_river(&river, target_ns)
+    }
+
+    /// A test's label-to-key resolution, named so it cannot be mistaken for the
+    /// production boundaries.
+    ///
+    /// Tests build a fresh registry inline and then ask about a symbol, which is
+    /// the one place a by-label call is harmless: there is exactly one river per
+    /// label in a fixture and no passenger to be wrong about. Production water
+    /// reads take a key, and `key_for_symbol` names the few boundaries that may
+    /// still resolve one.
+    #[cfg(test)]
+    pub(crate) fn test_key(&self, symbol: &str) -> RiverKey {
+        self.key_for_symbol(symbol)
+            .expect("a fixture symbol resolves to a river")
     }
 }
 
@@ -821,15 +883,14 @@ fn reach_river_within(river: &River, target_ns: u64, ceiling: usize) -> anyhow::
 /// next trade would be unpriceable forever and would freeze the settlement
 /// frontier for the rest of the run.
 impl Rivers {
+    /// Takes a key rather than a label, for the reason `key_for_symbol` states:
+    /// a settlement price is water, and water is never selected by name.
     pub(crate) fn last_trade_at_or_before(
         &self,
-        symbol: &str,
+        key: &RiverKey,
         ts: u64,
     ) -> anyhow::Result<Option<Decimal>> {
-        let Ok(profile) = self.resolve_profile(symbol) else {
-            return Ok(None);
-        };
-        let Ok(river) = self.river(&self.resolve_key(&profile)) else {
+        let Ok(river) = self.river(key) else {
             return Ok(None);
         };
         reach_river(&river, ts)?;
@@ -940,7 +1001,9 @@ mod river_tests {
                 .all(|def| def.symbol.as_ref() != "FOOBAR"),
             "a memo hit that materialized nothing must not advertise"
         );
-        rivers.history_source("FOOBAR", None).expect("history poll");
+        rivers
+            .history_source(&rivers.test_key("FOOBAR"), None)
+            .expect("history poll");
         assert!(
             rivers
                 .instrument_defs()
@@ -1012,9 +1075,11 @@ mod river_tests {
     fn materialization_refuses_past_the_cap_without_exceeding_it() {
         let rivers = total_rivers();
         for index in 0..MAX_MATERIALIZED_RIVERS {
-            rivers.history_source(&format!("S{index}"), None).unwrap();
+            rivers
+                .history_source(&rivers.test_key(&format!("S{index}")), None)
+                .unwrap();
         }
-        let error = match rivers.history_source("OVER_CAP", None) {
+        let error = match rivers.history_source(&rivers.test_key("OVER_CAP"), None) {
             Ok(_) => panic!("the 257th river materialized"),
             Err(error) => error,
         };
@@ -1051,12 +1116,14 @@ mod river_tests {
     #[test]
     fn a_boat_placed_after_a_history_read_still_starts_at_the_river_origin() {
         let rivers = crate::fills::test_rivers();
-        rivers.ensure_reach("BTCUSDT", 3_600_000_000_000).unwrap();
+        rivers
+            .ensure_reach(&rivers.test_key("BTCUSDT"), 3_600_000_000_000)
+            .unwrap();
         let profile = rivers.resolve_profile("BTCUSDT").unwrap();
         let key = rivers.resolve_key(&profile);
         let mut cursor = rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap();
         let mut history = rivers
-            .history_source("BTCUSDT", Some(TAPE_ORIGIN_NS))
+            .history_source(&rivers.test_key("BTCUSDT"), Some(TAPE_ORIGIN_NS))
             .unwrap();
         assert_eq!(
             cursor.next_tick().unwrap().ts_event(),
@@ -1072,7 +1139,10 @@ mod river_tests {
         drop(rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap());
         let before = locked(&rivers.river(&key).unwrap().checkpoints).frontier_ns();
         rivers
-            .ensure_reach("BTCUSDT", before.saturating_add(60_000_000_000))
+            .ensure_reach(
+                &rivers.test_key("BTCUSDT"),
+                before.saturating_add(60_000_000_000),
+            )
             .unwrap();
         assert!(
             locked(&rivers.river(&key).unwrap().checkpoints).frontier_ns()
@@ -1085,7 +1155,9 @@ mod river_tests {
         let rivers = crate::fills::test_rivers();
         let profile = rivers.resolve_profile("BTCUSDT").unwrap();
         let key = rivers.resolve_key(&profile);
-        let mut expected = rivers.history_source("BTCUSDT", None).unwrap();
+        let mut expected = rivers
+            .history_source(&rivers.test_key("BTCUSDT"), None)
+            .unwrap();
         let first = expected.next_tick().unwrap();
         let instant = first.ts_event();
         let mut count = 1;
@@ -1120,11 +1192,11 @@ mod river_tests {
     fn a_cold_river_reaches_an_instant_far_past_the_origin() {
         let rivers = crate::fills::test_rivers();
         let reached = rivers
-            .ensure_reach("BTCUSDT", 3_600_000_000_000)
+            .ensure_reach(&rivers.test_key("BTCUSDT"), 3_600_000_000_000)
             .expect("a cold river materializes on demand");
         assert!(reached > 0, "the walk retained checkpoints");
         rivers
-            .history_source("BTCUSDT", Some(3_600_000_000_000))
+            .history_source(&rivers.test_key("BTCUSDT"), Some(3_600_000_000_000))
             .expect("cold history");
     }
 
@@ -1140,7 +1212,7 @@ mod river_tests {
             "one chain per configured shape"
         );
         let mut boot_source = rivers
-            .history_source("BTCUSDT", Some(TAPE_ORIGIN_NS))
+            .history_source(&rivers.test_key("BTCUSDT"), Some(TAPE_ORIGIN_NS))
             .expect("boot river history");
         let boot_prints: Vec<_> = std::iter::from_fn(|| boot_source.next_tick())
             .filter_map(|tick| match tick {
@@ -1151,7 +1223,7 @@ mod river_tests {
             .collect();
         assert_eq!(boot_prints.len(), 32, "the boot river prints");
         let mut second_source = rivers
-            .history_source("SECOND", Some(TAPE_ORIGIN_NS))
+            .history_source(&rivers.test_key("SECOND"), Some(TAPE_ORIGIN_NS))
             .expect("second river history");
         let second_prints: Vec<_> = std::iter::from_fn(|| second_source.next_tick())
             .filter_map(|tick| match tick {
@@ -1172,7 +1244,7 @@ mod river_tests {
         // the chains advance independently, which is the whole point of keying
         // them.
         rivers
-            .ensure_reach("SECOND", 600_000_000_000)
+            .ensure_reach(&rivers.test_key("SECOND"), 600_000_000_000)
             .expect("second river materializes");
         assert!(locked(&second.checkpoints).frontier_ns() >= 600_000_000_000);
         assert_eq!(locked(&boot.checkpoints).frontier_ns(), TAPE_ORIGIN_NS);

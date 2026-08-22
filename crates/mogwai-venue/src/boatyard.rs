@@ -207,7 +207,7 @@ impl Boatyard {
                 sim,
                 tape,
                 last_swept_ns: AtomicU64::new(self.origin_ns),
-                market_readings: crate::fills::MarketReadingCache::for_symbol(req.river.symbol()),
+                market_readings: crate::fills::MarketReadingCache::for_river(req.river.clone()),
                 extremes,
                 worker: Mutex::new(Some(worker)),
                 cancel,

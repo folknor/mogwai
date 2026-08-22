@@ -1686,7 +1686,7 @@ async fn market_reading(
                 .read(ts, &rivers, mult, max_ticks, interval_ms);
             let last_px = reading
                 .map(|value| value.last_px)
-                .or_else(|| crate::fills::read_last(boat.symbol(), ts, &rivers));
+                .or_else(|| crate::fills::read_last(boat.key().river(), ts, &rivers));
             (reading, last_px)
         })
         .await
@@ -1808,9 +1808,19 @@ pub(crate) async fn trades(
         // its own `end`, so the river was served while still owing most of the
         // span - and the next reader paid a walk this one should have. Reaching
         // is idempotent: a river already past `run_start_ns` walks nothing.
+        // RESOLVED ONCE, AT THE BOUNDARY. A history poll names a symbol and no
+        // passenger, so this is one of the few places allowed to turn a label
+        // into water - see `Rivers::key_for_symbol`. Which river a poll should
+        // read once a label names several is an open wire question; while one
+        // label resolves to one river it is the same answer either way.
         let body = rivers
-            .ensure_reach(&symbol, run_start_ns)
-            .and_then(|_| bounded_trades(&symbol, start, end, limit, &rivers))
+            .key_for_symbol(&symbol)
+            .map_err(anyhow::Error::new)
+            .and_then(|river| {
+                rivers
+                    .ensure_reach(&river, run_start_ns)
+                    .and_then(|_| bounded_trades(&river, start, end, limit, &rivers))
+            })
             .and_then(|rows| serde_json::to_vec(&rows).map_err(Into::into));
         (history_slot, body)
     })
@@ -1874,8 +1884,20 @@ pub(crate) async fn quotes(
     // The permit rides the blocking task for the same reason as `/trades`: a
     // a dropped connection drops this future, and only the closure outlives that.
     let named = truncated_symbol(&symbol);
+    let run_start_ns = state.run.started_ns;
     let (history_slot, body) = match tokio::task::spawn_blocking(move || {
-        let body = bounded_quotes(&symbol, start, end, limit, &rivers)
+        // Resolved once at the boundary and reached to the run start, exactly as
+        // `/trades` does. This route was MISSED when the reach landed - the edit
+        // matched only the sibling handler - so a quote window near the origin
+        // was served while its river still owed most of its warmup.
+        let body = rivers
+            .key_for_symbol(&symbol)
+            .map_err(anyhow::Error::new)
+            .and_then(|river| {
+                rivers
+                    .ensure_reach(&river, run_start_ns)
+                    .and_then(|_| bounded_quotes(&river, start, end, limit, &rivers))
+            })
             .and_then(|rows| serde_json::to_vec(&rows).map_err(Into::into));
         (history_slot, body)
     })
@@ -2488,7 +2510,7 @@ pub(crate) fn normalize_limit(limit: Option<usize>) -> usize {
 /// can cut either. Break that generator property and this surface is wrong; the
 /// `mogwai-data` test is what says so.
 pub(crate) fn bounded_trades(
-    symbol: &str,
+    river: &source::RiverKey,
     start: Option<u64>,
     end: Option<u64>,
     limit: usize,
@@ -2498,7 +2520,7 @@ pub(crate) fn bounded_trades(
         return Ok(Vec::new());
     }
 
-    let mut merged = rivers.history_source(symbol, start)?;
+    let mut merged = rivers.history_source(river, start)?;
     let mut out = Vec::new();
 
     while let Some(tick) = merged.next_tick() {
@@ -2521,7 +2543,7 @@ pub(crate) fn bounded_trades(
 }
 
 pub(crate) fn bounded_quotes(
-    symbol: &str,
+    river: &source::RiverKey,
     start: Option<u64>,
     end: Option<u64>,
     limit: usize,
@@ -2530,7 +2552,7 @@ pub(crate) fn bounded_quotes(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut merged = rivers.history_source(symbol, start)?;
+    let mut merged = rivers.history_source(river, start)?;
     let mut out = Vec::new();
     while let Some(tick) = merged.next_tick() {
         if let Some(end) = end
@@ -2615,7 +2637,8 @@ mod calendar_tests {
     #[test]
     fn bounded_quotes_respects_the_window_and_the_limit() {
         let profiles = generated_profiles();
-        let first = bounded_quotes("BTCUSDT", Some(0), None, 4, &profiles).unwrap();
+        let first =
+            bounded_quotes(&profiles.test_key("BTCUSDT"), Some(0), None, 4, &profiles).unwrap();
         assert_eq!(first.len(), 4);
         assert!(
             first
@@ -2624,7 +2647,14 @@ mod calendar_tests {
         );
         let start = first[1].ts_event;
         let end = first[2].ts_event;
-        let bounded = bounded_quotes("BTCUSDT", Some(start), Some(end), 10, &profiles).unwrap();
+        let bounded = bounded_quotes(
+            &profiles.test_key("BTCUSDT"),
+            Some(start),
+            Some(end),
+            10,
+            &profiles,
+        )
+        .unwrap();
         assert!(!bounded.is_empty());
         assert!(
             bounded
@@ -2641,8 +2671,10 @@ mod calendar_tests {
     #[test]
     fn a_mid_gap_start_yields_nothing_earlier_on_either_route() {
         let profiles = generated_profiles();
-        let quotes = bounded_quotes("BTCUSDT", Some(0), None, 8, &profiles).unwrap();
-        let trades = bounded_trades("BTCUSDT", Some(0), None, 8, &profiles).unwrap();
+        let quotes =
+            bounded_quotes(&profiles.test_key("BTCUSDT"), Some(0), None, 8, &profiles).unwrap();
+        let trades =
+            bounded_trades(&profiles.test_key("BTCUSDT"), Some(0), None, 8, &profiles).unwrap();
         assert!(quotes.len() > 2 && trades.len() > 2);
 
         // Strictly inside the gap between two prints, so the seek cannot land
@@ -2654,27 +2686,40 @@ mod calendar_tests {
 
         let start = gap(quotes[0].ts_event, quotes[1].ts_event);
         assert!(
-            bounded_quotes("BTCUSDT", Some(start), None, 8, &profiles)
-                .unwrap()
-                .iter()
-                .all(|quote| quote.ts_event >= start)
+            bounded_quotes(
+                &profiles.test_key("BTCUSDT"),
+                Some(start),
+                None,
+                8,
+                &profiles
+            )
+            .unwrap()
+            .iter()
+            .all(|quote| quote.ts_event >= start)
         );
 
         let start = gap(trades[0].ts_event, trades[1].ts_event);
         assert!(
-            bounded_trades("BTCUSDT", Some(start), None, 8, &profiles)
-                .unwrap()
-                .iter()
-                .all(|trade| trade.ts_event >= start)
+            bounded_trades(
+                &profiles.test_key("BTCUSDT"),
+                Some(start),
+                None,
+                8,
+                &profiles
+            )
+            .unwrap()
+            .iter()
+            .all(|trade| trade.ts_event >= start)
         );
     }
 
     #[test]
     fn bounded_quotes_reproduce_the_live_quote_sequence() {
         let profiles = generated_profiles();
-        let history = bounded_quotes("BTCUSDT", Some(0), None, 100, &profiles).unwrap();
+        let history =
+            bounded_quotes(&profiles.test_key("BTCUSDT"), Some(0), None, 100, &profiles).unwrap();
         let mut live = profiles
-            .history_source("BTCUSDT", Some(source::TAPE_ORIGIN_NS))
+            .history_source(&profiles.test_key("BTCUSDT"), Some(source::TAPE_ORIGIN_NS))
             .expect("live source");
         let mut live_quotes = Vec::new();
         while live_quotes.len() < history.len() {
@@ -2690,8 +2735,9 @@ mod calendar_tests {
 
     #[test]
     fn the_quotes_route_is_no_longer_empty() {
+        let profiles = generated_profiles();
         assert!(
-            !bounded_quotes("BTCUSDT", Some(0), None, 1, &generated_profiles())
+            !bounded_quotes(&profiles.test_key("BTCUSDT"), Some(0), None, 1, &profiles)
                 .unwrap()
                 .is_empty()
         );
