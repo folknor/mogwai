@@ -252,6 +252,17 @@ pub(crate) struct WsConnectionConfig {
     /// placed there would cover only the first connection - the one least likely
     /// to reach a stranger.
     pub(crate) identity: Option<RunIdentityCheck>,
+    /// How long ONE dial may take before it is abandoned and retried.
+    ///
+    /// IT BOUNDS EVERY DIAL, not just the first, which is what the name has to
+    /// mean if a host is going to set it. A first boarding on a cold river pays
+    /// that river's whole warmup synthesis inside the upgrade - the venue
+    /// materializes no river before something asks for one - so this is the
+    /// deadline a large warmup runs into. A reconnect to a river already
+    /// materialized is cheap, but a reconnect after its boat wound down, or one
+    /// that follows a first dial which never completed placement, pays the same
+    /// cost as a first.
+    pub(crate) dial_timeout: Duration,
 }
 
 /// What an identity probe established. Three outcomes, not two: only one of
@@ -459,6 +470,7 @@ async fn run_ws_connection_inner<
         sim,
         label,
         identity,
+        dial_timeout,
     } = config;
     let policy = ReconnectPolicy::from_conn(&conn, sim);
     // The reconnect-jitter RNG is seeded from the configured havoc seed when one
@@ -495,9 +507,21 @@ async fn run_ws_connection_inner<
             return;
         }
 
-        let ws = match connect_async(&ws_url).await {
-            Ok((ws, _)) => ws,
-            Err(error) => {
+        let ws = match tokio::time::timeout(dial_timeout, connect_async(&ws_url)).await {
+            Ok(Ok((ws, _))) => ws,
+            outcome => {
+                let error = match outcome {
+                    Ok(Err(error)) => error.to_string(),
+                    // The upgrade did not complete inside the deadline. On a cold
+                    // river that usually means the venue is still synthesizing the
+                    // warmup this dial asked for, so it is reported as the wait it
+                    // is rather than folded into transport errors.
+                    _ => format!(
+                        "no upgrade within {dial_timeout:?}; the venue may still be materializing \
+                         this river"
+                    ),
+                    // (the Ok(Ok(..)) arm is taken above)
+                };
                 tracing::warn!(
                     socket = label,
                     url = %ws_url,
@@ -1452,6 +1476,7 @@ mod tests {
                 sim: SimClock::identity(),
                 label: "test",
                 identity: None,
+                dial_timeout: Duration::from_secs(mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS),
             },
             Some(cmd_rx),
             |cmd: &Command| cmd.clone(),

@@ -36,7 +36,7 @@ are.
 
 ## Selecting a bundle in your config
 
-Name the boot symbol at top level - the river a consumer gets when it binds
+Name the default symbol at top level - the river a consumer gets when it binds
 without naming one. If its name matches a shipped preset, case-insensitively,
 that preset supplies the whole bundle.
 

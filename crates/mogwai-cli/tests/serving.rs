@@ -52,7 +52,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// tell the two apart.
 #[test]
 #[ignore = "binds a loopback listener"]
-fn preset_only_config_resolves_the_boot_river() {
+fn preset_only_config_resolves_the_default_river() {
     let venue = spawn(&["--config", &mnq_preset_config()]);
     assert_eq!(venue.symbol, "MNQ");
     let (status, body) = http_get(&venue.http_base(), "/instruments");
@@ -67,7 +67,7 @@ fn preset_only_config_resolves_the_boot_river() {
 
 #[test]
 #[ignore = "binds a loopback listener"]
-fn history_is_served_for_a_configured_symbol_that_is_not_the_boot_river() {
+fn history_is_served_for_a_configured_symbol_that_is_not_the_default_river() {
     let venue = spawn(&["--config", &two_symbols_config()]);
     let (status, body) = http_get(&venue.http_base(), "/trades?symbol=MNQ&start=0&limit=5");
     assert_eq!(status, 200, "configured cold history is served: {body}");
@@ -140,7 +140,7 @@ async fn ws_upgrade_refuses_an_illegal_symbol_with_400() {
 
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
-async fn a_ws_upgrade_for_a_configured_non_boot_symbol_is_served() {
+async fn a_ws_upgrade_for_a_configured_non_default_symbol_is_served() {
     let venue = spawn(&["--config", &two_symbols_config()]);
     let (mut socket, response) = tokio_tungstenite::connect_async(venue.ws_url_for("MNQ"))
         .await
@@ -3316,13 +3316,19 @@ fn post_divergence_body(base: &str, body: &str) -> (u16, String) {
 }
 
 /// Generator havoc forks the river, so it belongs to the sharing key at
-/// placement and may not mutate water a boat is already sitting on. The boot
-/// river always carries the boot boat, so this is the refusal an operator sees.
-#[test]
+/// placement and may not mutate water a boat is already sitting on.
+///
+/// A SOCKET PLACES THE BOAT, and this used to rely on the boot boat instead.
+/// No river is boated at boot now, so a test that armed without boarding would
+/// exercise the boatless path and report the refusal as missing.
+#[tokio::test]
 #[ignore = "binds a loopback listener"]
-fn a_generator_arm_on_a_boated_river_is_refused_naming_the_forking_alternative() {
+async fn a_generator_arm_on_a_boated_river_is_refused_naming_the_forking_alternative() {
     let venue = spawn(&["--config", &fast_config()]);
     let symbol = venue.symbol.clone();
+    let (_socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
+        .await
+        .expect("board the river so it carries a boat");
     let (status, body) = post_divergence_body(
         &venue.http_base(),
         &format!(
@@ -3343,23 +3349,37 @@ fn a_generator_arm_on_a_boated_river_is_refused_naming_the_forking_alternative()
     );
 }
 
-/// Unqualified, a generator arm does NOT fan out over every river. It is
-/// refused while any boat is placed, and the refusal names those rivers.
-#[test]
+/// An omitted generator symbol means the DEFAULT LABEL, whatever else is
+/// boarded.
+///
+/// IT USED TO MEAN THAT ONLY WHILE THE BOATYARD WAS EMPTY, and to become a
+/// refusal naming the placed rivers as soon as any unrelated river boarded - so
+/// the identical request changed meaning according to what other passengers were
+/// doing. That is not a contract a caller can rely on, and the boatyard was only
+/// ever non-empty at boot because one river was privileged.
+///
+/// The second half is what makes this more than a happy path: an unrelated river
+/// is boarded first, and the arm must still land on the default label rather
+/// than be refused for the existence of a boat it does not name.
+#[tokio::test]
 #[ignore = "binds a loopback listener"]
-fn a_generator_arm_with_no_symbol_is_refused_naming_the_boated_rivers() {
-    let venue = spawn(&["--config", &fast_config()]);
+async fn an_omitted_generator_symbol_means_the_default_label() {
+    let venue = spawn(&["--config", &two_symbols_config()]);
+    let (_other, _) = tokio_tungstenite::connect_async(format!("{}?symbol=MNQ", venue.ws_url()))
+        .await
+        .expect("board an unrelated river");
+
     let (status, body) = post_divergence_body(
         &venue.http_base(),
         r#"{"type":"FlowSurge","rate_mult":2.0,"children_mult":2.0,"duration_ms":1000}"#,
     );
     assert_eq!(
-        status, 400,
-        "an unqualified generator arm is refused: {body}"
+        status, 202,
+        "an omitted symbol takes the default label even with another river boarded: {body}"
     );
     assert!(
         body.contains(&*venue.symbol),
-        "the refusal names the boated river: {body}"
+        "the ack names the river it armed: {body}"
     );
 }
 

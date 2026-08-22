@@ -78,6 +78,23 @@ pub type VenueOrderId = String;
 /// the honest-transport default lives in exactly one spot.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// How long a consumer waits for ONE `/ws` upgrade before abandoning it.
+///
+/// SIZED FOR A COLD RIVER, not for a handshake. The venue materializes no river
+/// until something names it, so the first boarding of a river pays that river's
+/// whole warmup synthesis inside the upgrade - the boat cannot be placed until
+/// the water it reads exists. This was five hardcoded seconds, chosen when one
+/// river was warmed before readiness and every first boarding therefore found
+/// its water already there; with that privilege gone, five seconds refuses any
+/// warmup a consumer might reasonably configure.
+///
+/// It is a CONSUMER policy and it belongs to the consumer: the venue declines to
+/// promise a fast first boarding, because the honest cost of a long warmup is a
+/// long wait. Raising it past a nautilus node's own `timeout_connection`, which
+/// defaults to sixty seconds, buys nothing - that deadline governs the node's
+/// wait for every client to report connected, and it is the host's to raise.
+pub const DEFAULT_DIAL_TIMEOUT_SECS: u64 = 60;
+
 /// What a `/trades` request that states NO `limit` gets. This is the
 /// no-opinion answer, deliberately split from the ceiling below: at the
 /// raw-fill cadence one page at `MAX_HISTORY_LIMIT` is roughly 7 MB of JSON,

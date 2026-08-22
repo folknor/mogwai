@@ -267,8 +267,12 @@ impl Boatyard {
             .collect()
     }
 
-    /// The boat on `symbol` at this quantized speed, if one is placed.
+    /// Every symbol carrying a placed boat, sorted and deduplicated.
     ///
+    /// Test-only since the control plane stopped consulting the boatyard to
+    /// decide what an omitted generator symbol meant. It survives because it is
+    /// the observable a placement test asserts on.
+    #[cfg(test)]
     pub(crate) fn placed_symbols(&self) -> Vec<String> {
         let mut symbols: Vec<String> = self
             .locked()
@@ -282,6 +286,7 @@ impl Boatyard {
         symbols.dedup();
         symbols
     }
+
     pub(crate) fn boats(&self) -> Vec<Arc<Boat>> {
         self.locked()
             .values()

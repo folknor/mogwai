@@ -706,6 +706,19 @@ developer or library consumer reads both. Where a project publishes a site,
 separate: a document that may be wrong must not sit where a document that must
 be right is expected.
 
+ONE DOCUMENT IN `reference/` IS EXEMPT FROM THE MUST-BE-TRUE RULE, and it is the
+most binding document in the repository: `reference/glossary.md` states the END
+STATE rather than the present. Where it and the code disagree, the CODE owes the
+change - the entry is not stale, the tree is behind - and correcting an entry to
+match current behaviour is the one edit that is always wrong there. Its own
+preamble says so, and only the owner adds an entry to it.
+
+The exemption is narrow and does not spread. Every other file under `reference/`
+and `docs/` describes what is true NOW, so a change that moves behaviour moves
+them in the same commit. When such a file must record something the code has not
+caught up with, it says so in as many words and names it as owed, rather than
+quietly asserting the end state as though it had landed.
+
 The dependency direction is therefore one-way. `notes/` may cite `docs/` and
 `reference/`; nothing durable may cite `notes/` - not a code comment, not
 `docs/`, not `reference/`. A code comment must carry its full context, because

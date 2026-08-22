@@ -26,7 +26,7 @@ the two never interleave. A launcher captures stdout and reads a line; a human
 sees the same line in the terminal.
 
 The WebSocket endpoint is `GET /ws?symbol=<symbol>`. The query parameter is
-optional; omitting it binds the socket to the run's boot symbol for compatibility
+optional; omitting it binds the socket to the run's default symbol for compatibility
 with older consumers. A socket owns exactly one river. A supplied symbol is 1 to
 32 ASCII letters, digits, dot, dash, or underscore, and matching is case exact.
 Malformed symbols are refused with HTTP 400 before the upgrade. Every legal

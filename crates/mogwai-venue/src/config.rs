@@ -489,13 +489,13 @@ pub(crate) fn build_admission_limits(cfg: &Config) -> AdmissionLimits {
 impl Config {
     /// The boot symbol the operator named, if any. Absent, the chosen bundle's
     /// own symbol stands, which is what makes a no-config run BTCUSDT.
-    pub fn boot_symbol(&self) -> Option<&str> {
+    pub fn default_symbol(&self) -> Option<&str> {
         self.symbol.as_deref()
     }
 
     /// True when no operator knobs apply to the boot symbol.
-    pub fn boot_symbol_carries_no_knobs(&self) -> bool {
-        self.overlays_for(self.boot_symbol()).is_empty()
+    pub fn default_symbol_carries_no_knobs(&self) -> bool {
+        self.overlays_for(self.default_symbol()).is_empty()
     }
 
     /// Default knobs followed by the matching symbol-specific knobs, each
@@ -1248,13 +1248,13 @@ pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::Instrum
         .keys()
         .map(String::as_str)
         .filter(|key| {
-            cfg.boot_symbol()
+            cfg.default_symbol()
                 .is_none_or(|boot| !key.eq_ignore_ascii_case(boot))
         })
         .collect();
     configured.sort_unstable();
     let mut resolved = Vec::new();
-    for symbol in std::iter::once(cfg.boot_symbol()).chain(configured.into_iter().map(Some)) {
+    for symbol in std::iter::once(cfg.default_symbol()).chain(configured.into_iter().map(Some)) {
         let named = symbol.unwrap_or(DEFAULT_PRESET);
         let profile = profile_for(cfg, symbol)
             .with_context(|| format!("configured symbol {named} is invalid"))?;
@@ -2224,10 +2224,10 @@ mod tests {
     }
 
     #[test]
-    fn a_boot_symbol_at_top_level_selects_its_preset() {
+    fn a_default_symbol_at_top_level_selects_its_preset() {
         let cfg: Config = toml::from_str("symbol = \"MNQ\"").unwrap();
         assert_eq!(
-            profile_for(&cfg, cfg.boot_symbol()).unwrap().def,
+            profile_for(&cfg, cfg.default_symbol()).unwrap().def,
             profile_from_preset("MNQ").unwrap().def
         );
     }
@@ -2237,7 +2237,7 @@ mod tests {
         let cfg: Config =
             toml::from_str("symbol = \"FOOBAR\"\n[instrument]\nprice_increment = \"0.02\"\n")
                 .unwrap();
-        let profile = profile_for(&cfg, cfg.boot_symbol()).unwrap();
+        let profile = profile_for(&cfg, cfg.default_symbol()).unwrap();
         assert_eq!(profile.def.symbol.as_ref(), "FOOBAR");
         assert_eq!(profile.def.price_increment, Decimal::new(2, 2));
     }
@@ -2249,7 +2249,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            profile_for(&cfg, cfg.boot_symbol())
+            profile_for(&cfg, cfg.default_symbol())
                 .unwrap()
                 .def
                 .price_increment,
@@ -2263,7 +2263,7 @@ mod tests {
             "symbol = \"X\"\n[instrument]\npreset = \"MNQ\"\n[symbols.X]\npreset = \"MES\"\n",
         )
         .unwrap();
-        let profile = profile_for(&cfg, cfg.boot_symbol()).unwrap();
+        let profile = profile_for(&cfg, cfg.default_symbol()).unwrap();
         assert_eq!(profile.def.symbol.as_ref(), "X");
         assert_eq!(
             profile.def.class,
@@ -2347,13 +2347,13 @@ mod tests {
     }
 
     #[test]
-    fn a_lowercase_boot_symbol_finds_its_uppercase_symbols_table() {
+    fn a_lowercase_default_symbol_finds_its_uppercase_symbols_table() {
         let cfg: Config = toml::from_str(
             "symbol = \"mnq\"\n[symbols.MNQ]\nmargin = { initial_per_contract = \"2100\", maintenance_per_contract = \"1800\", breach_action = \"liquidate\" }\n",
         )
         .unwrap();
         assert_eq!(
-            profile_for(&cfg, cfg.boot_symbol())
+            profile_for(&cfg, cfg.default_symbol())
                 .unwrap()
                 .margin
                 .unwrap()
@@ -2373,7 +2373,7 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_non_boot_symbol_table_refuses_at_boot() {
+    fn an_invalid_non_default_symbol_table_refuses_at_boot() {
         let cfg: Config = toml::from_str(
             "symbol = \"MNQ\"\n[balances]\nUSD = \"1\"\n[symbols.X.override]\n\"class.typo\" = \"x\"\n",
         )
@@ -2384,7 +2384,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unfunded_non_boot_symbol_refuses_at_boot() {
+    fn an_unfunded_non_default_symbol_refuses_at_boot() {
         let cfg: Config = toml::from_str(
             "symbol = \"BTCUSDT\"\n[balances]\nUSDT = \"1\"\n[symbols.X]\npreset = \"MNQ\"\n",
         )
@@ -2402,7 +2402,7 @@ mod tests {
     /// that call, so it has to cover the boot shape whether or not the symbol
     /// also has a `[symbols.*]` table.
     #[test]
-    fn an_unfunded_boot_symbol_refuses_at_boot() {
+    fn an_unfunded_default_symbol_refuses_at_boot() {
         let cfg: Config = toml::from_str("symbol = \"MNQ\"\n[balances]\nUSDT = \"1\"\n").unwrap();
         let error = format!("{:#}", build_instrument_profiles(&cfg).unwrap_err());
         assert!(error.contains("unfunded"), "{error}");
@@ -2909,13 +2909,13 @@ mod tests {
     }
 
     #[test]
-    fn a_boot_symbol_that_is_not_first_alphabetically_is_the_one_readied() {
+    fn a_default_symbol_that_is_not_first_alphabetically_is_the_one_readied() {
         let cfg: Config = toml::from_str("symbol = \"MNQ\"\n[balances]\nUSD = \"100000\"\nUSDT = \"100000\"\n[symbols.BTCUSDT]\npreset = \"BTCUSDT\"\n").unwrap();
         let profiles = build_instrument_profiles(&cfg).unwrap();
         assert_eq!(profiles.instrument_defs().len(), 2);
         assert_eq!(
             profiles
-                .boot_symbol_def(cfg.boot_symbol())
+                .default_symbol_def(cfg.default_symbol())
                 .unwrap()
                 .symbol
                 .as_ref(),
@@ -2924,7 +2924,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_boot_symbol_resolves_the_default_shape_among_several() {
+    fn an_unset_default_symbol_resolves_the_default_shape_among_several() {
         let cfg: Config = toml::from_str(
             "[balances]\nUSD = \"100000\"\nUSDT = \"100000\"\n[symbols.MNQ]\npreset = \"MNQ\"\n",
         )
@@ -2932,7 +2932,7 @@ mod tests {
         let profiles = build_instrument_profiles(&cfg).unwrap();
         assert_eq!(profiles.instrument_defs().len(), 2);
         assert_eq!(
-            profiles.boot_symbol_def(None).unwrap().symbol.as_ref(),
+            profiles.default_symbol_def(None).unwrap().symbol.as_ref(),
             "BTCUSDT"
         );
     }

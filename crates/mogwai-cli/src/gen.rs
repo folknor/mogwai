@@ -559,7 +559,7 @@ fn profile_from_config(
 ) -> anyhow::Result<mogwai_venue::source::InstrumentProfile> {
     let cfg = mogwai_venue::config::Config::load(Some(path.to_path_buf()))
         .with_context(|| format!("loading --config {}", path.display()))?;
-    if cfg.boot_symbol_carries_no_knobs() {
+    if cfg.default_symbol_carries_no_knobs() {
         bail!(
             "--config {} carries no [instrument] or matching [symbols.*] knobs for its boot \
              symbol; it would ignore every scratch scalar, so a scratch profile must configure one",
@@ -567,7 +567,7 @@ fn profile_from_config(
         );
     }
     let profiles = mogwai_venue::config::build_instrument_profiles(&cfg)?;
-    let def = profiles.boot_symbol_def(cfg.boot_symbol())?;
+    let def = profiles.default_symbol_def(cfg.default_symbol())?;
     Ok((*profiles
         .configured(&def.symbol)
         .expect("just listed this symbol"))

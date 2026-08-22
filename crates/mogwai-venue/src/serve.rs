@@ -169,7 +169,7 @@ async fn serve_async(
 ) -> anyhow::Result<()> {
     let cfg = Config::load(config)?;
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
-    let instrument = profiles.boot_symbol_def(cfg.boot_symbol())?;
+    let instrument = profiles.default_symbol_def(cfg.default_symbol())?;
     let seeds = mogwai_protocol::RunSeeds::from_run_seed(
         cfg.seed.unwrap_or_else(|| rand::random::<u64>() >> 1),
     );
@@ -222,18 +222,26 @@ async fn serve_async(
             );
         }
     }
-    let warm_rivers = Arc::clone(&rivers);
-    let checkpoints =
-        tokio::task::spawn_blocking(move || warm_rivers.ensure_reach(&warm_symbol, run_start_ns))
-            .await??;
+    // NO RIVER IS WARMED HERE, and none is boated. Boot used to materialize the
+    // default symbol's whole warmup span before writing its readiness line and
+    // then keep a boat on it for the life of the process, which made one river a
+    // privileged object: warm before anyone named it, and never wound down. Every
+    // other river has always been synthesized inside the request that first named
+    // it, so what this removes is an exception rather than a rule.
+    //
+    // WHAT BOOT STILL OWES IS VALIDATION, and that has already run above: label
+    // legality, every configured shape, funding for each settlement currency, the
+    // scalar bounds. What it cannot owe is proof that a validated shape will
+    // GENERATE - only generating proves that - so a generator failure during a
+    // first materialization is a venue fault raised then, not a refusal to start.
     let sim = build_run_clock(&cfg, now_ns())?;
     let data_origin_ns = source::TAPE_ORIGIN_NS;
+    let _ = warm_symbol;
     tracing::info!(
-        checkpoints,
         warmup_ns = cfg.warmup_ns,
         run_start_ns,
         data_origin_ns,
-        "eager warmup materialized"
+        "rivers materialize on first request"
     );
     let run_duration_ns = resolve_run_duration(duration_override_ns, cfg.run_duration_ns);
     // Construct this before Tape::start: a source can fault immediately on its
@@ -258,19 +266,6 @@ async fn serve_async(
         cfg.account_policies.clone(),
         fault_tx,
     );
-    let boot_profile = rivers
-        .resolve_profile(&instrument.symbol)
-        .expect("validated boot profile");
-    let boot_river = rivers.resolve_key(&boot_profile);
-    let boot_ticket = run
-        .boatyard
-        .board(&crate::boatyard::BoardRequest {
-            river: boot_river,
-            speed: cfg.speed,
-        })
-        .await
-        .map_err(|refusal| anyhow::anyhow!("could not place boot boat: {refusal:?}"))?;
-    run.retain_boot_ticket(boot_ticket);
     tracing::info!(
         account_id = cfg.account_id.trim(),
         "run ledger account fixed"

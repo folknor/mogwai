@@ -434,6 +434,7 @@ impl DataClient for MogwaiDataClient {
             self.config.expected_run_seed,
             "data",
         );
+        let dial_timeout = std::time::Duration::from_secs(self.config.dial_timeout_secs);
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
                 WsConnectionConfig {
@@ -444,6 +445,7 @@ impl DataClient for MogwaiDataClient {
                     sim,
                     label: "data",
                     identity,
+                    dial_timeout,
                 },
                 None::<tokio::sync::mpsc::UnboundedReceiver<std::convert::Infallible>>,
                 |never: &std::convert::Infallible| match *never {},

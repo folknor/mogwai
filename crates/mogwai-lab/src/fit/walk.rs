@@ -335,7 +335,7 @@ pub fn run_summary_walk(
 pub fn profile_from_config(path: &Path) -> LabResult<mogwai_venue::source::InstrumentProfile> {
     let cfg = mogwai_venue::config::Config::load(Some(path.to_path_buf()))
         .map_err(|e| LabError::refusal(format!("loading scratch config: {e}")))?;
-    if cfg.boot_symbol_carries_no_knobs() {
+    if cfg.default_symbol_carries_no_knobs() {
         return Err(LabError::refusal(
             "the scratch config carries no [instrument] or matching [symbols.*] knobs for its \
              boot symbol; it would ignore every scratch scalar",
@@ -344,7 +344,7 @@ pub fn profile_from_config(path: &Path) -> LabResult<mogwai_venue::source::Instr
     let profiles = mogwai_venue::config::build_instrument_profiles(&cfg)
         .map_err(|e| LabError::refusal(format!("building instrument profiles: {e}")))?;
     let def = profiles
-        .boot_symbol_def(cfg.boot_symbol())
+        .default_symbol_def(cfg.default_symbol())
         .map_err(|e| LabError::refusal(format!("resolving boot shape: {e}")))?;
     Ok((*profiles
         .configured(&def.symbol)

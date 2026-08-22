@@ -41,6 +41,16 @@ struct WatchedRun {
     venue: Venue,
     /// One entry per requested url, in that order.
     seen: Vec<Watched>,
+    /// Wall time the winning attempt spent opening its sockets.
+    ///
+    /// IT IS THE MATERIALIZATION COST, and it is measured rather than assumed
+    /// because no constant can predict it. No river exists until something names
+    /// it, so the first boarding of a run generates that river's whole warmup
+    /// span inside the upgrade - and that time is spent while the declared
+    /// duration is already running. A test that wants to say the run served its
+    /// duration has to subtract what the run spent making itself servable, and
+    /// this is the only honest source for that number.
+    boarding_wall: Duration,
     /// Runs no socket of this test was ever a passenger on. KEPT ALIVE rather than
     /// dropped as they are discarded, and that is load-bearing rather than
     /// laziness: `common`'s wall budget re-anchors when the LAST live venue goes
@@ -155,6 +165,9 @@ async fn watch_a_bounded_run(
             "a watched run needs at least one socket; with none, every check below is vacuous"
         );
 
+        // TIMED, because the first upgrade of a run is where its river is
+        // synthesized. See `WatchedRun::boarding_wall`.
+        let boarding_started = std::time::Instant::now();
         let mut sockets = Vec::new();
         for url in &requested {
             // A refused or rejected upgrade is the run having ended under us. It
@@ -164,6 +177,7 @@ async fn watch_a_bounded_run(
                 Err(_) => break,
             }
         }
+        let boarding_wall = boarding_started.elapsed();
 
         let seen = if sockets.len() == wanted {
             // All drained CONCURRENTLY. Draining one while another sits parked
@@ -198,6 +212,7 @@ async fn watch_a_bounded_run(
             return WatchedRun {
                 venue,
                 seen,
+                boarding_wall,
                 _spent: spent,
             };
         }
@@ -631,20 +646,28 @@ async fn sigterm_closes_without_announcing_run_complete() {
     venue.wait_for_exit(Duration::from_secs(20));
 }
 
-/// Decision 8. A large warmup, a fast clock and a short declared duration: if
-/// the deadline were measured from boot instead of from the post-warmup
-/// `started_ns`, the accelerated duration would elapse DURING warmup and the
-/// run would be over before the launcher could connect. It must instead serve
-/// its whole declared duration from `run_start_ns`, which is what
-/// `reference/architecture.md` states the run duration is measured from.
+/// A large warmup, a fast clock and a short declared duration: the run must
+/// still serve that duration from `run_start_ns` rather than end before its
+/// launcher can connect.
 ///
-/// FROM `run_start_ns`, NOT FROM READINESS, and the difference is small but
-/// real: the deadline task now sleeps to `sim.wall_ns(deadline_ns)` rather than
-/// for `deadline_ns - started_ns` from wherever the spawn happened to land. The
-/// clock is anchored right after warmup, so what used to be added on top was
-/// the boot interval - boat placement, the listener bind, the readiness write -
-/// which at speed 100 is a large multiple of the declared duration in simulated
-/// terms.
+/// ITS ORIGINAL PREMISE IS GONE, and saying so is the point. This was written
+/// when one river was materialized BEFORE readiness, so "the deadline epoch is
+/// boot" and "the deadline epoch is the post-warmup start" named two instants
+/// separated by the whole warmup, and this test told them apart. No river is
+/// warmed before readiness now - none exists until something names it - so those
+/// two instants have collapsed into one and that distinction is no longer
+/// available to assert.
+///
+/// WHAT REPLACES IT is the property that survived the collapse: a run still
+/// serves its declared duration, less only the placement skew and the time it
+/// spent materializing the river its first passenger asked for. That
+/// materialization is now paid out of the declared duration - for EVERY river,
+/// the default label included, which is uniformity rather than a regression:
+/// every river but one already behaved this way, because `place_cursor` reaches
+/// inline and only the boot river was reached before the clock existed.
+///
+/// The bound is computed from this run's own boarding wall rather than from a
+/// constant, because no constant can predict a synthesis cost.
 ///
 /// SO THIS TEST HAS LESS MARGIN THAN IT USED TO, and it had none: the old
 /// span-based sleep served the declared duration PLUS the boot interval, and
@@ -690,15 +713,27 @@ async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
         )
     });
 
+    // WHAT THE RUN SPENT MAKING ITSELF SERVABLE, measured on this run rather
+    // than assumed. No river exists until something names it, so this socket's
+    // own upgrade generated six simulated hours of warmup - and it did so while
+    // the declared duration was already running. At speed 100 every wall
+    // millisecond of that is a tenth of a simulated second off what the run can
+    // then serve, so the bound has to carry it or it is asserting that
+    // materialization is free.
+    let materialization_ns = u64::try_from(run.boarding_wall.as_nanos())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(100);
+    let owed = boat_skew_floor(30_000_000_000).saturating_sub(materialization_ns);
     assert!(
-        elapsed_ns >= boat_skew_floor(30_000_000_000),
-        "the run served only {elapsed_ns} ns of a declared 30s; the deadline epoch \
-         is boot rather than the post-warmup start"
+        elapsed_ns >= owed,
+        "the run served only {elapsed_ns} ns of a declared 30s, and materializing its river \
+         accounts for just {materialization_ns} ns of the shortfall; the deadline is not being \
+         served from the readiness era at all"
     );
     assert!(
-        sim_now_ns >= record.run_start_ns + boat_skew_floor(30_000_000_000),
-        "sim-now at completion is at least the declared duration past run_start_ns, \
-         less the boat's placement skew"
+        sim_now_ns >= record.run_start_ns + owed,
+        "sim-now at completion is at least the declared duration past run_start_ns, less the \
+         boat's placement skew and the materialization this run paid for"
     );
     assert_eq!(
         run.venue.wait_for_exit(Duration::from_secs(20)).code,

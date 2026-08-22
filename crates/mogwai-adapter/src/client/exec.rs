@@ -1130,6 +1130,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             self.config.expected_run_seed,
             "exec",
         );
+        let dial_timeout = std::time::Duration::from_secs(self.config.dial_timeout_secs);
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
                 WsConnectionConfig {
@@ -1140,6 +1141,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     sim,
                     label: "exec",
                     identity,
+                    dial_timeout,
                 },
                 Some(cmd_rx),
                 exec_command_to_client_message,

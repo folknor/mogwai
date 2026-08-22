@@ -548,7 +548,7 @@ does an absent one, which keeps silence meaning what it always meant. The venue
 reads nothing into the string beyond equality, and `mogwai-adapter` mints one per
 PROCESS from the pid and start instant so a host configures nothing and a
 restarted worker still reclaims its ledger from the sockets of the dead one.
-Absent, they default to the run's boot symbol and the configured `speed`, and
+Absent, they default to the run's default symbol and the configured `speed`, and
 to an indefinite passenger. The key is known before any tasks or bytes exist,
 a refusal - an illegal label, a shape that does not validate, a funding-barred
 one, an exhausted river cap, a non-finite or negative speed, or a second
@@ -661,28 +661,34 @@ cancels its worker and joins it away from the registry mutex. Other cadences
 on the same river stay. Rivers and their bounded checkpoint sets remain for
 process life so later history does not depend on eviction timing.
 
-The BOOT river is the exception to placement on demand: `serve` places a boat on
-it before it writes the readiness line, at the configured `speed`, and the run
-retains that ticket for process life. The run boards nothing - boarding is a
-passenger's act and a run has no passengers - so what it holds is a keepalive
-ticket rather than a ride. The boot river therefore always has a boat at the
-configured speed and that boat never winds down. A socket asking for a
-different speed on the boot symbol gets a second boat. Every other river is
-boatless until a connection boards it.
+THERE IS NO EXCEPTION TO PLACEMENT ON DEMAND. Every river is boatless until a
+passenger boards it, and no river is materialized before readiness. `serve` used
+to warm the default label's whole span before writing its readiness line and then
+retain a ticket on it for process life, which made one river permanently warm and
+permanently boated while every other was cold - a privilege rather than a rule.
+
+Removing it makes the venue uniform in a way worth stating, because it looks like
+a cost and is mostly the disappearance of an exception. Placement reaches its
+river inline, so EVERY river has always been synthesized inside the request that
+first named it, and that synthesis has always been paid out of the declared run
+duration. Only the default label escaped, and only because it was reached before
+the run clock was built. Now nothing escapes: a run that materializes a cold
+river spends part of itself doing so, whichever label that river carries.
+
+The first requester pays, and that requester can be a history poll as easily as a
+boarding - so a history request reaches its river to the run start before serving
+a window, rather than generating only as far as its own `end` and leaving the
+river owing most of its warmup to whoever came next.
 
 Concurrent first boarders share one placement through a semaphore handoff
-rather than each placing a boat, and a reader asking a river's now while a
-placement is in flight WAITS for it instead of falling through to the venue
-clock - falling through would hand back a well-formed answer off a clock ahead
-of the boat about to be placed, which is the look-ahead per-boat clocks exist
-to remove. `/health` keeps the non-blocking form, because it must never block
-on a placement.
+rather than each placing a boat. `/health` reads the boatyard on non-blocking
+terms, because it must never block on a placement.
 
 `/health`'s tape fault reads EVERY boated river on those same non-blocking
-terms, not the boot river alone. It read only the boot river until 2026-08-16,
+terms, not one river alone. It read only the default river until 2026-08-16,
 which was right when a run had one paced tape and became a hole under the open
 instrument set: a consumer bound to any other river got a healthy answer while
-its own tape was stuck, and the boot river is the one a strategy under test is
+its own tape was stuck, and the default river is the one a strategy under test is
 least likely to have bound. One optional object over N boats forces a choice,
 and it is the faulted river with the smallest symbol - deterministic across
 polls, unchanged in wire shape, and enough to answer whether any river faulted.
@@ -938,8 +944,8 @@ derives from it by domain-separated derivation; nothing else in a run is
 random. The fill root is run-level, because the band's draw key already carries
 the order's symbol; a tape root is per-river, keyed by the REQUESTED symbol
 label as described above, so two labels resolving to the same shape never share
-a path. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; the boot river's
-warmup is generated before readiness, every other river's on first read, and the
+a path. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; every river's
+warmup is generated on first read, and the
 run proper begins at `run_start_ns = TAPE_ORIGIN_NS + warmup_ns` on the same
 axis, so `data_origin_ns` is always `TAPE_ORIGIN_NS` and history outside
 `[data_origin_ns, sim_now]` is refused. The venue has one tape origin, one
@@ -1141,9 +1147,10 @@ current state, not the end state.
 
 Config declares no closed instrument set. It supplies a default knob overlay
 and optional case-insensitive per-symbol overlays for total symbol resolution.
-The top-level boot symbol selects the eagerly warmed boot river and remains the
-default for a request that carries no symbol; other request symbols materialize
-their own rivers in the same run.
+The top-level default symbol is what a request carrying no symbol binds - a
+carrier convenience for consumers that predate the parameter, not a privileged
+river. It is materialized on first request like any other, and other request
+symbols materialize their own rivers in the same run.
 
 The intake sequence therefore makes a river better and gates nothing:
 survey what cheap data exists, decide whether a paid corpus is worth buying

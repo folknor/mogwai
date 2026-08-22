@@ -17,11 +17,11 @@ matters here because a generator arm is part of that key. A BOAT is the paced
 reader sitting on a river, placed when the first connection boards it at a given
 speed, and it carries the clock every answer about that river is dated on.
 
-The venue does keep one wall-to-sim reference, for the answers that have no boat
-- a boatless river, the venue deadline, the venue-scoped account ledger - and it
-is labelled as such on the wire. What it is not is authoritative for a boated
-river, whose answers are dated on its boat. So a havoc window cannot be an
-interval on one clock.
+The venue keeps one wall-to-sim reference, and it answers every request that owns
+no boat: history, the venue deadline, the venue-scoped account ledger, `/clock`.
+It is deliberately not any boat's, because a boat's own instant belongs to the
+passengers riding it. What a passenger receives is still dated on its boat, so a
+havoc window cannot be an interval on one clock.
 
 An armed `CommandLatency` act delay is HEAD-OF-LINE on its socket. Each
 connection feeds one sequential dispatcher, so a delayed submit holds every
@@ -74,9 +74,11 @@ history and to every passenger that boards later; its window opens at the
 river's own origin, and the `202` body names that origin so you can see which
 span was armed. A generator arm on a river that already has a boat is refused
 with `400` naming that river: mid-run mutation of shared live water is not
-supported, so arm the surge before any socket binds that symbol. An arm without
-a symbol is refused too while any boat is placed, naming those rivers; with no
-boat anywhere it falls to the run's boot symbol. `ClearDivergences` follows the
+supported, so arm the surge before any socket binds that symbol. An arm naming no
+symbol takes the run's DEFAULT LABEL, whatever else is boarded - it used to be
+refused instead whenever any unrelated river carried a boat, so the same request
+meant different things depending on what other passengers were doing.
+`ClearDivergences` follows the
 same rule from the other side - naming a boated river refuses, while an
 unqualified clear lifts the transport windows run-wide and clears the surge on
 every boatless river, skipping boated ones rather than refusing.

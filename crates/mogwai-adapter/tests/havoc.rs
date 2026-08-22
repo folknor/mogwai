@@ -68,6 +68,7 @@ async fn subscribed_data_client(
         callsign: None,
         havoc,
         expected_run_seed: None,
+        ..Default::default()
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
@@ -130,6 +131,7 @@ async fn connect_data_client(
         callsign: None,
         havoc,
         expected_run_seed: None,
+        ..Default::default()
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
@@ -414,6 +416,7 @@ async fn ships_venue_havoc() {
         callsign: None,
         havoc: Some(havoc),
         expected_run_seed: None,
+        ..Default::default()
     };
     let mut data_client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), data_config).expect("client builds");
@@ -699,6 +702,7 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
         havoc: None,
         // Bound to a run this stub is not serving.
         expected_run_seed: Some(7),
+        ..Default::default()
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
@@ -837,6 +841,7 @@ async fn dialing_blind_establishes_a_full_passenger_with_a_stranger() {
         havoc: None,
         // The undecided default: no identity to check against.
         expected_run_seed: None,
+        ..Default::default()
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
@@ -922,6 +927,7 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
         callsign: None,
         havoc: None,
         expected_run_seed: Some(7),
+        ..Default::default()
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
@@ -986,6 +992,7 @@ async fn conn_reconnect_respects_max_attempts() {
             ..ConnHavoc::default()
         })),
         expected_run_seed: None,
+        ..Default::default()
     };
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");

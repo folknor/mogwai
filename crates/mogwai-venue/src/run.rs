@@ -726,7 +726,7 @@ pub(crate) struct Run {
     /// river in `rivers`, is servable for history, and gets a boat of its own
     /// when an account boards it; this one is only distinguished by carrying
     /// a boat from boot, and therefore by never lagging the venue clock.
-    pub(crate) boot_symbol: Symbol,
+    pub(crate) default_symbol: Symbol,
     /// Every configured river, created on first use and keyed independently, so
     /// two symbols never serialize on each other's checkpoint chain.
     pub(crate) rivers: Arc<source::Rivers>,
@@ -756,7 +756,6 @@ pub(crate) struct Run {
     account_policies: std::collections::HashMap<String, mogwai_protocol::risk::AccountPolicy>,
     pub(crate) seeds: RunSeeds,
     pub(crate) boatyard: Arc<Boatyard>,
-    boot_ticket: Mutex<Option<crate::boatyard::Ticket>>,
     /// The VENUE clock, and not the now of any boated river. It is the venue's
     /// one wall-to-sim reference, kept for the three answers no boat can give:
     /// a boatless river's history ceiling, the venue deadline, and the
@@ -888,12 +887,11 @@ impl Run {
             default_account_id: account_id,
             reset_account_on_reconnect,
             account_policies,
-            boot_symbol: instrument.symbol,
+            default_symbol: instrument.symbol,
             rivers,
             oms_type,
             seeds,
             boatyard,
-            boot_ticket: Mutex::new(None),
             sim,
             started_ns,
             deadline_ns: run_duration_ns.map(|duration| started_ns.saturating_add(duration)),
@@ -1582,13 +1580,6 @@ impl Run {
             .values()
             .map(Arc::clone)
             .collect()
-    }
-
-    pub(crate) fn retain_boot_ticket(&self, ticket: crate::boatyard::Ticket) {
-        *self
-            .boot_ticket
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ticket);
     }
 
     /// Make `symbol` tradable on ONE ACCOUNT'S ledger: register the def and

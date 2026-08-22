@@ -213,7 +213,7 @@ pub struct Venue {
     /// through the venue's own profile resolution, not the raw config key, which
     /// diverges from the served spelling under case-insensitive preset matching.
     /// That resolution is pinned against a LITERAL by
-    /// `preset_only_config_resolves_the_boot_river`, which exists for exactly
+    /// `preset_only_config_resolves_the_default_river`, which exists for exactly
     /// this reason; without it the recomputation here would be answering itself.
     pub symbol: String,
     /// This venue's stderr, line by line. Captured for every venue: a run that
@@ -407,7 +407,7 @@ pub fn spawn(extra_args: &[&str]) -> Venue {
             lines.push(line);
         }
     }));
-    let symbol = boot_symbol(spec.config.as_deref());
+    let symbol = default_symbol(spec.config.as_deref());
     // A launch that panics leaves the count at zero on purpose: the next
     // `spawn`, in the next test, then re-anchors instead of inheriting the
     // anchor this failed one opened.
@@ -506,17 +506,17 @@ impl CapturedLog {
 /// matching and answers BTCUSDT for a venue serving MNQ.
 ///
 /// What keeps the recomputation from answering itself is that it is pinned
-/// against a LITERAL by `preset_only_config_resolves_the_boot_river`, whose bite
+/// against a LITERAL by `preset_only_config_resolves_the_default_river`, whose bite
 /// was proven when it landed. Do not remove that test, and do not let it become
 /// the only config in the tree whose boot river is non-trivial without noticing.
-fn boot_symbol(config_path: Option<&std::path::Path>) -> String {
+fn default_symbol(config_path: Option<&std::path::Path>) -> String {
     use mogwai_venue::config;
 
     let cfg = config::Config::load(config_path.map(PathBuf::from))
         .expect("the harness launches only configs the venue accepts");
     config::build_instrument_profiles(&cfg)
         .expect("the harness launches only configs the venue accepts")
-        .boot_symbol_def(cfg.boot_symbol())
+        .default_symbol_def(cfg.default_symbol())
         .expect("the boot shape resolves for a config the venue accepts")
         .symbol
         .to_string()

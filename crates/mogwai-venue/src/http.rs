@@ -765,7 +765,7 @@ pub(crate) struct Health {
     run_seed: u64,
     /// A FAULTED TAPE ON ANY BOATED RIVER, not merely on the boot one.
     ///
-    /// This used to read `boat_for_symbol(boot_symbol)` and report that one
+    /// This used to read `boat_for_symbol(default_symbol)` and report that one
     /// boat's tape fault, which was exactly right when a run had one paced
     /// tape. Under the open instrument set a run places a boat per keyed river,
     /// every one owns its own tape and can fault independently, and the boot
@@ -994,21 +994,25 @@ pub(crate) async fn arm_divergence(
             children_mult,
             duration_ms,
         } => {
-            let symbol = if let Some(symbol) = request.symbol.as_deref() {
-                symbol
-            } else {
-                let placed = run.boatyard.placed_symbols();
-                if !placed.is_empty() {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        format!(
-                            "generator divergence requires symbol; placed boats: {}",
-                            placed.join(", ")
-                        ),
-                    );
-                }
-                run.boot_symbol.as_ref()
-            };
+            // AN OMITTED SYMBOL MEANS THE DEFAULT LABEL, always. It used to mean
+            // that only while the boatyard happened to be empty, and to become a
+            // refusal the moment any UNRELATED river boarded - so the identical
+            // request changed meaning based on what other passengers were doing,
+            // which is not a thing a caller can predict or a contract can state.
+            //
+            // KNOWN DEFECT, LEFT DELIBERATELY AND NAMED SO IT IS NOT MISTAKEN FOR
+            // INTENT: arming a generator divergence still MATERIALIZES its target
+            // river, and the glossary says only a boarding or a history poll
+            // creates one, since a control post boards nothing. Making omission
+            // consistent widens the cases where that happens rather than
+            // narrowing them. It is the same defect as the missing river fork -
+            // a generator arm belongs to river identity and should be recorded
+            // against a key ahead of materialization, not written into water that
+            // already exists - and it closes with that change, not this one.
+            let symbol = request
+                .symbol
+                .as_deref()
+                .unwrap_or_else(|| run.default_symbol.as_ref());
             if run.boatyard.boat_for_symbol(symbol).is_some() {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -1796,8 +1800,17 @@ pub(crate) async fn trades(
     // Echoed back on the failure paths below, since the handler's own copy is
     // moved into the blocking task.
     let named = truncated_symbol(&symbol);
+    let run_start_ns = state.run.started_ns;
     let (history_slot, body) = match tokio::task::spawn_blocking(move || {
-        let body = bounded_trades(&symbol, start, end, limit, &rivers)
+        // EVERY RIVER OWES THE WHOLE WARMUP SPAN BEFORE IT CAN BE SERVED, and a
+        // history poll is a first requester like any other. Without this a small
+        // window near the tape origin returned having generated only as far as
+        // its own `end`, so the river was served while still owing most of the
+        // span - and the next reader paid a walk this one should have. Reaching
+        // is idempotent: a river already past `run_start_ns` walks nothing.
+        let body = rivers
+            .ensure_reach(&symbol, run_start_ns)
+            .and_then(|_| bounded_trades(&symbol, start, end, limit, &rivers))
             .and_then(|rows| serde_json::to_vec(&rows).map_err(Into::into));
         (history_slot, body)
     })
@@ -2081,7 +2094,7 @@ const MAX_ECHOED_SYMBOL: usize = 64;
 /// resource is actually spent.
 ///
 /// Takes `bound: &Symbol` and not `&Run` deliberately: it reads exactly
-/// `run.boot_symbol`, and taking the whole run would make the unit tests
+/// `run.default_symbol`, and taking the whole run would make the unit tests
 /// below impossible to write without spawning a tape.
 ///
 /// The charset rule is stated on the DECODED value, which is the whole of it
@@ -2317,7 +2330,7 @@ mod history_slot_tests {
     }
 
     #[test]
-    fn an_absent_socket_symbol_binds_the_boot_symbol() {
+    fn an_absent_socket_symbol_binds_the_default_symbol() {
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
         assert_eq!(
             resolve_socket_symbol(None, &bound).expect("default symbol"),
@@ -2326,7 +2339,7 @@ mod history_slot_tests {
     }
 
     #[test]
-    fn a_socket_symbol_matching_the_boot_symbol_binds_it() {
+    fn a_socket_symbol_matching_the_default_symbol_binds_it() {
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
         assert_eq!(
             resolve_socket_symbol(Some("MNQ"), &bound).expect("matching symbol"),

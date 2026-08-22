@@ -211,7 +211,7 @@ impl InstrumentProfiles {
     /// top-level `symbol` plus a `[symbols.*]` table. An absent `symbol` falls
     /// back to the shape the sweep resolved FIRST, which is exactly what the
     /// config's own defaulting produced for a `None` symbol.
-    pub fn boot_symbol_def(&self, symbol: Option<&str>) -> anyhow::Result<InstrumentDef> {
+    pub fn default_symbol_def(&self, symbol: Option<&str>) -> anyhow::Result<InstrumentDef> {
         let named = symbol
             .or(self.boot.as_deref())
             .unwrap_or(crate::config::DEFAULT_PRESET);

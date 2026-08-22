@@ -90,6 +90,15 @@ pub struct MogwaiDataClientConfig {
     /// differs. See `verify_run_identity`.
     #[serde(default)]
     pub expected_run_seed: Option<u64>,
+    /// How long ONE websocket dial may take before it is abandoned and retried.
+    ///
+    /// Defaults to [`mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS`]. It bounds
+    /// every dial rather than only the first, because a reconnect after a boat
+    /// has wound down pays the same cold-river cost a first boarding does. Both
+    /// clients take the same default, so the two legs of one host cannot
+    /// disagree about how long the venue is allowed to take.
+    #[serde(default = "default_dial_timeout_secs")]
+    pub dial_timeout_secs: u64,
 }
 
 impl Default for MogwaiDataClientConfig {
@@ -101,6 +110,7 @@ impl Default for MogwaiDataClientConfig {
             havoc: None,
             callsign: default_callsign(),
             expected_run_seed: None,
+            dial_timeout_secs: default_dial_timeout_secs(),
         }
     }
 }
@@ -117,6 +127,10 @@ impl Default for MogwaiDataClientConfig {
 /// undetectable.
 fn default_callsign() -> Option<String> {
     Some(process_callsign().to_owned())
+}
+
+fn default_dial_timeout_secs() -> u64 {
+    mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS
 }
 
 impl MogwaiDataClientConfig {
@@ -272,6 +286,15 @@ pub struct MogwaiExecClientConfig {
     /// same one, for the same reason they carry the same account.
     #[serde(default)]
     pub expected_run_seed: Option<u64>,
+    /// How long ONE websocket dial may take before it is abandoned and retried.
+    ///
+    /// Defaults to [`mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS`]. It bounds
+    /// every dial rather than only the first, because a reconnect after a boat
+    /// has wound down pays the same cold-river cost a first boarding does. Both
+    /// clients take the same default, so the two legs of one host cannot
+    /// disagree about how long the venue is allowed to take.
+    #[serde(default = "default_dial_timeout_secs")]
+    pub dial_timeout_secs: u64,
 }
 
 /// Default OMS type for an exec client config field that is absent from the
@@ -294,6 +317,7 @@ impl Default for MogwaiExecClientConfig {
             havoc: None,
             callsign: default_callsign(),
             expected_run_seed: None,
+            dial_timeout_secs: default_dial_timeout_secs(),
         }
     }
 }

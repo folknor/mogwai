@@ -6,12 +6,13 @@ built-in defaults. Unknown keys and malformed values fail startup.
 The lifecycle keys are `run_duration_ns` (zero means no declared completion)
 and `warmup_ns` (the uniform servable span before the run starts). `warmup_ns`
 was formerly `backfill_horizon_ns`: an operator carrying an old file renames the
-key and keeps the value, since the span it names is the same one. The boot
-river is materialized before readiness and every other river on first read.
-`/clock` names the resulting `data_origin_ns` and `warmup_ns`, and its optional
-`?symbol=` answers on that river's boat clock rather than the venue clock.
-`/trades` and `/quotes` refuse a start below the floor or beyond the NAMED
-RIVER's now, and clamp an end past it. They do not refuse an unfamiliar symbol:
+key and keeps the value, since the span it names is the same one. Every river is
+materialized on first read; none is warmed before readiness, so the first request
+to name a river waits for that river's whole warmup span to be generated.
+`/clock` names the resulting `data_origin_ns` and `warmup_ns` and answers on the
+run's clock, taking no parameters.
+`/trades` and `/quotes` refuse a start below the floor or beyond the RUN
+PRESENT, and clamp an end past it. They do not refuse an unfamiliar symbol:
 resolution is total, so any wire-legal label names a river this run will serve.
 What they still refuse with `400` is a label that is not a legal symbol, a
 shape this run's `[balances]` cannot fund, a shape the resolved configuration
@@ -150,15 +151,15 @@ Instrument resolution has three layers: a preset bundle, default knobs from
 `[instrument]`, then knobs from the matching `[symbols.<SYM>]` table. This
 resolution is TOTAL - a label with no `[symbols.*]` table and no matching preset
 name resolves `[instrument]` over the operator's `preset` or over BTCUSDT.
-The top-level `symbol` names only the boot river, the one that receives a boat
-at readiness; if absent, the default
-bundle's BTCUSDT symbol stands. An explicit per-symbol `preset` beats a default
+The top-level `symbol` names the DEFAULT LABEL - what a request that carries no
+symbol binds - and nothing else; it receives no boat and no early warmup. If
+absent, the default bundle's BTCUSDT symbol stands. An explicit per-symbol `preset` beats a default
 `[instrument]` preset, which beats a preset matching the symbol, which beats the
 BTCUSDT default. Symbol-table lookup is ASCII case-insensitive, and boot refuses
 two table keys that differ only in case. `[instrument].symbol` is refused:
-overlays carry knobs, while the top-level key carries the boot symbol.
+overlays carry knobs, while the top-level key carries the default symbol.
 
-Boot resolves and validates every shape the config NAMES - the boot symbol and
+Boot resolves and validates every shape the config NAMES - the default symbol and
 every `[symbols.*]` table - funding currencies included, and refuses startup
 over any of them. It additionally resolves each shipped preset and the
 unconfigured fallback, but only RECORDS an unfundable settlement currency there
@@ -168,12 +169,12 @@ those barred shapes is refused at bind or at the history poll instead, naming
 the currency to add to `[balances]`.
 
 Every configured shape is reported by `/instruments`, and every river a socket
-bind or a history poll materializes joins the list. Any river can carry a boat:
-the first socket on it places one, so a live paced tape is not the boot river's
-privilege. A run retains at most 256 materialized rivers and never evicts them.
-The first history request for a cold river synchronously materializes its
-checkpoint chain through the requested instant, so it can be slow and allocate
-up to that river's checkpoint ceiling. A malformed
+bind or a history poll materializes joins the list. Any river can carry a boat: the first socket on it places one, and no river
+carries one before that. A run retains at most 256 materialized rivers and never evicts them.
+The first request to name a cold river - a socket bind or a history poll -
+synchronously generates that river's whole warmup span, so it can be slow and
+allocate up to that river's checkpoint ceiling. That cost is paid inside the
+request and out of the run's declared duration, for every river alike. A malformed
 or unfunded `[symbols.*]` table refuses startup even when nothing ever asks for
 that label, so a typo cannot wait to surface as a runtime rejection.
 
@@ -507,7 +508,7 @@ comparison; it is derived from the latent median, reference price, contract
 multiplier, and lognormal shape and never feeds the sampler.
 
 Websocket requests accept `?symbol=`, `?speed=` and `?duration_ms=`. An absent
-symbol binds the boot river, which is what a consumer written before symbols
+symbol binds the default river, which is what a consumer written before symbols
 moved to the request does. An absent
 speed uses the configured default. Speed is finite and non-negative, capped at
 1,000,000, and quantized to micro-multiples, so `100` and `100.0000001` share.

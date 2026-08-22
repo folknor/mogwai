@@ -3,17 +3,21 @@
 `SimClock` maps wall time to simulated time for one boat. The tape's origin is
 the fixed constant `TAPE_ORIGIN_NS = 0` - not derived from wall time - so
 `data_origin_ns` is the same for every run of a given config. The run clock is
-built AFTER warmup is materialized, anchoring `sim_epoch_ns` at
-`TAPE_ORIGIN_NS + warmup_ns` and the wall anchor at the post-warmup boot
-instant; that anchor decides only WHEN a tick is delivered, never which tick
-it is. Warmup generation does not consume declared run duration.
+built during readiness preparation, anchoring `sim_epoch_ns` at
+`TAPE_ORIGIN_NS + warmup_ns` and the wall anchor at that instant; that anchor
+decides only WHEN a tick is delivered, never which tick it is.
 
-The venue retains one wall-to-sim reference for answers that have no boat: a
-boatless river, the venue deadline, and the venue-scoped account ledger. It is
-not the now of a placed boat. A boated river's now is the last instant its boat
-published, not the boat clock's affine projection. Every symbol-bearing HTTP
-endpoint uses that same resolution rule and waits for an in-flight placement
-before choosing its answer.
+MATERIALIZING A RIVER CONSUMES DECLARED RUN DURATION, and no river escapes it.
+The clock was once built after one river had been warmed, so that river's warmup
+was free and every other river's was not. Nothing is warmed before readiness now,
+so a run that first names a river pays for generating it out of the duration it
+declared - uniformly, whichever label that river carries.
+
+The venue retains one wall-to-sim reference, and it is the only axis any request
+that owns no boat is answered on: history, the venue deadline, the venue-scoped
+account ledger, `/clock`. It is deliberately NOT the now of any placed boat -
+a boat's delivery frontier belongs to the passengers riding it, and reporting it
+to a caller that owns no boat told one passenger about another.
 
 `speed` is the only clock key left in config, and it is a DEFAULT rather than
 the run's one pacing rate: a `/ws` upgrade may name its own `speed`, and the
@@ -75,8 +79,7 @@ measurement a decision to serve is a specific forward result somebody doubts,
 where the question becomes whether that run was valid.
 
 `warmup_ns` is the uniform servable simulated interval before `run_start_ns`.
-The boot river is materialized before readiness and every other river on first
-read. `run_start_ns` is every boat's placement origin, so per-boat clocks vary
+Every river is materialized on first read; none is warmed before readiness. `run_start_ns` is every boat's placement origin, so per-boat clocks vary
 in wall anchor and speed but never in sim epoch. THE CONSEQUENCE FOR A DECLARED
 DURATION IS WORTH STATING, because it reads as a venue defect otherwise: the
 run deadline is judged on the venue clock, while a socket's `RunComplete` is

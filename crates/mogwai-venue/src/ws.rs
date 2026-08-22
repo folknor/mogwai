@@ -206,7 +206,7 @@ pub(crate) async fn ws_upgrade(
     Query(query): Query<SocketQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    let symbol = match resolve_socket_symbol(query.symbol.as_deref(), &state.run.boot_symbol) {
+    let symbol = match resolve_socket_symbol(query.symbol.as_deref(), &state.run.default_symbol) {
         Ok(symbol) => symbol,
         Err(body) => return (StatusCode::BAD_REQUEST, body).into_response(),
     };
@@ -314,6 +314,18 @@ pub(crate) async fn ws_upgrade(
         .await
     {
         Ok(ticket) => ticket,
+        // MISCLASSIFIED, AND KNOWINGLY SO UNTIL THE FAULT VOCABULARY EXISTS.
+        // Placement performs the river's first materialization, so a failure here
+        // is usually a generator that could not produce a shape config already
+        // validated - a venue fault, not a bad request. It reaches the consumer
+        // as a 400 and never reaches the tape fault channel or `/health`, because
+        // placement runs BEFORE `Tape::start` installs the fault sender, and
+        // because `TickFault` has no variant for a materialization that could not
+        // proceed. Every river has always failed this way; the riverless boot
+        // merely makes it the only path for the default label too. Closing it
+        // means giving the run a latched materialization fault that follows the
+        // terminal path and answers `/health`, and handing every waiter on the
+        // same placement that terminal rather than this refusal.
         Err(BoardRefusal::Placement(err)) => {
             return (
                 StatusCode::BAD_REQUEST,
