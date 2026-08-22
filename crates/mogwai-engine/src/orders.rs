@@ -3399,6 +3399,7 @@ pub(crate) fn account_changed(out: &[VenueMessage]) -> bool {
         // Not order lifecycle at all: replies, tape frames and transport
         // notices, none of which an engine batch books a balance through.
         | VenueMessage::RunComplete { .. }
+        | VenueMessage::PassengerDurationComplete { .. }
         | VenueMessage::AdmissionRejected { .. }
         | VenueMessage::OrderStatusSnapshot(_)
         | VenueMessage::FillSnapshot(_)

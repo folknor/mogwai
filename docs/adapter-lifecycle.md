@@ -61,7 +61,8 @@ client. Three things stop that permanently, and each writes one log line:
 
 - the venue's **run completing** - the `RunComplete` frame, or a WS 1000 close
   reasoned `run complete`,
-- **this connection's configured duration elapsing** - a WS 1000 close reasoned
+- **this connection's configured duration elapsing** - the
+  `PassengerDurationComplete` frame, or a WS 1000 close reasoned
   `passenger duration complete`,
 - **eviction** - a WS 1000 close whose reason begins `evicted: `, meaning a
   newer connection presented this client's account id under a different or
@@ -74,14 +75,12 @@ proxy retiring an idle socket sends it, and so does a venue restarting. The
 adapter classifies on the close REASON (`mogwai_protocol::close::classify`), not
 on the code, and a reason it does not recognize is never read as completion.
 
-**The log line does not always distinguish the first two.** The venue sends a
-`RunComplete` frame ahead of its close on BOTH completion paths - a finished run
-and an elapsed passenger duration - and the adapter stops on that frame without
-reading the close behind it, so an ordinary duration end logs the run-completed
-line. The duration line is reached only when the frame was lost and the close
-carried the news, which is the fallback that reason exists for. Both readings
-stop the client, so nothing downstream turns on which line appeared; do not
-build on the distinction. Eviction has no frame ahead of it and is always exact.
+**The log line distinguishes all three.** The venue announces a finished run
+and an elapsed passenger duration as different frames, so the adapter classifies
+each correctly from the frame and the close behind it agrees rather than
+refining it. Until those frames split, both completions sent one frame and an
+ordinary duration end was logged, and reported, as a finished run. Eviction has
+no frame ahead of it and was always exact.
 
 ## A command your host submitted is not a command the venue saw
 

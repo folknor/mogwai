@@ -960,6 +960,17 @@ crosses to a socket; the numbers on the `RunComplete` frame are always
 re-derived on that socket's boat clock, and `elapsed_ns` is how much tape that
 boat actually covered.
 
+THE TWO ENDINGS ARE DIFFERENT FRAMES, `RunComplete` and
+`PassengerDurationComplete`, and the close reason behind each agrees with it.
+They were one frame until the split, so a consumer classifying on frames called
+its own deadline a finished run and the close reason that could have told them
+apart was documented as unreachable. A passenger's frame carries the span it
+observed since IT boarded - a shared boat can predate its passenger, so the
+boat's own epoch is somebody else's boarding - alongside the deadline that
+fired. When both deadlines fall in the same instant the run wins, because a
+finished run is the stronger fact and the one that stays true for a consumer
+deciding whether to redial.
+
 The history endpoints refuse rather than return an empty page on every
 impossible request, so a refusal is never mistaken for a span nothing traded
 in. A START before the tape origin or past the ceiling is a 400; so is a

@@ -997,6 +997,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
     });
     let mut completion = state.run.completion();
     let already_complete = current_completion(&mut completion);
+    // Where this passenger's own ride starts, on its boat's clock. Taken beside
+    // the timer it anchors so the two cannot drift apart, and NOT derivable from
+    // the boat: a boat placed for an earlier passenger has been running since
+    // before this one existed, so its epoch is somebody else's boarding.
+    let boarded_ns = sim_now_ns(boat_sim);
     let duration = passenger
         .duration_ms
         .map(|ms| tokio::time::sleep(boat_sim.wall_duration(sim_duration_from_millis(ms))));
@@ -1051,10 +1056,33 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
                     break;
                 }
                 () = async { if let Some(timer) = duration.as_mut().as_pin_mut() { timer.await } }, if duration.is_some() => {
-                    let elapsed_ns = passenger.duration_ms.unwrap_or(0).saturating_mul(1_000_000);
-                    let now = sim_now_ns(boat_sim);
-                    drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&VenueMessage::RunComplete { sim_now_ns: now, elapsed_ns }).expect("RunComplete serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
-                    drop(out_tx.send(Outbound::Close(CloseSpec { code: mogwai_protocol::close::NORMAL, reason: mogwai_protocol::close::DURATION_COMPLETE.into() })).await);
+                    // THE RUN WINS A TIE, and this re-read is what decides it.
+                    // The completion watch and this timer are sibling select
+                    // branches, so when both are ready the scheduler picks one -
+                    // which was invisible while both announced the same frame
+                    // and would become an externally visible claim about what
+                    // ended the socket now that they do not. A run that has
+                    // already reached its deadline is the stronger fact and the
+                    // one that stays true for a consumer deciding whether to
+                    // redial, so it is announced instead.
+                    let (frame, reason) = if current_completion(&mut completion).is_some() {
+                        let (sim_now_ns, elapsed_ns) = completion_on_boat_clock(boat_sim);
+                        (VenueMessage::RunComplete { sim_now_ns, elapsed_ns }, mogwai_protocol::close::RUN_COMPLETE)
+                    } else {
+                        let now = sim_now_ns(boat_sim);
+                        (VenueMessage::PassengerDurationComplete {
+                            sim_now_ns: now,
+                            // OBSERVED since this passenger boarded, not the
+                            // deadline restated and not the boat's own span: a
+                            // shared boat can predate its passenger, so the
+                            // run-completion helper - which measures from the
+                            // boat epoch - would report someone else's ride.
+                            elapsed_ns: now.saturating_sub(boarded_ns),
+                            declared_duration_ns: passenger.duration_ms.unwrap_or(0).saturating_mul(1_000_000),
+                        }, mogwai_protocol::close::DURATION_COMPLETE)
+                    };
+                    drop(out_tx.send(Outbound::Frame(OutboundFrame { payload: Arc::from(serde_json::to_string(&frame).expect("a terminal announcement serializes")), class: FrameClass::Terminal, charge: None, slot: None })).await);
+                    drop(out_tx.send(Outbound::Close(CloseSpec { code: mogwai_protocol::close::NORMAL, reason: reason.into() })).await);
                     break;
                 }
                 message = stream.next() => match message {

@@ -1420,12 +1420,52 @@ pub fn validate_modify_order(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum VenueMessage {
-    /// The declared simulated run duration elapsed. This is sent immediately
-    /// before the venue closes normally, making a planned exit distinguishable
-    /// from a failed connection.
+    /// THE RUN reached its declared simulated duration. Venue-wide: it is true
+    /// for every passenger at once and nothing further comes from this venue.
+    /// Sent immediately before a normal close, which makes a planned exit
+    /// distinguishable from a failed connection.
+    ///
+    /// A passenger boarding a run that has ALREADY completed is told at once,
+    /// and that is the same event rather than a third one - it is learning a
+    /// run-wide fact, not causing a new kind of completion.
+    ///
+    /// BOTH FIELDS ARE THIS PASSENGER'S OBSERVATION of a run-wide fact, read on
+    /// its own boat clock. `elapsed_ns` is therefore the span that boat has
+    /// covered, NOT the run's declared duration: a boat placed late, or a
+    /// passenger that boards after completion, reports a shorter span for the
+    /// same event. See `reference/clock.md`.
     RunComplete {
         sim_now_ns: u64,
         elapsed_ns: u64,
+    },
+    /// THIS PASSENGER's own declared duration elapsed. The run continues for
+    /// everyone else; for this socket it is over, and redialling would start a
+    /// fresh duration rather than resume anything.
+    ///
+    /// A SEPARATE VARIANT RATHER THAN A FIELD, deliberately. Both events end a
+    /// socket with WS 1000, and they were once the same frame - so a consumer
+    /// classifying on the frame called a passenger's own deadline a finished
+    /// run and stopped, while the close reason that could have told it apart
+    /// was documented as unreliable. A new field would not have cured that: an
+    /// older decoder ignores an unknown field and commits the same false
+    /// transition, where an unknown TAG fails outright and makes version skew
+    /// visible instead of silent.
+    ///
+    /// THE RUN WINS A TIE. If the run's own deadline has passed, the venue
+    /// announces `RunComplete` even when this passenger's timer fired in the
+    /// same instant: the run-wide fact is the stronger one, and it is the one
+    /// that stays true for a consumer deciding whether to redial.
+    ///
+    /// `elapsed_ns` is the span observed on the boat clock SINCE THIS PASSENGER
+    /// BOARDED, which is the same kind of quantity `RunComplete` carries and is
+    /// not the same as the deadline that fired - a boat can predate its
+    /// passenger, and a timer can wake late. `declared_duration_ns` states the
+    /// deadline itself, so a consumer can see the difference rather than infer
+    /// it.
+    PassengerDurationComplete {
+        sim_now_ns: u64,
+        elapsed_ns: u64,
+        declared_duration_ns: u64,
     },
     /// The venue REFUSED to do the work, before any engine state was touched:
     /// its per-connection outbound capacity could not cover the command's
@@ -1739,11 +1779,17 @@ impl VenueMessage {
             | VenueMessage::OrderUpdated { .. }
             | VenueMessage::OrderModifyRejected { .. }
             | VenueMessage::OrderCancelRejected { .. } => EventKind::Exec,
+            // TRANSPORT CLASSIFICATION, not a claim that these are admissions
+            // in the ordinary sense. This bucket is what `DelayAcks` is exempt
+            // from and what rides the priority lane; the two terminal
+            // announcements sit here because a completion must not be held
+            // behind engine output, not because completing is an admission.
             VenueMessage::AdmissionRejected { .. }
             | VenueMessage::ProtocolError { .. }
             | VenueMessage::FeedLagged { .. }
             | VenueMessage::HavocDiagnostic { .. }
-            | VenueMessage::RunComplete { .. } => EventKind::Admission,
+            | VenueMessage::RunComplete { .. }
+            | VenueMessage::PassengerDurationComplete { .. } => EventKind::Admission,
         }
     }
 
@@ -2520,6 +2566,16 @@ mod tests {
                     elapsed_ns: 45,
                 },
                 r#"{"type":"RunComplete","sim_now_ns":123,"elapsed_ns":45}"#,
+            ),
+            (
+                // A DISTINCT TAG, which is the whole point: an older consumer
+                // fails to decode this rather than reading it as a finished run.
+                VenueMessage::PassengerDurationComplete {
+                    sim_now_ns: 123,
+                    elapsed_ns: 45,
+                    declared_duration_ns: 40,
+                },
+                r#"{"type":"PassengerDurationComplete","sim_now_ns":123,"elapsed_ns":45,"declared_duration_ns":40}"#,
             ),
             (
                 // Formerly SubscriptionIssue::FeedLagged. There is no

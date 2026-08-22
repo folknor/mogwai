@@ -671,10 +671,7 @@ async fn run_ws_connection_inner<
                             // (D.5).
                             match VenueMessage::from_json_str(&text) {
                                 Ok(venue_msg) => {
-                                    if matches!(venue_msg, VenueMessage::RunComplete { .. }) {
-                                        terminal =
-                                            Some(mogwai_protocol::close::Terminal::RunComplete);
-                                    }
+                                    terminal = terminal.or_else(|| terminal_for(&venue_msg));
                                     handler(venue_msg).await;
                                     if terminal.is_some() {
                                         break;
@@ -692,10 +689,7 @@ async fn run_ws_connection_inner<
                             reset_idle(&mut idle_sleep, conn.idle_timeout_ms, sim);
                             match VenueMessage::from_json_slice(&bytes) {
                                 Ok(venue_msg) => {
-                                    if matches!(venue_msg, VenueMessage::RunComplete { .. }) {
-                                        terminal =
-                                            Some(mogwai_protocol::close::Terminal::RunComplete);
-                                    }
+                                    terminal = terminal.or_else(|| terminal_for(&venue_msg));
                                     handler(venue_msg).await;
                                     if terminal.is_some() {
                                         break;
@@ -796,17 +790,13 @@ async fn run_ws_connection_inner<
             // this account under a different callsign - a configuration
             // problem, not a finish line.
             //
-            // WHICH ARM RUNS IS NOT A CLEAN THREE-WAY SPLIT, and pretending it
-            // is would mislead whoever reads these lines. The venue sends a
-            // `RunComplete` TEXT frame ahead of its close on BOTH completion
-            // paths - a finished run and an elapsed passenger duration
-            // (`ws.rs`) - and the inbound-text arm above classifies on that
-            // frame and breaks without reading the close that follows. So an
-            // ordinary duration end logs RUN COMPLETED, and `DurationComplete`
-            // is reached only through the close-frame path, i.e. when the text
-            // frame was lost or never read - which is exactly the fallback that
-            // close reason exists to be. Eviction is the only one of the three
-            // with no text frame at all, so it is always exact.
+            // ALL THREE ARMS ARE NOW EXACT. The venue announces a finished run
+            // and an elapsed passenger duration as DIFFERENT frames, so the
+            // inbound-text arm above classifies each correctly and breaks
+            // without needing the close that follows; the close agrees with it
+            // and remains the fallback for a reader that lost the frame.
+            // Eviction has no text frame at all and was always exact. Until the
+            // frames split, a duration end was logged here as a finished run.
             match kind {
                 mogwai_protocol::close::Terminal::RunComplete => {
                     tracing::info!(socket = label, "venue run completed; reconnect disabled");
@@ -877,6 +867,27 @@ async fn recv_command<Cmd>(rx: &mut Option<UnboundedReceiver<Cmd>>) -> Option<Cm
 /// A LAGGED FEED IS NOT ONE OF THESE, and used to be. The venue declares a
 /// market-view hole with `FeedLagged` and keeps serving, so no disconnect
 /// happens at all and this function never sees it.
+/// Which terminal a venue FRAME announces, if any.
+///
+/// The two terminal announcements are distinct variants precisely so this can
+/// be exact. It used to test for `RunComplete` alone, because that was the only
+/// frame either completion sent - so a passenger whose own duration elapsed was
+/// logged, and reported, as a finished run. The close reason carried the truth
+/// and was read only when the frame was missed.
+///
+/// The close remains the socket-level fallback for a reader that loses the final
+/// text frame while the venue drains; it now agrees with the frame rather than
+/// refining it.
+fn terminal_for(message: &VenueMessage) -> Option<mogwai_protocol::close::Terminal> {
+    match message {
+        VenueMessage::RunComplete { .. } => Some(mogwai_protocol::close::Terminal::RunComplete),
+        VenueMessage::PassengerDurationComplete { .. } => {
+            Some(mogwai_protocol::close::Terminal::DurationComplete)
+        }
+        _ => None,
+    }
+}
+
 fn disconnect_cause(
     inbound: &Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
 ) -> Option<String> {

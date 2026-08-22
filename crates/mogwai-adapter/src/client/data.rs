@@ -1306,6 +1306,24 @@ async fn handle_market_message(
             // so a finished run is never mistaken for a quiet failed feed.
             tracing::info!(sim_now_ns, elapsed_ns, "venue run completed on data socket");
         }
+        VenueMessage::PassengerDurationComplete {
+            sim_now_ns,
+            elapsed_ns,
+            declared_duration_ns,
+        } => {
+            // ITS OWN RECORD, and not folded into the arm above. The run may
+            // still be going for everyone else, so logging this as a completed
+            // run would tell an operator the venue had finished when only this
+            // socket had. Both spans are reported because they can differ: the
+            // deadline is what was asked for, the elapsed span is what this
+            // passenger actually observed on its boat clock.
+            tracing::info!(
+                sim_now_ns,
+                elapsed_ns,
+                declared_duration_ns,
+                "this data socket's own declared duration elapsed; the run continues"
+            );
+        }
         _ => {}
     }
 }

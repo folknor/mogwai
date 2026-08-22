@@ -3832,21 +3832,55 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
         }
     });
 
+    // WHAT IT ANNOUNCES IS THE POINT, not merely that it announced. The run is
+    // still going for `staying`, so a `RunComplete` here would tell this
+    // consumer the venue had finished when only its own deadline had - which is
+    // exactly what both completions sharing one frame used to say. The close
+    // reason is checked too, so the frame and the close are held against each
+    // other rather than each against the test's expectation.
     let deadline = common::deadline(common::TEST_WALL_BUDGET);
-    let mut announced = false;
+    let mut announced: Option<(u64, u64)> = None;
+    let mut close_reason = None;
     loop {
         let message = tokio::time::timeout_at(deadline, leaving.next())
             .await
             .expect("the bounded passenger closes before the deadline");
         match message {
-            Some(Ok(Message::Text(text))) => announced |= text.contains("RunComplete"),
-            Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<VenueMessage>(&text) {
+                Ok(VenueMessage::PassengerDurationComplete {
+                    elapsed_ns,
+                    declared_duration_ns,
+                    ..
+                }) => announced = Some((elapsed_ns, declared_duration_ns)),
+                Ok(VenueMessage::RunComplete { .. }) => panic!(
+                    "the bounded passenger announced a finished RUN; the run is still \
+                         carrying the other passenger"
+                ),
+                _ => {}
+            },
+            Some(Ok(Message::Close(frame))) => {
+                close_reason = frame.map(|frame| frame.reason.to_string());
+                break;
+            }
+            Some(Err(_)) | None => break,
             Some(Ok(_)) => {}
         }
     }
+    let (elapsed_ns, declared_duration_ns) =
+        announced.expect("the bounded passenger announced its own duration before closing");
+    assert_eq!(
+        declared_duration_ns, 1_500_000_000,
+        "the announcement states the deadline that fired"
+    );
     assert!(
-        announced,
-        "the bounded passenger announced its completion before closing"
+        elapsed_ns >= declared_duration_ns,
+        "the observed span is measured, not the deadline restated: {elapsed_ns} < \
+         {declared_duration_ns}"
+    );
+    assert_eq!(
+        close_reason.as_deref(),
+        Some(mogwai_protocol::close::DURATION_COMPLETE),
+        "the close agrees with the frame rather than refining it"
     );
 
     // The boat is still carrying the other passenger. Establishing that takes a

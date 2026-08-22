@@ -2242,7 +2242,14 @@ pub(crate) fn audience(event: &mogwai_protocol::VenueMessage) -> Audience<'_> {
         M::AdmissionRejected { .. }
         | M::OrderStatusSnapshot(_)
         | M::FillSnapshot(_)
-        | M::ProtocolError { .. } => Audience::Requester,
+        | M::ProtocolError { .. }
+        // One socket's own deadline, and true of no other passenger - so it is
+        // NOT `Venue` even though it sits beside `RunComplete` in the terminal
+        // vocabulary. Its producer writes it straight to the socket that owns
+        // it and it never enters a swept batch; classifying it venue-wide would
+        // make this classifier lie today and broadcast one passenger's
+        // completion to the whole run if it ever reached the sweep.
+        | M::PassengerDurationComplete { .. } => Audience::Requester,
     }
 }
 

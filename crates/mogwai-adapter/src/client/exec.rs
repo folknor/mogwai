@@ -2908,10 +2908,11 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
         VenueMessage::Trade(_)
         | VenueMessage::Quote(_)
         | VenueMessage::HavocDiagnostic { .. }
-        // A clean venue completion is a transport concern.  The reader owns
-        // reconnect policy; the execution event translator has no event to
-        // publish for it.
-        | VenueMessage::RunComplete { .. } => {}
+        // A clean completion is a transport concern, whether the RUN ended or
+        // this passenger's own duration did. The reader owns reconnect policy;
+        // the execution event translator has no event to publish for either.
+        | VenueMessage::RunComplete { .. }
+        | VenueMessage::PassengerDurationComplete { .. } => {}
     }
 }
 

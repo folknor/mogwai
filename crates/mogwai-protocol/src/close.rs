@@ -11,9 +11,12 @@
 //!
 //! So the REASON string is the discriminator, and it is a protocol contract
 //! rather than a log line: the venue writes these exact strings and a consumer
-//! classifies against them. `VenueMessage::RunComplete` remains the primary
-//! completion signal; the close is its socket-level fallback for a reader that
-//! loses the final text frame while the venue drains.
+//! classifies against them. The terminal FRAMES - `VenueMessage::RunComplete`
+//! and `VenueMessage::PassengerDurationComplete` - remain the primary signals,
+//! one per terminal this module names except eviction, which has no frame at
+//! all. The close is their socket-level fallback for a reader that loses the
+//! final text frame while the venue drains, and it agrees with the frame rather
+//! than refining it.
 //!
 //! A reason this module does not recognize is NOT terminal. That is the safe
 //! default in both directions: an unrecognized graceful close is a transport
@@ -69,13 +72,13 @@ pub const RUN_COMPLETE: &str = "run complete";
 /// others; for this connection it is over, and redialling would start a fresh
 /// duration rather than resume anything.
 ///
-/// THE VENUE SENDS A `RunComplete` TEXT FRAME AHEAD OF THIS CLOSE, the same as
-/// it does for a genuinely finished run, so a consumer that classifies on the
-/// text frame will call this a run completion and never look at the close. This
-/// reason is therefore a REFINEMENT available to a consumer that reads the close,
-/// not a signal it is guaranteed to act on. Both readings stop the consumer,
-/// which is why the imprecision is tolerable; nothing may be built on this arm
-/// being reached.
+/// The venue sends `VenueMessage::PassengerDurationComplete` ahead of this
+/// close, so a consumer classifying on the frame and one classifying on the
+/// close reach the SAME answer. That is what this reason could not promise
+/// while both completions announced one frame: a frame-reading consumer called
+/// a passenger's own deadline a finished run and never read the close, so this
+/// arm was reachable only when the frame was lost, and nothing could be built on
+/// it. It is now an ordinary agreeing signal.
 pub const DURATION_COMPLETE: &str = "passenger duration complete";
 
 /// Prefix on the eviction close's reason. The remainder names the account.
