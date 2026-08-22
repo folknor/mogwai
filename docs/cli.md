@@ -73,7 +73,10 @@ carries the same one, so pagination cannot chase a moving present. The
 bookkeeping, and treating it as anything else is relying on something the venue
 has not promised.
 
-`GET /trades` and `GET /quotes` remain as the OPERATOR's view. They both require
+`GET /operator/trades` and `GET /operator/quotes` are the operator's view, and
+the path says so because prose cannot: a route that kept its old spelling would
+have gone on answering a consumer plausibly while its meaning changed
+underneath. They both require
 `symbol`; `start`, `end` and `limit` are optional. They are bounded by the RUN
 CLOCK, taken as one snapshot when the request is admitted and consulting no boat.
 An omitted end is clamped to it and so is a stated one - an explicit `end` is a

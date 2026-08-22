@@ -496,7 +496,11 @@ a socket binds that symbol or an order names it, guarded on the registration
 having been new so re-binding never resets a live configuration.
 
 The venue exposes `/health`, `/account`, `/accounts`, `/instruments`, `/clock`,
-`/trades`, `/quotes`, `/control/divergence`, and `/ws`. `POST /accounts` opens
+`/operator/trades`, `/operator/quotes`, `/control/divergence`, and `/ws`. A
+consumer reads its own history over `/ws` with `QueryHistory`; the two operator
+routes serve the unarmed river of a label on the run clock, and are namespaced
+so that difference is visible on the wire rather than only in prose.
+`POST /accounts` opens
 an account on terms the consumer states - an id, its opening balances, and
 optionally the risk policy the venue enforces against it - and is OPTIONAL:
 account resolution is total, so a connection that never calls it is served under
@@ -759,21 +763,31 @@ the exchange and a posted default is run-wide state; and the arm carries a
 coordinate rather than opening at the boarding instant, because two passengers
 carrying the same arm a second apart would otherwise ask for different water and
 every late boarding would fork a river of its own. The base is the RUN ORIGIN,
-which is where the old boatless handler already stamped its window. The two
-still owed:
+which is where the old boatless handler already stamped its window.
 
-HISTORY MOVES ONTO THE SOCKET. A poll names a symbol and no passenger, so once a
-label names several rivers it names none of them - and every proposed selector
+HISTORY IS READ OVER THE SOCKET. A poll names a symbol and no passenger, so once
+a label names several rivers it names none of them - and every proposed selector
 restates at the history call what the upgrade already settled, which is a second
 place for identity to be stated and therefore to drift. A passenger's socket
-already names its boat and so its river, so a history request carried there
-names nothing and cannot name it wrong. This follows order entry, which became
-websocket-only for the same reason. `/trades` and `/quotes` survive as the
-OPERATOR's view of the unarmed river, documented as such rather than as a
-consumer route. The premise it rests on, recorded because it is the load-bearing
-one: every history poll comes from a party that has already boarded. If a caller
-appears that polls before dialing, it is served by the demoted routes and gets
-unarmed water, which is what it would have needed a selector for anyway.
+already names its boat and so its river, so a `QueryHistory` carried there names
+nothing and cannot name it wrong. This follows order entry, which became
+websocket-only for the same reason. The premise it rests on, recorded because it
+is the load-bearing one: every history read comes from a party that has already
+boarded. `/operator/trades` and `/operator/quotes` serve the unarmed river of a
+label on the run clock, and the PATH carries the demotion because prose cannot -
+a route that kept its old spelling would have gone on answering a consumer
+plausibly while its meaning changed underneath.
+
+The operator view still MATERIALIZES the river it is asked for, and that was
+argued the other way before it was checked. A read that creates has real costs -
+a typo permanently spends one of 256 never-evicted rivers, and `/instruments`
+changes as a result of being looked at - but the glossary settles it: nothing
+has to be boarded for history to answer, so refusing a label no passenger had
+boarded would make cold history unservable.
+
+What the socket route does NOT yet carry is the splice a consumer needs against
+a boat's own frontier: the pages are bounded by the run clock, so a passenger on
+a slow boat can be handed rows that are still its own future. Owed:
 
 ONE ACCOUNT RIDING TWO RIVERS OF ONE SYMBOL IS UNPOLICED OPERATOR ERROR. A
 resting order and a position are recorded per INSTRUMENT, so such an account has
@@ -1080,10 +1094,11 @@ forward claim is worth something, and a run that read its own future would look
 clean and not be. Repairing one passenger's own gap would need tape identity an
 anonymous route does not carry.
 
-The protocol crate owns every JSON type shared by venue and adapter. The
-adapter uses WebSocket streaming only for market data and execution; `/trades`
-and `/quotes` remain request endpoints, which is how history and warmup are
-fetched. Each adapter consumer names its river with an optional `symbol` in its
+The protocol crate owns every JSON type shared by venue and adapter. The adapter
+uses its websocket for market data, execution AND history: warmup and backfill
+are pulled with `QueryHistory` on the socket that boarded, in bounded pages
+resumed by an opaque continuation. It makes no HTTP history call at all, which
+is what stops it reading a label's water instead of its own. Each adapter consumer names its river with an optional `symbol` in its
 own config, which becomes `/ws?symbol=`; it carries no `speed` or
 `duration_ms`, so the data and execution consumers of one host board the same
 boat at the venue's configured speed. The adapter holds NO served-symbol guard

@@ -331,8 +331,17 @@ async fn serve_async(
         .route("/health", get(http::health))
         .route("/account", get(account))
         .route("/instruments", get(instruments))
-        .route("/trades", get(trades))
-        .route("/quotes", get(quotes))
+        // Namespaced, because demotion by prose is not a transport boundary.
+        // These serve the UNARMED river of a label on the run clock, which is
+        // the operator's view and not any passenger's: a passenger carrying a
+        // generator arm is on other water, a passenger on a slow boat is behind
+        // the run clock so these can hand it rows still in its future, and a
+        // passenger under an armed blackout or a ring overrun has an observed
+        // market these would silently repair. A consumer that kept calling the
+        // old path would have received a plausible answer and no way to know
+        // the meaning had changed, so the path itself moved.
+        .route("/operator/trades", get(trades))
+        .route("/operator/quotes", get(quotes))
         .route("/clock", get(clock))
         .route("/ws", get(ws_upgrade))
         .route("/accounts", post(http::open_account))

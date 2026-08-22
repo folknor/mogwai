@@ -126,7 +126,7 @@ async fn a_run_serves_a_symbol_nobody_configured() {
 
     let (status, body) = http_get(
         &base,
-        &format!("/trades?symbol={UNCONFIGURED}&start=0&limit=5"),
+        &format!("/operator/trades?symbol={UNCONFIGURED}&start=0&limit=5"),
     );
     assert_eq!(status, 200, "its history is servable too: {body}");
     assert!(body.contains(UNCONFIGURED), "{body}");
@@ -142,7 +142,10 @@ fn a_history_poll_alone_materializes_and_advertises() {
     const POLLED: &str = "BARFOO";
 
     assert!(!advertises(&base, POLLED));
-    let (status, body) = http_get(&base, &format!("/trades?symbol={POLLED}&start=0&limit=5"));
+    let (status, body) = http_get(
+        &base,
+        &format!("/operator/trades?symbol={POLLED}&start=0&limit=5"),
+    );
     assert_eq!(status, 200, "an unconfigured poll is served: {body}");
     assert!(
         advertises(&base, POLLED),

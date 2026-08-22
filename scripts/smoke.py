@@ -356,11 +356,11 @@ def check_common(venue: Venue) -> None:
     # The declared warmup is MATERIALIZED, not merely declared: the earliest
     # servable instant answers with trades the moment readiness lands.
     floor = venue.record["data_origin_ns"]
-    warm = venue.http(f"/trades?symbol={venue.symbol}&start={floor}&limit=20")
+    warm = venue.http(f"/operator/trades?symbol={venue.symbol}&start={floor}&limit=20")
     assert warm, "the earliest servable instant returned no trades"
 
     unconfigured = venue.http(
-        f"/trades?symbol=NOT-A-SYMBOL&start={floor}&limit=5"
+        f"/operator/trades?symbol=NOT-A-SYMBOL&start={floor}&limit=5"
     )
     assert unconfigured, "an unconfigured symbol returned no synthesized history"
     advertised = venue.http("/instruments")
@@ -384,7 +384,7 @@ def check_common(venue: Venue) -> None:
         (venue.record["run_start_ns"] + 86_400_000_000_000, "after sim-now"),
     ):
         try:
-            venue.http(f"/trades?symbol={venue.symbol}&start={start}")
+            venue.http(f"/operator/trades?symbol={venue.symbol}&start={start}")
             raise AssertionError(f"a window {label} was served instead of refused")
         except urllib.error.HTTPError as err:
             assert err.code == 400, f"a window {label} must be a 400, got {err.code}"
@@ -470,7 +470,7 @@ def mode_default(venue: Venue) -> str:
             ts = int(fill["ts_event"])
             reading_ts = ts // bucket_ns * bucket_ns
             tape = venue.http(
-                f"/trades?symbol={venue.symbol}&start={reading_ts - 300_000_000_000}"
+                f"/operator/trades?symbol={venue.symbol}&start={reading_ts - 300_000_000_000}"
                 f"&end={reading_ts}&limit=50000"
             )
             assert tape, f"no tape reading at the {side} fill"
@@ -652,7 +652,7 @@ def mode_band(venue: Venue) -> str:
     # prints strictly through its price.
     sim_now = int(venue.http("/clock")["venue_now_ns"])
     anchor = venue.http(
-        f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
+        f"/operator/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
     )
     assert anchor, "no anchor print"
     price = float(anchor[-1]["price"])
@@ -735,7 +735,7 @@ def mode_band_swept(venue: Venue) -> str:
             client_order_id = f"BAND-SWEPT-{attempt}"
             sim_now = int(venue.http("/clock")["venue_now_ns"])
             anchor = venue.http(
-                f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
+                f"/operator/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
             )
             assert anchor, "no anchor print"
             price = float(anchor[-1]["price"])
@@ -840,7 +840,7 @@ def mode_stop(venue: Venue) -> str:
     """
     sim_now = int(venue.http("/clock")["venue_now_ns"])
     recent = venue.http(
-        f"/trades?symbol={venue.symbol}&start={sim_now - 30_000_000_000}&end={sim_now}&limit=10000"
+        f"/operator/trades?symbol={venue.symbol}&start={sim_now - 30_000_000_000}&end={sim_now}&limit=10000"
     )
     assert recent, "no recent tape to size the stop offset from"
     prices = [Decimal(row["price"]) for row in recent]
@@ -871,7 +871,7 @@ def mode_stop(venue: Venue) -> str:
 
             sim_now = int(venue.http("/clock")["venue_now_ns"])
             anchor = venue.http(
-                f"/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
+                f"/operator/trades?symbol={venue.symbol}&start={sim_now - 300_000_000_000}&end={sim_now}&limit=10000"
             )
             assert anchor, "no anchor print"
             # Decimal, not float, and the SENT string is what is asserted

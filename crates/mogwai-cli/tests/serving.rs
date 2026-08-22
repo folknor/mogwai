@@ -69,7 +69,10 @@ fn preset_only_config_resolves_the_default_river() {
 #[ignore = "binds a loopback listener"]
 fn history_is_served_for_a_configured_symbol_that_is_not_the_default_river() {
     let venue = spawn(&["--config", &two_symbols_config()]);
-    let (status, body) = http_get(&venue.http_base(), "/trades?symbol=MNQ&start=0&limit=5");
+    let (status, body) = http_get(
+        &venue.http_base(),
+        "/operator/trades?symbol=MNQ&start=0&limit=5",
+    );
     assert_eq!(status, 200, "configured cold history is served: {body}");
     assert!(body.contains("MNQ"));
 }
@@ -222,7 +225,7 @@ async fn history_is_bounded_by_the_run_clock_and_no_boat_moves_it() {
     let start = run_now.saturating_sub(1_000_000);
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!("/trades?symbol=MNQ&start={start}&limit=5"),
+        &format!("/operator/trades?symbol=MNQ&start={start}&limit=5"),
     );
     assert_eq!(
         status, 200,
@@ -236,7 +239,7 @@ async fn history_is_bounded_by_the_run_clock_and_no_boat_moves_it() {
     let future = run_now.saturating_add(60_000_000_000);
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!("/trades?symbol=MNQ&start={future}&limit=5"),
+        &format!("/operator/trades?symbol=MNQ&start={future}&limit=5"),
     );
     assert_eq!(
         status, 400,
@@ -405,7 +408,7 @@ fn two_runs_with_the_same_configured_seed_serve_the_same_first_trades() {
     let third = spawn(&["--config", &alternate]);
     let page = |venue: &common::Venue| {
         let path = format!(
-            "/trades?symbol={}&start=0&end={}&limit=50",
+            "/operator/trades?symbol={}&start=0&end={}&limit=50",
             venue.symbol, venue.record.run_start_ns
         );
         let (status, body) = http_get(&venue.http_base(), &path);
@@ -427,7 +430,10 @@ fn trades_after_sim_now_are_refused_with_400() {
 
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!("/trades?symbol={}&start={far_future}", venue.symbol),
+        &format!(
+            "/operator/trades?symbol={}&start={far_future}",
+            venue.symbol
+        ),
     );
     assert_eq!(status, 400, "a future start is refused");
     assert!(
@@ -442,7 +448,7 @@ fn trades_after_sim_now_are_refused_with_400() {
     let (status, body) = http_get(
         &venue.http_base(),
         &format!(
-            "/trades?symbol={}&start={}&end={far_future}&limit=5",
+            "/operator/trades?symbol={}&start={}&end={far_future}&limit=5",
             venue.symbol, venue.record.run_start_ns
         ),
     );
@@ -460,7 +466,7 @@ fn history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one() {
     for endpoint in ["trades", "quotes"] {
         let (status, body) = http_get(
             &venue.http_base(),
-            &format!("/{endpoint}?symbol=NOT%20A%20SYMBOL&start=0&limit=5"),
+            &format!("/operator/{endpoint}?symbol=NOT%20A%20SYMBOL&start=0&limit=5"),
         );
         assert_eq!(status, 400, "an illegal symbol is refused: {body}");
         assert!(
@@ -470,7 +476,7 @@ fn history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one() {
 
         let (status, body) = http_get(
             &venue.http_base(),
-            &format!("/{endpoint}?symbol=NOT-A-SYMBOL&start=0&limit=5"),
+            &format!("/operator/{endpoint}?symbol=NOT-A-SYMBOL&start=0&limit=5"),
         );
         assert_eq!(status, 200, "an unconfigured symbol is served: {body}");
         assert!(
@@ -483,7 +489,7 @@ fn history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one() {
     if lowercase != venue.symbol {
         let (status, body) = http_get(
             &venue.http_base(),
-            &format!("/trades?symbol={lowercase}&start=0&limit=5"),
+            &format!("/operator/trades?symbol={lowercase}&start=0&limit=5"),
         );
         assert_eq!(status, 200, "a miscased label is its own river: {body}");
         assert!(
@@ -494,7 +500,7 @@ fn history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one() {
 
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!("/trades?symbol={}&start=0&limit=5", venue.symbol),
+        &format!("/operator/trades?symbol={}&start=0&limit=5", venue.symbol),
     );
     assert_eq!(
         status, 200,
@@ -513,7 +519,10 @@ fn the_full_warmup_span_is_servable_at_readiness() {
 
     let (status, body) = http_get(
         &venue.http_base(),
-        &format!("/trades?symbol={}&start={floor}&limit=50", venue.symbol),
+        &format!(
+            "/operator/trades?symbol={}&start={floor}&limit=50",
+            venue.symbol
+        ),
     );
     assert_eq!(status, 200, "the declared floor is servable: {body}");
 
@@ -2161,7 +2170,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
     let (_, trades_body) = http_get(
         &venue.http_base(),
         &format!(
-            "/trades?symbol={}&start={}&end={sim_now}&limit=10000",
+            "/operator/trades?symbol={}&start={}&end={sim_now}&limit=10000",
             venue.symbol,
             sim_now.saturating_sub(300_000_000_000)
         ),
@@ -2464,7 +2473,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
 async fn the_tape_is_identical_with_and_without_order_flow() {
     let venue = spawn(&["--config", &band_config()]);
     let path = format!(
-        "/trades?symbol={}&start={}&limit=200",
+        "/operator/trades?symbol={}&start={}&limit=200",
         venue.symbol, venue.record.data_origin_ns
     );
     let (status, before) = http_get(&venue.http_base(), &path);
@@ -2548,7 +2557,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
 async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     let venue = spawn(&["--config", &band_config()]);
     let path = format!(
-        "/trades?symbol={}&start={}&limit=200",
+        "/operator/trades?symbol={}&start={}&limit=200",
         venue.symbol, venue.record.data_origin_ns
     );
     let (status, before) = http_get(&venue.http_base(), &path);
@@ -2916,7 +2925,7 @@ fn trade_window_paged(
     loop {
         let (status, body) = http_get(
             base,
-            &format!("/trades?symbol={symbol}&start={cursor}&end={end}&limit={page_size}"),
+            &format!("/operator/trades?symbol={symbol}&start={cursor}&end={end}&limit={page_size}"),
         );
         assert_eq!(status, 200, "the tape window answers: {body}");
         let page: Vec<TradeTick> = serde_json::from_str(&body).expect("a page of tape");
@@ -2983,7 +2992,7 @@ fn a_paged_tape_window_equals_the_same_window_read_in_one_query() {
     let (status, body) = http_get(
         &venue.http_base(),
         &format!(
-            "/trades?symbol={}&start={start}&end={end}&limit={}",
+            "/operator/trades?symbol={}&start={start}&end={end}&limit={}",
             venue.symbol,
             mogwai_protocol::MAX_HISTORY_LIMIT
         ),

@@ -773,11 +773,16 @@ impl Rivers {
         )))
     }
 
-    /// Materialize the river for `symbol` and answer nothing but whether it
-    /// could be. The pre-check the history handlers run so a cap exhaustion or
-    /// a barred shape is a 400 naming its reason rather than a 500 raised out
-    /// of the synthesis task - and so a history poll ADVERTISES the shape it
-    /// just spent a river on, which is the same event.
+    /// Materialize the UNARMED river for `symbol` and answer nothing but
+    /// whether it could be. The pre-check the operator history routes run so a
+    /// cap exhaustion or a barred shape is a 400 naming its reason rather than
+    /// a 500 raised out of the synthesis task - and so a poll advertises the
+    /// shape it just spent a river on, which is the same event.
+    ///
+    /// UNARMED, explicitly, and that is the whole of what the fork changed
+    /// here. This is the operator's view of a label, so it names the river a
+    /// passenger carrying no generator arm would board. A passenger that
+    /// carries one is on other water and reads it over its own socket.
     pub(crate) fn materialize(&self, symbol: &str) -> Result<(), MaterializeRefusal> {
         let key = self.key_for_symbol(symbol)?;
         self.river(&key)?;

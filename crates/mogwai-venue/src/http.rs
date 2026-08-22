@@ -1669,9 +1669,16 @@ pub(crate) async fn trades(
     // Resolution is total, so the only history refusals left are shape-class
     // ones - an illegal label, an invalid or funding-barred shape, an exhausted
     // river cap - and they are decided HERE so each is a 400 naming its reason
-    // rather than a 500 raised out of the synthesis task below. Materializing
-    // here also means the poll advertises through `/instruments`, which is the
-    // same event as spending the river.
+    // rather than a 500 raised out of the synthesis task below.
+    //
+    // THE OPERATOR VIEW MATERIALIZES, and that was argued the other way before
+    // it was checked. A read that creates has real costs - a typo permanently
+    // spends one of 256 never-evicted rivers, and `/instruments` changes as a
+    // result of being looked at - but the glossary settles it: nothing has to
+    // be boarded for history to answer, and refusing a label no passenger had
+    // boarded would make cold history unservable. The cap is an operational
+    // contract for a venue serving its owner's own agents, which is stated at
+    // `MAX_MATERIALIZED_RIVERS` and does not become a defence here.
     if let Err(error) = rivers.materialize(&symbol) {
         return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
@@ -1785,9 +1792,16 @@ pub(crate) async fn quotes(
     // Resolution is total, so the only history refusals left are shape-class
     // ones - an illegal label, an invalid or funding-barred shape, an exhausted
     // river cap - and they are decided HERE so each is a 400 naming its reason
-    // rather than a 500 raised out of the synthesis task below. Materializing
-    // here also means the poll advertises through `/instruments`, which is the
-    // same event as spending the river.
+    // rather than a 500 raised out of the synthesis task below.
+    //
+    // THE OPERATOR VIEW MATERIALIZES, and that was argued the other way before
+    // it was checked. A read that creates has real costs - a typo permanently
+    // spends one of 256 never-evicted rivers, and `/instruments` changes as a
+    // result of being looked at - but the glossary settles it: nothing has to
+    // be boarded for history to answer, and refusing a label no passenger had
+    // boarded would make cold history unservable. The cap is an operational
+    // contract for a venue serving its owner's own agents, which is stated at
+    // `MAX_MATERIALIZED_RIVERS` and does not become a defence here.
     if let Err(error) = rivers.materialize(&symbol) {
         return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
