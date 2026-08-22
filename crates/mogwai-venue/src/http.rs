@@ -1158,58 +1158,9 @@ pub(crate) async fn arm_divergence(
             }
             tracing::info!(%client_order_id, "silently canceled resting order venue-side");
         }
-        Divergence::ClearDivergences => {
-            // Lift both venue-owned temporal windows. `None` is the cleared
-            // state and is closed on every reader clock. There is no backlog
-            // to replay because gated frames are dropped.
-            // The generator half is decided BEFORE anything is lifted: a
-            // refused control must be a no-op, and returning here after the
-            // stores below would leave the transport windows cleared under a
-            // `400` that says nothing happened.
-            let clearing: Vec<String> = match request.symbol.as_deref() {
-                Some(symbol) => {
-                    if run.boatyard.boat_for_symbol(symbol).is_some() {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "river {symbol} has a placed boat; generator controls cannot mutate live water"
-                            ),
-                        );
-                    }
-                    vec![symbol.to_owned()]
-                }
-                // Unqualified, this clears every river whose water exists and
-                // carries no boat. A boated river is SKIPPED rather than
-                // refused: the transport half of this control is run-wide and
-                // must stay reachable while a boat is sitting.
-                None => state
-                    .rivers
-                    .materialized_symbols()
-                    .into_iter()
-                    .filter(|symbol| run.boatyard.boat_for_symbol(symbol).is_none())
-                    .collect(),
-            };
-            // EVERY account's transport arms and fee surcharge, whatever the
-            // request named: a clear is an operator saying "stop everything",
-            // and clearing only one account's would leave a blackout armed
-            // somewhere the request never mentioned. THE VENUE RECORD IS
-            // CLEARED WITH THEM, or an account connecting after a clear would be
-            // opened from a record the operator already lifted.
-            //
-            // That covers all six `CommandLatency` fields too. It clears what
-            // the venue will do to commands it has NOT started acting on, and
-            // lifts an ack window off frames already queued (the pump reads that
-            // one per event at dequeue). It does NOT reach into an act delay
-            // already being served: that command's sleep was read once, at
-            // detach, and a venue that has begun acting does not un-begin.
-            run.clear_venue_arms().await;
-            for symbol in clearing {
-                state.rivers.clear_flow_surge(&symbol);
-            }
-        }
-        // Venue-ownership contract (pins B.4 / E.11): the EIGHT variants the
+        // Venue-ownership contract (pins B.4 / E.11): the SEVEN variants the
         // arms above intercept - `DelayAcks`, `CommandLatency`, `GoDark`,
-        // `StallData`, `FlowSurge`, `FeeSurcharge`, `ClearDivergences` and
+        // `StallData`, `FlowSurge`, `FeeSurcharge` and
         // `CancelOpenOrderSilently` - are venue-owned controls with no
         // synchronous engine-side trigger. The venue owns them and must NEVER
         // forward them to `engine.arm()`, which would drop them on the floor.
@@ -1228,8 +1179,7 @@ pub(crate) async fn arm_divergence(
         // forwarded here would fail this crate's build rather than being
         // queued as a dead entry.
         // TERMINAL, so it is handled before the engine-armed set and never
-        // recorded: there is no later ledger for a venue arm to replay onto, and
-        // no `ClearDivergences` that could reach it.
+        // recorded: there is no later ledger for a venue arm to replay onto.
         Divergence::FaultTape => {
             // The account scope is REFUSED rather than ignored. A venue fault is
             // the whole process going away, so naming one account reads as a

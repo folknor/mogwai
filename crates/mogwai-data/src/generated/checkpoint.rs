@@ -36,7 +36,9 @@ pub(super) const MAX_CHECKPOINTS: usize = 4096;
 /// One retained walk state.
 ///
 /// `pinned` marks a CONTROL BOUNDARY: the snapshot taken the instant a
-/// `FlowSurge` was armed or cleared. Surge state lives in the generator, so a
+/// `FlowSurge` was armed. Arming is the only boundary there is - a surge is
+/// never lifted, because the control plane has no clear and a window ends by
+/// expiring. Surge state lives in the generator, so a
 /// snapshot taken BEFORE an arm replays the span after it unsurged, which is
 /// precisely the realization fork the surge-on-the-canonical-tape change exists
 /// to remove. A target landing between an arm and the next ordinary snapshot
@@ -92,11 +94,6 @@ impl CheckpointIndex {
     ) {
         self.lead
             .arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
-        self.checkpoint_control_boundary();
-    }
-
-    pub fn clear_flow_surge(&mut self) {
-        self.lead.clear_flow_surge();
         self.checkpoint_control_boundary();
     }
 

@@ -5526,7 +5526,6 @@ mod tests {
                 mult: Decimal::from(2),
                 window_ms: 100,
             },
-            Divergence::ClearDivergences,
             Divergence::CancelOpenOrderSilently {
                 client_order_id: "O1".into(),
             },
@@ -5543,7 +5542,7 @@ mod tests {
     /// exist yet, which only the compiler can hold, and it does: both arms of
     /// that match are enumerated, so a new variant breaks the build there and
     /// in the expectation below. What THIS test adds is the half the compiler
-    /// cannot see - that today's eight venue-owned variants really do leave the
+    /// cannot see - that today's seven venue-owned variants really do leave the
     /// queue empty (a dead entry nothing consumes, forever) and today's five
     /// engine-side ones really are stored.
     #[test]
@@ -5564,7 +5563,6 @@ mod tests {
                 | Divergence::StallData { .. }
                 | Divergence::FlowSurge { .. }
                 | Divergence::FeeSurcharge { .. }
-                | Divergence::ClearDivergences
                 | Divergence::CancelOpenOrderSilently { .. }
                 | Divergence::FaultTape => false,
             };
@@ -5596,11 +5594,10 @@ mod tests {
         e.arm(Divergence::DelayAcks { ms: 100 });
         e.arm(Divergence::GoDark { ms: 100 });
         e.arm(Divergence::StallData { ms: 100 });
-        e.arm(Divergence::ClearDivergences);
         e.arm(Divergence::DuplicateNextFill);
 
-        // The QUEUE is the observable, not the event count: five arms, and the
-        // one engine-side arm is alone in it and at the FRONT, so the four
+        // The QUEUE is the observable, not the event count: four arms, and the
+        // one engine-side arm is alone in it and at the FRONT, so the three
         // drops neither queued a dead entry nor sat in front of it.
         assert_eq!(
             e.armed.iter().collect::<Vec<_>>(),
@@ -5614,19 +5611,6 @@ mod tests {
         assert_eq!(out.len(), 4);
         assert!(matches!(out[1], VenueMessage::OrderFilled(_)));
         assert!(matches!(out[2], VenueMessage::OrderFilled(_)));
-    }
-
-    #[test]
-    fn clear_divergences_is_dropped_not_queued() {
-        let mut e = Engine::new();
-        e.arm(Divergence::ClearDivergences);
-
-        let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
-
-        assert_eq!(out.len(), 3);
-        assert!(matches!(out[0], VenueMessage::OrderAccepted { .. }));
-        assert!(matches!(out[1], VenueMessage::OrderFilled(_)));
-        assert!(matches!(out[2], VenueMessage::AccountState(_)));
     }
 
     #[test]
@@ -5883,7 +5867,7 @@ mod tests {
                 fraction: Decimal::ONE,
             });
         }
-        assert!(e.arm(Divergence::ClearDivergences).is_none());
+        assert!(e.arm(Divergence::GoDark { ms: 10 }).is_none());
         assert!(e.arm(Divergence::DelayAcks { ms: 10 }).is_none());
         assert_eq!(e.armed.len(), MAX_ARMED_DIVERGENCES);
     }

@@ -722,24 +722,60 @@ glossary says a passenger whose resolved config carries a generator arm boards a
 DIFFERENT river than one without it, and that nothing mutates water someone is
 already reading. What the code does instead is mutate the one river a symbol
 resolves to, in place, guarded by refusing the arm when that river has a boat -
-`FlowSurge` and the generator half of `ClearDivergences` are a 400 on a boated
-river, and an unqualified clear reaches every boatless materialized river while
-SKIPPING boated ones, because the transport half of that control is run-wide and
-must stay reachable. An arm naming no symbol takes the default label.
+`FlowSurge` is a 400 on a boated river. An arm naming no symbol takes the
+default label. On a shared exchange some river nearly always has a boat, so
+generator havoc is refused in exactly the mode it is most needed, which is the
+cost of the gap rather than an argument for the guard.
 
 WHAT THE FORK OWES, recorded because it is larger than adding a field to a key.
 Every water read now takes a `RiverKey` rather than a symbol - history, the
 order-time market reading, the trigger scans, marks and settlement - so a fork
 cannot land halfway and leave execution reading a river the passenger is not on.
-What remains unanswered is ownership rather than plumbing: a resting order and a
-position are recorded per INSTRUMENT, so an account whose passengers rode a clean
-and a surged river of one symbol would have orders that match both boats and a
-position that cannot carry two marks. A history poll names a symbol and no
-passenger, so once a label names several rivers it names none of them. A
-perpetual's funding index has the same problem and no passenger to ask. And an
-arm needs a tape coordinate rather than only parameters, or two passengers
-carrying the same arm and boarding a second apart would be asking for different
-water and every late boarding would fork a river of its own. A timed havoc window carries a
+What remained unanswered was ownership rather than plumbing, and the owner ruled
+on it 2026-08-22. The rulings, which the code has NOT caught up with and which
+this section records as owed:
+
+A PASSENGER CARRIES ITS ARM ON THE UPGRADE, as the `control::Divergence` type
+`mogwai-protocol` already defines, rather than naming a bundle registered in the
+venue's config. The deciding ground is the mode split: in server mode the config
+file belongs to whoever launched the exchange, so a registration surface would
+leave an attached consumer able to use only the water shapes the operator had
+anticipated, which guts the point of a consumer owning its own havoc against a
+venue it does not own. A posted symbol default was refused on the same axis - it
+is run-wide state, so one consumer's surge would change what every other
+account's next boarding resolves to.
+
+THE ARM CARRIES A TAPE COORDINATE, an offset from the river's origin, rather
+than opening at the boarding instant. Otherwise two passengers carrying the same
+arm and boarding a second apart are asking for different water, every late
+boarding forks a river of its own, and sharing collapses.
+
+HISTORY MOVES ONTO THE SOCKET. A poll names a symbol and no passenger, so once a
+label names several rivers it names none of them - and every proposed selector
+restates at the history call what the upgrade already settled, which is a second
+place for identity to be stated and therefore to drift. A passenger's socket
+already names its boat and so its river, so a history request carried there
+names nothing and cannot name it wrong. This follows order entry, which became
+websocket-only for the same reason. `/trades` and `/quotes` survive as the
+OPERATOR's view of the unarmed river, documented as such rather than as a
+consumer route. The premise it rests on, recorded because it is the load-bearing
+one: every history poll comes from a party that has already boarded. If a caller
+appears that polls before dialing, it is served by the demoted routes and gets
+unarmed water, which is what it would have needed a selector for anyway.
+
+ONE ACCOUNT RIDING TWO RIVERS OF ONE SYMBOL IS UNPOLICED OPERATOR ERROR. A
+resting order and a position are recorded per INSTRUMENT, so such an account has
+orders that match both boats and one `last_marks` entry that two boats race to
+write - which decides unrealized PnL, the peak-equity ratchet and therefore
+whether a risk rule fires. The venue neither refuses it nor rekeys the ledger to
+express it. It is unreachable through a nautilus host, whose two legs must carry
+identical water, and a consumer that genuinely wants clean and surged water side
+by side uses two accounts. The glossary's non-interference and invisibility
+properties are unaffected, because both are stated over passengers of DIFFERENT
+accounts and this is one account's passengers colliding with each other.
+
+A perpetual's funding index has the history problem and no passenger to ask,
+and is not settled by the above. A timed havoc window carries a
 wall arming instant and a
 simulated span rather than one boat's absolute deadline, and every passenger
 judges it on its own clock.
@@ -762,7 +798,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 22; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 23; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,

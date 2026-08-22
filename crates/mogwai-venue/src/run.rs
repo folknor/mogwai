@@ -61,15 +61,6 @@ impl HavocWindow {
         });
     }
 
-    /// The cleared state, which is closed on EVERY reader's clock - the
-    /// property the old `0` deadline sentinel had, now expressed as absence.
-    pub(crate) fn clear(&self) {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
-
     /// Judged on the reader's own clock.
     ///
     /// THE LATE-BOARDER RULE: the opening instant is
@@ -378,16 +369,6 @@ impl Account {
             &self.cancel_ack_ms,
         ]
     }
-
-    /// Clear every transport arm this account carries.
-    pub(crate) fn clear_transport_havoc(&self) {
-        self.dark.clear();
-        self.stall.clear();
-        self.delay_ms.store(0, Ordering::Relaxed);
-        for knob in self.latency_knobs() {
-            knob.store(0, Ordering::Relaxed);
-        }
-    }
 }
 
 impl std::fmt::Debug for Account {
@@ -510,16 +491,6 @@ impl ArmRecord {
         }
     }
 
-    /// Lift what `ClearDivergences` lifts. The engine queue is deliberately left
-    /// standing; see `VenueArms`.
-    fn clear_transport_and_fee(&mut self) {
-        self.dark = None;
-        self.stall = None;
-        self.delay_ms = None;
-        self.latency = None;
-        self.fee_surcharge = None;
-    }
-
     /// Replay the transport-side record onto an account being opened.
     fn open_transport(&self, account_state: &Account) {
         if let Some(span) = self.dark {
@@ -611,14 +582,21 @@ fn apply_transport_arm(arm: &VenueArm, account_state: &Account) {
 /// A previous draft minted the ledger here, which locked that consumer out with a
 /// `409` and handed it default balances.
 ///
-/// WHAT A CLEAR TOUCHES AND WHAT IT DOES NOT is mirrored here, because a ledger
-/// minted now must be indistinguishable from one minted at boot that received
-/// every control request since - see `Run::arm` for the exact scope of that
-/// claim. `ClearDivergences` lifts the transport windows and the fee surcharge
-/// off every existing ledger and does NOT drain the engine's armed queue, so
-/// `all` does the same. `pending` is dropped WHOLE by a clear, engine entries
-/// included: those arms were never applied to anything, so there is no existing
-/// ledger for them to stay consistent with.
+/// A LEDGER MINTED NOW MUST BE INDISTINGUISHABLE FROM ONE MINTED AT BOOT that
+/// received every control request since - see `Run::arm` for the exact scope of
+/// that claim. That is the whole reason this record exists, and it is why an
+/// arm is only ever added here and never subtracted: there is no control that
+/// retracts one. The control plane arms and does not disarm, so what a run
+/// carries is the accumulation of what was posted to it.
+///
+/// AN ARM RECORDED HERE IS THEREFORE ONE-WAY within the run. Pre-boarding havoc
+/// setup is run CONSTRUCTION, not run state a harness manages: a setup that
+/// fails partway leaves records behind, `ArmRecord::record` APPENDS engine arms
+/// rather than replacing them, so a retried setup accumulates one-shots instead
+/// of reproducing itself, and the only rollback is discarding the run. The one
+/// qualification, and it is a capacity rule rather than a control: `pending` is
+/// bounded, so a record here can still be shed by arms posted for OTHER names -
+/// see `MAX_PENDING_ACCOUNT_ARMS`. A pending arm is retained, not guaranteed.
 #[derive(Default)]
 struct VenueArms {
     all: ArmRecord,
@@ -1151,39 +1129,6 @@ impl Run {
             | VenueArm::StallData { .. } => {}
         }
         shed
-    }
-
-    /// `ClearDivergences`: lift the transport windows and the fee surcharge off
-    /// every existing ledger AND off the venue record, so an account connecting
-    /// after a clear is not re-armed from a stale record.
-    ///
-    /// The engine's armed queue is untouched on the venue record and on every
-    /// existing ledger. That is not an oversight - a clear has never drained it -
-    /// and mirroring the omission is what keeps a ledger minted after the clear
-    /// identical to one that was already open. The PENDING per-account records
-    /// are dropped whole, engine
-    /// entries included: nothing was ever applied from them, so there is no
-    /// existing ledger for them to stay consistent with.
-    pub(crate) async fn clear_venue_arms(&self) {
-        let existing: Vec<Arc<Account>> = {
-            let accounts = self
-                .accounts
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut arms = self
-                .venue_arms
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            arms.all.clear_transport_and_fee();
-            arms.pending.clear();
-            accounts.values().map(Arc::clone).collect()
-        };
-        for account_state in existing {
-            // EVERY account's transport arms, whatever the request named: a
-            // clear is an operator saying "stop everything".
-            account_state.clear_transport_havoc();
-            account_state.engine.lock().await.clear_fee_surcharge();
-        }
     }
 
     /// Claim an account for a CONNECTION: evict whoever holds it, then hand
@@ -2267,12 +2212,23 @@ mod havoc_window_tests {
         assert!(!window.open_at(sim(0, 1.0), 1_026));
     }
 
+    /// A ZERO SPAN IS THE ROUTE OFF A WINDOW, and it is the only one: the
+    /// control plane has no clear, so `GoDark { ms: 0 }` and `StallData
+    /// { ms: 0 }` are what `control.rs` documents as lifting an armed window.
+    /// The property that makes that honest is that a zero span is open for NO
+    /// clock at all - `open_at` wants `sim_at_ns` both at or after the opening
+    /// and strictly before `opening + span`, which no instant satisfies when
+    /// the span is zero. A late boarder is covered too: it opens at its own
+    /// epoch and still consumes a span of zero.
     #[test]
-    fn a_cleared_window_is_open_for_no_clock() {
+    fn a_zero_span_window_is_open_for_no_clock() {
         let window = HavocWindow::new();
         window.arm(10, 100);
-        window.clear();
+        window.arm(20, 0);
         assert!(!window.open_at(sim(0, 1.0), 1_010));
+        assert!(!window.open_at(sim(0, 1.0), 1_020));
+        let late = sim(2_000, 5.0);
+        assert!(!window.open_at(late, late.sim_epoch_ns));
     }
 
     #[test]
@@ -2299,13 +2255,16 @@ mod havoc_window_tests {
     }
 
     #[test]
-    fn concurrent_arm_clear_and_read_never_observe_a_torn_span() {
+    fn concurrent_arm_and_read_never_observe_a_torn_span() {
         let window = Arc::new(HavocWindow::new());
         let writer = Arc::clone(&window);
         let handle = std::thread::spawn(move || {
             for i in 0..10_000 {
                 writer.arm(i, i.saturating_add(1));
-                writer.clear();
+                // The zero-span lift, which is a WRITE like any other arm -
+                // that is the point here, since the two writes alternate and a
+                // reader must see one whole span or the other.
+                writer.arm(i, 0);
             }
         });
         let clock = sim(0, 1.0);
@@ -3095,47 +3054,53 @@ mod tests {
         );
     }
 
-    /// A clear lifts the venue RECORD and every pending named one too, or an
-    /// account connecting after it would be opened from arms the operator
-    /// already lifted. The engine queue is deliberately untouched on the existing
-    /// ledgers and on the venue record, which is `Engine::clear_armed`'s
-    /// documented split.
+    /// A PENDING ARM IS RETAINED, NOT GUARANTEED, and this is the limit that
+    /// makes the difference matter. There is no control that retracts an arm,
+    /// so a pending record is one-way as far as the operator is concerned - but
+    /// `pending` is capacity-bounded and sheds from the OLDEST end, which means
+    /// arms posted for entirely UNRELATED names can drop one. An operator
+    /// reading only "there is no clear" would conclude the arm is certain to be
+    /// standing when its account arrives, and it is not.
+    ///
+    /// The account under test is armed FIRST so it is the oldest, and the cap's
+    /// worth of other names is then posted; the shed takes the front on the
+    /// entry that overflows.
     #[tokio::test]
-    async fn a_clear_stops_arming_ledgers_minted_after_it() {
+    async fn a_pending_arm_is_shed_by_arms_posted_for_other_accounts() {
         let run = run(1_000, 400, None);
         run.arm(
-            None,
+            Some("SHED-000"),
             VenueArm::GoDark {
                 armed_ns: 1_000,
                 span_ns: 5_000,
             },
         )
         .await;
-        run.arm(None, VenueArm::DelayAcks { ms: 37 }).await;
-        run.arm(
-            Some("SUB-04"),
-            VenueArm::StallData {
-                armed_ns: 1_000,
-                span_ns: 5_000,
-            },
-        )
-        .await;
-        run.clear_venue_arms().await;
+        for i in 1..=MAX_PENDING_ACCOUNT_ARMS {
+            run.arm(
+                Some(&format!("SHED-{i:03}")),
+                VenueArm::GoDark {
+                    armed_ns: 1_000,
+                    span_ns: 5_000,
+                },
+            )
+            .await;
+        }
 
-        let late = run.account(&mogwai_protocol::AccountId::parse("LATE-002").unwrap());
+        let shed = run.account(&mogwai_protocol::AccountId::parse("SHED-000").unwrap());
         assert!(
-            !late.dark.open_at(SimClock::identity(), 1_000),
-            "a cleared blackout must not be re-armed onto a ledger minted after the clear"
+            !shed.dark.open_at(SimClock::identity(), 1_000),
+            "the oldest pending arm is shed at the cap, so the account it named opens clean"
         );
-        assert_eq!(
-            late.delay_ms.load(Ordering::Relaxed),
-            0,
-            "a cleared ack delay must not be re-armed either"
+        // The distinguishing half: the cap sheds the OLDEST rather than
+        // refusing the newest, so the arm that caused the overflow is standing.
+        let kept = run.account(
+            &mogwai_protocol::AccountId::parse(&format!("SHED-{MAX_PENDING_ACCOUNT_ARMS:03}"))
+                .unwrap(),
         );
-        let named = run.account(&mogwai_protocol::AccountId::parse("SUB-04").unwrap());
         assert!(
-            !named.stall.open_at(SimClock::identity(), 1_000),
-            "a clear stops everything, including an arm waiting for an account to arrive"
+            kept.dark.open_at(SimClock::identity(), 1_000),
+            "the arm that overflowed the cap is the one retained"
         );
     }
 

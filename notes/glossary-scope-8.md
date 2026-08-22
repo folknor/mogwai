@@ -230,8 +230,8 @@ not an owner ruling.
    easy fixes: state the gap and stop, or state the decision.
 
 2. **`reference/architecture.md`'s tape-version narrative stops at 18 and then
-   asserts 22.** It walks versions 5 through 18 in prose, and separately states
-   "`TAPE_PROTOCOL_VERSION` is 22". Four bumps landed with no durable record of
+   asserts 23.** It walks versions 5 through 18 in prose, and separately states
+   "`TAPE_PROTOCOL_VERSION` is 23". Five bumps landed with no durable record of
    what they changed - which is the exact gap the version-narrative exists to
    close, since the whole point of the section is that a reader can tell whether
    a given bump moved their tape. Either the narrative is completed or it is

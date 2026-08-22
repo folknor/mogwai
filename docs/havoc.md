@@ -77,11 +77,9 @@ with `400` naming that river: mid-run mutation of shared live water is not
 supported, so arm the surge before any socket binds that symbol. An arm naming no
 symbol takes the run's DEFAULT LABEL, whatever else is boarded - it used to be
 refused instead whenever any unrelated river carried a boat, so the same request
-meant different things depending on what other passengers were doing.
-`ClearDivergences` follows the
-same rule from the other side - naming a boated river refuses, while an
-unqualified clear lifts the transport windows run-wide and clears the surge on
-every boatless river, skipping boated ones rather than refusing.
+meant different things depending on what other passengers were doing. A surge is
+never lifted: it ends when its window expires, and there is no control that
+takes it back off the water.
 
 Transport controls remain runtime-armable and are ARMED PER ACCOUNT. `GoDark`,
 `StallData`, `DelayAcks` and `CommandLatency` all take an optional `account` on
@@ -91,8 +89,29 @@ scenario file already writes, so nothing on the wire breaks. They ride the
 account rather than the venue because they change what one connection RECEIVES,
 or when it hears about its own commands, rather than what the generator
 produces - so on a shared exchange, blacking out or slowing one subagent leaves
-the rest of the batch untouched. Clearing clears every account whatever the
-request names, since a clear means stop everything.
+the rest of the batch untouched.
+
+THE CONTROL PLANE ARMS AND DOES NOT DISARM. There is no clear: the route off an
+armed window is to RE-ARM IT WITH A ZERO SPAN, which is closed on every reader's
+clock, and it is scoped exactly like any other arm - naming an account lifts
+that account's window and naming none lifts every account's. `GoDark { ms: 0 }`
+and `StallData { ms: 0 }` lift a blackout early, `DelayAcks { ms: 0 }` releases
+acknowledgements already queued because the writer reads that window per event
+at dequeue, and a `CommandLatency` arm with every field omitted zeroes all six.
+What no re-arm reaches is an act delay the venue has ALREADY BEGUN serving: that
+command sleeps out its full window and then mutates, because a venue that has
+begun acting does not un-begin.
+
+WHAT IS ARMED BEFORE A CONSUMER DIALS IS ONE-WAY. An arm recorded against an
+account that does not exist yet is spent when that account opens, or when the
+run ends, and nothing retracts it in between - pre-boarding havoc setup is run
+CONSTRUCTION, so a setup that fails partway is rolled back by discarding the run
+and starting another. Two consequences worth stating because a harness will meet
+both. Engine arms APPEND rather than replace, so a retried setup leaves the
+eventual account carrying one-shots from every abandoned attempt rather than
+just the intended ones. And a pending record is RETAINED, NOT GUARANTEED: the
+venue holds arms for a bounded number of unopened names and sheds the oldest, so
+arms posted for unrelated accounts can drop one that was already waiting.
 
 AN ARM DOES NOT WAIT FOR A CONNECTION, in either spelling. Naming an account
 that has not connected yet records the arm against that name, and the account's
@@ -157,9 +176,10 @@ broker does and which no in-process backtest can produce.
 Three things follow from it being TERMINAL. It cannot be scoped to an account -
 a request naming one is refused with HTTP 400 rather than silently widened,
 because killing a whole run when a scenario meant to perturb one ledger is not a
-generous reading. Nothing clears it, since there is no venue left to clear it
-on. And it is never queued or replayed onto a later ledger, unlike the
-engine-armed set. Posting it is the last thing a scenario does.
+generous reading. Nothing takes it back, which is true of every arm here but
+differently so: the others are spent or expire, while this one has no venue left
+to be spent on. And it is never queued or replayed onto a later ledger, unlike
+the engine-armed set. Posting it is the last thing a scenario does.
 
 A second `FaultTape` arriving while the venue is already tearing down answers
 `202` and says so in the body, rather than failing: the state it asked for is

@@ -676,17 +676,6 @@ impl Rivers {
         defs
     }
 
-    pub(crate) fn clear_flow_surge(&self, symbol: &str) -> bool {
-        let Ok(profile) = self.resolve_profile(symbol) else {
-            return false;
-        };
-        let Ok(river) = self.river(&self.resolve_key(&profile)) else {
-            return false;
-        };
-        locked(&river.checkpoints).clear_flow_surge();
-        true
-    }
-
     /// A source positioned at `start`, RESUMED from the run's checkpoint chain
     /// rather than re-walked from the origin. `None` means the tape origin, which
     /// is checkpoint zero and therefore free.

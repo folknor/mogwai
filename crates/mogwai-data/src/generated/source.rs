@@ -929,10 +929,6 @@ impl TickSource for GeneratedSource {
         });
     }
 
-    fn clear_flow_surge(&mut self) {
-        self.surge = None;
-    }
-
     fn fault(&self) -> Option<TickFault> {
         self.fault
     }

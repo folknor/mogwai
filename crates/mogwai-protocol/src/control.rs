@@ -42,8 +42,10 @@ pub enum Divergence {
     /// is that the book and the consumer's model disagree afterwards.
     RejectNextCancel { reason: String },
     /// Delay every outbound execution event by `ms`, bounded by
-    /// `MAX_DIVERGENCE_MS`. Arm with `ms: 0` to clear, or post
-    /// `ClearDivergences`.
+    /// `MAX_DIVERGENCE_MS`. Arm with `ms: 0` to clear: that is the only route
+    /// off it, and it releases acknowledgements already queued, because the
+    /// writer reads the window per event at dequeue. It does not reach an act
+    /// delay already being served.
     DelayAcks { ms: u64 },
     /// Per-command venue latency: how long the venue takes to ACT on each order
     /// command, and how long it then takes to ACK what it did.
@@ -53,7 +55,10 @@ pub enum Divergence {
     /// replacing it (the same composition rule `BASELINE_LATENCY` states for the
     /// adapter's inbound latency) - though that addition happens in the WS pump,
     /// which is the only place `DelayAcks` applies at all. An arm REPLACES all
-    /// six values; an omitted field is zero.
+    /// six values; an omitted field is zero. Re-arming with every field omitted
+    /// is therefore the route off it, and it is the only one: an ACT delay the
+    /// venue has already begun serving sleeps out its full window and then
+    /// mutates, because a venue that has begun acting does not un-begin.
     CommandLatency {
         #[serde(default)]
         submit_act_ms: u64,
@@ -79,13 +84,13 @@ pub enum Divergence {
     DropNextAccountUpdate,
     /// Stop sending anything for `ms` (simulate a venue blackout), bounded
     /// by `MAX_DIVERGENCE_MS`. Frames produced during the window are
-    /// dropped, not buffered. Post `ClearDivergences` to lift the window
-    /// early.
+    /// dropped, not buffered. Re-arm with `ms: 0` to lift the window early;
+    /// a re-arm replaces the window outright rather than extending it.
     GoDark { ms: u64 },
     /// Suppress only market-data frames (`Trade` / `Quote`) for `ms`,
     /// leaving every execution frame alive. Bounded by
     /// `MAX_DIVERGENCE_MS`. Frames produced during the window are dropped,
-    /// not buffered. Post `ClearDivergences` to lift the window early.
+    /// not buffered. Re-arm with `ms: 0` to lift the window early.
     ///
     /// Unlike `GoDark`, this keeps the socket healthy while only channel
     /// data is withheld, especially when paired with the venue
@@ -99,20 +104,6 @@ pub enum Divergence {
     },
     /// Temporarily multiply the configured maker/taker charge in sim time.
     FeeSurcharge { mult: Decimal, window_ms: u64 },
-    /// Clear the venue-owned temporal windows: cancel any armed
-    /// `DelayAcks`, any armed `GoDark`, any armed `StallData`, and every
-    /// `CommandLatency` field.
-    ///
-    /// This does not flush engine-side single-shot divergences
-    /// (`PartialFillNext`, `RejectNextSubmit`, `DuplicateNextFill`,
-    /// `DropNextAccountUpdate`), which self-disarm on their own trigger.
-    ///
-    /// Nor does it lift a `CommandLatency` ACT delay the venue has already begun
-    /// serving: that command sleeps out its full window and then mutates. A
-    /// queued ACK hold IS lifted, because the writer reads that window per event
-    /// at dequeue. Clearing governs commands the venue has not started acting on
-    /// yet; it is not a time machine.
-    ClearDivergences,
     /// Cancel a RESTING order venue-side, immediately, emitting NO lifecycle
     /// event - the out-of-band cancel with a lost `OrderCanceled` that the
     /// consumer's reconciliation poll exists to catch. Unlike the armed

@@ -1164,12 +1164,15 @@ mod tests {
             "/../../analysis/stage-a-batch-manifest.json"
         ));
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
-        // Re-blessed at tape protocol 22, which the manifest hashes over: the
+        // Re-blessed at tape protocol 23, which the manifest hashes over: the
         // constant is an input to the plan identity, so a bump moves this by
-        // construction and the artifact and this literal move together.
+        // construction and the artifact and this literal move together. NO CELL
+        // MOVED in that re-bless - the whole diff was the version field and the
+        // digest taken over it - which is the evidence that the bump was owed
+        // by the rule rather than by a tape byte.
         assert_eq!(
             manifest.plan_sha256,
-            "d27e4b7b0f7289c4752b10463df3c2f2699aaff0d6917b1c81f39729a82b8ad0"
+            "cb36a1b4035bfcfc4a000a2132bfcb630c0405d3deeffaffd9b1cb80ba168f56"
         );
         assert_eq!(
             manifest.plan_sha256,

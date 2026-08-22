@@ -49,7 +49,6 @@ impl Engine {
             | Divergence::StallData { .. }
             | Divergence::FlowSurge { .. }
             | Divergence::FeeSurcharge { .. }
-            | Divergence::ClearDivergences
             | Divergence::CancelOpenOrderSilently { .. }
             // `FaultTape` is venue-owned and TERMINAL. It acts on the run's
             // fault channel at post time and takes the process down, so there is
@@ -92,17 +91,16 @@ impl Engine {
     /// their own trigger, but a TARGETED `PartialFillNext` whose order never
     /// arrives has no trigger and would sit armed forever - a leftover from one
     /// scenario can otherwise ambush a later scenario that reuses the same order
-    /// id. This is the explicit escape hatch a harness calls between scenarios
-    /// to guarantee a clean slate.
+    /// id. This is the explicit escape hatch for an in-process harness that
+    /// wants a clean slate between scenarios without minting a fresh engine.
     ///
-    /// Deliberately distinct from the wire `control::Divergence::ClearDivergences`,
-    /// which clears ONLY the venue-owned temporal windows (`DelayAcks`,
-    /// `GoDark`, `StallData`) and by documented contract leaves the engine-side
-    /// single-shots alone. Widening that wire variant to also flush the engine
-    /// queue would change its contract; this crate-local method flushes without
-    /// touching the wire, so a future venue that wants a full reset on
-    /// `ClearDivergences` can call this alongside its atomics rather than
-    /// overloading the variant.
+    /// THERE IS NO WIRE ROUTE TO IT, deliberately, and nothing outside this
+    /// crate calls it today. An armed single-shot reaches the engine by way of
+    /// the control plane, and the control plane has no clear: a one-shot posted
+    /// against an account is spent by its trigger or it is spent by the run
+    /// ending. Exposing a flush on the wire would make the queue's contents
+    /// something a consumer can retract mid-run, which is the deferred-state
+    /// surface the venue declines to keep.
     pub fn clear_armed(&mut self) {
         self.armed.clear();
     }

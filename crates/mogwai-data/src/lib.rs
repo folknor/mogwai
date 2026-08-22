@@ -125,7 +125,16 @@ pub use trigger::{
 /// is the output envelope it is declared to be. NO CLEAN TAPE MOVES - under
 /// neutral modifiers the new factor is exactly 1.0 - but a tape served while a
 /// `FlowSurge` was armed does, and the rule is unconditional.
-pub const TAPE_PROTOCOL_VERSION: u32 = 22;
+///
+/// 23 removes `clear_flow_surge` from the generator, the merge source and the
+/// checkpoint index, with the `ClearDivergences` control that was its only
+/// caller. NO TAPE MOVES: nothing called it by the time it was deleted, and an
+/// armed surge now ends only by expiring. The bump is owed anyway, because the
+/// rule over the tape generation path is unconditional and a bump costs one
+/// integer - and the surge's control-boundary snapshot is taken on arming alone
+/// from here, which is a statement about the checkpoint chain rather than about
+/// any byte.
+pub const TAPE_PROTOCOL_VERSION: u32 = 23;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.
@@ -193,9 +202,6 @@ pub trait TickSource {
         _children_mult: f64,
     ) {
     }
-
-    /// Clear an armed flow surge. Non-generated sources ignore it.
-    fn clear_flow_surge(&mut self) {}
 
     /// Advance past ticks before `start_ts`, returning the first tick in the
     /// window. The default drains one tick at a time and keeps O(1) memory.
@@ -608,12 +614,6 @@ impl TickSource for MergeSource {
     ) {
         for source in &mut self.sources {
             source.arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
-        }
-    }
-
-    fn clear_flow_surge(&mut self) {
-        for source in &mut self.sources {
-            source.clear_flow_surge();
         }
     }
 }
