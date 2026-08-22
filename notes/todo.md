@@ -239,19 +239,41 @@ group by any other route has no API for it, and none is owed until one is wanted
   the close carry it - both are protocol changes with consumers to consider, so
   they were not made inside a bug-fix round. Nothing detects this regressing
   further, because the two arms are correct in isolation.
-- THE TWO HISTORY PAGINATORS ARE NEAR-DUPLICATES AND HAVE ALREADY DRIFTED ONCE.
-  `fetch_trades_windowed` and `fetch_quotes_windowed` in
-  `crates/mogwai-adapter/src/client/data.rs` share a page loop, a
-  `MAX_TRADES_PER_REQUEST` ceiling and `final_ts_group_start`'s timestamp-cursor
-  rule, and differ in exactly one line: the short-page return, which the trade
-  path routes through its stop closure and the quote path returns `false` from.
-  That difference is CORRECT today (the quote path has no early-stop) and it is
-  now stated at the quote site so nobody unifies it by making the two lines
-  identical. The unification worth doing is a generic loop over a `ts_of`
-  accessor plus an optional stop closure, which `final_ts_group_start` is
-  already shaped for; it was left out of the 2026-08-18 adapter round as a
-  refactor rather than a fix, and it stays a live risk because nothing detects
-  the two drifting again.
+- SOCKET HISTORY IS BOUNDED BY THE RUN CLOCK, NOT BY THE ASKING PASSENGER'S BOAT
+  FRONTIER, so a passenger on a slow boat can be handed rows that are still in
+  its own future. `history::serve_page` clamps its cutoff to `AppState::run_now`,
+  which consults no boat by design, and the request carries no boat instant of
+  its own. On a paced run at speed 1 the two are close enough that nothing shows;
+  on an unpaced or slow-boat run they diverge, and a strategy warming from its
+  own history reads water it has not been delivered yet - which is the
+  look-ahead this venue exists to prevent, arriving through the route that was
+  supposed to fix it. Filed 2026-08-23 out of the history-on-socket landing,
+  where the cold review named the clock split and only the RIVER half was
+  closed. The fix wants the passenger's boat frontier as a second clamp
+  alongside the run clock, and it is a real design question rather than an
+  oversight: history reads a river directly and a boat's frontier is a delivery
+  fact, so clamping to it makes history mean something different for two
+  passengers on one river at two speeds. Nothing detects this today, and the
+  end-to-end paging test cannot: it runs on a boat at the venue's default speed,
+  where the gap is invisible.
+- THE SOLE-ATTACHED-ACCOUNT TERMINATION GATE COUNTS ATTACHMENT, NOT EXISTENCE.
+  `sweeper.rs`'s `terminated && attached_accounts.len() == 1` ends the whole run,
+  and its own comment states the intent - "on a shared exchange one subagent
+  breaching must not take down the batch, and the count is the only thing that
+  distinguishes the two modes at runtime". The count does not distinguish them:
+  a frozen account has no boat and is therefore not attached, so a run holding
+  several ledgers whose other passengers are momentarily disconnected lets one
+  breaching account complete the run for all of them. Already catalogued as a
+  vacuous gate in the glossary arc's cross-cutting findings; filed here because
+  the river fork made it REACHABLE BY A SECOND ROUTE. An account riding two
+  rivers of one symbol is unpoliced operator error by owner ruling of
+  2026-08-22, and its racing mark can produce a false policy breach - which is
+  account-local on every other axis (marks, settlement, margin, funding,
+  liquidation) and escapes only here. The ruling was made on the premise that
+  the wound is self-inflicted, so either this gate counts accounts that EXIST
+  rather than accounts attached at this instant, or the operator-error ruling is
+  documented as potentially run-terminal. The gate is wrong on its own terms
+  regardless of the fork.
 - `await_account_registered` AND `wait_connected` ARE BUSY-WAIT SHIMS INSIDE
   `connect()`. Both poll on a 10 ms sleep for up to 5 s -
   `await_account_registered` against the nautilus cache, `wait_connected`
@@ -374,22 +396,20 @@ group by any other route has no API for it, and none is owed until one is wanted
   pinned by `mogwai-venue`'s
   `the_deadline_wait_never_reports_done_before_the_sim_clock_arrives`.
 
-- CLOSED 2026-08-20 BY OWNER RULING: `ClearDivergences` DOES NOT DRAIN THE
-  ENGINE'S ARMED QUEUE, AND STAYS THAT WAY. `Engine::clear_armed` remains
-  crate-local so the control plane's contract is not widened by accident, and
-  the venue-arm record MIRRORS the omission, so a ledger minted after a clear
-  holds exactly what a seated one holds. The grounds: havoc knobs are
-  per-account configuration POSTED ON CONNECT and constant for that connection,
-  so nothing is queued in the engine at the moment a clear could arrive and a
-  full reset and a partial one are the same operation in every real usage.
-  Widening it would let the control plane reach engine state it currently
-  cannot, and would put `ArmRecord::engine` under a sync obligation, in exchange
-  for a difference nobody observes.
-  THE ENTRY USED TO SAY "the wire variant", which reads as the client socket.
-  It is the CONTROL PLANE - `POST /control/divergence` - and the misreading is
-  most of why this looked like a consumer-facing defect. The convention and the
-  fact that the venue does NOT enforce it are stated at the route registration
-  in `mogwai-venue`'s `serve.rs`.
+- MOOT SINCE 2026-08-23: `ClearDivergences` IS DELETED, so the question of
+  whether it drains the engine's armed queue no longer has a subject. The
+  2026-08-20 ruling was that it does not and stays that way; the command went
+  entirely in `bf25a5e`, generator half and transport half. `Engine::clear_armed`
+  survives as a crate-local flush with no wire route, which is the same
+  conclusion the ruling reached by a different road: the control plane arms and
+  does not disarm. What the deletion did change, and what the ruling never
+  covered, is that `clear_venue_arms` also dropped PENDING per-account records
+  wholesale, engine one-shots included - so an arm posted at an account that
+  never connected had exactly one retraction route and now has none. That is
+  accepted rather than replaced: pre-boarding havoc setup is one-way run
+  construction, and `docs/havoc.md` states it, including the qualification that
+  a pending record is retained rather than guaranteed because the bounded map
+  sheds the oldest.
 
 - ENGINE-ARM APPLICATION ORDER IS UNORDERED ACROSS CONCURRENT CONTROL REQUESTS.
   `Run::arm` records under the passenger map lock, but the engine half is applied
