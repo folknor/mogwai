@@ -397,6 +397,7 @@ fn rivers_over(profiles: InstrumentProfiles) -> std::sync::Arc<source::Rivers> {
             seeds: mogwai_protocol::RunSeeds::from_run_seed(42),
             regime: None,
         },
+        source::TAPE_ORIGIN_NS,
         std::sync::Arc::new(profiles),
     )
 }

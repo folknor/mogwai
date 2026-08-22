@@ -33,20 +33,19 @@ use super::source::GeneratedSource;
 /// calendar are shared by the lead and every snapshot.
 pub(super) const MAX_CHECKPOINTS: usize = 4096;
 
-/// One retained walk state.
+/// One retained walk state, and nothing distinguishes one from another.
 ///
-/// `pinned` marks a CONTROL BOUNDARY: the snapshot taken the instant a
-/// `FlowSurge` was armed. Arming is the only boundary there is - a surge is
-/// never lifted, because the control plane has no clear and a window ends by
-/// expiring. Surge state lives in the generator, so a
-/// snapshot taken BEFORE an arm replays the span after it unsurged, which is
-/// precisely the realization fork the surge-on-the-canonical-tape change exists
-/// to remove. A target landing between an arm and the next ordinary snapshot
-/// can only be answered correctly from the boundary snapshot, so `coarsen` may
-/// not drop it on the ordinary every-other rule.
+/// There used to be a second kind: a control boundary, pinned against
+/// coarsening and fencing the walk-back, taken the instant a `FlowSurge` was
+/// armed mid-walk. It existed because arming mutated a generator that had
+/// already drawn, so a snapshot taken before the arm would replay the span
+/// after it unsurged and answer from a different realization. A surge is now
+/// installed on a fresh source before its first draw and is part of the
+/// river's identity, so every snapshot of a river carries the same window and
+/// resuming from any of them stays on one realization. With nothing to fence,
+/// every snapshot is ordinary and coarsening has no exception to make.
 struct Snapshot {
     source: GeneratedSource,
-    pinned: bool,
 }
 
 pub struct CheckpointIndex {
@@ -80,21 +79,9 @@ impl CheckpointIndex {
         let tick = self.lead.next_tick()?;
         self.since_snapshot += 1;
         if self.since_snapshot >= self.k {
-            self.snapshot(false);
+            self.snapshot();
         }
         Some(tick)
-    }
-
-    pub fn arm_flow_surge(
-        &mut self,
-        start_ns: u64,
-        duration_ms: u64,
-        rate_mult: f64,
-        children_mult: f64,
-    ) {
-        self.lead
-            .arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
-        self.checkpoint_control_boundary();
     }
 
     #[must_use]
@@ -102,15 +89,10 @@ impl CheckpointIndex {
         self.lead.fault()
     }
 
-    fn checkpoint_control_boundary(&mut self) {
-        self.snapshot(true);
-    }
-
     /// Retain the lead's current walk state and reset the snapshot cadence.
-    fn snapshot(&mut self, pinned: bool) {
+    fn snapshot(&mut self) {
         self.checkpoints.push(Snapshot {
             source: self.lead.clone(),
-            pinned,
         });
         self.since_snapshot = 0;
         if self.checkpoints.len() > MAX_CHECKPOINTS {
@@ -129,7 +111,6 @@ impl CheckpointIndex {
         Self {
             checkpoints: vec![Snapshot {
                 source: origin.clone(),
-                pinned: true,
             }],
             lead: origin,
             since_snapshot: 0,
@@ -177,7 +158,7 @@ impl CheckpointIndex {
                     walked += parent_ticks;
                     self.since_snapshot += parent_ticks;
                     if self.since_snapshot == self.k {
-                        self.snapshot(false);
+                        self.snapshot();
                     }
                     continue;
                 }
@@ -188,7 +169,7 @@ impl CheckpointIndex {
             walked += 1;
             self.since_snapshot += 1;
             if self.since_snapshot >= self.k {
-                self.snapshot(false);
+                self.snapshot();
             }
         }
         walked
@@ -210,19 +191,16 @@ impl CheckpointIndex {
     /// coarsened `k`, which grows only logarithmically in session length (each
     /// doubling costs `MAX_CHECKPOINTS * k` more ticks).
     ///
-    /// PINNED snapshots are exempt from the every-other rule, because dropping
-    /// one is NOT correctness-preserving: a control boundary is the only
-    /// snapshot carrying the surge state a target just past an arm must replay
-    /// under. The exemption cannot break the memory ceiling - if pins alone fill
-    /// the chain the tail below drops the OLDEST of them, trading replay
-    /// fidelity for the most ancient surge windows rather than the bound - and
-    /// `k` doubles only when the every-other pass actually removed something,
-    /// so pin pressure cannot inflate the residual drain.
+    /// There is no exemption. Control boundaries used to be exempt, because
+    /// dropping the one snapshot carrying the surge state a target just past an
+    /// arm had to replay under was not correctness-preserving. A surge now
+    /// belongs to the river rather than to a moment in its walk, so every
+    /// snapshot carries it and every snapshot is equally droppable.
     fn coarsen(&mut self) {
         let before = self.checkpoints.len();
         let mut idx = 0usize;
-        self.checkpoints.retain(|snapshot| {
-            let keep = snapshot.pinned || idx.is_multiple_of(2);
+        self.checkpoints.retain(|_| {
+            let keep = idx.is_multiple_of(2);
             idx += 1;
             keep
         });
@@ -250,20 +228,19 @@ impl CheckpointIndex {
             .map(|(source, _)| source)
     }
 
-    /// The same positioning, but `back` snapshots EARLIER than the strict
-    /// partition point, and reporting whether the result is the EARLIEST
-    /// snapshot the walk-back may use - the origin, or the nearest `FlowSurge`
-    /// control boundary when one fences the retreat.
+    /// The same positioning, but `back` snapshots earlier than the strict
+    /// partition point, and reporting whether the result is the origin - the
+    /// earliest snapshot there is, and now the only floor the walk-back has.
     ///
     /// A positioned source only re-emits ticks the resume point had not yet
     /// consumed, so a reader recovering state the snapshot itself consumed - the
     /// last trade price at or before `target`, say - can find nothing to read
     /// even though the answer exists. That reader is not wrong to have asked,
     /// and must not be told "no such print": it walks back until it finds one or
-    /// until it hits the floor. Returning the floor flag is what lets the caller
-    /// stop without guessing at the chain's length; a FENCED caller then reads
-    /// the consumed print off the boundary snapshot's own state
-    /// (`GeneratedSource::last_trade_price`) rather than being refused forever.
+    /// until it reaches the origin. Returning the origin flag is what lets the
+    /// caller stop without guessing at the chain's length, and the origin is a
+    /// complete answer rather than a fence to work around: it has consumed
+    /// nothing, so replaying from it re-emits every tick the river ever had.
     pub fn try_source_before_target(
         &mut self,
         target: u64,
@@ -296,19 +273,15 @@ impl CheckpointIndex {
             .iter()
             .rposition(|checkpoint| checkpoint.source.clock_ns() < target)
             .unwrap_or(0);
-        // The walk-back stops at the nearest CONTROL BOUNDARY at or below the
-        // partition point. Resuming earlier than an arm and replaying across it
-        // would regenerate the span unsurged - the exact realization fork the
-        // canonical-tape surge removes - so a reader hunting backwards for a
-        // consumed print must not be handed a source that would answer from a
-        // different tape. The origin is pinned, so an index that never armed a
-        // surge walks all the way back as before.
-        let floor = self.checkpoints[..=idx]
-            .iter()
-            .rposition(|checkpoint| checkpoint.pinned)
-            .unwrap_or(0);
-        let idx = idx.saturating_sub(back).max(floor);
-        Some((self.checkpoints[idx].source.clone(), idx == floor))
+        // The walk-back stops at the origin and nowhere earlier, which is the
+        // only floor there is. It used to stop at the nearest control boundary
+        // instead, because resuming earlier than a mid-walk arm and replaying
+        // across it would regenerate the span unsurged and answer from a
+        // different tape. A surge is now part of the river rather than an event
+        // in its walk, so no snapshot is a boundary and every retreat stays on
+        // one realization.
+        let idx = idx.saturating_sub(back);
+        Some((self.checkpoints[idx].source.clone(), idx == 0))
     }
 
     /// Position at a reachable target, panicking rather than returning a
@@ -328,19 +301,5 @@ impl CheckpointIndex {
     #[must_use]
     pub fn frontier_ns(&self) -> u64 {
         self.lead.clock_ns()
-    }
-
-    /// Snapshots retained as `FlowSurge` control boundaries, origin included.
-    #[cfg(test)]
-    pub(crate) fn pinned_count(&self) -> usize {
-        self.checkpoints
-            .iter()
-            .filter(|checkpoint| checkpoint.pinned)
-            .count()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn frontier_source(&self) -> GeneratedSource {
-        self.lead.clone()
     }
 }

@@ -444,6 +444,7 @@ fn render() -> String {
             seeds: RunSeeds::from_run_seed(GOLDEN_RUN_SEED),
             regime: None,
         },
+        crate::source::TAPE_ORIGIN_NS,
         profiles,
     );
     let golden = Golden {

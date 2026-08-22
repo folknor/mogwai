@@ -256,6 +256,44 @@ impl GeneratedSource {
             }
     }
 
+    /// Install a flow surge on a source that has not drawn yet, consuming and
+    /// returning it so it reads as part of construction.
+    ///
+    /// Taking `self` by value is the whole guarantee. A surge is part of a
+    /// river's identity, so it has to be present before the first draw: a
+    /// generator that acquired one part-way through its walk would produce a
+    /// sequence no from-origin replay could reproduce, and every checkpoint
+    /// taken before the arm would resume onto different water. That was the
+    /// old mid-walk mutation, and the pinned control boundary and its
+    /// walk-back fence existed only to contain it. Here there is nothing to
+    /// contain: every snapshot of this source carries the same immutable
+    /// window, so resuming from any of them stays on one realization, across
+    /// the surge opening and its expiry alike.
+    ///
+    /// `start_ns` is a generator timestamp, not a wall instant and not a
+    /// per-reader deadline. Two passengers naming the same window get the same
+    /// water whenever they board, and a passenger boarding after it closed
+    /// gets a river whose surge is in the past - which is what makes the water
+    /// exogenous rather than a promise to whoever asked.
+    #[must_use]
+    pub fn with_surge(
+        self,
+        start_ns: u64,
+        duration_ms: u64,
+        rate_mult: f64,
+        children_mult: f64,
+    ) -> Self {
+        Self {
+            surge: Some(SurgeWindow {
+                start_ns,
+                end_ns: start_ns.saturating_add(duration_ms.saturating_mul(1_000_000)),
+                rate_mult,
+                children_mult,
+            }),
+            ..self
+        }
+    }
+
     #[must_use]
     pub fn new(
         scalars: GeneratorScalars,
@@ -555,37 +593,6 @@ impl GeneratedSource {
     #[must_use]
     pub fn clock_ns(&self) -> u64 {
         self.clock_ns
-    }
-
-    /// The price of the last TRADE this walk has emitted, or `None` for a walk
-    /// that has printed nothing yet. Mid-burst it is the current sweep's latest
-    /// child print; at a parent boundary it is the completed event's final
-    /// print. Both are state the walk already carries - no draw is consumed and
-    /// nothing about the stream moves.
-    ///
-    /// It exists for the checkpoint walk-back's FENCE case: a `FlowSurge`
-    /// control-boundary snapshot may have CONSUMED the last print at or before
-    /// a reader's target, and resuming any earlier snapshot would replay across
-    /// the arm and answer from a different tape. The snapshot itself still
-    /// knows that print, and this is how it says so. Without it, a settlement
-    /// instant landing between a control boundary and the next trade is
-    /// unpriceable forever and the sweep frontier stalls permanently.
-    #[must_use]
-    pub fn last_trade_price(&self) -> Option<Decimal> {
-        let price_ticks = if self.burst.emitted > 0 {
-            // `step_child` leaves `burst.price_ticks` at the price of the child
-            // it just drew, so between ticks this IS the latest print. A
-            // completed burst keeps `emitted > 0` until the next parent begins,
-            // where it agrees with `last_event_price_ticks` by construction.
-            Some(self.burst.price_ticks)
-        } else {
-            self.last_event_price_ticks
-        };
-        // The exact materialization `next_child` performs, so the answer is
-        // byte-identical to the print a replay would have re-emitted.
-        price_ticks.map(|ticks| {
-            decimal_from_f64(ticks * self.tick_f64).round_dp(self.scalars.price_decimals)
-        })
     }
 
     #[cfg(test)]
@@ -912,21 +919,6 @@ impl TickSource for GeneratedSource {
             return self.pending_quote.take().map(TickEvent::Quote);
         }
         Some(TickEvent::Trade(self.next_child()))
-    }
-
-    fn arm_flow_surge(
-        &mut self,
-        start_ns: u64,
-        duration_ms: u64,
-        rate_mult: f64,
-        children_mult: f64,
-    ) {
-        self.surge = Some(SurgeWindow {
-            start_ns,
-            end_ns: start_ns.saturating_add(duration_ms.saturating_mul(1_000_000)),
-            rate_mult,
-            children_mult,
-        });
     }
 
     fn fault(&self) -> Option<TickFault> {

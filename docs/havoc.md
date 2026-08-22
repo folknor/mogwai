@@ -67,19 +67,55 @@ therefore not in a position to read it, and a run that needs the distinction
 programmatically wants a consumer on the raw protocol. The real fix is a declared
 feed-gap event upstream; it is filed in `notes/todo.md`.
 
-Generator havoc is river-scoped. The control payload accepts an optional
-`symbol`. `FlowSurge { rate_mult, children_mult, duration_ms }` on a BOATLESS
-river mutates its checkpointed water at parent boundaries and is visible to
-history and to every passenger that boards later; its window opens at the
-river's own origin, and the `202` body names that origin so you can see which
-span was armed. A generator arm on a river that already has a boat is refused
-with `400` naming that river: mid-run mutation of shared live water is not
-supported, so arm the surge before any socket binds that symbol. An arm naming no
-symbol takes the run's DEFAULT LABEL, whatever else is boarded - it used to be
-refused instead whenever any unrelated river carried a boat, so the same request
-meant different things depending on what other passengers were doing. A surge is
-never lifted: it ends when its window expires, and there is no control that
-takes it back off the water.
+Generator havoc is not a control post at all. It rides the websocket upgrade,
+in four query keys, and it selects which river the passenger boards:
+
+    /ws?symbol=MNQ&surge_start_ms=0&surge_duration_ms=60000&surge_rate_mult=4&surge_children_mult=2
+
+A passenger carrying an arm boards a different river than one without it. That
+is the whole mechanism, and it is why generator havoc no longer needs an empty
+boatyard: nothing is mutated, so nothing that anyone is already reading can
+change under them. Two accounts can run a clean strategy and a surged one on one
+exchange, at the same time, on the same symbol, and neither sees the other's
+weather. Ask for the same arm twice and you get the same river, which is what
+keeps sharing intact - the boat, the checkpoint chain and the warmup are all
+paid once.
+
+It rides the upgrade rather than a control post for a reason worth stating,
+because the control post is the obvious design and it is wrong here. A posted
+arm is run-wide state: on a server-mode venue it would let one consumer decide
+what every other account's next boarding resolves to, which is cross-account
+interference arriving through the control plane rather than through the water.
+And a registry of named water shapes in the venue's config would be worse for
+the attached case, where the config file belongs to whoever launched the
+exchange and the consumer is precisely the party that does not own it.
+
+`surge_start_ms` is an offset from the RUN ORIGIN, not from the moment you
+connect. That is what lets two passengers share one river: "starting when I
+connect" names a different window for every boarding instant, so it would fork a
+river per connection and share nothing. The consequence to expect, and it is
+deliberate: boarding late with a zero offset boards water whose surge is already
+over. The river had its weather whether or not anyone was aboard, the same way
+it had a Tuesday. A harness that wants a surge beginning at its own connection
+computes the offset against the run origin first and reuses that one arm for
+every leg of the passenger - which a nautilus host must do anyway, since its
+data and execution legs have to carry identical water or the strategy prices
+against one market and is filled in another.
+
+The multipliers are canonicalized to parts per million before they become
+identity, so two spellings of one multiplier are one river. Without that, a
+scenario that accumulates `1.1 + 2.2` where another writes `3.3` would strand
+two rivers instead of sharing one, and the river cap does not evict.
+
+A surge is never lifted: it ends when its window expires. There is no control
+that takes it back off the water, because there is no water to take it off - a
+different arm is a different river, and you leave one by leaving the boat.
+
+WHAT THIS COSTS, stated because the cap is real. Every distinct arm materializes
+a river, rivers are never evicted, and the run's cap is 256. A scenario sweep
+across a hundred multiplier values spends a hundred rivers for the run's whole
+life, not for the life of the socket that asked. Sweeps larger than the cap want
+one venue process per batch.
 
 Transport controls remain runtime-armable and are ARMED PER ACCOUNT. `GoDark`,
 `StallData`, `DelayAcks` and `CommandLatency` all take an optional `account` on
@@ -127,10 +163,13 @@ Recording an arm does not open an account, deliberately: the consumer still
 states its own opening balances and policy on `POST /accounts`, and finds the
 arm standing on the ledger that call returns.
 
-The market REGIMES - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are not
-runtime arms. They are a boot choice made by whoever launches the run, apply to
-the whole run's water, and enter every river's identity, so a regime run serves
-different rivers rather than mutating one. `LiquidityDrought` is the inverse
+The market REGIMES - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are the
+same mechanism at a different scope. They are a boot choice made by whoever
+launches the run, apply to the whole run's water, and enter every river's
+identity, so a regime run serves different rivers rather than mutating one. A
+surge is now that idea per passenger rather than per run, which is why neither
+needs a control post and neither can reach water anyone is reading.
+`LiquidityDrought` is the inverse
 rate control to a surge: it stretches parent gaps while leaving sweep shape
 unchanged. `mogwai gen` takes the same regimes offline.
 

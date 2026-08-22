@@ -1545,7 +1545,7 @@ mod tests {
         let mut hashes = serde_json::Map::new();
         for &(symbol, seed, surged) in matrix {
             let profile = resolve_profile(symbol).expect("preset resolves");
-            let mut source = mogwai_data::GeneratedSource::try_new_with_session_profile(
+            let source = mogwai_data::GeneratedSource::try_new_with_session_profile(
                 profile.scalars.clone(),
                 seed,
                 0,
@@ -1556,9 +1556,11 @@ mod tests {
                 profile.calendar.clone(),
             )
             .expect("oracle source");
-            if surged {
-                source.arm_flow_surge(3_600 * 1_000_000_000, 30 * 60 * 1_000, 2.0, 1.5);
-            }
+            let mut source = if surged {
+                source.with_surge(3_600 * 1_000_000_000, 30 * 60 * 1_000, 2.0, 1.5)
+            } else {
+                source
+            };
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
             let mut events: u64 = 0;
             while let Some(event) = source.next_tick() {

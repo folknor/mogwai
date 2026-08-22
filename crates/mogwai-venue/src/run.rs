@@ -2303,6 +2303,7 @@ mod tests {
                     seeds: RunSeeds::from_run_seed(42),
                     regime: None,
                 },
+                started_ns,
                 profiles,
             ),
             std::collections::HashMap::new(),
@@ -2630,7 +2631,7 @@ mod tests {
 
     fn boat_key(run: &Run, symbol: &str, speed: f64) -> crate::boatyard::BoatKey {
         let profile = run.rivers.resolve_profile(symbol).expect("a served symbol");
-        crate::boatyard::BoatKey::new(run.rivers.resolve_key(&profile), speed)
+        crate::boatyard::BoatKey::new(run.rivers.resolve_key(&profile, None), speed)
             .expect("a legal speed")
     }
 

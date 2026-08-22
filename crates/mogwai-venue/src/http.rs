@@ -989,69 +989,6 @@ pub(crate) async fn arm_divergence(
             run.arm(target, VenueArm::StallData { armed_ns, span_ns })
                 .await;
         }
-        Divergence::FlowSurge {
-            rate_mult,
-            children_mult,
-            duration_ms,
-        } => {
-            // AN OMITTED SYMBOL MEANS THE DEFAULT LABEL, always. It used to mean
-            // that only while the boatyard happened to be empty, and to become a
-            // refusal the moment any UNRELATED river boarded - so the identical
-            // request changed meaning based on what other passengers were doing,
-            // which is not a thing a caller can predict or a contract can state.
-            //
-            // KNOWN DEFECT, LEFT DELIBERATELY AND NAMED SO IT IS NOT MISTAKEN FOR
-            // INTENT: arming a generator divergence still MATERIALIZES its target
-            // river, and the glossary says only a boarding or a history poll
-            // creates one, since a control post boards nothing. Making omission
-            // consistent widens the cases where that happens rather than
-            // narrowing them. It is the same defect as the missing river fork -
-            // a generator arm belongs to river identity and should be recorded
-            // against a key ahead of materialization, not written into water that
-            // already exists - and it closes with that change, not this one.
-            let symbol = request
-                .symbol
-                .as_deref()
-                .unwrap_or_else(|| run.default_symbol.as_ref());
-            if run.boatyard.boat_for_symbol(symbol).is_some() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "river {symbol} has a placed boat; place one whose sharing key carries generator havoc"
-                    ),
-                );
-            }
-            // The late-boarder rule, collapsed to its only reachable case. This
-            // arm is refused above unless the river is BOATLESS, and every boat
-            // placed on a river anchors `sim_epoch_ns` at the yard's origin,
-            // which is `run.started_ns`. So the instant a future boat would open
-            // this window at IS the run origin, and stamping it here is the same
-            // answer `HavocWindow::open_at` computes for the transport windows.
-            // Stamping `sim_now_ns(venue_sim)` instead - what this used to do -
-            // put the window in that boat's far future, where it could never be
-            // entered at all.
-            if !state.rivers.arm_flow_surge(
-                symbol,
-                run.started_ns,
-                duration_ms,
-                rate_mult,
-                children_mult,
-            ) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("symbol {symbol} has no configured shape"),
-                );
-            }
-            // Named in the ack so an operator can see WHICH span was armed and
-            // against which origin, rather than inferring it from a bare 202.
-            return (
-                StatusCode::ACCEPTED,
-                format!(
-                    "armed a {duration_ms} ms simulated surge on {symbol}, opening at the river origin {origin}",
-                    origin = run.started_ns
-                ),
-            );
-        }
         Divergence::FeeSurcharge { mult, window_ms } => {
             // VENUE-WIDE WHATEVER THE REQUEST NAMED, which is why this passes
             // `None` rather than `target`: a surcharge is a statement about the
@@ -1158,9 +1095,9 @@ pub(crate) async fn arm_divergence(
             }
             tracing::info!(%client_order_id, "silently canceled resting order venue-side");
         }
-        // Venue-ownership contract (pins B.4 / E.11): the SEVEN variants the
+        // Venue-ownership contract (pins B.4 / E.11): the six variants the
         // arms above intercept - `DelayAcks`, `CommandLatency`, `GoDark`,
-        // `StallData`, `FlowSurge`, `FeeSurcharge` and
+        // `StallData`, `FeeSurcharge` and
         // `CancelOpenOrderSilently` - are venue-owned controls with no
         // synchronous engine-side trigger. The venue owns them and must NEVER
         // forward them to `engine.arm()`, which would drop them on the floor.

@@ -134,7 +134,18 @@ pub use trigger::{
 /// integer - and the surge's control-boundary snapshot is taken on arming alone
 /// from here, which is a statement about the checkpoint chain rather than about
 /// any byte.
-pub const TAPE_PROTOCOL_VERSION: u32 = 23;
+/// 24 makes a flow surge part of a river's identity instead of an event in its
+/// walk. `arm_flow_surge` is replaced by `with_surge`, which consumes a source
+/// that has drawn nothing, so the window is present before the first draw and
+/// every checkpoint of that river carries it. Surged tapes MOVE: the same
+/// window applied from the origin is not the sequence the old mid-walk mutation
+/// produced, because the generator's path-dependent state entering the window
+/// differs. No clean tape moves - a river with no arm is byte-identical, which
+/// is what the fill golden re-rendering unchanged shows. The pinned control
+/// boundary, its coarsening exemption, the walk-back fence and the fence's
+/// `last_trade_price` recovery all go with the mutation they existed to
+/// contain.
+pub const TAPE_PROTOCOL_VERSION: u32 = 24;
 
 /// A terminal condition that ended a [`TickSource`] before ordinary
 /// exhaustion.
@@ -191,16 +202,6 @@ pub trait TickSource {
     /// terminal `None` when exhaustion and failure have different outcomes.
     fn fault(&self) -> Option<TickFault> {
         None
-    }
-
-    /// Arm a simulated-time flow surge. Non-generated sources ignore it.
-    fn arm_flow_surge(
-        &mut self,
-        _start_ns: u64,
-        _duration_ms: u64,
-        _rate_mult: f64,
-        _children_mult: f64,
-    ) {
     }
 
     /// Advance past ticks before `start_ts`, returning the first tick in the
@@ -603,18 +604,6 @@ impl TickSource for MergeSource {
 
     fn fault(&self) -> Option<TickFault> {
         self.fault
-    }
-
-    fn arm_flow_surge(
-        &mut self,
-        start_ns: u64,
-        duration_ms: u64,
-        rate_mult: f64,
-        children_mult: f64,
-    ) {
-        for source in &mut self.sources {
-            source.arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
-        }
     }
 }
 

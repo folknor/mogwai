@@ -1164,15 +1164,15 @@ mod tests {
             "/../../analysis/stage-a-batch-manifest.json"
         ));
         let manifest = parse_manifest(bytes).expect("committed manifest validates");
-        // Re-blessed at tape protocol 23, which the manifest hashes over: the
+        // Re-blessed at tape protocol 24, which the manifest hashes over: the
         // constant is an input to the plan identity, so a bump moves this by
-        // construction and the artifact and this literal move together. NO CELL
-        // MOVED in that re-bless - the whole diff was the version field and the
-        // digest taken over it - which is the evidence that the bump was owed
-        // by the rule rather than by a tape byte.
+        // construction and the artifact and this literal move together. No cell
+        // moved in that re-bless - the whole diff was the version field and the
+        // digest taken over it - which is the evidence that the panel itself is
+        // untouched even though the tape identity is not.
         assert_eq!(
             manifest.plan_sha256,
-            "cb36a1b4035bfcfc4a000a2132bfcb630c0405d3deeffaffd9b1cb80ba168f56"
+            "0f431caef94b0a917a7e63dcfb02700e5f93546d934c742d71163832da0d1e91"
         );
         assert_eq!(
             manifest.plan_sha256,

@@ -47,7 +47,6 @@ impl Engine {
             | Divergence::CommandLatency { .. }
             | Divergence::GoDark { .. }
             | Divergence::StallData { .. }
-            | Divergence::FlowSurge { .. }
             | Divergence::FeeSurcharge { .. }
             | Divergence::CancelOpenOrderSilently { .. }
             // `FaultTape` is venue-owned and TERMINAL. It acts on the run's

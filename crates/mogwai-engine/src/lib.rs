@@ -5517,11 +5517,6 @@ mod tests {
             },
             Divergence::GoDark { ms: 100 },
             Divergence::StallData { ms: 100 },
-            Divergence::FlowSurge {
-                rate_mult: 2.0,
-                children_mult: 2.0,
-                duration_ms: 100,
-            },
             Divergence::FeeSurcharge {
                 mult: Decimal::from(2),
                 window_ms: 100,
@@ -5561,7 +5556,6 @@ mod tests {
                 | Divergence::CommandLatency { .. }
                 | Divergence::GoDark { .. }
                 | Divergence::StallData { .. }
-                | Divergence::FlowSurge { .. }
                 | Divergence::FeeSurcharge { .. }
                 | Divergence::CancelOpenOrderSilently { .. }
                 | Divergence::FaultTape => false,

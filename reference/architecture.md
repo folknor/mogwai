@@ -717,38 +717,50 @@ submitting the same buy against the same water receive the same fill without
 changing one another's result. Transport havoc remains a property of what a
 passenger sees.
 
-GENERATOR HAVOC BELONGS TO RIVER IDENTITY AND DOES NOT YET LIVE THERE. The
-glossary says a passenger whose resolved config carries a generator arm boards a
-DIFFERENT river than one without it, and that nothing mutates water someone is
-already reading. What the code does instead is mutate the one river a symbol
-resolves to, in place, guarded by refusing the arm when that river has a boat -
-`FlowSurge` is a 400 on a boated river. An arm naming no symbol takes the
-default label. On a shared exchange some river nearly always has a boat, so
-generator havoc is refused in exactly the mode it is most needed, which is the
-cost of the gap rather than an argument for the guard.
+GENERATOR HAVOC IS RIVER IDENTITY. A passenger whose resolved config carries a
+generator arm boards a different river than one without it, and nothing mutates
+water someone is already reading. The arm arrives on the `/ws` upgrade as four
+query keys, is normalized into a `GeneratorArm` before the account is claimed,
+and enters `RiverKey` structurally beside the bundle digest. The generator
+receives it through `with_surge`, which consumes a source that has drawn
+nothing, so the window is installed before the first draw and every checkpoint
+of that river carries it.
+
+That is what removed the checkpoint machinery the mutation needed. The pinned
+control boundary, its exemption from coarsening, the walk-back fence and the
+fence's own `last_trade_price` recovery all existed to stop a snapshot taken
+before an arm from replaying the span after it unsurged. With the window present
+from the origin there is nothing to fence: resuming from any snapshot, or from
+the origin itself, stays on one realization across the surge's opening and its
+expiry alike.
+
+Two asymmetries in the key are deliberate. The bundle digest covers the
+operator-owned half - instrument shape, tape seed, boot regime - and the arm is
+held exactly, because a passenger chooses the arm and a digest collision would
+hand it water belonging to another key rather than merely mislabelling one. And
+the multipliers are canonicalized to parts per million before they become
+identity, because equivalent human inputs do not produce equal floats and the
+river cap does not evict.
+
+`Rivers::river` validates by ISSUANCE rather than by re-derivation. It used to
+ask whether a key equalled the key the registry resolves for its symbol, and
+that question has only one answer, the armless one - so after the fork it would
+refuse every armed key, while deleting it would admit a key nothing minted.
 
 WHAT THE FORK OWES, recorded because it is larger than adding a field to a key.
 Every water read now takes a `RiverKey` rather than a symbol - history, the
 order-time market reading, the trigger scans, marks and settlement - so a fork
 cannot land halfway and leave execution reading a river the passenger is not on.
 What remained unanswered was ownership rather than plumbing, and the owner ruled
-on it 2026-08-22. The rulings, which the code has NOT caught up with and which
-this section records as owed:
-
-A PASSENGER CARRIES ITS ARM ON THE UPGRADE, as the `control::Divergence` type
-`mogwai-protocol` already defines, rather than naming a bundle registered in the
-venue's config. The deciding ground is the mode split: in server mode the config
-file belongs to whoever launched the exchange, so a registration surface would
-leave an attached consumer able to use only the water shapes the operator had
-anticipated, which guts the point of a consumer owning its own havoc against a
-venue it does not own. A posted symbol default was refused on the same axis - it
-is run-wide state, so one consumer's surge would change what every other
-account's next boarding resolves to.
-
-THE ARM CARRIES A TAPE COORDINATE, an offset from the river's origin, rather
-than opening at the boarding instant. Otherwise two passengers carrying the same
-arm and boarding a second apart are asking for different water, every late
-boarding forks a river of its own, and sharing collapses.
+on it 2026-08-22. Two of the four rulings have landed and are described above:
+the arm rides the upgrade rather than a registered bundle or a posted default,
+on the grounds that in server mode the config file belongs to whoever launched
+the exchange and a posted default is run-wide state; and the arm carries a
+coordinate rather than opening at the boarding instant, because two passengers
+carrying the same arm a second apart would otherwise ask for different water and
+every late boarding would fork a river of its own. The base is the RUN ORIGIN,
+which is where the old boatless handler already stamped its window. The two
+still owed:
 
 HISTORY MOVES ONTO THE SOCKET. A poll names a symbol and no passenger, so once a
 label names several rivers it names none of them - and every proposed selector
@@ -798,7 +810,7 @@ away from zero and floored at one contract, so no print becomes the zero
 quantity nautilus drops. `latent_size_median` is stated directly in the
 instrument's native size unit and names the continuous lognormal center before
 that grid is applied. The floor truncates its lower tail, so it is deliberately
-not called the observed size median. `TAPE_PROTOCOL_VERSION` is 23; version 5
+not called the observed size median. `TAPE_PROTOCOL_VERSION` is 24; version 5
 removed the quote-notional proxy whose value was actually arithmetic mean
 notional and made the latent size distribution explicit, and version 6 repaired
 the GARCH recursion's second moment. Version 7 added the observable top of book,

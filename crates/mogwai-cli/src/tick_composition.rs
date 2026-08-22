@@ -36,7 +36,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Args;
-use mogwai_data::{GeneratedSource, ParentSummary, SizeGrid, TickSource};
+use mogwai_data::{GeneratedSource, ParentSummary, SizeGrid};
 use serde::Serialize;
 
 use mogwai_venue::source::{InstrumentProfile, fingerprint};
@@ -472,11 +472,13 @@ fn measure(
     let fanout_end_ns = start_ns.saturating_add(fanout_span as u64 * 1_000_000_000);
     let start_second = start_ns / 1_000_000_000;
     let mut source = build_source(profile, seed, start_ns, fp);
+    if matches!(mode, Mode::Surged) {
+        source = source.with_surge(start_ns, u64::MAX, 1_000.0, 100.0);
+    }
     match mode {
         Mode::Quiet => source.set_arrival_quiet_for_measurement(Some(true)),
         Mode::Active => source.set_arrival_quiet_for_measurement(Some(false)),
-        Mode::Natural => {}
-        Mode::Surged => source.arm_flow_surge(start_ns, u64::MAX, 1_000.0, 100.0),
+        Mode::Natural | Mode::Surged => {}
     }
     let mut counters = Counters::new(fanout_span);
     let mut recorded = 0_usize;
@@ -718,7 +720,7 @@ fn tail_of(mut values: Vec<u64>) -> Tail {
 
 #[cfg(test)]
 mod tests {
-    use mogwai_data::TickEvent;
+    use mogwai_data::{TickEvent, TickSource};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -863,7 +865,16 @@ mod tests {
         let start_ns = peak_hour_ns();
         for preset in mogwai_venue::config::preset_names() {
             for mode in MODES {
-                let mut compact = build_source(&profiles[preset], 17, start_ns, fp);
+                let source = build_source(&profiles[preset], 17, start_ns, fp);
+                // Applied BEFORE the clone, so both sides carry the same
+                // immutable window - which is now the only way a surge can be
+                // present at all, and is what keeps this a surge transition
+                // rather than two differently-watered sources.
+                let mut compact = if matches!(mode, Mode::Surged) {
+                    source.with_surge(start_ns, 50, 1_000.0, 100.0)
+                } else {
+                    source
+                };
                 let mut wire = compact.clone();
                 match mode {
                     Mode::Quiet => {
@@ -874,11 +885,7 @@ mod tests {
                         compact.set_arrival_quiet_for_measurement(Some(false));
                         wire.set_arrival_quiet_for_measurement(Some(false));
                     }
-                    Mode::Natural => {}
-                    Mode::Surged => {
-                        compact.arm_flow_surge(start_ns, 50, 1_000.0, 100.0);
-                        wire.arm_flow_surge(start_ns, 50, 1_000.0, 100.0);
-                    }
+                    Mode::Natural | Mode::Surged => {}
                 }
                 assert_compact_matches_wire(&mut compact, &mut wire, 64);
             }

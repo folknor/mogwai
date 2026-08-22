@@ -8,7 +8,7 @@ use mogwai_data::{
     CheckpointIndex, Fingerprint, GeneratedSource, GeneratorScalars, MergeSource, SessionProfile,
     SizeGrid, TickSource,
 };
-use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol};
+use mogwai_protocol::{InstrumentDef, MarketRegime, RunSeeds, Symbol, control::GeneratorArm};
 use rust_decimal::Decimal;
 use std::{
     collections::HashMap,
@@ -220,8 +220,14 @@ impl InstrumentProfiles {
             .ok_or_else(|| anyhow::anyhow!("boot symbol {named} has no configured shape"))
     }
 }
-fn generator(label: &str, profile: &InstrumentProfile, identity: TapeIdentity) -> GeneratedSource {
-    GeneratedSource::new_with_session_profile(
+fn generator(
+    label: &str,
+    profile: &InstrumentProfile,
+    identity: TapeIdentity,
+    arm: Option<GeneratorArm>,
+    run_origin_ns: u64,
+) -> GeneratedSource {
+    let source = GeneratedSource::new_with_session_profile(
         profile.scalars.clone(),
         identity.seeds.tape_for(label),
         TAPE_ORIGIN_NS,
@@ -230,7 +236,20 @@ fn generator(label: &str, profile: &InstrumentProfile, identity: TapeIdentity) -
         identity.regime,
         SizeGrid::from_def(&profile.def),
         profile.calendar.clone(),
-    )
+    );
+    // Applied to a source that has drawn nothing, which is what makes the
+    // surge part of this river rather than an event in its walk. The offset is
+    // resolved against the run origin here, once, so the generator only ever
+    // sees an absolute instant on its own axis.
+    match arm {
+        Some(arm) => source.with_surge(
+            run_origin_ns.saturating_add(arm.start_offset_ns),
+            arm.duration_ms,
+            arm.rate_mult(),
+            arm.children_mult(),
+        ),
+        None => source,
+    }
 }
 
 /// Snapshot spacing of the run's checkpoint chain, in ticks. The generator is
@@ -280,13 +299,29 @@ const MAX_EXTEND_TICKS: usize = 1 << 30;
 /// would wedge history for a sufficiently long run.
 const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 1_335_079_000_000;
 
+/// Which river a request names.
+///
+/// The bundle digest covers the resolved instrument shape, the tape seed and
+/// the boot regime - all of it operator-owned, fixed at boot, and the same for
+/// every passenger. The arm is not: it is chosen per passenger, so it is held
+/// STRUCTURALLY rather than folded into the digest. That asymmetry is
+/// deliberate. A digest collision here does not merely mislabel a river, it
+/// hands a passenger water belonging to another key, and a value the passenger
+/// controls is a value a passenger could search for collisions in. Keeping the
+/// passenger-chosen half exact means equality can only be reached by asking for
+/// the same arm.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RiverKey {
     symbol: Symbol,
     bundle: u64,
+    arm: Option<GeneratorArm>,
 }
 impl RiverKey {
-    pub(crate) fn resolve(profile: &InstrumentProfile, identity: TapeIdentity) -> Self {
+    pub(crate) fn resolve(
+        profile: &InstrumentProfile,
+        identity: TapeIdentity,
+        arm: Option<GeneratorArm>,
+    ) -> Self {
         let mut digest = std::collections::hash_map::DefaultHasher::new();
         let hash_f64 = |value: f64, digest: &mut std::collections::hash_map::DefaultHasher| {
             value.to_bits().hash(digest);
@@ -388,6 +423,7 @@ impl RiverKey {
         Self {
             symbol: Arc::clone(&profile.def.symbol),
             bundle: digest.finish(),
+            arm,
         }
     }
     pub(crate) fn symbol(&self) -> &str {
@@ -403,6 +439,7 @@ impl RiverKey {
         Self {
             symbol: Arc::clone(&self.symbol),
             bundle: self.bundle ^ 0x5fd0_e9a5_1c37_b2e1,
+            arm: self.arm,
         }
     }
 }
@@ -419,12 +456,19 @@ pub(crate) struct River {
 
 pub(crate) struct Rivers {
     identity: TapeIdentity,
+    /// The served run's origin on the tape axis, which is the warmup span
+    /// because the generator starts at `TAPE_ORIGIN_NS`. A generator arm's
+    /// offset counts from here rather than from the tape origin: an offset of
+    /// zero should mean the instant the run begins serving, not an instant
+    /// buried in the warmup where a one-hour window could open and close
+    /// before any passenger sees live water.
+    run_origin_ns: u64,
     profiles: Arc<InstrumentProfiles>,
     /// Resolved once per configured profile at construction. `resolve` walks
     /// the whole knob bundle and serializes two values, while river resolution
     /// happens on every history read, every mark read and every placement, so
     /// re-deriving it per lookup would put a digest on the serving hot path.
-    keys: Mutex<HashMap<Symbol, RiverKey>>,
+    keys: Mutex<HashMap<(Symbol, Option<GeneratorArm>), RiverKey>>,
     rivers: Mutex<HashMap<RiverKey, Arc<River>>>,
 }
 
@@ -499,18 +543,23 @@ pub(crate) fn build_history_source(
 }
 
 impl Rivers {
-    pub(crate) fn new(identity: TapeIdentity, profiles: Arc<InstrumentProfiles>) -> Arc<Self> {
+    pub(crate) fn new(
+        identity: TapeIdentity,
+        run_origin_ns: u64,
+        profiles: Arc<InstrumentProfiles>,
+    ) -> Arc<Self> {
         let keys = profiles
             .iter()
             .map(|profile| {
                 (
-                    Arc::clone(&profile.def.symbol),
-                    RiverKey::resolve(profile, identity),
+                    (Arc::clone(&profile.def.symbol), None),
+                    RiverKey::resolve(profile, identity, None),
                 )
             })
             .collect();
         Arc::new(Self {
             identity,
+            run_origin_ns,
             profiles,
             keys: Mutex::new(keys),
             rivers: Mutex::new(HashMap::new()),
@@ -540,26 +589,52 @@ impl Rivers {
     ) -> Result<Arc<InstrumentProfile>, ResolveRefusal> {
         self.profiles.resolve(symbol)
     }
-    /// The key for a profile this registry was built from. Cached, so this is
-    /// a lookup rather than a digest; a profile from anywhere else is resolved
-    /// the long way rather than silently mis-keyed.
-    pub(crate) fn resolve_key(&self, profile: &InstrumentProfile) -> RiverKey {
+    /// The key for a profile this registry was built from, under a given arm.
+    ///
+    /// This is the only place a key is minted, and every key that exists came
+    /// from here - which is what `river` relies on instead of re-deriving. The
+    /// memo is keyed by symbol AND arm because one label now names several
+    /// rivers; it exists because resolution happens on every history read,
+    /// every mark read and every placement, and the bundle digest must not sit
+    /// on that path. The first request for a given pair pays the digest and
+    /// every later one pays a hash lookup.
+    pub(crate) fn resolve_key(
+        &self,
+        profile: &InstrumentProfile,
+        arm: Option<GeneratorArm>,
+    ) -> RiverKey {
+        let memo = (Arc::clone(&profile.def.symbol), arm);
         let mut keys = self
             .keys
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(key) = keys.get(&profile.def.symbol) {
+        if let Some(key) = keys.get(&memo) {
             return key.clone();
         }
-        let key = RiverKey::resolve(profile, self.identity);
-        keys.insert(Arc::clone(&profile.def.symbol), key.clone());
+        let key = RiverKey::resolve(profile, self.identity, arm);
+        keys.insert(memo, key.clone());
         key
+    }
+    /// Whether this registry issued `key`.
+    ///
+    /// It used to ask a different question - whether `key` equals the key this
+    /// registry resolves for its symbol - and that question only had one
+    /// answer, the clean one. Once a label names several rivers, re-deriving
+    /// can produce at most the armless key, so a surged key would be refused as
+    /// a mismatch and deleting the check outright would admit a key nothing
+    /// issued. Asking whether the key was issued here is the question that
+    /// survives the fork: a caller selects among rivers this registry minted
+    /// rather than describing one it must then be trusted about.
+    fn issued(&self, key: &RiverKey) -> bool {
+        self.keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(Arc::clone(&key.symbol), key.arm))
+            .is_some_and(|issued| issued == key)
     }
     fn river(&self, key: &RiverKey) -> Result<Arc<River>, MaterializeRefusal> {
         let profile = self.resolve_profile(key.symbol())?;
-        // A key naming a bundle this run does not serve resolves to no river.
-        // The comparison is against the CACHED key, so it costs a hash lookup.
-        if self.resolve_key(&profile) != *key {
+        if !self.issued(key) {
             return Err(MaterializeRefusal::KeyMismatch {
                 symbol: key.symbol().to_owned(),
             });
@@ -587,7 +662,7 @@ impl Rivers {
             materialized = Some(self.identity.seeds.tape_for(symbol));
             Arc::new(River {
                 checkpoints: Mutex::new(CheckpointIndex::new(
-                    generator(symbol, &profile, self.identity),
+                    generator(symbol, &profile, self.identity, key.arm, self.run_origin_ns),
                     CHECKPOINT_K,
                     MAX_EXTEND_TICKS,
                 )),
@@ -611,25 +686,7 @@ impl Rivers {
     #[cfg(test)]
     pub(crate) fn river_handle_for_test(&self, symbol: &str) -> Option<Arc<River>> {
         let profile = self.resolve_profile(symbol).ok()?;
-        self.river(&self.resolve_key(&profile)).ok()
-    }
-
-    pub(crate) fn arm_flow_surge(
-        &self,
-        symbol: &str,
-        start_ns: u64,
-        duration_ms: u64,
-        rate_mult: f64,
-        children_mult: f64,
-    ) -> bool {
-        let Ok(profile) = self.resolve_profile(symbol) else {
-            return false;
-        };
-        let Ok(river) = self.river(&self.resolve_key(&profile)) else {
-            return false;
-        };
-        locked(&river.checkpoints).arm_flow_surge(start_ns, duration_ms, rate_mult, children_mult);
-        true
+        self.river(&self.resolve_key(&profile, None)).ok()
     }
 
     /// The symbols whose water actually exists right now. A control that means
@@ -747,22 +804,24 @@ impl Rivers {
     /// except this one.
     ///
     /// THE CALLERS THAT LEGITIMATELY HAVE NO KEY, each a named boundary rather
-    /// than a convenience:
+    /// than a convenience. Each of them now names the UNARMED river of that
+    /// label, which is a choice rather than the only possibility it once was:
     ///
-    /// - `/trades` and `/quotes`, which name a symbol and no passenger. Once a
-    ///   label names several rivers a history poll names none of them, and
-    ///   which river it should read is an unresolved wire question.
-    /// - The generator control plane, until arms move into the key and stop
-    ///   mutating an existing chain.
+    /// - `/trades` and `/quotes`, which name a symbol and no passenger. They
+    ///   are the operator's view of a label, not a consumer route: a passenger
+    ///   reads its own water over its own socket, where the connection already
+    ///   names the river and cannot name it wrong.
     /// - The perpetual funding index, which names an index symbol its boat does
-    ///   not ride and therefore has no key for.
+    ///   not ride and therefore has no key for. The index is a property of the
+    ///   instrument rather than of any one passenger's realization, so the
+    ///   unarmed river is the answer rather than a fallback.
     ///
-    /// While one label resolves to exactly one river these are all the same
-    /// answer, which is why this lands as a refactor. They become real choices
-    /// the moment the fork does.
+    /// The generator control plane used to be the third. It is gone: a
+    /// generator arm rides the upgrade and enters the key, so there is no
+    /// longer a route that reaches an existing chain in order to change it.
     pub(crate) fn key_for_symbol(&self, symbol: &str) -> Result<RiverKey, MaterializeRefusal> {
         let profile = self.resolve_profile(symbol)?;
-        Ok(self.resolve_key(&profile))
+        Ok(self.resolve_key(&profile, None))
     }
 
     pub(crate) fn place_cursor(
@@ -854,23 +913,22 @@ fn reach_river_within(river: &River, target_ns: u64, ceiling: usize) -> anyhow::
 /// AFTER the tick its checkpoint last consumed, so the residual covers only
 /// `(checkpoint clock, ts]`. When the last print at or before `ts` fell on or
 /// before that clock - `ts` sitting between a parent's final trade and the next
-/// parent is the easy case, and a `FlowSurge` control boundary snapshots at an
-/// arbitrary instant - the residual contains no trade at all and the honest
-/// answer is not `None`. Resuming progressively earlier snapshots recovers it,
-/// doubling the step so the retry count is logarithmic in the chain rather than
-/// one walk per checkpoint. Callers treat `None` as "the tape could not be
-/// read", and the sweeper's settlement frontier refuses to retire a span on it,
-/// so answering `None` where a print exists would stall the frontier forever
-/// rather than merely losing one reading.
+/// parent is the easy case - the residual contains no trade at all and the
+/// honest answer is not `None`. Resuming progressively earlier snapshots
+/// recovers it, doubling the step so the retry count is logarithmic in the
+/// chain rather than one walk per checkpoint. Callers treat `None` as "the tape
+/// could not be read", and the sweeper's settlement frontier refuses to retire
+/// a span on it, so answering `None` where a print exists would stall the
+/// frontier forever rather than merely losing one reading.
 ///
-/// The walk-back is FENCED at a `FlowSurge` control boundary (resuming earlier
-/// and replaying across the arm would answer from a different tape), so the
-/// fence itself needs its own recovery: when the earliest permitted snapshot's
-/// residual holds no print, the print the reader wants is one that snapshot
-/// CONSUMED, and the snapshot still knows it. `last_trade_price` is that
-/// answer. Without it, a settlement instant landing between an arm and the
-/// next trade would be unpriceable forever and would freeze the settlement
-/// frontier for the rest of the run.
+/// The retreat ends at the origin and needs no recovery there. It used to be
+/// fenced at a `FlowSurge` control boundary, because resuming earlier and
+/// replaying across a mid-walk arm would answer from a different tape, and the
+/// fence then needed a way to read a print the boundary snapshot had already
+/// consumed. A surge belongs to the river now, so no snapshot fences anything
+/// and the origin is a complete answer rather than a wall: it has consumed
+/// nothing, so its residual is the whole river and any print at or before `ts`
+/// is in it.
 impl Rivers {
     /// Takes a key rather than a label, for the reason `key_for_symbol` states:
     /// a settlement price is water, and water is never selected by name.
@@ -891,15 +949,6 @@ impl Rivers {
             else {
                 return Ok(None);
             };
-            // Captured BEFORE draining: it is the resume point's own last consumed
-            // print, whose ts is at most the snapshot clock and therefore strictly
-            // before `ts` (the partition is strict). Only consulted when the chain
-            // is exhausted and the residual held nothing.
-            let fence_price = if exhausted {
-                source.last_trade_price()
-            } else {
-                None
-            };
             let mut last = None;
             let mut drained = 0usize;
             while let Some(tick) = source.next_tick() {
@@ -916,7 +965,7 @@ impl Rivers {
                 last = Some(trade.price);
             }
             if last.is_some() || exhausted {
-                return Ok(last.or(fence_price));
+                return Ok(last);
             }
             budget = budget.saturating_sub(drained);
             if budget == 0 {
@@ -940,6 +989,7 @@ mod river_tests {
                 seeds: RunSeeds::from_run_seed(7),
                 regime: None,
             },
+            TAPE_ORIGIN_NS,
             profiles,
         )
     }
@@ -956,14 +1006,94 @@ mod river_tests {
             &rivers
                 .resolve_profile(crate::config::DEFAULT_PRESET)
                 .unwrap(),
+            None,
         );
-        let foobar = rivers.resolve_key(&rivers.resolve_profile("FOOBAR").unwrap());
-        let other = rivers.resolve_key(&rivers.resolve_profile("BARFOO").unwrap());
+        let foobar = rivers.resolve_key(&rivers.resolve_profile("FOOBAR").unwrap(), None);
+        let other = rivers.resolve_key(&rivers.resolve_profile("BARFOO").unwrap(), None);
         assert_ne!(foobar, default);
         assert_ne!(foobar, other);
         // And exact case: `foobar` is a different label, so a different river.
-        let miscased = rivers.resolve_key(&rivers.resolve_profile("foobar").unwrap());
+        let miscased = rivers.resolve_key(&rivers.resolve_profile("foobar").unwrap(), None);
         assert_ne!(foobar, miscased);
+    }
+
+    /// The fork itself, at the level the key decides it: one label, one
+    /// profile, two arms, three distinct rivers.
+    ///
+    /// The clean key and an armed key must differ, or a passenger carrying an
+    /// arm would board the water someone else is already reading and the whole
+    /// point of putting the arm in identity is lost. Two DIFFERENT arms must
+    /// differ from each other too - otherwise a surged passenger and a
+    /// differently-surged one would share, which is the same defect wearing a
+    /// disguise.
+    #[test]
+    fn a_generator_arm_forks_the_river_under_one_label() {
+        let rivers = total_rivers();
+        let profile = rivers
+            .resolve_profile(crate::config::DEFAULT_PRESET)
+            .unwrap();
+        let clean = rivers.resolve_key(&profile, None);
+        let surged = rivers.resolve_key(
+            &profile,
+            GeneratorArm::normalize(0, 60_000, 4.0, 2.0).unwrap(),
+        );
+        let harder = rivers.resolve_key(
+            &profile,
+            GeneratorArm::normalize(0, 60_000, 8.0, 2.0).unwrap(),
+        );
+        let later = rivers.resolve_key(
+            &profile,
+            GeneratorArm::normalize(30_000_000_000, 60_000, 4.0, 2.0).unwrap(),
+        );
+        assert_ne!(clean, surged, "an arm names other water than none");
+        assert_ne!(surged, harder, "a different multiplier is different water");
+        assert_ne!(later, surged, "a different coordinate is different water");
+        assert_eq!(
+            clean.symbol(),
+            surged.symbol(),
+            "the fork is under one label, which is what makes it a fork"
+        );
+
+        // The sharing half, and the one that keeps the river cap honest: the
+        // same arm asked for twice is one river, not two.
+        assert_eq!(
+            surged,
+            rivers.resolve_key(
+                &profile,
+                GeneratorArm::normalize(0, 60_000, 4.0, 2.0).unwrap()
+            ),
+            "two passengers naming one window share one river"
+        );
+    }
+
+    /// A key this registry never issued is refused rather than served.
+    ///
+    /// The check used to re-derive the clean key and compare, which after the
+    /// fork would refuse every armed key - the armless derivation is the only
+    /// one it could produce. Asking whether the registry issued the key is the
+    /// question that survives, and this pins both directions: an issued armed
+    /// key resolves, a fabricated one does not.
+    #[test]
+    fn only_a_key_this_registry_issued_resolves_to_water() {
+        let rivers = total_rivers();
+        let profile = rivers
+            .resolve_profile(crate::config::DEFAULT_PRESET)
+            .unwrap();
+        let surged = rivers.resolve_key(
+            &profile,
+            GeneratorArm::normalize(0, 60_000, 4.0, 2.0).unwrap(),
+        );
+        assert!(
+            rivers.river(&surged).is_ok(),
+            "an armed key the registry minted names real water"
+        );
+        assert!(
+            matches!(
+                rivers.river(&surged.with_unresolvable_bundle()),
+                Err(MaterializeRefusal::KeyMismatch { .. })
+            ),
+            "a key nothing issued is refused rather than silently resolved"
+        );
     }
 
     #[test]
@@ -1109,7 +1239,7 @@ mod river_tests {
             .ensure_reach(&rivers.test_key("BTCUSDT"), 3_600_000_000_000)
             .unwrap();
         let profile = rivers.resolve_profile("BTCUSDT").unwrap();
-        let key = rivers.resolve_key(&profile);
+        let key = rivers.resolve_key(&profile, None);
         let mut cursor = rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap();
         let mut history = rivers
             .history_source(&rivers.test_key("BTCUSDT"), Some(TAPE_ORIGIN_NS))
@@ -1124,7 +1254,7 @@ mod river_tests {
     fn a_wound_down_boat_leaves_its_river_extendable() {
         let rivers = crate::fills::test_rivers();
         let profile = rivers.resolve_profile("BTCUSDT").unwrap();
-        let key = rivers.resolve_key(&profile);
+        let key = rivers.resolve_key(&profile, None);
         drop(rivers.place_cursor(&key, TAPE_ORIGIN_NS).unwrap());
         let before = locked(&rivers.river(&key).unwrap().checkpoints).frontier_ns();
         rivers
@@ -1143,7 +1273,7 @@ mod river_tests {
     fn a_placed_cursor_yields_every_row_at_the_origin_instant() {
         let rivers = crate::fills::test_rivers();
         let profile = rivers.resolve_profile("BTCUSDT").unwrap();
-        let key = rivers.resolve_key(&profile);
+        let key = rivers.resolve_key(&profile, None);
         let mut expected = rivers
             .history_source(&rivers.test_key("BTCUSDT"), None)
             .unwrap();

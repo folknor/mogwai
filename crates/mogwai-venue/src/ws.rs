@@ -100,6 +100,38 @@ pub(crate) struct SocketQuery {
     /// assumed.
     #[serde(default)]
     account: Option<String>,
+    /// The generator arm this passenger's water carries, in four flat keys so
+    /// the query string stays readable and `deny_unknown_fields` still covers
+    /// them.
+    ///
+    /// This is the fork. A passenger carrying an arm boards a DIFFERENT river
+    /// than one without it, rather than mutating water someone else may already
+    /// be reading, so two accounts can run a clean strategy and a surged one on
+    /// one exchange without either seeing the other's weather. It rides the
+    /// upgrade rather than a control post because a posted default is run-wide
+    /// state: on a shared venue that would let one consumer decide what every
+    /// other account's next boarding resolves to.
+    ///
+    /// `surge_start_ms` is an offset from the RUN ORIGIN, not from this
+    /// passenger's boarding instant. That is what lets two passengers share:
+    /// "starting when I connect" names a different window for every boarding
+    /// instant, so it would fork a river per connection and share nothing. The
+    /// consequence to expect is that boarding late with a zero offset boards
+    /// water whose surge is already over - the river had its weather whether or
+    /// not anyone was aboard, which is what exogenous water means.
+    ///
+    /// MILLISECONDS, deliberately, where the identity underneath is
+    /// nanoseconds. Two harness paths computing the same intended start through
+    /// different units would otherwise differ by sub-millisecond residue and
+    /// each strand a river of its own against a cap that never evicts.
+    #[serde(default)]
+    surge_start_ms: Option<u64>,
+    #[serde(default)]
+    surge_duration_ms: Option<u64>,
+    #[serde(default)]
+    surge_rate_mult: Option<f64>,
+    #[serde(default)]
+    surge_children_mult: Option<f64>,
     /// The identity this socket presents, so several sockets presenting the
     /// same value can coexist on one ledger.
     ///
@@ -306,7 +338,20 @@ pub(crate) async fn ws_upgrade(
         )
             .into_response();
     }
-    let river = state.rivers.resolve_key(&profile);
+    // Resolved here, once, and then carried by the boat, the ticket and the
+    // passenger: no serving path re-derives it, so none of them can reach water
+    // this passenger is not on. Refused BEFORE the account is claimed, so a
+    // malformed arm cannot evict an incumbent on its way to a 400.
+    let arm = match mogwai_protocol::control::GeneratorArm::normalize(
+        query.surge_start_ms.unwrap_or(0).saturating_mul(1_000_000),
+        query.surge_duration_ms.unwrap_or(0),
+        query.surge_rate_mult.unwrap_or(1.0),
+        query.surge_children_mult.unwrap_or(1.0),
+    ) {
+        Ok(arm) => arm,
+        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+    };
+    let river = state.rivers.resolve_key(&profile, arm);
     let ticket = match state
         .run
         .boatyard

@@ -270,34 +270,72 @@ fn compact_seek_is_wire_identical_and_preserves_continuation() {
     }
 }
 
-/// An armed `FlowSurge` moves the CANONICAL tape, so a history read placed
-/// inside the surge window must replay the surged prints, not the clean ones the
-/// index would have drawn. That is what closes the realization fork: the
-/// subscribed feed, `/trades`, the volatility reading and the trigger scans are
-/// all this one walk.
+/// A surge moves the CANONICAL tape, so a history read placed inside the surge
+/// window must replay the surged prints rather than the clean ones. That is
+/// what keeps one river one realization: the subscribed feed, `/trades`, the
+/// volatility reading and the trigger scans are all this one walk.
 ///
 /// The read goes through `try_source_at_or_before` deliberately. Comparing two
 /// clones of the lead proves only that the lead is surged, which was never in
-/// doubt; the fork lived in the checkpoint chain, and the chain is what a
-/// history request actually resumes from.
+/// doubt; what has to agree is the CHAIN, because that is what a history
+/// request resumes from.
+///
+/// The surge is installed at CONSTRUCTION and the clean river is a separate
+/// source. It used to be armed mid-walk on a shared index, with the clean
+/// comparison taken from a frontier clone - which was the mutation the fork
+/// removed. Two rivers is now the honest fixture, because that is what a
+/// passenger carrying an arm and a passenger without one actually board.
 #[test]
-fn checkpoint_flow_surge_is_visible_to_canonical_and_history_walks() {
+fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
     let fp = Fingerprint::from_repo_json();
-    let source = GeneratedSource::new(GeneratorScalars::xbtusd_anchor(&fp), 4242, 1_000, &fp, None);
-    let mut index = CheckpointIndex::new(source, 8_192, 1_000_000);
-    index.extend_toward(30_000_000_000);
-    let arm_at = index.frontier_ns();
-    let mut clean = index.frontier_source();
-    index.arm_flow_surge(arm_at, 600_000, 10.0, 4.0);
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    // DERIVED FROM THE TAPE, not guessed: the window has to open somewhere the
+    // walk below actually reaches, and far enough in that the two rivers share
+    // a real prefix first. A hardcoded instant either sits past the end of the
+    // walk - in which case the surge never opens and the test passes against a
+    // no-op - or sits at tick zero, where "they agree before the window" says
+    // nothing.
+    let opens_at = {
+        let mut probe = GeneratedSource::new(scalars.clone(), 4242, 1_000, &fp, None);
+        let mut ts = 0;
+        for _ in 0..2_000 {
+            ts = probe.next_tick().expect("infinite tape").ts_event();
+        }
+        ts
+    };
+    let mut index = CheckpointIndex::new(
+        GeneratedSource::new(scalars.clone(), 4242, 1_000, &fp, None)
+            .with_surge(opens_at, 600_000, 10.0, 4.0),
+        8_192,
+        1_000_000,
+    );
+    let mut clean = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
 
+    // Walked in LOCKSTEP from the origin. Advancing one side first would make
+    // the two disagree from misalignment rather than from the surge, which is a
+    // divergence assertion that passes against a no-op window.
     let mut canonical = Vec::with_capacity(10_000);
-    let mut diverged = false;
+    let mut first_mismatch = None;
     for _ in 0..10_000 {
         let tick = index.next_tick().expect("infinite tape");
-        diverged |= format!("{tick:?}") != format!("{:?}", clean.next_tick());
-        canonical.push((tick.ts_event(), format!("{tick:?}")));
+        let rendered = format!("{tick:?}");
+        // BOTH SIDES UNWRAPPED. Comparing a `TickEvent` against an
+        // `Option<TickEvent>` renders `Trade(..)` against `Some(Trade(..))`,
+        // which can never be equal - so the divergence guard would report a
+        // mismatch on the first tick whatever the water did, and the
+        // assertion that the fixture exercises the surge could not fail.
+        let clean_tick = clean.next_tick().expect("infinite tape");
+        if rendered != format!("{clean_tick:?}") && first_mismatch.is_none() {
+            first_mismatch = Some(tick.ts_event());
+        }
+        canonical.push((tick.ts_event(), rendered));
     }
-    assert!(diverged, "the fixture must exercise the armed surge");
+    let parted_at = first_mismatch.expect("the fixture must exercise the surge");
+    assert!(
+        parted_at >= opens_at,
+        "the two rivers must agree until the window opens at {opens_at}, but they \
+         parted at {parted_at}"
+    );
 
     // A history read landing well inside the surge window, resumed off the
     // chain exactly as `build_history_source` does it.
@@ -405,90 +443,112 @@ fn last_trade_through(source: &mut GeneratedSource, target: u64) -> Option<Decim
     last
 }
 
-/// The FENCE half of the walk-back recovery above. A `FlowSurge` control
-/// boundary stops the walk-back - resuming earlier and replaying across the
-/// arm would answer from a different tape - so when the boundary snapshot
-/// itself consumed the last print before a target, NO resumable snapshot can
-/// re-emit it. The snapshot's own state still carries that print, and
-/// `last_trade_price` is how the venue's lookup recovers it instead of
-/// refusing forever: a permanent refusal at a settlement instant would freeze
-/// the sweep's settlement frontier for the rest of the run.
+/// THE FENCE IS GONE AND NOTHING REPLACED IT, because a surge installed before
+/// the first draw leaves nothing to fence.
+///
+/// The old hazard: arming mutated a generator that had already walked, so a
+/// snapshot taken BEFORE the arm would replay the span after it unsurged. The
+/// walk-back had to stop at a pinned control boundary, coarsening had to keep
+/// that boundary, and a reader whose print the boundary had eaten needed a
+/// separate recovery to avoid refusing forever. All three existed to contain
+/// one mutation.
+///
+/// What has to be true now is stronger and simpler: retreating ACROSS the surge
+/// window - all the way to the origin, past however many snapshots - must
+/// replay the same ticks as resuming just before the target. This is the test
+/// that would have failed under the old model without a fence, so it is the
+/// one that shows the fence is unnecessary rather than merely absent.
 #[test]
-fn a_fenced_control_boundary_still_answers_for_the_print_it_consumed() {
+fn a_walk_back_across_a_surge_window_stays_on_one_realization() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-    let origin = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
-    // Spacing far wider than the walk below, so the chain is exactly the
-    // origin plus the arm boundary and the partition can only land on the pin.
-    let mut index = CheckpointIndex::new(origin, 1 << 20, 10_000_000);
-    // Advance until the lead has printed a trade AND its next tick lands
-    // strictly later than one nanosecond past the frontier, so a target of
-    // frontier plus one is guaranteed an empty residual.
-    let mut last_trade = None;
-    loop {
-        if let TickEvent::Trade(trade) = index.next_tick().expect("infinite tape") {
-            last_trade = Some(trade.price);
-        }
-        if last_trade.is_some() {
-            let mut peek = index.frontier_source();
-            let next_ts = peek.next_tick().expect("infinite tape").ts_event();
-            if next_ts > index.frontier_ns() + 1 {
-                break;
-            }
-        }
-    }
-    let arm_at = index.frontier_ns();
-    index.arm_flow_surge(arm_at, 60_000, 8.0, 3.0);
-    let target = arm_at + 1;
+    let opens_at = 5_000_000_000;
+    // A dense chain, so a deep retreat really does cross many snapshots and the
+    // window rather than landing next door to the target.
+    let mut index = CheckpointIndex::new(
+        GeneratedSource::new(scalars, 4242, 1_000, &fp, None)
+            .with_surge(opens_at, 600_000, 10.0, 4.0),
+        64,
+        10_000_000,
+    );
+    index.extend_toward(opens_at.saturating_mul(2));
 
-    let (mut fenced, exhausted) = index
-        .try_source_before_target(target, 0)
-        .expect("a reachable target");
+    // A target well past the window's opening, so every resume below has to
+    // replay across it.
+    let target = index.frontier_ns();
+    let near = {
+        let (mut source, _) = index
+            .try_source_before_target(target, 0)
+            .expect("a reached target");
+        drain_from(&mut source, target, 64)
+    };
+    let (mut far_source, at_origin) = index
+        .try_source_before_target(target, usize::MAX)
+        .expect("a reached target");
     assert!(
-        exhausted,
-        "the arm boundary must be the earliest snapshot the walk-back may use"
+        at_origin,
+        "an unbounded retreat must reach the origin, which is the only floor left"
     );
-    let boundary_price = fenced.last_trade_price();
+    let far = drain_from(&mut far_source, target, 64);
+
     assert_eq!(
-        last_trade_through(&mut fenced, target),
-        None,
-        "the fixture must exercise a residual the boundary snapshot already ate"
-    );
-    assert_eq!(
-        boundary_price, last_trade,
-        "the boundary snapshot must answer for the print it consumed"
+        near, far,
+        "a retreat across the surge window replayed a different tape"
     );
 }
 
-/// Coarsening drops every other snapshot, which is correctness-preserving for
-/// an ordinary one and NOT for a `FlowSurge` control boundary: the surge lives
-/// in the generator, so a target between an arm and the next ordinary snapshot
-/// can only be replayed correctly from the boundary itself. Dropping it would
-/// reopen the realization fork that arming on the canonical tape closed.
+/// Coarsening has no exception any more, and this is what that means: a chain
+/// carrying a surge coarsens exactly like a clean one. Under the old model two
+/// snapshots were pinned against the every-other rule - the origin and the arm
+/// boundary - and dropping the boundary would have reopened the realization
+/// fork. There is no boundary to keep now.
 #[test]
-fn coarsening_retains_flow_surge_control_boundaries() {
+fn coarsening_keeps_no_exception_on_a_surged_chain() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-    let origin = GeneratedSource::new(scalars, 11, 1_000, &fp, None);
-    let mut index = CheckpointIndex::new(origin, 1, 10_000_000);
-
-    for _ in 0..64 {
-        index.next_tick().expect("infinite tape");
-    }
-    let arm_at = index.frontier_ns();
-    index.arm_flow_surge(arm_at, 60_000, 8.0, 3.0);
-    assert_eq!(index.pinned_count(), 2, "the origin and the arm boundary");
+    let mut index = CheckpointIndex::new(
+        GeneratedSource::new(scalars, 11, 1_000, &fp, None).with_surge(1_000, 60_000, 8.0, 3.0),
+        1,
+        10_000_000,
+    );
 
     // Past MAX_CHECKPOINTS at k = 1, so coarsen must have run at least once.
     for _ in 0..MAX_CHECKPOINTS + 500 {
         index.next_tick().expect("infinite tape");
     }
     assert!(index.checkpoint_count() <= MAX_CHECKPOINTS);
+
+    // And the chain still answers consistently after coarsening, which is the
+    // property the pin used to buy.
+    let target = index.frontier_ns();
+    let (mut resumed, _) = index
+        .try_source_before_target(target, 0)
+        .expect("a reached target");
+    let (mut from_origin, at_origin) = index
+        .try_source_before_target(target, usize::MAX)
+        .expect("a reached target");
+    assert!(at_origin);
     assert_eq!(
-        index.pinned_count(),
-        2,
-        "coarsening may not drop a control boundary"
+        drain_from(&mut resumed, target, 32),
+        drain_from(&mut from_origin, target, 32),
+        "a coarsened surged chain must replay one tape from every resume point"
     );
+}
+
+/// Seek `source` to the first tick at or after `target`, then take `count`
+/// ticks in their debug form - enough to compare two replays as sequences
+/// rather than as single ticks, since a divergence can begin anywhere.
+fn drain_from(source: &mut GeneratedSource, target: u64, count: usize) -> Vec<String> {
+    let mut tick = source.next_tick().expect("infinite tape");
+    while tick.ts_event() < target {
+        tick = source.next_tick().expect("infinite tape");
+    }
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        out.push(format!("{tick:?}"));
+        tick = source.next_tick().expect("infinite tape");
+    }
+    out
 }
 
 const DRAW: usize = 2_000_000;
@@ -1702,11 +1762,15 @@ fn the_maintenance_halt_is_expressible_at_sub_hour_resolution() {
 }
 
 #[test]
-fn an_armed_flow_surge_cannot_shorten_a_closure_jump() {
+fn a_surged_river_cannot_shorten_a_closure_jump() {
     let friday_close = FIRST_SUNDAY_NS + (5 * 1_440 + 1_020) * MINUTE_NS;
     let sunday_reopen = FIRST_SUNDAY_NS + 7 * DAY_NS + 1_080 * MINUTE_NS;
-    let mut source = calendar_source(friday_close - 1);
-    source.arm_flow_surge(friday_close - 1, 4 * 24 * 60 * 60 * 1_000, 100.0, 1.0);
+    let mut source = calendar_source(friday_close - 1).with_surge(
+        friday_close - 1,
+        4 * 24 * 60 * 60 * 1_000,
+        100.0,
+        1.0,
+    );
     for _ in 0..1_000 {
         let ts = source.next_tick().unwrap().ts_event();
         assert!(ts < friday_close || ts >= sunday_reopen);
@@ -5277,8 +5341,8 @@ fn a_surge_crossing_the_floor_boundary_follows_the_branch() {
     // identity would not.
     let fp = Fingerprint::from_repo_json();
     let scalars = mnq_july_scalars(&fp);
-    let mut source = GeneratedSource::new(scalars, 11, 0, &fp, None);
-    source.arm_flow_surge(0, 86_400_000, 1.0, 6.0);
+    let mut source =
+        GeneratedSource::new(scalars, 11, 0, &fp, None).with_surge(0, 86_400_000, 1.0, 6.0);
     let (mean, single) = realized_children(&mut source, 120_000);
     let target = 1.171_112_721_155_989_7 * 6.0;
     assert!(

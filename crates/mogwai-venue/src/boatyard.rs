@@ -244,17 +244,16 @@ impl Boatyard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    pub(crate) fn boat_for_symbol(&self, symbol: &str) -> Option<Arc<Boat>> {
-        // Deterministic when a river carries more than one cadence: the
-        // slowest placed boat. Callers that mean "is anyone reading this
-        // symbol" only need Some; callers that need a particular speed use
-        // `boat_at`.
-        self.boats_for_symbol(symbol)
-            .into_iter()
-            .min_by_key(|boat| boat.key.speed_micros)
-    }
 
-    /// Every placed boat on `symbol`, any speed.
+    /// Every placed boat on `symbol`, any speed and any river.
+    ///
+    /// Test-only now. It used to answer the generator control plane's question,
+    /// which was whether this label had a boat and whether an arm might
+    /// therefore mutate its water; the fork deleted that question along with
+    /// mid-run mutation. What survives is its use as an observation: one label
+    /// can carry several boats, and after the fork they need not even be
+    /// reading the same river.
+    #[cfg(test)]
     pub(crate) fn boats_for_symbol(&self, symbol: &str) -> Vec<Arc<Boat>> {
         self.locked()
             .values()
@@ -266,7 +265,6 @@ impl Boatyard {
             })
             .collect()
     }
-
     /// Every symbol carrying a placed boat, sorted and deduplicated.
     ///
     /// Test-only since the control plane stopped consulting the boatyard to
@@ -375,7 +373,7 @@ mod tests {
 
     fn yard() -> (Arc<Boatyard>, RiverKey) {
         let rivers = crate::fills::test_rivers();
-        let key = rivers.resolve_key(&rivers.resolve_profile("BTCUSDT").unwrap());
+        let key = rivers.resolve_key(&rivers.resolve_profile("BTCUSDT").unwrap(), None);
         let (fault_tx, _fault_rx) = mpsc::channel();
         (
             Boatyard::new(rivers, 64, fault_tx, crate::source::TAPE_ORIGIN_NS),
@@ -389,8 +387,8 @@ mod tests {
     /// live guard on configured-only lookup and must not be read as one.
     fn two_symbol_yard() -> (Arc<Boatyard>, RiverKey, RiverKey) {
         let rivers = crate::fills::test_rivers_with_a_second_symbol();
-        let first = rivers.resolve_key(&rivers.resolve_profile("BTCUSDT").unwrap());
-        let second = rivers.resolve_key(&rivers.resolve_profile("SECOND").unwrap());
+        let first = rivers.resolve_key(&rivers.resolve_profile("BTCUSDT").unwrap(), None);
+        let second = rivers.resolve_key(&rivers.resolve_profile("SECOND").unwrap(), None);
         let (fault_tx, _fault_rx) = mpsc::channel();
         (
             Boatyard::new(

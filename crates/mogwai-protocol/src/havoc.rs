@@ -309,22 +309,6 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             }
             Ok(())
         }
-        control::Divergence::FlowSurge {
-            rate_mult,
-            children_mult,
-            duration_ms,
-        } => {
-            if !rate_mult.is_finite() || !(1.0..=1000.0).contains(rate_mult) || *rate_mult == 1.0 {
-                return Err("FlowSurge rate_mult must be in (1, 1000]");
-            }
-            if !children_mult.is_finite() || !(1.0..=100.0).contains(children_mult) {
-                return Err("FlowSurge children_mult must be in [1, 100]");
-            }
-            if *duration_ms > control::MAX_DIVERGENCE_MS {
-                return Err("FlowSurge duration_ms must be <= 3600000");
-            }
-            Ok(())
-        }
         control::Divergence::FeeSurcharge { mult, window_ms } => {
             if *mult <= Decimal::ZERO || *mult > Decimal::from(100) {
                 return Err("FeeSurcharge mult must be in (0, 100]");
@@ -1067,51 +1051,69 @@ mod tests {
         }
     }
 
-    /// `FlowSurge` carries three independent bounds and had none of them
-    /// pinned. `rate_mult`'s is the odd one - an inclusive `[1, 1000]` range
-    /// MINUS the point 1.0, because a surge that multiplies by one is an armed
-    /// divergence that does nothing.
+    /// The generator arm's three bounds, and the refusals are the easy half.
     #[test]
-    fn validate_divergence_bounds_flow_surge() {
-        let surge =
-            |rate_mult: f64, children_mult: f64, duration_ms: u64| control::Divergence::FlowSurge {
-                rate_mult,
-                children_mult,
-                duration_ms,
-            };
-
-        // In range on every axis, including both inclusive edges.
-        for div in [
-            surge(1.000_001, 1.0, 0),
-            surge(2.0, 3.0, 1_000),
-            surge(1_000.0, 100.0, control::MAX_DIVERGENCE_MS),
-        ] {
-            validate_divergence(&div).expect("an in-range surge is valid");
-        }
-
-        // rate_mult: the excluded lower point, below it, above the ceiling,
-        // and non-finite.
-        for bad in [1.0, 0.999, 0.0, -1.0, 1_000.1, f64::NAN, f64::INFINITY] {
+    fn generator_arm_bounds_are_refused_at_the_edges() {
+        for bad in [0.999, 0.0, -1.0, 1_000.1, f64::NAN, f64::INFINITY] {
             assert_eq!(
-                validate_divergence(&surge(bad, 2.0, 0)),
-                Err("FlowSurge rate_mult must be in (1, 1000]"),
+                control::GeneratorArm::normalize(0, 1_000, bad, 2.0),
+                Err("generator rate_mult must be in [1, 1000]"),
                 "rate_mult {bad} must be refused"
             );
         }
-
-        // children_mult: inclusive at 1, so only below it and above 100 fail.
         for bad in [0.999, 0.0, -1.0, 100.1, f64::NAN, f64::INFINITY] {
             assert_eq!(
-                validate_divergence(&surge(2.0, bad, 0)),
-                Err("FlowSurge children_mult must be in [1, 100]"),
+                control::GeneratorArm::normalize(0, 1_000, 2.0, bad),
+                Err("generator children_mult must be in [1, 100]"),
                 "children_mult {bad} must be refused"
             );
         }
-
         assert_eq!(
-            validate_divergence(&surge(2.0, 2.0, control::MAX_DIVERGENCE_MS + 1)),
-            Err("FlowSurge duration_ms must be <= 3600000")
+            control::GeneratorArm::normalize(0, control::MAX_DIVERGENCE_MS + 1, 2.0, 2.0),
+            Err("generator duration_ms must be <= 3600000")
         );
+    }
+
+    /// The half that only exists because the arm is now IDENTITY.
+    ///
+    /// Two spellings that generate the same water must key the same river, or
+    /// ordinary use strands rivers against a cap that never evicts. The
+    /// multipliers are the dangerous axis: equivalent human inputs do not
+    /// produce equal floats, so identity is taken on the scaled integer rather
+    /// than on the float that produced it.
+    #[test]
+    fn equivalent_generator_arms_normalize_to_one_identity() {
+        // Accumulated rather than written: a scenario that builds a multiplier
+        // by adding steps lands one ulp away from the literal, which is the
+        // whole hazard. Asserted to differ FIRST, because a pair that happens
+        // to be bit-equal would make the equality below vacuous - and the
+        // obvious candidate, 11.0/10.0 against 1.1, is exactly that trap: those
+        // two are the same double and prove nothing.
+        let accumulated = 1.1 + 2.2;
+        assert_ne!(
+            accumulated, 3.3_f64,
+            "the two floats must really differ, or the equality below is vacuous"
+        );
+        assert_eq!(
+            control::GeneratorArm::normalize(0, 1_000, 3.3, 2.0).unwrap(),
+            control::GeneratorArm::normalize(0, 1_000, accumulated, 2.0).unwrap(),
+            "two spellings of one multiplier are one river"
+        );
+
+        // A request that changes no generated byte is not an arm at all, so it
+        // boards the same river as a passenger that asked for nothing.
+        for neutral in [
+            control::GeneratorArm::normalize(0, 0, 4.0, 4.0),
+            control::GeneratorArm::normalize(0, 1_000, 1.0, 1.0),
+        ] {
+            assert_eq!(neutral, Ok(None), "a neutral arm collapses to no arm");
+        }
+
+        // An arm whose window has closed is NOT neutral: it moved the warmup,
+        // the history and the generator's path-dependent state, so the water
+        // after it is not the water that never had it.
+        let expired = control::GeneratorArm::normalize(0, 1, 4.0, 4.0).unwrap();
+        assert!(expired.is_some(), "a short window is still an arm");
     }
 
     /// `FeeSurcharge` is the `Decimal` twin of the surge bounds, and was

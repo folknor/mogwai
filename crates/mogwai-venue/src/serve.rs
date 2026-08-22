@@ -185,6 +185,7 @@ async fn serve_async(
             seeds,
             regime: cfg.regime,
         },
+        run_start_ns,
         Arc::clone(&profiles),
     );
     // Boot projections. Both are advisory - warmup length and ring depth are
