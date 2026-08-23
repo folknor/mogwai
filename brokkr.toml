@@ -390,6 +390,81 @@ certifies = "complete"
 # matching nothing is a DEAD FILTER naming the block that declared it. The file
 # kept only its two source-hygiene scans, which never mentioned the tool, and is
 # `test_hygiene.rs`. An exemption removed beats an exemption re-checked.
+# The no-shouting family: the AGENTS.md rule that emphasis is carried by the
+# words and where they sit, never by all-caps. 5+ letters is the threshold: it
+# clears the great majority of acronyms (VM, RHS, CI, API, TOML, JSON, HTTP)
+# without an allowlist, while catching the words people actually shout. Known
+# coarseness, deliberate in both directions: `except` exempts the whole
+# physical line, so a line carrying both a backticked env var and genuine
+# shouting slips through (a false negative costs a missed nit, a false
+# positive costs a broken check in a tree that did nothing wrong), and a shout
+# built entirely of words under five letters never fires at all.
+[textlint_preset.no-shouting]
+# Escape hatch: put `shout-ok` in a comment on the offending line, or on one
+# of the two lines above it (a wrapped sentence pushes the caps off the line
+# the marker would naturally sit on).
+allow_marker = "shout-ok"
+allow_marker_above = 2
+except = [
+    # -- Machine text, matched by shape rather than by name. ---------------
+    #
+    # This is the load-bearing group. Env vars, sentinels and constants are
+    # legitimately capitalised and no allowlist could ever be finished, so
+    # exempt them by the context they appear in:
+    #
+    #   `RUSTFLAGS`   an inline code span - the single best signal, and the
+    #                 one to reach for when something is wrongly flagged
+    '`[^`]*[A-Z]{5,}',
+    #   $RUSTFLAGS / ${RUSTFLAGS} / %PATH%
+    '[$%]\{?[A-Z][A-Z0-9_]*',
+    #   RUSTFLAGS=... or RUSTFLAGS: ... (an assignment or a table cell)
+    '\b[A-Z][A-Z0-9_]{3,}\s*[:=]',
+    #   env!("RUSTFLAGS"), std::env::var("EDITOR"), getenv, os.environ
+    '\b(?:env!|env::var(?:_os)?|getenv|environ)',
+    #   URLs, and a bare HTTP request line.
+    'https?://',
+    '^\s*(?://[/!]?|\*|#+)?\s*(?:GET|PUT|POST|PATCH|DELETE|HEAD|OPTIONS)\s+/',
+    #
+    # SCREAMING_SNAKE_CASE needs no entry at all: `\b` does not break at `_`,
+    # so no run of 5+ caps in `REQUEST_TIMEOUT_SECS` is ever whole-word and
+    # the pattern never fires on it. Only single-word names are exposed, and
+    # the three rules above cover how those are actually written.
+
+    # -- Idiomatic section markers, not emphasis. --------------------------
+    '^\s*(?://[/!]?|\*|#+)?\s*(?:SAFETY|PANICS|ERRORS|INVARIANT|WARNING|DEPRECATED)\b',
+
+    # -- Acronyms and proper nouns that are legitimately 5+ letters. -------
+    # Short by design: prose acronyms are mostly 2-4 letters and clear the
+    # threshold for free. Bare env-var mentions that escape the shape rules
+    # above (a sentence naming RUSTFLAGS with no backticks) belong here too.
+    # The second alternation is this project's vocabulary: the venue name,
+    # instrument symbols, the GARCH model, and the root license filenames.
+    '\b(?:ASCII|HTTPS|README|LICENSE|SQLITE|POSIX|JSONL|MSRV|NOTICE|RUSTFLAGS|EDITOR|PAGER|VISUAL|LOGNAME|HOSTNAME|RUSTUP)\b',
+    '\b(?:MOGWAI|GARCH|BTCUSDT|ETHUSDT|SOLUSDT|COMMERCIAL-LICENSE)\b',
+    # The root convention files, named bare in prose without backticks, and
+    # FOOBAR, the placeholder symbol docs/presets.md's fenced example uses.
+    '\b(?:AGENTS|CLAUDE)\.md',
+    '\bFOOBAR\b',
+]
+
+# A sibling rule for Rust comments is owed but not yet landed: with
+# `region = "comment"` and this preset it would fire on roughly 3200
+# pre-existing lines across 191 files (measured 2026-08-23), so the comment
+# de-shouting is its own arc, and the rule lands with it.
+
+[[textlint]]
+name = "no-shouting-markdown"
+preset = "no-shouting"
+pattern = '\b[A-Z]{5,}\b'
+paths = ["**/*.md"]
+# notes/ is transient with no truth guarantee - de-shouting retired specs is
+# churn, so only durable prose is linted. research/ is vendored upstream.
+exclude = ["notes/**", "research/**"]
+# textlint has no markdown fence awareness, so exempt indented code blocks by
+# shape; a fenced block that trips the rule takes a shout-ok marker instead.
+except = ['^ {4,}\S', '^\t']
+message = "write the emphasis into the sentence; don't shout in all caps (shout-ok to allow)"
+
 [[textlint]]
 name = "no-brokkr-in-rust-source"
 pattern = 'brokkr'

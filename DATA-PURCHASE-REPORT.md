@@ -13,52 +13,52 @@ nothing durable may cite it.
 
 ## Money
 
-Owner policy, restated 2026-08-05: CREDIT-FIRST. The 125 dollars of
+Owner policy, restated 2026-08-05: credit first, always. The 125 dollars of
 Databento credit is spent as optimally as possible first; personal cash
-(roughly 100 more) is a CAN, argued case by case, put to the owner only on
+(roughly 100 more) is a can-be, argued case by case, put to the owner only on
 joint reviewer agreement, never a committed path.
 
 | | |
 |---|---:|
 | Databento credit | 125.00 |
-| Wave 1, the paired NQ/MNQ test, job GLBX-20260805-JUBCRPRLG8 | 24.06 |
-| Wave 2B July, the MNQ TBBO month, job GLBX-20260805-HAPEWPABKG | 73.41 |
+| Wave 1, the paired NQ/MNQ test, job `GLBX-20260805-JUBCRPRLG8` | 24.06 |
+| Wave 2B July, the MNQ TBBO month, job `GLBX-20260805-HAPEWPABKG` | 73.41 |
 | **Credit remaining (contingency, not re-buy capacity)** | **27.53** |
 
 Both purchases are delivered, hash-verified, ledger-bound
 (`analysis/databento-jobs.json`) and fully consumed by the protocol 10, 11
-and 12a landings. NOTHING further is authorized. The named next marginal
+and 12a landings. Nothing further is authorized. The named next marginal
 dollar is a ~30 dollar ES/MES buy so the MES preset stops being inherited
 faith - owner-gated, not urgent, recorded here since 2026-08-05.
 
 ## Standing verdicts that gate future buying
 
-- **NQ is NOT an MNQ proxy.** The wave 1 pair test FAILED under its frozen
+- **NQ is not an MNQ proxy.** The wave 1 pair test failed under its frozen
   preregistration (`notes/pair-test-preregistration.md`, still the live
   judge): mandatory P5 failed on `zero_change_frac`, the
   activity-tracking failure predicted in advance. Verdict artifact
   `analysis/databento-pair-verdict.json`, bound to job, hashes, prereg
   hash and harness commit; one run, final. Consequence: wave 2A (four NQ
-  months, 71.79) is PERMANENTLY SKIPPED and structurally locked in the
+  months, 71.79) is permanently skipped and structurally locked in the
   downloader's stage gate.
-- **Volatility-stratified window selection is REJECTED.** The
+- **Volatility-stratified window selection is rejected.** The
   sampling-frame experiment (`notes/sampling-frame-preregistration.md`)
   failed its preregistered association test on 19 months of BTCUSDT;
   contiguous recent months replaced regime-selected windows. Scope
   caveat that keeps being missed: only the rv-rank association was
   tested; the five-feature farthest-point selection was never on trial.
 - **`mnq06` (the June month, 70.11, personal cash) is priced but
-  deliberately NOT buy-whitelisted.** Its case must come from a decision
+  deliberately not buy-whitelisted.** Its case must come from a decision
   contract that does not exist; July's delivery must never become its
   unlock. Absence from the whitelist fails closed.
-- **Wave 3 (MNQ MBO, 54.52) is ALWAYS LAST and spec-gated**: it needs an
+- **Wave 3 (MNQ MBO, 54.52) is always last and spec-gated**: it needs an
   accepted implementation spec for where order-lifecycle evidence lands
-  in the venue (book, queue, cancellation dynamics) BEFORE purchase, plus
+  in the venue (book, queue, cancellation dynamics) before purchase, plus
   its own authorization. MBP-1 (44.64) is the fallback if order identity
   proves unneeded; MBP-10 rejected as dominated.
 - **The 12a verdict implicates the generator, not the evidence base** -
   `no-family-eligible` with arrival composition the loudest finding - so
-  protocol 12b requires NO new data. The blocking gap is generated-side.
+  protocol 12b requires no new data at all. The blocking gap is generated-side.
 
 ## The tools (all Python, permanently out of the Rust rewrite's scope)
 
@@ -68,7 +68,7 @@ faith - owner-gated, not urgent, recorded here since 2026-08-05.
   reachable path to `timeseries.get_range` or `batch.submit_job`; it
   cannot spend.
 - `analysis/databento_download.py` - the purchase tool. Dry-run default;
-  submission needs `--confirm` AND a cumulative `--max-dollars` cap;
+  submission needs both `--confirm` and a cumulative `--max-dollars` cap;
   fresh re-price at submit refusing above-cap or >10 percent drift;
   durable pre-POST intent with lag-aware reconciliation (it caught a real
   504 and adopted the job instead of double-buying); buys whitelisted to
@@ -81,16 +81,16 @@ faith - owner-gated, not urgent, recorded here since 2026-08-05.
 
 ## Traps already paid for - do not re-derive
 
-- The DBN side alphabet is B=buy, A=SELL, N=none
+- The DBN side alphabet is B=buy, A=sell, N=none
   (`research/dbn/rust/dbn/src/enums.rs`); reading B/S manufactures a
-  FAIL.
-- Binance monthly SPOT trades are SEVEN columns, headerless; the daily
-  FUTURES archives are six columns WITH a header. Assuming either schema
+  failure.
+- Binance monthly spot trades are seven columns, headerless; the daily
+  futures archives are six columns with a header. Assuming either schema
   for the other mis-parses every row.
 - The delivered CME csv echoes continuous labels (`NQ.v.0`) in the symbol
   column, so the minority-contract guard is blind there;
   `instrument_id` is the sharper witness.
-- Submit format flags are DECIDED and frozen by the wave 1 delivery:
+- Submit format flags are decided and frozen by the wave 1 delivery:
   `pretty_px = False`, `pretty_ts = False`, `map_symbols = True`. Format
   continuity with the only delivery ever consumed beats theoretical
   improvement.
@@ -118,7 +118,7 @@ own - were retired 2026-08-09 by owner ruling.
 ## Open items that survive the consolidation
 
 - The ~30 dollar ES/MES purchase: named, owner-gated, unscheduled.
-- Whether `zero_change_frac` should be DERIVED from the tick-to-price
+- Whether `zero_change_frac` should be derived from the tick-to-price
   ratio rather than fitted - the strongest cross-corpus finding of the
   original report (it tracks activity, not the instrument; provable for
   free across hundreds of Kraken tick grids). Generator-design question,
@@ -127,7 +127,7 @@ own - were retired 2026-08-09 by owner ruling.
   response: the per-instrument seams exist and are fitted static; making
   them respond to stress is a future spec with its own bump. Whether the
   delivered July month spans enough volatility range to fit it is
-  MEASURED from the delivered data first; buying range is a later
+  measured from the delivered data first; buying range is a later
   decision only if that measurement says it is missing.
 - The MNQ chart PNG (`docs/example-generated-bars.png` counterpart):
   cosmetic, needs a browser.

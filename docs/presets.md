@@ -2,13 +2,13 @@
 
 A symbol arrives and mogwai resolves its instrument knobs. The symbol may come
 from the run config, from a websocket binding a river, or from a history query -
-resolution is the same either way, and it is TOTAL: every wire-legal symbol
+resolution is the same either way, and it is total: every wire-legal symbol
 resolves to a shape, so nothing is refused for wanting a preset. Three presets
 ship inside the `mogwai` binary - no data directory, no network fetch, nothing
 outside the executable itself.
 
 A preset is a named bundle of instrument knobs, not an admission record. Presets
-make a symbol's river BETTER; they never decide whether it can be served.
+make a symbol's river better; they never decide whether it can be served.
 
 ## Listing and inspecting presets
 
@@ -57,7 +57,7 @@ symbol = "FOOBAR"
 preset = "MNQ"
 ```
 
-`[instrument]` is the DEFAULT overlay: it applies to every symbol this run
+`[instrument]` is the default overlay: it applies to every symbol this run
 resolves, including one no config mentions, so a `preset` written there becomes
 the bundle for the whole run. `[symbols.<SYM>]` is the same overlay shape
 applied to one symbol on top of it.
@@ -82,7 +82,7 @@ Two rules, both enforced at boot with a message that names the problem:
   section - `fees`, `margin`, `calendar` - the bundle leaves out. A key that is
   not an instrument field refuses boot by name. `[instrument.override]` is
   still the only way to reach a dotted path.
-- Overriding a DOTTED path the bundle does not set refuses boot, so a typo in
+- Overriding a dotted path the bundle does not set refuses boot, so a typo in
   the override table is caught rather than silently ignored. The message names
   the bundle that was chosen.
 
@@ -114,7 +114,7 @@ the MNQ knobs while remaining a different river and label from `MNQ`.
   their NQ-bar lineage.
 - **MES** - Micro E-mini S&P 500 future. Built as an override of the MNQ
   preset: same session calendar and margin shape, five dollars per index
-  point instead of two. That means MES BORROWS the fitted MNQ values - apart
+  point instead of two. That means MES borrows the fitted MNQ values - apart
   from the identity overrides (symbol, underlying, multiplier and start
   price), every fitted generator knob, quote seam and session curve is MNQ
   evidence, and the inherited corpus strings say so, so no MES corpus is
@@ -158,7 +158,7 @@ a quota to plan around.
 
 ## Funding decides which presets your run can serve
 
-A shape can only trade if its SETTLEMENT currency is funded in `[balances]`.
+A shape can only trade if its settlement currency is funded in `[balances]`.
 The rule lands in two places. A shape you configured is checked at boot: an
 unfunded one refuses the run rather than rejecting every buy minutes in. Every
 shipped preset is resolved at boot too, and one whose settlement currency is
@@ -167,7 +167,7 @@ landing on that shape is refused when it binds, with a message naming the
 symbol and the currency.
 
 This bites the shipped default. The default balances fund USDT only, which
-covers BTCUSDT and every unmatched symbol resolving through it, but NOT the
+covers BTCUSDT and every unmatched symbol resolving through it, but not the
 USD-settled MNQ and MES bundles. Fund USD in `[balances]` for a run whose
 consumers may ask for the index futures. The payoff is that a funds rejection on
 a served shape then means depletion and only depletion.

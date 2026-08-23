@@ -18,7 +18,7 @@ venue and no network involved:
 python3 analysis/plot_tape.py --gen --type bars --interval 1m --length 4d --seed 7 --open
 ```
 
-What mogwai generates is a TRADE stream - individual raw fills, at a cadence
+What mogwai generates is a trade stream, never bars - individual raw fills, at a cadence
 fitted to real trade archives. The bars above are only a rendering of it: 5,760
 one-minute windows aggregated from those trades so four days fit on a screen,
 none of them empty. Swap `--type bars --interval 1m` for `--type trades` to dump
@@ -84,7 +84,7 @@ cargo install --path crates/mogwai-cli              # from a checkout
 This build graph excludes `mogwai-adapter`, so it pulls no nautilus crates at
 all, and the fingerprint and instrument presets are embedded at compile time -
 the binary is self-contained, needing no data directory. `mogwai serve` runs one
-venue in the FOREGROUND for one run and owns no PID, log or config files: it
+venue in the foreground for one run and owns no PID, log or config files: it
 never consults the working directory, so pass `serve --config <path>` to use
 anything but the built-in defaults. There is no daemon mode and no `stop`
 subcommand - the launcher owns the lifecycle, reading the bound address from the
@@ -104,17 +104,17 @@ mogwai gen --help                  # dump a river offline, no venue involved
 mogwai man cli                     # read a bundled doc; bare `man` lists topics
 ```
 
-One venue is ONE RUN: many accounts, one ledger per account, on an ephemeral
+One venue is exactly one run: many accounts, one ledger per account, on an ephemeral
 loopback port. The account id is the discriminator - no account sees any other,
 and every socket presenting one account id acts on that account's ledger. The
 adapter alone opens two sockets, data and execution; they speak for one
 account, so anything they submit lands in that one shared ledger.
 
-The INSTRUMENT SET IS OPEN, and the venue does not gate on it: a symbol that
+The instrument set is open, and the venue does not gate on it: a symbol that
 arrives is served. If a tuned preset exists for it, that preset drives the
 river; if none does, the default shape is served under that symbol. So one run
 can serve many symbols - each gets its own river, and the config supplies the
-SHAPE a requested symbol resolves to rather than declaring the run's one
+shape a requested symbol resolves to rather than declaring the run's one
 instrument.
 
 ### Driving it from a nautilus live node
@@ -154,14 +154,14 @@ use nautilus_model::identifiers::AccountId;
 //    what keeps the venue alive; dropping it kills and reaps the process.
 let venue = launch(LaunchSpec {
     config: Some("run.toml".into()),
-    duration: Some(Duration::from_secs(600)), // SIM time, not wall time
+    duration: Some(Duration::from_secs(600)), // simulated time, not wall time
     stderr: StderrSink::Lines(Box::new(|line| tracing::info!("mogwai: {line}"))),
     ..LaunchSpec::default()
 })?;
 
-// 2. Both clients speak for ONE account against ONE ledger, so they take one
+// 2. Both clients speak for one account against one ledger, so they take one
 //    account id - nothing on the wire notices if they disagree - and `for_run`
-//    binds them to THIS run rather than to the address it happened to land on.
+//    binds them to this run rather than to the address it happened to land on.
 //    The port is ephemeral and is freed before the venue exits, so a consumer
 //    that only knows where to dial cannot tell its own run from whatever
 //    answers there next.
@@ -211,15 +211,15 @@ load-bearing rather than conventional:
 "Direct child" is load-bearing rather than stylistic: the venue arms
 `PR_SET_PDEATHSIG` against its immediate parent, so a shell, a `cargo run`, or a
 double fork in between wires the death watch to the wrapper and leaves a real
-orphan behind. The signal also tracks the parent THREAD, so spawn from a thread
+orphan behind. The signal also tracks the parent thread, not just the process, so spawn from a thread
 that outlives the run or the venue dies mid-run under a healthy launcher.
 `scripts/smoke.py` is this contract executed in Python, and is the reference to
 copy from.
 
 ## Documentation
 
-Split by subject rather than audience. `docs/` is how the venue is USED, and
-`reference/` is how it is BUILT and why - what you need in order to change it
+Split by subject rather than audience. `docs/` is how the venue is used, and
+`reference/` is how it is built and why - what you need in order to change it
 safely. Both are binding: what they say has to be true.
 
 Using it:

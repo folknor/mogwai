@@ -31,7 +31,7 @@ the same artifact.
      tests proving both ends serialize identical bytes.
    - **The serving and generation path** - river materialization, checkpoint
      positioning, the boatyard, the fill sweep, the arrival draw: a
-     MEASUREMENT, not an assertion, because these are all synthesis cost
+     measurement, not an assertion, because these are all synthesis cost
      rather than IO. The accepted cost of a change that knowingly trades
      throughput for capability is stated as an explicit bound the
      keep/revert verdict is read against.
@@ -44,16 +44,16 @@ the same artifact.
      tests that pin it.
 
    A brick whose load is unproven is not laid. Per gate, the spec contains
-   the EXACT command to run - copy-pasteable, flags and all, not "run the
+   the exact command to run - copy-pasteable, flags and all, not "run the
    relevant tests". The commands that exist today are:
    - `brokkr check` - gremlins, clippy and the tests, in the DEV profile and
-     scoped to changed files. It does NOT run the four `#[ignore]`d
+     scoped to changed files. It does not run the four `#[ignore]`d
      socket-backed adapter binaries (`adapter_smoke`,
      `data_client_transport`, `havoc`, `reconciliation`), and two
      regressions have shipped red through that gap.
-   - `brokkr check --gate` - the complete answer and the ONLY invocation that
+   - `brokkr check --gate` - the complete answer and the only invocation that
      runs those four. A spec touching `mogwai-adapter` names this one.
-   - `brokkr test -p <package> <NAME>` - a focused RELEASE-profile run with
+   - `brokkr test -p <package> <NAME>` - a focused release-profile run with
      `--include-ignored`, which is how every measurement instrument in the
      tree is invoked (the gate profile skips them by name for cost or
      environment reasons, and each stays runnable this way).
@@ -62,15 +62,15 @@ the same artifact.
    - `brokkr mogwai ... --bench/--hotpath/--alloc`, `brokkr results` and
      `brokkr sidecar` - the durable measurement record. A spec whose gate is
      a number names the invocation and the row it is compared against, and a
-     benched surface emits its WORK SIZE as a counter so a wall delta cannot
+     benched surface emits its work size as a counter so a wall delta cannot
      be confused with doing less work.
 
-   THE PROFILE SPLIT BITES: `brokkr check` runs tests in dev and `brokkr
+   The profile split bites: `brokkr check` runs tests in dev and `brokkr
    test` in release. A brick whose gate pins `debug_assertions` behaviour
    states the `#[cfg(debug_assertions)]` gating; a brick whose gate depends
    on optimization states that it is checked in release.
 
-   Every regression test a spec lays is BITE-CHECKED: revert the production
+   Every regression test a spec lays is bite-checked: revert the production
    fix as a text edit, observe the named failure, restore it as a text edit.
    A spec that names a new test names the failure it must produce against
    the unfixed code. If no command exists that can verify a gate
@@ -82,7 +82,7 @@ the same artifact.
    proceed/close threshold the reading is judged against - below it, the item
    closes as mispriced and the rewrite is never laid. The estimate motivates
    the spec; only the measurement justifies the landing. Every demand for a
-   measurement names the DECISION the result would change; no decision named,
+   measurement names the decision the result would change; no decision named,
    no measurement run.
 6. **A keep/revert path.** The implementation unit is one coherent, fully
    intrusive change that lands and is then kept or reverted on its gate
@@ -107,10 +107,10 @@ the same artifact.
    naming the property is proposing the same defect again.
 9. **A stopping rule.** The rebuild has a bounded blast radius. Where the
    teardown stops, and what is out of scope, is stated explicitly.
-10. **The standing references.** Every spec MUST cite, by path, this document
+10. **The standing references.** Every spec must cite, by path, this document
     (`reference/technical-implementation-spec.md`) as the contract it is
-    written against, AND the work item it was spawned from, if one exists.
-    A spec document is itself TRANSIENT: it lives with the other work items,
+    written against, and also the work item it was spawned from, if one exists.
+    A spec document is itself transient: it lives with the other work items,
     never in `docs/` or `reference/`, and it is deleted in the same commit
     that lands its implementation. What survives a landing is the commit
     message, the tests and whatever durable prose the landing updated - so a
@@ -129,12 +129,12 @@ the same artifact.
   abstractions earn no protection from age; shared writer abstractions and
   generic reuse are not goals. Correctness and maintainability of the *result*
   still hold.
-- **Implementation effort is unbounded; RUNTIME COST IS NOT.** A multi-hour
+- **Implementation effort is unbounded; runtime cost is not.** A multi-hour
   computation the spec proposes is presumptively a defect to design out before
   it is run, not a budget to provision for. Bit-exactness toward the
   Python-era committed artifacts is not an obligation and has not been one
   since that program closed: a change that legitimately moves an artifact
-  RE-BLESSES it knowingly in the same landing, and never widens an
+  re-blesses it knowingly in the same landing, and never widens an
   exact-equality gate into a tolerance to keep an old blessing alive. What
   replaces it is determinism per binary plus green statistical gates.
 - **Owner attention is the scarcest input.** A spec presents a

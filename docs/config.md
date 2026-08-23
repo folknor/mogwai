@@ -11,14 +11,14 @@ materialized on first read; none is warmed before readiness, so the first reques
 to name a river waits for that river's whole warmup span to be generated.
 `/clock` names the resulting `data_origin_ns` and `warmup_ns` and answers on the
 run's clock, taking no parameters.
-`/trades` and `/quotes` refuse a start below the floor or beyond the RUN
-PRESENT, and clamp an end past it. They do not refuse an unfamiliar symbol:
+`/trades` and `/quotes` refuse a start below the floor or beyond the run
+present, and clamp an end past it. They do not refuse an unfamiliar symbol:
 resolution is total, so any wire-legal label names a river this run will serve.
 What they still refuse with `400` is a label that is not a legal symbol, a
 shape this run's `[balances]` cannot fund, a shape the resolved configuration
 makes invalid, and a run that has already materialized its river cap.
 
-Symbols are LABELS and match case-exactly on the wire, even though
+Symbols are labels and match case-exactly on the wire, even though
 `[symbols.*]` keys and preset names resolve case-insensitively - `mnq` and
 `MNQ` are two distinct rivers. The readiness record
 names no symbol, so a consumer takes the labels it wants from its own
@@ -50,7 +50,7 @@ unpaced delivery, not a stopped clock - the underlying sim time still advances
 at wall rate. `venue_heartbeat_ms` sets the venue-originated liveness
 cadence; zero disables it.
 
-The heartbeat period is SIMULATED, so `speed` divides it: 1000 ms at speed 100
+The heartbeat period is simulated time, so `speed` divides it: 1000 ms at speed 100
 is one beat per 10 ms of wall time. It is floored at 5 ms of wall time, whatever
 the configuration says. The cost of a beat - a serialization, a channel send, a
 writer wake - does not shrink with `speed`, so without the floor a high speed
@@ -72,8 +72,8 @@ reconnect a continuation - kill a worker holding a position, start it again,
 find the book where it was left. Set it true when a batch reuses ids across
 independent experiments.
 
-`account_ttl_ms` (default `0`, meaning never) is how long an UNATTENDED account
-survives before the venue collects it. While unattended an account is FROZEN: it
+`account_ttl_ms` (default `0`, meaning never) is how long an unattended account
+survives before the venue collects it. While unattended an account is frozen: it
 is not swept, its positions do not mark, its funding does not accrue and its
 policy cannot liquidate it. That is deliberate - mogwai exists to exercise a
 consumer's live path, not to run an account nobody is trading - and it means a run
@@ -81,31 +81,31 @@ spanning a disconnect has a gap in its risk history. Set the TTL longer than the
 slowest restart any consumer performs; a collected account is gone, and the next
 socket presenting that id opens a clean ledger.
 
-The span is WALL time rather than simulated, because a frozen account has no
+The span is wall time rather than simulated, because a frozen account has no
 simulated clock: the boat carrying one wound down with the last socket.
 
 Two things happen when a socket returns to a frozen account. Every surviving
-order resumes scanning from the RETURNING boat's clock, since the departed one's
+order resumes scanning from the returning boat's clock, since the departed one's
 frontier sits in the new cursor's future. And whatever the account held off the
 river the new socket bound - resting orders, positions - is retired, because the
 returning connection can neither see nor close it.
 
-While a consumer is ATTACHED, an order on a symbol no cursor is reading is
+While a consumer is attached, an order on a symbol no cursor is reading is
 cancelled rather than left resting: nothing could ever fill or expire it, and
 the consumer is there to be told.
 
 History synthesis runs four `/trades` or `/quotes` requests at a time per run. A
-slot is held until the response has been WRITTEN, not merely until synthesis
+slot is held until the response has been written, not merely until synthesis
 finishes, so the ceiling bounds resident response bytes as well as CPU - near
 41 MB across four full pages.
 
-**A fifth request WAITS for a slot rather than being refused**, for up to 30
+**A fifth request waits for a slot rather than being refused**, for up to 30
 seconds. The cap bounds resident pages, and a waiter holds no page, so waiting
 costs the bound nothing - while refusing cost the consumer a great deal. This is
 not a preference about politeness: a nautilus host's historical-response types
 carry no error channel, so an adapter's only alternative to an unresolvable hang
-is to resolve the request EMPTY and log why. A refused history request therefore
-reaches a strategy as a QUIET WINDOW, indistinguishable from a tape that
+is to resolve the request empty and log why. A refused history request therefore
+reaches a strategy as a quiet window, indistinguishable from a tape that
 genuinely printed nothing, and the run reasons about a market it was never
 shown.
 
@@ -142,16 +142,16 @@ is how often the run re-checks its resting limits against the tape; the sweep
 is the only thing that ever fills a resting limit or delivers a market order's
 slipped fill unsolicited, so boot refuses a zero interval.
 
-Config does NOT declare the run's instrument. A run serves whatever symbol a
-consumer asks for; what config supplies is the SHAPE each requested label
+Config never declares the run's instrument. A run serves whatever symbol a
+consumer asks for; what config supplies is the shape each requested label
 resolves to, and one boot label so a run has a river under a boat before it
 announces readiness.
 
 Instrument resolution has three layers: a preset bundle, default knobs from
 `[instrument]`, then knobs from the matching `[symbols.<SYM>]` table. This
-resolution is TOTAL - a label with no `[symbols.*]` table and no matching preset
+resolution is total - a label with no `[symbols.*]` table and no matching preset
 name resolves `[instrument]` over the operator's `preset` or over BTCUSDT.
-The top-level `symbol` names the DEFAULT LABEL - what a request that carries no
+The top-level `symbol` names the default label - what a request that carries no
 symbol binds - and nothing else; it receives no boat and no early warmup. If
 absent, the default bundle's BTCUSDT symbol stands. An explicit per-symbol `preset` beats a default
 `[instrument]` preset, which beats a preset matching the symbol, which beats the
@@ -159,10 +159,10 @@ BTCUSDT default. Symbol-table lookup is ASCII case-insensitive, and boot refuses
 two table keys that differ only in case. `[instrument].symbol` is refused:
 overlays carry knobs, while the top-level key carries the default symbol.
 
-Boot resolves and validates every shape the config NAMES - the default symbol and
+Boot resolves and validates every shape the config names - the default symbol and
 every `[symbols.*]` table - funding currencies included, and refuses startup
 over any of them. It additionally resolves each shipped preset and the
-unconfigured fallback, but only RECORDS an unfundable settlement currency there
+unconfigured fallback, but only records an unfundable settlement currency there
 rather than refusing: barring a BTCUSDT-only operator over an unfunded USD
 would make the venue harder to launch than to use. A request landing on one of
 those barred shapes is refused at bind or at the history poll instead, naming
@@ -182,22 +182,22 @@ A `[symbols.NAME.class]` table names one of five `kind` values, and the choice
 decides how holding the instrument moves the ledger rather than merely how it is
 labelled:
 
-- `spot` with `base` and `quote`. Credits the base asset as a CURRENCY BALANCE,
+- `spot` with `base` and `quote`. Credits the base asset as a currency balance,
   which is right for crypto spot where the base is money you can spend.
 - `equity` with `currency` and an optional `multiplier` (one share per contract
-  by default). Held as a POSITION, paid for in cash. Not a spot pair with the
+  by default). Held as a position, paid for in cash. Not a spot pair with the
   ticker as its base: that puts shares in the ledger as money.
 - `future` with `underlying`, `settlement_currency`, `multiplier` and
   `asset_class`. Whole contracts only.
 - `perpetual`, the same fields plus `funding_interval_ns` (eight hours by
-  default) and `funding_rate`, the zero-premium INTEREST a LONG pays a SHORT
+  default) and `funding_rate`, the zero-premium interest a long pays a short
   each interval. Negative reverses the direction. Optional `index_symbol`
-  names another symbol whose last mark is the INDEX; when that mark is
+  names another symbol whose last mark is the index; when that mark is
   available the live rate is `clamp(interest + (mark - index) / index,
   +/- funding_clamp)`. `funding_clamp` of zero (the default) means no cap.
   Absent an index mark the premium is zero and the rate is exactly
   `funding_rate`, which is also what a perp-only venue produces: reading an
-  index never spends a river nobody asked for. Sizing may be FRACTIONAL,
+  index never spends a river nobody asked for. Sizing may be fractional,
   unlike a listed future, because that is what crypto perpetuals actually do.
 - `inverse`, coin-margined: `settlement_currency` is what moves and
   `quote_currency` is what the contract is priced in. The two must differ.
@@ -210,14 +210,14 @@ requirement moves with the price - ten-times leverage is `initial = 0.1`. That i
 the leveraged account forex, crypto margin and Reg-T equity margin need.
 
 `[regime]` selects the single run-wide market regime. `[balances]` is the
-OPENING balance every account is funded with when its consumer names none - not
+opening balance every account is funded with when its consumer names none - not
 the balance of one shared ledger. A consumer that wants its own size opens an
 account with `POST /accounts`, naming an id and its balances; a connection that
 never does is served under the default account on these values.
 `oms_type` is `netting` (the default) or `hedging`; the venue serves both and
 refuses a consumer over neither, and `/health` reports the run's choice.
 
-`account_id` names the DEFAULT account - the one a connection naming none is
+`account_id` names the default account - the one a connection naming none is
 served under - and defaults to `MOGWAI-001`. Every socket may name its own with
 `/ws?account=`, and `GET /account?account=` reports whichever ledger it names,
 so this selects a default rather than declaring the venue's one account. Set it
@@ -225,17 +225,17 @@ because the consumer asserts it: a nautilus host holds an account of its own
 naming and compares it against what the venue reports, so a venue insisting on
 its own label is a venue that host cannot use.
 
-WHO OWES AN ACCOUNT ID, stated as the usage contract it is, because the answer
+Who owes an account id is stated here as the usage contract it is, because the answer
 differs by how you run the venue and the venue cannot tell which you meant.
 
-- A SHARED VENUE - one `mogwai serve` whose address you hand to several consumers
-  at once - REQUIRES every consumer to name its own account. This is on you, not
-  on the venue: an id identifies a TRADER, and two consumers presenting one id ARE
+- A shared venue - one `mogwai serve` whose address you hand to several consumers
+  at once - requires every consumer to name its own account. This is on you, not
+  on the venue: an id identifies a trader, and two consumers presenting one id are
   one trader as far as the venue can tell. It will hand the account to whichever
   connected most recently, which is the same mechanism that lets a dropped consumer
   reconnect to its own book. Leave them all on the default and they will take
   each other's ledger in turn.
-- AN EPHEMERAL VENUE - spawned for one run, dying with the consumer that owns it -
+- An ephemeral venue - spawned for one run, dying with the consumer that owns it -
   owes nothing. One connection has nobody to collide with, so naming an id would
   be ceremony. This is what the default exists for.
 
@@ -246,7 +246,7 @@ the second dial disconnect the first. Sockets presenting the same callsign
 coexist; a different one takes the ledger over and closes every incumbent
 socket.
 
-Absent means EVICT, on both sides. A socket that names no callsign has made no
+Absent means evict, on both sides. A socket that names no callsign has made no
 claim to be the incumbent, so it displaces whoever is there and is displaced in
 turn - which is exactly what every socket did before callsigns existed. Coexisting
 is therefore opt-in, and the safe reading is what you get by saying nothing.
@@ -275,7 +275,7 @@ load costs a line.
 
 ## Account policies
 
-A connecting consumer may name a RISK POLICY, which the venue ENFORCES. This is
+A connecting consumer may name a risk policy, which the venue itself enforces. This is
 a risk-policy layer, not a funded-account feature: a live venue has the same
 machinery. A rule is a triple - what it measures, on what basis, and what it
 does on breach - and two breach actions cover the known cases:
@@ -312,7 +312,7 @@ hedging, the larger of the two sides. Working orders count; reduce-only does
 not, because a reduce-only leave cannot grow a side.
 
 `GET /account` publishes the thresholds, remaining budgets, the position cap
-and any breach for the EVALUATOR. A strategy that ended flat having spent most
+and any breach for the evaluator. A strategy that ended flat having spent most
 of its budget is a different result from one that never came close.
 
 ## The instrument class
@@ -360,7 +360,7 @@ still means depletion and only depletion.
 ### Equity, and the conventions that go with it
 
 `kind = "equity"` takes `currency` and an optional `multiplier` (one share per
-contract, on every venue that lists shares). A share is a POSITION and never a
+contract, on every venue that lists shares). A share is a position and never a
 currency balance: buying it debits the whole notional and credits shares, which
 is what makes short sales, settlement periods and round lots expressible at all.
 
@@ -376,13 +376,13 @@ settlement_ns = 172800000000000   # T+2, held unsettled for two days of sim time
 ```
 
 `lot_size` (default `1`, meaning odd lots are accepted) governs what may be
-SUBMITTED. It is deliberately not `size_increment`, which stays at one share:
+submitted. It is deliberately not `size_increment`, which stays at one share:
 a partial fill legitimately leaves an odd-lot remainder that the grid still has
 to represent.
 
-`borrowable` is the LOCATE. Absent means the venue models no borrow constraint;
+`borrowable` is the locate. Absent means the venue models no borrow constraint;
 `0` states a name nobody will lend, and any other value caps how short the
-account may go. It is checked against the account's NET position in the symbol.
+account may go. It is checked against the account's net position in the symbol.
 
 `settlement_ns` holds sale proceeds unspendable for that span. The money is
 credited immediately - it is the account's - and appears as `locked` on the
@@ -390,10 +390,10 @@ balance row until it settles, which is what `T+N` means to a strategy. It is a
 fixed sim span rather than N sessions, so a weekend does not stretch it; a
 preset wanting the session-counted form owes a calendar-aware successor.
 
-**Cash account or margin account.** An equity with NO `[symbols.X.margin]` table
-is a CASH account: it pays the full notional on a buy and may not sell short at
+**Cash account or margin account.** An equity with no `[symbols.X.margin]` table
+is a cash account: it pays the full notional on a buy and may not sell short at
 any price, which is refused by name rather than as a funding shortfall. Give the
-symbol a margin policy with `basis = "notional"` and it becomes a MARGIN
+symbol a margin policy with `basis = "notional"` and it becomes a margin
 account - `initial = "0.5"` and `maintenance = "0.25"` is Reg-T. It then posts a
 fraction of the notional and borrows the rest, so the settlement balance goes
 negative by the loan while the shares sit on the other side of it, and the
@@ -437,7 +437,7 @@ open, which is the crypto case and the default.
 
 ## Presets
 
-A REQUESTED symbol selects a committed preset of the same name, or BTCUSDT when
+A requested symbol selects a committed preset of the same name, or BTCUSDT when
 unmatched - so `?symbol=MNQ` gets the index-future bundle from a config that
 never mentions MNQ.
 An explicit `preset = "MNQ"` in either overlay takes precedence and serves that
@@ -454,7 +454,7 @@ applied to each boat's own ring; the remaining settings are run-wide:
 `exec_held_budget_bytes`, `admission_lane_frames`,
 `pending_command_acts`, and `global_pending_command_acts`.
 
-`zero_speed_stall_ms` is GONE and a file still naming it is refused. It set how
+`zero_speed_stall_ms` is gone and a file still naming it is refused. It set how
 long an unpaced tape parked waiting for its slowest subscriber to catch up, and
 nothing does that any more: parking on ring occupancy let one slow passenger
 pace a boat other accounts were sharing. A passenger that cannot keep up is now
@@ -468,7 +468,7 @@ account, tape-cap, subscription, or transport-profile configuration keys.
 
 `AdmissionRejected` carries `retryable`, and it is the field to key on rather
 than the reason text. Every refusal the venue issues today sets it `true`, and
-that is the point: an admission refusal means the venue was FULL, not that it
+that is the point: an admission refusal means the venue was full, not that it
 said no, and stating that as data rather than as prose is what lets a consumer
 act on it. A refusal that is genuinely not retryable would set it `false`, and
 absent - a venue predating the field - decodes as `false`, so the safe reading is
@@ -495,7 +495,7 @@ to be finite and non-negative; it is intentionally not capped at half
 `quoted_width`, because the displayed BBO is one level and an aggressive parent
 may print beyond the touch. The two quantities remain independent calibration
 seams. The default `fanout_depth` is 1,048,576. At
-boot, a custom value should exceed one wall second of BASELINE projected frames:
+boot, a custom value should exceed one wall second of baseline projected frames:
 `children_mean / mean_event_duration_s * speed`.
 An armed flow surge can exceed that baseline. Under the measured maximum surge,
 the default holds only 0.114 wall seconds - longer than the 0.030 the previous
@@ -515,7 +515,7 @@ speed uses the configured default. Speed is finite and non-negative, capped at
 A different quantized speed places a second boat on the same river. Two
 sockets on one account cannot ride two cadences of one river: that would give
 the ledger two clocks, and the second upgrade is a `400` naming the sitting
-speed. The one-cadence rule belongs to the ACCOUNT and holds for as long as any
+speed. The one-cadence rule belongs to the account and holds for as long as any
 of its passengers is riding that river. Once the last of them has gone the
 account may take the river at a new cadence, and no other passenger of that
 account has to disconnect for it. Duration is simulated milliseconds from

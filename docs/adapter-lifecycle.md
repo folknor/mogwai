@@ -5,7 +5,7 @@ This page uses `client` only for nautilus's inherited adapter objects.
 `mogwai-adapter` ships an `ExecutionClient`/`DataClient` pair a nautilus host
 registers for the `MOGWAI` venue. Both are ordinary nautilus components, and a
 host that drives them through the standard kernel path already satisfies
-everything below. This page exists because ONE of these requirements is a
+everything below. This page exists because exactly one of these requirements is a
 refusal rather than a warning, and a host assembling its clients by hand can
 trip it.
 
@@ -22,9 +22,9 @@ This is not a style preference, and it is not a guard that can be relaxed. The
 sink is nautilus's own `ExecutionEventEmitter`, and two of its properties
 combine badly:
 
-- The emitter derives `Clone` and owns its sender BY VALUE. The client clones
+- The emitter derives `Clone` and owns its sender by value. The client clones
   its execution context into the websocket pump at connect time, so whatever
-  sender state exists at that instant is FROZEN into the pump for the life of
+  sender state exists at that instant is frozen into the pump for the life of
   the connection. A sender installed afterwards never reaches it.
 - `send_order_event` on an emitter with no sender writes a `log::warn!` and
   returns. There is no error and no return value to check.
@@ -37,7 +37,7 @@ and then never hear another word. Refusing the connection is the only way this
 adapter can make that condition visible, so it refuses.
 
 `start()` is where the sender is resolved, because nautilus keeps it in a
-THREAD-LOCAL on the runner's thread (`EXEC_EVENT_SENDER` in
+thread-local on the runner's thread (`EXEC_EVENT_SENDER` in
 `nautilus_common::live::runner`) rather than in a shared cell. That is also why
 the adapter cannot simply resolve it lazily inside `connect()`: an async fn may
 already be polled on a different thread, where the slot is empty. `connect()`
@@ -69,10 +69,10 @@ client. Three things stop that permanently, and each writes one log line:
   absent callsign. Redialling would evict the claimant in turn, forever, so the
   client stops.
 
-Everything else is a transport event and is redialled, INCLUDING any other WS
+Everything else is a transport event and is redialled, including any other WS
 1000. That matters because 1000 is the ordinary code for any graceful close: a
 proxy retiring an idle socket sends it, and so does a venue restarting. The
-adapter classifies on the close REASON (`mogwai_protocol::close::classify`), not
+adapter classifies on the close reason (`mogwai_protocol::close::classify`), not
 on the code, and a reason it does not recognize is never read as completion.
 
 **The log line distinguishes all three.** The venue announces a finished run
@@ -91,7 +91,7 @@ is on the socket. If the socket dies in that window, the frame is never written.
 **The adapter does not replay those commands onto the next connection.**
 Re-submitting orders across a reconnect is a policy call your host owns, not one
 a venue adapter should make silently on your behalf. What the adapter guarantees
-instead is that you are TOLD: every accepted-but-unwritten order command is
+instead is that you are told: every accepted-but-unwritten order command is
 reported through the same synthesized rejection as any other transport failure -
 an `OrderRejected` for a submit (every leg, for a group), an
 `OrderModifyRejected` for a modify, an `OrderCancelRejected` for a cancel - with

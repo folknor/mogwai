@@ -23,8 +23,8 @@ copies). Profiles: `deep` (gpt-5.6-sol, xhigh, read-only) and `build`
 (gpt-5.6-terra, medium, workspace-write). It replaced the old
 `scripts/codex-*.py` wrappers.
 
-**Always get permission from the user before launching subagents - ASK FIRST,
-EVERY TIME.** This is not satisfied by the user approving the underlying task.
+**Always get permission from the user before launching subagents - ask first,
+every time.** This is not satisfied by the user approving the underlying task.
 "Yes, fix the bug" authorizes the work, NOT the fan-out: spawning Agent/Task
 subagents (Explore, general-purpose, fork, anything) is a separate decision the
 user makes explicitly. Before any `Agent`/`Task` launch, stop and ask in chat -
@@ -37,7 +37,7 @@ user invokes by name and which carries its own standing authorization.
 
 Agent coordination rules:
 - Each agent gets exclusive ownership of specific files. No two agents touch the same file.
-- Agents must read their target file FIRST. Do not replace existing code with placeholders or stub it out.
+- Agents must read their target file first, before anything else. Do not replace existing code with placeholders or stub it out.
 - Agents must NOT run `brokkr` or `cargo`. The orchestrator validates between agents.
 
 Audit protocol:
@@ -70,7 +70,7 @@ by measuring more. The standing corrections:
 - **A rendered chart, eyeballed by the owner, is a standing gate** for
   any change to tape generation. It is the cheapest gate available and
   the only one that catches what statistics cannot see.
-- **The budget is MINUTES of owner attention at real forks.** Autonomy
+- **The budget is minutes of owner attention at real forks.** Autonomy
   that consumes more of the owner than it saves is worse than none.
   Do not manufacture forks; do not present menus where a
   recommendation suffices; when the owner is depleted, park cleanly.

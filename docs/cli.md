@@ -3,7 +3,7 @@
 `mogwai` runs one foreground venue for one run. It owns no PID, log, or
 configuration files. Logs go to stderr; `RUST_LOG` selects the tracing filter.
 
-`serve` binds the HTTP and WebSocket endpoint on `127.0.0.1` and an EPHEMERAL
+`serve` binds the HTTP and WebSocket endpoint on `127.0.0.1` and an ephemeral
 port. Neither half is configurable: there is no `--addr`, no way to name a port,
 and no way to serve another interface. The kernel allocates the port, so two
 concurrent runs on one machine cannot collide on a shared default and cannot be
@@ -12,7 +12,7 @@ because the venue models latency on the sim axis and runs on the same machine as
 its consumer.
 
 The endpoint therefore has to be learned rather than assumed. On boot the venue
-writes ONE line of JSON to STDOUT - the version 8 `ReadyRecord`, carrying
+writes a single line of JSON to `stdout` - the version 8 `ReadyRecord`, carrying
 `version`, `addr`, `pid`, `run_seed`, `data_origin_ns`, `run_start_ns`,
 `run_duration_ns`, `warmup_ns`, `reset_account_on_reconnect`, `account_ttl_ms`
 and `version_string` - and in practice that is the only thing it ever writes
@@ -45,7 +45,7 @@ A run retains at most 256 materialized rivers and never evicts them. This is an
 operational bound for trusted consumers belonging to the run's owner, not a
 hostile-consumer defence.
 
-A CONSUMER READS ITS HISTORY OVER ITS OWN SOCKET, not over these routes. Send
+A consumer reads its history over its own socket, never over these routes. Send
 `QueryHistory` with a `request_id` and a `kind` of `Trades` or `Quotes`; the
 venue answers a `HistoryPage` carrying that `request_id`, one bounded page of
 rows, the session's `cutoff`, and a `continuation` to hand back for the next
@@ -60,7 +60,7 @@ and a poll naming a symbol names none of them - a passenger reading surged water
 would backfill the clean river's prints and fold bars from a market it is not in.
 
 To splice a backfill onto live: start buffering the live frames your socket is
-already receiving BEFORE you send the first `QueryHistory` - a frame can arrive
+already receiving before you send the first `QueryHistory` - a frame can arrive
 between your decision to backfill and the command reaching the venue - then,
 once the session completes, drop buffered rows of that kind at or below `cutoff`
 and keep the rest. That admits overlap and forbids gaps, which is the right way
@@ -77,15 +77,15 @@ has not promised.
 the path says so because prose cannot: a route that kept its old spelling would
 have gone on answering a consumer plausibly while its meaning changed
 underneath. They both require
-`symbol`; `start`, `end` and `limit` are optional. They are bounded by the RUN
-CLOCK, taken as one snapshot when the request is admitted and consulting no boat.
+`symbol`; `start`, `end` and `limit` are optional. They are bounded by the run
+clock alone, taken as one snapshot when the request is admitted and consulting no boat.
 An omitted end is clamped to it and so is a stated one - an explicit `end` is a
 bound on the window, never permission to cross the run present - and a `start`
 above it, or below the tape origin, is refused with HTTP 400. Read `GET /clock`
 once and pass its `venue_now_ns` as `end` on every page of a paginated window, or
 the window grows as you read it.
 
-DO NOT WARM A PASSENGER FROM THEM. They serve the UNARMED river of a label, on
+Never warm a passenger from them. They serve the unarmed river of a label, on
 the run clock, and three things follow that a consumer must not inherit: a
 passenger carrying a generator arm is on different water entirely; a passenger on
 a slow boat is behind the run clock, so these routes can hand it rows that are
@@ -100,7 +100,7 @@ serve past the run present is what keeps a strategy from reading its own
 future.
 
 A history poll materializes the named river, so the only refusals left are
-about the SHAPE rather than about the symbol being unknown: a label that is not
+about the shape rather than about the symbol being unknown: a label that is not
 a legal symbol, a shape whose settlement currency this run does not fund, a
 shape the resolved configuration makes invalid, and an exhausted river cap.
 Each is a 400 naming its reason.
@@ -108,7 +108,7 @@ Each is a 400 naming its reason.
 `GET /clock` takes no parameters and always answers on the run's clock:
 `venue_now_ns` is the affine map read at the wall, and `data_origin_ns` and
 `warmup_ns` are venue facts identical for every river. It took `symbol` and
-`speed` and answered on a named river's boat, and both are now REFUSED with a
+`speed` and answered on a named river's boat, and both are now refused with a
 400 rather than ignored - a route that cannot tell who is asking must not report
 whether a boat exists, what cadence it runs, or how far it has delivered, since
 none of that is knowledge a caller has about its own connection. Your own
@@ -159,16 +159,16 @@ The prose remains because a launcher in another language still has to implement
 it.
 
 Four details of that guard are worth stating, because a caller writes code
-against each and cannot see any of them from the signature. Dropping it BLOCKS -
+against each and cannot see any of them from the signature. Dropping it blocks -
 it signals the owning thread, which kills and reaps the child, and joins it - but
 the cost is a signal round trip, measured at a few hundred microseconds against a
-healthy venue, NOT the 200 ms interval at which the owner polls for a venue that
+healthy venue, never the 200 ms interval at which the owner polls for a venue that
 ended on its own. Those are different clocks: the shutdown channel disconnects
 when the guard drops and the owner wakes on that at once, so no teardown ever
 waits out a poll window. Sub-millisecond is short enough to drop on an async
 worker; what no launcher can bound is a venue that refuses `SIGKILL`, and a
 caller for whom that matters drops the guard off its reactor. `shutdown()` reports
-a venue that would NOT die - a failed signal or a failed reap comes back as
+a venue that would not die - a failed signal or a failed reap comes back as
 `LaunchError::Teardown`, so the "shut it down and report a failure to do so"
 check callers write is real, and a caller that ignores it may launch a
 replacement into an address the old venue still holds. `exited()` records the
@@ -187,7 +187,7 @@ then is the readiness read released by the kill rather than by the timeout.
 The venue otherwise inherits the launcher's environment. `LaunchSpec::env` sets
 variables on top of it, and the one that usually wants setting is `RUST_LOG`: the
 venue's `mogwai=info` default applies only when `RUST_LOG` is unset, so a caller
-that READS the venue's log has its filter chosen by whatever the surrounding
+that reads the venue's log has its filter chosen by whatever the surrounding
 process exported. Pin it rather than inherit it.
 
 The launcher starts `mogwai serve` as its direct child with stdout captured,
@@ -203,7 +203,7 @@ the process exits successfully; otherwise the launcher terminates and reaps it.
 Two properties of that parent-death handling decide whether a launcher is
 written correctly, and neither is guessable from the outside.
 
-`PR_SET_PDEATHSIG` fires on the death of the parent THREAD, not the parent
+`PR_SET_PDEATHSIG` fires on the death of the parent thread, not the parent
 process. A launcher that spawns the venue from a worker thread and then lets
 that thread finish gets its venue terminated mid-run while the launcher itself
 is perfectly healthy. Spawn from a thread that outlives the run - the main
@@ -212,10 +212,10 @@ scale, spawning from a short-lived pool task is the natural thing to write and
 the wrong thing to write.
 
 The venue refuses to start if its launcher is already gone. `--launcher-pid PID`
-is how it knows: told the launcher's own pid, it checks it still HAS that parent
+is how it knows: told the launcher's own pid, it checks it still has that parent
 before serving, and exits nonzero otherwise. The shipped launcher always passes
 it; a launcher in another language should too. Without it the venue can only
-notice a launcher that dies DURING its startup - comparing its parent before and
+notice a launcher that dies during its startup - comparing its parent before and
 after arming the signal - which is blind to one already gone before the first
 instruction ran, and that is the case a launcher that spawns and exits produces
 every time.
@@ -232,30 +232,30 @@ closes with no line - so no special handling is needed for them.
 
 ## Which run is at an address
 
-`GET /health` reports `run_seed`, identifying the RUN rather than the process.
+`GET /health` reports `run_seed`, identifying the run rather than the process.
 
 A port identifies nothing over time. It is ephemeral, and this venue frees it
-BEFORE it exits: a declared completion stops the accept loop first, then drains
+before it exits: a declared completion stops the accept loop first, then drains
 live passengers for up to the shutdown grace, so the address is available while
 the process is still alive. A consumer watching for child exit sees nothing
 during that window, and a consumer that only knows where to dial cannot tell its
 own run from whatever answers there next.
 
-THAT DRAIN COVERS PASSENGERS, and saying so is not redundant: an
+That drain covers passengers, and saying so is not redundant: an
 upgraded connection stops being an HTTP connection at the 101, so a venue that
 waited only on its accept loop would consider itself drained while passengers were
 still mid-frame - and it did, which is how a completed run's `RunComplete` and
 its WS 1000 close went missing on a loaded host, leaving the peer with a reset
-instead of an announcement. A DECLARED COMPLETION now waits for the passengers
+instead of an announcement. A declared completion now waits for the passengers
 themselves, inside the same grace.
 
-A SIGNAL DOES NOT, and that is the deliberate difference. A signal means the
+A signal does not, and that is the deliberate difference. A signal means the
 launcher ended the run rather than the run completing, so no `RunComplete` is
 published and nothing tells a passenger to end; waiting for one would idle out
 the whole grace on any venue with a socket attached. A signalled venue takes its
 sockets with it.
 
-A venue whose live passengers do NOT drain within that grace exits NONZERO. It
+A venue whose live passengers do not drain within that grace exits nonzero. It
 used to log a warning and exit 0, which made an abandoned connection
 indistinguishable from a clean teardown to a launcher inspecting exit status. A
 consumer that holds `/ws` open past the venue's completion is what produces it, so
@@ -269,24 +269,24 @@ nautilus adapter does this through `MogwaiDataClientConfig::for_run` /
 refuse - terminally, logging `venue identity mismatch` - when the address is
 serving a different run.
 
-BIND TO THE RUN, NOT THE ADDRESS. This is a usage contract rather than a knob to
+Bind to the run, never to the address. This is a usage contract rather than a knob to
 tune, because the identity is always available: `addr` and `run_seed` arrive in
-the SAME readiness record, on the same line. So there is no shape of deployment
+the same readiness record, on the same line. So there is no shape of deployment
 that can know where to dial and not know what it is dialling.
 
-- If you LAUNCH the venue, you parsed that record to get the address. Build the
+- If you launch the venue, you parsed that record to get the address. Build the
   client config with `for_run`, not `for_addr`.
-- If you hand ONE venue's address to several consumers, hand them the `run_seed`
+- If you hand one venue's address to several consumers, hand them the `run_seed`
   with it. You are already distributing per-consumer configuration - the account
   id each one must name - and the seed rides the same path.
 
 `for_addr` is the lossy path: it takes an address alone and sets no expected
 seed, so the consumer cannot tell its venue from whatever answers there next. It
-is not a consumer that COULDN'T check, it is a config that dropped the identity one
+is not a consumer that could not check, it is a config that dropped the identity one
 call earlier, so a consumer built that way logs a warning naming the fix.
 
 What the contract buys is worth stating plainly, because the failure is silent
-rather than loud. A recycled port is most likely held by ANOTHER MOGWAI VENUE -
+rather than loud. A recycled port is most likely held by another mogwai venue -
 they all bind ephemeral loopback ports - and a sibling venue speaks the wire
 perfectly: it accepts the subscription, serves a tape, takes orders. The run then
 completes green against the wrong river, and the seed recorded against its result
@@ -295,14 +295,14 @@ connect.
 
 ## Whether a run is worth keeping
 
-`GET /health` carries an optional `fault` object, present when a BOATED
-RIVER's tape has faulted. It names the river in `symbol`, the refusal in
+`GET /health` carries an optional `fault` object, present when a boated
+river's tape has faulted. It names the river in `symbol`, the refusal in
 `kind`, and the simulated instant in `clock_ns`.
 
 A run places a boat per river and every boat owns its own tape, so rivers fault
 independently. The field reports the faulted river with the smallest symbol,
 which makes it stable across polls of the same run and still answers the
-question a fleet poller has - is ANY river faulted. It does not enumerate a
+question a fleet poller has - whether any river at all is faulted. It does not enumerate a
 second simultaneous fault, because one faulted river already condemns the run:
 a poller that sees this field at all should discard the run rather than trust
 its output. A run is fire-and-forget, so discarding one is cheap and
@@ -311,17 +311,17 @@ reproducing it means a fresh instance with the same seed and config.
 Absence of the field is not a promise that the venue is healthy in every other
 sense - it reports tape faults, not a connection's delivery backlog - and a faulted run
 may also die on its own terminal-fault path, which is separate. What the field
-buys is seeing the fault BEFORE that.
+buys is seeing the fault before that.
 
-Two outcomes are deliberately NOT a mismatch, and they are reported as different
+Two outcomes are deliberately not a mismatch, and they are reported as different
 things because they are different things. A probe that gets no usable answer -
 the request failed, or returned an error status, or returned something that is
 not JSON - is a transport failure, indistinguishable from the socket failing the
-same way, so the connection proceeds. A probe that IS answered by a venue
+same way, so the connection proceeds. A probe that is answered by a venue
 reporting no `run_seed` is version skew: nothing failed, the venue simply
 predates run identity, and the log says so rather than blaming the network.
 
-A launcher that CAPTURES the child's stderr must also DRAIN it, continuously,
+A launcher that captures the child's stderr must also drain it, continuously,
 from the moment of spawn. Logs go to stderr by design, a pipe holds roughly
 64 KiB, and a full pipe blocks the writer - so an undrained capture wedges the
 venue mid-run, which is indistinguishable from a hung venue at the socket. A
@@ -354,7 +354,7 @@ taken from it disagreed with the served river it was supposed to illustrate.
 
 `tick-composition` is the offline measurement the tape budget constants are
 derived from. It walks all three presets across eight seeds and four arrival
-configurations and writes ONE fixture, named by `--out` and stamped with the
+configurations and writes exactly one fixture, named by `--out` and stamped with the
 live tape protocol version. Each preset is resolved the way `serve` resolves
 it, so the futures are measured on their own size grid and session calendar. It
 is a long run - about an hour at the default 2,000,000 parent events per
@@ -364,14 +364,14 @@ is no longer the shipped fixture. The destination is staged and renamed at the
 end, and the document carries a pairing identifier naming the traversal that
 produced it.
 
-It emitted two files until protocol 8. Protocol 6 was a count PROJECTION of the
+It emitted two files until protocol 8. Protocol 6 was a count projection of the
 protocol-7 stream - quote placement draws no randomness, so one traversal
 carried both - but that is specific to those two versions. A session profile
 divides the duration draw and scales the return, so protocol 8's tape has
 different timestamps and prices and cannot be projected from protocol 7. Version
 pairs are compared by `mogwai tick-composition-ratios compare`, whose `--mode
 projection` keeps the 6-to-7 contract and whose `--mode independent` compares
-two separately measured tapes. It is a SEPARATE subcommand rather than a report
+two separately measured tapes. It is a separate subcommand rather than a report
 mode here: `tick-composition` measures a tape, and that command turns a
 measurement into proposed constants, so fusing them would let one invocation
 measure a fixture and bless it in the same breath.
@@ -397,7 +397,7 @@ There is no `stop` subcommand.
 The remaining subcommands are the 2026-08 Python-to-Rust rewrite's absorbed
 half of `analysis/`: the corpus-to-fingerprint method library
 (`mogwai_lab`), reached the same way `gen`/`tick-composition` are - offline,
-no socket bound. Each writes an ARTIFACT (the storage policy's term: the
+no socket bound. Each writes an artifact (the storage policy's term: the
 user's own file, written to `--out` or a working-directory default, never
 cached, never auto-deleted) and every default path is chosen so a bare
 invocation can never overwrite a committed `analysis/` file by accident.
@@ -414,18 +414,18 @@ empty inputs are skipped by name rather than failing the sweep.
 
 `session-profile preflight` and `session-profile fit` are the
 calendar-conditional session fit over a one-minute bar archive. The preflight
-is a GATE, not a summary: it answers whether the archive carries zero-volume
+is a gate, not a summary: it answers whether the archive carries zero-volume
 rows, which decides whether exposure may come from row presence or must come
 from the calendar - deriving it from row presence would shrink each quiet
 hour's denominator in proportion to its own quietness and compress the
 peak-to-trough ratio the fit exists to measure. Run it before trusting any
 fit. `--preset` selects the session calendar the fit is conditional on, which
-is an INPUT to the estimator rather than a consumer of it; `--alignment`
+is an input to the estimator rather than a consumer of it; `--alignment`
 chooses between reading historical civil labels against the preset's fixed
 offset (`civil`, the default, so CST and CDT land on the same session phase)
 and reading them as instants.
 
-`segments` is the session-segment sampler: it builds a river out of REAL
+`segments` is the session-segment sampler: it builds a river out of real
 session slices instead of synthesizing one. Two halves, both offline.
 
 `segments cut` carves one session window out of a delivered TBBO month into a
@@ -435,7 +435,7 @@ segment library:
 brokkr run mogwai -- segments cut --symbol MNQ --month 2026-04 --window asia --out analysis/out/asia-mnq-2026-04.json
 ```
 
-`--window` is one of four, each stated in EXCHANGE-LOCAL time and anchored on
+`--window` is one of four, each stated in exchange-local time and anchored on
 the trade date's own 17:00 reopen, so all four are DST-correct without a second
 calendar:
 
@@ -446,7 +446,7 @@ calendar:
 | `ny-morning` | 08:00 to 11:00 | 09:00 to 12:00, cash open with a lead-in, to lunch |
 | `ny-afternoon` | 09:30 to 15:00 | 10:30 to 16:00, to the cash close |
 
-A window overlapping the 15:15 trading halt is REFUSED rather than cut: it
+A window overlapping the 15:15 trading halt is refused rather than cut: it
 would carry the halt's fifteen-minute hole invisibly into every loop of the
 composed river. The corpus directory is
 resolved under `--root` from the conventional
@@ -458,7 +458,7 @@ reports the work size - segments cut, ticks in them, and how many carried a
 measured open gap.
 
 A holiday half-session is dropped, by name, on stderr. `--min-ticks-fraction`
-is the rule: a session carrying less than that fraction of the month's MEDIAN
+is the rule: a session carrying less than that fraction of the month's median
 session is a stub rather than a session, and sampling would otherwise draw it
 as often as a full day. The 2026-04-03 `ny-morning` slice is the worked
 example - Good Friday, 4,408 ticks against a 400,000-tick typical day, non-empty
@@ -537,12 +537,12 @@ synthesis paths (`analysis/build_fingerprint.py`/`build_cadence.py`):
 `analysis/` unless `--out` names a path there explicitly - the bare default
 is `analysis/out/`, which is gitignored. `cadence-feasible` reads a cadence
 measurement and prints the `check_cadence_feasible.py` L0
-structural-proceed verdict (PROCEED/CLOSE/STOP AND ASK) read off its
+structural-proceed verdict (`PROCEED`, `CLOSE` or `STOP AND ASK`) read off its
 `children_mean`/`children_single_frac` anchors, exiting nonzero on anything
-but PROCEED. It then re-simulates the arrival clock over `--events`
+but `PROCEED`. It then re-simulates the arrival clock over `--events`
 (3,000,000 by default, matching the Python) and exits nonzero when the
 realized per-second density misses the feasibility bands - that
-simulation is a GATE, not a diagnostic, and skipping it would let this
+simulation is a gate, not a diagnostic, and skipping it would let this
 subcommand exit 0 where the script exits 1. `--skip-density` stops after
 the structural verdict for callers who only want the L0 reading; the
 Python has no such flag, so leaving it off is the matching behaviour.
@@ -558,16 +558,16 @@ generated 820-case sweep against CPython. Not yet ported: the `--fit` and
 `--fit-markov` grid searches, which are candidate-search tools rather than
 gates.
 
-`cache` is the manual-case cover for the storage policy's CACHE class:
+`cache` is the manual-case cover for the storage policy's cache class:
 `mogwai cache stats` reports entry/file/byte counts under the cache root
 (`$XDG_CACHE_HOME/mogwai/`, `~/.cache/mogwai/`, `MOGWAI_CACHE_DIR` or
 `--cache-dir`), and `mogwai cache clean` removes every provenance directory.
 
 `mogwai cache clean --stale --keep <TOKEN>` removes every provenance directory
-EXCEPT the named one - the same pruning a cache write already does
+except the named one - the same pruning a cache write already does
 automatically, exposed for manual use. The token is named rather than derived,
 and `mogwai cache stats --entries` prints the ones present. A cache entry's
-provenance token binds the command that PRODUCED it (its kernel version, window
+provenance token binds the command that produced it (its kernel version, window
 start, length and burn-in, and its own sub-contract hash), so a `cache`
 invocation has nothing to compute one from; `--stale` without `--keep` refuses
 rather than guessing. It used to guess - it folded its own argv into a token,
@@ -575,7 +575,7 @@ matched nothing, and deleted the whole cache on the invocation meant to be the
 safe one.
 
 A `--keep` naming a token that is not present refuses too, and prints the
-candidates. The prune only ever COMPARES names, so a mistyped token keeps
+candidates. The prune only ever compares names, so a mistyped token keeps
 nothing and clears everything - the same data loss the required `--keep` was
 introduced to prevent, one keystroke away instead of unconditional.
 
@@ -592,7 +592,7 @@ per-symbol parent-build baselines under
 `analysis/out/arrival-control-b1-baseline/` (three since the 2026-08-09
 preset retirement; the committed brick N artifact recorded five).
 
-Gate B5 is EVIDENCE THIS COMMAND READS, never a check it runs. Run
+Gate B5 is evidence this command reads, never a check it runs. Run
 `brokkr check --gate --json` yourself first and capture its output to
 `analysis/out/arrival-control-b5-gate.log` (or pass `--b5-log`); the command
 records that transcript's digest and the machine-readable summary on its last
@@ -610,7 +610,7 @@ reads the diff from the baseline commit (`--b1-baseline-commit`, default
 `HEAD~1`) to HEAD and records whether it touched any tape-bearing area - the
 data crate, the protocol crate, the shipped preset bundles, or
 `analysis/fingerprint.json`; touching any of them, or a tape protocol version
-that has MOVED since the baseline commit, fails the tape-identity gate. The
+that has moved since the baseline commit, fails the tape-identity gate. The
 accepted identity is not written down anywhere: the check reads
 `TAPE_PROTOCOL_VERSION` out of the baseline commit itself and compares it
 against the running binary's, so what it asserts is that no bump landed in the

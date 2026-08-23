@@ -1,7 +1,7 @@
 # Performance record
 
 Measured numbers across every operational surface, plus how to obtain and read
-them. Every later change that moves a number APPENDS a row; rows are never
+them. Every later change that moves a number appends a row; rows are never
 edited in place, so this file is a history and not a snapshot.
 
 Numbers measured through `brokkr mogwai` carry their result UUID, so any claim
@@ -12,10 +12,10 @@ Numbers from the criterion harnesses do not, and are pinned by commit instead.
 
 Priced to answer one question - whether an `ArrivalKernel::next_parent`
 jump-ahead rewrite is worth the owner's chart gate - and recorded here because
-the answer turns on the numbers rather than on the mechanism. THE ANSWER IS NO.
+the answer turns on the numbers rather than on the mechanism. The answer is no.
 The measured record, the reachability analysis and the recommendation follow.
 
-NOT A BENCHED ROW, so it carries no UUID. A throwaway integration probe over
+Not a benched row, so it carries no UUID. A throwaway integration probe over
 `CadenceWalk::next` - the shipped kernel draw with nothing attached - at
 fingerprint-median BTCUSDT scalars, a flat session profile and
 `mean_event_duration_s` 0.171, on the owner's host. Dev and release agreed to
@@ -40,7 +40,7 @@ The 31.6M cliff is real and reachable, but only from a config no preset ships -
 no shipped preset declares an arrival family at all, so `ArrivalConfig::kernel`
 is never called on any default serving path, and the reachable population is
 operator `generator.arrival` overrides plus the lab's own screen. It also
-TERMINATES rather than recurring: the traversal that reaches
+terminates rather than recurring: the traversal that reaches
 `MAX_SESSION_GAP_NS` refuses with `NoOpenExposure`, the fault latches, and the
 source is done. `AGENTS.md`'s "a multi-hour computation is presumptively a
 defect" does not apply to two-thirds of a second that cannot repeat.
@@ -48,15 +48,15 @@ defect" does not apply to two-thirds of a second that cannot repeat.
 `LiquidityDrought` is not the cause; capped at `thin_factor` 1000 it buys 3
 microseconds. What reaches the cliff is two knobs with no upper bound -
 `LogOuCox`'s `sigma_y`, whose `x = exp(y - sigma^2 / 2)` latent is unbounded
-BELOW, and `GeneratorScalars::mean_event_duration_s` - and both are validator
+below, and `GeneratorScalars::mean_event_duration_s` - and both are validator
 gaps rather than kernel defects.
 
-THE RECOMMENDATION IS TO BOUND THOSE TWO KNOBS AND LEAVE THE KERNEL ALONE. The
-per-cell RNG draw inside `advance_state_to` IS the tape: skipping it, batching
+The recommendation is to bound those two knobs and leave the kernel alone. The
+per-cell RNG draw inside `advance_state_to` is itself the tape: skipping it, batching
 it, or substituting the closed-form n-step transition changes how many values
 come off the `ChaCha12Rng` and therefore every later draw, so no byte-preserving
 O(1) jump-ahead exists and any rewrite spends the chart gate. Upper bounds cost
-nothing by comparison - they are ADMISSION changes that move no byte of any tape
+nothing by comparison - they are admission changes that move no byte of any tape
 a bounded config produces - but refusing a config that works today is a product
 decision, so they are filed rather than landed. The number to beat if the
 rewrite is ever revisited is 45 ns per parent on a healthy walk. The kernel is
@@ -71,7 +71,7 @@ per point at the `LiquidityDrought` thinning ceiling, release, on host `bygg`.
 Two runs at different draw counts agreed row for row. The example is committed
 because the question recurs whenever either knob is revisited.
 
-THE MEDIAN DRAW IS 50 TO 70 NS AT EVERY `sigma_y` SETTING. All of the cost is
+The median draw is 50 to 70 ns at every `sigma_y` setting. All of the cost is
 in the tail, so the mean and the max are the readings:
 
 | `sigma_y` | mean | max |
@@ -84,12 +84,12 @@ in the tail, so the mean and the max are the readings:
 | 8.0 | 24 us | 10.6 ms |
 | 9.0 | 336 us | 40.7 ms |
 
-SIX IS A KNEE and the ceiling is placed there: the mean is flat at healthy-walk
+Six is a knee and the ceiling is placed there: the mean is flat at healthy-walk
 cost through 5.5 and departs by an order of magnitude at 6.0, while the max
 crosses a millisecond at 7.0. The bound admits the knee and excludes the whole
 millisecond region with a point of margin.
 
-`mean_event_duration_s` HAS NO KNEE. Its cost is LINEAR in the knob, measured
+`mean_event_duration_s` has no knee. Its cost is linear in the knob, measured
 against a fixed healthy `LogOuCox`:
 
 | `mean_event_duration_s` | mean | max | outcome |
@@ -111,14 +111,14 @@ why the numbers are what they are.
 
 ## The `mogwai-data` test binary's wall, 2026-08-19
 
-TWO DIFFERENT LANES ARE MEASURED HERE AND THEY DO NOT PAIR. Read the command
+Two different lanes are measured here and they do not pair. Read the command
 attached to each number; an earlier draft of this entry attributed both sweep
 walls to one invocation that cannot produce them, and the correction is the
 reason the split is spelled out.
 
-THE FOCUSED RUNNER, `brokkr test -p mogwai-data "" --debug` on host `bygg`.
-It runs the crate's suite once per sweep and there are THREE sweeps -
-`workspace`, `instrumented` and `timing` - not two, and it does NOT apply the
+The focused runner, `brokkr test -p mogwai-data "" --debug` on host `bygg`.
+It runs the crate's suite once per sweep and there are three sweeps -
+`workspace`, `instrumented` and `timing` - not two, and it does not apply the
 gate profile's `skip` list, which is why both dwell twins ran in the baseline.
 Serial, one run each side, re-measured on the round's own tree:
 
@@ -130,31 +130,31 @@ Serial, one run each side, re-measured on the round's own tree:
 | total | **133.66 s** | **86.15 s** |
 
 The three deltas decompose exactly. `workspace` and `timing` each lose only the
-deleted twin, about 6.5 s. `instrumented` loses the twin AND the five walks
+deleted twin, about 6.5 s. `instrumented` loses the twin and also the five walks
 that are now absent from that build shape, 6.5 + 28.4 s. `timing` does not
 enable `hotpath`, so the `cfg` leaves it alone by construction.
 
-THE GATE, `brokkr check --gate`, full and unscoped: **58.3 s -> 41.4 s and
+The gate, `brokkr check --gate`, full and unscoped: **58.3 s -> 41.4 s and
 50.4 s**, two runs on the same host after the change. Both are quoted because
 one is not a number: the gate runs eight threads against a loaded desktop and
 its wall is the noisiest figure in this file, so treat it as "faster, by
 something between 8 and 17 seconds" and re-derive it before quoting it. The
-coverage counts are NOT noisy and are the ones to check: 1191 + 436 = 1627
+coverage counts are not noisy and are the ones to check: 1191 + 436 = 1627
 run across the two sweeps, 61 ignored, so 1688 pairs, 0 orphaned, 16 skips.
-The two summands are the SWEEPS, and the pair count is run plus ignored - an
+The two summands are the sweeps, and the pair count is run plus ignored - an
 earlier draft wrote the sum as the pair count, which is the one arithmetic in
 this entry a reader would otherwise carry forward wrong. The gate runs
-`workspace` and `instrumented` only, and it DOES apply `skip`, so its
-arithmetic is not the table's. IN THE GATE'S `workspace` SWEEP THE TWO DWELL
-CHANGES CANCEL - the twin's deletion is about -6.5 s and un-skipping
+`workspace` and `instrumented` only, and it does apply `skip`, so its
+arithmetic is not the table's. In the gate's `workspace` sweep the two dwell
+changes cancel - the twin's deletion is about -6.5 s and un-skipping
 `dwell_is_bounded_across_run_seeds` is about +6.5 s - and all five `cfg`'d
-walks still run there. THE ENTIRE GATE SAVING COMES FROM THE `instrumented`
-SWEEP. The dwell change bought coverage, not wall clock, on the default lane;
+walks still run there. The entire gate saving comes from the `instrumented`
+sweep. The dwell change bought coverage, not wall clock, on the default lane;
 only the focused runner sees it as time.
 
-THE DISTRIBUTION CAME FIRST, through the same instrument the adapter round
+The distribution came first, through the same instrument the adapter round
 built - `scripts/adapter_test_walls.py`, which is generic over libtest
-binaries. It showed the OPPOSITE shape to the adapter's: not a floor but seven
+binaries. It showed the opposite shape to the adapter's: not a floor but seven
 genuine walks carrying 93% of the wall, with a tail of 168 tests at a
 millisecond apiece.
 
@@ -169,22 +169,22 @@ millisecond apiece.
 | `session_edge_spike_localizes` | 2.72 s |
 | the other 168 | 3.29 s combined |
 
-TWO CUTS, and neither weakened a gate.
+Two cuts, and neither weakened a gate.
 
-THE BINARY RAN TWICE FOR NOTHING. The `instrumented` sweep builds this crate
+The binary ran twice for nothing. The `instrumented` sweep builds this crate
 with `hotpath-alloc` so that a feature nothing compiles cannot rot; that is a
-COMPILE-time property, and `crates/mogwai-data/src` carries no `hotpath`
+compile-time property, and `crates/mogwai-data/src` carries no `hotpath`
 annotation at all - the crate's only one is in `examples/arrival_walk_bench.rs`.
 So the second sweep re-executed every million-tick walk to learn nothing: the
 same test measures 7.65 s in the default shape and 7.67 s in the instrumented
 one. The five walks over ~2 s now carry `#[cfg(not(feature = "hotpath"))]`, so
 they are absent from that build shape rather than filtered out of the run -
 which matters, because the gate certifies complete coverage and a filtered test
-is an ORPHANED pair while a test that does not exist in a shape is no pair at
+is an orphaned pair while a test that does not exist in a shape is no pair at
 all. The audit agrees: 1688 pairs, 0 orphaned. Instrumented 44.61 -> 9.96 s,
 and that sweep is where all of the gate's saving lives.
 
-THE ONLY MULTI-SEED DWELL GATE WAS THE ONE NOBODY RAN. It was `#[ignore]`d and
+The only multi-seed dwell gate was the one nobody ran. It was `#[ignore]`d and
 in the runner's skip list on the claim that it "outlives the 20-second per-test
 hang watchdog by design"; measured, it is 6.54 s, and its eight arms are
 `DRAW / 8` apiece - the same two million parent events in total as `realism`.
@@ -197,7 +197,7 @@ parent events. Eight realizations for the wall clock of one - and on the gate's
 default sweep that is exactly what it cost, nothing, since the deletion and the
 un-skipping cancel there.
 
-WHAT THE SHORTER PER-SEED DRAW COSTS, measured against each bound rather than
+What the shorter per-seed draw costs, measured against each bound rather than
 argued: `mean_gap_s` 0.1743-0.1785 short against 0.17426 full, declared
 0.17104 with a 10% window, so the short arms sit further from the declared mean
 and the band did not soften; `gap_p999_s` 2.92-3.03 short against 3.18 full,
@@ -208,12 +208,12 @@ against silence that a 0.17 s mean gap never approaches. The silence guard was
 bite-checked at the short draw by injecting a 30,000x `LiquidityDrought`:
 `empty_hour_frac` fails at 0.765 against 0.0105. State that guard honestly: at
 ~11 complete hour buckets its resolution is 1/11 = 0.09 against a 0.0105 bound,
-so it is a BINARY "no empty hour at all" and not a measurement of a fraction.
+so it is a binary "no empty hour at all" and not a measurement of a fraction.
 That was already true at the full draw, where ~96 buckets give 0.0104 against
 the same 0.0105, so the short draw gives up nothing here - but the two-sided
 reading the assertion's form suggests was never available.
 
-REFUSED: cutting `SESSION_DRAW`. Its 15M parent events are about 30 simulated
+Refused: cutting `SESSION_DRAW`. Its 15M parent events are about 30 simulated
 days and the seven `dow_weight` assertions need whole weeks to separate a
 weekend from a weekday, so halving it does not fail sooner, it passes on less
 evidence. The reported watchdog risk did not reproduce either: 7.51 s serial,
@@ -230,16 +230,16 @@ gate profile's `skip` list under the heading claiming every entry there outlives
 the 20-second per-test hang watchdog. Measured one test per process in dev on
 host `bygg`: **0.43 s** and **0.20 s**, three sweeps agreeing to within 0.15 s.
 
-A review pass argued that 0.43 s reads like a RELEASE number and that dev would
-land at 8 to 30 s, straddling the watchdog. IT DOES NOT. Re-measured with
+A review pass argued that 0.43 s reads like a release number and that dev would
+land at 8 to 30 s, straddling the watchdog. It does not. Re-measured with
 `--debug`, which is the profile the argument was about, the rail sizing runs
 **0.45 s to 0.56 s** across the three sweeps, and the whole `garch` filter -
 both instruments plus the second-moment harness - runs **0.63 s to 0.77 s**.
 Record the spread rather than a single figure: this crate's gate wall is noisy
 and a lone number invites exactly that objection.
 
-WHAT THE WRONG CLAIM COST, and it is the dwell lesson verbatim: those two are
-the ONLY measurements behind `GARCH_SIGMA_CAP`, `FEEDBACK_RETURN_CEILING` and
+What the wrong claim cost, and it is the dwell lesson verbatim: those two are
+the only measurements behind `GARCH_SIGMA_CAP`, `FEEDBACK_RETURN_CEILING` and
 `REALIZED_RETURN_CEILING`. The numbers `consts.rs` cites in prose - a sigma
 reaching 57.2x its unconditional scale, a largest clean return of 3.33e-3, an
 unclipped return RMS of 1.2393e-5 over 16M updates, a clean realized maximum of
@@ -249,7 +249,7 @@ were written. Both are un-ignored, out of `skip`, and read
 that happened to equal them. Every figure above re-measured unchanged on the
 round's tree.
 
-THE GATE, `brokkr check --gate`, on the round's tree: **49.0 s** on the fix
+The gate, `brokkr check --gate`, on the round's tree: **49.0 s** on the fix
 pass and **52.4 s** after the review repairs, which changed no test count.
 Against the 41.4 s / 50.4 s pair recorded above this is inside the noise that
 entry warns about; the counts are the readable part. 1195 + 440 = 1635 run,
@@ -264,20 +264,20 @@ adding no pair, having already been pairs.
 `brokkr test -p mogwai-adapter "" --debug`, the serial sweep of the four
 socket-backed test binaries, on host `bygg`: **39.71 s -> 12.14 s**, no test
 removed and two added. For four rounds roughly 37 s of that was recorded as
-UNEXPLAINED and was the crate's largest single cost; this is where it went.
+unexplained and was the crate's largest single cost; this is where it went.
 
-COUNTS, because two figures below are ratios and a stale denominator makes them
+Counts, because two figures below are ratios and a stale denominator makes them
 unreadable. The four binaries held 58 tests when the work started and hold 60
 now: `adapter_smoke::both_legs_disclose_one_process_callsign_on_the_upgrade` and
 `data_client_transport::an_undecodable_clock_is_retried_then_falls_back_without
 _refusing` were added, in that order. The distribution quoted next was taken
 between those two additions, so its denominator is 59.
 
-THE INSTRUMENT CAME FIRST, because nobody had a per-test distribution and every
+The instrument came first, because nobody had a per-test distribution and every
 proposal was therefore a guess. libtest's `--report-time` is nightly-only, so
 `scripts/adapter_test_walls.py` runs the already-built test binaries directly,
 one test per process, and times each. The shape it showed was not a few
-outliers but a FLOOR: 55 of those 59 sat in a 419-892 ms band with a hard
+outliers but a floor: 55 of those 59 sat in a 419-892 ms band with a hard
 ~420 ms bottom, while the only two that never call `connect()` came in at 15 ms
 and 23 ms.
 
@@ -300,8 +300,8 @@ the new `fail_clock` switch and counts the attempts.
 With the floor gone the distribution became legible and named a real outlier:
 `havoc::a_venue_serving_another_run_is_refused_terminally` at 5.0 s, which is
 `wait_connected`'s five-second readiness bound spent in full because readiness
-never arrives on a terminal refusal. That is the standing shape - A BOUND ON A
-FUTURE THAT CANNOT SUCCEED IS ON THE PASSING PATH, NOT THE FAILING ONE - and
+never arrives on a terminal refusal. That is the standing shape - a bound on a
+future that cannot succeed is on the passing path, not the failing one - and
 the same repair applied there as to `conn_reconnect_respects_max_attempts` a
 round earlier: bound the connect at 500 ms, then poll the observable. 15.93 ->
 11.83 s.
@@ -318,7 +318,7 @@ cost the other 57 used to pay each.
 The session-segment sampler's two offline surfaces, measured on host `bygg`
 against the delivered MNQ 2026-04 TBBO month. Not through `brokkr mogwai`, and
 the reason is worth recording: that tool resolves the first token after `--` as
-a HARNESS TARGET unless it is one of the CLI subcommands it already knows, and
+a harness target unless it is one of the CLI subcommands it already knows, and
 `segments` is new, so an argv-shaped bench of it is refused with
 `unknown target "segments"` despite the documented rule that CLI surfaces need
 no registration. The commands therefore emit their own elapsed as stderr
@@ -330,14 +330,14 @@ Worst case of the four windows, `ny-afternoon`, 9,572,450 ticks over 21
 sessions: `cut_seconds=45.9`. Composing 4,000,000 ticks from the resulting
 165 MB library: `library_load_seconds=0.4`, `compose_seconds=0.7`.
 
-WHAT THIS DECIDES, and it was measured to decide it: whether cutting the full
+What this decides, and it was measured to decide it: whether cutting the full
 eleven-month corpus needs optimizing before it is run, per the standing rule
 that a multi-hour computation is presumptively a defect rather than a budget.
 It does not. Eleven months across four windows is on the order of 44 cuts at
 roughly three quarters of a minute each, so about half an hour - a coffee
 break, not an overnight job, and not worth optimizing ahead of a need.
 
-THE LEVER IF IT EVER MATTERS, recorded so it need not be rediscovered: cut cost
+The lever if it ever matters, recorded so it need not be rediscovered: cut cost
 is dominated by streaming the month's TBBO, which is the same work whichever
 window is being cut, so cutting four windows re-reads the same month four
 times. One pass emitting all four libraries would be close to four times
@@ -365,7 +365,7 @@ landing, so brokkr correctly stored no durable results row; the benchmark's
 stderr counter is the measurement record for this landing. The depth itself is
 `mogwai_venue::config::DEFAULT_FANOUT_DEPTH`, public precisely so the
 `ring_sizing` harness measures the shipped value rather than a copy of it, and
-the ring is allocated PER BOAT - a run serving several rivers at once pays it
+the ring is allocated per boat - a run serving several rivers at once pays it
 once per placed boat.
 
 ## History slot gate, 2026-08-15
@@ -378,7 +378,7 @@ pairs five times on host `bygg`: 23, 23, 23, 22 and 22 ns per acquire. This
 measures the added gate itself, not endpoint latency; history synthesis and
 JSON response construction dominate it.
 
-The bound the gate multiplies is MEASURED, by the release-mode
+The bound the gate multiplies is measured, by the release-mode
 `worst_case_history_page_bytes` instrument, at a full `MAX_HISTORY_LIMIT` page
 of MNQ-shaped ticks: `/quotes` is 4.40 MB of `QuoteTick` vector and 5.90 MB of
 serialized JSON, `/trades` 3.20 MB and 5.05 MB. The vector and its bytes are
@@ -391,12 +391,12 @@ multi-megabyte responses were still being built. History serializes on its own
 blocking task and hands the finished bytes and the permit to `HistoryPage`
 together.
 
-AMENDED 2026-08-18: the gate WAITS instead of refusing. The measurements above
+Amended 2026-08-18: the gate waits instead of refusing. The measurements above
 stand unchanged - the concurrency, the per-page bytes and the ~41 MB ceiling are
-all properties of what is RESIDENT, and a caller waiting for a slot holds no
+all properties of what is resident, and a caller waiting for a slot holds no
 page - but a fifth request now blocks for up to `HISTORY_SLOT_WAIT` rather
 than taking a `503`. The reason is consumer-side and not a performance one: a
-refusal reaches a nautilus host as an EMPTY window, because its historical
+refusal reaches a nautilus host as an empty window, because its historical
 response types carry no error channel, so a refused history request was
 indistinguishable from a quiet tape. The gate's own overhead figure above is the
 uncontended path and is unaffected; what a contended caller now pays is queueing
@@ -412,7 +412,7 @@ brokkr run fill_bench -- --bench
 brokkr run fill_walk_bench -- --bench
 ```
 
-Both are criterion benchmarks shipped as EXAMPLE targets, not `[[bench]]`
+Both are criterion benchmarks shipped as example targets, not `[[bench]]`
 targets: `criterion_main!` parses `--bench` out of its own argv, `brokkr run`
 forwards everything after `--` raw and defaults to release, and examples link
 dev-dependencies so criterion never enters the shipped dependency graph.
@@ -433,7 +433,7 @@ baselines live under `target/`, which is gitignored and not portable between
 machines, and a wall-clock assertion inside `brokkr check` would be flaky on any
 shared machine. The benches are operator-run before and after a change that
 touches the fill path, and this file is where the two readings are compared.
-Fill BEHAVIOUR is gated automatically, by
+Fill behaviour is gated automatically, by
 `crates/mogwai-venue/tests/golden/fill_distribution.json`, which runs in
 `brokkr check`.
 
@@ -468,7 +468,7 @@ brokkr mogwai screen_projection --alloc
 `arrival_walk` (`mogwai-data`) runs the kernel draw with no projection attached;
 `screen_projection` (`mogwai-lab`) runs one Stage A cell with the projection.
 The gap between them is the measurement cost the Stage A round is spending
-against, and it is read by SUBTRACTION rather than by annotation - see the
+against, and it is read by subtraction rather than by annotation - see the
 reading rules below.
 
 Both need their crate's `hotpath` feature, which `required-features` enforces:
@@ -480,18 +480,18 @@ and an alloc run without that line reports zero bytes everywhere. Registering
 the feature shape is what makes `--hotpath` produce a profile at all; a target
 registered without it records a row with an empty table.
 
-`fill_walk_bench` and `fill_bench` are NOT registered targets. They are criterion
+`fill_walk_bench` and `fill_bench` are not registered targets. They are criterion
 harnesses that parse `--bench` out of their own argv, which is what lets them
 live in example targets, and which would collide with the mode flag. Run them as
 in the section above.
 
 The delivered July corpus is registered per host under
 `[bygg.datasets.mnq-tbbo-july]` and pinned by an XXH128 digest over the whole
-delivery DIRECTORY, not over its manifest. The two hashes on that corpus answer
-different questions and neither replaces the other: this digest is a DRIFT check
+delivery directory, not over its manifest. The two hashes on that corpus answer
+different questions and neither replaces the other: this digest is a drift check
 - the delivery under that path not being the one it was last time - while
 `measure`'s own SHA-256 verification against the jobs manifest and the committed
-preflight is about the CONTENTS being the ones the method was fitted to.
+preflight is about the contents being the ones the method was fitted to.
 
 **The two output channels.** Every benched command emits its work size beside
 its timing, unconditionally, on both channels
@@ -507,14 +507,14 @@ marker path is a load and a branch, so a plain interactive run pays nothing.
 | `gen --type summary` | `walk` | `parents`, `rows` |
 | `measure` | `observed`, `walks`, `bootstrap` | `elapsed_ms`, per-phase ms, `seeds`, `sessions`, `usable_sessions`, `peak_rss_bytes`, `scratch_bytes` |
 
-Every surface is timed EXTERNALLY. `measure` briefly carried a self-reported
+Every surface is timed externally. `measure` briefly carried a self-reported
 clock, on the reasoning that it verifies a multi-gigabyte corpus before any
 measured work and an external wall folds that hash pass into every reading; that
-was withdrawn 2026-08-10 because it redefined what the recorded elapsed MEANS
+was withdrawn 2026-08-10 because it redefined what the recorded elapsed means
 for one surface while the column said the same thing everywhere else. The
 corpus pass is excluded the way every other phase boundary is - with a marker,
 so `brokkr sidecar --durations` reports the measured phases alone and the
-verification stays VISIBLE as its own phase rather than deleted from the record.
+verification stays visible as its own phase rather than deleted from the record.
 Timing everything externally is also what lets a history be back-filled to any
 commit whose CLI still parses the invocation.
 
@@ -524,13 +524,13 @@ function called millions of times per run - annotate its caller instead. Today:
 `SessionAcc::close_reduced` (once per session rotation). The value of a profile
 is the same names appearing run after run.
 
-This is a HARD limit, not a preference, and it decides how attribution is done.
+This is a hard limit, not a preference, and it decides how attribution is done.
 `hotpath` queues one event per instrumented call and drains at roughly 1.3M
 events per second. `project_stream` is a single loop over ~147M children per
 cell, so annotating anything inside it - `session_segment_at`, `push_print`,
 `close_parent` - would backlog tens of gigabytes and price the instrument rather
-than the code. Attribution inside such a loop therefore comes from HARNESS
-SUBTRACTION (run the same loop with one layer absent and difference the
+than the code. Attribution inside such a loop therefore comes from harness
+subtraction (run the same loop with one layer absent and difference the
 per-parent cost) or from the allocation profile, never from a finer annotation.
 
 ## Reading rules
@@ -552,11 +552,11 @@ every rule here should be traceable to a run.
   workload.
 - **First noise reading: two runs of an identical cell measured 15.2 s and
   15.1 s** (`d3fa0b0a`, `3f82ed37`), with byte-identical counters. That is a
-  ~0.7% spread on a single sample and the only variance datum on file. It is NOT
+  ~0.7% spread on a single sample and the only variance datum on file. It is not
   yet an error bar: two runs minutes apart on a quiet host is the best case, and
   nothing has yet tested the same cell across a day, a thermal state, or a
   loaded host.
-- **Tape lateness is a MEASUREMENT, not a gate, and that is a ruling about what
+- **Tape lateness is a measurement, not a gate, and that is a ruling about what
   a wall-clock threshold can mean.** It was `tape_lateness_under_acceleration`,
   a test asserting a 50 ms p99 pacing bound, and it failed at 311 ms p99 on
   2026-08-08 with a load average of 1.46 across 32 visible CPUs - so load
@@ -580,16 +580,16 @@ every rule here should be traceable to a run.
     | 15,433 | 0.420 ms | 12.4 ms | 43.2 ms |
     | 16,987 | 0.301 ms | 28.3 ms | 41.5 ms |
 
-    THE TAIL IS THE UNSTABLE PART AND THE BODY IS NOT. p50 holds inside a third
-    of a millisecond across all three while p99 moves threefold, and the MAX is
+    The tail is the unstable part and the body is not. p50 holds inside a third
+    of a millisecond across all three while p99 moves threefold, and the max is
     the steadiest figure of the four - about 42 ms every time, which is what the
     retired 50 ms p99 bound was really sitting against. A threshold placed on
     p99 was therefore being judged by the quantile with the widest spread here.
     Read one reading as a sample of a distribution, never as this host's number.
-  - `ending` IS PART OF THE READING, not decoration. Only `sample_complete`
+  - `ending` is part of the reading, not decoration. Only `sample_complete`
     means `frames` covers the whole `sample_ms`; a stream that ended or faulted
-    early leaves a PREFIX, and two frame counts are not comparable unless both
-    loops ended the same way. THAT IS NOT HYPOTHETICAL: an earlier reading
+    early leaves a prefix, and two frame counts are not comparable unless both
+    loops ended the same way. That is not hypothetical: an earlier reading
     recorded here - 11,893 frames, p99 42.9 ms - was taken with a draft loop
     that stopped on the first non-text frame, and its "p99" landed on the max
     because the truncated sample had too few points to separate them. It has been
@@ -629,8 +629,8 @@ essentially nothing** - 3.8 KB total across 6M parents and 50.9M children. The
 remaining two thirds, and all 5.9 GB, are the projection layer: about 47 bytes
 allocated per parent, on a path whose per-child work is a `BTreeMap` traversal.
 
-`close_reduced` is 3.03% of wall, so the session-CLOSE path is not where the
-time is. This CORRECTS the round's entering hypothesis, which named `SessionAcc`
+`close_reduced` is 3.03% of wall, so the session-close path is not where the
+time is. This corrects the round's entering hypothesis, which named `SessionAcc`
 bookkeeping generally: the cost is the per-child and per-parent accumulation,
 not the rotation.
 
@@ -655,7 +655,7 @@ nothing; do not re-open that line.
 Host `bygg`, release, one run per family through
 `brokkr run --release envelope_evaluation_bench -- <family> <months>`
 (registered as `[mogwai.targets.envelope_evaluation]`). The measured unit is
-ONE replicate month of the protocol-12b section 9.7 envelope over the frozen
+one replicate month of the protocol-12b section 9.7 envelope over the frozen
 section 8 exposure, 2,674,800 grid cells. An evaluation is exactly
 `500 * (1 + K)` months, so the unit multiplies out to every K tier; the work
 count is exactly linear, the wall only estimated so, because fixed overhead,
@@ -671,8 +671,8 @@ host noise and stochastic draw counts all intrude.
 
 The optimization hoisted per-walk constants out of a 2.67-million-iteration
 loop: `Poisson` and `Exp` objects whose parameters are fixed for the walk were
-being CONSTRUCTED per grid cell, and `exp(-dt/tau)`, its square and the log-OU
-spread were recomputed per cell. Every row is BIT-IDENTICAL - the harness work
+being constructed per grid cell, and `exp(-dt/tau)`, its square and the log-OU
+spread were recomputed per cell. Every row is bit-identical - the harness work
 sink reproduces its pre-optimization value exactly - so no envelope number,
 gate verdict or conformance figure moved and nothing was re-blessed.
 
@@ -680,13 +680,13 @@ gate verdict or conformance figure moved and nothing was re-blessed.
 0.080 s are one Poisson draw plus loop overhead per grid cell. `event_markov`
 at 0.372 s draws about sixteen gaps per cell and `shot_noise` at 0.435 s draws
 ten jumps per cell, each jump costing an `Exp`, a uniform and a transcendental
-decay factor. Both are the LAW at their probe cells - which are deliberately
+decay factor. Both are the law at their probe cells - which are deliberately
 the worst-cost corners, maximum jump rate and most state flips - and not an
 implementation artifact. Reaching the fast families' price would mean drawing
 fewer variates than the law specifies.
 
 **A recorded pessimization.** Replacing the `event_markov` gap draw with
-inverse CDF (`-ln(U) / rate`) measured 10% SLOWER than `rand_distr`'s ziggurat
+inverse CDF (`-ln(U) / rate`) measured 10% slower than `rand_distr`'s ziggurat
 on this toolchain and RNG: the ziggurat takes its rejection branch rarely
 enough to beat an unconditional logarithm. It was measured, reverted, and only
 the construction removal kept, reproducing `Exp`'s own reciprocal-multiply
@@ -695,7 +695,7 @@ toolchain, not a claim about every future one.
 
 ## The eleven envelope gate parts' wall, 2026-08-19
 
-Host `bygg`, release, ONE PART PER INVOCATION - which is not a preference but
+Host `bygg`, release, one part per invocation - which is not a preference but
 the only form that runs. `brokkr test --timeout` is honored only when the
 filter matches exactly one test and errors out before running when it matches
 more, so the ten fidelity parts have to be named individually by appending
@@ -721,11 +721,11 @@ is what the suite costs when it is run deliberately.
 About sixteen minutes for the whole suite, every part inside the runner's 280 s
 ceiling - which is the number that actually binds these, not the 900 s
 `CONFORMANCE_BUDGET_S` the spec names. The conformance gate sits 5.3x inside
-that budget, which is why its wall is now REPORTED
+that budget, which is why its wall is now reported
 (`conformance_wall_s=... budget_s=900`) rather than asserted: an assertion with
 that much headroom catches no cost regression and can only fire on host load.
 
-THE GRID STEP IS NOT THE COST DRIVER FOR FAMILY 1. `event_markov` runs real
+The grid step is not the cost driver for family 1. `event_markov` runs real
 `advance_parent` walks rather than a grid sweep, so its two steps measure 138 s
 and 142 s; every other family's 250 ms part costs 1.3x to 1.4x its 1 s twin
 rather than the 4x the cell count would suggest, because the per-cell draw
@@ -925,8 +925,8 @@ of the output. Both matter: an engine reused across iterations grows without
 bound (retained client order ids, closed orders, fill history, resting orders)
 and would report the average of a ramp as a latency; a `TickSource` reused
 across iterations is already drained past `to_ns` and would report one
-`next_tick` as the cost of a pass. And because `iter_batched` drops OUTPUTS
-after stopping the timer but drops a consumed INPUT inside the timed region,
+`next_tick` as the cost of a pass. And because `iter_batched` drops outputs
+after stopping the timer but drops a consumed input inside the timed region,
 returning the state is what keeps a teardown out of the reading - it was worth
 roughly 45 percent of `apply_scans_50` and took its deviation from 15.3 percent
 (unusable) to 2.8 percent.
@@ -991,9 +991,9 @@ to the number above. The common path also stopped allocating a temporary
 locked-balance map per funds query: it reads the cached order hold and folds
 only the position-maintenance component.
 
-What these four numbers do NOT cover, stated because the omission decided a
+What these four numbers do not cover, stated because the omission decided a
 design question. `fill_bench`'s `scans` engine seeds no balances, so it is an
-UNFUNDED engine and `enforce_funds` is false throughout the table above. The
+unfunded engine and `enforce_funds` is false throughout the table above. The
 round-3 working tree originally also ran a full reconciling fold of the book
 in release whenever `enforce_funds` was set, repairing and logging on drift.
 No benchmark here would ever have seen that fold, because none of them is
@@ -1011,7 +1011,7 @@ instead. The table therefore stands as measured for both profiles.
 one mapping allocation per symbol per pass on the condition that it stays at
 least an order of magnitude under the walk. It lands at 10.6 percent - at the
 bound rather than comfortably inside it, and worth restating honestly: the walk
-figure is for a ONE-SECOND span, while the default `fill_sweep_interval_ms` is
+figure is for a one-second span, while the default `fill_sweep_interval_ms` is
 100 ms, so a default-interval pass walks less tape and the true ratio is worse
 than this. In absolute terms the mapping is 0.6 ns per scan against a pass that
 also pays a checkpoint restore and a mutex acquisition (`source_positioning`,
@@ -1019,7 +1019,7 @@ also pays a checkpoint restore and a mutex acquisition (`source_positioning`,
 answer is to have `pending_scans` produce the tape-shaped scan directly, not to
 reunite the two crates.
 
-### What `source_positioning` does NOT include
+### What `source_positioning` does not include
 
 It is built from `mogwai-data` and so omits one ingredient of the venue's
 `build_history_source`: the `InstrumentProfiles` lookup, a constant-time table
@@ -1066,14 +1066,14 @@ irrelevant; a run carrying dozens of futures symbols in one currency would want
 the equity hoisted out of the per-symbol loop, which nothing today needs.
 
 An earlier draft of this table read 396.9 ns and 1.677 us. Those were measured
-with a per-POSITION margin row, which under-reported the work and, worse,
+with a per-position margin row, which under-reported the work and, worse,
 under-reserved the admission budget for a hedged book; the row is now
-aggregated per symbol over positions AND resting orders, which is what the
+aggregated per symbol over positions and resting orders together, which is what the
 current numbers price. These numbers do
 not hide the dominant venue cost: a cache miss still pays the previously
 measured 13.86 ms tape walk per symbol. That landing's memo was a single
 run-level entry shared between the command path and the sweeper, so a
-multi-symbol pass could evict itself; 2026-08-16 moved the memo ONTO THE BOAT,
+multi-symbol pass could evict itself; 2026-08-16 moved the memo onto the boat,
 one single-entry cache per river keyed by the boat's own sweep-interval bucket,
 which removes the cross-symbol eviction. The sweeper no longer reads that memo
 at all - its two reads are exact-instant last-print reads - so the only consumer
@@ -1096,7 +1096,7 @@ BTCUSDT, 4,288,935 projected ticks, 19 checkpoints retained). Release binary.
 **2.9 M ticks/s**, spread 0.9 percent across the three. This is the number
 `SYNTHESIS_TICKS_PER_SEC` in `mogwai-venue/src/serve.rs` exists to hold, and it
 had been carrying 5 M - so the boot projection ran 1.7x optimistic, and the
-60-second WARN threshold it gates was really firing at about 104 seconds of
+60-second warn threshold it gates was really firing at about 104 seconds of
 actual cost. Corrected to 2.9 M.
 
 Measuring the whole boot interval rather than tick synthesis alone is
@@ -1106,8 +1106,8 @@ same way after any change to the generator, the checkpoint stride, or the tape
 protocol - the previous value's stated provenance was a `fill_bench` row, and no
 such row has ever existed in this document.
 
-DO NOT COMPARE THIS NUMBER AGAINST A CORPUS-PARSING RATE. It is the rate at
-which the generator MANUFACTURES a tick - GARCH recursion, RNG draws, checkpoint
+Never compare this number against a corpus-parsing rate. It is the rate at
+which the generator manufactures a tick - GARCH recursion, RNG draws, checkpoint
 retention - and manufacturing a tick is far heavier per item than splitting a
 CSV line. Set beside the measured Python archive-parse ceiling (2.21 M rows/s
 for a 128.7 M-row month, bytes-mode hot loop plus a process pool, 2026-08-05)
@@ -1185,7 +1185,7 @@ rounding make the final bound deliberately longer than an exact preservation;
 it cannot shorten the baseline horizon. At the worst measured wall rate, the
 old 65,536-frame fanout held 0.007398 wall seconds; the resized fanout holds
 0.029553 wall seconds, so its horizon does not shrink. This round regenerated
-both fixtures from ONE invocation of `tick-composition`, which then took an
+both fixtures from one invocation of `tick-composition`, which then took an
 `--out-6` and an `--out-7` path and was followed by
 `mogwai tick-composition-ratios compare`. The command takes a single `--out`
 today and every later protocol is measured independently, so the paired form is
@@ -1197,7 +1197,7 @@ so a fixture paired with a stale partner is refused rather than silently
 ratioed. Both were serialized in full and staged beside their destinations
 before either was touched, so a serialization failure or a full disk could not
 consume a finished run; the two renames were still two operations, so what that
-shape guaranteed was DETECTION of a mismatch rather than its prevention.
+shape guaranteed was detection of a mismatch rather than its prevention.
 `--jobs N` sets worker count, defaulting to the machine's parallelism, and
 still does.
 
@@ -1212,7 +1212,7 @@ the same parent count into the cash session raises all of them.
 
 Protocol 8 cannot be projected from protocol 7. The profile divides the duration
 draw and scales the return, so timestamps and prices both move and the two
-fixtures come from SEPARATE traversals. `mogwai tick-composition-ratios compare --mode
+fixtures come from separate traversals. `mogwai tick-composition-ratios compare --mode
 independent` therefore gates before computing any ratio: `ticks_per_parent` must
 be bit-identical for all five presets, because the profile changes when events
 happen and never how many, and every measured field must be identical for
@@ -1239,7 +1239,7 @@ and 162,349,000,000 against 83,250,340,704. The worst measured p99.9 rate is now
 270,931,449 and 1,364,836,628, remain lower and set neither result.
 
 The warmup ratio is the one that reads oddly. At 1.000619 it is the only one of
-the four that FAILS the 1.05 materiality threshold, yet its ceiling doubles. The
+the four that fails the 1.05 materiality threshold, yet its ceiling doubles. The
 reason is that the 24-hour reach is dominated by the maximum-surge arm, where
 arrival compression already saturates the horizon and a session profile has
 almost nothing left to concentrate. The doubling is entirely the standing
@@ -1266,7 +1266,7 @@ run should size `fanout_depth` deliberately rather than inherit the default.
 Regenerate with
 `brokkr run mogwai -- tick-composition --out analysis/tick-composition-protocol-8.json`,
 then `mogwai tick-composition-ratios compare --mode independent`. The run
-now costs about 90 minutes rather than an hour, and the increase IS the result.
+now costs about 90 minutes rather than an hour, and the increase is itself the result.
 Each mode carries its own baseline constant table; a shared one would resize the
 current constants by the pre-protocol-7 baseline and under-propose checkpoint
 and fanout by the factor protocol 7 had already absorbed.
@@ -1280,7 +1280,7 @@ their cadence and fanout both move while the three crypto presets are untouched
 by construction. The `independent_9_10` mode gates accordingly before any
 ratio: every measured field must be byte-identical for BTCUSDT, ETHUSDT and
 SOLUSDT, `parents` must match for all five, and every measurement entering a
-ratio must be finite and positive on both sides. `ticks_per_parent` is NOT
+ratio must be finite and positive on both sides. `ticks_per_parent` is not
 frozen for the futures - the fit changes what a parent looks like, which the
 7-to-8 session reshape could not. All gates passed; the protocol-9 side is the
 Brick B0 fixture whose 8/9 byte-identity was separately verified.
@@ -1325,14 +1325,14 @@ Protocol 11 refit the two MNQ session arrays in the units the runtime
 applies - arrival intensity from July MNQ inferred-parent counts,
 per-parent volatility from quote-mid returns - and re-solved
 `vol_scalar`; the fit artifact is `analysis/mnq-fit.json`. A session
-reshape changes WHEN parents happen and how far returns reach, never how
+reshape changes when parents happen and how far returns reach, never how
 many children a parent draws, so the `independent_10_11` mode gates
-STRICTLY: `parents` and `ticks_per_parent` must be identical for every
+strictly: `parents` and `ticks_per_parent` must be identical for every
 pairing, the three crypto presets byte-identical, and every numeric leaf
 finite and positive on both sides. All gates passed.
 
 The maximum independent p99.9 protocol-11/protocol-10 ratios, the
-standing policy's proposals, and what LANDED:
+standing policy's proposals, and what landed:
 
 | budget denominator | ratio | prior | policy proposal | landed |
 |---|---:|---:|---:|---:|
@@ -1347,11 +1347,11 @@ for checkpoint, next-million for sweep and warmup, then the larger of
 that and required reach (281,678,600 frames for a 300-second window and
 81,123,436,742 for the 24-hour warmup, both far below the ceilings). The
 worst measured p99.9 rate is 938,928.67 frames per simulated second,
-unchanged from protocol 10: the refit moves density BETWEEN hours rather
+unchanged from protocol 10: the refit moves density between hours rather
 than raising the peak, which is why the ratios sit barely above one
 where the 9-to-10 cadence fit roughly doubled them.
 
-The FANOUT proposal was REJECTED by joint review, the first recorded
+The fanout proposal was rejected by joint review, the first recorded
 policy exception. The reasoning, carried here in full: the resize
 formula models costless refusal ceilings, but the fanout ring is eagerly
 allocated state proportional to its depth, and compounding a fresh
@@ -1360,11 +1360,11 @@ power-of-two rounding turns a 1.014x measured ratio into a 4x
 allocation. The retained depth holds 0.466 wall seconds of ring at the
 protocol-11 worst measured p99.9 frame rate against the 0.472 it held at
 protocol 10 and the 0.114 the protocol-10 resize was justified over.
-Decisively, the proposed 16,777,216 capacity DETERMINISTICALLY breaks
+Decisively, the proposed 16,777,216 capacity deterministically breaks
 `a_banded_limit_fills_from_the_run_sweep` (5 of 5 failing against 5 of 5
 passing at 4,194,304, with the other three resizes present in both
 trees, on the default BTCUSDT venue at speed 100): an accept-before-fill
-invariant failure whose mechanism is UNRESOLVED - the assertion cannot
+invariant failure whose mechanism is unresolved - the assertion cannot
 yet distinguish wire reordering (the fill frame arriving before
 `OrderAccepted`) from timestamp inversion, and ring depth is not
 consulted after construction at nonzero speed, so the suspected channel
@@ -1470,11 +1470,11 @@ or `brokkr run --release tag_decode_probe` for a bare run that stores no row.
 |---|---:|---:|
 | serde internally tagged enum | 219 | 4 |
 | identical payload fields as a plain untagged struct | 103 | 2 |
-| tag probe plus direct market payload, LANDED | 224 | 2 |
+| tag probe plus direct market payload, the landed one | 224 | 2 |
 | tag probe, noncanonical escaped tag | 245 | 4 |
 
-READ THIS AS AN ALLOCATION RESULT, NOT A THROUGHPUT ONE. The landed decoder is
-5 ns per frame SLOWER than the internally tagged enum it replaces, because
+Read this as an allocation result, not a throughput one. The landed decoder is
+5 ns per frame slower than the internally tagged enum it replaces, because
 probing the tag is a second pass over the same bytes; the plain-struct row is
 the idealized single-parse floor and is not reachable on a tagged wire without
 changing the wire. What the change buys is two fewer allocator calls per market
@@ -1505,28 +1505,28 @@ through its own wrapping global allocator. Run it with
 | landed `VenueMessage::from_json_str` | 239, 220, 219 | 2 |
 | payload struct, `Symbol = Arc<str>` (today) | 110, 115, 109 | 2 |
 | payload struct, inline 32-byte `Copy` symbol | 103, 111, 103 | 0 |
-| `mogwai_adapter::convert::trade_id`, ONE trade | 162, 154, 153 | 5 |
+| `mogwai_adapter::convert::trade_id`, one trade | 162, 154, 153 | 5 |
 
-`Symbol` IS `Arc<str>`, and deserializing one costs TWO allocations, not the one
+`Symbol` is `Arc<str>`, and deserializing one costs two allocations, not the one
 a reader expects: serde takes a `String` off the wire and then copies it into a
 fresh `Arc`. An inline fixed-capacity symbol removes both, and about 4 to 7 ns.
 
-THE FIRST NUMBERS RECORDED HERE SAID 19 ns, AND THEY WERE BIASED. That table was
+The first numbers recorded here said 19 ns, and they were biased. That table was
 taken from a probe whose arms differed in two uncontrolled ways at once, both
 found by the round's cold review, and it is worth knowing which because either
 one can recur in the next probe someone writes here:
 
-- THE INLINE ARM OBSERVED ONLY `symbol.as_str().len()`, a read of the `len: u8`
+- The inline arm observed only `symbol.as_str().len()`, a read of the `len: u8`
   field, so nothing observed `bytes` and the 32-byte `copy_from_slice` that is
   the inline representation's entire cost was free to be elided. Both arms now
   `black_box` the whole decoded tuple, symbol value included.
-- THE INLINE ARM ALSO RAN `validate_wire_symbol` PER FRAME while the `Arc` arm
+- The inline arm also ran `validate_wire_symbol` per frame while the `Arc` arm
   validated nothing - the opposite bias, undisclosed. Neither arm validates now,
-  so the delta is representation ONLY, and the alphabet check the proposal would
-  add is a cost NOT counted here. The measured saving is therefore an upper
+  so the delta is representation only, and the alphabet check the proposal would
+  add is a cost not counted here. The measured saving is therefore an upper
   bound on the real one.
 
-THE FOURTH ROW IS WHY THE CHANGE WAS REFUSED, and it is the row to reach for
+The fourth row is why the change was refused, and it is the row to reach for
 whenever a per-frame decode saving is proposed. The adapter's socket reader is
 the only decoder of `VenueMessage` that exists - `from_json_str` and
 `from_json_slice` have one call site each, both in `lifecycle.rs`'s read loop -
@@ -1536,22 +1536,22 @@ before the nautilus event construction, the `handler().await`, the tungstenite
 framing, and the `Message::Text` `String` the frame already arrived in. And five
 is itself a floor: the probe replicates `trade_id` down to its 56-bit mask but
 omits `TradeId::new_checked`, which interns the string. A ~5 ns saving inside a
-~220 ns decode, at the frame rates a paced venue serves, is not observable. THE
-ARC SHARING IS ALSO NOT WASTED, it is just not earned at DECODE: it pays inside
+~220 ns decode, at the frame rates a paced venue serves, is not observable. The
+`Arc` sharing is also not wasted, it is just not earned at decode: it pays inside
 the process afterwards, which is where `GeneratedSource` and `TickRuleAggressor`
 share one allocation (see the section above).
 
-THAT `VenueMessage` INVENTORY IS EXACTLY AS NARROW AS IT READS. Symbols also
-reach the adapter through five UNTAGGED HTTP decodes that are not
+That `VenueMessage` inventory is exactly as narrow as it reads. Symbols also
+reach the adapter through five untagged HTTP decodes that are not
 `VenueMessage` at all and validate nothing - `client/shared.rs` (instruments),
 two in `client/data.rs` (trades and quotes), `client/exec.rs` and `clock.rs`.
 They are the same deliberate posture `convert::instrument_id` takes below, not
 an oversight, but a claim about "the decoders" has to name them.
 
-THE OTHER HALF OF THE SAME PROPOSAL was making `MAX_SYMBOL_LEN` a property of
+The other half of the same proposal was making `MAX_SYMBOL_LEN` a property of
 the type rather than a validator a caller must remember to call. Audited, it
 named one live gap, now closed in the same commit as this table:
-`validate_submit_order` checked ONLY `symbol.len() > MAX_SYMBOL_LEN`, so the
+`validate_submit_order` checked only `symbol.len() > MAX_SYMBOL_LEN`, so the
 empty string and any byte outside the wire alphabet were admitted at order
 entry - the one inbound symbol ingress - while this document asserted
 every ingress validated. It runs `validate_wire_symbol` now, on both the
@@ -1559,17 +1559,17 @@ every ingress validated. It runs `validate_wire_symbol` now, on both the
 `an_order_entry_symbol_is_judged_by_the_wire_alphabet`. What each ingress checks
 today:
 
-- ORDER ENTRY: the full wire alphabet, through `validate_submit_order` at
+- Order entry: the full wire alphabet, through `validate_submit_order` at
   `http::boundary_error`, the one gate the websocket order carrier uses for
   every command.
-- URL-CARRIED SYMBOLS: the full wire alphabet, in `http.rs` and `source.rs`.
-- CONFIG INSTRUMENTS: non-empty and `MAX_SYMBOL_LEN` only. `config.rs` calls
-  `validate_wire_symbol` on an instrument's `index_symbol` and NOT on its own
+- URL-carried symbols: the full wire alphabet, in `http.rs` and `source.rs`.
+- Config instruments: non-empty and `MAX_SYMBOL_LEN` only. `config.rs` calls
+  `validate_wire_symbol` on an instrument's `index_symbol` and not on its own
   `symbol`, so a configured instrument may carry a symbol order entry would now
   refuse. Filed as an owner-level item in `notes/todo.md` rather than tightened
   here: it is operator-supplied rather than consumer-supplied, and it is a
   `mogwai-venue` decision.
-- THE ADAPTER'S DECODE: unvalidated DELIBERATELY, with `convert::instrument_id`
+- The adapter's decode: deliberately unvalidated, with `convert::instrument_id`
   using `NautilusSymbol::new_checked` so a hostile symbol drops one frame rather
   than an unsupervised task. Validating at decode would move that refusal, not
   close a hole.
@@ -1578,5 +1578,5 @@ So the type-level bound would have caught the order-entry gap for free, which is
 the honest point in its favour; it does not survive the cost of the edit, and a
 one-line call to the validator that already existed closed the gap instead.
 
-The probe is deliberately NOT a registered `brokkr mogwai` target: it settled one
+The probe is deliberately not a registered `brokkr mogwai` target: it settled one
 decision rather than opening a series.

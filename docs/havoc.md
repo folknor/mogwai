@@ -11,9 +11,9 @@ liquidation, bypasses them and leaves them armed for the next matching consumer
 action.
 
 Two nouns run through what follows and `reference/glossary.md` defines both. A
-RIVER is the generated sequence for one resolved instrument shape, keyed by the
+river is the generated sequence for one resolved instrument shape, keyed by the
 requested symbol plus that shape's knobs - not by the symbol alone, which
-matters here because a generator arm is part of that key. A BOAT is the paced
+matters here because a generator arm is part of that key. A boat is the paced
 reader sitting on a river, placed when the first connection boards it at a given
 speed, and it carries the clock every answer about that river is dated on.
 
@@ -23,7 +23,7 @@ It is deliberately not any boat's, because a boat's own instant belongs to the
 passengers riding it. What a passenger receives is still dated on its boat, so a
 havoc window cannot be an interval on one clock.
 
-An armed `CommandLatency` act delay is HEAD-OF-LINE on its socket. Each
+An armed `CommandLatency` act delay is head-of-line on its socket. Each
 connection feeds one sequential dispatcher, so a delayed submit holds every
 later command from the same socket behind it - which is what stops a cancel
 from overtaking the submit it cancels. Concurrent in-flight commands under an
@@ -35,25 +35,25 @@ suppresses a connection's output wholesale; `StallData` suppresses market data
 only, so a venue heartbeat still arrives and a stalled feed stays
 distinguishable from a dead venue.
 
-TRANSPORT HAVOC RESHAPES BARS RATHER THAN DROPPING THEM, and that is deliberate.
-The venue ships no bars: every bar a nautilus host receives is FABRICATED by the
+Transport havoc reshapes bars rather than dropping them, and that is deliberate.
+The venue ships no bars: every bar a nautilus host receives is fabricated by the
 adapter by folding the trades it was delivered. Dropping or duplicating a trade
 therefore changes a bar's open, high, low, close or volume rather than removing
 or duplicating a whole bar frame, because the fold happens downstream of the
 filter. That is what a real consumer-side aggregator on a lossy feed experiences,
-so it is the honest simulation of THIS venue; modelling a dropped bar would be
+so it is the honest simulation of this venue; modelling a dropped bar would be
 modelling a venue that ships bars natively, which mogwai is not. It follows the
 same principle as the rest of the surface: mogwai injects faults and declines to
 repair them downstream.
 
-AN OVERRUN RING IS NOT HAVOC, and the venue keeps the two apart on the wire. A
+An overrun ring is not havoc, and the venue keeps the two apart on the wire. A
 window you armed withholds frames deliberately and is never reported as loss; a
 passenger that falls behind the bounded fanout ring has lost frames nobody armed,
 and that is declared with `FeedLagged` before the next market frame it receives.
 A hole discovered while a blackout is open waits for the blackout to lift rather
 than being announced into it. The venue does not close the socket for either.
 
-WHAT A CONSUMER CAN DO ABOUT IT DEPENDS ON THE CONSUMER, and the nautilus case is
+What a consumer can do about it depends on the consumer, and the nautilus case is
 the constrained one. The venue declares the hole on the wire: `FeedLagged`
 carries the skipped count and the two boundaries of the affected span, so a
 consumer reading the protocol directly can tell a
@@ -61,7 +61,7 @@ quiet feed from a lossy one rather than inferring it from bar shape. A nautilus
 host cannot: `DataEvent` has no gap or degradation variant, the adapter object
 reaches the host as a `dyn DataClient` with no downcast, and fabricating an
 `InstrumentStatus` would report a venue halt that did not happen - so
-`mogwai-adapter` logs the frame at ERROR, at the level a host alerts on, and
+`mogwai-adapter` logs the frame at the `error` level, the level a host alerts on, and
 that log line is the only channel the signal has. A bar-folding strategy is
 therefore not in a position to read it, and a run that needs the distinction
 programmatically wants a consumer on the raw protocol. The real fix is a declared
@@ -90,7 +90,7 @@ And a registry of named water shapes in the venue's config would be worse for
 the attached case, where the config file belongs to whoever launched the
 exchange and the consumer is precisely the party that does not own it.
 
-`surge_start_ms` is an offset from the RUN ORIGIN, not from the moment you
+`surge_start_ms` is an offset from the run origin, not from the moment you
 connect. That is what lets two passengers share one river: "starting when I
 connect" names a different window for every boarding instant, so it would fork a
 river per connection and share nothing. The consequence to expect, and it is
@@ -111,48 +111,48 @@ A surge is never lifted: it ends when its window expires. There is no control
 that takes it back off the water, because there is no water to take it off - a
 different arm is a different river, and you leave one by leaving the boat.
 
-WHAT THIS COSTS, stated because the cap is real. Every distinct arm materializes
+What this costs, stated because the cap is real. Every distinct arm materializes
 a river, rivers are never evicted, and the run's cap is 256. A scenario sweep
 across a hundred multiplier values spends a hundred rivers for the run's whole
 life, not for the life of the socket that asked. Sweeps larger than the cap want
 one venue process per batch.
 
-Transport controls remain runtime-armable and are ARMED PER ACCOUNT. `GoDark`,
+Transport controls remain runtime-armable and are armed per account. `GoDark`,
 `StallData`, `DelayAcks` and `CommandLatency` all take an optional `account` on
 the request and corrupt only that account's view; naming none arms every
 account, which is what a single-account venue wants and what an existing
 scenario file already writes, so nothing on the wire breaks. They ride the
-account rather than the venue because they change what one connection RECEIVES,
+account rather than the venue because they change what one connection receives,
 or when it hears about its own commands, rather than what the generator
 produces - so on a shared exchange, blacking out or slowing one subagent leaves
 the rest of the batch untouched.
 
-THE CONTROL PLANE ARMS AND DOES NOT DISARM. There is no clear: the route off an
-armed window is to RE-ARM IT WITH A ZERO SPAN, which is closed on every reader's
+The control plane arms and never disarms. There is no clear: the route off an
+armed window is to re-arm it with a zero span, which is closed on every reader's
 clock, and it is scoped exactly like any other arm - naming an account lifts
 that account's window and naming none lifts every account's. `GoDark { ms: 0 }`
 and `StallData { ms: 0 }` lift a blackout early, `DelayAcks { ms: 0 }` releases
 acknowledgements already queued because the writer reads that window per event
 at dequeue, and a `CommandLatency` arm with every field omitted zeroes all six.
-What no re-arm reaches is an act delay the venue has ALREADY BEGUN serving: that
+What no re-arm reaches is an act delay the venue has already begun serving: that
 command sleeps out its full window and then mutates, because a venue that has
 begun acting does not un-begin.
 
-WHAT IS ARMED BEFORE A CONSUMER DIALS IS ONE-WAY. An arm recorded against an
+What is armed before a consumer dials is one-way. An arm recorded against an
 account that does not exist yet is spent when that account opens, or when the
 run ends, and nothing retracts it in between - pre-boarding havoc setup is run
-CONSTRUCTION, so a setup that fails partway is rolled back by discarding the run
+construction, so a setup that fails partway is rolled back by discarding the run
 and starting another. Two consequences worth stating because a harness will meet
-both. Engine arms APPEND rather than replace, so a retried setup leaves the
+both. Engine arms append rather than replace, so a retried setup leaves the
 eventual account carrying one-shots from every abandoned attempt rather than
-just the intended ones. And a pending record is RETAINED, NOT GUARANTEED: the
+just the intended ones. And a pending record is retained, never guaranteed: the
 venue holds arms for a bounded number of unopened names and sheds the oldest, so
 arms posted for unrelated accounts can drop one that was already waiting.
 
-AN ARM DOES NOT WAIT FOR A CONNECTION, in either spelling. Naming an account
+An arm does not wait for a connection, in either spelling. Naming an account
 that has not connected yet records the arm against that name, and the account's
 first ledger - whether it is minted by a socket or by the consumer's own
-`POST /accounts` - opens carrying it. Naming none records the arm on the RUN, so
+`POST /accounts` - opens carrying it. Naming none records the arm on the run itself, so
 every ledger opened afterwards carries it too, engine divergences and the fee
 surcharge included. Both used to reach only the accounts that happened to exist
 at the instant of the request while answering `202` either way, so arming a
@@ -163,7 +163,7 @@ Recording an arm does not open an account, deliberately: the consumer still
 states its own opening balances and policy on `POST /accounts`, and finds the
 arm standing on the ledger that call returns.
 
-The market REGIMES - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are the
+The market regimes - `VolStorm`, `LiquidityDrought` and `ReopenGap` - are the
 same mechanism at a different scope. They are a boot choice made by whoever
 launches the run, apply to the whole run's water, and enter every river's
 identity, so a regime run serves different rivers rather than mutating one. A
@@ -175,7 +175,7 @@ unchanged. `mogwai gen` takes the same regimes offline.
 
 Every timed havoc window, including transport windows and `FeeSurcharge`, is
 measured in simulated milliseconds on the receiving passenger's clock. The
-window is stored as the WALL instant it was armed at plus a simulated span, so
+window is stored as the wall instant it was armed at plus a simulated span, so
 each reader judges the span on its own boat's clock: a passenger that boards
 after the arm receives the full declared span from its own boarding instant,
 and so does a boat placed after the arm, which opens the window at its own
@@ -196,9 +196,9 @@ order. If the control request also supplies `symbol`, a mismatch is refused
 with HTTP 400 rather than using the supplied symbol to choose a clock.
 
 `DropNextAccountUpdate` swallows the next account snapshot that follows an
-order EXECUTING or LEAVING THE BOOK - a fill, a cancel that frees a resting
+order executing or leaving the book - a fill, a cancel that frees a resting
 order's hold, a funds-check eviction during a sweep, a stop trigger that booked
-any of these. It is deliberately NOT spent on an order JOINING the book, even
+any of these. It is deliberately not spent on an order joining the book, even
 though the hold that joining places does move `locked`: acceptance
 necessarily precedes the fill, so an arm consumed there could never reach the
 event a scenario author aimed it at. That one carve-out is the whole of the
@@ -206,13 +206,13 @@ asymmetry - everywhere else the question is whether an order's state actually
 transitioned, not whether the transition was a fill.
 
 `FaultTape` kills the venue. The run reports a source fault, tears down, and
-the process exits NONZERO, with an ERROR line on stderr naming the operator as
+the process exits nonzero, with an error line on stderr naming the operator as
 the cause. It is the one arm a consumer is least likely to have exercised: a
 strategy that survives a blackout, a duplicate fill and a dropped account update
 may still have no answer for the venue simply going away mid-run, which a real
 broker does and which no in-process backtest can produce.
 
-Three things follow from it being TERMINAL. It cannot be scoped to an account -
+Three things follow from it being terminal. It cannot be scoped to an account -
 a request naming one is refused with HTTP 400 rather than silently widened,
 because killing a whole run when a scenario meant to perturb one ledger is not a
 generous reading. Nothing takes it back, which is true of every arm here but
@@ -255,7 +255,7 @@ carved out and no new arm exists for the trigger itself.
 | Arm | Where it lands on a conditional |
 |---|---|
 | `RejectNextSubmit` | The submit. The conditional never exists, so nothing can trigger. |
-| `RejectNextCancel` | A cancel for a RESTING order, refusing it and leaving the order where it was. Not spent on an unknown or already-terminal id, which would be refused anyway and would look like the arm failing to fire. The point is what the consumer is left believing: publish a replacement before the cancel is acknowledged, have the cancel refused, and two orders rest where the script rests one. |
+| `RejectNextCancel` | A cancel for a resting order, refusing it and leaving the order where it was. Not spent on an unknown or already-terminal id, which would be refused anyway and would look like the arm failing to fire. The point is what the consumer is left believing: publish a replacement before the cancel is acknowledged, have the cancel refused, and two orders rest where the script rests one. |
 | `PartialFillNext` | The fill the trigger produces, never the trigger itself. An untriggered stop consumes no arm - only a fill targets one by client order id. |
 | `DuplicateNextFill` | The fill event only. `OrderTriggered` is never duplicated - it is not a fill, and a duplicated trigger has no consumer FSM transition to land on. |
 | `DropNextAccountUpdate` | The account snapshot that follows the triggered fill, or the cancel a trigger's funds check produced, on the same rule as anywhere else. A trigger that only comes to rest still emits its snapshot, and consumes no arm. |

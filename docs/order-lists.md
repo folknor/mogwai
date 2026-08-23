@@ -1,6 +1,6 @@
 # Order lists: OCO, OTO and OUO
 
-An ORDER LIST is several orders submitted together whose fates are linked. The
+An order list is several orders submitted together whose fates are linked. The
 venue serves all three linkage rules, so a bracket - an entry with a take-profit
 and a stop that reap each other - is a real primitive here rather than two
 independent legs a strategy has to reconcile itself.
@@ -25,12 +25,12 @@ Three things are guaranteed, and they are meant to be cited:
 
 The third is the one that costs something to implement and is the reason the
 frame exists at all. Sent leg by leg, a two-leg `Ouo` bracket lets the entry
-FILL before the stop has been admitted: the shrink runs against a sibling that
+fill before the stop has been admitted: the shrink runs against a sibling that
 is not on the book, adjusts nothing, and the stop then arrives at full size
 beside a position that is already open. The pair's aggregate fill is twice the
 bracket quantity, which for a crossed slice reverses the account. So:
 
-**A LINKED ORDER SENT AS A BARE `SubmitOrder` IS REFUSED.** Not deprecated -
+**A linked order sent as a bare `SubmitOrder` is refused.** Not deprecated -
 refused, at the protocol boundary, naming the group frame as the remedy. A venue
 that served both routes could only promise atomicity for one code path, and a
 consumer cannot build a safety argument on which path a consumer happened to take.
@@ -53,15 +53,15 @@ took to reach it:
   a parent can travel with the maximum number of siblings.
 
 **The one carve-out, and it is funds.** The admission pass judges every member
-against the book as it is BEFORE the group runs, so it cannot see money an
+against the book as it is before the group runs, so it cannot see money an
 earlier member's fill is about to spend. A member the venue can no longer fund
-when its own turn comes is REJECTED, with its earlier siblings already accepted.
+when its own turn comes is rejected, with its earlier siblings already accepted.
 On that one axis the guarantee covers everything the venue can decide in
 advance, and not a balance the group's own fills moved.
 
-Whether your own group meets it is a question about YOUR orders, not about
+Whether your own group meets it is a question about your own orders, not about
 brackets in general. A reduce-only order places no hold, so a group whose
-exits are reduce-only never meets the carve-out. Whether an exit CAN be
+exits are reduce-only never meets the carve-out. Whether an exit can be
 reduce-only depends on the run's `oms_type` and is on your side of the wire:
 under hedging an exit names the `position_id` it reduces and caps against that
 position, while under netting the cap is taken against the account net, which
@@ -75,7 +75,7 @@ holds at submission and the carve-out is unreachable.
 
 ## The model
 
-A linkage is a GROUP ID plus a RULE, carried by each member. The venue holds no
+A linkage is a group id plus a rule, carried by each member. The venue holds no
 list object: it holds what each order says about the orders it names, and it
 acts on that at the instant a member fills.
 
@@ -91,9 +91,9 @@ Every order may carry a `link`:
 ```
 
 - **`order_list_id`** - the list's identity, shared by every member.
-- **`contingency`** - what a fill of THIS order does to the orders it names.
+- **`contingency`** - what a fill of this order does to the orders it names.
 - **`linked_order_ids`** - the siblings the rule acts on. Capped at 8.
-- **`parent_order_id`** - the order this one WAITS FOR, if any.
+- **`parent_order_id`** - the order this one waits for, if any.
 
 An order with no `link` is a standalone order and behaves exactly as it always
 did.
@@ -103,11 +103,11 @@ did.
 | `contingency` | A fill of this order... |
 |---|---|
 | `NoContingency` | does nothing to the orders it names. |
-| `Oco` | CANCELS every named sibling still resting. |
+| `Oco` | cancels every named sibling still resting. |
 | `Oto` | releases its children (which name it as their parent). |
-| `Ouo` | SHRINKS every named sibling by the filled quantity, cancelling one the shrink takes to zero. |
+| `Ouo` | shrinks every named sibling by the filled quantity, cancelling one the shrink takes to zero. |
 
-`Oco` cancels on ANY fill, not only a full one: a venue that let a partially
+`Oco` cancels on any fill at all, not only a full one: a venue that let a partially
 filled take-profit leave its stop live would leave a bracket holding two live
 exits for one position. `Ouo` is the variant that survives partial fills - the
 surviving leg tracks how much of the position is actually left.
@@ -122,22 +122,22 @@ legs of an OCO pair swept together produce exactly one fill and one cancel.
 
 ## Children: what `parent_order_id` buys
 
-A child is ACCEPTED at submit and then HELD: on the book, answerable to
+A child is accepted at submit and then held: on the book, answerable to
 `QueryOrders`, scanned by nothing, and **placing no hold**. An order that
 cannot execute must not tie up funds the parent's own fill needs.
 
-Its parent's first fill RELEASES it: it takes the resting state it would have
+Its parent's first fill releases it: it takes the resting state it would have
 been given at submit, draws a fresh fill-band trigger, starts its scan from the
 release instant, and places its hold then. Release emits no wire frame -
 the child was already accepted and its status has not changed.
 
-A child of a parent that has ALREADY filled is live at once. That is the
+A child of a parent that has already filled is live at once. That is the
 fast-market bracket: a market entry that filled on arrival leaves its exits
 nothing to wait for.
 
-A parent that goes terminal WITHOUT filling takes its held children with it, in
+A parent that goes terminal without filling takes its held children with it, in
 the same batch. A child left waiting for a release that can never come would
-rest for the life of the run. EVERY terminal path counts, not just the consumer's
+rest for the life of the run. Every terminal path counts, not just the consumer's
 own cancel and the clock's expiry: a reduce-only parent cancelled at its trigger
 because there is nothing left to reduce, a post-only stop-limit rejected when it
 would have taken liquidity, a resting or triggered order cancelled at its funds
@@ -146,7 +146,7 @@ The silent one reaps silently - the children leave the book and the truth store
 records them cancelled, with no wire frame for either, which is the whole point
 of that fault class.
 
-AMENDING A HELD CHILD LEAVES IT HELD. A price amend moves the price the child
+Amending a held child leaves it held. A price amend moves the price the child
 will rest at once it is released; it does not promote the child to a live limit,
 does not give it a hold, and does not offer it any tape. A trigger amend
 on a held conditional child is refused, and says which of the two it is - the
@@ -154,7 +154,7 @@ child is held, not triggered.
 
 ## What the venue refuses, and why
 
-- A child that is a `Market` order, or `Ioc`/`Fok`. A released child RESTS, and
+- A child that is a `Market` order, or `Ioc`/`Fok`. A released child rests, and
   a now-or-never child would be gone before its parent ever filled. Both are
   refused at the protocol boundary, so they are refused on every route a linked
   order can legally take: a linked bare `SubmitOrder` is refused for being bare,
@@ -162,7 +162,7 @@ child is held, not triggered.
 - `Oco` or `Ouo` naming nothing. It would silently behave like a standalone
   order, which a consumer discovers only by watching a stop it thought was reaped
   go on to fill.
-- An order linking or parenting ITSELF.
+- An order linking or parenting itself.
 - A child whose parent the venue has not seen. Submit a list in its own order,
   parent first - which is the order nautilus's `OrderList` already puts them in.
 - A child whose parent is terminal and never filled.
@@ -175,16 +175,16 @@ child is held, not triggered.
 
 ## From nautilus
 
-A host submits an `OrderList` and the adapter sends its legs as ONE
+A host submits an `OrderList` and the adapter sends its legs as one
 `SubmitOrderGroup`, in the list's own order, each carrying its own linkage. A
 leg the adapter cannot convert, or cannot resolve against the cache, aborts the
-whole list before any leg is ANNOUNCED and before anything is dispatched: half a
+whole list before any leg is announced and before anything is dispatched: half a
 bracket is worse than none, and a strategy that gets a rejection for its entry
 can retry, while one whose stop silently never reached the venue cannot. Both
 fallible passes run to completion first, so the pass that emits `OrderSubmitted`
 and writes the mirror cannot fail partway and strand the legs behind it.
 
-A group refusal names the LIST rather than a member, since a group is refused
+A group refusal names the list rather than a member, since a group is refused
 whole; the adapter remembers which legs it dispatched under which list id and
 fans the refusal back out as one `OrderRejected` per leg, because nautilus has
 no order-list-scoped rejection event and a leg with no answer would wait on one

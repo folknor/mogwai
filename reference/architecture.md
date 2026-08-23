@@ -3,10 +3,10 @@
 Mogwai is a fake venue. A direct launcher starts one foreground process and
 receives a versioned readiness record as one JSON line on the child's stdout.
 The process binds one endpoint and owns an open set of resolved instruments,
-generated rivers, and one ledger PER ACCOUNT.
+generated rivers, and one ledger per account.
 
-A RIVER is a generated sequence and is shared; an ACCOUNT owns its ledger,
-risk state and freeze stamp; a PASSENGER is one connected trader riding one
+A river is a generated sequence and is shared; an account owns its ledger,
+risk state and freeze stamp; a passenger is one connected trader riding one
 boat and dying with its socket. The
 engine is per account: one engine per process meant every consumer's
 fills moved every other consumer's net, which is right for a venue owned by one
@@ -17,12 +17,12 @@ opening a fresh one. The venue cannot distinguish a reconnect from a stranger
 claiming the id and does not try, so an account id is effectively a bearer
 token.
 
-DELIVERY IS ATTRIBUTED, NOT BROADCAST, which is what makes the per-account
+Delivery is attributed, not broadcast, which is what makes the per-account
 ledger worth having on the wire as well as in memory. A sweep executes one engine
 pass per account, and each frame it produces reaches only the passengers of the
 account it is
 about: an order-scoped frame goes to the account that submitted the order, and an
-`AccountState` goes to the account it NAMES. What reaches every connection is
+`AccountState` goes to the account it names. What reaches every connection is
 what is genuinely about the venue - a fault, a run completion, a feed gap.
 
 The account snapshot was the last frame to get this, and until it did, an
@@ -33,8 +33,8 @@ serves one ledger per run has no reason to read it. If a consumer's own adapter
 skips that comparison on the strength of the one-ledger-per-run premise, the
 shared-venue topology breaks the premise, so the venue is what has to be right.
 
-AN ACCOUNT IS READ UNDER ONE CALLSIGN. A second socket presenting an existing
-account id under a DIFFERENT or ABSENT callsign EVICTS the incumbent, because a
+An account is read under one callsign. A second socket presenting an existing
+account id under a different or absent callsign evicts the incumbent, because a
 ledger read and written by two unrelated parties is one ledger with two notions
 of its own state. Sockets presenting the same callsign coexist instead, which is
 what lets one consumer hold a data leg and an exec leg - and, through them, as
@@ -42,14 +42,14 @@ many rivers as those sockets bound - on one account. The evicted socket is
 closed with `1000`, normally rather than as a fault: the venue cannot tell a
 returning consumer from a stranger claiming the id, and treating an eviction as a
 failure would make a consumer's reconnect ladder evict whatever evicted it. By
-default the newcomer RESUMES that account - positions, order history and risk
+default the newcomer resumes that account - positions, order history and risk
 state intact - which is what makes a killed worker able to come back to its own
 book. `reset_account_on_reconnect` hands it a clean ledger instead, and the
 readiness record reports which way the venue is set so a launcher never has to
 infer it.
 
-THE CLOSE CODE DOES NOT CARRY THE MEANING; THE REASON DOES. `1000` is the
-ordinary code for any graceful close, and this venue sends it for THREE
+The close code does not carry the meaning; the reason does. `1000` is the
+ordinary code for any graceful close, and this venue sends it for three
 different things - a completed run, a passenger whose configured duration
 elapsed, and the eviction above - while a proxy or a load balancer sends it for
 reasons of its own. A consumer that read the code alone would have to treat all
@@ -57,10 +57,10 @@ four alike, and the adapter did: it read every `1000` as run completion and
 permanently disabled its reconnect. The reason strings are therefore a protocol
 contract rather than log text, and they live in `mogwai_protocol::close`, which
 the venue writes and `close::classify` reads. A reason that module does not
-recognize is NOT terminal, which is the safe default in both directions: a
+recognize is never terminal, which is the safe default in both directions: a
 needless redial is recoverable, and a run silently declared over is not.
 
-A close reason is therefore bounded by the FRAME rather than by the ordinary
+A close reason is therefore bounded by the frame rather than by the ordinary
 reason cap. RFC 6455 allows a control frame 125 payload bytes and the status
 code takes two of them, so `close::MAX_REASON_BYTES` is 123 - a quarter of the
 512 that bounds a reason inside a text frame. The eviction sentence interpolates
@@ -70,24 +70,24 @@ arrive, and a consumer that sees a bare EOF instead classifies nothing and redia
 into the loop. Every `CloseSpec` constructor trims to that budget, after
 composing its prefix, so the terminal survives and only the detail is spent.
 
-EVICTION IS THE LAST THING AN UPGRADE DOES. Every refusal `/ws` can make - an
+Eviction is the last thing an upgrade does. Every refusal `/ws` can make - an
 unresolvable shape, an account unfunded in the settlement currency, a
 non-finite speed, a boat that could not be placed, a second cadence on one
-ledger - is decided BEFORE the claim, because claiming closes the incumbent's
+ledger - is decided before the claim, because claiming closes the incumbent's
 sockets and, under `reset_account_on_reconnect`, discards its ledger. A refused
 upgrade must cost the incumbent nothing; the alternative made a single
 unauthenticated request a way to disconnect a live consumer and wipe its book
 without ever connecting.
 
-AN UNATTENDED ACCOUNT FREEZES. The moment its last connection goes away it is
+An unattended account freezes. The moment its last connection goes away it is
 not swept, not marked, not funded and not judged against its policy, and a
 socket returning with the same id resumes it. This is a deliberate departure
 from a real venue, where being away is no defence against liquidation: mogwai
 exists to exercise a consumer's live path rather than to simulate an account
-nobody is trading. THE CONSEQUENCE TO STATE IN ANY CLAIM is that a run spanning
+nobody is trading. The consequence to state in any claim is that a run spanning
 a disconnect has a gap in its risk history.
 
-"ITS LAST PASSENGER" IS COUNTED FROM THE ATTACH, not from the outbound lane a
+"Its last passenger" is counted from the attach, not from the outbound lane a
 socket binds after its upgrade completes. The lane table alone cannot answer
 whether anybody is reading an account: an eviction retires the incumbent's lane
 immediately, while the newcomer binds its own only once its handler runs - and
@@ -103,29 +103,29 @@ ledger attached with zero passengers: never TTL-collected, and still swept
 while riding no boat, which cancelled the very resting orders the freeze
 exists to preserve.
 
-RESUMING RE-BASES THE BOOK, because a returning boat is not the one that left. A
+Resuming re-bases the book, because a returning boat is not the one that left. A
 cursor is placed at its river's origin, so a frozen order's scan frontier - the
-instant the departed boat had reached - sits in the new boat's FUTURE, and an
+instant the departed boat had reached - sits in the new boat's future, and an
 order left carrying it would wait for the new cursor to cover ground the old one
 had already covered. Every surviving order therefore resumes scanning from the
 returning boat's own clock. Nothing is owed for the span in between: nobody was
 reading the account, which is the same statement the freeze makes.
 
-RETIREMENT DOES NOT APPLY TO AN EVICTION, and the boundary is the freeze rather
-than the reconnection. Retirement runs only for a RETURNING account - one the
+Retirement does not apply to an eviction, and the boundary is the freeze rather
+than the reconnection. Retirement runs only for a returning account - one the
 venue found frozen - and a newcomer that claims an existing account is counted onto
 it before the incumbent is closed, so the account never freezes in that window
-and the newcomer resumes a LIVE ledger. That is deliberate: retiring off it
+and the newcomer resumes a live ledger. That is deliberate: retiring off it
 would cancel resting orders and close positions the incumbent connection had every
 reason to expect to survive its own reconnect. The alternative was worse than a
 rule: before the count existed the incumbent's teardown could win the race and
 freeze the account first, so whether the newcomer's book was retired depended on
 which task got there first.
 
-RE-BASING IS NOT BOUNDED BY THE FREEZE, and this document previously said it
+Re-basing is not bounded by the freeze, and this document previously said it
 was, on the reasoning that a book taken over by eviction carries "the frontiers
-of a river something is still reading". THAT IS FALSE WHEN THE CLAIMER BOARDS A
-DIFFERENT RIVER. The newcomer takes a different `BoatKey`, the incumbent's
+of a river something is still reading". That is false when the claimer boards a
+different river. The newcomer takes a different `BoatKey`, the incumbent's
 ticket drops, and the departed river's boat is torn down with its worker; a boat
 placed over that river again starts at the yard's origin, under the same key,
 because `BoatKey` carries no placement nonce. The surviving orders' frontiers
@@ -133,8 +133,8 @@ then name a cursor that no longer exists, and every scan window they are judged
 on is empty until the new cursor has covered the whole of the first session
 again - silently, and indistinguishable from an order the tape has not reached.
 
-SO THE RULE IS STATED ON THE FRONTIER ITSELF rather than on the freeze. A
-frontier may TRAIL the cursor serving it and may never LEAD it: it is set either
+So the rule is stated on the frontier itself rather than on the freeze. A
+frontier may trail the cursor serving it and may never lead it: it is set either
 at an order's acceptance or by how far a sweep has walked, both sampled on the
 cursor in front of it. `resume` therefore re-bases exactly the leading frontiers
 on every bind, and leaves trailing ones alone - a trailing frontier names water
@@ -142,12 +142,12 @@ this account is genuinely owed a scan over. Asking the state directly needs no
 new identity and closes the case whatever produced it; a placement nonce on the
 boat would instead repair the freeze proxy, and was not taken for that reason.
 
-WHAT THE ACCOUNT HELD OFF THE JOINED RIVER IS RETIRED at that moment - resting
+What the account held off the joined river is retired at that moment - resting
 orders cancelled, positions closed at their last mark. A returning socket may
 name a different symbol than the account was trading, and carrying that forward
 would leave it holding something the new connection can neither see nor close.
 
-AN ORDER ON A RIVER NOBODY READS IS CANCELLED rather than left, and this is the
+An order on a river nobody reads is cancelled rather than left, and this is the
 other half of the same rule. An attached account's order on a symbol no cursor
 is walking cannot fill, cannot expire, and cannot be told apart from one the
 tape has not reached; the consumer is attached, so it is told. A frozen account is
@@ -155,32 +155,32 @@ exempt because it is skipped wholesale - its book is being kept for the socket
 that comes back for it. Between the two, no resting order can sit indefinitely
 on water nothing is reading.
 
-A TTL BOUNDS THE FREEZE. `account_ttl_ms` collects an account nobody reclaims,
-in WALL time because a frozen account has no simulated clock - the boat that
+A TTL bounds the freeze. `account_ttl_ms` collects an account nobody reclaims,
+in wall time because a frozen account has no simulated clock - the boat that
 carried one wound down with the last socket. Zero, the default, keeps accounts
 for the life of the process, which is what a consumer restarting a worker needs.
 The setting is on the readiness record, so a consumer whose restart takes longer
 than the TTL can assert on the fact rather than discover it as a clean ledger.
 
-A connection that names no account is served under the venue's DEFAULT account.
+A connection that names no account is served under the venue's default account.
 That exists for the ephemeral single-consumer venue, where making the one consumer
 name an id would be ceremony; it is not a venue-wide account every connection
 shares.
 
-THE ACCOUNT ID ON A SNAPSHOT IS A LABEL, AND A CONSUMER KEEPS ITS OWN. A venue
-may hold several ledgers, and `/ws?account=` names one, but ONE CONNECTION SEES
-EXACTLY ONE OF THEM. The account a connection carries is the only account on that socket, so nothing
+The account id on a snapshot is a label, and a consumer keeps its own. A venue
+may hold several ledgers, and `/ws?account=` names one, but one connection sees
+exactly one of them. The account a connection carries is the only account on that socket, so nothing
 can be misrouted onto it, and the id the venue writes on an `AccountState`
 therefore identifies nothing a consumer has to resolve. The
 adapter reads it exactly once, at connect, where `note_account_label` logs the
 mismatch if the venue's name for the ledger differs from the configured one -
-and then stamps the CONFIGURED id onto every snapshot it publishes
+and then stamps the configured id onto every snapshot it publishes
 (`handle_account_state`). Both halves of this used to be an equality check, and
 both were per-account-slot invariants that outlived the slots: the connect-time
 one killed the consumer outright, and one release of the venue reported a bare
 `MOGWAI`, which is a legal `mogwai_protocol::AccountId` and an unconstructable
 nautilus one, so no configured value could satisfy it and every run died on
-connect. The push-path one silently DROPPED a differently-labelled snapshot, so
+connect. The push-path one silently dropped a differently-labelled snapshot, so
 a consumer took every fill while its balances quietly stopped moving.
 
 This is written here because the design is counter-intuitive from the outside
@@ -193,7 +193,7 @@ lives. The scope is the connection, and that is where the argument would break:
 if a socket ever carried several ledgers, the id becomes a key and this whole
 paragraph is what has to change first.
 
-An account may carry a RISK POLICY, which the venue ENFORCES rather than
+An account may carry a risk policy, which the venue enforces rather than
 reports. This is a risk-policy layer and not a funded-account feature: a live
 venue has the same machinery, where an operator sets a daily loss limit that
 behaves like a liquidation except that it lifts at the next session. A rule is a
@@ -209,92 +209,92 @@ can reach after this order, given worst-case fill order of the working book
 (worse extreme net under netting, larger side under hedging). Working orders
 count; reduce-only does not. An oversized submit is a consumer error rather than
 a liquidation.
-THE ACCOUNT DEFINES ITS OWN DAY: the reset
+The account defines its own day: the reset
 is a minute of the UTC day named by the policy, not the instrument's calendar,
 and it fires whenever sim time crosses it.
 
-A POLICY RESOLVES THE WAY A SYMBOL DOES: total, three steps, step three never
+A policy resolves the way a symbol does: total, three steps, step three never
 fails. Knobs stated inline win; otherwise a policy registered by name under
 `[account_policies]` in the venue config, or one this build ships under that
-name, with registered shadowing shipped; otherwise unpoliced. A name NOBODY has
+name, with registered shadowing shipped; otherwise unpoliced. A name nobody has
 is an error rather than a silent fall to unpoliced, because a run that believes
 it is enforced and is not is the worst of the three outcomes. Registration is a
-RUNTIME path, unlike instrument presets, which are compiled in: funded-account
+runtime path, unlike instrument presets, which are compiled in: funded-account
 programmes number in the hundreds and change their terms without notice, so the
 shipped set is illustrative rather than authoritative.
 
-A breach FLATTENS - cancel every resting order, then close every position as
+A breach flattens - cancel every resting order, then close every position as
 reduce-only IOC market orders at the mark, judged against the configured
-liquidation band - and then locks. A TERMINATING breach on a venue serving ONE
+liquidation band - and then locks. A terminating breach on a venue serving one
 account ends the run, since its only account is dead and there is nothing left
 to serve; on a shared exchange it does not, because one subagent breaching must
 not take down the batch. Enforcement without the flatten would be a
 report; the flatten is what makes a forward claim mean anything, because a
 strategy that would have been liquidated actually is.
 
-The thresholds, the ratcheted peak and the remaining budget are PUBLISHED on
-`GET /account` for the EVALUATOR rather than for the strategy. mogwai presents
+The thresholds, the ratcheted peak and the remaining budget are published on
+`GET /account` for the evaluator rather than for the strategy. mogwai presents
 no dashboard, so a run that ended flat having spent most of its budget would be
 indistinguishable from one that never came close.
 
-THE ORDER-TYPE SURFACE IS COMPLETE RATHER THAN CURATED, and as of 2026-08-18 it
+The order-type surface is complete rather than curated, and as of 2026-08-18 it
 is complete in fact and not only in intent: Market, Limit, StopMarket,
 StopLimit, TrailingStopMarket, TrailingStopLimit, MarketIfTouched,
 LimitIfTouched and MarketToLimit are served, which is every order type nautilus
 expresses. `wire_order_type` has no refusal arm left, so a type nautilus adds
-later is a COMPILE ERROR in the adapter rather than a runtime refusal a strategy
+later is a compile error in the adapter rather than a runtime refusal a strategy
 discovers mid-run.
 
-A TRAILING STOP LIMIT CARRIES TWO DISTANCES, which is what distinguishes it from
+A trailing stop limit carries two distances, which is what distinguishes it from
 every other conditional. `trail_offset` holds the trigger away from the extreme
 the tape has reached, exactly as on a trailing stop market. `limit_offset` holds
-the LIMIT away from that trigger, on the side the order can fill from: a sell
+the limit away from that trigger, on the side the order can fill from: a sell
 rests at `trigger - limit_offset`, a buy at `trigger + limit_offset`. The limit
-price is DERIVED rather than consumer-stated, at acceptance and again on every
+price is derived rather than consumer-stated, at acceptance and again on every
 ratchet through one function, so the two can never disagree about which side of
 the trigger the limit belongs on and the limit can never drift out of reach as
 the trigger advances. A consumer-stated price is refused on this type for the same
 reason: the first ratchet would overwrite it.
 
-What the second distance BUYS is a floor on the exit, and it bites in the gap
+What the second distance buys is a floor on the exit, and it bites in the gap
 case rather than the ordinary one. A sell's limit sits below its trigger, so a
 print that reaches the trigger is normally through the limit too and fills at
-once. When the tape GAPS past both, the trigger fires and the limit is not
-reachable, so the order RESTS instead of dumping into the hole - where a
+once. When the tape gaps past both, the trigger fires and the limit is not
+reachable, so the order rests instead of dumping into the hole - where a
 trailing stop market would have taken whatever the gap offered. Which of those
 a strategy wants is a real choice and the venue makes it for nobody.
 
-ORDER LISTS ARE A PRIMITIVE, not a workaround. A linkage is a GROUP ID plus a
-RULE that each member carries - one-cancels-the-other, one-triggers-the-other,
+Order lists are a primitive, not a workaround. A linkage is a group id plus a
+rule that each member carries - one-cancels-the-other, one-triggers-the-other,
 one-updates-the-other - and the venue holds no list object, only what each order
-says about the orders it names. THE RULE IS APPLIED WHERE THE FILL IS COMMITTED,
+says about the orders it names. The rule is applied where the fill is committed,
 between sweep results and never after the batch: a tape span can cross both legs
 of a bracket at once, so a sibling reaped on a later pass would already have
-filled against the same prints. A CHILD (`parent_order_id`) rests HELD -
+filled against the same prints. A child (`parent_order_id`) rests held -
 accepted, answerable, scanned by nothing and placing no hold - until its
 parent's first fill releases it into the state it would have been submitted
 into, drawing a fresh band trigger and taking its hold then. A parent that goes
 terminal without filling reaps its held children in the same batch.
 
-THE DEPTH RULE - a child may not itself be a parent, and a parent carries at
+The depth rule - a child may not itself be a parent, and a parent carries at
 most `MAX_LINKED_ORDERS` children - is what keeps a cancel's byte reservation
 computable: reaping is one generation, so `sizing::LINKAGE_MAX_BYTES` bounds it
 in advance. See `docs/order-lists.md` for the consumer-facing rules.
 
-ADMISSION IS ATOMIC, AND A LINKED ORDER MAY NOT TRAVEL ALONE. A group arrives as
+Admission is atomic, and a linked order may not travel alone. A group arrives as
 one `Command::SubmitOrderGroup` and a linked bare `SubmitOrder` is refused
 at the protocol boundary. That refusal is the load-bearing half: applying a rule
-where the fill is committed bounds nothing if a SIBLING HAS NOT BEEN ADMITTED
-YET, which is exactly what per-leg dispatch produces - the entry fills, the
+where the fill is committed bounds nothing if a sibling has not yet been
+admitted, which is exactly what per-leg dispatch produces - the entry fills, the
 shrink adjusts an order that is not on the book, and the stop then arrives at
 full size beside an open position, so a two-leg `Ouo` pair's aggregate fill is
-twice the bracket quantity. The group runs in two passes under one lock: a DRY
-VALIDATION of every member against the book and against the group's own ids,
+twice the bracket quantity. The group runs in two passes under one lock: a dry
+validation of every member against the book and against the group's own ids,
 which mutates nothing and refuses the whole frame on one bad member, then the
-ordinary submit path per member at one instant against one reading. A CLOSING
-LINKAGE PASS then applies the rule of every member that filled, against the
+ordinary submit path per member at one instant against one reading. A closing
+linkage pass then applies the rule of every member that filled, against the
 whole group, before the call returns - which is what covers the siblings
-admitted after the fill that adjusts them. That pass is the SOLE application of
+admitted after the fill that adjusts them. That pass is the sole application of
 a member's linkage: the submit path suppresses its own, because `Ouo` subtracts
 the filled quantity rather than setting a target, so applying it at the fill and
 again at the close would shrink an already-resting sibling twice and cancel a
@@ -302,65 +302,65 @@ stop-first bracket's stop outright.
 
 The residual is funds. The dry pass reads the book as it is before the group
 runs, so a member the venue can no longer fund once an earlier member's fill has
-spent the balance is REJECTED on the second pass, with its earlier siblings
+spent the balance is rejected on the second pass, with its earlier siblings
 already accepted. Atomic admission therefore covers everything the venue can
 decide in advance and not a balance the group's own fills moved; a group whose
 members are jointly affordable at submission never meets it.
 
-THE TWO PASSES ARE ONLY AS GOOD AS THEIR AGREEMENT, and asserting that they
-agree is what keeps them honest. The standing invariant is that NO REFUSAL MAY
-REACH A SUBMIT FROM OUTSIDE `Engine::dry_refusal` - the dry pass and the real
+The two passes are only as good as their agreement, and asserting that they
+agree is what keeps them honest. The standing invariant is that no refusal may
+reach a submit from outside `Engine::dry_refusal` - the dry pass and the real
 path ask that one function, so a refusal added to only one of them is the whole
 defect family in a single line. Three atomicity bugs came from it being
 unwritten: a hedging `position_id` rule that lived outside the validator, a link
 validated without the group's own ids on the second pass, and a non-idempotent
-`Ouo` applied twice. Because nothing can detect the NEXT such mismatch by
+`Ouo` applied twice. Because nothing can detect the next such mismatch by
 construction, the group checks itself instead: a member refused on pass two
 re-asks the dry question against the state as it now stands, and a dry pass that
-would ADMIT what the real path just refused is a defect rather than the funds
+would admit what the real path just refused is a defect rather than the funds
 carve-out, reported as an error and asserted on in debug builds. The
 discrimination is deliberately not a match on the reason text, which would pin
 the check to today's wording and stay silent about a refusal added tomorrow.
 
-A STOP and a TOUCHED order are the same machinery with opposite comparisons. A
+A stop and a touched order are the same machinery with opposite comparisons. A
 stop protects - buy above the market, sell below - and fires when price runs
-AWAY. A touched order enters - buy below, sell above - and fires when price comes
-TOWARD it. Both fire on TOUCH rather than through, because a conditional holds no
+away. A touched order enters - buy below, sell above - and fires when price comes
+toward it. Both fire on touch rather than through, because a conditional holds no
 queue position. The two predicates are separate functions and separate
 `ScanKind`s rather than one function with a flag, since they are the two most
 easily confused behaviours in the venue.
 
-A TRAILING STOP's trigger ratchets with the tape and never retreats: a sell trail
+A trailing stop's trigger ratchets with the tape and never retreats: a sell trail
 rises with the high and stays put when price falls back. It is advanced against
-the SPAN'S EXTREME rather than its closing mark, so a spike between two sweep
+the span's extreme rather than its closing mark, so a spike between two sweep
 passes drags it exactly as a tick-resolution venue would.
 
-TICK RESOLUTION WITHOUT PER-TICK EVALUATION, and this is one mechanism serving
-both the trail and the risk policy. The tape thread records the HIGH and the LOW
+Tick resolution without per-tick evaluation, and this is one mechanism serving
+both the trail and the risk policy. The tape thread records the high and the low
 its river reached since the sweeper last looked, with the instant of each; the
 sweeper takes that span once per pass. Two properties make it exact rather than
-approximate. A trail is a MONOTONE function of the tape, so the maximum over a
-span's ticks IS the span's high. Equity is LINEAR in the price of the one
+approximate. A trail is a monotone function of the tape, so the maximum over a
+span's ticks is exactly the span's high. Equity is linear in the price of the one
 instrument an account can hold - an account is on at most one river, strategies
 are single-instrument - so its extreme over the span sits at a price extreme.
-The policy therefore observes the two extremes IN THE ORDER THE TAPE REACHED
-THEM and then the close: a spike that opened and closed between passes spends
+The policy therefore observes the two extremes in the order the tape reached
+them and then the close: a spike that opened and closed between passes spends
 drawdown budget, and a collapse that recovered before the pass breaches. Order
 matters and is not a detail - replaying favourable-first would invent breaches
 that never happened. The tape thread's cost is two comparisons and one relaxed
 load per tick, and it publishes only when an extreme actually moves.
 
-TIME-IN-FORCE covers Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd
+Time-in-force covers Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd
 - both can wait for a trigger - but never Ioc or Fok, which cannot wait for
-anything. Expiry is a TIME-DRIVEN pass with nothing to do with triggers: a Gtd
+anything. Expiry is a time-driven pass with nothing to do with triggers: a Gtd
 order stops resting at its instant whether or not the tape came near it, and a
-Day order stops when its own instrument's SESSION CLOSES, which the sweeper
+Day order stops when its own instrument's session closes, which the sweeper
 detects by asking the calendar whether the span it swept crossed from open to
 shut. An instrument with no calendar supplies no such instant, so a day order on
 a 24/7 symbol rests like a Gtc - the honest answer, since inventing midnight UTC
 would expire orders at a time that market has never heard of.
 
-AN EXPIRY IS NOT A CANCEL, and the wire says so: expiry ends an order with
+An expiry is not a cancel, and the wire says so: expiry ends an order with
 `VenueMessage::OrderExpired` and a terminal `Expired` status, never
 `OrderCanceled`. A cancel is an actor's decision - a consumer's, or the venue's
 under havoc or a risk breach - while an expiry is the clock reaching a lifetime
@@ -372,13 +372,13 @@ until 2026-08-18, on the argument that no consumer matched the difference; that
 is the argument the order-type completeness ruling overturned, since the venue's
 surface is not sized against a consumer's current catalog.
 
-THE LEDGER MODELS FIVE INSTRUMENT CLASSES, split by SETTLEMENT SHAPE rather
+The ledger models five instrument classes, split by settlement shape rather
 than by asset class, because the shape is what decides how holding one moves the
 ledger.
 
-- `Spot` credits the BASE ASSET as a currency balance. Right for crypto spot,
+- `Spot` credits the base asset as a currency balance. Right for crypto spot,
   where the base genuinely is money you can spend on the next pair.
-- `Equity` credits a POSITION and never a balance. A share is not money, and
+- `Equity` credits a position and never a balance. A share is not money, and
   modelling it as `Spot { base: "AAPL" }` put it on the same footing as USD -
   which is what made short sales, settlement periods and round lots
   inexpressible. Cash moves by the full notional on both sides; the shares are
@@ -386,13 +386,13 @@ ledger.
   next paragraph is what they mean.
 - `Future` moves only settlement cash, with exposure carried as a marked
   position.
-- `Perpetual` is a future that pays FUNDING between long and short at an
+- `Perpetual` is a future that pays funding between long and short at an
   interval. With no expiry to converge at, funding is the only thing tying it to
   spot, so a perpetual without it reports P and L that is wrong by construction.
-  Funding is paid on notional AT THE MARK, on instants that sit on multiples of
+  Funding is paid on notional at the mark, on instants that sit on multiples of
   the interval from the unix epoch - a property of the clock, so the schedule
   cannot depend on when a run booted or how the sweep passes were cut. The
-  configured `funding_rate` is the zero-premium INTEREST. When the class names
+  configured `funding_rate` is the zero-premium interest. When the class names
   an `index_symbol` and that symbol already has a last mark, the live rate is
   `clamp(interest + (mark - index) / index, +/- funding_clamp)`. No index mark
   means a zero premium: reading an index never spends a river nobody asked for,
@@ -404,52 +404,52 @@ ledger.
   carries the one implementation of both forms, so realized and unrealized can
   never disagree.
 
-AN EQUITY IS A CASH ACCOUNT OR A MARGIN ACCOUNT, and the margin policy is which.
-That distinction is what decides what an equity account may DO, and it is
+An equity is a cash account or a margin account, and the margin policy is which.
+That distinction is what decides what an equity account may do, and it is
 enforced rather than reported:
 
-- A CASH account (no margin policy on the symbol) pays the whole notional on a
-  buy and MAY NOT SELL SHORT at any price. The refusal names the reason rather
+- A cash account (no margin policy on the symbol) pays the whole notional on a
+  buy and may never sell short at any price. The refusal names the reason rather
   than reading as a funding shortfall, because shorting is not something a
   larger balance would buy.
-- A MARGIN account posts the Reg-T requirement - `basis = "notional"`, `initial
-  = 0.5`, `maintenance = 0.25` - and BORROWS the rest, so the settlement balance
+- A margin account posts the Reg-T requirement - `basis = "notional"`, `initial
+  = 0.5`, `maintenance = 0.25` - and borrows the rest, so the settlement balance
   goes negative by the loan while the shares sit on the other side of it. The
-  account is worth what it was; `valuation_in` counts an equity at its MARKET
-  VALUE rather than its unrealized, because the cash already moved by the whole
+  account is worth what it was; `valuation_in` counts an equity at its market
+  value rather than its unrealized, because the cash already moved by the whole
   notional. The maintenance walk measures the same way, which is what makes a
   margin call reachable at all.
 
-THE LOCATE is `borrowable`: absent means the venue models no borrow market, `0`
+The locate is `borrowable`: absent means the venue models no borrow market, `0`
 states a name nobody will lend, and any other value caps the account's net short.
-THE SETTLEMENT PERIOD is `settlement_ns`: a sale's proceeds are credited at once
+The settlement period is `settlement_ns`: a sale's proceeds are credited at once
 and held unspendable until the span has run, appearing as `locked` on the balance
 row - which is what a `T+N` convention actually is to a strategy. It is a fixed
 sim span rather than N sessions, and that simplification is stated rather than
-hidden. THE ROUND LOT is `lot_size`, and it governs what may be SUBMITTED rather
+hidden. The round lot is `lot_size`, and it governs what may be submitted rather
 than what the size grid can represent: a partial fill legitimately leaves an
 odd-lot remainder, so `size_increment` stays at one share.
 
-MARGIN HAS TWO BASES. `per_contract` is a fixed amount of settlement currency
+Margin has two bases. `per_contract` is a fixed amount of settlement currency
 however the price moves, which is what CME publishes and what every shipped
 preset states. `notional` is a fraction of notional, so the requirement moves
 with the price - that is what forex, crypto margin and Reg-T equity margin
 actually do, and it is the leveraged account the venue previously had no way to
-express: ten-times leverage is `initial = 0.1`. THE MAINTENANCE WALK ASKS THE
-POLICY rather than multiplying `maintenance_per_contract` by a contract count,
+express: ten-times leverage is `initial = 0.1`. The maintenance walk asks the
+policy rather than multiplying `maintenance_per_contract` by a contract count,
 which read a notional-basis fraction as a per-contract amount and left a
 leveraged account unable to breach at any price.
 
-FUNDING IS CHECKED PER ACCOUNT AT BIND. The venue's `[balances]` is only what an
+Funding is checked per account at bind. The venue's `[balances]` is only what an
 unnamed account opens with, so a consumer that named its own funding cannot be
 checked at boot. It is still knowable with no order at all, so a socket binding
 a symbol its account holds no balance line for is refused before the upgrade,
-naming the account and the currency. PRESENCE, never sufficiency: running out is
-DEPLETION, and a funds rejection on a served shape has to keep meaning that and
+naming the account and the currency. Presence, never sufficiency: running out is
+depletion, and a funds rejection on a served shape has to keep meaning that and
 only that.
 
-A POLICY NAMES THE CURRENCY its thresholds are stated in, and the account is
-VALUED in it. A spot fill credits the base asset as a currency balance and
+A policy names the currency its thresholds are stated in, and the account is
+valued in it. A spot fill credits the base asset as a currency balance and
 debits the quote, so an account trading spot holds an asset that has to be
 priced before its equity means anything. The engine keeps a last mark per
 symbol for every class, the sweeper prices every pair whose base the account
@@ -460,18 +460,18 @@ nothing prices is refused at entry by name, and an account that reaches an
 unvaluable state some other way is warned about and left unenforced rather than
 judged against a wrong number.
 
-Valuation is ONE HOP: an asset is priced only through an instrument quoting it
+Valuation is one hop: an asset is priced only through an instrument quoting it
 directly in the policy currency, never through a chain. There is no rate
 surface.
 
-The policy is evaluated at TICK RESOLUTION, through the span of extremes the
+The policy is evaluated at tick resolution, through the span of extremes the
 tape thread records rather than through a per-tick evaluation. See the trailing
 stop above for the mechanism and why it is exact: a spike lasting a fraction of a
 sweep interval spends drawdown budget, and a collapse that recovers before the
 pass still breaches.
 
-WHAT THE SPAN DOES NOT COVER, stated because it is the one place the exactness
-argument stops: an account holding MORE THAN ONE marked symbol. Equity is then a
+What the span does not cover, stated because it is the one place the exactness
+argument stops: an account holding more than one marked symbol. Equity is then a
 sum of linear terms whose extremes need not coincide, and only the swept river's
 symbol carries a span - every other symbol contributes at its last mark, which is
 the mark-cadence behaviour. That costs nothing under the model the venue enforces
@@ -486,11 +486,11 @@ label, its per-label tape seed, and the resolved bundle digest, so two labels
 wearing the same default shape still own independent water.
 
 `/instruments` therefore answers the union of the configured shapes and every
-shape this run has MATERIALIZED a river for - materialized, not merely
+shape this run has materialized a river for - materialized, not merely
 resolved, because resolution is total and a memo-shaped list would advertise
 labels nothing had registered. A socket bind and a history poll spend the same
 river budget, so the advertised set grows exactly when the capped resource
-does. The ENGINE's instrument set grows on the same demand: `Run::ensure_instrument`
+does. The engine's instrument set grows on the same demand: `Run::ensure_instrument`
 registers a def and installs its margin policy and fee schedule the first time
 a socket binds that symbol or an order names it, guarded on the registration
 having been new so re-binding never resets a live configuration.
@@ -502,7 +502,7 @@ routes serve the unarmed river of a label on the run clock, and are namespaced
 so that difference is visible on the wire rather than only in prose.
 `POST /accounts` opens
 an account on terms the consumer states - an id, its opening balances, and
-optionally the risk policy the venue enforces against it - and is OPTIONAL:
+optionally the risk policy the venue enforces against it - and is optional:
 account resolution is total, so a connection that never calls it is served under
 the default account, unpoliced. A policy the venue cannot enforce is refused
 where it enters rather than hours later. Structured account config goes over HTTP for
@@ -519,7 +519,7 @@ The queue and a process-wide permit bound parsed command work before it reaches
 the blocking pool or engine mutex, and a full bound is a visible
 `AdmissionRejected` the engine never sees.
 
-THAT FRAME CARRIES `retryable`, AS DATA RATHER THAN AS PROSE, and the reason is
+That frame carries `retryable`, as data rather than as prose, and the reason is
 what happens to it downstream. A consumer's adapter must map it onto its own
 stack's event for the same subject, and nautilus's `OrderRejected` has one field
 an adapter may set - the reason string - so a refused submit reaches a strategy
@@ -530,7 +530,7 @@ our prose, and one correctly refused to. So the wire states it, and
 `RETRYABLE_REJECT_PREFIX` on the reason - an identifier this repo versions and
 tests, not a sentence. Every refusal the venue issues today is retryable, which
 is the contract rather than a redundancy: an admission refusal means the venue
-was FULL, not that it said no. Absent decodes `false`, so a consumer reading an
+was full, not that it said no. Absent decodes `false`, so a consumer reading an
 older venue takes the safe reading.
 
 Inbound frames and reassembled
@@ -550,7 +550,7 @@ and execution legs name one account by construction. A different callsign evicts
 every incumbent socket, and so
 does an absent one, which keeps silence meaning what it always meant. The venue
 reads nothing into the string beyond equality, and `mogwai-adapter` mints one per
-PROCESS from the pid and start instant so a host configures nothing and a
+process from the pid and start instant so a host configures nothing and a
 restarted worker still reclaims its ledger from the sockets of the dead one.
 Absent, they default to the run's default symbol and the configured `speed`, and
 to an indefinite passenger. The key is known before any tasks or bytes exist,
@@ -574,7 +574,7 @@ the first market frame delivered after it. The declaration is positional, which
 is why it rides the market stream rather than the priority lane - a diagnostic
 that overtook the backlog would name a boundary the reader had not reached.
 
-Only UNARMED loss is declared. A frame withheld by an armed `GoDark` or
+Only unarmed loss is declared. A frame withheld by an armed `GoDark` or
 `StallData` window is not loss, so a hole discovered while one is open is held
 back until delivery resumes rather than announced into a blackout. The venue does
 not claim the converse: it cannot know whether a frame the ring overwrote would
@@ -588,13 +588,13 @@ consumer's decision, and a rising episode count with no close is how a passenger
 that fell behind once is told apart from one whose sustainable read rate is below
 its boat's publish rate.
 
-A river's tape root is derived from the run seed and the REQUESTED symbol
+A river's tape root is derived from the run seed and the requested symbol
 label, not from the shape the label resolves to, so a run serving several
 symbols serves several genuinely different rivers. A run stays a pure function
 of `(seed, config)`; a river is a pure function of `(seed, label, resolved
 bundle)`. The seeding rules are set out with the run seed below.
 
-Execution output that no command asked for is delivered to the ACCOUNT it
+Execution output that no command asked for is delivered to the account it
 concerns, not broadcast: a submitting connection claims its order at acceptance,
 and a venue-originated order - a risk or margin liquidation the venue mints - is
 claimed for the account whose ledger produced it. An order absent from that table
@@ -607,7 +607,7 @@ that is never scanned again and ends only on cancel. Every resting limit
 carries a trigger price drawn once at submit from a seeded, volatility-scaled
 band around its stated price (`fill_band_vol_mult = 0.0` degenerates to a
 strict through-at-the-stated-price fill), and it fills only when the run's
-fill sweep walks a print STRICTLY THROUGH that trigger; the fill is delivered
+fill sweep walks a print strictly through that trigger; the fill is delivered
 to each connection's lanes from the run, not from a command response. A
 market order slips the same way, adverse to its side, off the same seeded
 band. The trailing-volatility reading is cached once per symbol and fill-sweep
@@ -616,7 +616,7 @@ one coherent coarse band instead of repeating the full 300-second synthesis.
 Sweep marks and settlement prices are separate exact-instant last-print reads;
 the coarse band cache never supplies unrealized P&L.
 A conditional (`StopMarket`/`StopLimit`) rests untriggered until the
-same sweep walks a print that TOUCHES its stop price - the mirror-image
+same sweep walks a print that touches its stop price - the mirror-image
 predicate, since a stop holds no queue position and every real venue fires one
 on touch rather than through. On trigger the venue emits `OrderTriggered` and,
 in the same batch, either fills a stop-market at the triggering print slipped
@@ -655,7 +655,7 @@ key. An unserved speed is a second cursor on the same water, not a refusal:
 speed mutates no generated value. One ledger still carries one cadence - two
 sockets on the default account may ride two rivers, but a second speed on a
 river that account is already riding is refused, because that would be two
-clocks judging one book. The account COUNTS its passengers per boat, and the
+clocks judging one book. The account counts its passengers per boat, and the
 count falls when a passenger ends rather than when the account freezes: an
 account riding two rivers never freezes on losing one socket, and a boat key is
 only (river, speed), so a ride left behind would be indistinguishable from a
@@ -665,7 +665,7 @@ cancels its worker and joins it away from the registry mutex. Other cadences
 on the same river stay. Rivers and their bounded checkpoint sets remain for
 process life so later history does not depend on eviction timing.
 
-THERE IS NO EXCEPTION TO PLACEMENT ON DEMAND. Every river is boatless until a
+There is no exception to placement on demand. Every river is boatless until a
 passenger boards it, and no river is materialized before readiness. `serve` used
 to warm the default label's whole span before writing its readiness line and then
 retain a ticket on it for process life, which made one river permanently warm and
@@ -673,7 +673,7 @@ permanently boated while every other was cold - a privilege rather than a rule.
 
 Removing it makes the venue uniform in a way worth stating, because it looks like
 a cost and is mostly the disappearance of an exception. Placement reaches its
-river inline, so EVERY river has always been synthesized inside the request that
+river inline, so every river has always been synthesized inside the request that
 first named it, and that synthesis has always been paid out of the declared run
 duration. Only the default label escaped, and only because it was reached before
 the run clock was built. Now nothing escapes: a run that materializes a cold
@@ -688,7 +688,7 @@ Concurrent first boarders share one placement through a semaphore handoff
 rather than each placing a boat. `/health` reads the boatyard on non-blocking
 terms, because it must never block on a placement.
 
-`/health`'s tape fault reads EVERY boated river on those same non-blocking
+`/health`'s tape fault reads every boated river on those same non-blocking
 terms, not one river alone. It read only the default river until 2026-08-16,
 which was right when a run had one paced tape and became a hole under the open
 instrument set: a consumer bound to any other river got a healthy answer while
@@ -706,7 +706,7 @@ only through the instant its own boat has published.
 The ledger stays venue-scoped because one engine serves every river, so a
 pulled `/account` snapshot has no boat axis to sit on: stamping it from any one
 boat makes it ahead of or behind a push from another. `GET /account` therefore
-keeps the venue stamp and LABELS it, adding a `clock: "venue"` field beside the
+keeps the venue stamp and labels it, adding a `clock: "venue"` field beside the
 otherwise unchanged `AccountState` so a consumer can never mistake that
 `ts_event` for boat time; pushes are ordered against pulls by sequence.
 `/clock` goes further and renders only the venue's: it named a river and rendered
@@ -721,7 +721,7 @@ submitting the same buy against the same water receive the same fill without
 changing one another's result. Transport havoc remains a property of what a
 passenger sees.
 
-GENERATOR HAVOC IS RIVER IDENTITY. A passenger whose resolved config carries a
+Generator havoc is river identity. A passenger whose resolved config carries a
 generator arm boards a different river than one without it, and nothing mutates
 water someone is already reading. The arm arrives on the `/ws` upgrade as four
 query keys, is normalized into a `GeneratorArm` before the account is claimed,
@@ -746,12 +746,12 @@ the multipliers are canonicalized to parts per million before they become
 identity, because equivalent human inputs do not produce equal floats and the
 river cap does not evict.
 
-`Rivers::river` validates by ISSUANCE rather than by re-derivation. It used to
+`Rivers::river` validates by issuance rather than by re-derivation. It used to
 ask whether a key equalled the key the registry resolves for its symbol, and
 that question has only one answer, the armless one - so after the fork it would
 refuse every armed key, while deleting it would admit a key nothing minted.
 
-WHAT THE FORK OWES, recorded because it is larger than adding a field to a key.
+What the fork owes, recorded because it is larger than adding a field to a key.
 Every water read now takes a `RiverKey` rather than a symbol - history, the
 order-time market reading, the trigger scans, marks and settlement - so a fork
 cannot land halfway and leave execution reading a river the passenger is not on.
@@ -762,10 +762,10 @@ on the grounds that in server mode the config file belongs to whoever launched
 the exchange and a posted default is run-wide state; and the arm carries a
 coordinate rather than opening at the boarding instant, because two passengers
 carrying the same arm a second apart would otherwise ask for different water and
-every late boarding would fork a river of its own. The base is the RUN ORIGIN,
+every late boarding would fork a river of its own. The base is the run origin,
 which is where the old boatless handler already stamped its window.
 
-HISTORY IS READ OVER THE SOCKET. A poll names a symbol and no passenger, so once
+History is read over the socket. A poll names a symbol and no passenger, so once
 a label names several rivers it names none of them - and every proposed selector
 restates at the history call what the upgrade already settled, which is a second
 place for identity to be stated and therefore to drift. A passenger's socket
@@ -774,11 +774,11 @@ nothing and cannot name it wrong. This follows order entry, which became
 websocket-only for the same reason. The premise it rests on, recorded because it
 is the load-bearing one: every history read comes from a party that has already
 boarded. `/operator/trades` and `/operator/quotes` serve the unarmed river of a
-label on the run clock, and the PATH carries the demotion because prose cannot -
+label on the run clock, and the path carries the demotion because prose cannot -
 a route that kept its old spelling would have gone on answering a consumer
 plausibly while its meaning changed underneath.
 
-The operator view still MATERIALIZES the river it is asked for, and that was
+The operator view still materializes the river it is asked for, and that was
 argued the other way before it was checked. A read that creates has real costs -
 a typo permanently spends one of 256 never-evicted rivers, and `/instruments`
 changes as a result of being looked at - but the glossary settles it: nothing
@@ -787,22 +787,22 @@ boarded would make cold history unservable.
 
 A page's cutoff is the tighter of the run clock and the asking passenger's own
 boat clock. The run bound keeps any caller from reading past the venue's
-present; the boat bound keeps THIS passenger from reading past its own, which on
+present; the boat bound keeps this one passenger from reading past its own, which on
 an unpaced or slow-boat run is earlier. Without the second, a strategy warming
 from its own history would read water it had not been delivered - the look-ahead
 the first bound exists to prevent, arriving one level down.
 
 Still owed:
 
-ONE ACCOUNT RIDING TWO RIVERS OF ONE SYMBOL IS UNPOLICED OPERATOR ERROR. A
-resting order and a position are recorded per INSTRUMENT, so such an account has
+One account riding two rivers of one symbol is unpoliced operator error. A
+resting order and a position are recorded per instrument, so such an account has
 orders that match both boats and one `last_marks` entry that two boats race to
 write - which decides unrealized PnL, the peak-equity ratchet and therefore
 whether a risk rule fires. The venue neither refuses it nor rekeys the ledger to
 express it. It is unreachable through a nautilus host, whose two legs must carry
 identical water, and a consumer that genuinely wants clean and surged water side
 by side uses two accounts. The glossary's non-interference and invisibility
-properties are unaffected, because both are stated over passengers of DIFFERENT
+properties are unaffected, because both are stated over passengers of different
 accounts and this is one account's passengers colliding with each other.
 
 A perpetual's funding index has the history problem and no passenger to ask,
@@ -822,7 +822,7 @@ An instrument is a bundle of knobs, not one fixed shape. Five classes are
 selectable, split by settlement shape and set out in full above: spot, equity,
 future, perpetual and inverse. The two that this paragraph's size-grid argument
 is drawn from are a spot currency pair, and a cash-settled continuous future
-with a contract multiplier, whole-contract quantities on the order path AND on
+with a contract multiplier, whole-contract quantities on the order path and on
 the tape, and no expiry or roll. The generator's size grid is multiplier-aware -
 notional per unit is `multiplier * price`, and a contract draw is rounded half
 away from zero and floored at one contract, so no print becomes the zero
@@ -846,8 +846,8 @@ reproduces the shared crypto shape byte for byte, and the fitted MNQ preset
 values with MES inheriting them loudly.
 
 Version 11 repaired a unit mismatch in the session calibration. `vol_hour` had
-been fitted at protocol 8 as a PER-MINUTE quantity from NQ one-minute bars but
-is applied PER PARENT EVENT, and minute-scale volatility carries the per-parent
+been fitted at protocol 8 as a per-minute quantity from NQ one-minute bars but
+is applied per parent event, and minute-scale volatility carries the per-parent
 scale times the square root of the arrivals in that minute - so the fitted 3.4x
 hourly swing compounded with the 27.5x arrival swing and left the generated
 Asia and London sessions roughly five times too quiet at bar scale. Both
@@ -855,7 +855,7 @@ session arrays were refitted from the July MNQ TBBO corpus as one atomic group:
 `intensity_hour` from inferred-parent counts conditional on the frozen
 `dow_weight`, landing 14.5x peak-to-trough against the volume proxy's 27.51x
 upper bound, and `vol_hour` as a per-parent robust scale, which comes out
-nearly flat and slightly INVERTED - overnight parents individually move a
+nearly flat and slightly inverted - overnight parents individually move a
 little more than cash-session ones, and the old curve's swing was almost
 entirely the arrival-density double count. `vol_scalar` was re-solved under the
 corrected arrays and ships declared rather than fitted: its pooled scale gate
@@ -872,7 +872,7 @@ drew different triggers and different slippage for the same order. Every
 seeded fill trigger and market-slippage offset therefore moves at 13. Version
 14 makes a scheduled calendar jump part of the `ReopenGap` crossing frontier,
 so an arm inside a closure cannot be skipped forever. The protocol-12b
-MECHANISM landing, long pencilled in for 13, now takes 15. Version 16 retired
+mechanism landing, long pencilled in for 13, now takes 15. Version 16 retired
 the second unnamed default knob bundle without moving generated bytes. Version
 17 keys each served river's tape root by the requested symbol label, moving
 every served tape while leaving offline generation seeds untouched. Version 18
@@ -880,13 +880,13 @@ is the boatyard landing: placement, pacing and the per-boat clock moved off the
 one venue-wide replay, so what a socket receives is a function of its boat
 rather than of the run.
 
-NOT EVERY BUMP MOVES EVERY TAPE, and the record for the crypto lineage is
+Not every bump moves every tape, and the record for the crypto lineage is
 specific enough to be worth stating, because a reader who knows the bumps are
 unconditional will assume the opposite. `analysis/protocol9-tape-hashes.json`
 freezes FNV-1a hashes of six simulated hours of canonical BTCUSDT trade and
 quote lines, at two seeds plus a flow-surge arm, taken when the tape identity
 was 9. `protocol9_tape_oracle` in `mogwai-cli`'s `gen` module asserts equality
-against it, and AT THE CURRENT TAPE IDENTITY IT STILL MATCHES - the assertion
+against it, and at the current tape identity it still matches - the assertion
 is live in the gate, so that sentence is enforced rather than dated, and it
 carries no version number of its own for a later bump to falsify. The identity
 itself is stated once above, in the phrasing
@@ -896,7 +896,7 @@ test exists to prevent.
 So none of the intervening bumps - 12's arrival-frame calibration, 13's
 fill-band decimal normalization, 14's `ReopenGap` crossing repair, 15's
 protocol-12b mechanism landing, and onward - moved any of the bytes this oracle
-observes: the first six simulated hours of the OFFLINE generation path, at
+observes: the first six simulated hours of the offline generation path, at
 those three arms. It does not walk MNQ, it does not walk the venue's river
 placement, and it does not run past six hours, so it is evidence about the
 crypto generator's core draw rather than a blanket identity. That is consistent
@@ -904,7 +904,7 @@ with each bump's own scope: 13 is a fill-band key and 14 a calendar crossing,
 neither of which the crypto preset's generation reaches, and 17's per-symbol
 tape root keys the venue's rivers while leaving offline generation seeds
 untouched. The
-version constant is a process identity that advances whenever a change COULD
+version constant is a process identity that advances whenever a change could
 move a tape; it is not a claim that every tape moved.
 
 Each generated parent event publishes one BBO before its first trade. The book
@@ -921,15 +921,15 @@ parent may print beyond the touch without making the book malformed. A connectin
 receives the current BBO snapshot before later tape frames, and the adapter
 retains that snapshot until its host activates quote delivery.
 
-That snapshot is CONDITIONAL, and a consumer must not read it as a
+That snapshot is conditional, and a consumer must not read it as a
 snapshot-first wire contract. `Tape::subscribe_with_snapshot` hands back an
-option: the boat retains the last quote it PUBLISHED, so a socket binding in
+option: the boat retains the last quote it published, so a socket binding in
 the window between a boat's first trade and its first quote is handed no
 snapshot and sees that trade as its first market frame. Nothing is hidden by
 the absence - the snapshot is missing only when no quote has been published on
 that river yet, and the tape's own first quote follows immediately, so there is
 no case where a bound socket holds a stale BBO or none at all for long. A test
-or a consumer that requires the FIRST frame to be a quote is asserting
+or a consumer that requires the first frame to be a quote is asserting
 something stronger than the venue promises, and it will lose that bet at boot;
 drain to a deadline instead. `scripts/smoke.py` did exactly that and flaked
 twice in one day before it was corrected.
@@ -944,12 +944,12 @@ claimed, and sat pinned at the variance cap 12.96 percent of the time. `a1`,
 
 Three rails are named separately because they answer to different things. The
 GARCH state cap and the feedback-return ceiling bound the base process and are
-NEVER scaled by a regime, so an armed divergence cannot raise the process's own
+never scaled by a regime, so an armed divergence cannot raise the process's own
 ceiling and change what it does after the divergence ends. The realized-return
 ceiling is absolute and applies after session and regime scaling, so a
 divergence is an output envelope. That ceiling is a stated product policy sized
 against a measured maximum-strength envelope, not a fitted market quantity: as a
-log return it permits about +5.13 and -4.88 percent in a SINGLE event, and it
+log return it permits about +5.13 and -4.88 percent in a single event, and it
 does not bound cumulative movement over many events.
 
 Two structural fidelity limits of the generated futures river are stated here
@@ -962,7 +962,7 @@ baseline river never produces one, so on it overnight gaps are absent and any
 large single-minute range the river does produce is a volatility-cluster tail
 inside a session, not a reopen - a different phenomenology occurring at a
 different time of day. Second, the session profile modulates intensity and
-volatility by HOURLY factors, so within-hour structure (the opening minutes'
+volatility by hourly factors, so within-hour structure (the opening minutes'
 concentration at the cash open, the settlement flurry) is smeared uniformly
 across each hour; the profile reproduces hour-scale contour, not
 minute-scale texture.
@@ -976,7 +976,7 @@ generator validation is mechanism-derived instead. In particular, the latent
 size center must not sit two orders of magnitude below the minimum tradable
 quantity, volatility must sit below the GARCH sigma cap so the process is not
 born clipped, and the tick must be representable at the declared precision.
-Rail HEADROOM is diagnosed rather than gated: a universal ratio of scale to rail
+Rail headroom is diagnosed rather than gated: a universal ratio of scale to rail
 would repeat the same mistake in another dimension, denying a legitimately
 higher-volatility instrument. Return ceilings remain shared module-level process
 shape: a coarse truthful grid is allowed to produce a stickier latent mid rather
@@ -995,13 +995,13 @@ account locks, reported per symbol as posted margin the adapter forwards as
 nautilus `MarginBalance` rows. Reduce-only orders place no hold, which is
 what makes two bracket legs against one position exclusive rather than
 additive. The sweep pass marks every open futures position to the tape, strikes
-every settlement instant the calendar crossed AT ITS OWN INSTANT rather than at
+every settlement instant the calendar crossed at its own instant rather than at
 the sweep boundary, and emits exactly one account snapshot per pass, after the
 mark, so no consumer sees a stale `mark_px`. Settlement moves the accumulated
 difference into actual cash and resets the VWAP to the settlement price, which
 is why a losing futures position drains an account rather than merely carrying
 a worse unrealized number. A breach is `total_balance + unrealized <
-maintenance` - the TOTAL balance, because the locked amount already IS the
+maintenance` - the total balance, because the locked amount already is the
 maintenance requirement and subtracting it twice liquidates solvent accounts.
 
 A scheduled close is configuration, not havoc: `[instrument.calendar]` names
@@ -1027,7 +1027,7 @@ A run draws one 64-bit seed at launch, or takes it from config, and every
 random stream in the run - each river's tape generator and the fill band -
 derives from it by domain-separated derivation; nothing else in a run is
 random. The fill root is run-level, because the band's draw key already carries
-the order's symbol; a tape root is per-river, keyed by the REQUESTED symbol
+the order's symbol; a tape root is per-river, keyed by the requested symbol
 label as described above, so two labels resolving to the same shape never share
 a path. The tape's origin is the fixed constant `TAPE_ORIGIN_NS = 0`; every river's
 warmup is generated on first read, and the
@@ -1042,24 +1042,24 @@ limit that a new seed only draws a new path from the one fitted model behind
 the fingerprint, so marginalizing over seeds reduces variance conditional on
 that model rather than adding out-of-sample market evidence.
 
-Two durations exist and they are not the same object. The RUN duration is
+Two durations exist and they are not the same object. The run duration is
 configured, starts at `run_start_ns` rather than boot, and is measured on the
 venue clock; at its deadline the venue announces `RunComplete`, closes
-WebSockets normally, drains, and exits zero. A PASSENGER duration is the
+WebSockets normally, drains, and exits zero. A passenger duration is the
 socket's own `duration_ms`, simulated milliseconds measured on its boat's clock
 from its boarding instant, so passengers with different durations still share
 one boat and each closes at its own deadline while the boat winds down only
-when the last of them leaves. The venue's completion instant is the SIGNAL that
+when the last of them leaves. The venue's completion instant is the signal that
 crosses to a socket; the numbers on the `RunComplete` frame are always
 re-derived on that socket's boat clock, and `elapsed_ns` is how much tape that
 boat actually covered.
 
-THE TWO ENDINGS ARE DIFFERENT FRAMES, `RunComplete` and
+The two endings are different frames, `RunComplete` and
 `PassengerDurationComplete`, and the close reason behind each agrees with it.
 They were one frame until the split, so a consumer classifying on frames called
 its own deadline a finished run and the close reason that could have told them
 apart was documented as unreachable. A passenger's frame carries the span it
-observed since IT boarded - a shared boat can predate its passenger, so the
+observed since it itself boarded - a shared boat can predate its passenger, so the
 boat's own epoch is somebody else's boarding - alongside the deadline that
 fired. When both deadlines fall in the same instant the run wins, because a
 finished run is the stronger fact and the one that stays true for a consumer
@@ -1067,15 +1067,15 @@ deciding whether to redial.
 
 The history endpoints refuse rather than return an empty page on every
 impossible request, so a refusal is never mistaken for a span nothing traded
-in. A START before the tape origin or past the ceiling is a 400; so is a
+in. A start before the tape origin or past the ceiling is a 400; so is a
 shape-class refusal decided before the synthesis task runs - an illegal label,
 a shape that does not validate, a funding-barred one, or an exhausted river
 cap. A synthesis failure is a 500 naming the symbol and the window. There is no
 "symbol this run does not serve" axis any more: resolution is total, and a poll
-MATERIALIZES the river it names, which is also what makes it advertise through
+materializes the river it names, which is also what makes it advertise through
 `/instruments`.
 
-THE CEILING IS THE RUN CLOCK, one snapshot per request, and it consults no boat.
+The ceiling is the run clock, one snapshot per request, and it consults no boat.
 It was the furthest-published boat on the named river, which made one
 passenger's delivery frontier decide another's window: board the same water at a
 faster cadence and you moved somebody else's ceiling, which they could watch
@@ -1084,7 +1084,7 @@ of the river in any case - speed belongs to a boat's identity, a tape is what on
 boat publishes, so a maximum over boats is a maximum across different tapes. A
 river has no present of its own; it is deterministic water with no cursor.
 
-An `end` past the ceiling is CLAMPED rather than refused, deliberately asymmetric
+An `end` past the ceiling is clamped rather than refused, deliberately asymmetric
 with the start, and it is clamped whether it was stated or not: an explicit end
 bounds a window and never authorizes crossing the run present. A consumer paging
 a window pins its own end by reading `/clock` once before its first page.
@@ -1100,15 +1100,15 @@ clean and not be. Repairing one passenger's own gap would need tape identity an
 anonymous route does not carry.
 
 The protocol crate owns every JSON type shared by venue and adapter. The adapter
-uses its websocket for market data, execution AND history: warmup and backfill
+uses its websocket for market data, execution and history alike: warmup and backfill
 are pulled with `QueryHistory` on the socket that boarded, in bounded pages
 resumed by an opaque continuation. It makes no HTTP history call at all, which
 is what stops it reading a label's water instead of its own. Each adapter consumer names its river with an optional `symbol` in its
 own config, which becomes `/ws?symbol=`; it carries no `speed` or
 `duration_ms`, so the data and execution consumers of one host board the same
-boat at the venue's configured speed. The adapter holds NO served-symbol guard
+boat at the venue's configured speed. The adapter holds no served-symbol guard
 of its own any more: since resolution became total there is no set to guard
-against, so both clients re-read `/instruments` AFTER binding - binding is what
+against, so both clients re-read `/instruments` after binding - binding is what
 registers an unconfigured symbol, so only a read taken after the socket is up
 can see it - behind a watch-gated readiness barrier that black-holes delivery
 until the reseed says go, and a failed reseed tears the connection down rather
@@ -1151,20 +1151,20 @@ instrument, versus the 12.6 ms recorded before the checkpoint stride was
 repaired). The residual replay is now a small part of that: the 300 s
 volatility window is the walk, which is why cutting checkpoint positioning by
 53x moved this number by only a few milliseconds. So acceptance-time readings
-are memoized ON THE BOAT - one memo per boat, bucketed by fill-sweep interval
+are memoized on the boat - one memo per boat, bucketed by fill-sweep interval
 on that boat's own clock - and a submit sees a reading that may be up to one
 interval stale. A market order therefore fills at or beyond the market as of
 that reading, not as of the fill instant. The memo lives on the boat rather
 than on the run because the bucket is a function of the boat's clock and the
 walk it saves is a walk of one river: a run-level memo held a single entry, so
 two symbols evicted each other into a guaranteed miss and then serialized on
-the walk behind one mutex. The lock is held ACROSS the walk deliberately, so
+the walk behind one mutex. The lock is held across the walk deliberately, so
 two passengers landing in the same bucket pay for one walk rather than two.
 
 The exact-instant mark and settlement reads that never come from this memo fail
 differently from each other on purpose:
 an unreadable ordinary mark costs one pass of unrealized P&L freshness and is
-dropped, while an unreadable SETTLEMENT price refuses the whole read and leaves
+dropped, while an unreadable settlement price refuses the whole read and leaves
 the watermark where it stands, because nothing looks back past a watermark that
 has moved.
 
@@ -1175,7 +1175,7 @@ imports nothing else in the workspace. `mogwai-engine` is the venue-agnostic
 exchange core. `mogwai-data` owns `TickSource`, the k-way merge and the
 `GeneratedSource` synthetic generator fitted to the committed fingerprint.
 `mogwai-venue` is a library - it owns the sockets, the clock and the replay
-pacing, and ships no binary of its own. `mogwai-cli` is the `mogwai` BINARY: a
+pacing, and ships no binary of its own. `mogwai-cli` is the `mogwai` binary: a
 clap dispatcher over `serve` (which does no work itself, just forwards to
 `mogwai_venue::serve`) plus every offline subcommand. `serve` is the only one
 that binds a socket; the rest are the intake and measurement surface - `gen`,
@@ -1187,20 +1187,20 @@ that binds a socket; the rest are the intake and measurement surface - `gen`,
 the authority on the current set. `mogwai-adapter` is
 the lone nautilus-dependent crate, unchanged by anything below.
 
-ONE BINARY IS A STANDING DECISION, not an accident of growth. A split into a
+One binary is a standing decision, not an accident of growth. A split into a
 venue binary and a lab binary was proposed and refused 2026-08-20, and a
 re-proposal has to answer three things. First, `arrival-control`'s B1 gate
-execs `gen` on `current_exe` so the binary generating the byte comparison IS
-the binary under test - the driver cannot disagree with itself about which
+execs `gen` on `current_exe` so the binary generating the byte comparison is
+the very binary under test - the driver cannot disagree with itself about which
 build ran - and a split reintroduces exactly the build-identity ambiguity that
-design forecloses. Second, the size benefit is already banked: the METHOD
+design forecloses. Second, the size benefit is already banked: the method
 lives in `mogwai-lab`, which stays linked into the venue binary regardless,
 because `gen` reaches into it and `main` calls `sidecar::init` before the argv
 parse; a split relocates thin driver layers while the intake method remains
 shipped. Third, the cost is on the order of two hundred path rewrites across
 one-shot brick drivers, relocated integration suites, a moved attestation
 roster, and a new build-identity mechanism to replace the one the split
-destroys. Two potential hard blockers were checked and are NOT part of the
+destroys. Two potential hard blockers were checked and are not part of the
 refusal: the crate direction admits a lab binary, and the `test-seam` cfg
 survives a move - the refusal rests on the three arguments, not on a build
 obstacle.
@@ -1212,7 +1212,7 @@ git history) - streaming TBBO/Binance-trades
 parsing, the protocol-12a measurement engine, aggregation and bootstrap,
 fingerprint and cadence synthesis, and the protocol-11 session-calibration
 fit. Its dependency direction is one-way and asymmetric: `mogwai-lab` depends
-on `mogwai-data`, `mogwai-protocol` AND `mogwai-venue` (session-summary work
+on `mogwai-data`, `mogwai-protocol` and also `mogwai-venue` (session-summary work
 needs to resolve an `InstrumentProfile` through `Config::load` exactly as the
 Python's `--config` scratch walks did), but `mogwai-venue` depends on none of
 it - there is no cycle, and `mogwai-lab` stays out of the tape-generation path
@@ -1223,7 +1223,7 @@ resolution
 (preflight, cache, most of measure/fit/synth) and calls straight into
 `mogwai-venue` for the generated side of measurement.
 
-THE INSTRUMENT SET IS OPEN, and that is why `mogwai-lab` is a library rather
+The instrument set is open, and that is why `mogwai-lab` is a library rather
 than a folder of scripts. A symbol is a request string, never an admission
 identity. `InstrumentDef` is derived through one path from the symbol and the
 operator overlay: an explicit preset, a matching preset, or the BTCUSDT default
@@ -1243,7 +1243,7 @@ survey what cheap data exists, decide whether a paid corpus is worth buying
 and which windows of it, buy, preflight, measure, characterize, fit, ship a
 preset with its provenance. The offline toolbox is that sequence made
 reusable, and the two consequences bind anything built on it. A component is
-SPENT only when its QUESTION cannot recur, never merely because the MNQ pass
+spent only when its question cannot recur, never merely because the MNQ pass
 answered it - an archive inspector or a corpus driver is idle between
 instruments, not dead. And per-instrument knowledge belongs in config or a
 preset rather than a hardcoded list in the method: a preset tuple naming
@@ -1253,23 +1253,23 @@ a law, until a second instrument either reproduces it or does not - which is
 why methods a preregistered test rejected are kept runnable rather than
 deleted.
 
-THE SECOND CONSEQUENCE IS THE DIRECTION OF TRAVEL, NOT A MET INVARIANT, and
+The second consequence is the direction of travel, not a met invariant, and
 stating it as met would be false. The offline toolbox still fixes
 per-instrument choices in source, faithfully mirroring the Python it was
 ported from rather than introducing the debt: `cadence.rs` fixes the pair set
 and the archive month and takes BTCUSDT as anchor, `fingerprint.rs` takes
-XBTUSD as anchor, and both `session_profile.rs` entry points resolve the MNQ
+`XBTUSD` as anchor, and both `session_profile.rs` entry points resolve the MNQ
 preset. None of these is reachable as an input. Retiring the Python removes no
 parameterization that exists today - it was equally hardcoded - so closing
 this is forward work rather than a porting debt, and it is what a second
 instrument will force.
 
-THE PARITY CONTRACT a port is held to, stated once because every case
-otherwise gets argued from scratch: for every VALID input, the Rust must
+The parity contract a port is held to, stated once because every case
+otherwise gets argued from scratch: for every valid input, the Rust must
 either produce output equivalent to the implementation it replaces or embody
-an explicitly approved semantic change. It MAY additionally reject inputs
-outside the declared input contract. It may NOT silently accept malformed
-input, and it may NOT silently change results for valid input.
+an explicitly approved semantic change. It may additionally reject inputs
+outside the declared input contract. It may never silently accept malformed
+input, and it may never silently change results for valid input.
 
 The line that follows from it, and the reason it is worth writing down: a
 gate passing on the committed fixtures is evidence about those fixtures, not
@@ -1280,7 +1280,7 @@ silent mismatch and must be fixed or approved; and a Rust default where the
 original raised is silent acceptance of malformed input, the worst of the
 three, because it manufactures an answer. Fixing the third class by making
 the committed artifact pass again is not a fix - the repair needs a fixture
-chosen to DISTINGUISH the implementations, or the blind spot survives.
+chosen to distinguish the implementations, or the blind spot survives.
 
 The rewrite's parity gates are the porting program's whole verification
 story: every absorbed Python computation is checked against a committed JSON
@@ -1300,9 +1300,9 @@ Twister, and the rest) and every owner decision the review adjudicated - is
 retired to git history; the review signed and the program is complete.
 
 The storage policy `mogwai_lab::storage` implements keeps three classes of
-on-disk data apart, never mixed. ARTIFACTS (preflight, measurement and fit
+on-disk data apart, never mixed. Artifacts (preflight, measurement and fit
 outputs) are the user's files: written to `--out` or a subcommand's own
-working-directory default, never cached, never auto-deleted. CACHE
+working-directory default, never cached, never auto-deleted. Cache
 (recomputable, keyed data - walk summaries, measure12a walk records) lives
 under `$XDG_CACHE_HOME/mogwai/` (falling back to `~/.cache/mogwai/`),
 overridable by `MOGWAI_CACHE_DIR` or `--cache-dir`, keyed by a
@@ -1312,12 +1312,12 @@ sub-contract hash and (when built from a tree) the git sha; entries under a
 stale token are unreachable by construction and pruned automatically on
 write, with `mogwai cache stats`, `mogwai cache stats --entries`,
 `mogwai cache clean` and `mogwai cache clean --stale --keep TOKEN` covering
-the manual case. `--keep` IS REQUIRED with `--stale`, and the token must name
+the manual case. `--keep` is required with `--stale`, and the token must name
 a directory that is actually present: a cache entry's provenance token binds
-the command that PRODUCED it, which a `cache` invocation cannot derive, and a
+the command that produced it, which a `cache` invocation cannot derive, and a
 token matching nothing keeps nothing - so both the missing and the mistyped
 token refuse rather than pruning the lot. `stats --entries` prints the
-candidates. SCRATCH (per-run temporaries) is a run-scoped directory under the
+candidates. Scratch (per-run temporaries) is a run-scoped directory under the
 cache root with a leaf unique to the process, removed when its guard drops -
 so two concurrent runs, or the two sweeps a full gate runs at once, cannot
 share one. Repo development pins `MOGWAI_CACHE_DIR` to the Python-era
