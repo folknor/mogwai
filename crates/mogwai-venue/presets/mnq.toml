@@ -204,7 +204,7 @@ open_windows = [
 "generator.trade_displacement_ticks.provenance.kind" = { kind = "declared", rationale = "the nested seam states its own fitted corpus" }
 "generator.trade_displacement_ticks.provenance.corpus" = { kind = "declared", rationale = "names the MNQ TBBO evidence; no other instrument's corpus is implied" }
 "session.intensity_hour" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG; conditional hour parameter from inferred-parent counts under the frozen dow_weight", window = "2026-07 full month, 22 usable sessions" }
-"session.dow_weight" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected by preregistered separability and era-stability rules" }
+"session.dow_weight" = { kind = "fitted", corpus = "NQ one-minute ratio-back-adjusted bars; contract volume per calendar-open minute used as an arrival-count proxy", window = "2020-01-01 through 2026-07-08; recent era selected mechanically by the preregistered fallback after the era-stability check failed at 22.83 percent divergent exposure - the era is a fallback choice, not a passed one" }
 "session.vol_hour" = { kind = "fitted", corpus = "MNQ.v.0 GLBX.MDP3 TBBO, job GLBX-20260805-HAPEWPABKG; per-parent trimmed mean absolute quote-mid return, median across sessions", window = "2026-07 full month, 22 usable sessions" }
 "calendar.utc_offset_minutes" = { kind = "declared", rationale = "permanent CDT model clock; DST transitions unmodelled, so CST sessions sit one UTC hour later than this table places them" }
 "calendar.settlement_minute_of_day" = { kind = "declared", rationale = "15:00 Central daily settlement" }

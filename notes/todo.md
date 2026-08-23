@@ -381,6 +381,56 @@ undone. Neither is urgent; both modes must eventually be supported.
 
 ## Data and generator
 
+- **Three generator defects inherited from the closed measure-and-fit arc.**
+  Recorded 2026-08-23 when that arc's documents were deleted; the evidence for
+  each is in `notes/tape-research-v1.md`, and each is live regardless of what
+  tape research v2 turns out to be.
+
+  `ARRIVAL_MEAN_CAL = 0.944` corrects the shipped sampling scheme's realized-mean
+  inflation. The integrated frame has no such inflation, so applying it there
+  double counts by exactly 1.05932 and the shipped path carries a 5.5 to 7.0
+  percent absolute-rate conflict against the observed July month. It is a derived
+  constant, not a fitted one, and a Jensen-gap explanation was refuted in closed
+  form.
+
+  The generator hardcodes a July-style UTC offset. Twelve of twenty-four Stage M
+  control walks, exactly the winter rotation, collapsed the local-hour-22 stratum
+  to zero variance, and the frozen daylight offset applied to November put
+  840,315 rows outside declared sessions, 3.8 percent against September's 0.5.
+  Any regression suite over this needs one daylight, one standard and one
+  transition month, because single-month validation is structurally blind to it.
+
+  The `children_mean` clamp: at an observed mean of 1.1711 the quiet-state
+  multiplier draws an impossible sub-one mean, `SweepShape` clamps it to one, and
+  the mean-preserving identity breaks. Realized mean inflates to about 1.44 at
+  any configured value, so the parameter is silently a constant.
+
+- **The 86 MB and 57 MB build tax, and whether the dead protocol code goes.**
+  `analysis/mnq-measure-12a.json` is 86 MB and is `include_str!`d at five sites,
+  two of them outside `cfg(test)`, so it is baked into the shipped binary.
+  `analysis/mnq-arrival-screen.json` is 57 MB and is parsed in full by
+  `arrival_envelope_diagnostic.rs`'s test, which is not ignored, so every
+  `brokkr check` reads it. Both are terminal outputs of the closed 12b protocol.
+  They cannot be removed without deciding the larger question they sit inside:
+  roughly 25,000 lines across `mogwai-lab` and `mogwai-cli` are the compiled
+  machinery of the closed arc (the arrival screen, control and envelope family,
+  `measure12a`, `aggregate`, `stage_m` and its Tier 2 limb, `count_curve`,
+  `ordered_counts`, `slow_geometry`, `tick_composition`, `select_windows`), and
+  the binary still advertises them as supported subcommands. Owner call, deferred
+  until v2's shape is known, since a successor may want some of the corpus-side
+  machinery.
+
+- **Nine deleted Python scripts are still referenced about forty times.**
+  `analysis/mnq_fit.py` alone has roughly thirty references across `mogwai-lab`
+  and `mogwai-cli`; `characterize.py`, `build_fingerprint.py`, `select_windows.py`,
+  `build_cadence.py`, `run_corpus.py`, `fit_session_profile.py`,
+  `check_cadence_feasible.py` and `tick_composition_ratios.py` account for the
+  rest, across doc comments, `docs/cli.md`, `AGENTS.md` and `Cargo.toml`. One is
+  not prose: `mogwai-lab/src/fingerprint.rs` emits the runtime error
+  "analysis/cadence.json is required; run build_cadence.py first", instructing the
+  user to run a script deleted in the Rust port. `scripts/retire_note_citations.py`
+  is the existing tool for this sweep but is scoped to `crates/` and `brokkr.toml`.
+
 - `SegmentSource` overrides neither `seek_to` nor `fault`. An effectively
   infinite source inherits the O(distance) default walk that `mogwai-data`'s own
   `TickSource` doc warns about - the shape `GeneratedSource` needed
@@ -449,6 +499,18 @@ undone. Neither is urgent; both modes must eventually be supported.
   the recorded reasoning and removes the trap.
 
 ## Adapter
+
+- **Unverified: `DuplicateNextFill` may certify nothing.** Nautilus's
+  `Position::apply_fill` suppresses duplicate fills keyed on `trade_id` plus
+  `causation_id`. If mogwai's duplicate-fill arm repeats the `trade_id`, nautilus
+  drops the second fill with a warning, and the arm looks green on the venue side
+  while the consumer never sees the divergence it exists to inject. That is the
+  vacuous-gate family exactly. Recorded 2026-08-23 from `notes/testnet.md` before
+  that document's other findings were reviewed; it was established against
+  nautilus HEAD at 409214a while `mogwai-adapter` pins 0.61, so it needs checking
+  at the pin before anything is changed. Read `research/nautilus_trader` for the
+  source; the fix, if it is one, is minting a distinct `trade_id` per emitted
+  fill.
 
 - `MogwaiDataClient::sink` is an `Option` filled in `start()`, and several
   delivery sites are `if let Ok(sink) = self.sink()`, so a data client connected

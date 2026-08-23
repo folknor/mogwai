@@ -201,18 +201,6 @@ const ALLOWED_FILES: &[AllowedFile] = &[
         reason: "the gate's reviewed data table must spell every spelling it refuses",
     },
     AllowedFile {
-        path: "notes/count-curve-preregistration.md",
-        reason: "frozen preregistration; later vocabulary changes may not rewrite it",
-    },
-    AllowedFile {
-        path: "notes/pair-test-preregistration.md",
-        reason: "frozen preregistration; later vocabulary changes may not rewrite it",
-    },
-    AllowedFile {
-        path: "notes/protocol-12b-arrival-composition-spec.md",
-        reason: "frozen specification whose body is amended, never rewritten",
-    },
-    AllowedFile {
         path: "analysis/asia_jump_probe.py",
         reason: "owner's untracked work in progress, explicitly outside repository sweeps",
     },
