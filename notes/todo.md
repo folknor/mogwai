@@ -91,22 +91,12 @@ undone. Neither is urgent; both modes must eventually be supported.
 
 ## Venue and protocol
 
-- Where should one ledger, one cadence sit? It is per river today: an account may
-  ride two rivers at two speeds, which is a supported shape and what the default
-  account's two-symbol case depends on, but a second speed of one river is
-  refused. Both directions are open and it is one owner call, because the
-  machinery decides it in a single predicate at reservation.
-
-  Tighter, account-wide: a ledger's balances, settled cash, daily resets and
-  peak-equity ratchet are all functions of simulated time, so an account reading
-  two rivers at two cadences already drifts - the multi-river peak-equity item
-  below, seen from the admission side rather than the valuation side. This costs
-  a consumer-visible refusal on a shape that works today.
-
-  Looser, served rather than refused: two cadences over one river share the
-  checkpoint chain underneath, so a second speed is a second cursor rather than a
-  second river. Serving it means giving the engine per-cursor temporal ownership
-  of orders and marks, which is the real prerequisite.
+- Serve a second cadence on one river rather than refusing it. The rule is per
+  river and stays there (owner, 2026-08-23), so what is open is only the looser
+  direction: two cadences over one river share the checkpoint chain underneath,
+  so a second speed is a second cursor rather than a second river. Serving it
+  means giving the engine per-cursor temporal ownership of orders and marks,
+  which is the real prerequisite and the reason it is refused today.
 
 - A passenger whose own duration ends is sent a `RunComplete` frame before the
   `close::DURATION_COMPLETE` close, identically to the whole-run arm
@@ -179,15 +169,6 @@ undone. Neither is urgent; both modes must eventually be supported.
 - `GoDark` swallows the startup mass-status query, so a client armed with it can
   never complete boot and never reaches command sequencing. Decide whether that
   is correct by design - it is a blackout - or an arm too broad to be useful.
-
-- The multi-river peak-equity bound. For a multi-river account the peak-equity
-  ratchet is fed a partial, arbitrarily ordered reconstruction: equity is a sum
-  over rivers, its extreme over a span need not sit at either river's extreme,
-  and the sweeper judges per due boat with the other rivers at last marks.
-  Closing it means a per-account extremes reconstruction across rivers. The
-  honest bound is already stated in the durable prose, so this is engineering
-  rather than documentation. Adjacent and unruled: the position cap is per
-  symbol, and whether an aggregate cap is wanted.
 
 - A whitespace-padded currency code is accepted and matches no balance. `" USD "`
   passes both `mogwai-protocol` validators - the risk-policy `validate()` and

@@ -72,16 +72,22 @@ use crate::source::RiverKey;
 /// quantized from it, so neither waits on a placement.
 ///
 /// One ledger, one cadence, per river. Two sockets of one account may ride two
-/// rivers at two speeds - a supported shape - but two speeds of one river would
-/// judge one book on two clocks.
+/// rivers at two speeds - a supported shape, and what the default account's
+/// two-symbol case rests on - but two speeds of one river would judge one book
+/// on two clocks.
 ///
-/// Whether that rule should be account-wide rather than per river is a real
-/// question and is not settled here: a ledger's balances, settled cash, daily
-/// resets and peak-equity ratchet are all functions of simulated time, so an
-/// account reading two rivers at two cadences already drifts, which is the open
-/// multi-river peak-equity item. Tightening it is a product decision with a
-/// consumer-visible refusal attached, so it is filed rather than smuggled in
-/// behind a structural rewrite.
+/// Per river and not account-wide, ruled by the owner 2026-08-23, and the
+/// tempting argument against it is recorded here because it is a good one and
+/// will be made again. A ledger's balances, settled cash, daily resets and
+/// peak-equity ratchet are all functions of simulated time, so an account
+/// reading two rivers at two cadences does drift. That is not a reason to
+/// widen this predicate. Across different symbols the drift is staleness
+/// bounded by the mark cadence and nothing is ambiguous, because each position
+/// is marked from its own river; the one genuinely ambiguous shape is two
+/// rivers wearing one symbol, which is allowed, is not a cadence question at
+/// all, and is stated on `Engine::last_marks` where it actually bites.
+/// Comparing cadence across rivers here would refuse a working topology to
+/// paper over neither of those.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Seat {
     pub(crate) river: RiverKey,

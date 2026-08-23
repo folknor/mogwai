@@ -549,6 +549,30 @@ pub struct Engine {
     /// than only the ones that post margin. This is what lets a spot holding be
     /// valued: the base asset sits in the ledger as a currency balance and the
     /// pair that quotes it is the only thing that can price it.
+    ///
+    /// Keyed by symbol, and that is not a limitation to route around. One
+    /// account holds one position in an instrument, so one symbol has one mark
+    /// by construction.
+    ///
+    /// The gotcha it produces, recorded so it is not re-filed as a defect and
+    /// not closed by a refusal. River identity carries the generator arm, so
+    /// clean MNQ and surged MNQ are two rivers wearing one symbol. An account
+    /// riding both has two boats at two simulated instants writing this one
+    /// entry in turn, so the position is marked from whichever swept last.
+    ///
+    /// That shape is allowed and the venue serves it. It is not refused at
+    /// admission and must not become one: a symbol is a request parameter and
+    /// the venue gates on nothing. It simply has no coherent answer to give -
+    /// the request asks one book to hold one instrument at two prices, and one
+    /// account holds one position in an instrument. Keying a mark by river
+    /// instead would mean an account with two MNQ positions, which is a worse
+    /// ledger model than the ambiguity it removes. So the consequence belongs to
+    /// whoever asked for it, and nothing here is owed a fix. Owner, 2026-08-23.
+    ///
+    /// Two rivers wearing two different symbols are not this, and carry no
+    /// ambiguity at all: their marks land in disjoint entries, each position is
+    /// marked from its own river, and a valuation summing them is stale by the
+    /// mark cadence rather than wrong.
     last_marks: HashMap<Symbol, Decimal>,
     liquidation_seq: u64,
     warned: Warned,
