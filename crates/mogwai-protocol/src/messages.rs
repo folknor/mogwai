@@ -198,7 +198,10 @@ pub const MAX_SYMBOL_LEN: usize = 32;
 /// rather than an oversight.
 pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
     if symbol.is_empty() || symbol.len() > MAX_SYMBOL_LEN {
-        return Err("symbols are 1 to 32 characters");
+        // Bytes, not characters: the check is `symbol.len()`. The two agree
+        // only because the alphabet arm below admits ASCII alone, and saying
+        // characters would be a lie the moment that arm relaxed.
+        return Err("symbols are 1 to 32 bytes");
     }
     if !symbol
         .bytes()
@@ -223,7 +226,7 @@ pub const MAX_CALLSIGN_LEN: usize = 64;
 /// would silently give it the always-evict behaviour it was trying to leave.
 pub fn validate_callsign(callsign: &str) -> Result<(), &'static str> {
     if callsign.is_empty() || callsign.len() > MAX_CALLSIGN_LEN {
-        return Err("callsigns are 1 to 64 characters");
+        return Err("callsigns are 1 to 64 bytes");
     }
     if !callsign
         .bytes()
@@ -260,6 +263,44 @@ pub const POST_ONLY_REFUSAL: &str = "post_only is legal only on Limit, StopLimit
 /// (`mogwai-venue/src/config.rs`), which fails startup rather than a
 /// connection.
 pub const MAX_CURRENCY_LEN: usize = 16;
+
+/// Validate a currency code wherever one is configured.
+///
+/// A currency code is a lookup key and nothing else: an account's equity is
+/// summed over the balances carrying exactly this string, and a margin or
+/// commission row is denominated by matching it. So a code that no balance can
+/// ever equal is not a cosmetic defect - it freezes a policed account's equity
+/// at zero, or denominates a charge in a currency the account does not hold,
+/// and it does so silently because every layer downstream is doing an honest
+/// comparison against a string that simply never matches.
+///
+/// Blank is refused for that reason, and so is a padded code: `" USD "` reads
+/// to a human as USD and matches no balance funded as `USD`. Refusing anything
+/// differing from its own trimmed form is deliberately stricter than
+/// normalizing it would be. Normalizing would make the config file and the
+/// venue's behaviour disagree about what the operator wrote, and the whole
+/// point of failing at load is that the operator learns before a run rather
+/// than from an equity figure hours later.
+///
+/// The length cap is what makes `sizing::BALANCE_ROW_MAX_BYTES` and its kin
+/// upper bounds rather than typical cases; see [`MAX_CURRENCY_LEN`].
+pub fn validate_currency_code(code: &str) -> Result<(), String> {
+    if code.is_empty() {
+        return Err("currency code must not be blank".to_owned());
+    }
+    if code != code.trim() {
+        return Err(format!(
+            "currency code {code:?} carries leading or trailing whitespace, so it would match no \
+             balance"
+        ));
+    }
+    if code.len() > MAX_CURRENCY_LEN {
+        return Err(format!(
+            "currency code {code:?} exceeds MAX_CURRENCY_LEN ({MAX_CURRENCY_LEN} bytes)"
+        ));
+    }
+    Ok(())
+}
 
 /// Worst-case expansion factor `serde_json` applies to an arbitrary string of
 /// N bytes: a byte that must be escaped as `\uXXXX` costs six output bytes.
@@ -1889,7 +1930,7 @@ impl VenueMessage {
     /// order-independent decoder.
     ///
     /// Accepts exactly what `serde_json::from_str::<VenueMessage>` accepts;
-    /// see [`TagProbe`] for the escape case that makes that non-obvious.
+    /// see the private `TagProbe` for the escape case that makes that non-obvious.
     pub fn from_json_str(json: &str) -> serde_json::Result<Self> {
         match serde_json::from_str::<TagProbe<'_>>(json)?.kind.as_ref() {
             "Trade" => serde_json::from_str(json).map(Self::Trade),
@@ -2123,6 +2164,53 @@ mod tests {
                 "{illegal:?} must be refused"
             );
         }
+        // Same guard the callsign cap carries, and for the same reason: the
+        // refusal text spells its bound out as a literal while the check reads
+        // `MAX_SYMBOL_LEN`, so moving the constant would leave a refusal
+        // stating a number the venue no longer enforces. This is the front
+        // door - order entry routes through this function - so the refusal is
+        // what a consumer reads when its symbol is rejected.
+        let over = "X".repeat(MAX_SYMBOL_LEN + 1);
+        let refusal = validate_wire_symbol(&over).unwrap_err();
+        assert!(
+            refusal.contains(&MAX_SYMBOL_LEN.to_string()),
+            "the refusal {refusal:?} must state the cap {MAX_SYMBOL_LEN} it enforces"
+        );
+    }
+
+    /// The currency-code rule, which is stricter than blank-rejection: a padded
+    /// code reads as a currency and matches no balance, so it is refused rather
+    /// than normalized. Both consumers - the risk policy here and
+    /// `mogwai-venue`'s config loader - go through this one function.
+    #[test]
+    fn currency_codes_are_unpadded_and_capped() {
+        for legal in ["USD", "USDT", "XBT", &"C".repeat(MAX_CURRENCY_LEN)] {
+            assert!(
+                validate_currency_code(legal).is_ok(),
+                "{legal:?} is a usable code"
+            );
+        }
+        for illegal in [
+            "",
+            " ",
+            "\t",
+            " USD",
+            "USD ",
+            " USD ",
+            "USD\n",
+            &"C".repeat(MAX_CURRENCY_LEN + 1),
+        ] {
+            assert!(
+                validate_currency_code(illegal).is_err(),
+                "{illegal:?} must be refused"
+            );
+        }
+        let over = "C".repeat(MAX_CURRENCY_LEN + 1);
+        let refusal = validate_currency_code(&over).unwrap_err();
+        assert!(
+            refusal.contains(&MAX_CURRENCY_LEN.to_string()),
+            "the refusal {refusal:?} must state the cap {MAX_CURRENCY_LEN} it enforces"
+        );
     }
 
     /// Order entry judges a symbol by the same alphabet the URL ingresses do.

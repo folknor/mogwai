@@ -210,7 +210,7 @@ impl HttpQuota {
                 // (D.9). Ceil keeps the effective rate at or below the
                 // configured ceiling.
                 let max = u64::from(max);
-                let nanos = 1_000_000_000u64.div_ceil(max);
+                let nanos = crate::clock::NANOS_PER_SEC.div_ceil(max);
                 sim.wall_duration(nanos.max(1))
             }),
             last_send: Arc::new(Mutex::new(None)),

@@ -146,8 +146,16 @@ pub struct TopMinuteRecord {
 /// One open segment of a trading session, all bounds in UTC nanoseconds.
 /// `session_start_ns` keys the session (the local 17:00 open instant);
 /// `segment_origin_ns` anchors the fixed-horizon boundary grid (spec 4.6).
+///
+/// Named for the four bounds it carries rather than for the segment, because
+/// [`crate::session::SessionSegment`] is the segment: this is that type's four
+/// instants with the trade day and the segment name dropped. The two used to
+/// share the name `SessionSegment` with identical field names on the shared
+/// half, so a wrong import compiled and every field access kept working - the
+/// error surfaced only where one of the two absent fields was read, arbitrarily
+/// far from the import that caused it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct SessionSegment {
+pub struct SessionBounds {
     pub session_start_ns: u64,
     pub session_end_ns: u64,
     pub segment_origin_ns: u64,
@@ -175,8 +183,8 @@ pub struct SessionSegment {
 /// [`crate::session`] one also reports the trade-date day number and the
 /// segment name, which every caller here would have to ignore. The mapping
 /// below is the whole difference.
-pub fn session_segment_at(ts: u64, offset_minutes: i16) -> Option<SessionSegment> {
-    crate::session::session_segment_at(ts, i32::from(offset_minutes)).map(|seg| SessionSegment {
+pub fn session_segment_at(ts: u64, offset_minutes: i16) -> Option<SessionBounds> {
+    crate::session::session_segment_at(ts, i32::from(offset_minutes)).map(|seg| SessionBounds {
         session_start_ns: seg.session_start_ns,
         session_end_ns: seg.session_end_ns,
         segment_origin_ns: seg.segment_origin_ns,
@@ -359,7 +367,7 @@ pub fn summarize(
     // quote must never establish or price a post-halt boundary - the
     // as-of resets to None on every segment change, exactly as the
     // observed harness resets its chain.
-    let mut seg_state: Option<(SessionSegment, HorizonState, Option<f64>)> = None;
+    let mut seg_state: Option<(SessionBounds, HorizonState, Option<f64>)> = None;
     // Worst-minute detail: minute index -> (low, high, trade_count) on the
     // exact price grid, plus parents by first-child minute (spec 4.7).
     let mut minute_detail: std::collections::BTreeMap<u64, (Decimal, Decimal, u64)> =
@@ -373,7 +381,7 @@ pub fn summarize(
     // quote mid seen so far; `window` is (measured_from, measured_until).
     fn advance_segment_boundaries(
         sessions: &mut std::collections::BTreeMap<u64, GeneratedSessionCells>,
-        seg: &SessionSegment,
+        seg: &SessionBounds,
         horizons: &mut HorizonState,
         until_ts: u64,
         inclusive: bool,

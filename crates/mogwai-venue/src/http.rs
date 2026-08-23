@@ -7,6 +7,7 @@
 //! (`/ws`) lives in `ws.rs`; both share `AppState` and the order-entry
 //! validation gate (`process_order_cmd`) defined here.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use axum::{
@@ -371,7 +372,7 @@ fn refuse_all(
     reason: &str,
     ts: u64,
 ) -> OrderOutcome {
-    let Some(reservation) = lanes.try_reserve_boundary_frames(submitted_orders(cmd).len()) else {
+    let Some(reservation) = lanes.try_reserve_boundary_frames(boundary_frame_count(cmd)) else {
         return OrderOutcome::NotAdmitted(VenueMessage::AdmissionRejected {
             subject: admission_subject(cmd),
             reason: "execution output admission budget exhausted".into(),
@@ -388,11 +389,19 @@ fn refuse_all(
 /// How many boundary refusal frames `cmd` can produce, which is what its
 /// reservation is sized from. One for everything except a group, which owes one
 /// per member and is bounded by `MAX_GROUP_ORDERS`.
-fn boundary_frame_count(cmd: &Command) -> usize {
-    match cmd {
-        Command::SubmitOrderGroup { orders } => orders.len().max(1),
+///
+/// The floor of one is the empty group, and it is a real wire shape rather than
+/// a defensive clamp: `{"type":"SubmitOrderGroup","orders":[]}` decodes, is
+/// refused at the boundary, and its refusal is the single frame saying so. That
+/// one frame is what the floor reserves for. Because the count is decided here
+/// and returned as a `NonZeroUsize`, no caller of
+/// `try_reserve_boundary_frames` can ask for a reservation covering nothing.
+fn boundary_frame_count(cmd: &Command) -> NonZeroUsize {
+    let members = match cmd {
+        Command::SubmitOrderGroup { orders } => orders.len(),
         _ => 1,
-    }
+    };
+    NonZeroUsize::new(members).unwrap_or(NonZeroUsize::MIN)
 }
 
 /// Run one order-entry command (`SubmitOrder`/`ModifyOrder`/`CancelOrder`, and
@@ -3254,6 +3263,15 @@ mod calendar_tests {
             })
             .collect();
         assert_eq!(ids, ["A", "B"], "{frames:?}");
-        assert_eq!(boundary_frame_count(&group), 2);
+        assert_eq!(boundary_frame_count(&group).get(), 2);
+        // The empty group is the shape the count's floor exists for: it
+        // decodes, it is refused, and its refusal is one frame. Asserted here
+        // so the floor is a stated behaviour rather than a clamp nobody reads.
+        let empty = Command::SubmitOrderGroup { orders: vec![] };
+        assert_eq!(boundary_frame_count(&empty).get(), 1);
+        assert!(
+            boundary_error(&empty).is_some(),
+            "an empty group is refused at the boundary"
+        );
     }
 }

@@ -15,7 +15,9 @@
 use std::collections::HashMap;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use mogwai_engine::{BreachAction, Engine, EngineConfig, MarginPolicy, MarketReading, ScanResult};
+use mogwai_engine::{
+    Engine, EngineConfig, MarginBreachAction, MarginPolicy, MarketReading, ScanResult,
+};
 use mogwai_protocol::Hit;
 use mogwai_protocol::{
     AccountId, Command, InstrumentClass, InstrumentDef, OrderType, Side, SubmitOrder, TimeInForce,
@@ -109,7 +111,7 @@ fn futures_book(size: usize) -> (Engine, Vec<(mogwai_protocol::Symbol, Decimal)>
     let policy = MarginPolicy {
         initial_per_contract: Decimal::from(2000),
         maintenance_per_contract: Decimal::from(1800),
-        breach_action: BreachAction::Refuse,
+        breach_action: MarginBreachAction::Refuse,
         basis: Default::default(),
     };
     for index in 0..size {

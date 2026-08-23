@@ -42,7 +42,7 @@ pub struct TreeReading {
 }
 
 /// The seam the tree gate reads through. Production is [`GitTreeOracle`];
-/// tests install a [`ScriptedTree`] so a refusal can be provoked in either
+/// tests install a `ScriptedTree` (test builds only) so a refusal can be provoked in either
 /// direction without a git process and without depending on whatever state
 /// the developer's working tree happens to be in.
 pub trait TreeOracle {

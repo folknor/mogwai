@@ -233,8 +233,8 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
             if at_ts == 0 {
                 return Err("at_ts must be > 0 (a forward-replay instant, not the epoch)");
             }
-            if halt_secs > 86_400 {
-                return Err("halt_secs must be <= 86400");
+            if halt_secs > MAX_HALT_SECS {
+                return Err(REFUSE_HALT_SECS);
             }
             if finite_in(gap_frac, -1.0, 1.0) {
                 Ok(())
@@ -417,6 +417,21 @@ pub const BASELINE_LATENCY: HavocLatency = HavocLatency {
 /// cap - an in-flight per-event delay belongs far below a total blackout.
 pub const MAX_LATENCY_NANOS: u64 = 60_000_000_000;
 
+/// Upper bound on `MarketRegime::ReopenGap.halt_secs`, in seconds: one day.
+///
+/// The last temporal bound in this crate that had no name behind it, unlike its
+/// sibling `control::MAX_DIVERGENCE_MS`. A halt is a market closure the
+/// generator plays through, so the ceiling is a statement about what closure is
+/// worth simulating rather than about arithmetic: a venue shut for longer than
+/// a day is a venue nobody is forward-testing against, and an unbounded
+/// `halt_secs` silences a river for a span the run itself cannot outlive.
+pub const MAX_HALT_SECS: u64 = 86_400;
+
+/// The refusal `MAX_HALT_SECS` earns, kept beside the bound it states so the
+/// pair moves together; `validate_market_regime` returns `&'static str`, so the
+/// number is a literal here and a test holds it against the constant.
+pub const REFUSE_HALT_SECS: &str = "halt_secs must be <= 86400";
+
 impl HavocLatency {
     /// Effective delay for an inbound event, composing base into the category.
     #[must_use]
@@ -518,7 +533,7 @@ impl EventKind {
     /// `Data` is market data and `Admission` is neither - it is transport truth
     /// about a request the venue would not serve. The venue's outbound delay
     /// path keys off this split, while the adapter's latency bucketing uses the
-    /// full `EventKind` - both consult [`VenueMessage::category`] so the two
+    /// full `EventKind` - both consult [`crate::VenueMessage::category`] so the two
     /// ends can never disagree about which side of the seam a variant sits on
     /// (the split-brain that classified `AccountState` as data on one end and
     /// execution on the other).
@@ -640,13 +655,26 @@ mod tests {
             .is_err(),
             "at_ts == 0 is a halt at the epoch"
         );
-        assert!(
+        // The bound is read off the constant, and the refusal text is held
+        // against it, so moving `MAX_HALT_SECS` moves the test and the message
+        // together rather than leaving either stating a day nobody enforces.
+        validate_market_regime(&MarketRegime::ReopenGap {
+            at_ts: 123,
+            halt_secs: MAX_HALT_SECS,
+            gap_frac: 0.0,
+        })
+        .expect("the ceiling itself is a legal halt");
+        assert_eq!(
             validate_market_regime(&MarketRegime::ReopenGap {
                 at_ts: 123,
-                halt_secs: 86_401,
+                halt_secs: MAX_HALT_SECS + 1,
                 gap_frac: 0.0,
-            })
-            .is_err()
+            }),
+            Err(REFUSE_HALT_SECS)
+        );
+        assert!(
+            REFUSE_HALT_SECS.contains(&MAX_HALT_SECS.to_string()),
+            "the refusal {REFUSE_HALT_SECS:?} must state the cap {MAX_HALT_SECS} it enforces"
         );
         assert!(
             validate_market_regime(&MarketRegime::ReopenGap {

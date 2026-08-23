@@ -201,7 +201,7 @@ pub struct MarginPolicy {
     /// is the same shape either way.
     pub initial_per_contract: Decimal,
     pub maintenance_per_contract: Decimal,
-    pub breach_action: BreachAction,
+    pub breach_action: MarginBreachAction,
     pub basis: MarginBasis,
 }
 
@@ -314,8 +314,20 @@ fn position_unrealized(
     })
 }
 
+/// What a margin breach does: refuse the order that would breach, or liquidate
+/// the position that already has.
+///
+/// Named for margin rather than for breach because
+/// `mogwai_protocol::risk::BreachAction` is the other breach in this
+/// workspace, naming what an account-policy rule does when its budget is
+/// spent, and the two carry disjoint variants for disjoint mechanisms. They
+/// shared the bare name
+/// `BreachAction` until 2026-08-23, which made a wrong import a plausible edit
+/// rather than an impossible one: both derive `Default`, so a
+/// `breach_action: Default::default()` under the wrong import compiles and
+/// silently arms the other subsystem's default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum BreachAction {
+pub enum MarginBreachAction {
     #[default]
     Refuse,
     Liquidate,
@@ -1228,10 +1240,10 @@ impl Engine {
                 .fold(Decimal::ZERO, Decimal::saturating_add);
             let breached = total.saturating_add(unrealized) < maintenance;
             match (breached, policy.breach_action) {
-                (true, BreachAction::Refuse) => {
+                (true, MarginBreachAction::Refuse) => {
                     self.margin_breached.insert(symbol);
                 }
-                (true, BreachAction::Liquidate) => {
+                (true, MarginBreachAction::Liquidate) => {
                     self.margin_breached.insert(std::sync::Arc::clone(&symbol));
                     // One order per open position, not one per symbol: under
                     // hedging a symbol carries several, and closing only the
@@ -1312,7 +1324,7 @@ impl Engine {
     /// This is what enforcing an account policy does on breach: a strategy that
     /// would have been liquidated must actually be liquidated, or the forward
     /// claim is worth nothing. It is the same close the margin ledger performs
-    /// under `BreachAction::Liquidate` - reduce-only IOC market orders at the
+    /// under `MarginBreachAction::Liquidate` - reduce-only IOC market orders at the
     /// mark, judged against the configured liquidation band - applied to the
     /// whole book instead of to one breached symbol.
     ///
@@ -3763,7 +3775,7 @@ mod tests {
         })
     }
 
-    fn futures_engine(cash: i64, action: BreachAction) -> Engine {
+    fn futures_engine(cash: i64, action: MarginBreachAction) -> Engine {
         let def = InstrumentDef {
             symbol: "MNQ".into(),
             class: InstrumentClass::Future {
@@ -3844,7 +3856,7 @@ mod tests {
 
     #[test]
     fn a_futures_fill_books_no_base_currency_leg() {
-        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        let mut engine = futures_engine(10_000, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         let state = engine.account_snapshot(2);
         assert_eq!(state.balances.len(), 1);
@@ -3853,7 +3865,7 @@ mod tests {
 
     #[test]
     fn a_futures_position_values_at_multiplier_times_points() {
-        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        let mut engine = futures_engine(10_000, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 2, 21_000);
         engine.mark(&[("MNQ".into(), Decimal::from(21_001))], 2);
         assert_eq!(engine.unrealized_pnl("MNQ"), Decimal::from(4));
@@ -3861,7 +3873,7 @@ mod tests {
 
     #[test]
     fn a_fresh_futures_position_is_marked_at_its_fill_price() {
-        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        let mut engine = futures_engine(10_000, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         let position = &engine.account_snapshot(2).positions[0];
         assert_eq!(position.mark_px, Decimal::from(21_000));
@@ -3870,7 +3882,7 @@ mod tests {
 
     #[test]
     fn flipping_a_futures_position_preserves_its_last_mark() {
-        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        let mut engine = futures_engine(10_000, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         engine.mark(&[("MNQ".into(), Decimal::from(21_100))], 2);
         fill_future(&mut engine, "F-2", Side::Sell, 2, 21_050);
@@ -3883,7 +3895,7 @@ mod tests {
     #[test]
     fn a_resting_futures_order_holds_margin_not_notional() {
         for side in [Side::Buy, Side::Sell] {
-            let mut engine = futures_engine(50_000, BreachAction::Refuse);
+            let mut engine = futures_engine(50_000, MarginBreachAction::Refuse);
             let mut order = mnq_order("REST", side, 1, 21_000);
             order.order_type = OrderType::Limit;
             engine.process(Command::SubmitOrder(order), 1);
@@ -3924,7 +3936,7 @@ mod tests {
                 MarginPolicy {
                     initial_per_contract: Decimal::from(2_000),
                     maintenance_per_contract: Decimal::from(1_800),
-                    breach_action: BreachAction::Refuse,
+                    breach_action: MarginBreachAction::Refuse,
                     basis: Default::default(),
                 },
             );
@@ -3960,13 +3972,13 @@ mod tests {
 
     #[test]
     fn a_futures_fill_is_funds_checked_against_margin_not_notional() {
-        let mut engine = futures_engine(2500, BreachAction::Refuse);
+        let mut engine = futures_engine(2500, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
     }
 
     #[test]
     fn two_reduce_only_legs_place_no_hold_against_one_position() {
-        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        let mut engine = futures_engine(10_000, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         for (id, price) in [("STOP", 20_000), ("TARGET", 22_000)] {
             let mut order = mnq_order(id, Side::Sell, 1, price);
@@ -3985,7 +3997,7 @@ mod tests {
 
     #[test]
     fn daily_settlement_moves_unrealized_into_cash_and_resets_avg_px() {
-        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        let mut engine = futures_engine(10_000, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 2, 21_000);
         engine.mark(&[("MNQ".into(), Decimal::from(21_001))], 2);
         engine.settle(&[("MNQ".into(), Decimal::from(21_001))], 3);
@@ -3997,7 +4009,7 @@ mod tests {
 
     #[test]
     fn an_equity_above_maintenance_with_maintenance_locked_is_not_a_breach() {
-        let mut engine = futures_engine(3000, BreachAction::Refuse);
+        let mut engine = futures_engine(3000, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         engine.mark(&[("MNQ".into(), Decimal::from(21_000))], 2);
         let events = engine.process(
@@ -4012,7 +4024,7 @@ mod tests {
 
     #[test]
     fn a_maintenance_breach_under_refuse_rejects_new_risk_but_not_reduce_only() {
-        let mut engine = futures_engine(3000, BreachAction::Refuse);
+        let mut engine = futures_engine(3000, MarginBreachAction::Refuse);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
         let rejected = engine.process(
@@ -4051,7 +4063,7 @@ mod tests {
 
     #[test]
     fn a_maintenance_breach_under_liquidate_closes_through_the_fill_band() {
-        let mut engine = futures_engine(3000, BreachAction::Liquidate);
+        let mut engine = futures_engine(3000, MarginBreachAction::Liquidate);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         let outcome = engine.mark(&[("MNQ".into(), Decimal::from(20_000))], 2);
         let liquidation = outcome
@@ -4077,7 +4089,7 @@ mod tests {
 
     #[test]
     fn a_liquidation_bypasses_and_preserves_consumer_armed_divergences() {
-        let mut engine = futures_engine(3_000, BreachAction::Liquidate);
+        let mut engine = futures_engine(3_000, MarginBreachAction::Liquidate);
         fill_future(&mut engine, "F-1", Side::Buy, 1, 21_000);
         engine.arm(Divergence::RejectNextSubmit {
             reason: "consumer scenario".into(),
@@ -4141,7 +4153,7 @@ mod tests {
         // liquidation's own funds check and leave the breached position open),
         // and must not expire its window either - the arm belongs to the next
         // consumer fill.
-        let mut engine = futures_engine(3_000, BreachAction::Liquidate);
+        let mut engine = futures_engine(3_000, MarginBreachAction::Liquidate);
         engine.set_fee_schedule(
             "MNQ".into(),
             FeeSchedule {
@@ -4194,7 +4206,7 @@ mod tests {
             MarginPolicy {
                 initial_per_contract: Decimal::ONE,
                 maintenance_per_contract: Decimal::ONE,
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: Default::default(),
             },
         );
@@ -4259,7 +4271,7 @@ mod tests {
 
     #[test]
     fn per_contract_fees_ignore_price_and_scale_with_contracts() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         engine.set_fee_schedule(
             "MNQ".into(),
             FeeSchedule {
@@ -4371,7 +4383,7 @@ mod tests {
 
     #[test]
     fn basis_point_fees_on_a_future_charge_multiplier_aware_notional() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         engine.set_fee_schedule(
             "MNQ".into(),
             FeeSchedule {
@@ -4385,7 +4397,7 @@ mod tests {
 
     #[test]
     fn a_fee_surcharge_bills_above_the_advertised_schedule_and_expires_on_sim_time() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         engine.set_fee_schedule(
             "MNQ".into(),
             FeeSchedule {
@@ -4410,7 +4422,7 @@ mod tests {
 
     #[test]
     fn a_re_armed_fee_surcharge_replaces_the_earlier_window() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         engine.set_fee_schedule(
             "MNQ".into(),
             FeeSchedule {
@@ -4461,7 +4473,7 @@ mod tests {
 
     #[test]
     fn netting_collapses_two_opposing_fills_into_one_position() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         let mut buy = mnq_order("NET-1", Side::Buy, 2, 21_000);
         buy.position_id = Some("CLIENT-LONG".into());
         let mut sell = mnq_order("NET-2", Side::Sell, 1, 21_000);
@@ -4485,7 +4497,7 @@ mod tests {
 
     #[test]
     fn hedging_keeps_two_opposing_fills_as_two_positions() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
         let mut buy = mnq_order("HEDGE-1", Side::Buy, 1, 21_000);
         buy.position_id = Some("LONG".into());
@@ -4507,7 +4519,7 @@ mod tests {
 
     #[test]
     fn a_hedging_order_without_a_position_id_opens_a_venue_assigned_one() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
         let fill = future_fill(&mut engine, "HEDGE-1", 1, 21_000, 1);
         assert!(
@@ -4520,7 +4532,7 @@ mod tests {
 
     #[test]
     fn a_hedging_fill_reports_the_position_id_the_venue_booked_it_against() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
         let mut order = mnq_order("HEDGE-1", Side::Buy, 1, 21_000);
         order.position_id = Some("BOOK-7".into());
@@ -5124,13 +5136,13 @@ mod tests {
         // otherwise disagree about whether the currency key exists while
         // agreeing on every amount, and the debug reconciliation would panic
         // on states that are economically identical.
-        let mut engine = futures_engine(10_000, BreachAction::Refuse);
+        let mut engine = futures_engine(10_000, MarginBreachAction::Refuse);
         engine.set_margin_policy(
             "MNQ".into(),
             MarginPolicy {
                 initial_per_contract: Decimal::ZERO,
                 maintenance_per_contract: Decimal::ZERO,
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: Default::default(),
             },
         );
@@ -6623,7 +6635,7 @@ mod tests {
             // Reg-T: half the notional to open, a quarter to hold.
             initial_per_contract: Decimal::new(5, 1),
             maintenance_per_contract: Decimal::new(25, 2),
-            breach_action: BreachAction::Refuse,
+            breach_action: MarginBreachAction::Refuse,
             basis: MarginBasis::Notional,
         }
     }
@@ -8405,7 +8417,7 @@ mod tests {
             MarginPolicy {
                 initial_per_contract: Decimal::ZERO,
                 maintenance_per_contract: Decimal::ZERO,
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: MarginBasis::PerContract,
             },
         );
@@ -8448,7 +8460,7 @@ mod tests {
             MarginPolicy {
                 initial_per_contract: Decimal::ZERO,
                 maintenance_per_contract: Decimal::ZERO,
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: MarginBasis::PerContract,
             },
         );
@@ -8504,7 +8516,7 @@ mod tests {
                 MarginPolicy {
                     initial_per_contract: Decimal::ZERO,
                     maintenance_per_contract: Decimal::ZERO,
-                    breach_action: BreachAction::Refuse,
+                    breach_action: MarginBreachAction::Refuse,
                     basis: MarginBasis::PerContract,
                 },
             );
@@ -8572,7 +8584,7 @@ mod tests {
             MarginPolicy {
                 initial_per_contract: Decimal::ZERO,
                 maintenance_per_contract: Decimal::ZERO,
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: MarginBasis::PerContract,
             },
         );
@@ -8620,7 +8632,7 @@ mod tests {
             MarginPolicy {
                 initial_per_contract: Decimal::ZERO,
                 maintenance_per_contract: Decimal::ZERO,
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: MarginBasis::PerContract,
             },
         );
@@ -8762,7 +8774,7 @@ mod tests {
     /// incoming buy ten is twenty, not a net of ten.
     #[test]
     fn projected_qty_on_a_hedged_book_is_the_larger_side() {
-        let mut e = futures_engine(200_000, BreachAction::Refuse);
+        let mut e = futures_engine(200_000, MarginBreachAction::Refuse);
         e.set_oms_type(mogwai_protocol::OmsType::Hedging);
         fill_future(&mut e, "L", Side::Buy, 10, 21_000);
         fill_future(&mut e, "S", Side::Sell, 10, 21_000);
@@ -8790,7 +8802,7 @@ mod tests {
         let leveraged = MarginPolicy {
             initial_per_contract: Decimal::new(333, 4),
             maintenance_per_contract: Decimal::new(333, 4),
-            breach_action: BreachAction::Liquidate,
+            breach_action: MarginBreachAction::Liquidate,
             basis: MarginBasis::Notional,
         };
         let cheap = leveraged.initial(&def, Decimal::ONE, Decimal::ONE);
@@ -8804,7 +8816,7 @@ mod tests {
         let fixed = MarginPolicy {
             initial_per_contract: Decimal::from(2_000),
             maintenance_per_contract: Decimal::from(1_800),
-            breach_action: BreachAction::Liquidate,
+            breach_action: MarginBreachAction::Liquidate,
             basis: MarginBasis::PerContract,
         };
         assert_eq!(
@@ -8825,7 +8837,7 @@ mod tests {
             margin: Some(MarginPolicy {
                 initial_per_contract: Decimal::new(5, 1),
                 maintenance_per_contract: Decimal::new(25, 2),
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: MarginBasis::Notional,
             }),
             ..Shares::default()
@@ -9824,7 +9836,7 @@ mod tests {
         // A futures book carries margin rows the spot cases cannot produce, and
         // `book_shape().margins` is what reserves them. Two hedged positions in
         // one symbol are the case a per-position margin row under-reserves.
-        let mut hedged = futures_engine(200_000, BreachAction::Refuse);
+        let mut hedged = futures_engine(200_000, MarginBreachAction::Refuse);
         hedged.set_oms_type(mogwai_protocol::OmsType::Hedging);
         for (index, side) in [(1, Side::Buy), (2, Side::Sell)] {
             let mut leg = mnq_order(&format!("HEDGE-{index}"), side, 1, 21_000);
@@ -9887,7 +9899,7 @@ mod tests {
     /// is what covers the gap.
     #[test]
     fn worst_case_byte_budget_covers_a_liquidation_cascade() {
-        let mut engine = futures_engine(3_000, BreachAction::Liquidate);
+        let mut engine = futures_engine(3_000, MarginBreachAction::Liquidate);
         engine.set_oms_type(mogwai_protocol::OmsType::Hedging);
         for index in 1..=2 {
             let mut leg = mnq_order(&format!("LONG-{index}"), Side::Buy, 1, 21_000);
@@ -10630,7 +10642,7 @@ mod tests {
 
     #[test]
     fn surcharge_window_is_a_pure_function_of_fill_timestamp() {
-        let mut engine = futures_engine(20_000, BreachAction::Refuse);
+        let mut engine = futures_engine(20_000, MarginBreachAction::Refuse);
         engine.set_fee_schedule(
             "MNQ".into(),
             FeeSchedule {
@@ -10929,7 +10941,7 @@ mod tests {
         let margin = MarginPolicy {
             initial_per_contract: Decimal::ONE,
             maintenance_per_contract: Decimal::ONE,
-            breach_action: BreachAction::Refuse,
+            breach_action: MarginBreachAction::Refuse,
             basis: Default::default(),
         };
         let fees = FeeSchedule {
@@ -11081,13 +11093,13 @@ mod tests {
 
     /// A leveraged futures engine: ten-to-one, stated as a fraction of notional.
     fn leveraged_futures(cash: i64) -> Engine {
-        let mut engine = futures_engine(cash, BreachAction::Refuse);
+        let mut engine = futures_engine(cash, MarginBreachAction::Refuse);
         engine.set_margin_policy(
             "MNQ".into(),
             MarginPolicy {
                 initial_per_contract: Decimal::new(1, 1),
                 maintenance_per_contract: Decimal::new(1, 1),
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: MarginBasis::Notional,
             },
         );

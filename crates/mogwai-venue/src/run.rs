@@ -1441,9 +1441,11 @@ impl Run {
                     initial_per_contract: margin.initial_per_contract,
                     maintenance_per_contract: margin.maintenance_per_contract,
                     breach_action: match margin.breach_action {
-                        crate::config::BreachAction::Refuse => mogwai_engine::BreachAction::Refuse,
-                        crate::config::BreachAction::Liquidate => {
-                            mogwai_engine::BreachAction::Liquidate
+                        crate::config::MarginBreachAction::Refuse => {
+                            mogwai_engine::MarginBreachAction::Refuse
+                        }
+                        crate::config::MarginBreachAction::Liquidate => {
+                            mogwai_engine::MarginBreachAction::Liquidate
                         }
                     },
                     basis: match margin.basis {

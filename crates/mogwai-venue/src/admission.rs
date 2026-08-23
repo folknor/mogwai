@@ -603,9 +603,20 @@ impl ExecLanes {
     /// whole, so its refusal is one frame per member rather than one frame -
     /// and the count is bounded by `MAX_GROUP_ORDERS`, which is what keeps this
     /// a reservation rather than an unbounded write.
-    pub(crate) fn try_reserve_boundary_frames(&self, frames: usize) -> Option<Reservation> {
+    ///
+    /// `NonZeroUsize` rather than `usize` with a clamp inside. Every refusal
+    /// produces at least one frame, so a zero-frame reservation is not a small
+    /// reservation but a nonsense one, and clamping it here made that
+    /// unrepresentable state merely harmless. The obligation now sits on the
+    /// signature: `http.rs`'s `boundary_frame_count` is the single place that
+    /// decides the count, and it is where the empty-group wire shape - the one
+    /// caller that genuinely has no members to count - is answered for.
+    pub(crate) fn try_reserve_boundary_frames(
+        &self,
+        frames: std::num::NonZeroUsize,
+    ) -> Option<Reservation> {
         self.held_budget
-            .try_reserve(frames.max(1) * BOUNDARY_REFUSAL_BYTES)
+            .try_reserve(frames.get() * BOUNDARY_REFUSAL_BYTES)
     }
 
     /// Reserve one priority-lane queue slot. `None` is the overload condition.

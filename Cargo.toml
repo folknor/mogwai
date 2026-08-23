@@ -80,6 +80,30 @@ unreachable_pub = "deny"
 unused = "deny"
 variant_size_differences = "deny"
 
+[workspace.lints.rustdoc]
+# A `[`Type`]` or `[`fn`]` reference that resolves to nothing renders as literal
+# brackets and silently stops being a link. Nothing in this workspace detected
+# that: clippy never runs rustdoc, and the doc comments here carry a lot of
+# intra-doc references precisely because the reasoning is written next to the
+# code it constrains. The `rustdoc-links` script-check in `brokkr.toml` is what
+# runs rustdoc, since a lint nothing invokes is a lint that is off.
+broken_intra_doc_links = "deny"
+# `private_intra_doc_links` is deliberately NOT denied. It fires on a public
+# item's doc linking a private one, and this tree does that everywhere on
+# purpose: the doc comments are written for whoever changes the code, so
+# `valuation_at` naming `position_unrealized_checked` and the engine's module
+# map naming `account`, `orders` and `divergence` are the reasoning, not
+# oversights. Denying it would trade seven accurate references for seven
+# unlinked backticks and teach the next author to stop citing internals.
+invalid_html_tags = "deny"
+# An unlabelled fence is compiled as Rust and run as a doctest. Every fenced
+# block in this tree is prose, TOML or JSON, so an unlabelled one is a mislabel
+# rather than an example - and doctests are off in every lane (see
+# `brokkr.toml`, which declares that choice), so running it would never catch
+# the mislabel. This lint reads the block without running it.
+invalid_rust_codeblocks = "deny"
+bare_urls = "deny"
+
 [workspace.lints.clippy]
 disallowed_methods = "deny"
 uninlined_format_args = "deny"

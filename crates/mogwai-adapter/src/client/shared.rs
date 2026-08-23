@@ -404,9 +404,9 @@ pub(crate) fn request_timeout_secs(spec: &Option<HavocSpec>, sim: SimClock) -> u
     } else {
         configured
     };
-    let wall_ns = sim.wall_span(sim_secs.saturating_mul(1_000_000_000));
+    let wall_ns = sim.wall_span(sim_secs.saturating_mul(crate::clock::NANOS_PER_SEC));
     wall_ns
-        .div_ceil(1_000_000_000)
+        .div_ceil(crate::clock::NANOS_PER_SEC)
         .max(MIN_WALL_REQUEST_TIMEOUT_SECS)
 }
 /// Wall backoff between clock-fetch retries. Small and fixed: this runs inline

@@ -382,8 +382,9 @@ pub(crate) fn validate_account_id(cfg: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validates the `[balances]` funding table: currencies must be non-blank,
-/// within `MAX_CURRENCY_LEN`, and amounts non-negative. Zero is allowed (it
+/// Validates the `[balances]` funding table: currencies must satisfy
+/// [`mogwai_protocol::validate_currency_code`] - non-blank, unpadded and within
+/// `MAX_CURRENCY_LEN` - and amounts non-negative. Zero is allowed (it
 /// pins a currency into every snapshot without funding it); negative initial
 /// funding has no venue meaning and is refused at startup like every other
 /// malformed knob.
@@ -395,14 +396,8 @@ pub(crate) fn validate_account_id(cfg: &Config) -> anyhow::Result<()> {
 /// runs in a state where its own reservations under-count.
 pub(crate) fn validate_balances(cfg: &Config) -> anyhow::Result<()> {
     for (currency, amount) in &cfg.balances {
-        if currency.trim().is_empty() {
-            anyhow::bail!("balances currency must not be blank");
-        }
-        if currency.len() > mogwai_protocol::MAX_CURRENCY_LEN {
-            anyhow::bail!(
-                "balances currency {currency} exceeds MAX_CURRENCY_LEN ({})",
-                mogwai_protocol::MAX_CURRENCY_LEN
-            );
+        if let Err(why) = mogwai_protocol::validate_currency_code(currency) {
+            anyhow::bail!("balances: {why}");
         }
         if *amount < Decimal::ZERO {
             anyhow::bail!("balances.{currency} must not be negative");
@@ -1136,14 +1131,14 @@ pub struct ConfiguredMargin {
     pub(crate) initial_per_contract: Decimal,
     pub(crate) maintenance_per_contract: Decimal,
     #[serde(default)]
-    pub(crate) breach_action: BreachAction,
+    pub(crate) breach_action: MarginBreachAction,
     #[serde(default)]
     pub(crate) basis: MarginBasis,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BreachAction {
+pub(crate) enum MarginBreachAction {
     #[default]
     Refuse,
     Liquidate,
@@ -1539,10 +1534,18 @@ const SESSION_KEYS: [&str; 3] = ["intensity_hour", "vol_hour", "dow_weight"];
 /// halves stayed green, because a defaulted scalar is a legal scalar. Checking
 /// the raw TOML keys here closes that without touching the shared types.
 ///
-/// One level deep, which is the level an operator writes as a table. The nested
-/// seams (`quoted_width`, `top_sizes`, `trade_displacement_ticks`, `arrival`)
-/// are written as inline tables and are not covered; `calendar`, `margin` and
-/// `fees` need no cover because their own types already deny unknown fields.
+/// Two levels deep under `generator`. The four seams an operator writes as
+/// inline tables (`quoted_width`, `top_sizes`, `trade_displacement_ticks`,
+/// `arrival`) deserialize into the same permissive shared types and were
+/// admitted unchecked until 2026-08-23, so a misspelled `tikcs` inside
+/// `quoted_width` left the quoted spread at one tick with nothing said - the
+/// same defect the outer guard closes, one level further in. `calendar`,
+/// `margin` and `fees` need no cover because their own types already deny
+/// unknown fields.
+///
+/// The floor is `provenance`, which is a tagged enum: an unknown `kind` is
+/// refused by serde itself, and the fields under a known one are a closed set
+/// serde already checks, so there is nothing left here to swallow.
 fn refuse_unknown_subtable_keys(instrument: &toml::Table) -> anyhow::Result<()> {
     for (name, known) in [
         ("generator", &GENERATOR_KEYS[..]),
@@ -1551,15 +1554,73 @@ fn refuse_unknown_subtable_keys(instrument: &toml::Table) -> anyhow::Result<()> 
         let Some(sub) = instrument.get(name).and_then(toml::Value::as_table) else {
             continue;
         };
-        for key in sub.keys() {
-            if !known.contains(&key.as_str()) {
-                anyhow::bail!(
-                    "unknown key {key} in the resolved [instrument.{name}] table; \
-                     it would be dropped and the knob it names left at its default, \
-                     so it is refused instead. Valid keys are: {}",
-                    known.join(", ")
-                );
-            }
+        refuse_unknown_keys_in(&format!("instrument.{name}"), sub, known)?;
+        if name == "generator" {
+            refuse_unknown_generator_seam_keys(sub)?;
+        }
+    }
+    Ok(())
+}
+
+/// The keys of the three calibration seams, each a plain struct plus the
+/// optional `provenance` tag every one of them carries.
+const QUOTED_WIDTH_KEYS: [&str; 2] = ["ticks", "provenance"];
+const TOP_SIZES_KEYS: [&str; 3] = ["bid", "ask", "provenance"];
+const TRADE_DISPLACEMENT_KEYS: [&str; 2] = ["ticks", "provenance"];
+
+/// The keys each `ArrivalConfig` family accepts, beside its own `family` tag.
+///
+/// Per family rather than a union of all five, because a union would admit
+/// `tau_s` under `EventMarkov` - a knob that family has no reader for, written
+/// by an operator who believed they were setting a time constant. The families
+/// are internally tagged, so an unknown or absent `family` is serde's refusal
+/// to make and this returns `None` rather than guessing at one.
+fn arrival_family_keys(family: &str) -> Option<&'static [&'static str]> {
+    match family {
+        "event_markov" => Some(&["family", "quiet_share", "switch_rate", "rate_ratio"]),
+        "wall_mmpp" => Some(&["family", "occupancy", "rate_ratio", "tau_s"]),
+        "log_ou_cox" => Some(&["family", "sigma_y", "tau_s"]),
+        "self_exciting" => Some(&["family", "phi", "tau_s"]),
+        "shot_noise" => Some(&["family", "m", "k", "tau_s"]),
+        _ => None,
+    }
+}
+
+fn refuse_unknown_generator_seam_keys(generator: &toml::Table) -> anyhow::Result<()> {
+    for (name, known) in [
+        ("quoted_width", &QUOTED_WIDTH_KEYS[..]),
+        ("top_sizes", &TOP_SIZES_KEYS[..]),
+        ("trade_displacement_ticks", &TRADE_DISPLACEMENT_KEYS[..]),
+    ] {
+        let Some(seam) = generator.get(name).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        refuse_unknown_keys_in(&format!("instrument.generator.{name}"), seam, known)?;
+    }
+    let Some(arrival) = generator.get("arrival").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    let Some(known) = arrival
+        .get("family")
+        .and_then(toml::Value::as_str)
+        .and_then(arrival_family_keys)
+    else {
+        return Ok(());
+    };
+    refuse_unknown_keys_in("instrument.generator.arrival", arrival, known)
+}
+
+/// One table's keys against the set its type accepts, `path` naming the table
+/// as the operator wrote it so the refusal points at the line to edit.
+fn refuse_unknown_keys_in(path: &str, table: &toml::Table, known: &[&str]) -> anyhow::Result<()> {
+    for key in table.keys() {
+        if !known.contains(&key.as_str()) {
+            anyhow::bail!(
+                "unknown key {key} in the resolved [{path}] table; \
+                 it would be dropped and the knob it names left at its default, \
+                 so it is refused instead. Valid keys are: {}",
+                known.join(", ")
+            );
         }
     }
     Ok(())
@@ -1639,10 +1700,8 @@ fn validate_derivative(
             def.symbol
         );
     }
-    if settlement_currency.trim().is_empty()
-        || settlement_currency.len() > mogwai_protocol::MAX_CURRENCY_LEN
-    {
-        anyhow::bail!("instrument {} settlement_currency is invalid", def.symbol);
+    if let Err(why) = mogwai_protocol::validate_currency_code(settlement_currency) {
+        anyhow::bail!("instrument {} settlement_currency: {why}", def.symbol);
     }
     if multiplier <= Decimal::ZERO || multiplier.scale() > 9 {
         anyhow::bail!(
@@ -1670,20 +1729,11 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
     }
     match &def.class {
         InstrumentClass::Spot { base, quote } => {
-            if base.trim().is_empty() {
-                anyhow::bail!("instrument {} base must not be empty", def.symbol);
+            if let Err(why) = mogwai_protocol::validate_currency_code(base) {
+                anyhow::bail!("instrument {} base: {why}", def.symbol);
             }
-            if quote.trim().is_empty() {
-                anyhow::bail!("instrument {} quote must not be empty", def.symbol);
-            }
-            if base.len() > mogwai_protocol::MAX_CURRENCY_LEN
-                || quote.len() > mogwai_protocol::MAX_CURRENCY_LEN
-            {
-                anyhow::bail!(
-                    "instrument {} base/quote exceeds MAX_CURRENCY_LEN ({})",
-                    def.symbol,
-                    mogwai_protocol::MAX_CURRENCY_LEN
-                );
+            if let Err(why) = mogwai_protocol::validate_currency_code(quote) {
+                anyhow::bail!("instrument {} quote: {why}", def.symbol);
             }
         }
         InstrumentClass::Future {
@@ -1701,10 +1751,8 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
                     def.symbol
                 );
             }
-            if settlement_currency.trim().is_empty()
-                || settlement_currency.len() > mogwai_protocol::MAX_CURRENCY_LEN
-            {
-                anyhow::bail!("instrument {} settlement_currency is invalid", def.symbol);
+            if let Err(why) = mogwai_protocol::validate_currency_code(settlement_currency) {
+                anyhow::bail!("instrument {} settlement_currency: {why}", def.symbol);
             }
             if *multiplier <= Decimal::ZERO || multiplier.scale() > 9 {
                 anyhow::bail!(
@@ -1726,8 +1774,8 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             borrowable,
             settlement_ns: _,
         } => {
-            if currency.trim().is_empty() || currency.len() > mogwai_protocol::MAX_CURRENCY_LEN {
-                anyhow::bail!("instrument {} equity currency is invalid", def.symbol);
+            if let Err(why) = mogwai_protocol::validate_currency_code(currency) {
+                anyhow::bail!("instrument {} equity currency: {why}", def.symbol);
             }
             if *multiplier <= Decimal::ZERO || multiplier.scale() > 9 {
                 anyhow::bail!(
@@ -1821,10 +1869,8 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             ..
         } => {
             validate_derivative(def, underlying, settlement_currency, *multiplier, true)?;
-            if quote_currency.trim().is_empty()
-                || quote_currency.len() > mogwai_protocol::MAX_CURRENCY_LEN
-            {
-                anyhow::bail!("instrument {} quote_currency is invalid", def.symbol);
+            if let Err(why) = mogwai_protocol::validate_currency_code(quote_currency) {
+                anyhow::bail!("instrument {} quote_currency: {why}", def.symbol);
             }
             if quote_currency == settlement_currency {
                 anyhow::bail!(
@@ -2026,7 +2072,7 @@ mod tests {
             margin: Some(ConfiguredMargin {
                 initial_per_contract: Decimal::from(2000),
                 maintenance_per_contract: Decimal::from(1800),
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: MarginBasis::PerContract,
             }),
             fees: None,
@@ -2251,6 +2297,88 @@ mod tests {
             dow_weight: _,
         } = default_session_profile();
         assert_eq!(SESSION_KEYS.len(), 3);
+    }
+
+    /// A typo one level further in, inside a calibration seam. Same defect and
+    /// same silence: `tikcs` is dropped, the quoted spread runs at whatever the
+    /// seam defaults to, and every gate downstream is measuring a legal river
+    /// that is not the configured one.
+    #[test]
+    fn a_typo_inside_a_generator_seam_refuses_and_names_the_key() {
+        for (seam, good, bad) in [
+            ("quoted_width", "ticks", "tikcs"),
+            ("top_sizes", "bid", "bidd"),
+            ("trade_displacement_ticks", "ticks", "tick"),
+        ] {
+            let (mut instrument, _) = effective_preset("MNQ").unwrap();
+            let generator = instrument
+                .get_mut("generator")
+                .and_then(toml::Value::as_table_mut)
+                .unwrap();
+            let table = generator
+                .get_mut(seam)
+                .and_then(toml::Value::as_table_mut)
+                .unwrap_or_else(|| panic!("the MNQ preset writes {seam} as a table"));
+            assert!(
+                table.contains_key(good),
+                "{seam} is expected to carry {good}"
+            );
+            table.insert(bad.into(), toml::Value::Float(1.0));
+            let message = configured_from_table(instrument)
+                .expect_err("a misspelled seam knob must not boot")
+                .to_string();
+            assert!(message.contains(bad), "{message}");
+            assert!(
+                message.contains(&format!("instrument.generator.{seam}")),
+                "{message}"
+            );
+        }
+    }
+
+    /// The arrival seam is checked against its own family, not against the
+    /// union of the five: a `tau_s` under `event_markov` is a knob that family
+    /// never reads, and admitting it is how an operator ends up believing they
+    /// set a time constant that does nothing.
+    #[test]
+    fn an_arrival_key_from_another_family_is_refused() {
+        let mut arrival = toml::Table::new();
+        arrival.insert("family".into(), toml::Value::String("event_markov".into()));
+        arrival.insert("quiet_share".into(), toml::Value::Float(0.5));
+        arrival.insert("switch_rate".into(), toml::Value::Float(0.1));
+        arrival.insert("rate_ratio".into(), toml::Value::Float(0.25));
+        let mut generator = toml::Table::new();
+        generator.insert("arrival".into(), toml::Value::Table(arrival.clone()));
+        refuse_unknown_generator_seam_keys(&generator)
+            .expect("a well-formed event_markov arrival is admitted");
+
+        arrival.insert("tau_s".into(), toml::Value::Float(60.0));
+        generator.insert("arrival".into(), toml::Value::Table(arrival));
+        let message = refuse_unknown_generator_seam_keys(&generator)
+            .expect_err("tau_s belongs to another family")
+            .to_string();
+        assert!(message.contains("tau_s"), "{message}");
+        assert!(
+            message.contains("instrument.generator.arrival"),
+            "{message}"
+        );
+    }
+
+    /// An unknown family is serde's refusal to make, not this guard's: the
+    /// enum is internally tagged, so an unrecognized tag fails to deserialize
+    /// with a message naming the families. The guard steps aside rather than
+    /// inventing a second, worse version of that error.
+    #[test]
+    fn an_unknown_arrival_family_is_left_to_serde() {
+        let mut arrival = toml::Table::new();
+        arrival.insert(
+            "family".into(),
+            toml::Value::String("no_such_family".into()),
+        );
+        arrival.insert("whatever".into(), toml::Value::Float(1.0));
+        let mut generator = toml::Table::new();
+        generator.insert("arrival".into(), toml::Value::Table(arrival));
+        refuse_unknown_generator_seam_keys(&generator)
+            .expect("the guard does not adjudicate an unknown family");
     }
 
     /// A typo inside `[instrument.generator]` used to be swallowed: the shared

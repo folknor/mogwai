@@ -628,6 +628,23 @@ impl GeneratedSource {
         self.arrival_override = quiet;
     }
 
+    /// The active-state mean gap this source was built with, in seconds.
+    ///
+    /// The one observable of the calibrated side of `ARRIVAL_MEAN_CAL`. The
+    /// composition happens inline in `new` and lands in a private field, and
+    /// the factor cancels in every ratio a test could form from generated
+    /// ticks, so without this reader the calibration gate can only assert that
+    /// the integrated frame stays bare - half a claim. With it, the corrected
+    /// half is exact: at `quiet_share` 0 the two states coincide and this must
+    /// equal the calibration times the bare mean, bit for bit.
+    /// Test-only: the generator itself reads the field directly, and a reader
+    /// compiled into the shipped binary for one gate's benefit would be a
+    /// public seam nobody asked for.
+    #[cfg(test)]
+    pub(super) fn active_mean_s(&self) -> f64 {
+        self.arrival.active_mean_s
+    }
+
     fn next_duration_ns(&mut self) -> u64 {
         if let Some(quiet) = self.arrival_override {
             self.arrival.quiet = quiet;

@@ -37,7 +37,7 @@
 //!
 //! Two deviations from the Python are deliberate, and both are documented at
 //! their sites: `sqrt` over `x ** 0.5` in the fingerprint synthesis, and
-//! [`select_windows::squared`] over `** 2`. Each replaces a libm-dependent
+//! `select_windows::squared` over `** 2`. Each replaces a libm-dependent
 //! CPython result - `pow` is not correctly rounded - with a correctly rounded
 //! one, on the ground that matching bug-for-bug would make output a function of
 //! whichever libm the machine carries.

@@ -979,7 +979,7 @@ fn holds_one_ledger(accounts: &[Arc<crate::run::Account>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mogwai_engine::{BreachAction, EngineConfig, MarginPolicy, MarketReading};
+    use mogwai_engine::{EngineConfig, MarginBreachAction, MarginPolicy, MarketReading};
     use mogwai_protocol::{
         AccountId, Command, Hit, InstrumentClass, InstrumentDef, OrderType, Side, SubmitOrder,
         TimeInForce, WireAssetClass,
@@ -1430,7 +1430,7 @@ mod tests {
             MarginPolicy {
                 initial_per_contract: Decimal::from(2_000),
                 maintenance_per_contract: Decimal::from(1_800),
-                breach_action: BreachAction::Refuse,
+                breach_action: MarginBreachAction::Refuse,
                 basis: Default::default(),
             },
         );

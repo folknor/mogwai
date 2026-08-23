@@ -2113,6 +2113,23 @@ impl Engine {
                 .is_some();
         let mut out = Vec::new();
         if duplicate {
+            // The duplicate is a byte-identical clone, `trade_id` included, and
+            // that is what a retransmitting venue sends. Verified 2026-08-23
+            // against nautilus 0.62, the version `mogwai-adapter` pins: a
+            // nautilus host never sees this arm. `ExecutionEngine`'s
+            // `validate_fill_for_order` calls `Order::is_duplicate_fill`, which
+            // matches on `trade_id`, `order_side`, `last_qty` and `last_px` at
+            // once - all four identical here - logs "Duplicate fill: ...
+            // skipping" and bails before the event reaches `Position::apply`,
+            // which would otherwise panic on a repeated trade id.
+            //
+            // So against nautilus the arm is inert, and green venue-side tests
+            // certify nothing about the consumer. Whether that is correct is an
+            // open product call, recorded in `notes/todo.md`: keeping the id
+            // makes this a test of the consumer's deduplication (which nautilus
+            // passes silently), while minting a fresh id per emitted fill makes
+            // it a phantom execution the consumer books twice. The two inject
+            // different lies; only the second one bites a correct consumer.
             out.push(VenueMessage::OrderFilled(fill.clone()));
         }
         out.push(VenueMessage::OrderFilled(fill));

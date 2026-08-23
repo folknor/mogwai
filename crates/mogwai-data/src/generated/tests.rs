@@ -18,8 +18,9 @@ use crate::{TickEvent, TickFault, TickSource};
 use super::arrival::cadence_base_mean_s;
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::{
-    ARRIVAL_MEAN_CAL, FEEDBACK_RETURN_CEILING, GARCH_ARCH, GARCH_GARCH, GARCH_SIGMA_CAP,
-    MAX_SESSION_GAP_NS, NS_PER_HOUR, REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
+    ARRIVAL_MEAN_CAL, ARRIVAL_QUIET_ACTIVE_RATIO, ARRIVAL_STATE_PERSISTENCE,
+    FEEDBACK_RETURN_CEILING, GARCH_ARCH, GARCH_GARCH, GARCH_SIGMA_CAP, MAX_SESSION_GAP_NS,
+    NS_PER_HOUR, REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
     TRADE_BOUNCE_HALF_WIDTH_TICKS, VOL_SCALAR,
 };
 use super::numeric::decimal_from_f64;
@@ -684,6 +685,28 @@ fn the_arrival_mean_calibration_stays_off_the_integrated_frame() {
         parts.base_mean_s.to_bits(),
         corrected.to_bits(),
         "the assembled cadence mean inherited the shipped path's calibration"
+    );
+
+    // The corrected half, which nothing reached until `active_mean_s` existed.
+    // With `quiet_share` at zero the two arrival states coincide and the
+    // composition in `GeneratedSource::new` reduces to the calibration times
+    // the declared mean exactly, so this is an identity rather than a
+    // tolerance: the calibration reaching the shipped sampler is asserted here
+    // as directly as its absence from the integrated frame is asserted above.
+    // A calibration silently dropped from the shipped path - the mirror image
+    // of the leak this gate was written for - now fails a bit comparison
+    // instead of passing unnoticed.
+    let mut shipped = scalars.clone();
+    shipped.arrival = Some(ArrivalConfig::EventMarkov {
+        quiet_share: 0.0,
+        switch_rate: 1.0 - ARRIVAL_STATE_PERSISTENCE,
+        rate_ratio: ARRIVAL_QUIET_ACTIVE_RATIO,
+    });
+    let source = GeneratedSource::new(shipped, 42, SESSION_START_TS, &fp, None);
+    assert_eq!(
+        source.active_mean_s().to_bits(),
+        corrected.to_bits(),
+        "the shipped sampler's active mean is the calibrated mean, bit for bit"
     );
 }
 

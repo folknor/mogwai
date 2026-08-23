@@ -9,7 +9,8 @@
 //! process-tree walk stays general rather than narrowing to "just read
 //! `/proc/self/status`" - a future caller may still spawn children.
 //!
-//! Any death of the sampling thread voids the cost attestation: [`stop`]
+//! Any death of the sampling thread voids the cost attestation:
+//! [`ResourceSampler::stop`]
 //! refuses rather than reporting a peak measured over a partial window.
 
 use std::path::PathBuf;

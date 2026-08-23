@@ -43,9 +43,9 @@ pub mod risk;
 pub use clock::{SimClock, VenueClock, now_unix_nanos, validate_sim_clock};
 pub use decimal::{decimal_from_f64, decimal_to_f64};
 pub use havoc::{
-    BASELINE_LATENCY, ConnHavoc, EventKind, HavocLatency, HavocSpec, InboundHavoc,
-    MAX_LATENCY_NANOS, MarketRegime, finite_in, finite_in_excl_lo, validate_conn_havoc,
-    validate_divergence, validate_inbound_havoc, validate_market_regime,
+    BASELINE_LATENCY, ConnHavoc, EventKind, HavocLatency, HavocSpec, InboundHavoc, MAX_HALT_SECS,
+    MAX_LATENCY_NANOS, MarketRegime, REFUSE_HALT_SECS, finite_in, finite_in_excl_lo,
+    validate_conn_havoc, validate_divergence, validate_inbound_havoc, validate_market_regime,
 };
 pub use instruments::{
     FundingTerms, InstrumentClass, InstrumentDef, OmsType, WireAssetClass, default_instruments,
@@ -60,8 +60,8 @@ pub use messages::{
     PostedMargin, QueryKind, QuoteTick, ScanKind, Side, SubmitOrder, TimeInForce, TradeTick,
     VenueMessage, WireOrderStatus, touches_toward, touches_trigger, trades_through,
     truncate_echoed_id, truncate_reason, validate_callsign, validate_client_order_id,
-    validate_modify_order, validate_request_id, validate_submit_group, validate_submit_order,
-    validate_wire_symbol,
+    validate_currency_code, validate_modify_order, validate_request_id, validate_submit_group,
+    validate_submit_order, validate_wire_symbol,
 };
 pub use ready::ReadyRecord;
 pub use seeds::RunSeeds;

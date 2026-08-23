@@ -87,6 +87,28 @@ profile = "release"
 only = ["read_market_latency"]
 curated = true
 
+# The only thing in this workspace that runs rustdoc. `[workspace.lints.rustdoc]`
+# in `Cargo.toml` denies broken intra-doc links and their kin, but clippy and the
+# test phases never invoke rustdoc, so without this entry those lints are
+# declared and never evaluated - the vacuous-gate shape, in a manifest.
+#
+# `pre-test` rather than `pre-clippy`: it builds, so it does not belong beside
+# the source-level convention phases that are meant to fail before anything
+# compiles. `--no-deps` documents this workspace's own crates only, which is what
+# the lints are about; the dependencies are already compiled by the time this
+# runs, so the marginal cost is rustdoc over seven crates.
+#
+# The sentinel is cargo's own "Generated <path>" line, which it prints on
+# success and not on a lint failure, and it goes to stderr like the rest of
+# cargo's progress output.
+[[script_check]]
+name = "rustdoc-links"
+command = "cargo doc --no-deps --workspace"
+expect = "Generated"
+match = "contains"
+stream = "both"
+stage = "pre-test"
+
 [test]
 gate_profile = "gate"
 # Without a default profile, a bare `brokkr check` runs every [[check]] entry -

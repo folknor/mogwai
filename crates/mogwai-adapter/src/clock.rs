@@ -25,6 +25,15 @@ use ustr::Ustr;
 
 use crate::client::join_url;
 
+/// Nanoseconds in one second.
+///
+/// Every timestamp this adapter handles is a `u64` of nanoseconds, so the
+/// conversion appears wherever a wall or simulated span meets a seconds-shaped
+/// value from a config knob or a nautilus API. Written once because the literal
+/// is nine zeroes: a typo is a factor of ten in a quota interval or a timeout,
+/// which is a wrong answer rather than a compile error.
+pub(crate) const NANOS_PER_SEC: u64 = 1_000_000_000;
+
 /// The nautilus `Clock` mogwai injects into a live node, reading and
 /// firing on the shared simulated axis (`reference/clock.md`).
 ///
@@ -81,7 +90,7 @@ impl Clock for MogwaiClock {
     }
 
     fn timestamp(&self) -> f64 {
-        self.timestamp_ns().as_f64() / 1_000_000_000.0
+        self.timestamp_ns().as_f64() / NANOS_PER_SEC as f64
     }
 
     fn timer_names(&self) -> Vec<&str> {

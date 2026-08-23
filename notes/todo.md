@@ -130,13 +130,6 @@ undone. Neither is urgent; both modes must eventually be supported.
   means asking the engine rather than re-deriving - `Engine::worst_case_leaves`
   is the precedent shape. Affects `Market` and `MarketToLimit`.
 
-- `try_reserve_boundary_frames` takes a `usize` and does `frames.max(1)`, which
-  makes an unreachable state harmless rather than unrepresentable. Every
-  `refuse_all` call site is guarded by a `submitted_orders(...).first()`, so the
-  zero-frame case cannot arrive. Taking a `NonZeroUsize` moves the guarantee from
-  the call sites to the signature; it is a change across the admission boundary
-  rather than a bug fix.
-
 - Engine-arm application order is unordered across concurrent control requests.
   `Run::arm` records under the passenger map lock but applies the engine half
   after both locks drop, because the engine sits behind an async mutex, so two
@@ -169,14 +162,6 @@ undone. Neither is urgent; both modes must eventually be supported.
 - `GoDark` swallows the startup mass-status query, so a client armed with it can
   never complete boot and never reaches command sequencing. Decide whether that
   is correct by design - it is a blackout - or an arm too broad to be useful.
-
-- A whitespace-padded currency code is accepted and matches no balance. `" USD "`
-  passes both `mogwai-protocol` validators - the risk-policy `validate()` and
-  `validate_divergence` agree on refusing blank via `trim()`, but neither
-  normalizes - so it is admitted as a lookup key that will match no balance and
-  freeze a policed account's equity at zero. The rule wanted, on both validators
-  at once: refuse any code differing from its trimmed form. Two passes of the
-  2026-08 arc declined to smuggle it in under adjacent findings.
 
 - Refusal texts spell their bounds out instead of naming the constant.
   `messages::validate_wire_symbol` refuses with "symbols are 1 to 32 characters"
@@ -270,9 +255,6 @@ undone. Neither is urgent; both modes must eventually be supported.
 - The late-boarder rule is open-coded twice with nothing shared: the fee
   surcharge window in `mogwai-engine` and the FlowSurge branch of
   `arm_divergence` in `mogwai-venue`.
-
-- Two project-owned `BreachAction` types share one name with disjoint variants,
-  and only one is defined anywhere. A wrong import compiles.
 
 - A linkage release emits no wire frame, so a consumer watching bracket exit legs
   waits forever. Stated only in doc comments; it is either a protocol gap to
@@ -440,35 +422,28 @@ undone. Neither is urgent; both modes must eventually be supported.
   must be refitted. Real monthly series carry positive return variance and come
   nowhere near the degenerate case.
 
-- The `ARRIVAL_MEAN_CAL` gate covers the bare side only: no cheap observable
-  reaches the corrected side, because the composition is inline in
-  `GeneratedSource::new` and lands in a private field, and the factor cancels in
-  every ratio probe. A `pub(super)` accessor returning the composed active mean
-  would close the second half in one line - for `quiet_share` 0 it must equal the
-  calibration times the bare mean, bit for bit.
-
-- The sub-table typo guard covers `[instrument.generator]` and
-  `[instrument.session]` one level deep only; the nested seams inside `generator`
-  (`quoted_width`, `top_sizes`, `trade_displacement_ticks`, `arrival`) stay
-  permissive, and the guard's doc says so.
-
-- Two public `SessionSegment` types in `mogwai-lab` (`summary` and `session`)
-  share field names, so a wrong import compiles. Renaming the narrow one keeps
-  the recorded reasoning and removes the trap.
-
 ## Adapter
 
-- **Unverified: `DuplicateNextFill` may certify nothing.** Nautilus's
-  `Position::apply_fill` suppresses duplicate fills keyed on `trade_id` plus
-  `causation_id`. If mogwai's duplicate-fill arm repeats the `trade_id`, nautilus
-  drops the second fill with a warning, and the arm looks green on the venue side
-  while the consumer never sees the divergence it exists to inject. That is the
-  vacuous-gate family exactly. Recorded 2026-08-23 from `notes/testnet.md` before
-  that document's other findings were reviewed; it was established against
-  nautilus HEAD at 409214a while `mogwai-adapter` pins 0.61, so it needs checking
-  at the pin before anything is changed. Read `research/nautilus_trader` for the
-  source; the fix, if it is one, is minting a distinct `trade_id` per emitted
-  fill.
+- **Confirmed, and now an owner call: `DuplicateNextFill` certifies nothing
+  against a nautilus host.** Verified 2026-08-23 against the pinned version -
+  `mogwai-adapter` pins nautilus 0.62.0 (the earlier note said 0.61) and
+  `research/nautilus_trader` is at 0.62.0, so the read is at the pin rather than
+  at HEAD. `commit_fill` emits `fill.clone()`, `trade_id` included.
+  `ExecutionEngine::validate_fill_for_order` calls `Order::is_duplicate_fill`,
+  which matches `trade_id`, `order_side`, `last_qty` and `last_px` together -
+  all four identical - and bails with a warning before `Position::apply`, whose
+  own `check_predicate_true` on a repeated trade id would panic. The suppression
+  is not keyed on `causation_id`, as the original note had it.
+
+  What is left is not a bug report but a choice, and the two options inject
+  different lies. Keeping the shared id models a retransmitting venue and makes
+  the arm a test of the consumer's deduplication, which nautilus passes in
+  silence and which nothing observes. Minting a fresh `trade_id` per emitted
+  fill models a phantom execution, which a correct consumer books twice - the
+  divergence the arm's own doc comments describe ("doubles the wire event, not
+  the truth"). Minting also shifts every subsequent venue trade id, so it owes a
+  re-bless of the exact-equality transcripts. The verdict and both readings are
+  recorded at the emission site in `mogwai-engine`'s `commit_fill`.
 
 - `MogwaiDataClient::sink` is an `Option` filled in `start()`, and several
   delivery sites are `if let Ok(sink) = self.sink()`, so a data client connected
@@ -672,10 +647,6 @@ undone. Neither is urgent; both modes must eventually be supported.
   have to justify its false-positive rate against a repository full of legitimate
   loose bounds.
 
-- `rustdoc::broken_intra_doc_links` is nowhere enabled, so the next dangling doc
-  reference goes undetected. The wrong-item doc-comment class is likewise
-  detected by nothing.
-
 - The no-shouting textlint is blind to several classes, so shouted words survive
   in three places at once. Check the lint's coverage before sweeping by hand,
   because a hand sweep will miss whatever the lint misses next time.
@@ -800,9 +771,6 @@ undone. Neither is urgent; both modes must eventually be supported.
 
 ## Values that want to become named constants or knobs
 
-- `ReopenGap`'s `halt_secs > 86_400` bound is inline in `validate_*`, the one
-  temporal bound in `mogwai-protocol` with no named const behind it, unlike its
-  sibling `MAX_DIVERGENCE_MS`.
 - `mogwai-protocol`'s `default_instruments()` BTCUSDT seed is seven inline
   literals, duplicated verbatim in two of that crate's own tests, and the smoke
   test's fixed order shape depends on it implicitly. Its own doc comment
@@ -810,14 +778,6 @@ undone. Neither is urgent; both modes must eventually be supported.
 - `mogwai-venue`'s HTTP route strings are inline literals with no shared registry
   against the adapter's route segments, so a renamed route breaks the pair
   silently.
-- `mogwai-venue`'s test-side `HORIZON_S 86_400.0` stands in for the production
-  `warmup_ns` default as a plain literal and can drift from it silently.
-- `mogwai-venue`'s channel capacity `1024` is duplicated inline for the writer
-  channel and the exec-delay pump - different traffic classes, so either they
-  share a const or they get two named ones.
-- `mogwai-adapter`: `1_000_000_000` appears inline five or more times across
-  `client.rs` and `lifecycle.rs` where a `NANOS_PER_SEC` const belongs.
-- `mogwai-data`'s `1e9` mid-price runaway ceiling is duplicated at two sites.
 - `arrival_screen`'s `DEFAULT_MAX_JOBS` carries no comment naming the measurement
   behind it, and `arrival_envelope_diagnostic` applies no 16-job cap at all while
   `arrival_screen` caps its default at 16 for a measured SMT regression. Whether

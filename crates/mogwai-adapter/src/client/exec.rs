@@ -1692,7 +1692,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             UnixNanos::from(
                 ts_init
                     .as_u64()
-                    .saturating_sub(mins.saturating_mul(60 * 1_000_000_000)),
+                    .saturating_sub(mins.saturating_mul(60 * crate::clock::NANOS_PER_SEC)),
             )
         });
         let order_reports = self

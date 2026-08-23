@@ -239,6 +239,15 @@ impl AccountPolicy {
                     .to_owned(),
             );
         }
+        // Naming one is not the same as naming a usable one. A padded code is
+        // the same defect as a blank one wearing a plausible value: it is a
+        // lookup key against balance currencies, `" USD "` equals no balance
+        // funded as `USD`, and the account is then policed on an equity that
+        // is permanently zero. Refused here, at registration, rather than
+        // discovered from a liquidation that had no cause.
+        if let Some(currency) = &self.currency {
+            crate::validate_currency_code(currency)?;
+        }
         Ok(())
     }
 }
@@ -649,6 +658,20 @@ mod tests {
                 policy.validate(),
                 Err(expected.to_owned()),
                 "a currency of {blank:?} names nothing"
+            );
+        }
+
+        // A padded code is the subtler half, and the one that reaches a live
+        // run: it is non-blank, so the rule above admits it, and it matches no
+        // balance, so the account is policed on an equity frozen at zero.
+        for padded in [" USD", "USD ", " USD "] {
+            let policy = AccountPolicy {
+                currency: Some(padded.to_owned()),
+                ..policed_no_currency.clone()
+            };
+            assert!(
+                policy.validate().is_err(),
+                "a currency of {padded:?} matches no balance and must be refused"
             );
         }
 

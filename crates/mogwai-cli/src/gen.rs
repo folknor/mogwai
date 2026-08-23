@@ -763,7 +763,7 @@ mod tests {
     // The rest of the moved summary surface is exercised by these tests
     // alone; the shipping paths need only `summarize`/`SummaryAcc`.
     use mogwai_lab::summary::{
-        DISPLACEMENT_BIN_TICKS, SUMMARY_VOL_HORIZONS_S, SessionSegment, TOP_MINUTE_RECORDS,
+        DISPLACEMENT_BIN_TICKS, SUMMARY_VOL_HORIZONS_S, SessionBounds, TOP_MINUTE_RECORDS,
         rank_top_minutes, session_segment_at,
     };
 
@@ -2169,7 +2169,7 @@ mod tests {
         // hour-crossing windows excluded, the final segment settled to
         // min(segment end, window end) inclusively.
         let quotes: Vec<(u64, f64)> = chunks.iter().map(|c| (c.ts, c.mid)).collect();
-        let mut segments: Vec<SessionSegment> = Vec::new();
+        let mut segments: Vec<SessionBounds> = Vec::new();
         for (ts, _) in &quotes {
             if let Some(seg) = session_segment_at(*ts, offset)
                 && segments.last() != Some(&seg)

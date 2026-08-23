@@ -35,12 +35,12 @@
 //! **Captured stderr must be drained continuously.** A pipe holds roughly 64 KiB
 //! and a full pipe blocks the writer, so a capture nobody reads wedges the venue
 //! mid-run - which at the socket is indistinguishable from a hung venue. Every
-//! [`StderrSink`] that captures also drains, from the moment of spawn. There is
+//! [`crate::launch::StderrSink`] that captures also drains, from the moment of spawn. There is
 //! no way to ask this module for an undrained pipe.
 //!
 //! **The ready read is unbounded unless the launcher bounds it.** It blocks for
 //! as long as warmup generation takes, which is proportional to the venue's
-//! `warmup_ns` and its tape cadence. [`LaunchSpec::ready_timeout`] bounds it so a
+//! `warmup_ns` and its tape cadence. [`field@crate::launch::LaunchSpec::ready_timeout`] bounds it so a
 //! venue that will never answer fails as a named timeout instead of hanging the
 //! caller forever.
 //!
@@ -68,7 +68,7 @@ use std::{
 
 use crate::ReadyRecord;
 
-/// Binary name assumed when [`LaunchSpec::binary`] is left unset.
+/// Binary name assumed when [`field@LaunchSpec::binary`] is left unset.
 pub const DEFAULT_BINARY: &str = "mogwai";
 
 /// Default bound on the readiness read.
@@ -212,7 +212,7 @@ pub enum LaunchError {
     /// stderr says why; retained lines are attached when this module captured
     /// them.
     NoRecord { stderr: Vec<String> },
-    /// No line arrived inside [`LaunchSpec::ready_timeout`].
+    /// No line arrived inside [`field@LaunchSpec::ready_timeout`].
     Timeout {
         waited: Duration,
         stderr: Vec<String>,
@@ -344,7 +344,7 @@ pub struct VenueExit {
 /// kills and reaps the child in between - so the calling thread is held for as
 /// long as the kernel takes to deliver `SIGKILL` and produce a zombie, measured
 /// at roughly 300 microseconds against a healthy venue. It is not bounded by
-/// [`OWNER_POLL`]: the shutdown channel disconnects when this value's sender
+/// the poll interval `OWNER_POLL`: the shutdown channel disconnects when this value's sender
 /// drops, and `recv_timeout` returns on that at once. The poll interval bounds
 /// only how late the owner notices a venue that ended on its own, which is a
 /// different clock and is not on any teardown path. That distinction is pinned
