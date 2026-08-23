@@ -16,57 +16,19 @@ them, it has failed.
 
 ## The arc, and the end goal
 
-One continuous piece of work, not a set of projects: make mogwai generate a
-realistic tape for whatever instrument gets traded next, and serve it over the
-live path so a strategy can be forward-tested against it.
+`reference/north-star.md`. Read it first; it is the durable statement of the
+end state - the ecosystem, mogwai's role, the tapes across session classes,
+the preset philosophy, the settled premises - and everything in this folder
+is a phase of it. One sentence of it repeated here because the tracks below
+make no sense without it: one continuous piece of work, not a set of
+projects - make mogwai generate a realistic tape for whatever instrument
+gets traded next, and serve it over the live path so a strategy can be
+forward-tested against it.
 
-**The end state**, stated here because `reference/` documents what is while this
-is what is intended: on the order of 200 agents running concurrently, each
-developing a strategy through broadarrow - backtest, optimize, Monte Carlo -
-and then forward-testing it against mogwai, accelerated, fire-and-forget,
-one venue instance per run, reproducible by seed. Resource cost is
-explicitly not a design input. The settled premises behind that (always
-accelerated, no restart or resume, single-instrument strategies, one MOGWAI
-venue) are recorded in `todo.md`'s problem-statements block. The full
-ecosystem those agents run in - who deals the strategies, where edge is
-established, what a mogwai forward run does and does not validate - is
-`todo.md`'s grand-design section (recorded 2026-08-15). The consequence
-that lands here, on the tape work: the tapes must span session classes
-(24/7 crypto, CME futures with closure, cash-equity hours, on the order of
-five presets), because a session-bound strategy forward-tested against the
-wrong session class tests a different claim. The segment-sampler track is
-what buys that; `dbnget` is the data spigot for each class's corpus.
-
-**Why the tapes**: a backtest optimizes against the one path that actually
-happened, so its edge is always suspect of being memorized. A fitted
-generative tape supplies unlimited counterfactual months drawn from the same
-measured process - a distribution of realistic worlds, a fresh path per
-seed, each reproducible and bindable to a claim. Every un-fitted quantity is
-a direction in which the sampled worlds silently stop resembling the real
-one, which is why realism is a measured property and why a preset states its
-provenance. It is not why a symbol gets served: the venue serves any symbol,
-using a preset where one exists and the default tape where none does. The
-line that used to sit here said fake tapes get cut rather than kept, citing
-the retired ETH and SOL presets - that was an invention, and the retirement it
-leaned on was a measurement-scope ruling about the oracle's rows. See
-`AGENTS.md`.
-
-**Why the preset knobs**: the generator's end state is pure instrument-agnostic
-method, with every instrument-specific fact living in a preset as a named,
-provenance-carrying value. Three jobs, per the settled parameterization
-ruling (recorded in `todo.md`): complete parameterization - everything is
-per-instrument in principle, so onboarding instrument N is the intake
-sequence terminating in a TOML file, zero method edits; landing sites -
-each knob is where a measurement lands, and evidence is only bought when a
-knob exists to receive it; auditable honesty - every knob carries
-fitted/derived/declared provenance, so a preset is a claim ledger stating
-which parts of its tape rest on measurement and which on assertion.
-
-Everything below is a phase of that. The current instrument set - MNQ, MES,
-BTCUSDT - is where the work has reached, not where it stops.
-That premise is load-bearing and is stated durably in `AGENTS.md` and
-`reference/architecture.md`; several assessments have been made wrong by
-assuming the corpus is closed.
+The current instrument set - MNQ, MES, BTCUSDT - is where the work has
+reached, not where it stops. That premise is load-bearing and stated durably
+in `AGENTS.md` and `reference/architecture.md`; several assessments have
+been made wrong by assuming the corpus is closed.
 
 ## Where the work stands, 2026-08-09
 
@@ -122,7 +84,8 @@ investigations, the hardcoded-value inventory.
 - **The eleven `bugs-*.md` reports** - closed 2026-08-20 and deleted
   2026-08-20 after a document-by-document accounting: every refusal and
   correction worth keeping now lives as a comment at its site or in
-  `reference/`, the standing lessons are in `AGENTS.md`, the still-open
+  `reference/`, the standing lessons are in `reference/test-doctrine.md`
+  (short form in `AGENTS.md`), the still-open
   residuals (lead 10's sigterm flake, the deliver fallthrough, the
   `reject_while_closed` band gap, the `MarketToLimit` release owner call, the
   two carried fixture items, the whitespace currency) are in `todo.md`, and

@@ -3,113 +3,67 @@
 ## Project
 
 mogwai is a fake broker/exchange that plugs into a nautilus trading system to
-exercise the *live* trading path. It synthesizes market data from a committed fingerprint
-fitted offline to Kraken trade history (the running venue opens no CSV) and
-injects the messy, realistic execution divergences (partial fills, rejects,
-delays,
-duplicate fills, dropped account updates, venue blackouts) that an in-process
-backtest sandbox structurally cannot produce. The broker core never imports
-nautilus; the `mogwai-adapter` crate is the lone, deliberate exception - it
-depends on the published nautilus crates to ship the
-`ExecutionClient`/`DataClient` pair a host constructs to drive the `MOGWAI`
-venue over this workspace's native JSON-over-WS protocol.
+exercise the *live* trading path. It synthesizes market data from a committed
+fingerprint fitted offline to real trade history (the running venue opens no
+CSV) and injects the messy, realistic execution divergences (partial fills,
+rejects, delays, duplicate fills, dropped account updates, venue blackouts)
+that an in-process backtest sandbox structurally cannot produce. The broker
+core never imports nautilus; the `mogwai-adapter` crate is the lone,
+deliberate exception - it depends on the published nautilus crates to ship
+the `ExecutionClient`/`DataClient` pair a host constructs to drive the
+`MOGWAI` venue over this workspace's native JSON-over-WS protocol.
 
-The instrument set is open, and the venue never gates on it. A symbol
-arrives and is served: if a tuned preset exists for that symbol, the preset
-drives the river; if none exists, the default shape is served under that symbol.
-Nothing refuses a symbol for wanting a fit, and no intake work is a
-precondition of serving one. The three shipped presets - MNQ, MES and
-BTCUSDT - are the current state, not the end state.
-
-The intake sequence - corpus, measurement, fit, preset - is therefore how a
-symbol's river gets better, never a gate on whether it can be served at all.
-Do not read it as an admission rule: earlier prose here and in `docs/presets.md`
-claimed that every instrument owes a corpus, a measurement and a fit before the
-venue serves it, and that claim was invented. It was back-derived from a
-2026-08-09 owner ruling that retired the ETHUSDT and SOLUSDT presets, which was
-a narrow measurement-scope amendment - those presets added identity-only rows to
-the measurement oracle while contributing no distinct dynamics, so the oracle
-lost nothing by dropping them. The record is that ruling in
-`notes/protocol-12b-arrival-composition-spec.md`, and it ruled on what the
-oracle measures, not on what the venue may serve.
-
-The offline toolbox (`mogwai-lab` and what survives in `analysis/`) is
-reusable intake machinery, not one instrument's history: treat a component as
-spent only when its question cannot recur, and keep per-instrument knowledge
-in config or a preset rather than hardcoded in the method. MES remains a
-stated stopgap borrowing the MNQ fit. See the architecture note on the intake
-sequence for what this binds.
+The instrument set is open and the venue gates on nothing: a symbol arrives
+and is served, with the preset's shape when the name matches one and the
+default shape under the requested label when none does. The intake sequence -
+corpus, measurement, fit, preset - makes a river better, never decides
+whether it is served. The three shipped presets - MNQ, MES and BTCUSDT, with
+MES a stated stopgap borrowing the MNQ fit - are the current state, not the
+end state; several assessments have been made wrong by assuming the corpus is
+closed. The offline toolbox (`mogwai-lab` and what survives in `analysis/`)
+is reusable intake machinery, not one instrument's history: treat a component
+as spent only when its question cannot recur, and keep per-instrument
+knowledge in config or a preset rather than hardcoded in the method.
 
 ## Workspace
 
-A Cargo workspace, seven crates under `crates/`:
+A Cargo workspace, seven crates under `crates/`. `reference/architecture.md`
+is the full map; what follows is each crate's identity and the one fact that
+binds work on it.
 
-- `mogwai-protocol` - the wire types (`Command`, `VenueMessage`) plus
-  `control::Divergence`. The single source of truth both ends serialize against;
-  it never imports nautilus. Also carries `launch`, the shipped launcher: it
-  lives here rather than in `mogwai-adapter` because this workspace's own test
-  binaries drive the venue through it and cannot depend on the adapter, so a
-  launcher shipped from there would leave the contract hand-rolled on both sides.
-  `mogwai-adapter` re-exports it for consumers that already depend on it.
-- `mogwai-engine` - the venue-agnostic exchange core, with the seam that injects
-  armed divergences into the event stream.
-- `mogwai-data` - the `TickSource` seam and the k-way `MergeSource`. Carries the
-  `GeneratedSource` synthetic generator the running venue uses (fitted to the
-  committed fingerprint) plus the `KrakenCsvSource` streaming loader kept as the
-  offline-analysis lineage.
-- `mogwai-venue` - the axum library that owns the sockets, the clock and replay
-  pacing, synthesizing market data per subscription; exposes `/health`, `/ws`,
-  `/control/divergence`, `/instruments`, `/trades`, `/quotes`, `/account` and
-  `/clock`. Order entry is websocket-only - the `POST /orders` carrier went with
-  the HTTP transport profiles. `serve` runs
-  one venue in the foreground for one run and owns no PID, log or config files:
-  it reports its bound address as a single JSON readiness line on stdout,
-  and `PR_SET_PDEATHSIG` makes the kernel kill it when its launcher dies. There
-  is no daemon mode and no `stop` subcommand - lifecycle is the launcher's job.
-  See `docs/cli.md`. It ships no binary: `serve`, `config` and `source` are its
-  public surface and `mogwai-cli` calls them.
-- `mogwai-cli` - the `mogwai` binary. A clap dispatcher plus the offline
-  subcommands that never bind a socket: `gen` (the river generator and its
-  measurement consumers, including `measure12a`), `tick-composition`,
-  `segments` - a subcommand tree of its own, `cut` turning a delivered TBBO
-  month into a returns-space segment library and `compose` realizing that
-  library as an endless river dumped as trades or bars in CSV - `presets` and
-  `man`.
-  `serve` does no work here - it hands its three arguments to
-  `mogwai_venue::serve`. The bin target name is `mogwai`, not the package name,
+- `mogwai-protocol` - the wire types both ends serialize against; never
+  imports nautilus. Also ships `launch`, the venue launcher, kept here because
+  this workspace's own test binaries drive the venue through it and cannot
+  depend on the adapter; `mogwai-adapter` re-exports it.
+- `mogwai-engine` - the venue-agnostic exchange core, with the seam that
+  injects armed divergences into the event stream.
+- `mogwai-data` - the `TickSource` seam and the `GeneratedSource` synthetic
+  generator the running venue uses, fitted to the committed fingerprint.
+- `mogwai-venue` - the axum library that owns the sockets, the clocks and the
+  pacing. It ships no binary and has no daemon mode: `serve` runs one
+  foreground venue, reports its bound address as one JSON readiness line on
+  stdout, and `PR_SET_PDEATHSIG` kills it with its launcher. Order entry is
+  websocket-only. See `docs/cli.md`.
+- `mogwai-cli` - the `mogwai` binary: a clap dispatcher over `serve` and the
+  offline subcommands. The bin target name is `mogwai`, not the package name,
   and that is load-bearing: `brokkr run mogwai` and the shipped launcher both
-  exec `target/release/mogwai` by that name. The Python measurement harness
-  did too, until phase 4b retired it; renaming the target no longer breaks it,
-  because it is gone, but the launcher and every doc still key on the name. The
-  socket-backed lifecycle/serving/completion integration tests live here too,
-  because only this crate's tests get `CARGO_BIN_EXE_mogwai`.
-- `mogwai-lab` - the corpus-to-fingerprint method library the 2026-08
-  Python-to-Rust rewrite absorbed from `analysis/` (the rewrite's phase
-  records are retired to git history):
-  TBBO/Binance-trades corpus parsing, the protocol-12a measurement engine,
-  fingerprint/cadence synthesis and the protocol-11 fit. Depends on
-  `mogwai-data`, `mogwai-protocol` and `mogwai-venue` (session-summary work
-  resolves an `InstrumentProfile` through `Config::load`); `mogwai-venue`
-  depends on none of it, so there is no cycle. `mogwai-cli` calls it for
-  `preflight`, `measure`, `fit`, `cache` and `synth`. It also carries
-  `sidecar`, the observation-only benchmarking channels (stderr `key=value`
-  scalars and the marker/counter FIFO) the benched commands report through;
-  see `reference/performance.md`.
-- `mogwai-adapter` - the nautilus venue adapter: the `MogwaiDataClientFactory` /
-  `MogwaiExecutionClientFactory`, their configs, and the client pair a host
-  registers for the `MOGWAI` venue. The only crate that depends on nautilus -
-  the published crates.io crates pinned in its `Cargo.toml`, default-features
-  off, no pyo3; the other six build nautilus-free.
+  exec `target/release/mogwai` by that name. The socket-backed
+  lifecycle/serving/completion integration tests live here, because only this
+  crate's tests get `CARGO_BIN_EXE_mogwai`.
+- `mogwai-lab` - the corpus-to-fingerprint method library (corpus parsing,
+  the 12a measurement engine, fingerprint synthesis, the fit) plus `sidecar`,
+  the observation-only benchmarking channels. It depends on `mogwai-data`,
+  `mogwai-protocol` and `mogwai-venue`; nothing depends on it back, so there
+  is no cycle.
+- `mogwai-adapter` - the nautilus venue adapter and the only crate that
+  touches nautilus: published crates.io releases pinned in its `Cargo.toml`,
+  default-features off, no pyo3. The other six build nautilus-free.
 
-`scripts/` holds the end-to-end smoke test and the harness-bug flush the
-orchestration loop uses (codex is now driven by the `review` tool, configured
-from `.review.toml`, not by wrapper scripts);
-`analysis/` is the offline Python that fits the fingerprint; `notes/` holds the
-transient work items and plans. The durable documentation is split by subject:
-`docs/` is how the venue is used (`cli`, `config`, `havoc`, `presets`,
-`oms-types`) and `reference/` is how it is built and why (`architecture`,
-`clock`, `glossary`, `performance`, `technical-implementation-spec`). See the
-Document folders section below for what each folder may and may not contain.
+`scripts/` holds the end-to-end smoke test and the harness-bug flush;
+`analysis/` is the offline Python that fits the fingerprint; `notes/` holds
+the transient work items. Durable documentation splits by subject: `docs/` is
+how the venue is used, `reference/` how it is built and why. See the Document
+folders section below for what each folder may and may not contain.
 
 ## Rules
 
@@ -152,327 +106,85 @@ Every other phrasing is read as a historical record of a past landing and is
 left alone, which is what keeps a frozen spec's "stays 11" from being rewritten
 out from under the contract it froze.
 
-There is one recorded exemption, granted 2026-08-08 and deliberately narrow.
-The correction of `analysis/fingerprint.json` at
-`empirical_ranges.modal_tick.max` from 0.25 to 0.1 landed without a bump.
-Grounds: exactly one JSON leaf changed, an exhaustive reader audit found its
-sole consumer to be `Scalars::empirical_diagnostics`, which emits advisory
-diagnostics and never reaches the generator, and fresh Python and Rust
-synthesis agree on every other leaf. Version 12 was at that time reserved for
-the protocol-12b mechanism change, so bumping here would have spent a tape
-identity on a change that provably moves no generated byte. Since then 12 went
-to the arrival-frame calibration repair and 13 to the fill-band decimal
-normalization and 14 to the calendar-aware `ReopenGap` crossing repair, so the
-mechanism landing took 15 and later tape changes carried it further, so
-`TAPE_PROTOCOL_VERSION` next takes 25; the reservation moves,
-the exemption's grounds do not. This exemption does not generalize to any
-other fingerprint leaf:
-the rule stays unconditional, and the next leaf needs its own audit and its
-own ruling. If a non-tape artifact revision ever needs an identity of its own,
-give it a content hash or a method version rather than overloading this
-constant.
+There is one recorded exemption, granted 2026-08-08 and deliberately narrow: a
+one-leaf correction of `analysis/fingerprint.json`
+(`empirical_ranges.modal_tick.max`, 0.25 to 0.1) landed without a bump, after
+an exhaustive reader audit proved its sole consumer advisory and never on the
+generator's path. It does not generalize to any other leaf: the rule stays
+unconditional, and the next leaf needs its own audit and its own ruling.
+`TAPE_PROTOCOL_VERSION` next takes 25. If a non-tape artifact revision ever
+needs an identity of its own, give it a content hash or a method version
+rather than overloading this constant.
 
-### The bit-exactness era is closed (owner ruling, 2026-08-09)
+### The correctness contract (owner ruling, 2026-08-09)
 
-The Python-to-Rust rewrite's parity contract and its pinned CPython
-conventions existed to prove the port against the Python oracle. That program
-completed and the Python retired, so they are history, not a standing
-constraint on new or optimized code:
+The bit-exactness era is closed: the pinned CPython conventions in the tree
+(`py_sum`/`py_fsum`, the ported Mersenne Twister and kin) are the record of
+how the Python-to-Rust port was proven, and bind nothing. The standing rules:
 
-- Bit-exactness toward the Python-era committed artifacts is no longer an
-  obligation. Floats may drift. A change that moves bits in a committed
-  artifact is closed by re-blessing the artifact, never by preserving CPython
-  arithmetic. The pinned conventions (compensated `py_sum`/`py_fsum`, exact
-  integer variance, insertion-ordered accumulation, the ported Mersenne
-  Twister, the CPython float repr) remain in the tree as the record of how
-  parity was proven; none of them binds future work, and replacing one for
-  performance needs no ruling beyond the re-bless it forces.
-- What replaces bit-exactness is a two-part contract. Determinism per binary:
-  the same seed, config and binary produce the same tape and the same
-  measurement, always. Statistical gates stay green: the realism gates, fit
-  tolerances and representability verdicts are the correctness story, and a
-  change that moves generated behavior re-runs them rather than being
-  forbidden. Cross-version, cross-toolchain and cross-platform bit
-  reproducibility is explicitly not promised.
-- Exact-equality gates (goldens, transcripts, `cmp`-based identity checks)
-  remain useful as free refactoring checks: a change that claims to move
-  nothing can prove it cheaply. Where a change legitimately moves output, the
-  gate is re-blessed knowingly in the same change, never widened into a
-  tolerance to keep an old blessing alive.
-- `TAPE_PROTOCOL_VERSION` bumps are free: no consumer has ever depended on a
-  tape identity, so the unconditional bump rule above stays (it costs one
-  integer edit) and forecloses nothing.
-- Runtime cost is a first-class concern. A multi-hour computation is
-  presumptively a defect to optimize before it is run, not a budget to
-  provision for. Performance work may change generated bytes freely under the
-  contract above; in particular, algebraic float operations (stable from Rust
-  1.98) and `target-cpu` SIMD are sanctioned wherever a serial recursion does
-  not forbid reordering, with the re-bless and gate re-runs they imply.
+- Determinism per binary: the same seed, config and binary produce the same
+  tape and the same measurement, always. Cross-version, cross-toolchain and
+  cross-platform bit reproducibility is explicitly not promised.
+- Statistical gates are the correctness story: a change that moves generated
+  behavior re-runs the realism gates and fit tolerances rather than being
+  forbidden. Floats may drift; a change that moves bits in a committed
+  artifact is closed by re-blessing the artifact.
+- Exact-equality gates (goldens, transcripts) are free refactoring checks. A
+  change that legitimately moves output re-blesses them knowingly in the same
+  change, never widens them into a tolerance to keep an old blessing alive.
+- `TAPE_PROTOCOL_VERSION` bumps are free - no consumer has ever depended on a
+  tape identity - so the unconditional bump rule above forecloses nothing.
+- Runtime cost is first-class: a multi-hour computation is presumptively a
+  defect to optimize before it is run. Algebraic float operations and
+  `target-cpu` SIMD are sanctioned wherever a serial recursion does not
+  forbid reordering, with the re-bless and gate re-runs they imply.
 
 ### Standing lessons from the 2026-08 bug-hunt arcs
 
-Two arcs, both closed with zero open findings: a seven-document loop, then an
-eleven-document arc over `notes/bugs-*.md` - five test-suite reports, then six
-production-code ones - closed 2026-08-20. What recurred enough to bind future
-work is kept here; each arc's round-by-round carry-forward was deleted once its
-distillation landed. A live arc keeps a live carry-forward - the orchestration
-loop needs
-somewhere to put state no agent in it can see, since no agent observes any round
-but its own - so `notes/bug-loop-carry-forward.md` existing is the normal state
-during an arc, and it is deleted when that arc closes and whatever still binds
-has been folded in here. Three defect families account for most of the serious
-finds:
+The full distillation is `reference/test-doctrine.md` - the defect families
+with their sub-shapes, the bite-check hazards, the lane and fixture
+disciplines, the diagnostic rules, and the process facts about what a green
+anything is worth. It is binding: read it before laying, bite-checking or
+judging any test, and before closing any finding. What must never be skipped
+in any session:
 
-- The frontier family, six instances. A watermark, cursor or frontier may
-  only advance over work whose success the same expression checked. A lookup
-  that legitimately returns nothing is exactly as dangerous as a panic, and
-  the inverse failure - a fence with no recovery that wedges the watermark
-  forever - is the same family. Treat any watermark assignment not guarded by
-  the success of the work it covers as a defect on sight. The adapter's
-  history pagination states the cursor form of the rule: a timestamp-only
-  cursor may advance onto an instant only once every row at that instant has
-  been seen; `ExecState::admit_account_snapshot` states the whole-work form,
-  where a snapshot that lost rows to a `filter_map` may not retire the
-  well-formed ones. The rule generalizes past cursors to writes: the adapter's
-  receipt book files a command before queueing its frame and retires it only in
-  the expression that saw `writer.send` return `Ok`, so what survives an abort
-  is exactly what the venue never saw.
-- The guard-scope family, three instances. A permit, lock or guard whose
-  scope ends before the work it protects is the frontier defect in reverse,
-  and it is visible by asking what is still resident when the guard drops. A
-  guard is not scoped to the work by being alive while the work runs - it
-  must be owned by the task doing the work, because the awaiting future can
-  be dropped first (hyper drops handler futures on client disconnect; a
-  running blocking task cannot be cancelled).
-- The vacuous-gate family, roughly forty-four instances across eleven
-  documents and by far the largest: a thing that reads as gated and is not.
-  Every instance is cheap to find once the shape is named, and invisible
-  otherwise, because both halves are green. The sub-shapes, which are the
-  reusable part:
-  - a guard that reports success on the branch it was built to catch (a drain
-    stopped before another task could record the close it was watching for);
-  - `all()` / `any()` over a collection whose emptiness is the failure mode -
-    `all` over an empty iterator is `true`, so the helper returned success
-    carrying nothing on exactly the race its doc described;
-  - a control that is itself vacuous: a scanner blind to half the syntax it
-    exists to scan (`#[test]` is not a substring of `#[tokio::test]`, so a
-    source gate read no async test in the workspace and reported zero
-    offenders), or a skip/only agreement checked by comparing two strings
-    rather than resolving both against the tests;
-  - a normalization applied to both sides of an equality that exists to detect
-    that very difference;
-  - a two-sided contract pinned on one side only - the eviction close's test
-    hand-built the prefixed reason while the venue's own bytes were never held
-    against the classifier that reads them;
-  - a doc, comment or help text describing a gate wider or narrower than the
-    gate - a comment promising a test runs a derivation it does not run, a
-    constructor's doc asserting an invariant the constructor does not enforce,
-    a helper whose comment states a set wider than its call sites (a runtime
-    guard installed at two of the six sites that owed it, under a comment
-    saying two);
-  - and a fix that trades one blind spot for another.
-  When a comment says a function guarantees something, either the function
-  guarantees it or the comment is a defect; there is no third reading, and the
-  cheap fix is almost always to move the guarantee into the function.
-  Prose is the only artifact here with no compiler.
-
-Test and process rules the arcs paid for, a dozen non-biting tests among them:
-
+- The frontier family: a watermark, cursor or frontier may only advance over
+  work whose success the same expression checked. A lookup that legitimately
+  returns nothing is exactly as dangerous as a panic; treat any watermark
+  assignment not guarded by the success of the work it covers as a defect on
+  sight.
+- The guard-scope family: a permit, lock or guard whose scope ends before the
+  work it protects, visible by asking what is still resident when the guard
+  drops. A guard must be owned by the task doing the work, because the
+  awaiting future can be dropped first.
+- The vacuous-gate family, by far the largest: a thing that reads as gated
+  and is not, invisible because both halves are green. When a comment says a
+  function guarantees something, either the function guarantees it or the
+  comment is a defect; there is no third reading.
 - Bite-check every new regression test: revert the production fix as a text
-  edit, observe the named failure, restore it as a text edit. Never restore
-  with `git checkout -- <path>` - the tree routinely carries other uncommitted
-  work in the same file, and that command destroyed it twice. The hazards, all
-  paid for at least once:
-  - Read which assertion fired, not merely that the test went red, and check it
-    can fire only for the reason you mean. Four rail assertions survived a
-    bite-check because an earlier guard inside the measurement loop failed
-    first; a loop bounded by an assertion may never evaluate the property
-    asserted after it; and a substring two messages share is not a
-    discriminator.
-  - Confirm the perturbed code can reach the assertion. A close-frame test that
-    sent `Message::Close(None)` passed against its own defect in 0.02 s and
-    looked like a clean pass, because the old code did not match that arm
-    either. A test can be vacuous against its own defect while naming it
-    correctly, and "red / green" cannot tell the difference.
-  - Gut the callee, not the call site. Emptying a call site does not compile
-    under dead-code deny, so the perturbation goes in the callee, imports
-    included.
-  - Derive the witness from the system when the defect has measure zero on the
-    obvious inputs, and beware a perturbation whose outcome is a coin flip - a
-    test resting on `HashMap` iteration order passed against its defect half
-    the time.
-  - And where a clean reversion is impossible, or the test cannot bite today,
-    say so in the record. An honest "this cannot bite, and here is what does
-    gate it" is worth a great deal; a perturbation that proves nothing looks
-    exactly like a test that cannot fail.
-- Diagnostic rules, from findings that were argued wrong before they were
-  measured right:
-  - A diagnosis that mutates is not a diagnosis, and a fix that makes a
-    property true on one clock does not make it true on the observable.
-  - When a fix splits a predicate into two halves, every other reader of the
-    old half is a call site of the fix. When a rule is added to both sides for
-    a reason, the next rule in the same commit inherits that reason. A rule's
-    blast radius is established at the call sites, never by grepping.
-  - The site that decides a behaviour may not mention the thing it decides for,
-    so reach it through the behaviour rather than through a name you can grep.
-    Read the validator, not the path.
-  - Check the callee's `unreachable!`s before reusing it from a new call site.
-    A panic path genuinely unreachable from one caller is a live hazard from
-    the next, and the compiler says nothing.
-  - Resolve a version-history sentence against `git show <ref>:<path>`, never
-    against memory - one such sentence shipped false, and the prose gate is
-    blind to historical phrasings by design. Grep the number, not the file: a
-    figure corrected in the documents a reviewer was looking at is not
-    corrected everywhere it was written.
-- A test that names which branch ran needs an observable, not a sleep. A wait
-  of some fraction of a poll interval does not select an arm, it bets on the
-  scheduler, and the losing bet is usually the silent one: the other arm does
-  equivalent work, the assertion passes, and the test stops testing the fix
-  without ever failing. Give the production code a counter or a state the test
-  can read, and where the interval itself is the race, make the interval a
-  parameter and pass one the test cannot lose to. The launcher's owner loop is
-  the worked example: `LaunchedVenue::polls` plus `launch_with_poll`.
-- The lane and profile splits bite, and they are two splits, not one. `brokkr
-  check` runs tests in dev and multi-threaded; `brokkr test` runs them in
-  release at `--test-threads=1`. A test pinning `debug_assertions` behaviour
-  must be gated `#[cfg(debug_assertions)]` or the release sweep fails it; a
-  test whose bite depends on optimization must be checked in release; and a
-  green run in one lane is not evidence about the other, so bite-check in the
-  lane that is disputed.
-  Libtest spawns a fresh named thread per test unconditionally on any threaded
-  target - the name is how a panic is attributed to a test - so
-  `--test-threads` caps how many run at once and not whether a thread is made.
-  A `thread_local!` is therefore per-test-isolated in every lane. Measured
-  twice, and a cold reviewer's contrary model (that the serial runner runs
-  tests inline on the main thread) was refuted by probe rather than by
-  argument. Treat it as true today and not as a contract: it is an
-  implementation detail that has changed once, the failure if it changes back
-  is silent and wholesale, and nothing detects it - which is why the adapter's
-  `common::owns_a_fresh_exec_sink_on_every_lane` asserts the premise directly.
-  A path is per-process or it is a shared resource: a test that wrote and then
-  exec'd a fixed path aborted a parallel sweep with `ETXTBSY` when another
-  process ran the same test. And when comparing flake records, the thread count
-  is part of the record; three green runs are not evidence about an
-  intermittent race.
-- Run the socket suites after any change to the serving path. `brokkr check` is
-  blind to roughly thirty tests that bind loopback listeners, and a real
-  regression shipped through that gap and stayed red across four commits -
-  eviction on the default account closing a consumer's own second socket, which
-  only the socket suite surfaced. `brokkr check --gate` is the invocation that
-  covers them, and it is the one to run. It was red on master through
-  2026-08-16 for a coverage-audit reason that was never a property of this
-  workspace - a brokkr bug reporting every `mogwai-data` test as orphaned under
-  the `instrumented` sweep - and a brokkr build dated 2026-08-17 fixed it. If it
-  ever goes red that way again, suspect the tool before the tree - but check
-  for a crashed test first, because the two readings are indistinguishable in
-  the output. A single test aborting the parallel sweep produces the same
-  wall of orphaned `mogwai-data` tests, and a real regression can hide behind
-  either reading; 2026-08-19 saw exactly that, from an `ETXTBSY` on a test that
-  wrote and then exec'd a fixed path while the gate's second sweep ran the same
-  test in another process. A path is per-process or it is a shared resource.
-  Meanwhile run the socket suites by name:
-  `brokkr test -p mogwai-adapter "" --debug` and
-  `brokkr test -p mogwai-cli socket --debug`.
-- Commit or stash before reading a `brokkr test -p mogwai-cli ""` result. That
-  filter catches `arrival_control_refuses_a_tree_that_changed_during_the_run`,
-  which refuses a dirty tree by design and fails rather than skips, so at a
-  glance it is indistinguishable from a real regression.
-- Audit the seam itself: a test double must be verified against the real
-  endpoint's semantics, not against what the test needs. A stub that replays
-  queued responses whatever the caller asked for is blind by construction;
-  serve real semantics and record the requests so tests can assert the
-  request sequence too.
-- A test observing only an error cannot distinguish a bound from a check
-  performed after the damage; assert on the resource the finding named.
-- Two implementations a gate compares are pinned by one shared fixture, never
-  by a hand-built case list on either side. Where a gate holds a corpus
-  measurement against a synthetic one, the quantity is computed twice, and if
-  the two conventions drift the gate silently compares different quantities and
-  still passes - the failure is invisible because both halves are green. A
-  fixture built on one side cannot catch this: it pins that implementation
-  against itself. The convention, three instances so far, is a versioned
-  language-neutral JSON fixture under `analysis/` carrying a `_doc`, `units`
-  and `rules` block and stating the contract in a form neither side's units
-  privilege, read by both sides: `spread_conformance.json` for the
-  stratified Roll estimator and `dwell_conformance.json` for the empty-hour
-  dwell statistics, both `include_str!`d, and
-  `segment_library_conformance.json` for the segment library, which both
-  `mogwai-data`'s `segment.rs` and `mogwai-lab`'s `segments.rs` load by path
-  at test time. Keep the implementations separate - collapsing them usually
-  means a dependency in the wrong direction - and keep the fixture shared. A
-  rule one side genuinely owns (the lab dwell's era clamp) stays a local test
-  beside it, because a shared fixture that cannot express it must not imply it
-  was checked.
-  Where the two sides share a crate graph, a module is the cheaper form of the
-  same discipline. `mogwai_protocol::close` carries the WS close vocabulary -
-  the code, the reason constants and `classify` - and the venue writes its
-  reasons from those constants while the adapter reads them through `classify`,
-  so neither side holds a literal the other could drift from. The gate on such
-  a contract must run one side's real output through the other side's reader: a
-  test that hand-builds the input it then classifies pins one side against
-  itself, which is exactly how a missing eviction prefix survived with both
-  halves green.
-  Nothing detects a missing fixture. The next cross-implementation gate is
-  caught by this habit or not at all, which is the same shape as the open item
-  on durable prose asserting a live fact. And no fixture detects its own
-  tolerance quietly widening: the version is a schema version, a tolerance
-  edit weakens both implementations at once, and the second implementation is
-  structurally blind to it - review a tolerance change as a contract change,
-  because no gate will.
-  And the fixture is not always the answer. A two-copy gate whose copies are
-  the same algorithm rather than two conventions for one quantity is closed by
-  deleting a copy, not by anchoring both - `mogwai-lab`'s `summary` and
-  `session` session-segment math was one such, collapsed in the lab/cli
-  test-hunt. And where the two sides produce a whole accumulator record rather
-  than a statistic, no units-neutral statement of it exists; anchor the
-  inputs instead, which is usually where the drift is.
-- Two constants encoding one quantity are the same defect without the gate,
-  and they are easier to miss because neither looks like an implementation.
-  `mogwai-lab`'s `subcontract` carries the final measurement window's length
-  twice - as a nanosecond difference and as a seconds string - read by
-  different consumers, so editing one moved the window the exposure walk
-  measures while every gate stayed green. Where neither encoding can be
-  derived from the other, assert the identity between them, and make a test
-  that claims to catch a constant's drift read the encoding its subject reads.
-  A frozen-snapshot hash over all the constants is not this gate: the
-  sanctioned way to move one re-blesses the hash in the same change.
-- Process facts, which govern how much a green anything is worth:
-  - A close pass over a whole arc is not optional, because the round shape -
-    fix pass, gate, cold review, then a fix-and-commit agent that closes the
-    review's findings and commits - leaves the second half of every commit
-    unreviewed. Eleven documents, eleven close passes, and the defect was in
-    that half eleven times out of eleven. Point the close pass at the durable
-    prose the round touched and at the call sites of whatever the round's last
-    fix installed: that code is the least-examined in the arc and it is the
-    code closing a finding.
-  - A green gate proves nothing about a test that cannot fail, and a consensus
-    review gate converges to the verifier's utility function - a clean cold
-    review was followed by a serious find in a later pass five times. A green
-    review is evidence, not proof.
-  - Measurement overturns confident argument, in both directions and
-    repeatedly: cold reviewers were refuted by probes, and reports arrived
-    whose findings were already fixed in the tree they were written against.
-    Measure the disputed thing in the disputed lane before conceding or
-    dismissing.
-  - The carry-forward is the artifact most likely to be skipped, because the
-    agent that lands the code and the report is the last hand on both and no
-    agent in the loop reads the carry-forward back. A round whose lesson is
-    not written there did not happen as far as the next arc is concerned.
-  - `analysis/asia_jump_probe.py` is the owner's untracked work in progress.
-    Some twenty cold reviewers have now raised it unprompted and several
-    proposed deciding its fate; the standing answer is that it is out of scope
-    and stays untracked, and it is never swept into a commit. One thing from
-    that noise binds: its percentile convention does not match
-    `mogwai_lab::kernel::nearest_rank_list`, so a number out of that script
-    must never land in a durable document labelled "p95" and be compared
-    against a Rust-computed one - two implementations of one quantity, no
-    shared fixture, both sides green because neither is checked.
-  - `reference/INVENTORY.md` does not exist in this repository. The generic
-    orchestration workflow names it as a mandatory read; it is an
-    unsubstituted variable from another repo. Do not put it in a brief. The
-    real contracts are `AGENTS.md` and `CLAUDE.md`, then
-    `reference/architecture.md`, `clock.md`, `glossary.md`, `performance.md`
-    and `technical-implementation-spec.md`.
+  edit, observe the named failure, restore it as a text edit - never with
+  `git checkout -- <path>`, which has destroyed uncommitted work in the same
+  file twice. Read which assertion fired and check it can fire only for the
+  reason you mean.
+- Run the socket suites after any change to the serving path: `brokkr check
+  --gate` is the invocation that covers them; plain `brokkr check` is blind
+  to roughly thirty loopback-binding tests and a real regression has shipped
+  red through that gap.
+- Commit or stash before reading a `brokkr test -p mogwai-cli ""` result:
+  that filter catches a test that refuses a dirty tree by design and fails
+  rather than skips.
+- `analysis/asia_jump_probe.py` is the owner's untracked work in progress.
+  It is out of scope, stays untracked, and is never swept into a commit. Its
+  percentile convention does not match
+  `mogwai_lab::kernel::nearest_rank_list`, so a number out of it must never
+  land in a durable document labelled "p95" beside a Rust-computed one.
+- `reference/INVENTORY.md` does not exist in this repository. The generic
+  orchestration workflow names it as a mandatory read; it is an
+  unsubstituted variable from another repo. Do not put it in a brief. The
+  real contracts are `AGENTS.md` and `CLAUDE.md`, then
+  `reference/north-star.md`, `architecture.md`, `clock.md`, `glossary.md`,
+  `performance.md`, `test-doctrine.md` and
+  `technical-implementation-spec.md`.
 
 ### Reading vs depending on nautilus_trader and broadarrow
 
@@ -491,22 +203,12 @@ or broadarrow APIs) has two distinct access paths - never conflate them:
   read-only reference, never a build input; `members = ["crates/*"]` already
   excludes it, so no workspace `exclude` is needed.
 
-The adapter previously path-depended a sibling `../nautilus_trader` checkout
-because the published release carried bugs this project hits. Those fixes landed
-in 0.61, so the manifest pins a published release - 0.62.0 as of 2026-08-21 -
-and the build is reproducible from a fresh clone. The `research/` copy is kept
-at the matching upstream ref, so what you read there is what compiles.
-
 Every implementation spec that references these APIs states both paths: the
 implementer reads from `research/` and builds against the pinned release. The
 two are kept in sync, so what you read in `research/` is what compiles.
 
 ### Bash rules
 
-- Never chain commands with `&&`.
-- Never chain commands with `;`.
-- Never chain/pipe commands with `|`.
-- Never capture stdout into env vars (`UUID=$(...)`).
 - Never read or write from `/tmp`. All data lives in the project.
 - Never run raw `cargo`, `curl`, `pkill`. Use `brokkr`.
 
@@ -523,163 +225,37 @@ Use `brokkr` (not `cargo`) for check/test. By default output is filtered to chan
 - `brokkr check --all` - show every diagnostic, no cap, no scope filter
 - `brokkr check -p <crate>` - scope to one package (e.g. `-p mogwai-engine`). You generally do not want to run this; a single `brokkr check` is faster than 2-3 `-p` runs, and brokkr intelligently filters which warnings and errors to show you
 - `brokkr check -- --test <file>` - forward args to `cargo test` (args after the second `--` go to the test binary)
-- `brokkr test -p <crate> <NAME>` - release-mode focused single-test runner. Always passes `--release --include-ignored --nocapture --test-threads=1`. `<NAME>` is a case-sensitive substring filter (matches both unit and integration tests). Streams the test's own stdout/stderr live and prints a `[test] PASS/FAIL` footer with wall time. Defaults to `--all-features`.
-  - `-p, --package <PKG>` - cargo package. Required in this workspace - no default package, and overrides `[test] default_package` in `brokkr.toml` if set.
+- `brokkr test -p <crate> <NAME>` - focused single-test runner. Always passes `--include-ignored --nocapture --test-threads=1`. `<NAME>` is a case-sensitive substring filter (matches both unit and integration tests). Builds dev by default (`[test] debug = true`); pass `--release` where optimization is what is measured. Streams the test's own stdout/stderr live and prints a `[test] PASS/FAIL` footer with wall time. Defaults to `--all-features`.
+  - `-p, --package <PKG>` - cargo package. Required in this workspace - no default package.
   - `-N, --repeat <N>` - run the test N times per sweep (flaky-test hunting).
   - `-j, --jobs <N>` - parallel cargo compile jobs.
   - `--raw` - bypass output filtering, print everything cargo emits.
-  - `--debug` - build and run the test in dev profile instead of release. Use this for subprocess-lifecycle / IPC / boot-path tests where release-LTO compile time (3-4 min for the full workspace) dominates wall time and the optimization level doesn't change the behavior under test. `BROKKR_TEST_BIN_DIR` points at `<target>/debug` accordingly.
   - Example: `brokkr test -p mogwai-data memory_source_replays_in_time_order` or `brokkr test -p mogwai-data parses_integer_and_fractional_timestamps -N 5`.
 - `brokkr run [NAME] [ARGS]...` - runs a bin or example by target name, discovered from cargo metadata across the whole workspace. This venue is `brokkr run mogwai -- serve` (`mogwai` is the bin target, not the package). A bare `brokkr run` lists what is runnable, or runs `[bin] default` if set. Arguments after `--` are forwarded raw to the program; brokkr's own `--debug`/`--release` go before the name. Use instead of `cargo run` for the same reason as `brokkr check`/`brokkr test`.
 
 ## Benchmarking
 
 `brokkr mogwai` measures, `brokkr results` queries the durable record, and
-`brokkr sidecar` queries the profiler store. In depth: `brokkr man mogwai`
-and `brokkr man results`. The design and what is deliberately deferred:
-`notes/benchmarking-design.md`. What each surface emits and the annotation
-discipline: `reference/performance.md`.
+`brokkr sidecar` queries the profiler store. The complete manual is bundled
+with the tool - `brokkr man mogwai`, `brokkr man results`, `brokkr man
+measure` and `brokkr man output-channels` - and `reference/performance.md`
+carries the durable numbers and the annotation discipline; this section
+deliberately repeats none of it. What binds every use:
 
-There are no layers and no frozen workloads. The argv is composed at the
-call site and captured verbatim in the row, so selecting an arm is a
-query rather than a name lookup. Recording needs a clean tree: `--force`
-runs a dirty tree but stores no `results.db` row (its sidecar data
-survives, reachable as the `dirty` pseudo-UUID).
-
-### The two surfaces
-
-**Argv-shaped**, through the shipped `target/release/mogwai`, needing no
-registration - `gen` and its `--type` variants, `tick-composition`,
-`preflight`, `measure`, `fit`, `cache`, `synth`, `arrival-screen`. The
-argv goes after `--`, raw:
-
-    brokkr mogwai --bench 3 -- gen --type summary --symbol MNQ
-
-Benching the release binary measures what ships, startup and argument
-parsing included, which is the honest end-to-end number.
-
-**Harness-shaped**, through a cargo example, for the loops that have no
-command line - the engine's matching loop and divergence seam, the
-`TickSource` implementations, the arrival draw, the screen's projection,
-and eventually the serving path and the adapter. These resolve by name
-against `[mogwai.targets.*]` in `brokkr.toml`:
-
-    brokkr mogwai screen_projection --hotpath
-    brokkr mogwai arrival_walk --alloc
-
-Harnesses take an argv too, after `--`, because every surface here is
-config-shaped (preset, window, seed, cell). Bare `brokkr mogwai` lists
-both kinds. Adding a surface to the measurable set is registering a
-target.
-
-Currently registered:
-
-| target | example | features |
-|---|---|---|
-| `arrival_walk` | `mogwai-data/arrival_walk_bench` | `hotpath` |
-| `screen_projection` | `mogwai-lab/screen_projection_bench` | `hotpath` |
-| `ring_sizing` | `mogwai-lab/ring_sizing` | `hotpath` |
-| `stage_a_batch` | `mogwai-lab/stage_a_batch_bench` | none |
-| `envelope_evaluation` | `mogwai-lab/envelope_evaluation_bench` | none |
-| `tag_decode_probe` | `mogwai-protocol/tag_decode_probe` | none |
-| `tape_lateness` | `mogwai-cli/tape_lateness_bench` | none |
-
-`tape_lateness` is the one that used to be a test. It asserted a 50 ms p99 on
-paced delivery, which is a statement about the host rather than about the code,
-and it was excluded from every lane that would have run it. The reading is worth
-recording every run; the threshold was never portable. That is the general
-shape: a wall-clock budget with no admission test is a measurement, not a gate.
-
-### The three modes, uniform over both surfaces
-
-- `--bench [N]` - N runs (default 3), lockfile, stores a row. A plain run
-  stores nothing.
-- `--hotpath [N]` - function-level timing.
-- `--alloc [N]` - per-function allocation bytes, exclusive of nested
-  calls.
-
-`--hotpath` and `--alloc` are inert without the feature that compiles the
-instrumentation in, which is what the registry's `features` field exists
-for. The registered features are a union with what the mode and call site
-add, never a replacement: `--hotpath` contributes `hotpath`, `--alloc`
-contributes `hotpath-alloc`, and a call-site `--features` adds an arm.
-
-The consequence worth knowing, and it bites: **a target registering
-`hotpath` has its `--bench` walls measured on an instrumented build.**
-Register the feature on the target that needs it, not on every target. A
-harness whose canonical output is a wall rather than a profile should
-carry no registered features and no cargo `required-features`.
-
-Other flags that matter: `--commit <REF>` builds and benches an old
-commit, `--dry-run` validates argv and path resolution without building,
-and `--stop <MARKER>` kills the child when a sidecar marker fires, for
-benching one phase.
-
-### Reading the record
-
-`brokkr results` prints the last `-n` rows (default 20), newest first.
-Filters AND together: `--commit`, `--command`, `--mode` (`bench`,
-`hotpath`, `alloc`), `--dataset`, and repeatable `--meta KEY=VALUE` /
-`--env NAME=VALUE`. Both `--meta` and `--env` exclude rows missing the
-key, so an arm defined by an unset variable needs an explicit baseline
-value recorded on the off runs.
-
-`--grep` / `--grep-v` match against the whole invocation - subprocess
-argv, brokkr argv, and each captured env var rendered as `NAME=VALUE`.
-Repeatable, `git log --grep` style: every `--grep` must match, any
-`--grep-v` hit excludes. That composition is the only way to select an
-arm defined by an absent flag.
-
-`brokkr results <uuid-prefix>` resolves to one row and prints a labelled
-block: full `cli_args`, the brokkr invocation, per-iteration walls for a
-`--bench N` row, the scraped counters, the `prev.*` provenance of what
-ran immediately before (often the explanation for an outlier), and the
-hotpath and alloc tables when the mode captured them. `--top N` caps the
-functions shown.
-
-`brokkr results --compare A B` pairs rows on
-`(command, mode, input_file, brokkr_args, env_fingerprint)`, with
-`--commit` and `--verbose` stripped from `brokkr_args` first. Pairs whose
-host conditions or captured env differed are annotated rather than
-rendered as a clean delta.
-
-### Counters, and why they are not optional
-
-Every external run scrapes the winning run's stderr for `key=value`
-counters. `--compare` reports the ones that moved:
-
-    counters: cells_evaluated 5000 -> 4000, prints 1240 -> 1180
-
-A wall alone cannot distinguish "the code got faster" from "the code did
-less". This is what turns "12 % faster" into "12 % faster on 8 % fewer
-cells", and it is why a benched surface should emit its work size. It is
-reported, never fatal. Where a moved count really does invalidate a
-series - a seeded tape whose draw moved - that owes a
-`TAPE_PROTOCOL_VERSION` bump, which is unconditional and cannot be waived
-per comparison.
-
-### The sidecar
-
-`brokkr sidecar <uuid>` queries `.brokkr/sidecar.db` - the observation-only
-channels the benched commands report through (`mogwai-lab`'s `sidecar`
-module). A UUID prefix is required; find one with `brokkr results`. Views:
-`--markers` and `--durations` (START/END pair timings), `--counters`
-(with `--grep` to filter a noisy dump), `--samples` (the raw 100 ms /proc
-stream, with `--phase`, `--range`, `--where`, `--fields`, `--every`,
-`--head`, `--tail`), `--stat <FIELD>` for min/max/avg/p50/p95, `--stalls`
-for `*_wait_ns` rollups, and `--compare A B` phase-aligned. `--human`
-renders a table instead of JSONL.
-
-### Datasets
-
-`[<host>.datasets.<name>]` in `brokkr.toml` records an out-of-git input
-by path and XXH128 digest - whether the bytes moved under a recorded row.
-This is not a substitute for the run's own content verification, which
-asks whether the data is what the ledger says. Register the path, run
-`brokkr env`, and paste back the digest it computed from disk. A `path`
-may name a directory, which digests as the sorted fold of
-`<relative path>\0<file digest>`, so a rename or a layout change moves
-it.
+- There are no layers and no frozen workloads. The argv is composed at the
+  call site and captured verbatim in the row, so selecting an arm is a query
+  rather than a name lookup. Adding a surface to the measurable set is
+  registering a target under `[mogwai.targets.*]` in `brokkr.toml`.
+- A wall alone cannot distinguish "the code got faster" from "the code did
+  less": a benched surface emits its work size as stderr `key=value`
+  counters, and `--compare` reports the ones that moved. Where a moved count
+  invalidates a series - a seeded tape whose draw moved - that owes a
+  `TAPE_PROTOCOL_VERSION` bump, which cannot be waived per comparison.
+- Recording needs a clean tree; `--force` runs a dirty tree but stores no
+  `results.db` row.
+- A target registering `hotpath` has its `--bench` walls measured on an
+  instrumented build. Register the feature on the target that needs it,
+  never on every target.
 
 ## Document folders
 
@@ -702,18 +278,21 @@ developer or library consumer reads both. Where a project publishes a site,
 separate: a document that may be wrong must not sit where a document that must
 be right is expected.
 
-One document in `reference/` is exempt from the must-be-true rule, and it is the
-most binding document in the repository: `reference/glossary.md` states the end
-state rather than the present. Where it and the code disagree, the code owes the
-change - the entry is not stale, the tree is behind - and correcting an entry to
-match current behaviour is the one edit that is always wrong there. Its own
-preamble says so, and only the owner adds an entry to it.
+Two documents in `reference/` are exempt from the must-be-true rule, and they
+are the most binding documents in the repository: `reference/north-star.md`
+states what the whole system is when it is finished, and
+`reference/glossary.md` states the end-state vocabulary. Both describe the end
+state rather than the present. Where either and the code disagree, the code
+owes the change - the entry is not stale, the tree is behind - and correcting
+either to match current behaviour is the one edit that is always wrong there.
+Their own preambles say so, and only the owner changes what they aim at.
 
-The exemption is narrow and does not spread. Every other file under `reference/`
-and `docs/` describes what is true now, so a change that moves behaviour moves
-them in the same commit. When such a file must record something the code has not
-caught up with, it says so in as many words and names it as owed, rather than
-quietly asserting the end state as though it had landed.
+The exemption is narrow and does not spread past those two. Every other file
+under `reference/` and `docs/` describes what is true now, so a change that
+moves behaviour moves them in the same commit. When such a file must record
+something the code has not caught up with, it says so in as many words and
+names it as owed, rather than quietly asserting the end state as though it had
+landed.
 
 The dependency direction is therefore one-way. `notes/` may cite `docs/` and
 `reference/`; nothing durable may cite `notes/` - not a code comment, not

@@ -53,10 +53,12 @@ the same artifact.
      regressions have shipped red through that gap.
    - `brokkr check --gate` - the complete answer and the only invocation that
      runs those four. A spec touching `mogwai-adapter` names this one.
-   - `brokkr test -p <package> <NAME>` - a focused release-profile run with
-     `--include-ignored`, which is how every measurement instrument in the
-     tree is invoked (the gate profile skips them by name for cost or
-     environment reasons, and each stays runnable this way).
+   - `brokkr test -p <package> <NAME>` - a focused run with
+     `--include-ignored`, building dev by default (`[test] debug = true`;
+     pass `--release` where optimization is what is measured), which is how
+     every measurement instrument in the tree is invoked (the gate profile
+     skips them by name for cost or environment reasons, and each stays
+     runnable this way).
    - `brokkr run mogwai -- serve` plus `python3 scripts/smoke.py` - the live
      end-to-end path over a real socket.
    - `brokkr mogwai ... --bench/--hotpath/--alloc`, `brokkr results` and
@@ -71,9 +73,10 @@ the same artifact.
    on optimization states that it is checked in release.
 
    Every regression test a spec lays is bite-checked: revert the production
-   fix as a text edit, observe the named failure, restore it as a text edit.
-   A spec that names a new test names the failure it must produce against
-   the unfixed code. If no command exists that can verify a gate
+   fix as a text edit, observe the named failure, restore it as a text edit -
+   under the full discipline in `reference/test-doctrine.md`, which binds
+   every test a spec lays or judges. A spec that names a new test names the
+   failure it must produce against the unfixed code. If no command exists that can verify a gate
    (no test pins the behavior, no harness measures the path), building that
    instrument is itself a brick of the spec - specified to the same standard
    and laid before the brick it gates. A spec justified by an estimated
@@ -110,6 +113,14 @@ the same artifact.
 10. **The standing references.** Every spec must cite, by path, this document
     (`reference/technical-implementation-spec.md`) as the contract it is
     written against, and also the work item it was spawned from, if one exists.
+    Two more documents bind every spec whether or not it cites them, and a
+    spec that touches their ground names them: `reference/north-star.md` is
+    the end state the work serves - a spec pulling against it is wrong however
+    well built - and `reference/glossary.md` is the vocabulary the spec is
+    written in, where using a defined word to mean something else guarantees
+    two implementers produce different artifacts. Both state the end state
+    rather than the present, so where the tree disagrees with them the spec
+    moves the tree toward them, never the other way.
     A spec document is itself transient: it lives with the other work items,
     never in `docs/` or `reference/`, and it is deleted in the same commit
     that lands its implementation. What survives a landing is the commit

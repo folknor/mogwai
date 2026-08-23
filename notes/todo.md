@@ -17,90 +17,28 @@ comment in the code, or (b) added to an existing or new ../reference/ document.
 
 Or both. There are no exceptions.
 
-## The grand design, and mogwai's place in it
+## The grand design moved to `reference/north-star.md`
 
-Recorded 2026-08-15 with the owner, after walking the whole toolchain. This
-is the context every item below serves. A mogwai developer does not need to
-operate the other tools, but must know what mogwai is for, because several
-design decisions only make sense against it.
+The ecosystem, mogwai's role, what the venue must become, the two modes and
+the settled premises all live there now - it is the durable statement of the
+end state, exempt from the must-be-true rule the way the glossary is, and it
+is what every item below serves. This file keeps only what is operational:
 
-**The ecosystem.** One human runs a handful of orchestrator agents. Each
-orchestrator deals a batch of `wyrd` assignments - deterministic,
-stratified strategy-design slates (a behavioral thesis plus rarity-weighted
-entry/exit/sizing components, with replication pairing across the batch) -
-and launches on the order of 20-50 subagents, one slate each. Each subagent
-authors one Pine strategy: it consults the Pine oracle, lints, hand-rolls
-its dealt components as libraries, then establishes its edge on real
-historical data through piners (backtest, optimize, Monte Carlo,
-walkforward), passes the broadarrow backtest parity witness, and finally
-forward tests through broadarrow against mogwai. The goal per strategy:
-minimum drawdown, roughly 20-50 dollars of income per day, reported as a
-scope-qualified claim ("works during $session on $symbol under $conditions")
-back to the orchestrator. The claim pipeline - collecting results,
-adjudicating replication pairs, deciding what deploys - is the orchestrator's
-job, human plus Claude, deliberately not software. Nothing in mogwai should
-grow toward owning it.
-
-**Mogwai's role**, stated exactly. Mogwai is the only forward-test venue the
-ecosystem has, and the only model of venue timing either project has. What a
-mogwai forward run validates is execution robustness: resting-order and
-conditional-order timing, fills under havoc, survival of the messy live
-path - the things a bar-close backtest structurally cannot see (wyrd's own
-doctrine: resting-order exits are validated in forward, against an
-accelerated synthetic tape). The edge was established upstream on real
-history; dollars earned on an exogenous synthetic tape are a statement about
-the fitted distribution of worlds, not about next month's market. Keep those
-two claims distinct in anything mogwai reports or documents. The
-distribution is also the point: one seed is one path, and a claim wants many
-seeds - which is why fire-and-forget, seed-reproducible instances and cheap
-tape identity matter more than any single run.
-
-**What mogwai must become** for this to work, which is what the items below
-build:
-
-1. **Serve any symbol**, symbol-as-label, total resolution, many rivers at once.
-   The venue must never be the reason a dealt strategy cannot be forward tested.
-   Landed 2026-08-15/16. A second clause - many passengers on one river, meaning
-   N traders each with its own account, ledger and view of one deterministic
-   tape - belongs to the shared-exchange mode only, is not needed by the default
-   per-run mode. It has since largely landed, and this entry said otherwise until
-   the `notes/bugs-server.md` close pass corrected it 2026-08-19: the engine and
-   the risk ledger moved onto `Passenger`, so each account has its own book, and
-   delivery is attributed - an order event reaches its owner's lanes and an
-   `AccountState` the account it names, rather than every connection. What is
-   still open under this clause is the per-account tape window rather than the
-   ledger.
-   See "An exchange serves many accounts and many tape windows" below.
-2. **Realistic tapes across session classes.** The wyrd doctrine holds session
-   structure to be the one non-fractal thing bars do not normalize away, so
-   a session-bound thesis forward-tested against the wrong session class
-   tests a different claim. The envisioned preset set is on the order of
-   five, spanning three classes: 24/7 crypto (BTCUSDT, a perp like
-   ETHUSDT.P), CME futures with genuine closure (MNQ, plus another such as
-   MGC), and cash-equity hours (AAPL). The segment-sampler track (see
-   `notes/README.md`) is what makes session-composable tapes; the intake
-   sequence makes each preset honest; neither ever gates serving.
-3. **The data spigot is `dbnget`** (Databento). The account already holds about
-   twelve months of MNQ/ES/MES tbbo plus mbp-1 server-side, re-fetchable by
-   job id at no new cost. The missing session classes are cheap: a year of
-   AAPL trades quoted at about 10 dollars list, a year of continuous MGC
-   tbbo at about 2, and the subscription zeroes covered pulls. Corpus
-   acquisition is never the bottleneck; fitting effort is.
-
-The 200-agent end-state paragraph in the problem statements block below and
-the settled premises it records (always accelerated, single-instrument
-strategies, one mogwai venue, resource cost shapes nothing) are this design's
-mogwai-side constraints. Two of them moved on 2026-08-16 - the venue's scope
-and what "no restart" implies - and the amendment is recorded in that block
-rather than here.
-
-**The venue's scope**, stated here because everything above reads differently
-without it. A venue is scoped to an orchestrator's batch, not to one run: the
-orchestrator starts one `mogwai serve`, takes the bound address, and hands it
-to its 20-50 subagents, each connecting with its own account and asking for
-whatever tape its strategy needs. A consumer given no address spawns its own
-ephemeral transient venue - the dev, CI and fallback path. Both shapes are
-supported; the shared exchange is the primary one.
+- The concrete deal shape, for reading `wyrd` output: a slate is a behavioral
+  thesis plus rarity-weighted entry/exit/sizing components with replication
+  pairing across the batch; a subagent consults the Pine oracle, lints,
+  hand-rolls its dealt components as libraries, and passes the broadarrow
+  backtest parity witness before forward-testing.
+- Serve-any-symbol landed 2026-08-15/16 and many-passengers-on-one-river has
+  largely landed since (engine and risk ledger on `Passenger`, attributed
+  delivery). What is still open under that clause is the per-account tape
+  window rather than the ledger - see "An exchange serves many accounts and
+  many tape windows" below.
+- Candidate symbols for the missing session classes: a perp like ETHUSDT.P,
+  a second CME future like MGC, and AAPL for cash-equity hours. Terabytes of
+  DBN data are already downloaded on another host, and the Databento account
+  additionally holds about twelve months of MNQ/ES/MES tbbo plus mbp-1
+  server-side, re-fetchable by job id at no new cost.
 
 ## Landing the grand design
 
@@ -1924,227 +1862,30 @@ group by any other route has no API for it, and none is owed until one is wanted
   account nobody reclaims. `ReadyRecord::VERSION` is 8, carrying the TTL beside
   the reset setting.
 
-- Problem statements. **This was the solvable set of problems believed to get
-  mogwai to the end state the user needs.** That was a claim rather than an
-  inventory: each entry was believed necessary, and the set was believed
-  sufficient for mogwai to stop being the blocker. All seven have now resolved
-  into landed code, which is the point at which the claim becomes checkable
-  rather than assumed - and whether the end state is in fact reached is an
-  observation to make going forward, not a re-litigation to hold here. If it
-  turns out not to be, that is a finding worth having, and the reason the claim
-  was stated as a claim rather than as a list.
-
-  Zero, down from seven. `problem-order-book.md` is deleted: the user's fill
-  model needed no book, and what remained open after that ruling - the
-  volatility estimator, the band's scale and shape, the derived RNG stream,
-  self-trade impossibility - is landed code (`a214996` and follow-on commits),
-  pinned by the tests and docs the landing itself cites. `problem-fees.md`
-  dissolved into the instrument model (an exchange charges fees, so the
-  schedule is one more config knob) and was deleted earlier.
-  `problem-refused-order-types.md` is deleted the same way: the venue now
-  accepts `StopMarket` and `StopLimit`, with reduce-only and post-only as
-  first-class flags and the touch-versus-through trigger distinction, and the
-  adapter stopped refusing them at conversion - landed code, pinned by the
-  engine, server and adapter test suites the landing itself added. The
-  mechanism half of `problem-instrument-profiles.md` went the same way, and the
-  document's one surviving question - whether the arrival and volatility
-  process constants are genuinely per-instrument - was answered by the same
-  parameterization ruling that closed `problem-instrument-model.md` below: the
-  model is a complete parameterization, so those constants are per-instrument
-  because everything is. Last of the seven, `problem-instrument-model.md` and
-  its spec, `spec-instrument-model.md`, are deleted with it: the venue now
-  models an instrument as a bundle of knobs rather than one hardcoded spot
-  shape - instrument identity and class, a multiplier-aware contract size grid,
-  a futures margin ledger with mark-to-market and settlement, a session
-  calendar with genuine closure, a fee schedule reaching the consumer as booked
-  commission, `position_id` end to end under both netting and hedging, and a
-  preset layer with mandatory provenance - landed code, pinned by the test
-  suites and gates each landing added. `reference/architecture.md`,
-  `docs/config.md`, `reference/glossary.md`, `docs/cli.md`,
-  `reference/performance.md` and `docs/presets.md` /
-  `docs/oms-types.md` carry what must endure; the landing history is git's, not
-  this file's, to keep. `notes/` now holds no problem statement or spec files
-  at all - only this one.
-
-  Premises the user has settled, which every document below inherits and none
-  previously stated. Forward tests always run accelerated, never at speed 1.0 -
-  which is a correctness bound rather than a cost one, since the adapter's
-  one-second minimum wall request timeout caps usable sim speed and a timed-out
-  request is a failed run. A run has an optional duration in sim time,
-  defaulting to indefinite. There is no restart and no resume; mogwai is fire
-  and forget, and reproducing a path means a fresh instance with the same seed
-  and config. Warmup is declared config, so the venue generates it eagerly at
-  boot and `MAX_HISTORY_SEEK_TICKS` dies with the lazy history it existed to
-  bound. Strategies are single-instrument, which is why independent per-symbol
-  tapes carrying no cross-instrument correlation is correct rather than a defect.
-  There is one `MOGWAI` venue, not one per asset class.
-
-  Amended 2026-08-16 with the owner. Three of the premises above now read
-  differently, and they are amended rather than rewritten because what changed
-  and when is worth keeping.
-
-  A venue is scoped to one run by default, and to an orchestrator's batch in a
-  second mode. The per-run instance every premise above assumes is unchanged and
-  remains the default: a consumer given no address spawns its own venue and owns
-  it. What is added is an optional shared exchange - one `mogwai serve` whose
-  address an orchestrator hands to its subagents, each connecting with its own
-  account - motivated by amortizing tape generation across a batch. "One MOGWAI
-  venue, not one per asset class" survives either way, and is strengthened in the
-  second mode: one venue across asset classes and across the batch's agents.
-
-  No restart and no resume survives for the process in both modes and is
-  unchanged: a venue is never restarted in place. "Reproducing a path means a
-  fresh instance with the same seed and config" stays exactly right for the
-  default mode. In the shared mode it becomes "requesting the same window on the
-  same tape", which is why placement has to become a request parameter there and
-  can stay config here.
-
-  Warmup generated eagerly at boot is already only half true - non-boot rivers
-  materialize on first read - and would go fully wrong under the shared mode's
-  per-window placement, where a request for `[T1, T2]` needs materialization from
-  `T1 - warmup_ns` and cannot be served by whatever one span was generated at
-  boot. In the default mode, eager-at-boot is correct and is what you want, since
-  the boot river is the run's river. Warmup stays declared config in both.
-  `MAX_HISTORY_SEEK_TICKS` staying dead is unaffected.
-
-  Single-instrument strategies is untouched, and note it does not imply a
-  single-instrument venue: one strategy trades one symbol, while the exchange
-  serving those strategies serves many.
-
-  The sufficiency claim has no evidence and is not meant to. Two review passes
-  have now flagged that, correctly as a matter of fact and beside the point as a
-  matter of genre: the first paragraph says outright that this is a claim rather
-  than an inventory, and that being wrong about it is the finding it exists to
-  produce. It cannot be evidenced in advance without already having built the
-  thing. Do not raise it a third time; raise a missing entry instead, which is
-  the falsifiable form of the same objection.
-
-  Three things are deliberately outside that claim. Throughput - whether N
-  instances fit on the machine - is excluded by the user's standing instruction
-  that resource cost shapes no decision here. The claim pipeline - how a seed
-  becomes provenance attached to a result, how many paths make a claim, how they
-  are allocated - belongs to whatever consumes the venue; mogwai's obligation
-  ends at generating a path and reporting which. And the open items elsewhere in
-  this file, notably the dead-feed watchdog and the terminal-venue-fault
-  decision, both bear on whether a forward result is valid and are not part of
-  this set.
-
-  They are ordinary todo items that outgrew a bullet, so they live in their own
-  files; they carry the evidence, the decisions to be made, and what is
-  explicitly out of scope, but no implementation plan. A spec is written against
-  `reference/technical-implementation-spec.md` only once the problem statement
-  it descends from has been resolved.
-
-  Ordering was a graph, not a line, while the set was open - recorded here as
-  a historical note rather than left to imply an active dependency structure,
-  since there is nothing left in the set to sequence. Two independent reviews
-  found an earlier total-order draft circular; the graph that replaced it ran
-  `lifecycle` and `seeds` into everything else, and `cadence` and
-  `instrument-model` both into `profiles`, with `order-types` gaining no
-  inbound edge once the fill band replaced the order book it would otherwise
-  have waited on. All of it resolved in landing order without the graph ever
-  needing to be redrawn again.
-
-  The end state they served: on the order of 200 agents running concurrently,
-  each developing a strategy through broadarrow - backtest, optimize, Monte
-  Carlo - and then forward testing it against mogwai. Whether that many
-  fit on the machine is explicitly not a design input; resource cost does not
-  shape any decision in these documents.
-
-  Read "instances" carefully here (amended 2026-08-16). In the default mode 200
-  agents really does mean 200 venue processes, and the exclusion says plainly
-  that whether they fit is not a design input. The shared mode exists to make
-  that number smaller by amortizing tape generation, and there the agents are
-  connections on a handful of exchanges rather than processes. The exclusion
-  holds in both readings - it was always about not letting cost shape the design,
-  and the shared mode is cost motivating a second mode rather than bending the
-  first one. Note the two counts the axes must scale in differ accordingly:
-  processes per machine in the default mode, connections per venue in the shared
-  one.
-
-  Who decides: the repository owner, on every product and architecture question
-  in every one of these documents. There is one user, and the operator of the
-  venue is an agent acting for them. broadarrow is a consumer, not an authority -
-  mogwai is a nautilus adapter, so where a standing broadarrow note conflicts
-  with what nautilus strategies emit, the note is a preference and loses.
-  Consulting them is courtesy, not process.
-
-  Acceptance was previously listed here as the largest defect these documents
-  share - that none names a measurable form of "done". That paragraph was wrong
-  at the layer it applied: gates are a
-  `reference/technical-implementation-spec.md` concern, stated there as exact
-  copy-pasteable commands, and a problem statement that carried them would be
-  doing the spec's job. The documents are correct to omit them. Two things
-  survive the removal. The set needs no acceptance criterion at all - the
-  repository owner is the gate and will know. But the cadence document does
-  invalidate a currently-green gate, the 0.1603 duration ACF anchor, without
-  naming a successor, and that debt is real and belongs to whichever spec
-  descends from it.
-
-  Deleted, not archived: `notes/problem-instrument-profiles.md`. Its mechanism
-  half had already moved to the instrument model under the parameterization
-  ruling. Its one surviving question - whether the arrival and volatility
-  process constants become per-instrument at all - is answered by that same
-  ruling and needed no separate document: the model is a complete
-  parameterization and a preset is a named bundle of otherwise-tunable knobs, so
-  those constants are per-instrument because everything is per-instrument. The
-  arrival constants, the GARCH parameters and `SIZE_LOG_SIGMA` get slots like any
-  other knob.
-
-  What survives is not a design question but a fitting one, and it belongs to
-  whoever builds each preset: whether BTC and ETH genuinely differ enough to
-  warrant different values, which the measured 2.8x dispersion spread across
-  three crypto majors suggests but one month of one venue cannot settle. That is
-  answered when the data arrives - trade-level or 1-second archives spanning
-  years are expected - and it gates nothing in the meantime, because the venue
-  can already express a difference whether or not one is fitted. The evidence
-  asymmetry the document recorded stays true and stays relevant to preset
-  authors: BTC, ETH and SOL have trade-level archives, MNQ and MES have
-  15-second bars and nothing else, so a CME preset's cadence is derived
-  arithmetic and its clustering comes from nowhere at all. Each preset says
-  where its numbers came from.
-
-  Deleted, not archived: `notes/problem-fees.md`. The engine books zero
-  commission on every fill, which biases every claim optimistically and
-  systematically - but an exchange charges fees, so under the parameterization
-  ruling the schedule is one more config knob and the problem belongs to the
-  instrument model, which now carries it. Its "declare fee-free and push cost
-  onto the consumer" exit was independently closed and the reason is recorded
-  there: nautilus computes commission client-side only in its simulated matching
-  engine, so on the live path a venue reporting no commission is
-  indistinguishable from one that charges none, and nothing downstream can
-  correct for it. Also deleted, its problem fully landed: `notes/problem-
-  refused-order-types.md`. The venue was refusing `StopMarket` and
-  `StopLimit` at conversion; it now serves both, first class - a four-variant
-  `OrderType`, a `Resting` state machine distinguishing a live limit from an
-  untriggered conditional from an inert market remainder, a stop that
-  triggers on touch rather than through, reduce-only and post-only as wire
-  flags enforced at fill time, and the adapter's `wire_order_type` no longer
-  refuses the two types. Trailing stops and two-leg brackets remained refused
-  by name under a ruling that they were excluded rather than deferred; that
-  ruling is reversed 2026-08-16 by the order-type completeness ruling below.
-
-  Raised in review and ruled on, recorded so they are not raised a third time.
-  (a) Three documents each partly re-scope the realism gate - cadence
-  invalidates its anchors, profiles moves the arrival constants out from under it,
-  and the parameterization ruling lets config move the tape anywhere - and it
-  was argued that nobody owns the result. The owner is the repository owner, the
-  same answer as acceptance above. (b) Three documents each want to rewrite part
-  of `mogwai-engine` (per-run state, matching, a margin ledger) and nothing
-  sequences the rewrites as opposed to the decisions. That is spec-level, the
-  same layer error the acceptance paragraph made. (c) The dead-feed watchdog and
-  the terminal-venue-fault item stay outside the set. A venue fault is
-  mogwai failing to do its job and is obviously terminal, and mogwai surfaces it
-  as such where it can tell - but in most cases it cannot, because a real
-  failure shows up as a crashed or stalled PID rather than as a protocol event.
-  Under fire-and-forget instances tied to a parent process that is exactly what
-  the owner observes, so the silent-but-socket-alive failure the watchdog was
-  designed for was a property of the long-lived shared daemon being deleted. The
-  watchdog is not worthless; it is not structural.
-
-  Also relevant and not a problem statement: `reference/glossary.md` defines the
-  identity chain the code builds - now just run, tape and ledger, since the
-  lifecycle landing collapsed account, session and subscription out of it.
+- Problem statements: closed, zero down from seven, every one resolved into
+  landed code and its document deleted (the round-by-round record is git
+  history; the durable prose lives in `reference/` and `docs/`). The settled
+  premises, their 2026-08-16 amendments, the two-mode scoping, the who-decides
+  rule and the deliberate exclusions all moved to `reference/north-star.md`.
+  What survives here, because it is still owed or still guides work:
+  - The cadence document invalidated a currently-green gate, the 0.1603
+    duration ACF anchor, without naming a successor. That debt is real and
+    belongs to whichever spec descends from it.
+  - The per-instrument fitting question belongs to whoever builds each
+    preset: whether BTC and ETH genuinely differ enough to warrant different
+    values - the measured 2.8x dispersion spread across three crypto majors
+    suggests so, one month of one venue cannot settle it. The evidence
+    asymmetry stays relevant to preset authors: BTC, ETH and SOL have
+    trade-level archives, MNQ and MES had 15-second bars and nothing else,
+    so a CME preset's cadence is derived arithmetic and its clustering comes
+    from nowhere. Each preset says where its numbers came from. The DBN bulk
+    download has since widened what is on disk; re-derive the asymmetry from
+    the delivered data before repeating it.
+  - The dead-feed watchdog verdict, context for its build item above: a real
+    venue failure mostly shows up as a crashed or stalled PID rather than a
+    protocol event, and the silent-but-socket-alive failure the watchdog was
+    designed for was largely a property of the deleted long-lived daemon.
+    The watchdog is not worthless; it is not structural.
 
 - `an_armed_divergence_reaches_every_connection` flaked once at the piece-7
   landing gate, 2026-08-15: "market data generated after an armed StallData
@@ -2281,26 +2022,6 @@ group by any other route has no API for it, and none is owed until one is wanted
   marketable order actually walks. One probe extension over archives already
   on disk would settle it; until then the slippage magnitude stays an
   unquantified mechanism shared by every order type that slips.
-
-- Re-scope the acceptance-time market reading, or accept 9.8 ms inside a
-  submit. Re-measured 2026-08-14 after the checkpoint stride repair: miss median
-  9.782 ms, p99 9.987 ms, hit 0.096 ms, on host `bygg` in release. The stride
-  repair cut checkpoint positioning by 53x and moved this by under 3 ms, which
-  settles where the cost lives: the 300 s `VOL_WINDOW_NS` walk, not the restore.
-  Everything below still stands with 12.6 read as 9.8. Originally measured
-  2026-08-03 by `read_market_latency_stays_within_submit_budget`
-  after that instrument was corrected to time the cache miss rather than a
-  warmed hit. The cadence landing applied lever two of that gate's own
-  keep/revert rule (memoize per symbol per sweep interval, `MarketReadingCache`)
-  and not lever one (a shorter `VOL_WINDOW_NS` or an otherwise re-scoped
-  reading), so the 5 ms budget is met on the hit path (~0.13 ms) and missed by
-  2.5x on the miss path. Lever one moves the estimator's identity and re-blesses
-  the fill golden, which is why the cadence spec put it out of scope; it is
-  still owed. Two prices are being paid for that: the 12.6 ms itself, and the
-  loss of an exactly-stated slippage contract (the reading instant is not on the
-  wire, so both end-to-end gates now assert a bracket - see the doc comment on
-  `MarketReadingCache`). Putting the reading instant on `OrderFilled` would buy
-  the contract back cheaply and independently of the re-scoping.
 
 - The reconciliation exposure is a class, not one method: every report path
   mogwai relies on shares the silent-degrade property. The socket-backed guard
