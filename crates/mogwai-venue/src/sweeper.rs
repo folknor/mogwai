@@ -795,7 +795,7 @@ fn deliver(
         }
         let Some(reservation) = bound.lanes.reserve_swept(shape, emitted, originated) else {
             if refuse(&bound.lanes, subject.clone(), ts).is_err() {
-                closed.push(bound.id);
+                closed.push((bound.account_id.clone(), bound.id));
             }
             continue;
         };
@@ -804,7 +804,7 @@ fn deliver(
             .submit_produced(reservation, Instant::now(), None, mine)
             .is_err()
         {
-            closed.push(bound.id);
+            closed.push((bound.account_id.clone(), bound.id));
         }
     }
     // No ownership bookkeeping here, deliberately - but the reason changed in
@@ -819,8 +819,8 @@ fn deliver(
     // A lane whose receiver is gone is a connection that is already tearing
     // down; retiring it here means a wedged socket cannot make every later pass
     // pay for it.
-    for id in closed {
-        run.release_lanes(id);
+    for (account_id, id) in closed {
+        run.release_lanes(&account_id, id);
     }
 }
 
@@ -1004,23 +1004,33 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_frozen_account_is_still_an_account_this_run_holds() {
         let run = crate::run::test_run();
-        let (mine, _my_rx) = ExecLanes::detached();
-        let (theirs, _their_rx) = ExecLanes::detached();
+        let mine_account = AccountId::parse("MOGWAI-001").unwrap();
+        let theirs_account = AccountId::parse("MOGWAI-002").unwrap();
+        // An account is unattended until a connection of it is reading, so both
+        // are admitted and bound and only one is then released. A test that
+        // bound neither would find both frozen and prove nothing about the
+        // split the gate turns on.
+        let (_mine_attach, mine_conn) = crate::run::admit_for_test(&run, &mine_account, None);
+        let (_theirs_attach, theirs_conn) = crate::run::admit_for_test(&run, &theirs_account, None);
+        let (mine, _my_rx) = ExecLanes::detached_as(mine_conn.connection_id);
+        let (theirs, _their_rx) = ExecLanes::detached_as(theirs_conn.connection_id);
         let mine_id = run.bind_lanes(mine, "MOGWAI-001", None);
         run.bind_lanes(theirs, "MOGWAI-002", None);
-        // An account is minted frozen and thawed when a passenger resumes it,
-        // so both are resumed and only one is then released. A test that
-        // resumed neither would find both frozen and prove nothing about the
-        // split the gate turns on.
-        let first = run.account(&AccountId::parse("MOGWAI-001").unwrap());
-        let second = run.account(&AccountId::parse("MOGWAI-002").unwrap());
+        let first = run.account(&mine_account);
+        let second = run.account(&theirs_account);
         let symbol = mogwai_protocol::Symbol::from(run.default_symbol.as_ref());
-        drop(run.resume(&first, &symbol, 1).await);
-        drop(run.resume(&second, &symbol, 1).await);
+        drop(
+            run.resume(&first, &symbol, 1, mine_conn.resumed_from_freeze)
+                .await,
+        );
+        drop(
+            run.resume(&second, &symbol, 1, theirs_conn.resumed_from_freeze)
+                .await,
+        );
 
         // The first passenger leaves. Its ledger survives - that is what makes
-        // a reconnect a continuation - but it stops being attached.
-        run.release_lanes(mine_id);
+        // a reconnect a continuation - but it stops being attended.
+        run.release_lanes("MOGWAI-001", mine_id);
 
         let held = run.accounts();
         // The fixture's own premise first. If the release did not actually
@@ -1053,8 +1063,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_swept_fill_reaches_only_the_connection_that_submitted_the_order() {
         let run = crate::run::test_run();
-        let (mine, mut my_rx) = ExecLanes::detached();
-        let (theirs, mut their_rx) = ExecLanes::detached();
+        // Admitted through the real path, because a lane only becomes
+        // deliverable once its connection has been committed and reaches its
+        // reading boundary.
+        let mine_account = AccountId::parse("MOGWAI-001").unwrap();
+        let theirs_account = AccountId::parse("MOGWAI-002").unwrap();
+        let (_mine_attach, mine_conn) = crate::run::admit_for_test(&run, &mine_account, None);
+        let (_theirs_attach, theirs_conn) = crate::run::admit_for_test(&run, &theirs_account, None);
+        let (mine, mut my_rx) = ExecLanes::detached_as(mine_conn.connection_id);
+        let (theirs, mut their_rx) = ExecLanes::detached_as(theirs_conn.connection_id);
         run.bind_lanes(mine.clone(), "MOGWAI-001", None);
         run.bind_lanes(theirs.clone(), "MOGWAI-002", None);
         let order: mogwai_protocol::VenueOrderId = "V-1".into();
@@ -1118,8 +1135,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_venue_originated_fill_reaches_only_the_account_that_produced_it() {
         let run = crate::run::test_run();
-        let (mine, mut my_rx) = ExecLanes::detached();
-        let (theirs, mut their_rx) = ExecLanes::detached();
+        // Admitted through the real path, because a lane only becomes
+        // deliverable once its connection has been committed and reaches its
+        // reading boundary.
+        let mine_account = AccountId::parse("MOGWAI-001").unwrap();
+        let theirs_account = AccountId::parse("MOGWAI-002").unwrap();
+        let (_mine_attach, mine_conn) = crate::run::admit_for_test(&run, &mine_account, None);
+        let (_theirs_attach, theirs_conn) = crate::run::admit_for_test(&run, &theirs_account, None);
+        let (mine, mut my_rx) = ExecLanes::detached_as(mine_conn.connection_id);
+        let (theirs, mut their_rx) = ExecLanes::detached_as(theirs_conn.connection_id);
         run.bind_lanes(mine.clone(), "MOGWAI-001", None);
         run.bind_lanes(theirs.clone(), "MOGWAI-002", None);
 
@@ -1185,8 +1209,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_swept_account_snapshot_reaches_only_that_account() {
         let run = crate::run::test_run();
-        let (mine, mut my_rx) = ExecLanes::detached();
-        let (theirs, mut their_rx) = ExecLanes::detached();
+        // Admitted through the real path, because a lane only becomes
+        // deliverable once its connection has been committed and reaches its
+        // reading boundary.
+        let mine_account = AccountId::parse("MOGWAI-001").unwrap();
+        let theirs_account = AccountId::parse("MOGWAI-002").unwrap();
+        let (_mine_attach, mine_conn) = crate::run::admit_for_test(&run, &mine_account, None);
+        let (_theirs_attach, theirs_conn) = crate::run::admit_for_test(&run, &theirs_account, None);
+        let (mine, mut my_rx) = ExecLanes::detached_as(mine_conn.connection_id);
+        let (theirs, mut their_rx) = ExecLanes::detached_as(theirs_conn.connection_id);
         run.bind_lanes(mine.clone(), "MOGWAI-001", None);
         run.bind_lanes(theirs.clone(), "MOGWAI-002", None);
 

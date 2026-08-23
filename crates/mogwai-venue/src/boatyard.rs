@@ -64,7 +64,7 @@ pub(crate) struct BoatKey {
 /// `100` and `100.0000001` share a boat. Bounded first: a float cast saturates
 /// rather than wrapping, so an absurd speed would otherwise be silently
 /// replaced by a different one and then paced at it.
-fn quantize_speed(speed: f64) -> anyhow::Result<u64> {
+pub(crate) fn quantize_speed(speed: f64) -> anyhow::Result<u64> {
     if !speed.is_finite() || speed < 0.0 {
         anyhow::bail!("speed must be finite and non-negative");
     }

@@ -468,8 +468,16 @@ pub(crate) struct ExecLanes {
     closed: Arc<tokio::sync::Notify>,
 }
 
-/// Mints `ExecLanes::id`. Monotonic and never reused within a process, so a
-/// retired connection's id cannot alias a later one and misdirect its fills.
+/// Mints an `ExecLanes::id` for lanes built outside an admission, which is
+/// tests only. Monotonic and never reused within a process, so a retired
+/// connection's id cannot alias a later one and misdirect its fills.
+///
+/// A served connection takes its id from the registry instead, because the
+/// registry has to name the connection when it commits the admission and that
+/// happens long before any socket machinery exists. One id, minted once, so the
+/// connection record and the lanes that deliver for it cannot disagree about
+/// who they are.
+#[cfg(test)]
 static NEXT_LANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// The receiving halves of a detached `ExecLanes`, kept alive by its owner.
@@ -485,19 +493,43 @@ pub(crate) struct LaneReceivers {
 }
 
 impl ExecLanes {
+    /// Build the outbound machinery for the connection `id` names.
+    ///
+    /// The id is supplied rather than minted, and it is the one the admission
+    /// commit assigned. `process_order_cmd` is handed these lanes and nothing
+    /// else identifying the connection, so this is what makes an accepted order
+    /// attributable to the socket that submitted it - and it has to be the same
+    /// value the registry filed, or an order would be claimed for a connection
+    /// the registry does not know.
     pub(crate) fn new(
+        id: u64,
         held_tx: mpsc::UnboundedSender<HeldFrame>,
         prio_tx: mpsc::UnboundedSender<Outbound>,
         limits: AdmissionLimits,
     ) -> Self {
         Self {
-            id: NEXT_LANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            id,
             held_tx,
             prio_tx,
             held_budget: ByteBudget::new(limits.held_budget_bytes),
             prio_budget: FrameBudget::new(limits.lane_frames),
             closed: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// An `ExecLanes` for a test that has no admission behind it.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        held_tx: mpsc::UnboundedSender<HeldFrame>,
+        prio_tx: mpsc::UnboundedSender<Outbound>,
+        limits: AdmissionLimits,
+    ) -> Self {
+        Self::new(
+            NEXT_LANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            held_tx,
+            prio_tx,
+            limits,
+        )
     }
 
     /// The connection this outbound machinery belongs to.
@@ -516,6 +548,18 @@ impl ExecLanes {
         Self::detached_with(AdmissionLimits::default())
     }
 
+    /// `detached`, under an id the caller chose. For a test that admitted a
+    /// connection through the registry and needs lanes naming it.
+    #[cfg(test)]
+    pub(crate) fn detached_as(id: u64) -> (Self, LaneReceivers) {
+        let (held_tx, held_rx) = mpsc::unbounded_channel();
+        let (prio_tx, prio_rx) = mpsc::unbounded_channel();
+        (
+            Self::new(id, held_tx, prio_tx, AdmissionLimits::default()),
+            LaneReceivers { held_rx, prio_rx },
+        )
+    }
+
     /// `detached`, at budgets of the caller's choosing. Tests only in practice:
     /// it is how a unit test reaches a refusal without producing 8 MiB.
     #[cfg(test)]
@@ -523,7 +567,7 @@ impl ExecLanes {
         let (held_tx, held_rx) = mpsc::unbounded_channel();
         let (prio_tx, prio_rx) = mpsc::unbounded_channel();
         (
-            Self::new(held_tx, prio_tx, limits),
+            Self::for_test(held_tx, prio_tx, limits),
             LaneReceivers { held_rx, prio_rx },
         )
     }

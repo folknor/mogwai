@@ -173,15 +173,35 @@ pub(crate) struct Passenger {
     /// The account this passenger trades under. Resolved before the upgrade, so a
     /// frame cannot reach a handler before the account it books into exists.
     pub(crate) account_state: Arc<crate::run::Account>,
-    /// The identity this socket presented, kept on the bound lane so a later
-    /// claim on the same account can tell related sockets
-    /// from a stranger's. See `Run::evict_account`.
+    /// The identity this socket presented, so a later claim on the same account
+    /// can tell related sockets from a stranger's.
     pub(crate) presented_identity: Option<String>,
-    /// This socket's claim to be reading the account, given up when the socket
-    /// is done with it. An `Option` so `handle_socket` can give it up the
-    /// instant it has released its lane, rather than at the end of its own
-    /// teardown - the boat ticket above must outlive the writer's close frame,
-    /// and the account must not be swept for that long.
+    /// Whether this passenger's admission found its account unattended, and is
+    /// therefore a return from a freeze rather than an additional socket on a
+    /// live ledger.
+    ///
+    /// Sampled by the admission commit and carried here, because the commit is
+    /// the only instant that can answer it: committing is what makes the account
+    /// attended, so asking later always answers no. What rides on it is whether
+    /// `resume` retires the book this account holds off the river being joined,
+    /// which cancels resting orders and closes positions - not something an
+    /// ordinary second socket of a live account may do.
+    pub(crate) resumed_from_freeze: bool,
+    /// This connection's registration, given up when the socket is done with it.
+    ///
+    /// An `Option` so `handle_socket` can give it up the instant it has released
+    /// its lane, rather than at the end of its own teardown: the boat ticket
+    /// above must outlive the writer's close frame, and the account must not be
+    /// swept for that long.
+    ///
+    /// Dropping it removes the connection record, which gives up the ride, the
+    /// lanes and this connection's share of attendance in one transition. There
+    /// is no separate ride release any more - the old shape gave up the ride
+    /// here, the lane somewhere else and an attach count in a third place, at
+    /// three different moments, which is why each had to tolerate finding
+    /// nothing. It drops on the abandoned-upgrade path too, where the handler
+    /// never runs at all, so an upgrade that never reaches `handle_socket` still
+    /// ends with nothing reading the account.
     pub(crate) attach: Option<crate::run::Attach>,
     /// This passenger's claim on the process, taken in `ws_upgrade` before the
     /// 101 is returned and dropped with the passenger, after the writer has
@@ -205,29 +225,6 @@ pub(crate) struct Passenger {
         reason = "its LIVENESS is the signal; reading it would be meaningless"
     )]
     pub(crate) alive: tokio::sync::watch::Receiver<()>,
-}
-
-/// The ride ends here, and it has to be here rather than at the freeze.
-///
-/// A freeze needs every socket on the account gone, so an account riding two
-/// rivers that loses one passenger never freezes and would hold that ride
-/// forever. `BoatKey` carries no placement nonce, so a stale ride is
-/// indistinguishable from a live one as soon as any account boards that river
-/// at that speed again - and the sweeper would then drive this ledger off a
-/// boat it never boarded.
-///
-/// `Drop` rather than a call at the end of `handle_socket`: the passenger is
-/// also dropped when an upgrade is abandoned before the handler ever runs.
-///
-/// The `Attach` it carries rides along for the same reason and is the half
-/// the abandoned upgrade makes necessary: a socket is counted onto its account
-/// before the 101, so an upgrade that never reaches `handle_socket` still ends
-/// with nothing reading the account - and the departure then freezes it, which
-/// is what makes it TTL-collectable and takes it back out of the sweep.
-impl Drop for Passenger {
-    fn drop(&mut self) {
-        self.account_state.unsit(&self.ticket.boat().key());
-    }
 }
 
 /// Bind one socket to one river, or refuse before the 101.
@@ -368,6 +365,53 @@ pub(crate) async fn ws_upgrade(
         Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
     };
     let river = state.rivers.resolve_key(&profile, arm);
+    // Phase one of the admission, and the reason the rest of this handler can
+    // be written as ordinary fallible code. The reservation takes exclusive
+    // authority over this account without claiming anything and without
+    // touching the incumbent, so every step below may refuse or be cancelled
+    // and the live consumer pays nothing. Dropping it rolls the reservation
+    // back.
+    //
+    // The cadence rule is decided here rather than after the placement, which
+    // is what makes it a check the incumbent cannot lose to. The seat is
+    // knowable now: the river is resolved above and the speed quantizes without
+    // a boat.
+    let speed_micros = match crate::boatyard::quantize_speed(speed) {
+        Ok(speed_micros) => speed_micros,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+    let seat = crate::registry::Seat {
+        river: river.clone(),
+        speed_micros,
+    };
+    let mut reservation = match state
+        .run
+        .reserve_admission(account_id.as_str(), seat, resetting)
+    {
+        Ok(reservation) => reservation,
+        Err(crate::registry::AdmissionRefusal::CadenceConflict(held)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "account {account} is already seated on {symbol} at speed {held_speed}; a \
+                     ledger carries one cadence",
+                    account = account_id.as_str(),
+                    held_speed = held.speed(),
+                ),
+            )
+                .into_response();
+        }
+        Err(crate::registry::AdmissionRefusal::Busy) => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "account {account} has another connection being admitted; retry",
+                    account = account_id.as_str()
+                ),
+            )
+                .into_response();
+        }
+    };
     let ticket = match state
         .run
         .boatyard
@@ -395,112 +439,46 @@ pub(crate) async fn ws_upgrade(
                 .into_response();
         }
     };
-    // One ledger, one cadence. Two sockets on the default account can ride
-    // two rivers, but two speeds on one river would give that ledger two
-    // clocks.
+    // Phase three, and the sole linearization point of the whole upgrade. Every
+    // fallible step is behind us: the shape resolved, the account funded, the
+    // speed quantized, the arm normalized and the boat placed. So the commit
+    // installs this connection, selects whoever it displaces and takes the
+    // continuity handoff in one transaction under the registry lock.
     //
-    // Unconditional, including for a frozen account. A return at a new speed
-    // still passes, because a frozen account has no passengers left; routing
-    // the frozen
-    // case around the check instead would reopen the race the check exists to
-    // close, since an account is created frozen and does not attach until its
-    // socket reaches `resume` further down - so two first connections would
-    // both read themselves frozen and both board.
-    //
-    // Taken on the existing ledger, before the claim, and skipped entirely when
-    // the claim is going to reset: a reset ledger has no passengers at all, so
-    // asking the outgoing one would refuse exactly the reconnect-at-a-new-speed
-    // the reset knob exists to serve. Where the check does apply, the ride is
-    // recorded here rather than merely tested, so nothing can slip between the
-    // test and the claim, and this is the last fallible step, so a ride recorded
-    // here is never abandoned.
-    let mut prepared_existing: Option<(Arc<crate::run::Account>, crate::run::Attach)> = None;
-    if !resetting {
-        // The account `claim_account` is about to return, resolved before the eviction so
-        // this socket can be counted on to the account before the incumbent is
-        // closed. Without that the incumbent's teardown could win the race to
-        // an account with no lane and no attach, freeze it, and make the
-        // newcomer's `resume` retire a book it had no business retiring - which
-        // would be a nondeterministic behaviour change, not a refusal. The
-        // resetting branch needs none of this: the ledger it produces is a
-        // fresh one, so a freeze in that window retires nothing.
-        let existing = state.run.account(&account_id);
-        if let Err(sitting) = existing.try_sit(ticket.boat().key()) {
-            let sitting_speed = sitting.speed();
-            return (
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "account {account} is already seated on {symbol} at speed {sitting_speed}; a \
-                     ledger carries one cadence",
-                    account = account_id.as_str()
-                ),
-            )
-                .into_response();
-        }
-        // The guard is taken and held, never raised as a bare count: an
-        // abandoned upgrade or a cancelled future between here and the 101 then
-        // lowers it on the way out instead of stranding the account
-        // permanently counted-in.
-        let attach = state.run.attach(&existing);
-        prepared_existing = Some((existing, attach));
-    }
-    // Eviction happens here, with every refusal already decided. `resetting`
-    // was evaluated once, above, and is handed to `claim_account` rather than
-    // re-derived there, so this call cannot decide to reset an account the
-    // funding and cadence checks were taken against on the assumption that it
+    // Nothing refuses after this point, which is the property the old ordering
+    // could not have. It evicted and then re-ran a cadence check against a
+    // ledger the eviction had just minted, so an upgrade losing that race
+    // refused a consumer whose incumbent it had already closed. There is no
+    // window here for that: the reservation held this account exclusively from
+    // before the placement, so no other upgrade can have moved the ledger
+    // underneath us.
+    let (attach, committed) = state.run.commit_admission(
+        &mut reservation,
+        callsign,
+        Some(ticket.boat().key()),
+        claimed,
+    );
+    // The ledger side. `resetting` was evaluated once, above, and is handed to
+    // `claim_account` rather than re-derived, so this cannot decide to reset an
+    // account the funding check was taken against on the assumption that it
     // would not.
     let account_state = state
         .run
         .claim_account(&account_id, claimed, callsign, resetting);
-    let attach = match prepared_existing {
-        // The ordinary non-resetting path: the ledger checked above is the one
-        // the claim returned, so its ride and its attach carry straight into
-        // the passenger.
-        Some((existing, attach)) if Arc::ptr_eq(&existing, &account_state) => Some(attach),
-        // The ledger moved out from under the check. `resetting` is false here,
-        // so `claim_account` did not reopen the account itself: only another upgrade
-        // racing this same account inside this window can have replaced the map
-        // entry. The attach is given up right here - dropping the guard
-        // departs the account it was taken on, so nothing is stranded counted-in
-        // - and the ride recorded on `existing` is left behind deliberately, since
-        // `existing` is no longer reachable through the account map and dies
-        // with this Arc. That is stated rather than relied on: the ride is
-        // harmless because the ledger holding it is unreachable, not because
-        // anything releases it.
-        //
-        // The resetting path arrives here too, having checked and attached
-        // nothing yet, and takes the same branch below.
-        _ => None,
-    };
-    let attach = match attach {
-        Some(attach) => attach,
-        None => {
-            // A ledger this call minted or reset has no passengers, so this cannot
-            // refuse for the cadence rule. It can still lose to another upgrade
-            // racing the same account, which is a refusal after the eviction and
-            // the one case the ordering above cannot reach - it needs two
-            // upgrades interleaved inside this window, where the pre-claim check
-            // needs none.
-            if let Err(sitting) = account_state.try_sit(ticket.boat().key()) {
-                let sitting_speed = sitting.speed();
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "account {account} is already seated on {symbol} at speed \
-                         {sitting_speed}; a ledger carries one cadence",
-                        account = account_state.account_id.as_str()
-                    ),
-                )
-                    .into_response();
-            }
-            // Counted onto the account here instead, since the branch above
-            // never ran. Either way the socket is counted on before the upgrade
-            // completes and off it when its passenger drops, which is what keeps
-            // the account attached across the gap before `bind_lanes` and what
-            // freezes it if this upgrade is abandoned and never binds anything.
-            state.run.attach(&account_state)
-        }
-    };
+    // Outside the registry lock, deliberately: closing a lane sends on a
+    // channel, and the commit hands the displaced set out rather than closing
+    // it, so a send can never block while the registry mutex is held.
+    let displaced = state
+        .run
+        .close_displaced(account_id.as_str(), &committed.displaced);
+    if displaced > 0 {
+        tracing::info!(
+            account = %account_id.as_str(),
+            displaced,
+            reset = resetting,
+            "a new connection claimed an existing account",
+        );
+    }
     // The ledger-side install, on the account the claim actually returned.
     state
         .run
@@ -512,6 +490,7 @@ pub(crate) async fn ws_upgrade(
         duration_ms: query.duration_ms,
         account_state,
         presented_identity: query.callsign.clone(),
+        resumed_from_freeze: committed.resumed_from_freeze,
         attach: Some(attach),
         // Before the 101, not inside the spawned handler. See the field.
         alive: state.run.passenger_guard(),
@@ -1149,7 +1128,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
     let (out_tx, out_rx) = mpsc::channel(256);
     let (held_tx, held_rx) = mpsc::unbounded_channel();
     let (prio_tx, prio_rx) = mpsc::unbounded_channel();
-    let lanes = ExecLanes::new(held_tx, prio_tx, build_admission_limits(&state.cfg));
+    // The id comes from the admission that produced this passenger, so the
+    // connection record the registry filed and the lanes that deliver for it
+    // name the same connection.
+    let lanes = ExecLanes::new(
+        passenger
+            .attach
+            .as_ref()
+            .expect("a passenger reaching its handler still holds its admission")
+            .connection_id(),
+        held_tx,
+        prio_tx,
+        build_admission_limits(&state.cfg),
+    );
     let (command_tx, command_rx) = mpsc::channel(state.cfg.pending_command_acts);
     let boat_sim = passenger.ticket.boat().sim;
     let dispatcher = spawn_command_dispatcher(
@@ -1181,16 +1172,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
         passenger.account_state.account_id.as_str(),
         passenger.presented_identity.as_deref(),
     );
-    // Attached from here, which is what un-freezes the account and puts it back
-    // in the sweep. Bound after the lane, so anything the resume retires has a
-    // lane to be delivered on; a returning socket learns what its absence cost
-    // rather than discovering a cancelled order by querying.
+    // Reading from here, which is what puts the account back in the sweep and
+    // retires the continuity handoff this connection has held since its
+    // admission committed. Run after the lane is bound, so anything the resume
+    // retires has a lane to be delivered on: a returning socket learns what its
+    // absence cost rather than discovering a cancelled order by querying.
     let resumed = state
         .run
         .resume(
             &passenger.account_state,
             &passenger.symbol,
             crate::config::sim_now_ns(boat_sim),
+            passenger.resumed_from_freeze,
         )
         .await;
     if !resumed.is_empty() {
@@ -1370,13 +1363,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
             }
         }
     }
-    state.run.release_lanes(lane_id);
+    state
+        .run
+        .release_lanes(passenger.account_state.account_id.as_str(), lane_id);
     // Given up here rather than with the passenger, which outlives this for as
-    // long as the writer needs to flush its close frame: the account is no
-    // longer being read the moment its lane is gone, and leaving it counted-in
-    // for the writer's grace would keep it in the sweep for that long. The
-    // passenger still carries the guard, so an abandoned upgrade that never got
-    // here is covered by the drop.
+    // long as the writer needs to flush its close frame: the account stops being
+    // read the moment its connection record is gone, and holding it for the
+    // writer's grace would keep it in the sweep for that long. The passenger
+    // still carries the guard, so an abandoned upgrade that never got here is
+    // covered by the drop instead - and the release is idempotent, so the two
+    // paths overlapping costs nothing.
     drop(passenger.attach.take());
     pump.abort();
     dispatcher.abort();

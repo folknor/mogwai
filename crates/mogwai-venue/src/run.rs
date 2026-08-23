@@ -4,12 +4,9 @@
 //! State owned by one venue process: one ledger, and keyed paced boats over
 //! many rivers.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 use mogwai_engine::{Engine, EngineConfig};
@@ -112,65 +109,17 @@ pub(crate) struct Account {
     /// the engine books a fill, and the risk ledger judges the equity that fill
     /// produced.
     pub(crate) risk: Mutex<crate::risk::RiskLedger>,
-    /// Whether anybody is reading this account, and since when.
+    /// Who is reading this account.
     ///
-    /// `None` while a connection is attached. `Some(wall_instant)` once the last
-    /// one went away, which freezes the account outright: it is not swept, not marked,
-    /// not funded and not judged against its policy until a socket returns.
+    /// Whether the account is frozen, which boats it rides, how many sockets
+    /// are on their way in and which lanes a frame reaches are all derived from
+    /// the connection records held here, so none of them can disagree with
+    /// another. Four fields used to carry parts of that answer with the
+    /// consistency rules in prose; see `crate::registry`.
     ///
-    /// This is a deliberate departure from a real venue, where being away is no
-    /// defence against liquidation. Mogwai exists to exercise a consumer's live
-    /// path rather than to simulate an account nobody is trading, and the
-    /// consequence to state in any claim is that a run spanning a disconnect has
-    /// a gap in its risk history.
-    ///
-    /// A WALL instant rather than a simulated one, and the reason is that there
-    /// is no simulated clock while frozen: the boat that carried one wound down
-    /// with the last socket. This is what the TTL is measured against.
-    pub(crate) frozen_since: Mutex<Option<std::time::Instant>>,
-    /// Which boats this account is currently riding, and how many passengers
-    /// ride each. One passenger rides one boat; the default account can
-    /// have two unnamed sockets on two symbols and therefore two boats. The
-    /// sweeper applies a boat's walk only to accounts riding it, so two
-    /// cadences on one river cannot double-fill one ledger.
-    ///
-    /// Counted rather than a set, because two unnamed sockets may share one
-    /// river at one speed and therefore one boat. A set would let the first of
-    /// them to close take the ride away from under the second, which stops
-    /// the sweeper applying that boat to a ledger somebody is still trading.
-    ///
-    /// A ride ends when the passenger drops, not when the account
-    /// freezes: a freeze needs every socket gone, and the two-socket shape
-    /// above would otherwise leave a ride held by a passenger that ended.
-    /// The key carries no placement nonce, so a stale ride would be
-    /// indistinguishable from a live one the moment any account boarded that
-    /// river at that speed again.
-    seated_on: Mutex<HashMap<crate::boatyard::BoatKey, usize>>,
-    /// How many sockets are attached to this account and have not yet finished
-    /// tearing down, counted from the instant the upgrade is decided rather
-    /// than from the instant a lane is bound.
-    ///
-    /// The lane table alone cannot answer "is anybody reading this account",
-    /// and the gap is not theoretical. An eviction retires the incumbent's lane
-    /// eagerly, and the newcomer binds its own only once `handle_socket` runs -
-    /// which is after the 101 and never at all if the consumer abandons the
-    /// upgrade. Between those two instants the account has no lane, and a freeze
-    /// decided on the lane table alone would either fire on a live account or,
-    /// as it did, never fire at all and leave the ledger un-frozen, un-swept-out
-    /// and un-collectable for the life of the process.
-    ///
-    /// Raised by `Run::attach` before the upgrade completes and lowered by
-    /// `Passenger`'s `Drop`, which runs on the abandoned-upgrade path too.
-    /// So it counts attaches, and every attach has exactly one departure.
-    ///
-    /// Only unit tests reach that abandoned-upgrade path, and the attempt to
-    /// reach it over a real socket has already been made: sixteen connections
-    /// writing a well-formed upgrade and then resetting with `SO_LINGER` at
-    /// zero all landed on the handled path instead. On loopback the venue has
-    /// read the request, written the 101 and started the handler before the
-    /// reset arrives, and the race sits inside hyper's upgrade handoff, so
-    /// there is no interval to parameterize. Do not spend another round trying.
-    attachments: AtomicUsize,
+    /// Held by the account so the ordinary questions still read as questions
+    /// about an account. The registry is run-wide and shared.
+    pub(crate) registry: Arc<crate::registry::ConnectionRegistry>,
     /// Transport havoc, per account rather than per venue.
     ///
     /// These corrupt what one connection receives rather than what the
@@ -200,161 +149,24 @@ impl Account {
     /// How long this account has been unattended, or `None` while a connection
     /// is reading it.
     pub(crate) fn frozen_for(&self) -> Option<std::time::Duration> {
-        self.frozen_since
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .map(|since| since.elapsed())
+        self.registry.frozen_for(self.account_id.as_str())
     }
 
     /// Whether this account is currently unattended, and therefore not swept,
     /// marked, funded or judged.
+    ///
+    /// Derived from the connection table, so it cannot drift from it. An
+    /// account is attended while any connection of it is reading, and also
+    /// while a committed admission holds a continuity handoff - the eviction
+    /// window in which the incumbent is gone and its successor has not begun
+    /// reading is not an unattended account. See `crate::registry`.
     pub(crate) fn is_frozen(&self) -> bool {
-        self.frozen_since
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
+        self.registry.is_frozen(self.account_id.as_str())
     }
 
-    /// Freeze the account, unless a connection is still reading it.
-    ///
-    /// Called when a lane is retired, so it must ask whether ANY lane is left
-    /// rather than assume the one that went away was the last: an eviction
-    /// retires the incumbent while the newcomer is already binding, and freezing
-    /// an account somebody just claimed would leave it unswept until its next
-    /// reconnect.
-    fn freeze(&self) {
-        let mut frozen = self
-            .frozen_since
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if frozen.is_none() {
-            *frozen = Some(std::time::Instant::now());
-            self.seated_on
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
-            tracing::debug!(
-                account = %self.account_id.as_str(),
-                "account frozen: nobody is reading it, so it is not swept until a socket returns",
-            );
-        }
-    }
-
-    /// Record one passenger riding `key`, or name the boat this account already
-    /// rides on that river at a different speed.
-    ///
-    /// The only way to record a ride, and unconditional on the freeze state on
-    /// purpose. A frozen account has an empty map - its passengers all died with
-    /// their sockets -
-    /// so a return at a new speed passes the check anyway, and routing a
-    /// frozen account past it instead would reopen the race this lock exists
-    /// to close: an account is created frozen and only attaches once its
-    /// socket reaches `resume`, so two first connections would both find
-    /// themselves frozen and both board unchecked.
-    ///
-    /// The check and the insert share the lock, so of two sockets racing two
-    /// speeds exactly one wins.
-    pub(crate) fn try_sit(
-        &self,
-        key: crate::boatyard::BoatKey,
-    ) -> Result<(), crate::boatyard::BoatKey> {
-        let mut seated = self
-            .seated_on
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(other) = seated
-            .keys()
-            .find(|sitting| {
-                sitting.river() == key.river() && sitting.speed_micros() != key.speed_micros()
-            })
-            .cloned()
-        {
-            return Err(other);
-        }
-        *seated.entry(key).or_insert(0) += 1;
-        Ok(())
-    }
-
-    /// Give up one passenger's ride on `key`.
-    ///
-    /// The boat stays ridden until the LAST passenger leaves, which is why the
-    /// map counts. Tolerant of a key it does not hold: a freeze clears the map,
-    /// and the freeze fires from lane release while the passenger that held the
-    /// ride is still unwinding.
-    pub(crate) fn unsit(&self, key: &crate::boatyard::BoatKey) {
-        let mut seated = self
-            .seated_on
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(passengers) = seated.get_mut(key) {
-            *passengers -= 1;
-            if *passengers == 0 {
-                seated.remove(key);
-            }
-        }
-    }
-
-    /// Whether this account is riding `key`.
+    /// Whether this account is riding `key`, derived from its connections.
     pub(crate) fn is_seated_on(&self, key: &crate::boatyard::BoatKey) -> bool {
-        self.seated_on
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(key)
-    }
-
-    /// How many sockets are still attached to this account. See the field of
-    /// the same name.
-    fn attachments(&self) -> usize {
-        self.attachments.load(Ordering::Acquire)
-    }
-
-    /// Count one socket in, before its upgrade completes.
-    fn attach(&self) {
-        self.attachments.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// Count one socket out. Called from `Passenger`'s `Drop`, so it runs
-    /// for an abandoned upgrade as well as for a socket that traded.
-    fn depart(&self) {
-        // Saturating, never wrapping, which is why this is a loop and not
-        // a `fetch_sub`: an unbalanced departure would wrap the count to
-        // `usize::MAX` and leave the account looking permanently attended,
-        // which is the exact failure this counter exists to close.
-        //
-        // It also asserts the invariant it protects, because a saturating loop
-        // alone silently absorbs the bug it fears: production keeps the safe
-        // floor, and a debug build says which account went unbalanced. It is a
-        // `debug_assert` deliberately: the workspace runs its tests in both
-        // profiles, and a hard assert here would turn an unbalanced departure
-        // into a release-mode abort of the serving path.
-        let mut live = self.attachments.load(Ordering::Acquire);
-        debug_assert!(
-            live > 0,
-            "an attach departed twice on account {account}: every attach has exactly one \
-             departure",
-            account = self.account_id.as_str()
-        );
-        while live > 0 {
-            match self.attachments.compare_exchange_weak(
-                live,
-                live - 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return,
-                Err(seen) => live = seen,
-            }
-        }
-    }
-
-    /// Clear the freeze stamp: something is reading this account again. Not
-    /// the attach refcount, which `attach` and `depart` carry - this is the
-    /// stamp `frozen_for` measures, and `resume` is what clears it.
-    fn clear_freeze(&self) {
-        *self
-            .frozen_since
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.registry.is_seated_on(self.account_id.as_str(), key)
     }
 
     pub(crate) fn act_ms(&self, class: CommandClass) -> u64 {
@@ -701,21 +513,32 @@ struct AccountOpeningTerms {
     fill_band_max_ticks: u32,
 }
 
-/// One socket's claim to be reading an account, from before the 101 until the
-/// socket is finished with it.
+/// One connection's registration, from the instant its admission commits until
+/// the socket is finished with it.
 ///
 /// A guard object rather than a pair of calls, because the failure it closes is
 /// the one where the release never runs: an upgrade abandoned after the 101
-/// never reaches `handle_socket`, and an account left counted-in forever is
-/// never frozen, never TTL-collected and swept while riding no boat.
+/// never reaches `handle_socket`, and a connection left registered forever
+/// leaves its account never frozen, never TTL-collected and swept while riding
+/// no boat.
 ///
-/// Minted only by `Run::attach`, which raises the count and constructs this in
-/// one expression. `Run::depart` is private to this module, so there is no way
-/// to raise the count without owning the guard that lowers it, and no way to
-/// lower it twice.
+/// Dropping it removes the connection record, which gives up its ride and its
+/// lanes in the same transition and re-derives whether the account is still
+/// attended. There is no way to register a connection without owning the guard
+/// that removes it, and no way to remove it twice.
 pub(crate) struct Attach {
-    run: Arc<Run>,
-    account: Arc<Account>,
+    registry: Arc<crate::registry::ConnectionRegistry>,
+    account_id: String,
+    connection_id: u64,
+}
+
+impl Attach {
+    /// This connection's identity, which is also the id its lanes carry, so an
+    /// order accepted on them is attributable to the connection that submitted
+    /// it.
+    pub(crate) fn connection_id(&self) -> u64 {
+        self.connection_id
+    }
 }
 
 /// The account only: the run behind it holds every ledger on the venue, which
@@ -723,14 +546,15 @@ pub(crate) struct Attach {
 impl std::fmt::Debug for Attach {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Attach")
-            .field("account_id", &self.account.account_id.as_str())
+            .field("account_id", &self.account_id)
+            .field("connection_id", &self.connection_id)
             .finish_non_exhaustive()
     }
 }
 
 impl Drop for Attach {
     fn drop(&mut self) {
-        self.run.depart(&self.account);
+        self.registry.release(&self.account_id, self.connection_id);
     }
 }
 
@@ -817,17 +641,15 @@ pub(crate) struct Run {
     /// which clone a fault arrived on - so an injected fault and a generated one
     /// take the same teardown, which is the whole point of injecting it.
     fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
-    /// Every live connection's outbound lanes, so venue-originated output - a
-    /// trigger fill nobody commanded - reaches the connection it belongs to.
+    /// Who is reading which account, and the lanes their output reaches.
     ///
-    /// This was a broadcast target: the argument was that with a single ledger a
-    /// fill is a fact about the run rather than about whichever socket submitted
-    /// the order. That is true of the ledger and false of the consumer, which is
-    /// told about orders it never placed. Delivery is now attributed through
-    /// `order_owners` below; the table stays a list of every live connection
-    /// because venue-wide frames (the account snapshot, a venue fault) still go
-    /// to all of them.
-    lanes: Mutex<Vec<BoundLane>>,
+    /// One structure rather than the four this replaced, so the answers cannot
+    /// disagree: whether an account is frozen, which boats it rides, whether a
+    /// socket is on its way in, and where a venue-originated frame goes are all
+    /// derived from the same connection records. It also owns the admission
+    /// reservation, which is what makes an upgrade and the eviction it performs
+    /// one transaction. See `crate::registry`.
+    pub(crate) registry: Arc<crate::registry::ConnectionRegistry>,
     /// Which connection submitted each live order, so a sweep-produced fill goes
     /// to the account that owns it and to nobody else.
     ///
@@ -913,7 +735,7 @@ impl Run {
             complete_tx,
             passengers_tx,
             fault_tx,
-            lanes: Mutex::new(Vec::new()),
+            registry: crate::registry::ConnectionRegistry::new(),
             order_owners: Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -1000,13 +822,11 @@ impl Run {
                 opening,
                 self.started_ns,
             )),
-            // Born frozen, at the instant it was created. An account with no
-            // connection is not being read whether it was just opened or just
-            // abandoned, and starting it attached would make a POSTed account
-            // nobody ever connects to immortal.
-            frozen_since: Mutex::new(Some(std::time::Instant::now())),
-            seated_on: Mutex::new(HashMap::new()),
-            attachments: AtomicUsize::new(0),
+            // Born frozen, because the registry has no connection for it yet.
+            // An account with no connection is not being read whether it was
+            // just opened or just abandoned, and starting it attended would
+            // make a POSTed account nobody ever connects to immortal.
+            registry: Arc::clone(&self.registry),
             dark: HavocWindow::new(),
             stall: HavocWindow::new(),
             delay_ms: AtomicU64::new(0),
@@ -1017,6 +837,10 @@ impl Run {
             modify_ack_ms: AtomicU64::new(0),
             cancel_ack_ms: AtomicU64::new(0),
         });
+        // The registry learns the account here, at its mint, so every derived
+        // answer about it has an entry to read rather than a missing one to
+        // guess from.
+        self.registry.ensure(account_id.as_str());
         arms.all.open_transport(&minted);
         if let Some(pending) = &pending {
             pending.open_transport(&minted);
@@ -1209,19 +1033,12 @@ impl Run {
         // consumer opening two sockets on two symbols names no account on either,
         // so both land on the default and the second closed the first - which
         // is a consumer evicting itself.
-        let displaced = if claimed {
-            self.evict_account(account_id.as_str(), callsign)
-        } else {
-            0
-        };
-        if displaced > 0 {
-            tracing::info!(
-                account = %account_id.as_str(),
-                displaced,
-                reset = self.reset_account_on_reconnect,
-                "a new connection claimed an existing account",
-            );
-        }
+        // Eviction is no longer performed here. It is selected by the admission
+        // commit, in the same transaction that installs the newcomer, and
+        // carried out by the caller once the registry lock is released - so a
+        // refusal can no longer arrive after an incumbent has been closed. What
+        // remains here is the ledger question.
+        let _ = (claimed, callsign);
         if resetting {
             self.reopen(account_id);
         }
@@ -1329,22 +1146,17 @@ impl Run {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|(_, account_state)| {
-                // An attach is the second half of "nobody is reading this", and
-                // asking only the freeze clock left the two predicates able to
-                // disagree. `freeze_if_unattended` refuses to freeze an account
-                // an attached socket is still on; this asked a stale freeze
-                // stamp, which a returning socket does not clear until its
-                // handler reaches `resume` - so a consumer reclaiming a
-                // long-frozen ledger could have it collected out from under it
-                // between the attach and the clearing of the freeze, and would
-                // silently be
-                // handed a fresh one instead of the book it came back for. The
-                // window is the whole upgrade, which is the 101, a task spawn
-                // and an instrument registration wide.
-                account_state.attachments() == 0
-                    && account_state
-                        .frozen_for()
-                        .is_some_and(|unattended| unattended >= ttl)
+                // One predicate, because there is now only one place that knows
+                // whether anybody is reading this account. `frozen_for` answers
+                // `None` for an attended account, and a committed admission
+                // that has not begun reading counts as attended - so a consumer
+                // reclaiming a long-frozen ledger can no longer have it
+                // collected out from under it between its admission and its
+                // first read. That window used to be the whole upgrade wide,
+                // and it was open because two predicates asked two structures.
+                account_state
+                    .frozen_for()
+                    .is_some_and(|unattended| unattended >= ttl)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -1378,6 +1190,11 @@ impl Run {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, owner| owner != account_id);
+        // The registry entry goes with the ledger it describes, including the
+        // timeline it was committed to. A collected account that came back
+        // would otherwise be refused for naming a different world than the one
+        // its predecessor left.
+        self.registry.forget(account_id);
     }
 
     /// Resolve a risk policy the way a symbol resolves: total, three steps,
@@ -1483,9 +1300,7 @@ impl Run {
             // like any other, which is also what makes it collectable: an
             // account opened and then abandoned must not outlive the TTL
             // just because no socket ever reached it.
-            frozen_since: Mutex::new(Some(std::time::Instant::now())),
-            seated_on: Mutex::new(HashMap::new()),
-            attachments: AtomicUsize::new(0),
+            registry: Arc::clone(&self.registry),
             dark: HavocWindow::new(),
             stall: HavocWindow::new(),
             delay_ms: AtomicU64::new(0),
@@ -1496,6 +1311,7 @@ impl Run {
             modify_ack_ms: AtomicU64::new(0),
             cancel_ack_ms: AtomicU64::new(0),
         });
+        self.registry.ensure(account_id.as_str());
         arms.all.open_transport(&opened);
         if let Some(pending) = &pending {
             pending.open_transport(&opened);
@@ -1660,111 +1476,67 @@ impl Run {
         &self,
         lanes: ExecLanes,
         account_id: &str,
-        callsign: Option<&str>,
+        _callsign: Option<&str>,
     ) -> u64 {
         let id = lanes.id();
-        self.locked_lanes().push(BoundLane {
-            id,
-            account_id: account_id.to_owned(),
-            callsign: callsign.map(str::to_owned),
-            lanes,
-        });
+        // The reading boundary. This is where the connection stops being a
+        // committed admission holding a continuity handoff and starts being an
+        // attended reader, so it is also where the handoff is retired.
+        self.registry.begin_reading(account_id, id, lanes);
         id
     }
 
     /// Retire one connection. The account's order claims survive: an account
     /// outlives every connection that ever presented it, so a returning socket
     /// must still find its own orders attributed to it.
-    pub(crate) fn release_lanes(&self, id: u64) {
-        let account = {
-            let mut lanes = self.locked_lanes();
-            let account = lanes
-                .iter()
-                .find(|bound| bound.id == id)
-                .map(|bound| bound.account_id.clone());
-            lanes.retain(|bound| bound.id != id);
-            account
+    ///
+    /// One transition rather than the several this replaced. The connection
+    /// record carries its ride and its lanes, so removing it gives all of them
+    /// up at once and attendance is re-derived from what is left. That is what
+    /// retired the tolerance the old shape needed: a ride used to be released
+    /// separately from a lane and from an attach count, at different moments,
+    /// so each release had to accept finding nothing.
+    pub(crate) fn release_lanes(&self, account_id: &str, id: u64) {
+        self.registry.release(account_id, id);
+    }
+
+    /// Phase one of an admission: take exclusive authority over this account so
+    /// the fallible work can happen without holding any lock.
+    ///
+    /// Nothing is claimed and nobody is evicted here. That is the whole point of
+    /// the split: an upgrade that goes on to fail placement, or has its future
+    /// cancelled, costs the incumbent nothing, where a check-then-claim shape
+    /// had to evict before it knew whether the newcomer could be served.
+    pub(crate) fn reserve_admission(
+        &self,
+        account_id: &str,
+        seat: crate::registry::Seat,
+        resetting: bool,
+    ) -> Result<crate::registry::Reservation, crate::registry::AdmissionRefusal> {
+        self.registry.reserve(account_id, seat, resetting)
+    }
+
+    /// Phase three: install the connection, and hand back both the guard that
+    /// removes it and whatever it displaced.
+    ///
+    /// The displaced lanes are returned rather than closed here, because closing
+    /// one sends on a channel: doing that under the registry lock would make
+    /// every consumer's teardown cost a registry acquisition. The caller closes
+    /// them once this has returned.
+    pub(crate) fn commit_admission(
+        &self,
+        reservation: &mut crate::registry::Reservation,
+        callsign: Option<&str>,
+        ride: Option<crate::boatyard::BoatKey>,
+        claimed: bool,
+    ) -> (Attach, crate::registry::Committed) {
+        let committed = self.registry.commit(reservation, callsign, ride, claimed);
+        let attach = Attach {
+            registry: Arc::clone(&self.registry),
+            account_id: reservation.account_id().to_owned(),
+            connection_id: committed.connection_id,
         };
-        // A lane this call did not find was retired by an eviction, and the
-        // freeze that owes is the departing socket's rather than this one's -
-        // see `freeze_if_unattended` and `Passenger`'s `Drop`. Retiring a
-        // lane is therefore an opportunity to freeze, never the only one.
-        let Some(account) = account else {
-            return;
-        };
-        let account_state = self
-            .accounts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(account.as_str())
-            .map(Arc::clone);
-        if let Some(account_state) = account_state {
-            self.freeze_if_unattended(&account_state);
-        }
-    }
-
-    /// Count one socket in, from the instant `/ws` decides to attach it, and
-    /// hand back the guard that counts it out again.
-    ///
-    /// The count is only reachable through the guard, which is the whole reason
-    /// this returns one rather than pairing with a `depart` call. A raise and a
-    /// release written as two statements leave a window - a panic, or an
-    /// `async fn` cancelled by a dropped connection, between the two - in which
-    /// the count is raised and nothing will ever lower it, and an account
-    /// permanently counted-in is exactly the never-frozen, never-collected,
-    /// still-swept ledger this counter exists to close. Returning the guard
-    /// makes that window unrepresentable: there is no way to raise the count
-    /// without simultaneously owning the thing that lowers it.
-    ///
-    /// Taken under the lane lock, which is what serializes an attach against
-    /// a departing socket's freeze decision: the two questions
-    /// `freeze_if_unattended` asks are answered against one state of the venue
-    /// rather than two.
-    pub(crate) fn attach(self: &Arc<Self>, account: &Arc<Account>) -> Attach {
-        let lanes = self.locked_lanes();
-        account.attach();
-        drop(lanes);
-        Attach {
-            run: Arc::clone(self),
-            account: Arc::clone(account),
-        }
-    }
-
-    /// Freeze `account` if nothing is reading it any more.
-    ///
-    /// Two conditions, and both are load-bearing. No lane is bound to the
-    /// account, AND no attached socket is still on its way to binding one. The
-    /// lane table alone says "attached" one instant too long for an evicted
-    /// socket and one instant too short for an attached one, so a freeze
-    /// decided on it alone either fires on a live account or - the defect this
-    /// closes - never fires at all: an eviction retires the incumbent's lane
-    /// eagerly, so the incumbent's own teardown found no lane, resolved no
-    /// account and returned without freezing, and a newcomer that never bound
-    /// left the account attached with zero connections. That account is then
-    /// never TTL-collected (`collect_expired_accounts` filters on
-    /// `frozen_for()`) and is still swept while riding no boat, which cancels
-    /// its resting orders - the exact opposite of the contract that a frozen
-    /// account's book survives for the socket that returns.
-    ///
-    /// Idempotent: `freeze` is a no-op on an account already frozen, so every
-    /// path that could be the last one may call this.
-    fn freeze_if_unattended(&self, account: &Account) {
-        let lanes = self.locked_lanes();
-        let account_id = account.account_id.as_str();
-        if account.attachments() > 0 || lanes.iter().any(|bound| bound.account_id == account_id) {
-            return;
-        }
-        account.freeze();
-        drop(lanes);
-    }
-
-    /// One socket has finished with `account`: give up its attach and
-    /// freeze the account if it was the last thing reading it.
-    ///
-    /// Private, and reached only by dropping an `Attach`: see `attach`.
-    fn depart(&self, account: &Account) {
-        account.depart();
-        self.freeze_if_unattended(account);
+        (attach, committed)
     }
 
     /// Attach an account to the river a socket has just bound, and put it in a
@@ -1795,14 +1567,20 @@ impl Run {
     /// anyway: nothing is stranded and no clock has been left behind.
     ///
     /// Returns the events the retirement produced, for the caller to deliver.
+    ///
+    /// `returning` is supplied by the admission that produced this passenger
+    /// rather than asked here, and it has to be: committing an admission is what
+    /// makes an account attended, so by the time this runs the account is never
+    /// frozen no matter how long it had been sitting. The commit samples it at
+    /// the one instant that can answer it. See
+    /// `crate::registry::Committed::resumed_from_freeze`.
     pub(crate) async fn resume(
         &self,
         account_state: &Account,
         symbol: &mogwai_protocol::Symbol,
         now_ns: u64,
+        returning: bool,
     ) -> Vec<mogwai_protocol::VenueMessage> {
-        let returning = account_state.is_frozen();
-        account_state.clear_freeze();
         if !returning {
             // Not a first bind, necessarily. An eviction-reconnect lands here
             // too: the newcomer is counted onto the account before the incumbent
@@ -1832,8 +1610,8 @@ impl Run {
 
     /// Whether a socket with this identity is already bound to `account_id`. A
     /// socket that named no callsign is never "already here": silence is not a
-    /// claim to be the incumbent, which is the same reading
-    /// [`Run::evict_account`] takes of it.
+    /// claim to be the incumbent, which is the same reading the admission commit
+    /// takes of it.
     pub(crate) fn has_matching_identity_on(
         &self,
         account_id: &str,
@@ -1842,9 +1620,7 @@ impl Run {
         let Some(callsign) = callsign else {
             return false;
         };
-        self.locked_lanes().iter().any(|bound| {
-            bound.account_id == account_id && bound.callsign.as_deref() == Some(callsign)
-        })
+        self.registry.has_callsign_on(account_id, callsign)
     }
 
     /// Close every connection already trading `account_id` under a different
@@ -1874,30 +1650,31 @@ impl Run {
     /// reconnect work. A consumer must not treat it as a reason to redial, or it
     /// would evict whatever evicted it.
     ///
-    /// Returns how many were displaced, so the caller can say so.
-    pub(crate) fn evict_account(&self, account_id: &str, callsign: Option<&str>) -> usize {
-        let same_callsign = |bound: &BoundLane| {
-            callsign.is_some_and(|callsign| bound.callsign.as_deref() == Some(callsign))
-        };
-        let displaced: Vec<BoundLane> = self
-            .locked_lanes()
-            .iter()
-            .filter(|bound| bound.account_id == account_id && !same_callsign(bound))
-            .cloned()
-            .collect();
-        for bound in &displaced {
+    /// Close the connections an admission displaced, and report how many.
+    ///
+    /// Which connections those are is decided inside the commit, under the
+    /// registry lock and in the same transaction that installed their
+    /// replacement. This runs after that lock is released, and only sends the
+    /// closes: a send can block, and doing it under the registry mutex would
+    /// make every consumer's teardown cost a registry acquisition.
+    ///
+    /// The records are already gone from the registry by the time this runs, so
+    /// the newcomer never sees the old lanes in `bound_lanes` even for the
+    /// instant it takes the incumbent to notice its close. That ordering used to
+    /// be a second retain pass over a lane table that the eviction had to
+    /// remember to perform.
+    pub(crate) fn close_displaced(
+        &self,
+        account_id: &str,
+        displaced: &[crate::registry::BoundLane],
+    ) -> usize {
+        for bound in displaced {
             drop(
                 bound
                     .lanes
                     .send_close(crate::admission::CloseSpec::evicted(account_id)),
             );
         }
-        // Retired here rather than left to each socket's own teardown: the new
-        // connection must not see the old lanes in `bound_lanes` even for the
-        // instant it takes them to notice the close, or its first batch would
-        // be delivered to a socket that is on its way out.
-        self.locked_lanes()
-            .retain(|bound| bound.account_id != account_id || same_callsign(bound));
         displaced.len()
     }
 
@@ -2008,14 +1785,8 @@ impl Run {
     /// lock rather than held across the delivery: delivery serializes JSON and
     /// touches per-connection budgets, and doing that while holding a run-wide
     /// mutex would let one connection's cost block every other's teardown.
-    pub(crate) fn bound_lanes(&self) -> Vec<BoundLane> {
-        self.locked_lanes().clone()
-    }
-
-    fn locked_lanes(&self) -> std::sync::MutexGuard<'_, Vec<BoundLane>> {
-        self.lanes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    pub(crate) fn bound_lanes(&self) -> Vec<crate::registry::BoundLane> {
+        self.registry.bound_lanes()
     }
 
     /// Earliest sim instant the tape can serve.
@@ -2133,18 +1904,6 @@ impl std::fmt::Display for AccountRefusal {
 /// by account - two sockets on one account are one trader and both hear about
 /// its fills - while retirement is per connection.
 #[derive(Clone)]
-pub(crate) struct BoundLane {
-    pub(crate) id: u64,
-    pub(crate) account_id: String,
-    /// The identity this socket announced on the upgrade, which is all the venue
-    /// has: it never sees a consumer, only what a connection claims to be.
-    /// `None` for a socket that named none, which is every socket
-    /// predating the carrier and every one that has no opinion. See
-    /// [`Run::evict_account`] for what it buys and why absent means "evict".
-    pub(crate) callsign: Option<String>,
-    pub(crate) lanes: ExecLanes,
-}
-
 /// Who a swept frame is for. Every `VenueMessage` variant is classified here,
 /// exhaustively and deliberately: [`audience`] carries no catch-all, so a new
 /// variant does not compile until someone decides who it belongs to. That is
@@ -2330,6 +2089,17 @@ mod havoc_window_tests {
 #[cfg(test)]
 pub(crate) fn test_run() -> Arc<Run> {
     tests::run(1_000, 400, None)
+}
+
+/// Admit a connection through the real reserve-and-commit path, for tests in
+/// sibling modules. Out here for the same reason `test_run` is.
+#[cfg(test)]
+pub(crate) fn admit_for_test(
+    run: &Arc<Run>,
+    account_id: &mogwai_protocol::AccountId,
+    callsign: Option<&str>,
+) -> (Attach, crate::registry::Committed) {
+    tests::admit(run, account_id, callsign, None)
 }
 
 #[cfg(test)]
@@ -2577,49 +2347,54 @@ mod tests {
             "an account nobody has connected to is unattended like any other"
         );
 
-        let (first, _first_rx) = crate::admission::ExecLanes::detached();
-        let first_id = run.bind_lanes(first, account.as_str(), None);
-        account_state.clear_freeze();
+        let (_first_attach, first) = admit(&run, &account, Some("leg"), None);
+        let (first_lanes, _first_rx) =
+            crate::admission::ExecLanes::detached_as(first.connection_id);
+        let first_id = run.bind_lanes(first_lanes, account.as_str(), None);
         assert!(!account_state.is_frozen());
 
         // A second connection on the same account: retiring the first must not
         // freeze an account somebody is still reading. This is the eviction
         // shape, where the incumbent is retired while the newcomer binds.
-        let (second, _second_rx) = crate::admission::ExecLanes::detached();
-        let second_id = run.bind_lanes(second, account.as_str(), None);
-        run.release_lanes(first_id);
+        let (_second_attach, second) = admit(&run, &account, Some("leg"), None);
+        let (second_lanes, _second_rx) =
+            crate::admission::ExecLanes::detached_as(second.connection_id);
+        let second_id = run.bind_lanes(second_lanes, account.as_str(), None);
+        run.release_lanes(account.as_str(), first_id);
         assert!(
             !account_state.is_frozen(),
             "a connection is still reading this account"
         );
 
-        run.release_lanes(second_id);
+        run.release_lanes(account.as_str(), second_id);
         assert!(account_state.is_frozen(), "the last one left");
     }
 
-    /// An evicted incumbent still owes the freeze. Eviction retires the
-    /// incumbent's lane eagerly, so the incumbent's own teardown finds no lane
-    /// to match its id - and a freeze that keyed off finding one simply
-    /// returned. The account was then left attached with zero connections:
-    /// never TTL-collected, because `collect_expired_accounts` filters on
-    /// `frozen_for()`, and still swept while riding no boat, which cancels its
-    /// resting orders.
+    /// An evicted incumbent still owes the freeze. The account must end up
+    /// frozen: collectable, because `collect_expired_accounts` filters on
+    /// `frozen_for()`, and out of the sweep, because a swept account riding no
+    /// boat has its resting orders cancelled.
     #[test]
     fn an_evicted_account_freezes_when_the_incumbent_finishes_tearing_down() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("FREEZE-002").unwrap();
         let account_state = run.account(&account);
-        let incumbent_attach = run.attach(&account_state);
-        let (lanes, _rx) = crate::admission::ExecLanes::detached();
-        let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        account_state.clear_freeze();
+        let (incumbent_attach, incumbent) = admit(&run, &account, Some("alpha"), None);
+        let (lanes, _rx) = crate::admission::ExecLanes::detached_as(incumbent.connection_id);
+        let incumbent_id = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
 
-        // A stranger claims the account and then never binds anything - the
-        // refused upgrade, and the upgrade abandoned after the 101 - so the
-        // incumbent's own teardown is the last thing that touches the account.
-        assert_eq!(run.evict_account(account.as_str(), Some("beta")), 1);
-        run.release_lanes(incumbent);
+        // A stranger claims the account and then goes away without ever
+        // binding - the upgrade abandoned after the 101 - so the incumbent's own
+        // teardown is the last thing that touches the account.
+        let (stranger_attach, stranger) = admit(&run, &account, Some("beta"), None);
+        assert_eq!(
+            run.close_displaced(account.as_str(), &stranger.displaced),
+            1,
+            "a different callsign displaces the incumbent"
+        );
+        run.release_lanes(account.as_str(), incumbent_id);
         drop(incumbent_attach);
+        drop(stranger_attach);
 
         assert!(
             account_state.is_frozen(),
@@ -2632,26 +2407,30 @@ mod tests {
         );
     }
 
-    /// The other half of the same rule: an account is not frozen out from under
-    /// a socket that has attached and has not bound its lane yet. That
-    /// window is real - it spans the 101 and everything `handle_socket` does
-    /// before `bind_lanes` - and freezing inside it would leave a live
-    /// connection trading a ledger the sweeper skips.
+    /// The continuity lease, which is the subtlety the registry turns on. An
+    /// account is not frozen out from under a committed socket that has not
+    /// begun reading yet. That window is real - it spans the 101 and everything
+    /// `handle_socket` does before `bind_lanes` - and freezing inside it would
+    /// retire a book and re-base every scan frontier because a socket arrived,
+    /// nondeterministically, while leaving a live connection trading a ledger
+    /// the sweeper skips.
     #[test]
-    fn an_attached_socket_holds_the_account_open_before_it_binds_a_lane() {
+    fn a_committed_socket_holds_the_account_open_before_it_binds_a_lane() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("FREEZE-003").unwrap();
         let account_state = run.account(&account);
-        let incumbent_attach = run.attach(&account_state);
-        let (lanes, _rx) = crate::admission::ExecLanes::detached();
-        let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        account_state.clear_freeze();
+        let (incumbent_attach, incumbent) = admit(&run, &account, Some("alpha"), None);
+        let (lanes, _rx) = crate::admission::ExecLanes::detached_as(incumbent.connection_id);
+        let incumbent_id = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
 
-        // The newcomer is counted on before the upgrade completes, exactly as
-        // `/ws` does it.
-        let newcomer_attach = run.attach(&account_state);
-        assert_eq!(run.evict_account(account.as_str(), Some("beta")), 1);
-        run.release_lanes(incumbent);
+        // The newcomer commits before the incumbent is closed, exactly as the
+        // upgrade does it, and holds a handoff until it reads.
+        let (newcomer_attach, newcomer) = admit(&run, &account, Some("beta"), None);
+        assert_eq!(
+            run.close_displaced(account.as_str(), &newcomer.displaced),
+            1
+        );
+        run.release_lanes(account.as_str(), incumbent_id);
         drop(incumbent_attach);
         assert!(
             !account_state.is_frozen(),
@@ -2684,78 +2463,118 @@ mod tests {
             .expect("a legal speed")
     }
 
-    /// Two passengers may share one boat under the default account, one symbol
-    /// and one speed, so the account counts them. The first to leave must not
-    /// remove the ride the second still holds, or the sweeper stops applying that
-    /// boat to a ledger somebody is still trading.
+    /// Admit a connection the way the upgrade does: reserve, then commit.
+    ///
+    /// Tests go through the real admission rather than installing a connection
+    /// by hand, because the properties they are about - when an account is
+    /// attended, what an admission displaces, whether a ride is held - are all
+    /// decided inside it.
+    pub(super) fn admit(
+        run: &Arc<Run>,
+        account_id: &mogwai_protocol::AccountId,
+        callsign: Option<&str>,
+        ride: Option<crate::boatyard::BoatKey>,
+    ) -> (Attach, crate::registry::Committed) {
+        admit_at(run, account_id, callsign, ride, 1.0)
+    }
+
+    /// `admit`, naming the cadence, for the tests about one ledger carrying one.
+    fn admit_at(
+        run: &Arc<Run>,
+        account_id: &mogwai_protocol::AccountId,
+        callsign: Option<&str>,
+        ride: Option<crate::boatyard::BoatKey>,
+        speed: f64,
+    ) -> (Attach, crate::registry::Committed) {
+        let seat = crate::registry::Seat {
+            river: ride
+                .as_ref()
+                .map_or_else(|| run.rivers.test_key("BTCUSDT"), |key| key.river().clone()),
+            speed_micros: crate::boatyard::quantize_speed(speed).expect("a legal speed"),
+        };
+        let mut reservation = run
+            .reserve_admission(account_id.as_str(), seat, false)
+            .expect("nothing else is being admitted");
+        run.commit_admission(&mut reservation, callsign, ride, true)
+    }
+
+    /// Two passengers of one ledger may share one boat, and the first to leave
+    /// must not take the ride away from the second, or the sweeper stops
+    /// applying that boat to a ledger somebody is still trading.
+    ///
+    /// Nothing counts here. The ride is a field on each connection record, so
+    /// two records naming one boat is what sharing is, and removing one record
+    /// cannot affect the other.
     #[test]
     fn a_ride_shared_by_two_passengers_survives_the_first_leaving() {
         let run = run(1_000, 400, None);
-        let account_state = run.account(&mogwai_protocol::AccountId::parse("SEAT-001").unwrap());
+        let account = mogwai_protocol::AccountId::parse("SEAT-001").unwrap();
+        let account_state = run.account(&account);
         let key = boat_key(&run, "BTCUSDT", 2.0);
 
-        account_state.try_sit(key.clone()).expect("the first sits");
-        account_state
-            .try_sit(key.clone())
-            .expect("the second shares it");
-        account_state.unsit(&key);
+        let (first, _) = admit_at(&run, &account, Some("leg"), Some(key.clone()), 2.0);
+        let (second, _) = admit_at(&run, &account, Some("leg"), Some(key.clone()), 2.0);
+        drop(first);
         assert!(
             account_state.is_seated_on(&key),
             "one passenger left, one is still riding"
         );
-        account_state.unsit(&key);
+        drop(second);
         assert!(
             !account_state.is_seated_on(&key),
             "the last passenger left the boat"
         );
     }
 
-    /// The one-cadence rule belongs to the account and holds while it is frozen,
-    /// which is the
-    /// state every account is created in and stays in until its first socket
-    /// reaches `resume`. Two first connections racing two speeds therefore
-    /// both meet this check, and exactly one may win it.
+    /// One ledger, one cadence, and the rule is account-wide rather than per
+    /// river: a ledger judged on two clocks would let a fill at one simulated
+    /// instant fund an order judged at another.
+    ///
+    /// It holds while the account is frozen, which is the state every account
+    /// is created in, so two first connections racing two speeds both meet it
+    /// and exactly one may win.
     #[test]
-    fn a_frozen_account_may_not_ride_two_cadences_of_one_river() {
+    fn an_account_may_not_ride_one_river_at_two_cadences() {
         let run = run(1_000, 400, None);
-        let account_state = run.account(&mogwai_protocol::AccountId::parse("SEAT-002").unwrap());
+        let account = mogwai_protocol::AccountId::parse("SEAT-002").unwrap();
+        let account_state = run.account(&account);
         assert!(account_state.is_frozen(), "a fresh account is unattended");
 
-        account_state
-            .try_sit(boat_key(&run, "BTCUSDT", 2.0))
-            .expect("the first cadence sits");
-        let refused = account_state
-            .try_sit(boat_key(&run, "BTCUSDT", 3.0))
-            .expect_err("a second cadence on one ledger is refused");
-        assert_eq!(
-            refused.speed(),
-            2.0,
-            "the refusal names the sitting cadence"
-        );
+        let key = boat_key(&run, "BTCUSDT", 2.0);
+        let (_first, _) = admit_at(&run, &account, Some("leg"), Some(key.clone()), 2.0);
+        let refused = run
+            .reserve_admission(
+                account.as_str(),
+                crate::registry::Seat {
+                    river: key.river().clone(),
+                    speed_micros: crate::boatyard::quantize_speed(3.0).unwrap(),
+                },
+                false,
+            )
+            .expect_err("a second cadence on one river is refused");
+        let crate::registry::AdmissionRefusal::CadenceConflict(held) = refused else {
+            panic!("the refusal names the conflict, not a busy admission");
+        };
+        assert_eq!(held.speed(), 2.0, "the refusal names the sitting cadence");
     }
 
-    /// A ride ends when its passenger does, not at the freeze - an account
-    /// riding two rivers that loses one socket never freezes. The key carries
-    /// no placement nonce, so a stale ride would be indistinguishable from a
-    /// live one and would both refuse a legitimate new cadence and hand this
-    /// ledger a boat it never boarded.
+    /// A ride ends when its connection does, not at the freeze - an account
+    /// riding two rivers that loses one socket never freezes. A stale ride would
+    /// be indistinguishable from a live one and would hand this ledger a boat it
+    /// never boarded.
     #[test]
     fn leaving_one_river_frees_that_ride_while_another_is_still_ridden() {
         let run = run(1_000, 400, None);
-        let account_state = run.account(&mogwai_protocol::AccountId::parse("SEAT-003").unwrap());
+        let account = mogwai_protocol::AccountId::parse("SEAT-003").unwrap();
+        let account_state = run.account(&account);
         let slow = boat_key(&run, "BTCUSDT", 2.0);
 
-        account_state
-            .try_sit(slow.clone())
-            .expect("board the slow one");
-        account_state.unsit(&slow);
+        let (rider, _) = admit_at(&run, &account, Some("leg"), Some(slow.clone()), 2.0);
+        drop(rider);
         assert!(
             !account_state.is_seated_on(&slow),
-            "the ride ended with the passenger, no freeze required"
+            "the ride ended with the connection, no freeze required"
         );
-        account_state
-            .try_sit(boat_key(&run, "BTCUSDT", 3.0))
-            .expect("a new cadence on a river nobody is riding is not a conflict");
     }
 
     /// An eviction-reconnect carries a scan frontier off a cursor that is gone.
@@ -2796,13 +2615,9 @@ mod tests {
         let key = boat_key(&run, "BTCUSDT", 1.0);
 
         let account_state = claim_account(&run, &account, Some("alpha"));
-        let incumbent_attach = run.attach(&account_state);
-        account_state
-            .try_sit(key.clone())
-            .expect("the incumbent boards");
-        let (lanes, _rx) = ExecLanes::detached();
-        let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
-        account_state.clear_freeze();
+        let (incumbent_attach, incumbent) = admit(&run, &account, Some("alpha"), Some(key.clone()));
+        let (lanes, _rx) = ExecLanes::detached_as(incumbent.connection_id);
+        let incumbent_id = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
 
         // A limit far below the tape, so it rests rather than filling: the
         // frontier only exists on an order the sweeper still has to judge.
@@ -2853,17 +2668,16 @@ mod tests {
 
         // The newcomer is counted on before the eviction, which is the ordering
         // `ws_upgrade` takes and the reason the freeze never fires.
-        let newcomer_attach = run.attach(&account_state);
+        let (newcomer_attach, newcomer) = admit(&run, &account, Some("beta"), None);
         assert_eq!(
-            run.evict_account(account.as_str(), Some("beta")),
+            run.close_displaced(account.as_str(), &newcomer.displaced),
             1,
             "the incumbent is displaced by a claim under a different callsign"
         );
-        // The incumbent's teardown: its lane goes, and its `Passenger` drop
-        // ends the ride on the river it was riding. That is the step that
-        // takes this account's last passenger off that boat.
-        run.release_lanes(incumbent);
-        account_state.unsit(&key);
+        // The incumbent's teardown. Removing its connection record gives up its
+        // lane and its ride in one transition, which is what takes this account
+        // off that boat.
+        run.release_lanes(account.as_str(), incumbent_id);
         drop(incumbent_attach);
         assert!(
             !account_state.is_frozen(),
@@ -2873,7 +2687,14 @@ mod tests {
 
         // The newcomer binds a river of its own, on a cursor at the origin.
         let resumed_ns = 1_000;
-        let events = run.resume(&account_state, &symbol, resumed_ns).await;
+        let events = run
+            .resume(
+                &account_state,
+                &symbol,
+                resumed_ns,
+                newcomer.resumed_from_freeze,
+            )
+            .await;
         assert!(
             events.is_empty(),
             "an unfrozen account is not retired, which is the behaviour under test rather than a \
@@ -2906,17 +2727,19 @@ mod tests {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("CLAUDETTE-07").unwrap();
 
-        let (data, _data_rx) = crate::admission::ExecLanes::detached();
-        let (exec, _exec_rx) = crate::admission::ExecLanes::detached();
         claim_account(&run, &account, Some("worker-1"));
-        run.bind_lanes(data, account.as_str(), Some("worker-1"));
+        let (_data_attach, data) = admit(&run, &account, Some("worker-1"), None);
+        let (data_lanes, _data_rx) = crate::admission::ExecLanes::detached_as(data.connection_id);
+        run.bind_lanes(data_lanes, account.as_str(), Some("worker-1"));
+
+        let (_exec_attach, exec) = admit(&run, &account, Some("worker-1"), None);
         assert_eq!(
-            run.evict_account(account.as_str(), Some("worker-1")),
+            run.close_displaced(account.as_str(), &exec.displaced),
             0,
             "the host's second leg presents the same callsign, not a claim"
         );
-        claim_account(&run, &account, Some("worker-1"));
-        run.bind_lanes(exec, account.as_str(), Some("worker-1"));
+        let (exec_lanes, _exec_rx) = crate::admission::ExecLanes::detached_as(exec.connection_id);
+        run.bind_lanes(exec_lanes, account.as_str(), Some("worker-1"));
         assert_eq!(
             run.bound_lanes()
                 .iter()
@@ -2926,11 +2749,12 @@ mod tests {
             "both legs are reading the ledger they were configured for"
         );
 
-        // A restarted worker presents a genuinely new callsign, and it takes the whole
-        // ledger: both stale sockets go, which is the reconnection story the
-        // eviction exists for.
+        // A restarted worker presents a genuinely new callsign, and it takes the
+        // whole ledger: both stale sockets go, which is the reconnection story
+        // the eviction exists for.
+        let (_new_attach, restarted) = admit(&run, &account, Some("worker-2"), None);
         assert_eq!(
-            run.evict_account(account.as_str(), Some("worker-2")),
+            run.close_displaced(account.as_str(), &restarted.displaced),
             2,
             "a different callsign displaces every socket of the old one"
         );
@@ -3185,18 +3009,24 @@ mod tests {
     fn a_socket_naming_no_callsign_evicts_and_is_evicted() {
         let run = run(1_000, 400, None);
         let account = mogwai_protocol::AccountId::parse("QUIET-001").unwrap();
-        let (first, _first_rx) = crate::admission::ExecLanes::detached();
-        let (second, _second_rx) = crate::admission::ExecLanes::detached();
+        let (_first_attach, first) = admit(&run, &account, None, None);
+        let (first_lanes, _first_rx) =
+            crate::admission::ExecLanes::detached_as(first.connection_id);
+        run.bind_lanes(first_lanes, account.as_str(), None);
 
-        run.bind_lanes(first, account.as_str(), None);
+        let (_quiet_attach, quiet) = admit(&run, &account, None, None);
         assert_eq!(
-            run.evict_account(account.as_str(), None),
+            run.close_displaced(account.as_str(), &quiet.displaced),
             1,
             "an unidentified newcomer takes the ledger, as it always did"
         );
-        run.bind_lanes(second, account.as_str(), Some("worker-1"));
+        let (second_lanes, _second_rx) =
+            crate::admission::ExecLanes::detached_as(quiet.connection_id);
+        run.bind_lanes(second_lanes, account.as_str(), Some("worker-1"));
+
+        let (_third_attach, third) = admit(&run, &account, None, None);
         assert_eq!(
-            run.evict_account(account.as_str(), None),
+            run.close_displaced(account.as_str(), &third.displaced),
             1,
             "and an unidentified newcomer displaces an identified incumbent too"
         );
@@ -3211,9 +3041,10 @@ mod tests {
         let held = mogwai_protocol::AccountId::parse("HELD-001").unwrap();
         run.account(&abandoned);
         let held_account = run.account(&held);
-        let (lanes, _rx) = crate::admission::ExecLanes::detached();
+        let (_held_attach, held_conn) = admit(&run, &held, None, None);
+        let (lanes, _rx) = crate::admission::ExecLanes::detached_as(held_conn.connection_id);
         run.bind_lanes(lanes, held.as_str(), None);
-        held_account.clear_freeze();
+        let _ = &held_account;
 
         // A TTL nothing has outlived yet spares even the unattended account,
         // which is what makes the collection about the SPAN rather than about
@@ -3266,7 +3097,7 @@ mod tests {
             "an account nobody has connected to is unattended, and this test is about that state"
         );
 
-        let attach = run.attach(&account_state);
+        let (attach, _committed) = admit(&run, &returning, None, None);
         assert!(
             run.collect_expired_accounts(std::time::Duration::ZERO)
                 .is_empty(),

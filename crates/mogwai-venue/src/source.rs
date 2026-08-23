@@ -317,6 +317,17 @@ pub(crate) struct RiverKey {
     arm: Option<GeneratorArm>,
 }
 impl RiverKey {
+    /// A key that names no materializable river, for tests about machinery that
+    /// only compares keys. Distinct `tag`s are distinct rivers.
+    #[cfg(test)]
+    pub(crate) fn synthetic(tag: u64) -> Self {
+        Self {
+            symbol: Symbol::from(format!("SYNTHETIC-{tag}").as_str()),
+            bundle: tag,
+            arm: None,
+        }
+    }
+
     pub(crate) fn resolve(
         profile: &InstrumentProfile,
         identity: TapeIdentity,

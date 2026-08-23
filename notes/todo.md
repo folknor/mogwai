@@ -113,23 +113,16 @@ undone. Neither is urgent; both modes must eventually be supported.
 
 ## Venue and protocol
 
-- The connection lifecycle is four mutable structures, not one derived registry.
-  `Run::lanes`, `Passenger::frozen_since`, `Passenger::seated_on` and
-  `Passenger::attachments` each hold part of the answer to "is anybody reading
-  this account", with the consistency rules only in prose, and nothing detects
-  the next lifecycle path that updates three of the four. Wanted: one registry
-  keyed by account holding the live connections, with `is_frozen` and
-  `is_seated_on` as derived queries. It is a rewrite of `run.rs` rather than a
-  fix, which is why it was not attempted when the two live holes were closed.
-
-- One `/ws` refusal still sits after the eviction, and only one: the cadence
-  check re-run on a ledger the seat minted or reset, which can lose to another
-  upgrade racing the same account inside that window. The pre-seat check covering
-  every other case cannot cover this one, because the ledger it would ask about
-  does not exist yet. Closing it means making eviction and admission one
-  transaction under the lane lock, which is the registry item above rather than a
-  local fix. It needs two upgrades on one account interleaved inside a few
-  microseconds to fire.
+- Should one ledger, one cadence be account-wide rather than per river? Today an
+  account may ride two rivers at two speeds, which is a supported shape and what
+  the default account's two-symbol case depends on. But a ledger's balances,
+  settled cash, daily resets and peak-equity ratchet are all functions of
+  simulated time, so an account reading two rivers at two cadences already
+  drifts - which is the multi-river peak-equity item below, seen from the
+  admission side rather than the valuation side. Tightening it is a
+  consumer-visible refusal and therefore an owner call; the machinery to enforce
+  it is already in place, since the rule is decided in one predicate at
+  reservation.
 
 - A passenger whose own duration ends is sent a `RunComplete` frame before the
   `close::DURATION_COMPLETE` close, identically to the whole-run arm

@@ -18,6 +18,7 @@ mod extremes;
 mod fills;
 mod history;
 mod http;
+mod registry;
 mod risk;
 mod run;
 mod serve;
