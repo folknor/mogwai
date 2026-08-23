@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE GOLDEN GATE of the retired rewrite plan, slice 2c-ii/2c-iii:
+//! The golden gate of the retired rewrite plan, slice 2c-ii/2c-iii:
 //! running the `mogwai measure` driver ([`mogwai_cli::measure`]) from the
 //! clean committed tree must reproduce `analysis/mnq-measure-12a.json`
 //! typed-canonical-identically except the honestly-live fields (top-level
@@ -9,16 +9,16 @@
 //! same three exclusions slice 2c-i's gate uses and for the same reason:
 //! see `crates/mogwai-lab/tests/parity12a_i.rs`).
 //!
-//! Two tests, split on the OBLIGATION the 2c-ii golden-gate run recorded
+//! Two tests, split on the obligation the 2c-ii golden-gate run recorded
 //! (the retired rewrite plan): the monolithic single-test run (observed
-//! pass plus eight in-process FINAL walks plus bootstrap) measured 288.1 s
+//! pass plus eight in-process final walks plus bootstrap) measured 288.1 s
 //! total against the runner's hard 280 s per-test ceiling.
 //!
 //! - `parity12a_ii_fast_matches_the_committed_artifact_over_cached_walks`
 //!   runs [`mogwai_cli::measure::WalkSource::PreAttestedCacheOnly`]: the
-//!   observed pass is LIVE (~85 s, the authoritative cross-check and the
+//!   observed pass is live (~85 s, the authoritative cross-check and the
 //!   piece this slice actually owns), but the eight walks are taken
-//!   straight from the Brick G cache with NEITHER a fresh walk NOR the
+//!   straight from the Brick G cache with neither a fresh walk nor the
 //!   content-comparison attestation performed. That proves nothing about
 //!   walk determinism on its own - it doesn't need to, because the nine
 //!   `crates/mogwai-cli/tests/parity12a.rs` gates
@@ -29,19 +29,19 @@
 //!   weakened, the coverage moved to gates that fit. Fits in ~90 s.
 //! - `parity12a_ii_live_full_run_matches_the_committed_artifact` is the
 //!   real, full [`mogwai_cli::measure::WalkSource::LiveAttested`] path -
-//!   `#[ignore]`d for cost, same as before, but ALSO documented as exceeding
-//!   the per-test ceiling: run it directly via the release BINARY, not the
+//!   `#[ignore]`d for cost, same as before, but also documented as exceeding
+//!   the per-test ceiling: run it directly via the release binary, not the
 //!   focused runner, exactly as the 2c-ii golden-gate demonstration did (see
 //!   the doc comment on that test for the invocation).
 //!
 //! Both call the driver directly (`mogwai_cli::measure::run_measure_with`),
-//! shelling nothing, with `--out` (`cfg.out`) redirected to a SCRATCH path
+//! shelling nothing, with `--out` (`cfg.out`) redirected to a scratch path
 //! under `target/`, never the committed artifact, and `--cache-dir`
 //! redirected to a scratch copy of the real `analysis/out` caches so the
 //! mandatory observed-cache rewrite never touches the committed file's
 //! bytes.
 //!
-//! BOTH REQUIRE A CLEAN GIT TREE, by construction: `run_measure`/
+//! Both require a clean git tree, by construction: `run_measure`/
 //! `run_measure_with` bind `binding.harness_tree_commit` to `HEAD` and
 //! refuse outright over a dirty working tree (`require_clean_tree`, ported
 //! faithfully from `analysis/mnq_fit.py`). That is not a test-harness
@@ -84,7 +84,7 @@ fn assert_canon_eq(got: &serde_json::Value, want: &serde_json::Value, what: &str
 
 /// A scratch copy of the real `analysis/out` caches, so the mandatory
 /// observed-cache rewrite inside `run_measure_with` never touches the
-/// committed bytes: this gate compares CONTENT against the committed
+/// committed bytes: this gate compares content against the committed
 /// artifact, it does not require the committed cache files to stay
 /// byte-identical.
 fn seed_scratch_cache(root: &Path, scratch_root: &str) -> PathBuf {

@@ -107,7 +107,7 @@ struct ColumnIndices {
     bid_sz_00: usize,
     ask_sz_00: usize,
     /// One past the largest index any of the above will dereference, so a
-    /// short row can be refused ONCE, before the first access, rather than
+    /// short row can be refused once, before the first access, rather than
     /// guarded at each of the ten sites individually.
     required_width: usize,
 }
@@ -162,7 +162,7 @@ fn column_indices(header_line: &str) -> LabResult<ColumnIndices> {
 }
 
 /// Lists the `.csv.zst` files under `directory`, sorted by name (the
-/// stream's file ORDER, load-bearing for the seam check and ordering
+/// stream's file order, load-bearing for the seam check and ordering
 /// contract). Refuses if none exist.
 pub fn data_files(directory: &Path) -> LabResult<Vec<PathBuf>> {
     let mut names: Vec<String> = std::fs::read_dir(directory)?
@@ -208,7 +208,7 @@ pub fn classify_book(bid_px: i64, ask_px: i64) -> &'static str {
     }
 }
 
-/// Reads one integer column, REFUSING rather than panicking on a malformed
+/// Reads one integer column, refusing rather than panicking on a malformed
 /// value.
 ///
 /// This used to `panic!`, mirroring `mnq_fit.py`'s `parse_stream`, which
@@ -219,7 +219,7 @@ pub fn classify_book(bid_px: i64, ask_px: i64) -> &'static str {
 /// from knowingly.
 ///
 /// The mismatch is safe by construction for the parity gates: they compare
-/// output over WELL-FORMED corpora, where no conversion fails and nothing is
+/// output over well-formed corpora, where no conversion fails and nothing is
 /// reached. What changes is only the behaviour on input the Python crashes on,
 /// which is the class the refusal contract in `reference/architecture.md`
 /// exists to cover.
@@ -244,9 +244,9 @@ fn parse_field_i64(
     })
 }
 
-/// The streaming pass over the ordered files as ONE stream
+/// The streaming pass over the ordered files as one stream
 /// (`analysis/mnq_fit.py` `parse_stream`): 19-digit ns timestamps, monotone
-/// ordering across the file boundary, no duplicate row AT THE SEAM, the
+/// ordering across the file boundary, no duplicate row at the seam, the
 /// per-price grid, strict B/A/N sides, action `T` on every row.
 pub struct ParseStream {
     paths: Vec<PathBuf>,
@@ -368,8 +368,8 @@ impl Iterator for ParseStream {
                         unreachable!("column indices set with the current file");
                     };
                     let parts: Vec<&str> = line.split(',').collect();
-                    // WIDTH FIRST, before any indexed access. Every dereference
-                    // below uses a position derived from the HEADER, so a row
+                    // Width first, before any indexed access. Every dereference
+                    // below uses a position derived from the header, so a row
                     // with fewer fields than the header promised used to panic
                     // on the very first one - `parts[idx.ts_event]` - which is
                     // earlier than any conversion and therefore not reachable by
@@ -524,10 +524,10 @@ pub fn parse_stream(paths: Vec<PathBuf>) -> ParseStream {
     ParseStream::new(paths)
 }
 
-/// `group_parents_batch`: the INDEPENDENT second implementation of the
+/// `group_parents_batch`: the independent second implementation of the
 /// frozen grouping rule, used to police the streaming pass over a
 /// materialized slice - contiguous `(ts, side)` runs, splitting wherever the
-/// key changes; an unsided (`N`) row never enters a group AND terminates the
+/// key changes; an unsided (`N`) row never enters a group and terminates the
 /// open one. Returns `[start, end)` index ranges into `rows`.
 pub fn group_parents_batch(rows: &[Row]) -> Vec<(usize, usize)> {
     let mut groups = Vec::new();

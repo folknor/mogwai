@@ -125,7 +125,7 @@ fn population_variance_matches_cpython_over_the_generated_sweep() {
          got {nonzero_subnormals}"
     );
 
-    // And the lowest-binade family has to sit on the OTHER side of the join.
+    // And the lowest-binade family has to sit on the other side of the join.
     // The implementation takes one branch for both ranges, but the mantissa is
     // below 2^52 for a subnormal and above it here, which is where a bound too
     // narrow by one binade hides. The first version of the subnormal family

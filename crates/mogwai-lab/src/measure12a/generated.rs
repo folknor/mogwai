@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The GENERATED front-end of the unified block engine: the walk consumer a
+//! The generated front-end of the unified block engine: the walk consumer a
 //! `mogwai-data` `GeneratedSource` drives. Ported from
 //! `crates/mogwai-cli/src/measure12a.rs`'s `Measure12aAcc`, which stays on
-//! disk and authoritative for this side until phase 2c - its outputs ARE the
+//! disk and authoritative for this side until phase 2c - its outputs are the
 //! committed walk caches.
 //!
-//! The consumer only READS events and `VolTrace` records: it neither adds nor
+//! The consumer only reads events and `VolTrace` records: it neither adds nor
 //! changes any field, branch, callback, buffer or draw in `GeneratedSource`,
 //! so the 12a landing owed no `TAPE_PROTOCOL_VERSION` bump (spec 2.3; the
 //! constant has since moved for unrelated generator changes).
 //!
-//! Parent inference on this side is event-shaped, not row-shaped: a QUOTE
+//! Parent inference on this side is event-shaped, not row-shaped: a quote
 //! closes the parent that ran under the previous book and becomes the pending
 //! book; the next sided trade opens a parent against it; an unsided print
 //! terminates the open parent, exactly as an `N` row does on the observed
@@ -52,7 +52,7 @@ fn price_nanos(value: Decimal) -> LabResult<i64> {
         .map_err(|_| LabError::refusal(format!("price {value} overflows i64 nano units")))
 }
 
-/// The previous MEASURED parent (first child in `[start, end)`), for
+/// The previous measured parent (first child in `[start, end)`), for
 /// `sigma_start` and the deferred ARCH share. Burn-in parents never enter.
 struct PrevParent {
     seq: u64,
@@ -91,7 +91,7 @@ pub struct GeneratedAcc {
 }
 
 impl GeneratedAcc {
-    /// `tick` is the instrument's modal tick; `[start, end)` is the MEASURED
+    /// `tick` is the instrument's modal tick; `[start, end)` is the measured
     /// window (the walk itself begins earlier, at `start - burn_in`).
     #[must_use]
     pub fn new(seed: u64, start: u64, end: u64, offset: i32, tick: Decimal) -> Self {
@@ -139,7 +139,7 @@ impl GeneratedAcc {
         }
     }
 
-    /// A quote closes the parent that ran under the PREVIOUS book and becomes
+    /// A quote closes the parent that ran under the previous book and becomes
     /// the pending book for the next one.
     pub fn push_quote(&mut self, q: &QuoteTick, trace: Option<VolTrace>) -> LabResult<()> {
         self.close_open_parent()?;
@@ -213,8 +213,8 @@ impl GeneratedAcc {
         )
     }
 
-    /// Get-or-create the forensic minute record. Minute CLOSURE (the
-    /// initiation resolution) is driven by PARENT minutes advancing in
+    /// Get-or-create the forensic minute record. Minute closure (the
+    /// initiation resolution) is driven by parent minutes advancing in
     /// `close_open_parent`, never by trades.
     fn forensic_minute(&mut self, minute: u64, event_ts: u64) -> LabResult<&mut MinuteRec> {
         if !self.minutes.contains_key(&minute) {
@@ -235,11 +235,11 @@ impl GeneratedAcc {
         };
         let final_range = match (rec.quote_lo, rec.quote_hi) {
             (Some(lo), Some(hi)) => hi - lo,
-            // A child-only extreme must stay VISIBLE: false, never a refusal.
+            // A child-only extreme must stay visible: false, never a refusal.
             _ => 0,
         };
         rec.initiation = if final_range > 0 && rec.traced > 0 {
-            // The first instant the running range STRICTLY exceeds half the
+            // The first instant the running range strictly exceeds half the
             // final value, on the exact half-tick grid: 2 * running > final.
             rec.breakpoints
                 .iter()
@@ -293,7 +293,7 @@ impl GeneratedAcc {
         let seq = self.parent_seq;
         self.parent_seq += 1;
         let prev = self.prev_parent.take();
-        // Resolve the PREVIOUS parent's deferred ARCH share against this
+        // Resolve the previous parent's deferred ARCH share against this
         // parent's candidate sigma2 (the successor may lie in a later minute;
         // both parents must be measured and traced).
         if let (Some(p), Some(trace)) = (&prev, &parent.trace)
@@ -351,7 +351,7 @@ impl GeneratedAcc {
                 rec.largest_inn = inn;
                 rec.largest_inn_ts = parent.first_ts;
                 rec.largest_inn_seq = seq;
-                // Any deferred share resolved for the PREVIOUS largest parent
+                // Any deferred share resolved for the previous largest parent
                 // no longer describes this minute's largest-innovation
                 // parent: null until (and unless) the new largest gains a
                 // measured successor.
@@ -375,7 +375,7 @@ impl GeneratedAcc {
                     rec.latent_hi = mid;
                 }
             }
-            // clamp_hits: the SUM of the three Boolean flag occurrences - a
+            // clamp_hits: the sum of the three Boolean flag occurrences - a
             // parent with two simultaneous flags contributes two.
             rec.clamp_hits += u64::from(trace.sigma_cap_hit)
                 + u64::from(trace.feedback_clamp_hit)
@@ -417,7 +417,7 @@ impl GeneratedAcc {
         let Some(session) = self.session.take() else {
             return Ok(());
         };
-        // COMPLETE sessions only: a session must lie fully inside
+        // Complete sessions only: a session must lie fully inside
         // [start, end) to be emitted (the Q1 all-session rule - the
         // downstream ObsContext treats every supplied session as a vote).
         if session.session_start_ns < self.start || session.session_end_ns > self.end {

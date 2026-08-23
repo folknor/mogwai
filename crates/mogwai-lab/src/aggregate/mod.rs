@@ -9,7 +9,7 @@
 //!
 //! The Python reference is `analysis/mnq_fit.py` and the binding contract is
 //! `notes/protocol-12a-measurement-spec.md` revision 12. Where the two
-//! disagree the PYTHON wins - it produced the committed
+//! disagree the Python wins - it produced the committed
 //! `analysis/mnq-measure-12a.json` that the parity gate compares against.
 //!
 //! ## What this module owns, and what it does not
@@ -27,7 +27,7 @@
 //! ## Why every statistic is a function of a multiplicity vector
 //!
 //! The point estimate (all ones), each of the 10,000 bootstrap replicates
-//! and each leave-one-ISO-week-out fold run the SAME `stat_fn(ctx, mult)`
+//! and each leave-one-ISO-week-out fold run the same `stat_fn(ctx, mult)`
 //! code path, so a resampling convention cannot drift from the point
 //! convention. That design is also what makes 10,000 replicates tractable:
 //! `ObsContext` extracts each cell's per-session votes (or a cumulative
@@ -128,7 +128,7 @@ pub(crate) fn jnum(v: Option<f64>) -> Value {
     }
 }
 
-/// `Option<i64>` to JSON, preserving the INTEGER leaf type.
+/// `Option<i64>` to JSON, preserving the integer leaf type.
 #[must_use]
 pub(crate) fn jint(v: Option<i64>) -> Value {
     match v {
@@ -179,7 +179,7 @@ impl RefusalRec {
     }
 }
 
-/// `stdev_ddof1`: the sample standard deviation over the FINITE values,
+/// `stdev_ddof1`: the sample standard deviation over the finite values,
 /// `None` below two of them. Non-finite entries are dropped here; every
 /// caller has already refused on them, so the filter is belt and braces.
 #[must_use]

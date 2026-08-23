@@ -126,7 +126,7 @@ struct PresetArgs {
 struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
-    /// KEEP THIS ON `humantime`. The shipped launcher renders `--duration`
+    /// Keep this on `humantime`. The shipped launcher renders `--duration`
     /// with `mogwai-protocol`'s `format_duration`, which emits `0s`, `ms` and
     /// `ns`; `gen`'s in-house `parse_duration` reads none of the three. See
     /// `serve_argv_parses_in_the_venues_own_grammar` below.
@@ -136,7 +136,7 @@ struct ServeArgs {
     /// was started by.
     ///
     /// Optional, and the shipped launcher always passes it. Without it the venue
-    /// can only notice a launcher that dies DURING its startup, never one
+    /// can only notice a launcher that dies during its startup, never one
     /// already gone before the first instruction ran - see
     /// `arm_parent_death_signal`.
     #[arg(long, value_name = "PID")]
@@ -147,7 +147,7 @@ struct ServeArgs {
 /// exactly one trailing newline, whatever the bundled file carries.
 ///
 /// The dispatcher used a bare `print!` of the document, so the trailing newline
-/// was a property of the INCLUDED FILE rather than of the command. A preset
+/// was a property of the included file rather than of the command. A preset
 /// saved without a final newline left the shell prompt mid-line; one saved with
 /// a blank line at the end printed two. Every shipped preset happens to end in
 /// exactly one newline today, so nothing in this workspace can currently
@@ -158,7 +158,7 @@ fn preset_output(document: &str) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    // FIRST, before the argv parse: the benchmark marker timeline is measured
+    // First, before the argv parse: the benchmark marker timeline is measured
     // from here, so anything ahead of this line is invisible to a phase
     // decomposition. A no-op outside a benchmark harness.
     mogwai_lab::sidecar::init();
@@ -227,7 +227,7 @@ mod tests {
 
     use super::{Cli, Command, r#gen, preset_output};
 
-    /// The three endings a preset FILE can have, normalized to the one ending
+    /// The three endings a preset file can have, normalized to the one ending
     /// the terminal needs.
     ///
     /// The middle case is the one the shipped presets exercise and is
@@ -260,14 +260,14 @@ mod tests {
         );
     }
 
-    /// THE LAUNCHER'S RENDERING AND THE VENUE'S PARSER ARE ONE CONTRACT, AND
-    /// THIS IS THE ONLY PLACE THE TWO MEET.
+    /// The launcher's rendering and the venue's parser are one contract, and
+    /// this is the only place the two meet.
     ///
     /// `mogwai-protocol`'s `format_duration` promises that "every value renders
     /// into something the venue accepts", and until this test that promise was
     /// asserted only against itself - a golden-string test in the same module,
     /// with nothing on the parsing side. It matters because this binary carries
-    /// TWO duration grammars that disagree on exactly the units the launcher
+    /// two duration grammars that disagree on exactly the units the launcher
     /// emits: `serve` takes `humantime::Duration`, which accepts `ms`, `ns` and
     /// `0s`, while `gen`'s in-house `parse_duration` accepts only
     /// `s m h d w mo y`, refuses a zero count, and reads `1500ms` as an unknown
@@ -282,8 +282,8 @@ mod tests {
     /// `Cli` this binary's `main` actually runs. It lives in the bin crate's
     /// unit tests because `ServeArgs` is private to it.
     ///
-    /// THE CASES ARE THE ONES `durations_render_in_the_coarsest_exact_unit`
-    /// ENUMERATES, so the two tests cannot drift onto different values: zero,
+    /// The cases are the ones `durations_render_in_the_coarsest_exact_unit`
+    /// enumerates, so the two tests cannot drift onto different values: zero,
     /// a whole-second span, a millisecond remainder, one nanosecond, and a
     /// microsecond that renders as nanoseconds.
     #[test]

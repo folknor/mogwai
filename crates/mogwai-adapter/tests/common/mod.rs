@@ -20,31 +20,31 @@
 //!
 //! # What is and is not shared between tests in one binary
 //!
-//! `replace_data_event_sender` / `replace_exec_event_sender` ARE NOT GLOBAL,
+//! `replace_data_event_sender` / `replace_exec_event_sender` are never global,
 //! whatever their nautilus doc comments say. Both are `thread_local!` in
 //! `nautilus_common::live::runner` (`DATA_EVENT_SENDER.with(...)`), libtest runs
 //! each test on its own thread, and every test in these binaries is
 //! `flavor = "current_thread"` so the client's tasks run on that same thread.
 //! Each test therefore owns its sink outright, which is what makes the several
 //! negative assertions here (`assert_no_exec_event`, the bounded tail drains)
-//! sound: a 250 ms window on a SHARED channel would be leaky, and these are not
+//! sound: a 250 ms window on a shared channel would be leaky, and these are not
 //! shared. Do not consolidate them onto one sender. Nothing else in scope is
 //! process-wide either - no global logger, no capture buffer, no environment
 //! variable, and every listener is `127.0.0.1:0`.
 //!
-//! AND THAT HOLDS IN EVERY LANE, INCLUDING `--test-threads=1`. This is the one
+//! And that holds in every lane, including `--test-threads=1`. This is the one
 //! part of the claim that invites a wrong model, and a cold review reached the
-//! wrong one: it read `--test-threads=1` as making libtest run tests INLINE on
+//! wrong one: it read `--test-threads=1` as making libtest run tests inline on
 //! the main thread, which would share one `EXEC_EVENT_SENDER` across a whole
 //! binary and make every negative window above leaky. It does not. libtest
 //! spawns a fresh named thread per test unconditionally on any threaded
 //! target, because the thread name is how a panic gets attributed to a test,
-//! and `--test-threads` caps how many run AT ONCE rather than whether a thread
+//! and `--test-threads` caps how many run at once rather than whether a thread
 //! is made at all.
-//! MEASURED, NOT ASSUMED: with the serial runner in the release lane (the one
+//! Measured, not assumed: with the serial runner in the release lane (the one
 //! that passes `--test-threads=1`), a probe of `thread::current()` and the
 //! runner slot reported a distinct `ThreadId` named for each test in
-//! `adapter_smoke`, and an EMPTY sender slot on entry to every one of them.
+//! `adapter_smoke`, and an empty sender slot on entry to every one of them.
 //! `owns_a_fresh_exec_sink_on_every_lane` below pins it, and
 //! [`assert_owns_a_fresh_exec_sink`] lets an individual test restate the
 //! premise it depends on, so a libtest change fails on the premise rather than
@@ -54,23 +54,23 @@
 //! `mogwai_adapter::config`'s `process_callsign` is a `OnceLock`, by design -
 //! one worker process presents one identity, so its data and execution legs share that
 //! identity and cannot evict each other off their shared ledger. The
-//! consequence for THESE binaries is that every client built through a
-//! `Mogwai*ClientConfig::default()` presents the SAME callsign string, which is
+//! consequence for these binaries is that every client built through a
+//! `Mogwai*ClientConfig::default()` presents the same callsign string, which is
 //! harmless only because each test binds its own stub and no two clients ever
 //! meet on one venue. Two things follow, and both bite silently:
 //!
-//! - A TEST WANTING TWO DISTINCT CLIENTS ON ONE VENUE MUST SET `callsign:`
-//!   EXPLICITLY (`havoc.rs` uses `callsign: None` throughout). A callsign-eviction
+//! - A test wanting two distinct clients on one venue must set `callsign:`
+//!   explicitly (`havoc.rs` uses `callsign: None` throughout). A callsign-eviction
 //!   test written the obvious way, with two defaulted configs, is asserting
 //!   against a constant.
 //! - A test wanting "same process, two legs, no eviction" is likewise testing a
-//!   constant unless it asserts on what CROSSED THE WIRE. That is what
+//!   constant unless it asserts on what crossed the wire. That is what
 //!   `adapter_smoke::both_legs_disclose_one_process_callsign_on_the_upgrade`
-//!   does, off `ws_requests`, and it is the only SOCKET test in the crate that
+//!   does, off `ws_requests`, and it is the only socket test in the crate that
 //!   fails when the default is removed. Re-measured by the close pass, because
 //!   the stronger phrasing that stood here ("the only thing in the crate") is
 //!   false and misleadingly so: `config`'s own
-//!   `both_legs_default_to_the_same_process_callsign` fails too, and it is a UNIT
+//!   `both_legs_default_to_the_same_process_callsign` fails too, and it is a unit
 //!   test, so cargo stops after the lib target and the four socket binaries
 //!   never run at all. Anyone repeating that bite-check has to name this test
 //!   directly, or the sweep reports a failure that says nothing about the wire.
@@ -116,13 +116,13 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-/// Asserts THE PREMISE every negative sink assertion in these binaries rests
+/// Asserts the premise every negative sink assertion in these binaries rests
 /// on: this test entered on a thread of its own, so the runner's
 /// `EXEC_EVENT_SENDER` slot is empty until this test fills it, and a timed
 /// "nothing arrived" window cannot observe another test's client.
 ///
 /// Call it at the top of any test that installs a sender and then asserts on
-/// the ABSENCE of an event, and of any test whose point is that no sender
+/// the absence of an event, and of any test whose point is that no sender
 /// exists. It is cheap and it converts a silent unsoundness into a named
 /// failure.
 pub fn assert_owns_a_fresh_exec_sink() {
@@ -159,12 +159,12 @@ pub const VENUE_SNAPSHOT_TS_EVENT: u64 = 1_000_000_000;
 /// The default `GET /clock` envelope: an identity simulated clock at speed 1,
 /// with the tape floor at zero.
 ///
-/// IDENTITY IS THE POINT. `sim_epoch_ns == wall_anchor_ns == 0` with
+/// Identity is the point. `sim_epoch_ns == wall_anchor_ns == 0` with
 /// `speed == 1.0` maps simulated onto wall exactly, which is what the adapter
 /// falls back to when it cannot read a clock at all - so serving this changes
 /// no scaling, no `ts_init`, no havoc sleep and no backoff anywhere. What it
-/// changes is that the client SUCCEEDS at reading it, which is the whole
-/// saving. `data_origin_ns` of zero is a KNOWN floor rather than an unknown
+/// changes is that the client succeeds at reading it, which is the whole
+/// saving. `data_origin_ns` of zero is a known floor rather than an unknown
 /// one, and no request start can precede it, so the off-river guard admits
 /// exactly what it admitted before.
 pub const IDENTITY_CLOCK_JSON: &str = r#"{"sim":{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0},"venue_now_ns":0,"data_origin_ns":0,"warmup_ns":0}"#;
@@ -173,25 +173,25 @@ pub const IDENTITY_CLOCK_JSON: &str = r#"{"sim":{"sim_epoch_ns":0,"wall_anchor_n
 /// the relevant fields before connecting, then reads the counters/recorded
 /// bodies afterwards. Defaults model a clean, honest venue.
 ///
-/// THE AXIS THAT MATTERS HERE IS DATA-LEG VERSUS EXEC-LEG, NOT HTTP VERSUS WS,
+/// The axis that matters here is data-leg versus exec-leg, not HTTP versus WS,
 /// and it is written down because getting it wrong is how the dead block in
 /// `serve_exec_message`'s doc comment survived. Splitting this struct by
 /// transport would have put `ws_trades`, `dark_ms`, `close_after_trades`,
-/// `ws_venue_pings`, `ws_exec_frames` and `ws_modify_frames` in ONE bucket
+/// `ws_venue_pings`, `ws_exec_frames` and `ws_modify_frames` in one bucket
 /// together - which is precisely the confusion that produced the defect, so
 /// that split localizes nothing. The ownership is:
 ///
-/// - DATA LEG, all of it served before the read loop in `serve_ws`:
+/// - Data leg, all of it served before the read loop in `serve_ws`:
 ///   `ws_trades`, `push_gate`, `dark_ms`, `close_after_trades`,
 ///   `ws_venue_pings`, `ws_first_frame_at`.
-/// - EXEC LEG, all of it served inside `serve_exec_message`: `ws_exec_frames`,
+/// - Exec leg, all of it served inside `serve_exec_message`: `ws_exec_frames`,
 ///   `ws_modify_frames`, `venue_orders`, `venue_fills`, `order_queries`,
 ///   `fill_queries`, `ws_first_exec_frame_at`.
-/// - EITHER LEG: the handshake and socket bookkeeping (`ws_handshakes`,
+/// - Either leg: the handshake and socket bookkeeping (`ws_handshakes`,
 ///   `ws_hits`, `ws_requests`, `active_ws`, `refuse_ws`, `ws_pings`,
 ///   `ws_pongs`, `ws_client_messages`) and everything HTTP.
 ///
-/// A NEW FIELD BELONGS IN EXACTLY ONE OF THOSE THREE, and a fixture that arms a
+/// A new field belongs in exactly one of those three, and a fixture that arms a
 /// data-leg switch on a test whose client is an exec client is arming nothing:
 /// exec clients never enter the tape push, data clients never send a
 /// `Command`.
@@ -200,7 +200,7 @@ pub struct StubState {
     /// Optional body served by `/instruments`; absent uses BTCUSDT spot.
     pub instruments_body: Mutex<Option<String>>,
     /// Body served by `/instruments` once at least one `/ws` upgrade has
-    /// happened. Models the venue registering a symbol AT BIND, which is why a
+    /// happened. Models the venue registering a symbol at bind, which is why a
     /// client can only learn an unconfigured symbol's shape after binding it.
     pub instruments_after_bind: Mutex<Option<String>>,
     /// Number of `POST /control/divergence` requests served.
@@ -224,7 +224,7 @@ pub struct StubState {
     /// delivered on the submit.
     pub ws_modify_frames: Mutex<Vec<String>>,
     /// Raw text of every `Command` frame the stub received, in arrival
-    /// order. A test asserting that a field CROSSED THE WIRE (rather than
+    /// order. A test asserting that a field crossed the wire (rather than
     /// merely being accepted by the client) reads it here.
     pub ws_client_messages: Mutex<Vec<String>>,
     /// WS upgrade attempts (handshakes the stub started serving). The
@@ -241,7 +241,7 @@ pub struct StubState {
     pub trades_body: Mutex<Option<String>>,
     /// Optional successive `/trades` bodies for pagination tests.
     pub trades_pages: Mutex<VecDeque<String>>,
-    /// A `ts_event`-sorted trade tape served with REAL cursor semantics: the
+    /// A `ts_event`-sorted trade tape served with real cursor semantics: the
     /// handler honours the inclusive `start` bound and the `limit`, exactly as
     /// `GET /trades` does. `trades_pages` cannot detect a lost row, because it
     /// replays queued bodies whatever the client asked for; a cursor that skips
@@ -263,8 +263,8 @@ pub struct StubState {
     /// Every `QueryHistory` this stub served, as (kind, continuation), in
     /// arrival order.
     ///
-    /// Recorded rather than merely counted so a test can assert the REQUEST
-    /// SEQUENCE - that the client resumed with the token it was given rather
+    /// Recorded rather than merely counted so a test can assert the request
+    /// sequence - that the client resumed with the token it was given rather
     /// than re-asking from the start, which a row-level assertion cannot
     /// distinguish from a client that paged correctly by luck.
     pub history_requests: Mutex<Vec<(mogwai_protocol::HistoryKind, Option<String>)>>,
@@ -272,12 +272,12 @@ pub struct StubState {
     /// decodable envelope at speed 1 with a zero river floor, which is what a
     /// venue that has just booted looks like. A test exercising the off-river
     /// window guard publishes an envelope with a real `data_origin_ns` here;
-    /// a test exercising the UNDECODABLE path sets `fail_clock`.
+    /// a test exercising the undecodable path sets `fail_clock`.
     ///
-    /// THE DEFAULT USED TO BE THE CATCH-ALL `[]`, and it was the single largest
+    /// The default used to be the catch-all `[]`, and it was the single largest
     /// cost in this crate's test suite: the client cannot decode it, and
     /// `fetch_clock_or_identity` retries three times with a 200 ms wall sleep
-    /// between attempts before falling back, INLINE IN `connect()`. That is
+    /// between attempts before falling back, inline in `connect()`. That is
     /// ~400 ms on every connecting test, and all but two tests in these
     /// binaries connect. Measured per test with
     /// `scripts/adapter_test_walls.py`: they sat in a flat 419-892 ms band with
@@ -295,7 +295,7 @@ pub struct StubState {
     /// and none of them asserted anything about. Costs ~400 ms of retry
     /// ladder, so arm it only in a test whose property IS that branch.
     pub fail_clock: AtomicBool,
-    /// Number of `GET /clock` requests served. The RETRY LADDER is the only
+    /// Number of `GET /clock` requests served. The retry ladder is the only
     /// thing that distinguishes a fallback from a refusal from the outside, so
     /// a test on `fail_clock` counts the attempts rather than inferring them
     /// from how long the connect took.
@@ -309,32 +309,32 @@ pub struct StubState {
     /// different `expected_run_seed` must refuse to use the connection.
     pub run_seed: AtomicU64,
     /// When true, `GET /health` answers `500` with an empty body, modelling a
-    /// venue whose identity probe CANNOT BE ANSWERED - the shape the adapter
+    /// venue whose identity probe cannot be answered at all - the shape the adapter
     /// classifies as `IdentityOutcome::Unreachable` and deliberately declines to
     /// refuse on. Without this the stub can only model a venue that answers, so
     /// the unreachable branch has no end-to-end fixture at all.
     pub fail_health: AtomicBool,
     /// Number of `GET /health` requests served. An identity test concluding
-    /// "the client did not refuse" must first establish that it ASKED: a client
+    /// "the client did not refuse" must first establish that it asked: a client
     /// that skipped the probe entirely satisfies the same assertion for free.
     pub health_hits: AtomicUsize,
-    /// Wall instant at which the WS leg put its FIRST `ws_trades` frame on the
+    /// Wall instant at which the WS leg put its first `ws_trades` frame on the
     /// wire. A test measuring an inbound-latency contribution starts its clock
     /// here rather than at `connect()`: everything the stub does between the
     /// upgrade and the push - scheduling turns, blackout windows, whatever the
     /// harness grows next - is otherwise counted as adapter-side latency, and a
     /// delay the client never applied passes the assertion.
     pub ws_first_frame_at: Mutex<Option<Instant>>,
-    /// `ws_first_frame_at`'s twin for the EXEC leg: the wall instant at which
-    /// the stub was ABOUT TO SEND its first `ws_exec_frames` frame in reply to a
+    /// `ws_first_frame_at`'s twin for the exec leg: the wall instant at which
+    /// the stub was about to send its first `ws_exec_frames` frame in reply to a
     /// `SubmitOrder`. Stamped strictly before the send, exactly as the data leg
     /// is, so everything above the stamp is stub time and the measured interval
     /// is `>=` the client's own contribution rather than `==` it - the phrasing
     /// matters because an earlier anchor makes a `>=` lower bound very slightly
-    /// WEAKER, never stricter.
+    /// weaker, never stricter.
     ///
-    /// SINGLE-SHOT ACROSS THE WHOLE `StubState`, like its data-leg twin: it
-    /// records the first exec frame of the FIRST socket and never moves again.
+    /// Single-shot across the whole `StubState`, like its data-leg twin: it
+    /// records the first exec frame of the first socket and never moves again.
     /// A test that submits two orders, or that lets the exec leg reconnect,
     /// would silently measure from the first submit - which is the "the anchor
     /// is not what it reads as" defect this field was added to remove. Such a
@@ -345,7 +345,7 @@ pub struct StubState {
     /// charging the client for the connect ladder, and on this leg that ladder
     /// is not small: `await_account_registered` blocks connect until the seeded
     /// account snapshot has come back through the very latency pump under test,
-    /// so an armed 400 ms exec delay is paid ONCE INSIDE CONNECT before the
+    /// so an armed 400 ms exec delay is paid once, inside connect, before the
     /// order is even submitted. Setup measured 416.7-418.7 ms over 40 runs of
     /// `havoc_reaches_the_order_a_trigger_produces`, whose lower bound was
     /// 400 ms: satisfied by setup alone, in every run, whatever the client did
@@ -368,7 +368,7 @@ pub struct StubState {
     pub trades_hits: AtomicUsize,
     /// Count of WS `/ws` upgrades (the polling profile must never open one).
     pub ws_hits: AtomicUsize,
-    /// The request LINE of every `/ws` upgrade this stub was offered, in order.
+    /// The request line of every `/ws` upgrade this stub was offered, in order.
     /// Carries the query string, and therefore the account id a client
     /// disclosed - which is what makes "what did the stranger learn" an
     /// assertable question rather than an inference from a counter.
@@ -383,18 +383,18 @@ pub struct StubState {
     /// ms of the subscribe instant, modelling a `GoDark` blackout window.
     pub dark_ms: AtomicUsize,
     /// When true, the WS data leg closes the connection (returns, dropping the
-    /// socket) right after pushing all `ws_trades` on the FIRST subscribe,
+    /// socket) right after pushing all `ws_trades` on the first subscribe,
     /// modelling a clean stream end. The peer close makes the client's reader
     /// loop exit normally and run its on-disconnect flush callback - the only
     /// path that releases a message the reorder filter is holding at stream end
     /// (the flush never runs on a client-side `stop()`, which merely aborts the
     /// reader task: that is finding A.5). On any later (reconnected) subscribe
-    /// the leg serves nothing and STAYS UP, so the held trade is not replayed
+    /// the leg serves nothing and stays up, so the held trade is not replayed
     /// and the client is not driven into a re-serve/close loop. Enforced by
     /// `served_once`.
     pub close_after_trades: AtomicBool,
     /// Internal: latched once a `close_after_trades` leg has served its one
-    /// batch and closed. THE SENTENCE ABOVE IS THIS FIELD - without it the leg
+    /// batch and closed. The sentence above is itself this field - without it the leg
     /// re-reads `ws_trades` on every upgrade, and since the close it just sent
     /// is exactly what makes the client re-dial, the stub spins re-serving the
     /// whole batch and closing again for as long as the test runs. Nothing
@@ -402,33 +402,33 @@ pub struct StubState {
     /// switch stops reading after three trades and passes over a stub still
     /// looping underneath it.
     served_once: AtomicBool,
-    /// Gate on the WS leg's FIRST application push. See [`PushGate`].
+    /// Gate on the WS leg's first application push. See [`PushGate`].
     pub push_gate: PushGate,
 }
 
 /// The condition the WS leg's tape push waits on, replacing a fixed sleep.
 ///
-/// THE PROBLEM IT SOLVES. A data client's subscription is satisfied ENTIRELY
-/// LOCALLY - `subscribe_trades` sends no wire frame - so a tape frame that
+/// The problem it solves. A data client's subscription is satisfied entirely
+/// locally - `subscribe_trades` sends no wire frame - so a tape frame that
 /// reaches the client before the local subscription is recorded is legitimately
 /// discarded, and the test then fails with "expected a trade data event, got
-/// Instrument" or a timeout. A WRONG ANSWER, not a clean one. The harness used
+/// Instrument" or a timeout. A wrong answer, not a clean one. The harness used
 /// to buy the client a head start with an unconditional `sleep(100ms)` before
 /// the push: a bet that connect-plus-subscribe fits in 100 ms of wall time,
 /// which a loaded box loses, and a flat 100 ms added to every socket test that
 /// seeds a frame.
 ///
-/// The stub CANNOT observe the subscription - nothing about it crosses the
+/// The stub cannot observe the subscription at all - nothing about it crosses the
 /// wire - so the test has to say when it is ready. That is what this is: the
 /// test calls [`PushGate::open`] after subscribing (or, where the property is
-/// about a PRE-subscription frame, before), and the leg pushes then and not
+/// about a pre-subscription frame, before), and the leg pushes then and not
 /// before.
 ///
-/// IT LATCHES. A reconnecting client re-enters `serve_ws`, and a one-shot
+/// It latches. A reconnecting client re-enters `serve_ws`, and a one-shot
 /// permit would strand the second socket forever; once open, every later socket
 /// pushes immediately.
 ///
-/// ONLY THE PUSH WAITS. A leg with an empty `ws_trades` has nothing to gate, so
+/// Only the push waits. A leg with an empty `ws_trades` has nothing to gate, so
 /// it never waits at all - which is where most of the removed wall time comes
 /// from, since the exec and reconciliation binaries seed no tape.
 pub struct PushGate {
@@ -445,10 +445,10 @@ impl Default for PushGate {
 
 /// How long the WS leg waits for a test to open the gate before giving up.
 ///
-/// ONE BOUND, NOT TWO. Below, the legitimate wait is one `connect()` return
+/// One bound, not two. Below, the legitimate wait is one `connect()` return
 /// plus a synchronous `subscribe_*` - single-digit milliseconds - so a second
 /// is two orders of magnitude of headroom and cannot be lost to host load.
-/// Above, this is only how long a FAILING run spends before it records the
+/// Above, this is only how long a failing run spends before it records the
 /// stall; it does not have to beat any downstream deadline, because the stall
 /// is reported by [`assert_push_gate_opened`] wherever a test waits, and by
 /// `StubState`'s `Drop` otherwise. An earlier draft made this constant race
@@ -458,26 +458,26 @@ impl Default for PushGate {
 const PUSH_GATE_DEADLINE: Duration = Duration::from_secs(1);
 
 thread_local! {
-    /// Set when a WS leg gave up waiting for [`PushGate::open`]. THREAD-LOCAL
-    /// RATHER THAN GLOBAL BECAUSE EVERY TEST IN THESE BINARIES IS
+    /// Set when a WS leg gave up waiting for [`PushGate::open`]. Thread-local
+    /// rather than global because every test in these binaries is
     /// `flavor = "current_thread"`: the stub's tasks are spawned onto the
     /// runtime the test itself blocks on, so they run on the test's own thread
     /// and a flag set there is readable by the test and by nothing else. The
     /// authoritative failure is `StubState`'s `Drop`, which reads the same flag
     /// on the same thread during runtime shutdown; the explicit checks exist
-    /// only so the gate is named BEFORE a downstream timeout gets to speak.
+    /// only so the gate is named before a downstream timeout gets to speak.
     static PUSH_GATE_STALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Panics naming the gate if any WS leg on this thread gave up waiting for it.
 ///
-/// CALL THIS WHEREVER A TEST WAITS FOR SOMETHING THE GATED PUSH PRODUCES,
+/// Call this wherever a test waits for something the gated push produces,
 /// before that wait reports its own timeout. Without it the symptom is a
 /// missing data event, which is exactly the wrong answer the gate was built to
 /// replace.
 ///
-/// NOTHING DETECTS A WAIT SITE THAT FORGOT THIS, and a `Drop` backstop on
-/// `StubState` was built to be that detector and then MEASURED NOT TO WORK: the
+/// Nothing detects a wait site that forgot this, and a `Drop` backstop on
+/// `StubState` was built to be that detector and then measured not to work: the
 /// state is released when the runtime drops the handler task holding it, tokio
 /// catches panics in task destructors, and the bite-check printed the panic
 /// under a test libtest still reported as passing. That is the same
@@ -502,7 +502,7 @@ impl PushGate {
 
     /// Waits for [`PushGate::open`], returning whether it opened.
     ///
-    /// A TIMEOUT RECORDS AND RETURNS rather than panicking. It used to assert
+    /// A timeout records and returns rather than panicking. It used to assert
     /// here, which cannot fail the test: this runs inside the per-connection
     /// `tokio::spawn` in `run_stub` whose `JoinHandle` is dropped, so the
     /// runtime captures the panic, prints it and moves on - and the unwind
@@ -513,7 +513,7 @@ impl PushGate {
     pub async fn wait(&self) -> bool {
         let mut rx = self.open.subscribe();
         let wait = async {
-            // `borrow_and_update` marks the value seen BEFORE awaiting the next
+            // `borrow_and_update` marks the value seen before awaiting the next
             // change, so an `open` racing this loop is observed rather than
             // slept through.
             while !*rx.borrow_and_update() {
@@ -593,7 +593,7 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
     } else if path.starts_with("/clock") {
         state.clock_hits.fetch_add(1, Ordering::Relaxed);
         if state.fail_clock.load(Ordering::Relaxed) {
-            // The old DEFAULT, now opt-in: a body the client cannot decode.
+            // The old default, now opt-in: a body the client cannot decode.
             respond_json(stream, "200 OK", "[]").await;
             return;
         }
@@ -603,7 +603,7 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
             None => respond_json(stream, "200 OK", IDENTITY_CLOCK_JSON).await,
         }
     } else if path.starts_with("/instruments") {
-        // The real venue REGISTERS a symbol when a socket binds it, so its
+        // The real venue registers a symbol when a socket binds it, so its
         // `/instruments` answer grows across a bind. Model that rather than a
         // fixed body, or a client's post-bind reseed reads the same list twice
         // and the test cannot tell a barrier from a no-op.
@@ -721,10 +721,10 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// `/control/divergence` divergence payloads) are read in full rather than
 /// truncated at the header boundary.
 ///
-/// BOTH READS LOOP. The body loop below is the obvious one; the HEAD loop is
+/// Both reads loop. The body loop below is the obvious one; the head loop is
 /// the one that was missing, and its absence was invisible rather than benign.
 /// A single `read` into a fixed 4 KiB buffer is not a request - it is one
-/// SEGMENT of one - so a `/ws` upgrade split across two TCP segments, or any
+/// segment of one - so a `/ws` upgrade split across two TCP segments, or any
 /// head over 4 KiB (which one `Authorization` header or a cookie jar would
 /// produce), found no `\r\n\r\n`, returned `None`, and dropped the connection
 /// with no diagnostic at all. The client then reports a connect failure and the
@@ -741,7 +741,7 @@ pub async fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
         if let Some(end) = find_header_end(&bytes) {
             break end;
         }
-        // The cap bounds what is ACCUMULATED, so the read is clamped to the
+        // The cap bounds what is accumulated, so the read is clamped to the
         // remaining room rather than checked after the fact. Checking a
         // whole-buffer read afterwards makes the true bound
         // `MAX_HEAD_BYTES + 4096` and fires one pass late, which is the sort of
@@ -821,8 +821,8 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     state.ws_handshakes.fetch_add(1, Ordering::Relaxed);
     state.ws_hits.fetch_add(1, Ordering::Relaxed);
 
-    // The REQUEST LINE, recorded before anything is served. A stub that only
-    // counts upgrades cannot answer what a client DISCLOSED to whoever was
+    // The request line, recorded before anything is served. A stub that only
+    // counts upgrades cannot answer what a client disclosed to whoever was
     // holding the port - the account id rides this query string - so counting
     // alone would leave the port-reuse question unanswerable from this side.
     if let Some(request_line) = head.lines().next() {
@@ -874,7 +874,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     // The venue streams the one run-wide tape without a subscribe frame, so the
     // test - not a fixed sleep - says when the push may happen. See `PushGate`.
     // A leg with nothing to push never waits.
-    // A `close_after_trades` leg serves its one batch on the FIRST upgrade only.
+    // A `close_after_trades` leg serves its one batch on the first upgrade only.
     // The close it sends is what makes the client re-dial, so re-reading
     // `ws_trades` on the second upgrade is a re-serve/close loop rather than a
     // second scenario: the replay leg pushes nothing and stays up.
@@ -886,7 +886,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
         state.ws_trades.lock().expect("ws trades mutex").clone()
     };
     if !frames.is_empty() && !state.push_gate.wait().await {
-        // The gate never opened. Push NOTHING - pushing anyway would restore
+        // The gate never opened. Push nothing at all - pushing anyway would restore
         // the raciness the gate replaced - but keep the socket alive and fall
         // through to the read loop, so the client is not driven into a
         // reconnect storm on top of the omission. The stall is recorded; see
@@ -898,7 +898,7 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
         tokio::time::sleep(Duration::from_millis(dark as u64)).await;
     }
     for trade in frames {
-        // Stamped BEFORE the send, and only for the first frame of the first
+        // Stamped before the send, and only for the first frame of the first
         // socket: this is the instant a latency measurement is honest from.
         // Everything above this line is stub time, not client time.
         state
@@ -938,17 +938,17 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     }
 }
 
-/// The EXEC leg's whole behaviour: a reply to one command.
+/// The exec leg's whole behaviour: a reply to one command.
 ///
-/// WHY THIS IS A SEPARATE FUNCTION. The two legs share the handshake and
-/// nothing else. The data leg is entirely ABOVE the read loop in `serve_ws` -
+/// Why this is a separate function. The two legs share the handshake and
+/// nothing else. The data leg is entirely above the read loop in `serve_ws` -
 /// it pushes the tape at upgrade and then only counts control frames, because
 /// a data client's subscription never crosses the wire and it sends no
 /// `Command` at all (only `ExecWsCommand`s become frames, in
 /// `client/exec.rs`). So every `Message::Text` a stub socket receives is exec
 /// traffic by construction, and keeping the reply logic inline invited the
 /// defect that was actually found here: the `ModifyOrder` arm had grown a copy
-/// of the DATA leg's `close_after_trades` / `dark_ms` / venue-ping / close
+/// of the data leg's `close_after_trades` / `dark_ms` / venue-ping / close
 /// tail, written as though the read loop were the data path.
 ///
 /// That block was unreachable three ways over and is deleted. Two of them are
@@ -958,15 +958,15 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
 /// data client sends a `Command`, so no socket that has `dark_ms` or
 /// `ws_venue_pings` armed for the data path reaches this code by any route a
 /// client can take. The `served_once` guard the block held was structurally
-/// unreachable HERE and moved to the data leg above, where the behaviour its
+/// unreachable in this leg and moved to the data leg above, where the behaviour its
 /// field documents actually lives; the `dark_ms`, venue-ping and close tails
 /// were duplicates of code already running there and are simply gone.
 ///
-/// The stub CANNOT dispatch the two legs at the upgrade, and that is a fact
+/// The stub cannot dispatch the two legs at the upgrade at all, and that is a fact
 /// about the adapter rather than a shortcut taken here: `MogwaiDataClientConfig`
 /// and `MogwaiExecClientConfig` build the same `/ws?account=...&callsign=...`
 /// URL (`config.rs`), so the request line does not distinguish them. The split
-/// is therefore by WHERE the behaviour sits - before the loop, or in here - not
+/// is therefore by where the behaviour sits - before the loop, or in here - not
 /// by two handlers chosen at the handshake.
 async fn serve_exec_message<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
@@ -995,7 +995,7 @@ async fn serve_exec_message<S>(
                 .expect("ws exec frames mutex")
                 .clone();
             for frame in frames {
-                // Stamped BEFORE the send, and only for the first frame of the
+                // Stamped before the send, and only for the first frame of the
                 // first socket, exactly as `ws_first_frame_at` is on the data
                 // leg. Everything above this line is stub time, not client
                 // time. See its doc comment.
@@ -1462,7 +1462,7 @@ fn cache_order(cache: &Rc<RefCell<Cache>>, order: &nautilus_model::orders::Order
 }
 
 /// The `SubmitOrder` command the exec client's `submit_order` takes, built from
-/// an order's own init event. `init` lets a caller hand in a MUTATED init - the
+/// an order's own init event. `init` lets a caller hand in a mutated init - the
 /// unsupported-shape table drives every refusal that way, because nautilus'
 /// own factory refuses to build most of them.
 pub fn submit_command(
@@ -1485,7 +1485,7 @@ pub fn submit_command(
     )
 }
 
-/// A BTCUSDT venue-truth row for a CONDITIONAL order, carrying the four fields
+/// A BTCUSDT venue-truth row for a conditional order, carrying the four fields
 /// the conditional surface added. Reconciliation of a stop is unreadable
 /// without them, which is what the report gate pins.
 #[expect(clippy::too_many_arguments)]
@@ -1523,13 +1523,13 @@ pub fn venue_stop_order_row(
 /// Awaits the next execution event or fails after `timeout`, naming what the
 /// caller was waiting for.
 ///
-/// `what` IS NOT DECORATION AND IS NOT OPTIONAL. This helper is called from
+/// `what` is neither decoration nor optional. This helper is called from
 /// roughly thirty sites across three binaries, and its old message -
 /// `execution event arrives: Elapsed(())`, reported at this file - named
 /// neither the expectation nor the wait, so every one of those thirty timeouts
 /// read identically and pointed at the harness rather than at the property. It
 /// was hit live during a round-4 bite-check and cost real time to attribute.
-/// libtest's panic header names the TEST (the thread is named for it); what
+/// libtest's panic header names the test (the thread is named for it); what
 /// only the call site knows is which event in the sequence failed to arrive,
 /// which is what this argument carries.
 ///
@@ -1560,7 +1560,7 @@ pub async fn next_data_event(
     timeout: Duration,
 ) -> DataEvent {
     let Ok(event) = tokio::time::timeout(timeout, rx.recv()).await else {
-        // THE GATE SPEAKS FIRST. A leg that gave up waiting for `push_gate`
+        // The gate speaks first. A leg that gave up waiting for `push_gate`
         // sent nothing, and the missing data event is that omission's symptom,
         // not a finding about the client.
         assert_push_gate_opened();
@@ -1576,7 +1576,7 @@ pub async fn next_data_event(
 /// the sink before any trade or bar (`emit_seeded_instruments`), so nautilus
 /// caches the instrument first. That ordering is load-bearing, not incidental:
 /// a host executor refuses a bar whose instrument is absent from the
-/// cache. A transport test asserting the first TRADE must therefore skip past
+/// cache. A transport test asserting the first trade must therefore skip past
 /// this instrument prologue rather than mistake it for the trade.
 pub async fn next_non_instrument_data_event(
     rx: &mut UnboundedReceiver<DataEvent>,

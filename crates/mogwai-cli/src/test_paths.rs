@@ -1,21 +1,21 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE TWO PATHS A UNIT TEST IN THIS CRATE MAY RESOLVE, in one place because
+//! The two paths a unit test in this crate may resolve, in one place because
 //! hand-rolling either one is a defect this crate has shipped twice.
 //!
-//! A cargo unit test runs with its working directory set to the PACKAGE root,
+//! A cargo unit test runs with its working directory set to the package root,
 //! `crates/mogwai-cli`, never the repository root. Two consequences, and both
 //! have bitten:
 //!
 //! - A test reading a repo-relative input (`analysis/mnq-arrival-screen.json`)
 //!   resolves `crates/mogwai-cli/analysis/...`, which does not exist. Where the
 //!   read was guarded by an existence check with an early return, the test
-//!   asserted NOTHING on every run it ever made, while reporting green.
+//!   asserted nothing on every run it ever made, while reporting green.
 //!   [`repo_root`] is what such a test joins against, and
 //!   `test_hygiene.rs`'s `no_test_declines_to_assert_on_a_missing_input`
 //!   holds the class shut.
-//! - A test WRITING to a relative `target/` lands in
+//! - A test writing to a relative `target/` lands in
 //!   `crates/mogwai-cli/target/`, which the root `.gitignore` hides - its bare
 //!   `target` pattern matches a directory of that name at any depth - and
 //!   which `cargo clean` never touches, because cargo's target directory is at
@@ -24,14 +24,14 @@
 //!   the real one.
 //!
 //! `CARGO_TARGET_TMPDIR` would serve the second case and is what the
-//! INTEGRATION tests use; cargo does not set it for unit tests, which is why
+//! integration tests use; cargo does not set it for unit tests, which is why
 //! this module resolves the workspace target directory from
 //! `CARGO_MANIFEST_DIR` instead.
 //!
-//! A PATH IS PER-PROCESS OR IT IS A SHARED RESOURCE, and the first cut of
-//! [`scratch_dir`] got that wrong: it resolved `target/<name>` - one FIXED path
+//! A path is per-process or it is a shared resource, and the first cut of
+//! [`scratch_dir`] got that wrong: it resolved `target/<name>` - one fixed path
 //! per name - and opened with `remove_dir_all`. The full gate profile runs the
-//! workspace and instrumented sweeps CONCURRENTLY, so two processes running the
+//! workspace and instrumented sweeps concurrently, so two processes running the
 //! same test race the wipe against the other's writes, and the directories
 //! survived the run besides. The leaf is unique per process now, and the
 //! `ScratchDir` guard removes it on drop, which is the same shape
@@ -53,7 +53,7 @@ pub(crate) fn repo_root() -> PathBuf {
     dir
 }
 
-/// A fresh, empty, PROCESS-PRIVATE scratch directory under
+/// A fresh, empty, process-private scratch directory under
 /// `target/cli-unit-scratch/<name>/`, removed when the returned guard drops.
 ///
 /// The guard is the return value on purpose: `scratch_dir("x").path()

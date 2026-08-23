@@ -28,11 +28,11 @@ impl Engine {
         self.on_submit_from(order, ts, reading, true, &[])
     }
 
-    /// The one refusal `on_submit_from` makes BEFORE `validate_submit`, lifted
+    /// The one refusal `on_submit_from` makes before `validate_submit`, lifted
     /// out so the group's dry pass can make it too.
     ///
     /// It has to be a separate function rather than a rule inside
-    /// `validate_submit`, because its sibling branch MUTATES - a hedging order
+    /// `validate_submit`, because its sibling branch mutates - a hedging order
     /// with no `position_id` that is not reduce-only gets a fresh one assigned -
     /// and `validate_submit` is a pure read that the dry pass depends on staying
     /// pure. Splitting the refusal from the assignment is what lets both passes
@@ -49,37 +49,37 @@ impl Engine {
             .then(|| "hedging reduce-only order requires a position_id".to_string())
     }
 
-    /// THE ONE HOME OF THE CLOSING-SNAPSHOT RULE for the ORDER-ENTRY paths.
+    /// The one home of the closing-snapshot rule for the order-entry paths.
     ///
-    /// The rule has two halves and both are load-bearing. A batch that MOVED
-    /// THE LEDGER owes a snapshot, and that snapshot is exactly what
+    /// The rule has two halves and both are load-bearing. A batch that moved
+    /// the ledger owes a snapshot, and that snapshot is exactly what
     /// `DropNextAccountUpdate` exists to hide - so an armed drop takes it and
-    /// the consumer is left to notice. A batch that moved NOTHING (a bare
+    /// the consumer is left to notice. A batch that moved nothing (a bare
     /// acceptance, a held child taking no hold) still reports the
     /// account, because there is nothing to hide and spending the arm on it
     /// would burn a divergence the operator armed against a real fill.
     ///
     /// `apply_divergences` carries the same meaning it does everywhere else in
-    /// this file: FALSE for a VENUE-ORIGINATED batch - a margin or risk breach
+    /// this file: false for a venue-originated batch - a margin or risk breach
     /// closing a position at the mark - which reports the account but must
     /// never spend an arm the consumer aimed at its own next fill. Passing it is
     /// what makes that structural rather than incidental; see `on_cancel`,
     /// which states the same rule for the cancel path.
     ///
-    /// WHAT THIS DOES NOT COVER, stated exactly, because a comment claiming a
+    /// What this does not cover, stated exactly, because a comment claiming a
     /// wider set than it has is this file's signature defect. Three
     /// order-entry sites are exempt and each says so in place - the
     /// resting-limit acceptance, the held-child acceptance and `on_modify`.
     /// `on_submit_from`'s fill snapshot and `on_cancel`'s spell the rule
     /// themselves because each carries an extra carve-out the helper has no
-    /// argument for. And the VENUE-MAINTENANCE snapshots in `lib.rs` - `on_mark`,
+    /// argument for. And the venue-maintenance snapshots in `lib.rs` - `on_mark`,
     /// `settle` and the funding exchange - do not come from an order-entry
     /// command at all: they report unconditionally and consult no arm, which is
     /// the same ruling `apply_divergences` encodes here.
     ///
-    /// A caller that must ALSO stay silent on a batch that moved nothing - the
+    /// A caller that must also stay silent on a batch that moved nothing - the
     /// clock-driven sweep, which runs on every tick - tests `account_changed`
-    /// itself before calling and gets the arm half from here. An EMPTY batch is
+    /// itself before calling and gets the arm half from here. An empty batch is
     /// no batch and reports nothing.
     fn push_account_snapshot(
         &mut self,
@@ -101,36 +101,36 @@ impl Engine {
         out.push(VenueMessage::AccountState(self.snapshot(ts)));
     }
 
-    /// Submit a LINKED GROUP: every member admitted, or none of them.
+    /// Submit a linked group: every member admitted, or none of them.
     ///
-    /// TWO PASSES, and the split is the whole mechanism.
+    /// Two passes, and the split is the whole mechanism.
     ///
-    /// PASS ONE is a DRY VALIDATION of every member against the current book and
+    /// Pass one is a dry validation of every member against the current book and
     /// against the rest of the group - the group's own ids count as known, so a
     /// child may name a parent that has not been accepted yet. It mutates
     /// nothing and consumes no divergence arm. If any member would be refused,
     /// the group is refused: one `OrderRejected` per member, the failing one
-    /// carrying its own reason and the others naming it, and NO `OrderAccepted`
+    /// carrying its own reason and the others naming it, and no `OrderAccepted`
     /// for anything. That is the atomic-admission guarantee, and it is cheap
     /// precisely because `validate_submit` is a pure read.
     ///
-    /// PASS TWO submits each member through the ordinary path, in the order the
-    /// consumer sent them, at ONE instant against ONE market reading. So no tape
+    /// Pass two submits each member through the ordinary path, in the order the
+    /// consumer sent them, at one instant against one market reading. So no tape
     /// advances between members and no member meets a market a sibling did not.
     ///
-    /// THEN THE CLOSING LINKAGE PASS, which is what makes the guarantee bite
-    /// rather than merely sound good, and which is the SOLE application of a
+    /// Then the closing linkage pass, which is what makes the guarantee bite
+    /// rather than merely sound good, and which is the sole application of a
     /// member's linkage - pass two suppresses the one `on_submit_from` would
     /// otherwise do at the fill.
     ///
     /// Applying it at the fill covers only siblings already on the book, and a
     /// filling member's later siblings are not there yet. That is the hazard
     /// the group frame exists to close: an `Ouo` entry filling before its stop
-    /// is admitted would leave the stop at FULL size, so the pair's aggregate
+    /// is admitted would leave the stop at full size, so the pair's aggregate
     /// fill would be twice the bracket quantity and a crossed slice would
-    /// reverse the account. Applying it at the fill AND again here would fix
+    /// reverse the account. Applying it at the fill and again here would fix
     /// that one and introduce its mirror, because `Ouo` subtracts the filled
-    /// quantity rather than setting a target: a sibling that WAS on the book
+    /// quantity rather than setting a target: a sibling that was on the book
     /// would be shrunk twice, and a two-leg bracket sent stop-first would have
     /// its stop driven to zero leaves and cancelled outright. Hence exactly
     /// once, here, with every member admitted.
@@ -138,17 +138,17 @@ impl Engine {
     /// It runs before this call returns, under the engine lock, so no sweep can
     /// have looked at any member in between.
     ///
-    /// `RejectNextSubmit` is consumed ONCE, for the group, before pass one.
+    /// `RejectNextSubmit` is consumed once, for the group, before pass one.
     /// Spending it per member would refuse one leg of an atomic group, which is
     /// the shape this whole path exists to make impossible.
     ///
-    /// THE WIRE-SHAPE VALIDATOR RUNS HERE, before anything else, because the
+    /// The wire-shape validator runs here, before anything else, because the
     /// atomicity guarantee must not be contingent on a caller. Two of its rules
-    /// are unreachable from the dry pass by construction: a DUPLICATE ID WITHIN
-    /// THE GROUP cannot be seen by `validate_submit`, whose duplicate test reads
+    /// are unreachable from the dry pass by construction: a duplicate id within
+    /// the group cannot be seen by `validate_submit`, whose duplicate test reads
     /// `seen_client_order_ids` and no member is in it yet, so pass one admitted
     /// the group whole and pass two refused the second copy with its sibling
-    /// already accepted and possibly filled; and an `Ioc`/`Fok` MEMBER is a
+    /// already accepted and possibly filled; and an `Ioc`/`Fok` member is a
     /// now-or-never order whose fate admission does not decide. `mogwai-venue`
     /// runs the same validator at the boundary, so nothing arriving over the
     /// wire changes verdict - what changes is that a caller reaching
@@ -194,8 +194,8 @@ impl Engine {
             return reject_all(&reason, None);
         }
 
-        // PASS ONE. Note it validates each member against the book as it is
-        // NOW, not as it will be after earlier members fill - which is why the
+        // Pass one. Note it validates each member against the book as it is
+        // now, not as it will be after earlier members fill - which is why the
         // funds carve-out on `Command::SubmitOrderGroup` exists and is
         // stated there rather than papered over here.
         for order in orders {
@@ -204,7 +204,7 @@ impl Engine {
             }
         }
 
-        // PASS TWO. The WHOLE member list travels into both passes, not just
+        // Pass two. The whole member list travels into both passes, not just
         // the ids: a check that reads the working book - the equity short check
         // does - has to see the members that have not rested yet, or pass one
         // and pass two compute different numbers over the same intent.
@@ -243,7 +243,7 @@ impl Engine {
             out.extend(events);
         }
 
-        // THE CLOSING PASS, and it is the ONLY place a group member's linkage
+        // The closing pass, and it is the only place a group member's linkage
         // is applied - `on_submit_from` skips its own application for a member,
         // because `Ouo` subtracts rather than sets and applying it twice would
         // shrink an already-resting sibling by twice the fill. Running it here
@@ -257,7 +257,7 @@ impl Engine {
             closing.extend(self.apply_linkage_after_fill(&order, qty, ts));
         }
         if !closing.is_empty() {
-            // The rule is asked of THE CLOSING PASS ALONE, not of `out`: every
+            // The rule is asked of the closing pass alone, not of `out`: every
             // member's own batch already took its own snapshot decision, and
             // re-reading their fills here would make this pass owe a second
             // snapshot for a ledger move somebody else already reported and
@@ -269,11 +269,11 @@ impl Engine {
         out
     }
 
-    /// EVERY REFUSAL A SUBMIT CAN MEET, asked as one pure question.
+    /// Every refusal a submit can meet, asked as one pure question.
     ///
     /// This exists so the group's dry pass and the group's own self-check ask
-    /// the SAME question, and so the standing invariant has somewhere to live:
-    /// NO REFUSAL MAY REACH A SUBMIT FROM OUTSIDE THIS FUNCTION. Three
+    /// the same question, and so the standing invariant has somewhere to live:
+    /// no refusal may reach a submit from outside this function. Three
     /// atomicity bugs came from that invariant being unwritten - the dry pass
     /// was built from `validate_submit` alone while the real path also refused
     /// on the hedging `position_id` rule and on a link validated without the
@@ -284,7 +284,7 @@ impl Engine {
     /// is what lets it run twice per member without the second run meaning
     /// anything different from the first.
     ///
-    /// `group` is the member ORDERS, not their ids, and that is load-bearing
+    /// `group` is the member orders, not their ids, and that is load-bearing
     /// rather than a convenience. A refusal computed from the working book -
     /// the equity short check - has to count the members that have not rested
     /// yet, or this pass and the real pass judge different books and the
@@ -308,24 +308,24 @@ impl Engine {
         None
     }
 
-    /// A group member was REFUSED on pass two, which the dry pass was supposed
+    /// A group member was refused on pass two, which the dry pass was supposed
     /// to have made impossible. Decide which of the two causes it was and say
     /// so, because they are a disclosed limit and a defect respectively.
     ///
-    /// The discriminator is to ask the dry question AGAIN, now, after the
+    /// The discriminator is to ask the dry question again, now, after the
     /// refusal:
     ///
-    /// - It still refuses. Then the two passes agree and the STATE moved under
+    /// - It still refuses. Then the two passes agree and the state moved under
     ///   them - an earlier member's fill spent the balance this one needed.
     ///   That is the disclosed funds carve-out on `SubmitOrderGroup`: the dry
     ///   pass reads the book before the group runs and cannot see money the
     ///   group is about to spend. A warning, not a defect.
-    /// - It passes. Then the two passes DISAGREE about the same state, which is
+    /// - It passes. Then the two passes disagree about the same state, which is
     ///   the defect family this whole split exists to prevent: a refusal
     ///   reachable from the real path and invisible to the dry one. Loud, and a
     ///   `debug_assert` so it cannot survive a single dev run of the path.
     ///
-    /// Deliberately not a classification of the REASON STRING. Matching text
+    /// Deliberately not a classification of the reason string. Matching text
     /// would pin the check to today's wording and would say nothing about a
     /// refusal added later, which is exactly the case that needs catching.
     fn report_group_member_refusal(
@@ -359,7 +359,7 @@ impl Engine {
         );
     }
 
-    /// A trailing stop limit's LIMIT is derived, never stated - the wire refuses
+    /// A trailing stop limit's limit is derived, never stated - the wire refuses
     /// a price on this type for exactly that reason. Deriving it before
     /// `risk_px` reads it is what makes the hold the one the limit
     /// implies rather than the one the trigger implies; the ratchet re-derives
@@ -406,7 +406,7 @@ impl Engine {
             self.position_seq = self.position_seq.saturating_add(1);
             order.position_id = Some(format!("{}-{}", order.symbol, self.position_seq));
         }
-        // The group's members travel into `validate_link` on THIS pass too, not just
+        // The group's members travel into `validate_link` on this pass too, not just
         // the dry one. A child may name a parent that has not been accepted yet,
         // and a group is not required to list parents before children - so a
         // pass that dropped the group context here refused a forward parent
@@ -441,10 +441,10 @@ impl Engine {
             return vec![VenueMessage::OrderRejected {
                 client_order_id: order.client_order_id,
                 // `validate_divergence` refuses an over-length reason at every
-                // WIRE arming path, but `Engine::arm` is a public in-process
+                // wire arming path, but `Engine::arm` is a public in-process
                 // API that reaches no validator, so the byte budget sized
                 // against `MAX_REASON_LEN` cannot rest on the caller alone.
-                // Truncating at the ECHO closes it by construction for every
+                // Truncating at the echo closes it by construction for every
                 // arming path there will ever be, and an already-valid reason
                 // passes through untouched.
                 reason: mogwai_protocol::truncate_reason(reason),
@@ -464,14 +464,14 @@ impl Engine {
         let increment = self.instruments[&order.symbol].price_increment;
         let band_ticks = reading.map_or(0, |value| value.band_ticks);
 
-        // An order-list CHILD whose parent has not executed rests HELD: accepted
+        // An order-list child whose parent has not executed rests held: accepted
         // and answerable, scanned by nothing, holding nothing. It is routed here,
         // ahead of every marketability and fill decision, precisely because none
         // of those questions may be asked of it yet - a child released later gets
-        // its band draw and its funds check at RELEASE, against the market that
+        // its band draw and its funds check at release, against the market that
         // exists then rather than the one its parent was submitted into.
         //
-        // A child whose parent has ALREADY filled skips this and takes the
+        // A child whose parent has already filled skips this and takes the
         // ordinary path, which is the fast-market case: a market entry that
         // filled on arrival leaves its exits nothing to wait for.
         if let Some(parent) = order
@@ -483,7 +483,7 @@ impl Engine {
             let venue_order_id = self.next_venue_order_id();
             self.seen_client_order_ids
                 .insert(order.client_order_id.clone(), venue_order_id.clone());
-            // MARKED EXEMPTION FROM `push_account_snapshot`, two of three, and
+            // Marked exemption from `push_account_snapshot`, two of three, and
             // for the same reason as the resting-limit one: a held child takes
             // no hold and books no balance, so there is no update for
             // `DropNextAccountUpdate` to hide and spending the arm here would
@@ -514,7 +514,7 @@ impl Engine {
         }
 
         let trigger_px = draw_trigger(self.fill_seed, &order, stated_px, increment, band_ticks, 0);
-        // A MARKET-TO-LIMIT TAKES THE MARKET, and its stated price is the limit
+        // A market-to-limit takes the market, and its stated price is the limit
         // that bounds what it will pay and the price its remainder rests at -
         // not, as this used to read, the price it fills its whole quantity at.
         // It shares the market order's draw for the part that executes and the
@@ -547,7 +547,7 @@ impl Engine {
         } else {
             stated_px
         };
-        // THE LIMIT HALF OF THE NAME. The band's adverse slip is drawn against
+        // The limit half of the name. The band's adverse slip is drawn against
         // the last print and can carry a market-to-limit past its own stated
         // price; the limit is the one thing the consumer asked the venue to
         // respect, so it bounds the fill rather than the other way round. A
@@ -590,8 +590,8 @@ impl Engine {
             let stop_px = order
                 .trigger_price
                 .expect("validated conditional has trigger");
-            // Which predicate this conditional waits on: a STOP fires when
-            // price runs away from what it protects, a TOUCHED order when
+            // Which predicate this conditional waits on: a stop fires when
+            // price runs away from what it protects, a touched order when
             // price comes toward the level it is waiting at.
             let toward = order.order_type.triggers_toward();
             let touched = reading.is_some_and(|value| {
@@ -623,7 +623,7 @@ impl Engine {
             self.rest_open(record);
             if let (true, Some(value)) = (touched, reading) {
                 // The synthesized hit of section 1.4: the reading's own last
-                // print, which IS a real print off the canonical tape. The
+                // print, which is a real print off the canonical tape. The
                 // frontier is the application instant, because a stop accepted
                 // at `ts` must never be offered prints that predate it.
                 let pos = self.open.len() - 1;
@@ -648,7 +648,7 @@ impl Engine {
             }];
         }
 
-        // THE TYPES THAT REST AS A LIMIT once accepted: the limit itself, and
+        // The types that rest as a limit once accepted: the limit itself, and
         // the market-to-limit, whose whole remainder rests at its stated price
         // when the touch is short of it and whose partial remainder rests there
         // when the touch takes only part of it. Spelled once and read at all
@@ -661,7 +661,7 @@ impl Engine {
         );
         if rests_as_limit && !marketable {
             if order.time_in_force == TimeInForce::Fok {
-                // `plan_fill` is called for its CONSUMING effect and its plan
+                // `plan_fill` is called for its consuming effect and its plan
                 // thrown away. A targeted `PartialFillNext` which is the very
                 // reason a FOK cannot fill must go with the FOK that hit it,
                 // rather than stay armed to ambush a resubmit of the same id.
@@ -714,13 +714,13 @@ impl Engine {
                 }
                 TimeInForce::Fok => unreachable!("FOK rejected above"),
             }
-            // MARKED EXEMPTION FROM `push_account_snapshot`, one of three.
-            // Deliberately does NOT consume `DropNextAccountUpdate`, and does
+            // Marked exemption from `push_account_snapshot`, one of three.
+            // Deliberately does not consume `DropNextAccountUpdate`, and does
             // not call `plan_fill`, so neither that divergence nor a targeted
-            // `PartialFillNext` is spent here: both are armed against the FILL,
+            // `PartialFillNext` is spent here: both are armed against the fill,
             // and a resting order has not had one yet. The helper would reach
             // the same verdict today, because an acceptance-and-rest batch
-            // moves no ledger - but it would do so INCIDENTALLY, and a future
+            // moves no ledger - but it would do so incidentally, and a future
             // event in this batch that did move one must not silently start
             // spending the arm on an order that has never traded.
             out.push(VenueMessage::AccountState(self.snapshot(ts)));
@@ -728,7 +728,7 @@ impl Engine {
         }
 
         // Order here is load-bearing. `plan_fill` consumes the targeted
-        // `PartialFillNext` for this id, and it must run BEFORE the FOK decision
+        // `PartialFillNext` for this id, and it must run before the FOK decision
         // because all-or-nothing is judged against the (possibly diverged) fill
         // size, not the requested quantity. A FOK the partial pushes below full
         // is rejected right here, and the partial it consumed goes with it: the
@@ -769,7 +769,7 @@ impl Engine {
         }
 
         // Reserve the id only now, past every reject gate (validation,
-        // RejectNextSubmit, FOK). Only an ACCEPTED order reserves its id, so a
+        // RejectNextSubmit, FOK). Only an accepted order reserves its id, so a
         // rejected submit can be corrected and resubmitted under the same id,
         // while a duplicate of an accepted id is caught in `validate_submit`.
         // The venue id rides along so a cancel/modify that arrives after this
@@ -804,7 +804,7 @@ impl Engine {
                 ts_event: ts,
             });
             out.extend(self.close_unrested(&record, WireOrderStatus::Canceled, ts));
-            // REACHABLE FROM A VENUE-ORIGINATED CLOSE: `close_at_mark` submits a
+            // Reachable from a venue-originated close: `close_at_mark` submits a
             // reduce-only market order, and a position that went flat between
             // the breach walk and this submit caps it at zero. Hence
             // `apply_divergences` rather than `true` - the venue's own flatten
@@ -840,13 +840,13 @@ impl Engine {
             // here is off the book by the time anything else looks at it, and
             // the order's own record is untouched by the linkage.
             //
-            // NOT FOR A GROUP MEMBER, and this is load-bearing rather than an
-            // optimization. `Ouo` SUBTRACTS the filled quantity from each
+            // Not for a group member, and this is load-bearing rather than an
+            // optimization. `Ouo` subtracts the filled quantity from each
             // sibling still resting, so it is not idempotent: applying it here
             // and again in `on_submit_group`'s closing pass shrinks a sibling
-            // that was already on the book by TWICE the fill. For a two-leg
+            // that was already on the book by twice the fill. For a two-leg
             // bracket sent stop-first that drove the stop's leaves to zero and
-            // CANCELLED it, leaving the position naked - the mirror image of
+            // cancelled it, leaving the position naked - the mirror image of
             // the hazard the group frame was built to close, and reachable only
             // through one of the two member orderings. The group applies every
             // filled member's rule exactly once, in the closing pass, once all
@@ -924,7 +924,7 @@ impl Engine {
             out.extend(self.close_unrested(&record, WireOrderStatus::Filled, ts));
         }
 
-        // SPELLS THE RULE ITSELF rather than calling `push_account_snapshot`,
+        // Spells the rule itself rather than calling `push_account_snapshot`,
         // and its doc names this site: the helper has no argument for the
         // `last_qty > 0` carve-out below, which is a statement about what the
         // arm was aimed at rather than about whether the batch moved anything.
@@ -958,7 +958,7 @@ impl Engine {
     /// what makes walking the tape off the engine lock safe: two overlapping
     /// walks naming one order would otherwise both credit the span they share.
     ///
-    /// Returns the batch's events and the number of orders it EMITTED ANY EVENT
+    /// Returns the batch's events and the number of orders it emitted any event
     /// for, which is what the caller reserves delivery bytes against - a scan
     /// the tape did not satisfy produces no bytes, so reserving for it would
     /// grow the request with the open-order count against a fixed budget. Fills
@@ -966,7 +966,7 @@ impl Engine {
     /// `OrderTriggered` and nothing else, and counting only fills would leave
     /// that frame unreserved.
     ///
-    /// Runs on the IDENTITY clock; the sweeper calls `apply_scans_on_clock`
+    /// Runs on the identity clock; the sweeper calls `apply_scans_on_clock`
     /// with the swept boat's.
     pub fn apply_scans(&mut self, results: &[ScanResult], ts: u64) -> (Vec<VenueMessage>, usize) {
         self.apply_scans_on_clock(results, ts, mogwai_protocol::SimClock::identity())
@@ -974,13 +974,13 @@ impl Engine {
 
     /// Cancel every resting order whose time-in-force has run out.
     ///
-    /// TIME-DRIVEN and nothing to do with triggers, which is why it is its own
+    /// Time-driven and nothing to do with triggers, which is why it is its own
     /// pass rather than a branch of the trigger walk: a `Gtd` limit nothing ever
     /// approached must still stop resting at its instant, and a `Day` order must
     /// stop resting at the session boundary whether or not the tape came near
     /// it.
     ///
-    /// `closed_symbol` names an instrument whose SESSION JUST CLOSED, which the
+    /// `closed_symbol` names an instrument whose session just closed, which the
     /// caller detects by asking the calendar whether the span it swept crossed
     /// from open to shut. A day order's expiry is that instant rather than
     /// anything the consumer stated, and an instrument with no calendar never
@@ -1016,7 +1016,7 @@ impl Engine {
             };
             let order = self.open[pos].clone();
             let reaped = self.close_out(pos, &order, WireOrderStatus::Expired, ts);
-            // EXPIRED, not Canceled. Nobody cancelled this order: the consumer
+            // Expired, not Canceled. Nobody cancelled this order: the consumer
             // stated its lifetime at submit and the clock reached the end of
             // it. Reporting a cancel says an actor pulled the order, which is
             // a different fact about the venue and the one a host would act on
@@ -1040,14 +1040,14 @@ impl Engine {
             out.extend(reaped);
         }
         if !out.is_empty() {
-            // An expiry FREES A HOLD, so this batch moves the ledger and
+            // An expiry frees a hold, so this batch moves the ledger and
             // owes the snapshot under the same rule a fill does - including the
             // `DropNextAccountUpdate` half, which this site used to skip. It
             // was the last unconditional push outside the two marked
             // exemptions: an operator could arm the arm, watch a GTD order
-            // expire, and be handed the fresh balances anyway. TRUE, though the
+            // expire, and be handed the fresh balances anyway. True, though the
             // clock rather than a consumer drives it: the arm is armed against an
-            // order LEAVING THE BOOK, which is exactly what an expiry is, and
+            // order leaving the book, which is exactly what an expiry is, and
             // `an_expiry_obeys_drop_next_account_update` pins that.
             self.push_account_snapshot(&mut out, ts, true);
         }
@@ -1055,15 +1055,15 @@ impl Engine {
     }
 
     /// Advance every resting `TrailingStopMarket` whose trigger the tape has
-    /// left behind, against the EXTREME its side follows.
+    /// left behind, against the extreme its side follows.
     ///
-    /// A sell trail rises with the high and NEVER falls back; a buy trail falls
+    /// A sell trail rises with the high and never falls back; a buy trail falls
     /// with the low and never rises. That one-way movement is the whole
     /// mechanism - a trigger that retreated would be a stop somebody keeps
     /// amending, not a trailing stop - so the candidate is only taken when it
     /// improves on where the trigger already is.
     ///
-    /// The trigger is moved on BOTH the resting state and the submit, because
+    /// The trigger is moved on both the resting state and the submit, because
     /// the order's hold is derived from the submit and a trail that moved
     /// only the scan predicate would hold the wrong amount.
     ///
@@ -1106,8 +1106,8 @@ impl Engine {
                 let Resting::Conditional { stop_px, toward } = order.resting else {
                     continue;
                 };
-                // The price this side's trail follows: the span's HIGH for a
-                // sell, its LOW for a buy - the extreme the trail would have
+                // The price this side's trail follows: the span's high for a
+                // sell, its low for a buy - the extreme the trail would have
                 // ratcheted to had it seen every tick. Without a span, the
                 // closing mark.
                 let followed = match (order.submit.side, span) {
@@ -1129,7 +1129,7 @@ impl Engine {
                 if !improves {
                     continue;
                 }
-                // A trailing stop LIMIT carries its limit `limit_offset` from
+                // A trailing stop limit carries its limit `limit_offset` from
                 // its own trigger, so the limit ratchets with it. Derived
                 // through the same function the accept path uses. An offset
                 // that overflows or drives the limit non-positive leaves the
@@ -1157,7 +1157,7 @@ impl Engine {
                     toward,
                 };
                 // The trigger window restarts, exactly as an amend restarts a
-                // limit's: a span walked against the OLD trigger says nothing
+                // limit's: a span walked against the old trigger says nothing
                 // about the new one.
                 order.scanned_ns = ts;
                 order.revision = order.revision.saturating_add(1);
@@ -1192,7 +1192,7 @@ impl Engine {
             let resting = self.open[pos].resting;
             if let (Resting::Conditional { .. }, Some(hit)) = (resting, result.hit) {
                 // The frontier the trigger's product inherits is where the walk
-                // REACHED, never the pass instant: a drain budget that cut the
+                // reached, never the pass instant: a drain budget that cut the
                 // span short must not hand a freshly live limit a span nothing
                 // looked at.
                 out.extend(self.on_trigger(pos, hit, ts, result.scanned_to_ns));
@@ -1201,7 +1201,7 @@ impl Engine {
             }
             let (submit, venue_order_id, leaves) = {
                 let order = &mut self.open[pos];
-                // The frontier advances to exactly where the walk REACHED, which
+                // The frontier advances to exactly where the walk reached, which
                 // a spent drain budget may leave short of the pass's target, so
                 // a truncated pass loses no span rather than skipping over it.
                 order.scanned_ns = result.scanned_to_ns;
@@ -1215,7 +1215,7 @@ impl Engine {
             if result.hit.is_none() {
                 continue;
             }
-            // Sized off the LEAVES, never `submit.quantity`: a swept order may
+            // Sized off the leaves, never `submit.quantity`: a swept order may
             // already be partly filled or have been amended, and multiplying a
             // partial-fill fraction by the original quantity would over-fill.
             let planned_qty = self.plan_fill(&submit, leaves, true);
@@ -1237,7 +1237,7 @@ impl Engine {
             let fill_px = submit
                 .price
                 .expect("validated resting limit carries a price");
-            // The order is RESTING, so `free_balance` has already had its own
+            // The order is resting, so `free_balance` has already had its own
             // hold subtracted; adding it back is what keeps a fully funded
             // order from failing its own fill against its own hold.
             let held = self.hold_for(&submit, leaves, fill_px);
@@ -1275,7 +1275,7 @@ impl Engine {
                 ));
                 emitted += 1;
             }
-            // BETWEEN results, never after the loop. Two legs of one bracket can
+            // Between results, never after the loop. Two legs of one bracket can
             // both be in this batch, and a sibling reaped after the loop would
             // already have filled against the same span of tape.
             //
@@ -1312,7 +1312,7 @@ impl Engine {
                 let order = &mut self.open[pos];
                 order.leaves_qty = new_leaves;
                 order.ts_last = ts;
-                // An execution starts a NEW tranche, so the remainder draws a
+                // An execution starts a new tranche, so the remainder draws a
                 // fresh trigger around the unchanged price and re-covers the
                 // span from here. Without this the remainder would rest already
                 // triggered and the next pass would fill it for free - the band
@@ -1354,14 +1354,14 @@ impl Engine {
         // whose only transitions were hold-freeing cancels still owes
         // it, so the test is "did anything move the ledger", not "did anything
         // fill".
-        // THE OUTER TEST IS NOT REDUNDANT WITH THE HELPER'S. A sweep pass runs
+        // The outer test is not redundant with the helper's. A sweep pass runs
         // on every clock tick and routinely produces events that move nothing -
         // an `OrderTriggered`, an acceptance - and this path must stay silent
         // for those rather than stamp an unchanged account onto every tick,
         // which is what `swept_fill_max_bytes` sizes against. What the helper
         // owns here is the `DropNextAccountUpdate` half.
         if account_changed(&out) {
-            // TRUE for the same reason the expiry pass passes it: a swept fill
+            // True for the same reason the expiry pass passes it: a swept fill
             // or a funds-check eviction is an order executing or leaving the
             // book, which is precisely what the arm names.
             self.push_account_snapshot(&mut out, ts, true);
@@ -1373,10 +1373,10 @@ impl Engine {
     }
 
     /// Whether the venue has seen this order execute at all - the predicate a
-    /// CHILD's release waits on.
+    /// child's release waits on.
     ///
     /// "Filled" is deliberately not the test. A parent that filled partially and
-    /// was then cancelled DID execute, and its child was released at that fill;
+    /// was then cancelled did execute, and its child was released at that fill;
     /// reading only the terminal status would call such a parent unfillable and
     /// refuse a resubmitted child that the venue had already honoured one of.
     fn has_filled(&self, client_order_id: &str) -> bool {
@@ -1400,8 +1400,8 @@ impl Engine {
             .collect()
     }
 
-    /// What one order's fill does to the orders it is linked to, applied WHERE
-    /// THE FILL IS COMMITTED rather than on a later sweep.
+    /// What one order's fill does to the orders it is linked to, applied where
+    /// the fill is committed rather than on a later sweep.
     ///
     /// The timing is the whole point and it is why this is not a periodic reap:
     /// two legs of one bracket can both be swept in a single batch, so a stop
@@ -1412,11 +1412,11 @@ impl Engine {
     ///
     /// Two independent things happen, in this order:
     ///
-    /// 1. RELEASE. Every held child of this order becomes live, whatever rule
+    /// 1. Release. Every held child of this order becomes live, whatever rule
     ///    the parent carries - a child waits on its parent's execution, not on a
     ///    contingency value. Releasing emits no wire frame: the child was
     ///    accepted when it was submitted and its status does not change.
-    /// 2. THE RULE. `Oco` cancels every named sibling still resting; `Ouo`
+    /// 2. The rule. `Oco` cancels every named sibling still resting; `Ouo`
     ///    shrinks each by the quantity just filled and cancels the ones that
     ///    reach zero. `Oto` and `NoContingency` do neither - an OTO parent's
     ///    whole effect is the release above.
@@ -1506,14 +1506,14 @@ impl Engine {
         out
     }
 
-    /// A linkage rule found a sibling it names NOT ON THE BOOK, which used to be
+    /// A linkage rule found a sibling it names not on the book, which used to be
     /// a silent `continue` and is now said out loud.
     ///
     /// There are two causes and they are not equally innocent. The ordinary one
     /// is a sibling already terminal - filled, cancelled, or reaped by an
     /// earlier rule in this same batch - and there is genuinely nothing to do,
-    /// which is why this is a `debug` and not a warning. The DANGEROUS one is a
-    /// sibling that has not been ADMITTED yet, which is what a per-leg
+    /// which is why this is a `debug` and not a warning. The dangerous one is a
+    /// sibling that has not been admitted yet, which is what a per-leg
     /// submission of a bracket produces: the rule adjusts nothing, and the
     /// sibling then arrives at full size with the position already open. That
     /// second case is what `Command::SubmitOrderGroup` exists to make
@@ -1541,7 +1541,7 @@ impl Engine {
     /// submitted standalone, and place the hold it did not have
     /// while it waited.
     ///
-    /// The draw is FRESH (`band_draw` advances), because a queue position earned
+    /// The draw is fresh (`band_draw` advances), because a queue position earned
     /// at submit is not one a child sitting out its parent's execution kept, and
     /// the scan frontier starts at the release instant: the span before it was
     /// walked against an order that could not fill.
@@ -1591,29 +1591,29 @@ impl Engine {
     }
 
     /// Freeze a terminal order into the truth store and reap the held children
-    /// its own terminality has just orphaned. THE SINGLE HOME OF THAT RULE.
+    /// its own terminality has just orphaned. The single home of that rule.
     ///
     /// `record` is the copy that goes into the store - the caller's own where
     /// it has mutated it (a triggered order's leaves), the book's otherwise -
     /// and `pos` is where the order still sits on the book. The invariant used
-    /// to be maintained by REMEMBERING at ten sites and was missed at six of
+    /// to be maintained by remembering at ten sites and was missed at six of
     /// them: the reduce-only cap-zero cancels, the post-only trigger
     /// rejection, the trigger-time and resting funds cancels, and the silent
     /// control-plane cancel all took an order terminal while leaving any
     /// `Resting::Held` child of it waiting for a release nothing could ever
     /// perform.
     ///
-    /// THE SET THIS COVERS, stated exactly, because a comment claiming a wider
+    /// The set this covers, stated exactly, because a comment claiming a wider
     /// set than it has is how the rule got lost the first time. Every terminal
     /// path that closes an order the consumer submitted routes through here or
     /// through `close_unrested` - including the several whose reap is provably
     /// a no-op because the order filled, since a site that skips the call on
     /// the strength of an early return three hundred lines up is maintained by
-    /// remembering again. The one path that does NOT is `reap_children_of`
+    /// remembering again. The one path that does not is `reap_children_of`
     /// itself, which closes the children: it must not re-enter, and it carries
     /// the generation walk in its own worklist instead.
     ///
-    /// Returns the child cancellations, which the caller emits AFTER its own
+    /// Returns the child cancellations, which the caller emits after its own
     /// terminal event so the wire reads parent-then-children.
     pub(crate) fn close_out(
         &mut self,
@@ -1628,7 +1628,7 @@ impl Engine {
 
     /// `close_out` for an order that never reached the book - a submit that
     /// closed inside `on_submit_from`. It can still be a parent: a group may
-    /// name its parent AFTER a child (`validate_link` admits the forward
+    /// name its parent after a child (`validate_link` admits the forward
     /// reference on purpose), so the child is already resting `Held` when the
     /// parent's own submit cancels it out.
     fn close_unrested(
@@ -1638,7 +1638,7 @@ impl Engine {
         ts: u64,
     ) -> Vec<VenueMessage> {
         self.record_closed(record, status, ts);
-        // Asked AFTER `record_closed`, so the store answers for an order that
+        // Asked after `record_closed`, so the store answers for an order that
         // is no longer on the book. A parent that filled at all can still
         // release its children, so only a wholly unfilled terminal reaps.
         if self.has_filled(&record.submit.client_order_id) {
@@ -1647,7 +1647,7 @@ impl Engine {
         self.reap_children_of(vec![record.submit.client_order_id.clone()], ts)
     }
 
-    /// Cancel every held child of an order that has gone terminal WITHOUT ever
+    /// Cancel every held child of an order that has gone terminal without ever
     /// filling, so a bracket whose entry was cancelled does not leave its exits
     /// waiting for a release that can never come.
     ///
@@ -1714,7 +1714,7 @@ impl Engine {
     /// The triggered conditional's transition, under the engine lock: emits
     /// `OrderTriggered` and then either commits the market fill, promotes the
     /// stop-limit to a live banded limit (filling it at once if the triggering
-    /// print is already through its drawn trigger), REJECTS a post-only
+    /// print is already through its drawn trigger), rejects a post-only
     /// stop-limit that would take liquidity, or cancels the order when the
     /// slipped price outruns the account or a reduce-only cap has gone to zero.
     /// Every terminal branch removes the order, frees its hold and calls
@@ -1723,11 +1723,11 @@ impl Engine {
     /// `hit` is a real print on the sweep path and the reading's own last print
     /// on the arrival path; `ts` is the application instant and is what every
     /// emitted `ts_event` and `ts_triggered` carries. `frontier` is how far the
-    /// venue has EVIDENCE - the walk's reached instant on the sweep path, the
+    /// venue has evidence - the walk's reached instant on the sweep path, the
     /// application instant on the arrival path - and is what a surviving order
     /// resumes scanning from.
     ///
-    /// The account snapshot is deliberately NOT emitted here: the caller owns
+    /// The account snapshot is deliberately not emitted here: the caller owns
     /// it, so one sweep pass takes one snapshot (which is what
     /// `sizing::swept_fill_max_bytes` bounds) and `DropNextAccountUpdate` is
     /// consumed exactly once per batch.
@@ -1746,7 +1746,7 @@ impl Engine {
             venue_order_id: order.venue_order_id.clone(),
             ts_event: ts,
         }];
-        // The cap is read before any fill is PLANNED: a reduce-only order whose
+        // The cap is read before any fill is planned: a reduce-only order whose
         // position is already gone never reaches `plan_fill`, so it consumes no
         // armed `PartialFillNext` on the way to its cancel.
         let cap = self.reduce_only_cap(&order.submit);
@@ -1763,7 +1763,7 @@ impl Engine {
         }
         let increment = self.instruments[&order.submit.symbol].price_increment;
         match order.submit.order_type {
-            // Every conditional that TAKES liquidity once triggered. The three
+            // Every conditional that takes liquidity once triggered. The three
             // differ only in what made them live - a stop running away from a
             // position, a touched order coming toward its level, a trailing stop
             // whose own trigger followed the tape - and not at all in what
@@ -1833,7 +1833,7 @@ impl Engine {
                     // scans an inert remainder, and that is not bookkeeping for
                     // its own sake: `apply_scans_on_clock` admits a result whose
                     // `from_ns` and `revision` still match the order, and this
-                    // record's pair still named the walk that TRIGGERED it. A
+                    // record's pair still named the walk that triggered it. A
                     // second delivery of that same result would therefore be
                     // applied to an order that is no longer conditional, fall
                     // through to the resting-limit arm, and panic on a
@@ -1846,13 +1846,13 @@ impl Engine {
                     self.rest_open(order);
                 }
             }
-            // Every conditional that RESTS as a limit once triggered. A
+            // Every conditional that rests as a limit once triggered. A
             // trailing stop limit reaches here with a trigger and a limit that
             // ratcheted together, so by this point it is a stop-limit whose
             // prices happen to have moved - nothing about the trigger handling
             // differs, which is why it shares the arm rather than copying it.
             OrderType::StopLimit | OrderType::LimitIfTouched | OrderType::TrailingStopLimit => {
-                // A live limit at the stated price, judged EXACTLY as a limit
+                // A live limit at the stated price, judged exactly as a limit
                 // submitted at this instant: the print that made it live is
                 // offered to it, and a gap that never reached the limit leaves
                 // it resting rather than manufacturing a price.
@@ -1965,7 +1965,7 @@ impl Engine {
     }
 
     /// The hold this order itself already contributes to
-    /// `held_balances` IN THE SETTLEMENT CURRENCY, which
+    /// `held_balances` in the settlement currency, which
     /// `validate_fill_funds` adds back before it compares. Zero for a
     /// reduce-only order (which places no hold) and zero for a spot sell
     /// (whose hold is base currency, and whose settlement-side check is about
@@ -1981,7 +1981,7 @@ impl Engine {
     }
 
     /// The trigger-time funds failure: an accepted, triggered order whose
-    /// slipped price outran the account is CANCELED, not rejected - running out
+    /// slipped price outran the account is canceled, not rejected - running out
     /// of money at the moment of execution is an economic outcome on a live
     /// order, not the venue refusing a request.
     fn cancel_triggered(
@@ -2004,7 +2004,7 @@ impl Engine {
         out
     }
 
-    /// The size this fill WOULD be, and nothing else: consumes the targeted
+    /// The size this fill would be, and nothing else: consumes the targeted
     /// `PartialFillNext`, clamps it and floors it onto the size grid against
     /// `remaining` (the order's leaves, not its original quantity). Mutates no
     /// ledger and needs no venue id, so `on_submit` can judge FOK against its
@@ -2036,7 +2036,7 @@ impl Engine {
     /// `record_fill`, and the `DuplicateNextFill` consumption. Shared by
     /// `on_submit` (marketable on arrival, or a slipped market order) and
     /// `apply_scans` (the tape has now traded through a trigger), so the two
-    /// paths cannot diverge in WHAT they produce, only in when. A limit always
+    /// paths cannot diverge in what they produce, only in when. A limit always
     /// books at its own stated price; only a market order is slipped, and the
     /// slippage is applied by the caller, not here.
     #[expect(
@@ -2082,7 +2082,7 @@ impl Engine {
             ts_event: ts,
         };
         self.apply_fill(&fill);
-        // Booked exactly once into the QueryFills truth store, BEFORE the
+        // Booked exactly once into the QueryFills truth store, before the
         // duplicate divergence doubles the wire event: the duplication is the
         // lie this venue injects, the store keeps the truth a reconciler checks
         // against.
@@ -2148,11 +2148,11 @@ impl Engine {
             .max(self.commission_for(order, qty, px, LiquiditySide::Taker, surcharge))
     }
 
-    /// The half of the linkage contract that only the LIVE BOOK can answer.
+    /// The half of the linkage contract that only the live book can answer.
     /// `mogwai_protocol::validate_submit_order` has already ruled on the shape;
     /// what is left is whether the orders this one names can mean anything here.
     ///
-    /// THE DEPTH RULE IS LOAD-BEARING, not tidiness. A child of a child would
+    /// The depth rule is load-bearing, not tidiness. A child of a child would
     /// make cancelling one order reap a chain of unbounded length, and the byte
     /// budget a cancel takes has to be computable before the cancel runs.
     /// One generation, capped at `MAX_LINKED_ORDERS`, is what
@@ -2160,10 +2160,10 @@ impl Engine {
     /// bracket is one entry and its exits.
     /// `group` names the members of the `SubmitOrderGroup` this order arrived
     /// in, empty for a standalone submit. A parent that is a group member is
-    /// KNOWN even before it has been accepted, which is the point of the group
+    /// known even before it has been accepted, which is the point of the group
     /// frame: the members are admitted together, so a child may name a parent
     /// that is one frame's worth of work away rather than one round trip.
-    /// `validate_submit_group` has already checked that every named id IS a
+    /// `validate_submit_group` has already checked that every named id is a
     /// member and that no member is both a parent and a child, so the depth and
     /// existence rules below still hold for the group as a whole.
     fn validate_link(
@@ -2177,7 +2177,7 @@ impl Engine {
         let Some(parent) = link.parent_order_id.as_ref() else {
             return Ok(());
         };
-        // A parent the venue has not accepted YET but which travels in this
+        // A parent the venue has not accepted yet but which travels in this
         // group is known: the frame admits every member, so it will exist by
         // the time this child does. Narrowed to the existence question alone -
         // every rule below still runs once the parent is really on the book,
@@ -2238,7 +2238,7 @@ impl Engine {
             return Err("client_order_id uses reserved liquidation prefix".into());
         }
 
-        // "Duplicate" means an id already ACCEPTED (the map is populated only on
+        // "Duplicate" means an id already accepted (the map is populated only on
         // the accept path in `on_submit`), so a previously-rejected id is free to
         // reuse; an id that named a live or completed order is not.
         if self
@@ -2271,7 +2271,7 @@ impl Engine {
             return Err("quantity violates size increment".into());
         }
 
-        // THE ROUND LOT, which is a rule about what may be SUBMITTED and not
+        // The round lot, which is a rule about what may be submitted and not
         // about what the grid can represent. A partial fill legitimately leaves
         // an odd-lot remainder, so the size increment stays at one share and the
         // lot rule sits here, where an order is judged.
@@ -2311,20 +2311,20 @@ impl Engine {
             _ => {}
         }
         let price = risk_px(order);
-        // THE SAME PREDICATE THE WIRE GATE READS, IN THE SAME POSITION. This
+        // The same predicate the wire gate reads, in the same position. This
         // was a hand-rolled `Limit | StopLimit | LimitIfTouched` and it had
         // drifted: the wire admitted a post-only `TrailingStopLimit` and this
         // then rejected it, so a consumer was told its order was on its way and
         // then that it was not. `on_trigger` has always enforced post-only on
         // that type, so the list was the only thing refusing it.
         //
-        // THE ORDER OF THESE TWO CHECKS IS PART OF THE CONTRACT, not an
+        // The order of these two checks is part of the contract, not an
         // accident of how they were written. An order can break both rules at
         // once - a post-only `StopMarket` marked `Ioc` - and unifying the
-        // PREDICATE while leaving the two gates to reach it in opposite orders
+        // predicate while leaving the two gates to reach it in opposite orders
         // reinstates the same defect one layer up: two gates, one order, two
         // different reasons, and a consumer that still cannot tell which of them
-        // spoke. Post-only is checked FIRST here because `validate_submit_order`
+        // spoke. Post-only is checked first here because `validate_submit_order`
         // checks it first. Pinned by
         // `post_only_is_admitted_by_one_rule_at_the_wire_and_in_the_engine`.
         if order.post_only && !order.order_type.may_be_post_only() {
@@ -2335,7 +2335,7 @@ impl Engine {
         {
             return Err("conditional orders cannot be immediate-or-cancel: a now-or-never order cannot wait for a trigger".into());
         }
-        // THE CHILD FORM OF THIS RULE IS NOT REPEATED HERE, deliberately.
+        // The child form of this rule is not repeated here, deliberately.
         // `mogwai_protocol::validate_order_link` already refuses a `Market`
         // child and an `Ioc`/`Fok` child for exactly these reasons, and
         // `validate_submit_order` runs it on every wire submit - the standalone
@@ -2411,8 +2411,8 @@ impl Engine {
                         None => notional,
                     },
                     Side::Sell => {
-                        // How short this order would leave the account IN THE
-                        // WORST FILL ORDER. Selling shares you hold is not a
+                        // How short this order would leave the account in the
+                        // worst fill order. Selling shares you hold is not a
                         // short and needs neither a borrow nor collateral - but
                         // the shares can only cover one sale, and this check
                         // used to hand the same holding to every resting sell
@@ -2422,7 +2422,7 @@ impl Engine {
                         // cash equity account ended the run short 100 through an
                         // order path that refuses shorting outright.
                         //
-                        // WORST FILL ORDER IS `worst_case_leaves`, NOT A SUM,
+                        // Worst fill order is `worst_case_leaves`, not a sum,
                         // and this order is one of its inputs rather than a
                         // term added to it. A plain bracket - a take-profit sell
                         // and a stop sell over the same held shares - is one
@@ -2448,10 +2448,10 @@ impl Engine {
                         if short.is_zero() {
                             Decimal::ZERO
                         } else {
-                            // SHORTING IS A MARGIN ACTIVITY. A cash account
+                            // Shorting is a margin activity. A cash account
                             // cannot do it at any price, which is the whole
                             // cash-versus-margin distinction and not a funding
-                            // question - so it is refused by NAME rather than
+                            // question - so it is refused by name rather than
                             // as an insufficient balance.
                             let Some(policy) = policy else {
                                 return Err(format!(
@@ -2461,7 +2461,7 @@ impl Engine {
                                     symbol = order.symbol
                                 ));
                             };
-                            // THE LOCATE. A venue that states a borrow has a
+                            // The locate. A venue that states a borrow has a
                             // finite one, and a name it states as zero cannot be
                             // shorted at all.
                             if let Some(borrowable) = instrument.class.borrowable()
@@ -2517,7 +2517,7 @@ impl Engine {
         Ok(())
     }
 
-    /// The funds check re-run against the price the order will ACTUALLY fill
+    /// The funds check re-run against the price the order will actually fill
     /// at, which for a market order is the slipped price rather than the stated
     /// one. `validate_submit` cleared the stated notional; without this a
     /// slipped buy could overdraw an account that validator had passed. A limit
@@ -2572,8 +2572,8 @@ impl Engine {
             }
             return Ok(());
         }
-        // A MARGINED EQUITY posts the Reg-T requirement rather than the whole
-        // notional, exactly as a future posts its bond, and BORROWS the rest -
+        // A margined equity posts the Reg-T requirement rather than the whole
+        // notional, exactly as a future posts its bond, and borrows the rest -
         // which is what makes the settlement balance go negative on a margin
         // buy and is the loan itself. A cash equity falls through to the
         // notional branch below, where it belongs.
@@ -2645,20 +2645,20 @@ impl Engine {
         }
     }
 
-    /// `apply_divergences` is FALSE for every venue-originated cancel, exactly
+    /// `apply_divergences` is false for every venue-originated cancel, exactly
     /// as it is for every venue-originated submit.
     ///
     /// `liquidate_all`, `retire_off_river` and `cancel_unreadable_orders` all
     /// flatten the book through here, and an arm the consumer aimed at its own
     /// next cancel must not be spent on one of those. `RejectNextCancel` was
     /// the serious half: the first order a risk-breach liquidation tried to
-    /// pull came back `OrderCancelRejected` AND STAYED RESTING, so the
+    /// pull came back `OrderCancelRejected` and stayed resting, so the
     /// liquidation went on to close the positions while leaving live orders
     /// behind - precisely the hazard `liquidate_all`'s "resting orders go
     /// first" rule exists to prevent. `DropNextAccountUpdate` was the quiet
     /// half: spent on a transition the scenario author never aimed at.
     ///
-    /// ONE FLAG, TWO EFFECTS, and the second is worth stating because it
+    /// One flag, two effects, and the second is worth stating because it
     /// changes what a liquidation puts on the wire. With `apply_divergences`
     /// false the `DropNextAccountUpdate` check is not merely unspent, it is not
     /// consulted, so a flatten emits one `AccountState` per cancelled order
@@ -2673,12 +2673,12 @@ impl Engine {
         ts: u64,
         apply_divergences: bool,
     ) -> Vec<VenueMessage> {
-        // Divergence: refuse a cancel the venue COULD have honoured, leaving the
+        // Divergence: refuse a cancel the venue could have honoured, leaving the
         // order resting. Checked before the book is touched, so the refusal
         // really does leave everything where it was - the whole point is that
         // the consumer's model and the book disagree afterwards.
         //
-        // Only when the order EXISTS: refusing a cancel for an unknown or
+        // Only when the order exists: refusing a cancel for an unknown or
         // already-terminal id would spend the arm on a rejection that was going
         // to happen anyway, which is the failure mode a scenario author would
         // never see and would misread as the arm not firing.
@@ -2711,18 +2711,18 @@ impl Engine {
                 ts_event: ts,
             }];
             out.extend(reaped);
-            // SPELLS THE RULE ITSELF rather than calling
+            // Spells the rule itself rather than calling
             // `push_account_snapshot`, and its doc names this site: a cancel
             // always moves the ledger, so the helper's `account_changed` half
             // would be dead weight, and the `apply_divergences` half is stated
             // here in the negative form this path was fixed into.
             //
-            // A cancel takes the order OFF the book and gives its hold back, so
+            // A cancel takes the order off the book and gives its hold back, so
             // the snapshot it owes is exactly the account movement
             // `DropNextAccountUpdate` exists to hide - suppressing it leaves the
             // consumer overstating `locked`, which is the drift the arm is for.
             // The arm is spent on transitions, not on fills specifically; the
-            // one carve-out is an order merely COMING TO REST, which `on_submit`
+            // one carve-out is an order merely coming to rest, which `on_submit`
             // holds open for the fill the author is aiming at.
             if !apply_divergences
                 || self
@@ -2736,7 +2736,7 @@ impl Engine {
             // The order is not resting, so there is nothing to cancel: it is
             // either unknown or already terminal (the no-book engine fills a
             // limit on accept, so it can be gone before a cancel arrives). This
-            // is a CANCEL rejection, not an ORDER rejection - emitting
+            // is a cancel rejection, not an order rejection - emitting
             // OrderRejected here would drive the adapter (and nautilus) to flip
             // an already-filled order to Rejected, an invalid transition.
             // Mirrors on_modify's OrderModifyRejected path: a terminal id keeps
@@ -2783,7 +2783,7 @@ impl Engine {
             }];
         }
 
-        // A trigger amend is legal on an UNTRIGGERED conditional and on nothing
+        // A trigger amend is legal on an untriggered conditional and on nothing
         // else. After the trigger there is nothing left to trigger; on a plain
         // limit or market there never was, and silently ignoring the field
         // would make the amend a lie either way - so the two cases are refused
@@ -2791,7 +2791,7 @@ impl Engine {
         if trigger_price.is_some() && !matches!(self.open[pos].resting, Resting::Conditional { .. })
         {
             let conditional = self.open[pos].submit.order_type.is_conditional();
-            // A HELD child has NOT triggered - it has not been released, and
+            // A held child has not triggered - it has not been released, and
             // saying it triggered is a false statement about the venue's own
             // state on the wire. Its trigger is still amendable in principle;
             // refusing it is the conservative answer while the child holds
@@ -2846,7 +2846,7 @@ impl Engine {
             }];
         }
 
-        // `<=`, not `<`: a new total EQUAL to the filled amount would leave
+        // `<=`, not `<`: a new total equal to the filled amount would leave
         // zero remaining - shrinking an order to nothing is a cancel, not a
         // modify - so equality is rejected too, and the reason says "at or
         // below" to match what the condition actually fires on.
@@ -2930,7 +2930,7 @@ impl Engine {
         }
 
         // The price this order's hold, notional and funds check are
-        // taken against AFTER the amend - `risk_px` under amendment. For a
+        // taken against after the amend - `risk_px` under amendment. For a
         // price-less `StopMarket` that is its trigger, new or existing, which
         // is what `held_balances` will hold against; for everything else it
         // is the limit price. Spelled as `or` rather than unwrapped so the
@@ -2968,7 +2968,7 @@ impl Engine {
             // balance, mirroring the submit-side funds check: an amend that
             // grows a hold past what the account holds is refused, or
             // the venue would advertise free < 0 in its own snapshot. The
-            // order's CURRENT hold is excluded from the comparison
+            // order's current hold is excluded from the comparison
             // (it is being replaced, not added to), so free-plus-own-hold
             // must cover the new hold. Both products are bounded: the new
             // one by the checked_mul just above (leaves <= total), the old
@@ -2984,7 +2984,7 @@ impl Engine {
                 // then cancels.
                 let commission =
                     self.maximum_commission(&order.submit, new_leaves, effective_price, ts, true);
-                // A spot sell places a BASE hold, but pays its fee out of the
+                // A spot sell places a base hold, but pays its fee out of the
                 // quote proceeds, so its commission is checked against the
                 // settlement balance separately - the same split
                 // `validate_submit` makes.
@@ -3000,7 +3000,7 @@ impl Engine {
                         }];
                     }
                 }
-                // BOTH SIDES OF THE COMPARISON COME FROM `order_hold`,
+                // Both sides of the comparison come from `order_hold`,
                 // the one home of the hold's shape. This block used to be a
                 // fourth hand-rolled copy of that formula, and it had drifted
                 // twice over: the futures arm priced the amended requirement at
@@ -3011,7 +3011,7 @@ impl Engine {
                 // amend grew the position; and the buy arm held the full
                 // notional even for a margined equity, which posts the Reg-T
                 // initial instead. The refusals below stay explicit because they
-                // name a MISCONFIGURED instrument rather than a funding
+                // name a misconfigured instrument rather than a funding
                 // shortfall, and `order_hold` answers `None` for both.
                 if instrument.class.is_future() && !self.margin.contains_key(&order.submit.symbol) {
                     return vec![VenueMessage::OrderModifyRejected {
@@ -3021,13 +3021,13 @@ impl Engine {
                         ts_event: ts,
                     }];
                 }
-                // A NON-FUTURE, NON-EQUITY SELL places a hold on its BASE asset, so an
+                // A non-future, non-equity sell places a hold on its base asset, so an
                 // instrument declaring no base currency has nowhere to take the
                 // hold from. The reason string used to say "cash-settled futures
                 // require the margin ledger" here, carried over verbatim from
                 // the futures arm it shared a block with, which named the wrong
                 // class of instrument for the wrong reason - the order being
-                // refused is a SPOT sell, not a future.
+                // refused is a spot sell, not a future.
                 if !instrument.class.is_future()
                     && !instrument.class.is_equity()
                     && order.submit.side == Side::Sell
@@ -3043,20 +3043,20 @@ impl Engine {
                         ts_event: ts,
                     }];
                 }
-                // A HELD order-list child holds nothing on either side of this
+                // A held order-list child holds nothing on either side of this
                 // comparison, and an amend does not release it - round 1's
                 // promotion guard excludes `Held` deliberately - so the amended
                 // order is still held and still holds nothing. The rule's home
                 // is `order_hold_entry`, which declines a held child
                 // before it computes anything; asking `order_hold`
                 // directly (as the two calls below do, because they must price
-                // an order that is not on the book in this shape yet) BYPASSES
+                // an order that is not on the book in this shape yet) bypasses
                 // that home, so the test is made here rather than left implicit.
                 // Without it an amend of a bracket's held exit leg was checked
                 // against a hold the venue would never take, and could be
                 // refused for funds an unheld order would not have needed.
                 if !matches!(order.resting, Resting::Held) {
-                    // The AMENDED order, built as a submit and priced at
+                    // The amended order, built as a submit and priced at
                     // `effective_price`, is what the venue would hold once the
                     // amend lands - the same construction `hold_for` makes for a
                     // resting order, so an amend can never be checked against a
@@ -3069,9 +3069,9 @@ impl Engine {
                     if let Some(new_trigger) = trigger_price {
                         amended.trigger_price = Some(new_trigger);
                     }
-                    // `clipped` is DROPPED, exactly as `hold_for` drops it and
+                    // `clipped` is dropped, exactly as `hold_for` drops it and
                     // every other check-time hold site does. The flag
-                    // belongs to the RECORDING path: `add_order_hold`
+                    // belongs to the recording path: `add_order_hold`
                     // re-derives it through `order_hold_entry` when the
                     // amend actually lands below, and that is what puts the
                     // currency into `order_holds_clipped` and raises the
@@ -3111,7 +3111,7 @@ impl Engine {
                         }
                     };
                     // The currency the check runs in is whichever one the
-                    // AMENDED hold lands in, falling back to the current hold's
+                    // amended hold lands in, falling back to the current hold's
                     // when the amend places no hold at all - a comparison
                     // against a currency neither side touches is vacuously true,
                     // which is exactly what it should be.
@@ -3151,13 +3151,13 @@ impl Engine {
             order.revision = order.revision.saturating_add(1);
             if let Some(new_price) = price {
                 order.submit.price = Some(new_price);
-                // A reprice is a new draw: prints through the OLD trigger are
+                // A reprice is a new draw: prints through the old trigger are
                 // not evidence about the new one, and the order rejoins the
                 // queue at the back. A quantity-only amend touches none of it,
                 // because the price the market has to trade through has not
                 // moved.
                 //
-                // The re-draw takes a FRESH band when the venue supplies one.
+                // The re-draw takes a fresh band when the venue supplies one.
                 // An amend arrives over the same path that reads the tape on
                 // every limit submit, so a reading is available and cheap next
                 // to the amend itself; an order repriced hours after acceptance
@@ -3167,14 +3167,14 @@ impl Engine {
                 // regime rather than the acceptance one.
                 order.band_draw = order.band_draw.saturating_add(1);
                 order.band_ticks = reading.map_or(order.band_ticks, |value| value.band_ticks);
-                // A price amend on an UNTRIGGERED stop-limit changes the limit
+                // A price amend on an untriggered stop-limit changes the limit
                 // the order will take once it fires, not the price the tape has
                 // to touch. It re-reads the band (which the trigger will draw
-                // against) but leaves the order conditional and does NOT
+                // against) but leaves the order conditional and does not
                 // restart the trigger window - promoting it here would make the
                 // venue fill a stop that never triggered.
                 //
-                // AND A HELD CHILD STAYS HELD. `Resting::Held` is not
+                // And a held child stays held. `Resting::Held` is not
                 // `Conditional`, so this used to promote an order-list child
                 // still waiting on its parent into a live, scannable limit -
                 // taking a hold it had deliberately not taken and
@@ -3213,12 +3213,12 @@ impl Engine {
         };
         self.refresh_open_hold(pos, &before);
 
-        // MARKED EXEMPTION FROM `push_account_snapshot`, three of three, and the
-        // only one whose batch genuinely DOES move the ledger -
+        // Marked exemption from `push_account_snapshot`, three of three, and the
+        // only one whose batch genuinely does move the ledger -
         // `refresh_open_hold` above just moved the hold. It is exempt by
         // an existing ruling rather than by the helper's rule:
-        // `modify_does_not_consume_armed_drop` pins the arm SURVIVING an amend
-        // so it lands on the next FILL, which is what an author arming
+        // `modify_does_not_consume_armed_drop` pins the arm surviving an amend
+        // so it lands on the next fill, which is what an author arming
         // `DropNextAccountUpdate` was pointing at. Routing this site through the
         // helper is therefore a deliberate behaviour change and an owner
         // question, not a bug fix - the cold review that proposed it had not
@@ -3268,7 +3268,7 @@ fn draw_key(fill_seed: u64, order: &SubmitOrder, price: Decimal, band_draw: u32)
 
 /// The band draw: an integer number of ticks uniform on `0 ..= band_ticks`.
 ///
-/// Uniform is a declaration, not a fit: the SCALE comes from trailing
+/// Uniform is a declaration, not a fit: the scale comes from trailing
 /// volatility, and the maximum-entropy shape on a bounded support is the one
 /// that claims nothing further. A fresh `ChaCha8Rng` per draw rather than a
 /// long-lived stream, so the offset is a pure function of its key and no
@@ -3295,7 +3295,7 @@ fn safe_price(stated: Decimal, candidate: Option<Decimal>) -> Decimal {
         .unwrap_or(stated)
 }
 
-/// The trigger for a limit: its stated price moved AWAY from the market by the
+/// The trigger for a limit: its stated price moved away from the market by the
 /// draw.
 ///
 /// One-sided on purpose. A symmetric band would fill a buy limit while the
@@ -3323,10 +3323,10 @@ pub(super) fn draw_trigger(
     )
 }
 
-/// The fill price for a MARKET order: the last print slipped adversely by a
+/// The fill price for a market order: the last print slipped adversely by a
 /// draw from the same band and the same key, with `band_draw = 0`.
 ///
-/// The consumer's stated price is ignored for PRICING - answering "what price did
+/// The consumer's stated price is ignored for pricing - answering "what price did
 /// this trade at" with the consumer's own number is the same defect the limit
 /// band removes - but it is still validated and still keys the draw, because
 /// the wire contract requires it. The magnitude here is borrowed rather than
@@ -3370,10 +3370,10 @@ fn risk_px(order: &SubmitOrder) -> Decimal {
 }
 
 /// Whether a batch moved the ledger and therefore owes an account snapshot. A
-/// no-fill transition that FREES a hold - a cap-zero reduce-only cancel,
+/// no-fill transition that frees a hold - a cap-zero reduce-only cancel,
 /// a post-only trigger rejection, a trigger-time funds cancel - owes one just
 /// as a fill does.
-/// EXHAUSTIVE OVER `VenueMessage` deliberately: the predicate claims to answer
+/// Exhaustive over `VenueMessage` deliberately: the predicate claims to answer
 /// "did anything move the ledger", and a `matches!` over a hand-written list
 /// answers "is it one of the ones I thought of". A variant added later must be
 /// classified here rather than inherit `false` silently - which is how
@@ -3388,7 +3388,7 @@ pub(crate) fn account_changed(out: &[VenueMessage]) -> bool {
         | VenueMessage::OrderRejected { .. }
         | VenueMessage::OrderUpdated { .. }
         | VenueMessage::OrderExpired { .. } => true,
-        // Accepted, triggered and the modify/cancel REFUSALS move nothing: the
+        // Accepted, triggered and the modify/cancel refusals move nothing: the
         // order is answerable but no balance has changed hands. `AccountState`
         // itself is the snapshot, not a reason to take one.
         VenueMessage::OrderAccepted { .. }
@@ -3419,7 +3419,7 @@ fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: De
     // Public control validation rejects out-of-range fractions, but
     // `Engine::arm` performs no range check of its own, so the engine still
     // protects its arithmetic so direct callers cannot emit zero, negative,
-    // or over-sized fills - or panic it. The clamp must run BEFORE the
+    // or over-sized fills - or panic it. The clamp must run before the
     // multiply: rust_decimal's `Mul` panics on overflow, so an extreme
     // fraction (e.g. `Decimal::MAX`) would take the engine down before
     // `.min(order.quantity)` ever saw the product. With the fraction confined
@@ -3443,8 +3443,8 @@ fn fill_quantity(order: &SubmitOrder, fill_fraction: Decimal, size_increment: De
     if candidate > Decimal::ZERO {
         // The fraction was a valid positive partial, but `quantity * fraction`
         // is smaller than one size increment: on a minimum-lot order the grid
-        // simply cannot represent the partial. Fill ZERO rather than round the
-        // partial UP to a full fill - a `PartialFillNext` armed to leave a
+        // simply cannot represent the partial. Fill zero rather than round the
+        // partial up to a full fill - a `PartialFillNext` armed to leave a
         // remainder must never invert into its opposite. Critically this keeps
         // a FOK the divergence was armed to kill dead: `last_qty == 0` leaves
         // the whole order unfilled, so the FOK all-or-nothing gate rejects it
@@ -3507,7 +3507,7 @@ fn on_increment(value: Decimal, increment: Decimal) -> bool {
 /// is populated only on accept and never cleared, so key presence is exactly
 /// "this id was once a real order, just not a resting one anymore" - and the
 /// venue id retained alongside it goes out on the reject, upholding the wire
-/// contract that `venue_order_id` is absent ONLY when the order id is unknown.
+/// contract that `venue_order_id` is absent only when the order id is unknown.
 /// An id the venue genuinely never saw reads as "unknown order" with no venue
 /// id, because none was ever assigned.
 fn terminal_or_unknown_reject(

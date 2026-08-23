@@ -434,7 +434,7 @@ fn nearest_rank(
 
 fn uncertainty_json(point: &Estimates, reps: &[Estimates]) -> anyhow::Result<Value> {
     // A null point (Fano over a zero-mean hour) or a null replicate is a
-    // frozen REFUSAL, never an error: the statistic reports null with the
+    // frozen refusal, never an error: the statistic reports null with the
     // finite-replicate count, and uncertainty is never computed over the
     // surviving subset.
     let field = |name: &str,
@@ -676,7 +676,7 @@ mod tests {
 
     /// 2026-07-06T22:00Z, the July 7 MNQ session open at offset -300.
     const WALK_OPEN_NS: u64 = 1_783_375_200_000_000_000;
-    /// 2026-07-07T21:00Z, its close. The measured window has to span the WHOLE
+    /// 2026-07-07T21:00Z, its close. The measured window has to span the whole
     /// session: `close_session` emits complete sessions only, so a shorter
     /// window yields an empty `per_session` and no windowed counts at all.
     const WALK_CLOSE_NS: u64 = 1_783_458_000_000_000_000;
@@ -684,9 +684,9 @@ mod tests {
     /// A short crafted session walk through `GeneratedAcc`, parameterized on
     /// the count-window list, returning the finished record's bytes.
     ///
-    /// It has to carry real TRADES, and the mechanism is worth stating exactly
+    /// It has to carry real trades, and the mechanism is worth stating exactly
     /// because it is not the obvious one. Block 2's cells come from
-    /// `window_schedule` over the session segment, INDEPENDENT of prints - so
+    /// `window_schedule` over the session segment, independent of prints - so
     /// window keys appear as soon as any session closes. What requires trades
     /// is the session existing at all: `push_trade` is the only thing that
     /// rotates one in, so a walk of quotes alone finishes with an empty
@@ -773,12 +773,12 @@ mod tests {
     /// The count-window seam: the default constructor really does carry the
     /// frozen 12a list, and the list really does reach the artifact.
     ///
-    /// THE SECOND HALF IS WHAT MAKES THE FIRST ONE MEAN ANYTHING. `new`
+    /// The second half is what makes the first one mean anything. `new`
     /// delegates to `new_with_count_windows` with `COUNT_WINDOWS_S`, so
     /// comparing the two against that same constant goes red on exactly one
     /// class of edit: one that re-points `new` at a different list, which
     /// moves the `default` walk alone. That is a real class - it is what the
-    /// test is for - but it can only be OBSERVED if a different list produces
+    /// test is for - but it can only be observed if a different list produces
     /// a different artifact in the first place. So the sensitivity is asserted
     /// here rather than assumed: `CURVE_WINDOWS`, the list this file's own
     /// month runs pass through the same seam, must move the bytes.

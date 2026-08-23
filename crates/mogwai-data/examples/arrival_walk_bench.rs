@@ -1,23 +1,23 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! HARNESS SURFACE: the parent draw with no projection attached.
+//! A harness surface: the parent draw with no projection attached.
 //!
-//! Stage A's cost probe found that a screen cell is dominated by MEASUREMENT
+//! Stage A's cost probe found that a screen cell is dominated by measurement
 //! rather than by simulation - the cadence-only walk was assumed ~10x cheaper
 //! than a full generator walk and measured ~2x. This harness is the control for
-//! that finding: it runs the kernel draw and NOTHING else, so whatever it costs
+//! that finding: it runs the kernel draw and nothing else, so whatever it costs
 //! is the floor no measurement-side optimization can go below. Pair it with
 //! `mogwai-lab`'s `screen_projection_bench`, which runs the same walk with the
 //! projection attached; the difference between the two is the whole budget the
 //! Stage A round is spending against.
 //!
-//! A DESIGNED WORKLOAD, NOT THE MNQ CELL. This crate cannot see a preset - that
+//! A designed workload, not the MNQ cell. This crate cannot see a preset - that
 //! resolution lives in `mogwai-venue` and depending on it here would invert
 //! the layering - so the walk runs on fingerprint medians, an all-ones session
-//! profile and no calendar. That makes the numbers a property of the KERNEL,
-//! and means they are NOT comparable with a screen cell's per-seed cost in
-//! absolute terms. What they are comparable in is cost PER PARENT, which is how
+//! profile and no calendar. That makes the numbers a property of the kernel
+//! itself, and means they are never comparable with a screen cell's per-seed
+//! cost in absolute terms. What they are comparable in is cost per parent, which is how
 //! the subtraction against `screen_projection_bench` is read; see the reading
 //! rules in `reference/performance.md`.
 //!
@@ -38,14 +38,14 @@ use mogwai_data::{ArrivalConfig, CadenceWalk, Fingerprint, GeneratorScalars, Ses
 /// an end-of-run metric from.
 ///
 /// Written out by hand rather than called from `mogwai_lab::sidecar` because
-/// the lab sits ABOVE this crate: a shared emitter reachable from here would
+/// the lab sits above this crate: a shared emitter reachable from here would
 /// mean mogwai-data depending on its own consumer. Three lines of `eprintln!`
 /// is the right price for keeping that arrow pointing one way.
 fn kv(key: &str, value: &str) {
     eprintln!("{key}={value}");
 }
 
-/// hotpath does NOT install its counting allocator itself - the crate exposes
+/// hotpath does not install its counting allocator itself - the crate exposes
 /// it and leaves the choice to the binary. Without this line an alloc-mode run
 /// completes, reports zero bytes for every frame, and looks like a program that
 /// does not allocate.
@@ -64,7 +64,7 @@ const ORIGIN_NS: u64 = 1_700_438_400_000_000_000;
 
 /// One representative cell per kernel family. These are the Stage A probe cells
 /// (`mogwai_lab::arrival_screen::probe_cell`), transcribed rather than imported
-/// because this crate sits BELOW the lab and must not learn about the screen.
+/// because this crate sits below the lab and must not learn about the screen.
 /// A transcription can drift from its source; that is acceptable for an
 /// instrument whose job is relative cost, and would not be for anything a
 /// verdict reads.
@@ -95,7 +95,7 @@ const CELLS: [(&str, ArrivalConfig); 3] = [
 
 /// The measured region: one family's whole walk.
 ///
-/// ANNOTATED HERE AND NOT ON `CadenceWalk::next`. A single draw is nanoseconds
+/// Annotated here, deliberately, and not on `CadenceWalk::next`. A single draw is nanoseconds
 /// and there are two million of them per family, so instrumenting the draw
 /// would price the instrumentation rather than the draw. The annotation sits on
 /// the caller, which is the standing rule for this workspace's profiles.
@@ -123,7 +123,7 @@ fn walk_family(config: ArrivalConfig, seed: u64) -> (u64, u64) {
                 parents += 1;
                 children += u64::from(draw.child_count);
             }
-            // A refusal ends the family early and is REPORTED rather than
+            // A refusal ends the family early and is always reported rather than
             // swallowed: a run that quietly walked a tenth of the parents would
             // read as a tenfold speedup.
             Err(refusal) => {
@@ -136,7 +136,7 @@ fn walk_family(config: ArrivalConfig, seed: u64) -> (u64, u64) {
 }
 
 fn main() {
-    // Bound to a NAMED guard. `let _ = ...` drops it on the spot, which ends
+    // Bound to a named guard. `let _ = ...` drops it on the spot, which ends
     // profiling before the first walk and writes an empty report; the report is
     // written by the Drop impl, so the binding has to outlive the work.
     #[cfg(feature = "hotpath")]

@@ -7,27 +7,27 @@
 //! and their policies, the cadence and eviction rules, and the divergence control
 //! plane.
 //!
-//! IT USED TO SAY "L3-L6 gates" AND THAT MEANT NOTHING ANY MORE, which is worth
+//! It used to say "L3-L6 gates" and that meant nothing any more, which is worth
 //! recording rather than silently replacing: those layer numbers came from a
 //! retired plan, and a file organized by a vanished index reads as unorganized.
 //!
-//! WHAT WAS CONSIDERED AND REFUSED, so the next reader does not re-derive it.
+//! What was considered and refused, so the next reader does not re-derive it.
 //! A 2026-08-18 report proposed splitting this file into a `serving_readonly.rs`
 //! sharing one leaked venue per config and a `serving_owned.rs` launching one
 //! each, on the premise that the binary's wall floor is 54 venue boots under
-//! parallel load. THE PREMISE WAS MEASURED AND IS FALSE. A `fast.toml` venue -
+//! parallel load. The premise was measured and is false. A `fast.toml` venue -
 //! process launch, bind, 300 s of warmup materialized, one HTTP round trip -
 //! costs about 10 ms in the profile these tests build under, and the binary's
-//! whole wall at `--test-threads=8` is 9.77 s against a SINGLE test,
+//! whole wall at `--test-threads=8` is 9.77 s against a single test,
 //! `a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`, at
 //! 9.63 s. The floor is that one test's deliberate flake margin - eight scored
 //! attempts with a 500 ms gap, which section B of the report ruled may not be
 //! trimmed for wall time - and no amount of venue sharing moves it.
 //!
 //! The split's own axis does not survive either. Only six tests here are
-//! GET-only, and two of those cannot share a venue for reasons that have nothing
+//! get-only, and two of those cannot share a venue for reasons that have nothing
 //! to do with writing: `history_refuses_an_illegal_symbol_and_serves_an
-//! _unconfigured_one` MATERIALIZES rivers, which `/instruments` then advertises,
+//! _unconfigured_one` materializes rivers, which `/instruments` then advertises,
 //! and `a_paged_tape_window_equals_the_same_window_read_in_one_query` asserts
 //! that its window still fits one page, which a longer-lived venue's growing
 //! tape falsifies. Sharing four venues to save 40 ms is not worth an
@@ -45,7 +45,7 @@ use futures_util::{SinkExt, StreamExt};
 use mogwai_protocol::{LiquiditySide, TradeTick, VenueMessage};
 use tokio_tungstenite::tungstenite::Message;
 
-/// A config whose boot river is named ONLY by `[instrument] preset`, with no
+/// A config whose boot river is named only by `[instrument] preset`, with no
 /// top-level `symbol` key. The harness must resolve MNQ the way `serve.rs`
 /// does; reading the raw config key and defaulting to `DEFAULT_PRESET` answers
 /// BTCUSDT for a venue that serves MNQ, and no other config in this tree can
@@ -112,7 +112,7 @@ fn instruments_reports_every_configured_shape() {
     );
 }
 
-/// Piece 13: the upgrade refuses an ILLEGAL symbol, not an unconfigured one.
+/// Piece 13: the upgrade refuses an illegal symbol, not an unconfigured one.
 /// `a_run_serves_a_symbol_nobody_configured` covers the served half.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
@@ -149,11 +149,11 @@ async fn a_ws_upgrade_for_a_configured_non_default_symbol_is_served() {
         .await
         .expect("configured non-boot river places a boat");
     assert_eq!(response.status(), 101);
-    // Drain to a DEADLINE and RECORD HOW THE STREAM ENDED. The shape this
+    // Drain to a deadline and record how the stream ended. The shape this
     // replaces - `while let Ok(Some(Ok(Message::Text(frame))))` - exits the
     // loop on a Ping, a Pong, a Binary or a Close as readily as on the
     // deadline, and every one of those then arrived at the panic below as
-    // "produced no named market frame". That is a WRONG ANSWER rather than a
+    // "produced no named market frame". That is the wrong answer rather than a
     // timeout: a venue that closed this socket would be reported as a venue
     // that served an unnamed river. The venue sends no control frames today,
     // so nothing makes it bite yet - which is exactly why it survived, and is
@@ -184,9 +184,9 @@ async fn a_ws_upgrade_for_a_configured_non_default_symbol_is_served() {
     );
 }
 
-/// History is bounded by the RUN CLOCK, and no boat moves that bound.
+/// History is bounded by the run clock, and no boat moves that bound.
 ///
-/// THE INVERSE OF WHAT THIS ONCE PINNED. The ceiling used to be the furthest
+/// The inverse of what this once pinned. The ceiling used to be the furthest
 /// boat on the river, which made one passenger's delivery frontier decide
 /// another's history window: board the same water at a faster cadence and you
 /// moved somebody else's ceiling, which they could watch move. The Boat entry
@@ -195,10 +195,10 @@ async fn a_ws_upgrade_for_a_configured_non_default_symbol_is_served() {
 /// since speed belongs to a boat's identity and a tape is what one boat
 /// publishes.
 ///
-/// A LATE BOAT IS THE DISCRIMINATOR, and it is why this uses a SECOND symbol.
+/// A late boat is the discriminator, and it is why this uses a second symbol.
 /// The boot river carries a boat from boot, so a boot-symbol test would pass
 /// under either rule. A boat placed well after boot has published almost
-/// nothing, so a window sitting far above ITS frontier but below the run present
+/// nothing, so a window sitting far above its frontier but below the run present
 /// separates the two rules exactly: the retired ceiling refused it, the run
 /// clock serves it.
 #[tokio::test]
@@ -219,7 +219,7 @@ async fn history_is_bounded_by_the_run_clock_and_no_boat_moves_it() {
         "the run clock must have left the tape floor for this test to say anything"
     );
 
-    // JUST BELOW THE RUN PRESENT, and far above anything a boat placed a moment
+    // Just below the run present, and far above anything a boat placed a moment
     // ago can have published - such a boat starts at the river's origin and
     // climbs from there. Under the retired ceiling this was a 400.
     let start = run_now.saturating_sub(1_000_000);
@@ -254,7 +254,7 @@ async fn an_order_for_another_symbol_is_refused_on_a_bound_socket() {
     let venue = spawn(&["--config", &fast_config()]);
     // A minute of modeled submit-act latency, which this venue's sim clock
     // realizes one-for-one in wall time. The mismatch is refused at the
-    // protocol boundary, ABOVE that sleep and above the market reading,
+    // protocol boundary, above that sleep and above the market reading,
     // calendar lookup and engine lock it fronts - so the refusal must land in
     // seconds. This is the assertion that a mismatched order drives no
     // symbol-dependent work: a check placed lower could not answer for a
@@ -369,14 +369,14 @@ async fn binary_command_frames_receive_a_protocol_error() {
     panic!("no ProtocolError arrived before the liveness deadline");
 }
 
-// TAPE LATENESS UNDER ACCELERATION IS NOT A TEST AND IS NOT HERE. It asserted a
-// 50 ms p99 on paced delivery, which is a statement about the HOST rather than
+// Tape lateness under acceleration is not a test and is not here. It asserted a
+// 50 ms p99 on paced delivery, which is a statement about the host rather than
 // about this code: a release build failed it at 311 ms under a load average of
 // 1.46, and no admission test distinguishes a machine that can judge that budget
 // from one that cannot. A gate nobody can evaluate is excluded from every lane
 // that would run it, and an excluded gate measures nothing at all.
 //
-// It is a BENCHMARK instead - `examples/tape_lateness_bench.rs`, registered as a
+// It is a benchmark instead - `examples/tape_lateness_bench.rs`, registered as a
 // measurable target - so the number is recorded on every run against the machine
 // and the commit that produced it, which is what makes a regression visible
 // without pretending a threshold is portable. `reference/performance.md` keeps
@@ -442,8 +442,8 @@ fn trades_after_sim_now_are_refused_with_400() {
     );
 
     // The asymmetry is deliberate and pinned here so it stays a decision: an
-    // explicit END past the clock is the ordinary "everything up to now"
-    // request written against the caller's own clock, so it is CLAMPED to
+    // explicit end past the clock is the ordinary "everything up to now"
+    // request written against the caller's own clock, so it is clamped to
     // sim-now and served, not refused. See the comment in `http::trades`.
     let (status, body) = http_get(
         &venue.http_base(),
@@ -455,7 +455,7 @@ fn trades_after_sim_now_are_refused_with_400() {
     assert_eq!(status, 200, "a future end is clamped, not refused: {body}");
 }
 
-/// Piece 13 REPLACED the unserved-symbol refusal on history: the only symbol a
+/// Piece 13 replaced the unserved-symbol refusal on history: the only symbol a
 /// history read refuses now is one that is not a legal symbol at all. A label
 /// nobody configured, and a miscased one, are both served - under their own
 /// label, on their own river.
@@ -508,7 +508,7 @@ fn history_refuses_an_illegal_symbol_and_serves_an_unconfigured_one() {
     );
 }
 
-/// What proves the warmup was MATERIALIZED rather than merely declared: a
+/// What proves the warmup was materialized rather than merely declared: a
 /// request for the earliest servable instant, issued the moment the readiness
 /// line arrives, returns data instead of a refusal or an empty page.
 #[test]
@@ -567,7 +567,7 @@ async fn a_connection_receives_the_tape_without_asking() {
     }
 }
 
-/// A venue declaring NO warmup still publishes its tape. The worker's opening
+/// A venue declaring no warmup still publishes its tape. The worker's opening
 /// positioning probe used to target the simulated now, which a live index will
 /// not extend to reach, so the probe's success rested on the warmup walk having
 /// overshot the run start far enough to cover the boot latency. With
@@ -600,15 +600,15 @@ async fn a_venue_without_warmup_still_publishes_its_tape() {
     }
 }
 
-/// The lag policy STAYS through the tenancy rip - it bounds one connection's
+/// The lag policy stays through the tenancy rip - it bounds one connection's
 /// memory, not one tenant's share - but the policy itself changed: a connection
-/// that falls behind the ring is TOLD what it missed and keeps being served,
+/// that falls behind the ring is told what it missed and keeps being served,
 /// where it used to be told and then killed with WS 1011.
 ///
-/// WHAT THIS HAS TO PROVE IS THE HARD PART. "No close" is not the contract and
+/// What this has to prove is the hard part. "No close" is not the contract and
 /// would pass against a venue that simply stopped noticing holes. So this pins
 /// three things a silent venue cannot fake: the declaration arrives, the socket
-/// goes on delivering market frames AFTER it, and a SECOND hole is declared with
+/// goes on delivering market frames after it, and a second hole is declared with
 /// a higher episode number - which is what says the venue can still speak about
 /// loss once it has spoken once. The old one-shot promise pool could not have
 /// passed the third.
@@ -620,7 +620,7 @@ async fn a_slow_connection_is_told_its_gap_and_keeps_being_served() {
         .await
         .expect("open a socket");
 
-    // Read SLOWLY rather than not at all, for the same reason as before: a peer
+    // Read slowly rather than not at all, for the same reason as before: a peer
     // that never reads wedges the writer, and the declaration rides that same
     // outbound path. Unlike the old test the stalling never stops - a second
     // episode needs the reader to fall behind twice, so it must keep being slow.
@@ -633,7 +633,7 @@ async fn a_slow_connection_is_told_its_gap_and_keeps_being_served() {
     while tokio::time::Instant::now() < deadline && episodes.len() < 2 {
         tokio::time::sleep(STALL).await;
         reads += 1;
-        // HOW THE READ LOOP ENDED IS RECORDED, for the same reason a drain
+        // How the read loop ended is recorded, for the same reason a drain
         // records how its stream ended: a timeout, a transport error and a clean
         // `None` are three different stories and only one is about the policy.
         let ending = match tokio::time::timeout_at(deadline, socket.next()).await {
@@ -725,12 +725,12 @@ async fn two_connections_share_one_ledger() {
         .await
         .expect("submit an order");
 
-    // The order is worked on one socket; the LEDGER it moved is the run's, so
+    // The order is worked on one socket; the ledger it moved is the run's, so
     // the other socket's query answers from the same book.
     //
-    // The query waits on the ACCEPTANCE, not on a fixed 500 ms. The query is
+    // The query waits on the acceptance, not on a fixed 500 ms. The query is
     // sent once and never retried, so a submit still in flight when it went out
-    // produced a snapshot without SHARED-1 and a failure reading "the run has
+    // produced a snapshot without `SHARED-1` and a failure reading "the run has
     // more than one ledger" - a wrong answer about a venue that was merely busy.
     //
     // `observer` is drained for that whole wait. It is attached to the live tape
@@ -774,7 +774,7 @@ async fn two_connections_share_one_ledger() {
     }
 }
 
-/// Two ACCOUNTS on one venue do not share a ledger, which is the converse of
+/// Two accounts on one venue do not share a ledger, which is the converse of
 /// the test above and the property that makes a shared exchange usable.
 ///
 /// The pair matters together: same account id means one trader and one book
@@ -804,8 +804,8 @@ async fn two_accounts_on_one_venue_do_not_share_a_ledger() {
         .expect("submit an order on the first account");
 
     // As above, but here the fixed wait was worse than a wrong answer: this
-    // assertion is that the stranger's book does NOT contain PRIVATE-1, and an
-    // order the venue had not booked yet satisfies it VACUOUSLY. Waiting for the
+    // assertion is that the stranger's book does not contain `PRIVATE-1`, and an
+    // order the venue had not booked yet satisfies it vacuously. Waiting for the
     // acceptance is what makes the absence mean something.
     //
     // And `stranger` is drained across the wait, for the reason above: an
@@ -850,7 +850,7 @@ async fn two_accounts_on_one_venue_do_not_share_a_ledger() {
 
 /// A consumer names its own opening balance, and that is the ledger it trades.
 ///
-/// The venue's `[balances]` is what an UNNAMED account gets; it stops being the
+/// The venue's `[balances]` is what an unnamed account gets; it stops being the
 /// balance of the one ledger. Two experiments sized differently are the case
 /// this exists for, and they have to be runnable on one venue.
 #[test]
@@ -918,9 +918,9 @@ fn an_account_that_is_already_open_is_not_reset() {
 }
 
 /// A policed account publishes what it is being enforced against, so a run can
-/// be JUDGED afterwards.
+/// be judged afterwards.
 ///
-/// The audience is the EVALUATOR, not the strategy: mogwai presents no
+/// The audience is the evaluator, not the strategy: mogwai presents no
 /// dashboard, so a run that ended flat having spent most of its drawdown budget
 /// is indistinguishable from one that never came close unless these numbers are
 /// on the wire.
@@ -961,7 +961,7 @@ fn a_policed_account_publishes_its_remaining_budget() {
     assert!(risk["breached"].is_null(), "nothing has fired yet: {body}");
 }
 
-/// A policy the venue cannot enforce is refused where it ENTERS, not hours
+/// A policy the venue cannot enforce is refused where it enters, not hours
 /// later. A nonsense rule that booted fine and then behaved strangely would be
 /// the worst of both.
 #[test]
@@ -1006,12 +1006,12 @@ fn an_unenforceable_policy_is_refused_at_the_boundary() {
     );
 }
 
-/// A policed SPOT account trades and is valued: the base asset it ends up
+/// A policed spot account trades and is valued: the base asset it ends up
 /// holding is priced by the pair that quotes it.
 ///
 /// This is what the default tape shape needs. A spot fill credits the base as a
 /// currency balance and debits the quote, so an account holding BTC is worth
-/// nothing statable until BTCUSDT is marked - and its equity must NOT collapse
+/// nothing statable until BTCUSDT is marked - and its equity must never collapse
 /// by the notional it just spent, which is what a naive sum of balances
 /// reported before the valuation landed.
 #[tokio::test]
@@ -1040,7 +1040,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
         .expect("submit a spot order");
 
     // The purchase must actually book before anything is asked about its
-    // valuation, and the ORDER OF THE TWO WAITS is what makes this test able to
+    // valuation, and the order of the two waits is what makes this test able to
     // fail at all: the account opens with 5,000,000 USDT, so the equity floor
     // below is already satisfied before the fill lands. A poll that did not wait
     // for the fill first would pass on the opening balance.
@@ -1065,7 +1065,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
     let drain = BackgroundDrain::spawn(socket);
 
     // Then the mark. A sweep pass valuing the pair is what lifts equity back
-    // over the floor, and it runs on its own cadence - so this RETRIES to a
+    // over the floor, and it runs on its own cadence - so this retries to a
     // deadline rather than betting a fixed span was enough. A venue that never
     // marks fails here with the reading it actually served, instead of the
     // reading whichever host it ran on happened to reach in 1.5 s.
@@ -1091,12 +1091,12 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     drain.stop("the policed account's socket").await;
-    // The RETRY above cannot hide a transient mispricing, and that is a property
-    // of the breach rather than of the loop. `RiskLedger::breach` is LATCHED -
+    // The retry above cannot hide a transient mispricing, and that is a property
+    // of the breach rather than of the loop. `RiskLedger::breach` is latched -
     // `observe` returns early once it is set, and the first breach is the one
     // that describes the run - so an equity reading that momentarily collapsed
     // by the notional would have crossed this account's 1,000,000 trailing
-    // drawdown off its 5,000,000 opening and STUCK. The poll can wait for the
+    // drawdown off its 5,000,000 opening and stuck there. The poll can wait for the
     // mark; it cannot wait out a breach that already fired.
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(
@@ -1105,7 +1105,7 @@ async fn a_policed_spot_account_is_valued_at_the_marked_price() {
     );
 }
 
-/// A second socket claiming an existing account evicts the first, and RESUMES its
+/// A second socket claiming an existing account evicts the first, and resumes its
 /// ledger.
 ///
 /// Both halves matter together. Eviction is what keeps an account on one river
@@ -1137,8 +1137,8 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
         .await
         .expect("open the second socket on the same account");
 
-    // The query goes out BEFORE the eviction is observed, and both sockets are
-    // then read concurrently, each on its OWN deadline.
+    // The query goes out before the eviction is observed, and both sockets are
+    // then read concurrently, each on its own deadline.
     //
     // Sequencing them shared one 30 s instant across two phases, so a slow
     // eviction ate the query's budget and the timeout fired with a message about
@@ -1147,7 +1147,7 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
     // market frames and is told so - it is no longer closed for it, but a
     // `None` here would still have been reported as the resumed ledger failing
     // to answer. Each arm below therefore names its
-    // OWN failure, and a venue-side close is spelled out as a close rather than
+    // own failure, and a venue-side close is spelled out as a close rather than
     // folded into "the query went unanswered".
     second
         .send(Message::Text(
@@ -1156,7 +1156,7 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
         .await
         .expect("query the resumed ledger");
 
-    // The incumbent is closed, and NORMALLY: an eviction is not a fault, and a
+    // The incumbent is closed, and normally: an eviction is not a fault, and a
     // consumer that redialled on it would evict whatever evicted it.
     let evicted = async {
         let deadline = common::deadline(common::TEST_WALL_BUDGET);
@@ -1214,7 +1214,7 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
         frame.reason.contains("claimed account"),
         "the close says why: {frame:?}"
     );
-    // The half of the contract the reason TEXT cannot state. WS 1000 is also
+    // The half of the contract the reason text cannot state. WS 1000 is also
     // what a completed run and an elapsed duration close with, so a consumer can
     // only tell an eviction apart by the protocol prefix - and this is the only
     // place the venue's real bytes meet the classifier that reads them. An
@@ -1242,7 +1242,7 @@ async fn a_second_socket_claiming_an_account_evicts_the_first_and_resumes_its_le
     );
 }
 
-/// A consumer asks for a policy BY NAME rather than restating it, and a name
+/// A consumer asks for a policy by name rather than restating it, and a name
 /// nobody has is an error rather than a silent fall to unpoliced.
 ///
 /// The second half is the one that matters: a run that believes it is enforced
@@ -1378,8 +1378,8 @@ async fn an_oversized_submit_is_refused_by_the_position_cap() {
 
 /// A blackout armed on one account does not blind another.
 ///
-/// Transport havoc corrupts what one connection RECEIVES rather than what the
-/// generator produces, so it is armed on the ACCOUNT and blurs each of its
+/// Transport havoc corrupts what one connection receives rather than what the
+/// generator produces, so it is armed on the account and blurs each of its
 /// passengers alike. Run-wide was the old shape,
 /// and on a shared exchange it meant one subagent arming a blackout blacked out
 /// the whole batch.
@@ -1399,18 +1399,18 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
     let (status, body) = http_post_json(
         &venue.http_base(),
         "/control/divergence",
-        // The ceiling, in SIMULATED ms. This config is accelerated, so a
+        // The ceiling, in simulated ms. This config is accelerated, so a
         // wall-comfortable window has to be a large sim one.
         r#"{"type":"GoDark","ms":3600000,"account":"WYRD-500"}"#,
     );
     assert_eq!(status, 202, "the targeted blackout arms: {body}");
 
-    // BOTH sockets are drained before either is judged. A socket is attached to
+    // Both sockets are drained before either is judged. A socket is attached to
     // the live tape on upgrade, so whatever the writer had queued when the
     // blackout armed is still in flight on both of them and says nothing about
     // whether a window is open. Asserting before this drain passes whichever way
     // the targeting is wired, which is the trap this comment exists to mark.
-    // WHETHER A SOCKET GOES QUIET is the discriminator, and it has to be, because
+    // Whether a socket goes quiet is the discriminator, and it has to be, because
     // neither "did it receive something" nor "was the next frame absent" can
     // tell the two apart: a socket is attached to the live tape on upgrade, so a
     // blacked-out one keeps delivering its backlog for a while and a live one
@@ -1418,14 +1418,14 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
     // blacked out means the backlog exhausts and a gap appears, still served
     // means frames keep arriving until the deadline.
     //
-    // The two are drained CONCURRENTLY, and the observer is three-valued rather
+    // The two are drained concurrently, and the observer is three-valued rather
     // than a bool. Both properties are load-bearing:
     //
     // - Draining one while the other sits unread let the unread one rot. This
     //   venue's fanout is a bounded ring, so a socket nobody reads accumulates
     //   declared holes in its market view, and the quiet that follows would then
     //   be read as the blackout's doing.
-    // - A two-valued "did it go quiet" CANNOT SEE that ejection at all. A closed
+    // - A two-valued "did it go quiet" cannot see that ejection at all. A closed
     //   stream answers `next()` with `None` immediately, which is not a timeout,
     //   so a bool observer reports "still receiving" for a socket that is gone -
     //   and `lit` would pass this gate while dead. `Closed` is therefore its own
@@ -1451,7 +1451,7 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
 
 /// What draining a `/ws` socket to a deadline actually observed.
 ///
-/// Three-valued on purpose: `Closed` is NOT `Quiet`. A socket the venue has
+/// Three-valued on purpose: `Closed` is never `Quiet`. A socket the venue has
 /// ejected returns `None` from `next()` at once, so any observer that folds the
 /// two together reports silence for a socket that no longer exists.
 #[derive(Debug, PartialEq, Eq)]
@@ -1470,7 +1470,7 @@ impl Observed {
             Self::Serving => "kept receiving frames".to_string(),
             Self::Quiet => "went quiet".to_string(),
             Self::Closed(why) => {
-                format!("was CLOSED by the venue, which says nothing about the blackout: {why}")
+                format!("was closed by the venue, which says nothing about the blackout: {why}")
             }
         }
     }
@@ -1520,7 +1520,7 @@ async fn two_accounts_at_different_speeds_both_stay_open() {
     .await
     .expect("an unserved speed is a second boat, not a 400");
 
-    // EACH SOCKET'S OWN DELIVERY IS THE OBSERVABLE. This used to read
+    // Each socket's own delivery is the observable. This used to read
     // `/clock?symbol=&speed=` for each boat and assert the two cadences back,
     // which is precisely the boat-discovery the route no longer performs - and
     // it proved the registry held two entries rather than that either passenger
@@ -1575,7 +1575,7 @@ async fn a_second_speed_on_the_same_account_is_refused() {
     let Err(error) = refused else {
         panic!("a second cadence on one ledger must not upgrade");
     };
-    // The REASON, not merely a 400. `contains("400") || contains("already
+    // The reason, not merely a 400. `contains("400") || contains("already
     // seated")` admitted any bad request on this route - the illegal-symbol
     // refusal, an unfunded-account refusal, a malformed speed - so a venue that
     // had stopped checking the cadence entirely could still turn this green by
@@ -1596,11 +1596,11 @@ async fn a_second_speed_on_the_same_account_is_refused() {
     );
     assert!(
         body.contains(&*venue.symbol) && body.contains("speed 2"),
-        "the refusal names the river and the SITTING cadence, not the asked one: {body}"
+        "the refusal names the river and the sitting cadence, not the asked one: {body}"
     );
 }
 
-/// A REFUSED upgrade does not evict the incumbent it was refused instead of
+/// A refused upgrade does not evict the incumbent it was refused instead of
 /// replacing.
 ///
 /// `/ws` used to claim the account first - which closes every socket of the
@@ -1609,7 +1609,7 @@ async fn a_second_speed_on_the_same_account_is_refused() {
 /// refusals, so `?account=X&speed=NaN` was a one-request, unauthenticated way
 /// to disconnect a live consumer while never connecting at all.
 ///
-/// TWO PHASES, AND THE SECOND IS THE POINT. The refusal path and the admission
+/// Two phases, and the second is the point. The refusal path and the admission
 /// path differ in exactly one character of the query string, so the incumbent
 /// surviving phase one can only mean the refusal spared it: phase two runs the
 /// same claim on the same account under the same new callsign with a legal
@@ -1627,11 +1627,11 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
     .await
     .expect("the incumbent claims the account");
 
-    // WAIT FOR THE INCUMBENT TO BE BOUND BEFORE CLAIMING ITS ACCOUNT, and read
+    // Wait for the incumbent to be bound before claiming its account, and read
     // an observable rather than sleeping: a `connect_async` returns at the 101,
     // and `handle_socket` binds the lane the eviction has to find only after
     // that. A market-data frame is written by the feed task, which is spawned
-    // AFTER `bind_lanes`, so one frame proves the lane is there - and without
+    // after `bind_lanes`, so one frame proves the lane is there - and without
     // this the eviction has nothing to close and the test passes for a reason
     // that has nothing to do with the ordering under test.
     let bound = common::deadline(Duration::from_secs(10));
@@ -1646,7 +1646,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
         }
     }
 
-    // A DIFFERENT callsign, so this is a stranger claiming the id - the shape
+    // A different callsign, so this is a stranger claiming the id - the shape
     // that evicts - and it is refused for the speed alone.
     let refused = while_draining(
         &mut incumbent,
@@ -1670,10 +1670,10 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
         "the refusal is the speed check rather than some other 400: {body}"
     );
 
-    // AND THE INCUMBENT IS STILL BEING SERVED AFTERWARDS. `while_draining`
+    // And the incumbent is still being served afterwards. `while_draining`
     // returns the instant the refusal resolves, so a close the eviction had
     // already queued would never be read - the drain has to keep going. Read
-    // FRAMES rather than wait a while: the close rides the priority lane and
+    // frames rather than wait a while: the close rides the priority lane and
     // the writer is biased to it, so if this socket had been evicted the very
     // next frame would be that close rather than more market data.
     let alive = common::deadline(Duration::from_secs(10));
@@ -1691,7 +1691,7 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
         }
     }
 
-    // The positive control: the same claim, legal this time, DOES take the
+    // The positive control: the same claim, legal this time, does take the
     // account - so the survival above is the refusal sparing the incumbent
     // rather than eviction being broken or unobservable on this socket.
     let (_newcomer, _) = tokio_tungstenite::connect_async(format!(
@@ -1715,35 +1715,35 @@ async fn a_refused_upgrade_leaves_the_incumbent_connected() {
     );
 }
 
-/// A SOCKET GOING AWAY FREES ITS ACCOUNT ALL THE WAY TO COLLECTION, and the
-/// thing that frees it is the ATTACH being given up rather than the lane
+/// A socket going away frees its account all the way to collection, and the
+/// thing that frees it is the attach being given up rather than the lane
 /// being released.
 ///
 /// A socket is counted onto its account before the 101 and off it when its
 /// passenger is done, because the lane table alone cannot answer whether anybody
 /// is reading an account: an eviction retires the incumbent's lane immediately,
 /// and a newcomer binds its own only once its handler runs. The consequence
-/// that matters here is one of ORDER. `handle_socket` releases its lane while
+/// that matters here is one of order. `handle_socket` releases its lane while
 /// still holding its attach, so the lane release finds the account still
 /// counted-in and declines to freeze; the freeze is owed by the attach's own
 /// departure a moment later. An account that never freezes is never
 /// TTL-collected and is still swept while riding no boat.
 ///
-/// THE OBSERVABLE IS COLLECTION, not a flag. `POST /accounts` refuses an id the
+/// The observable is collection, not a flag. `POST /accounts` refuses an id the
 /// venue still holds a ledger for with a 409 and answers 201 once that ledger
 /// has been collected, so a second open is a direct read of whether the freeze
 /// ever happened. Nothing else about a frozen account is visible from outside.
 ///
-/// THE ACCOUNT IS ATTACHED BEFORE IT IS ABANDONED, which is what stops this
-/// from passing vacuously. An account is born FROZEN - `POST /accounts` and
+/// The account is attached before it is abandoned, which is what stops this
+/// from passing vacuously. An account is born frozen - `POST /accounts` and
 /// first sight alike - so a gate that opened one and then watched it be
 /// collected would be watching the birth freeze age out and would stay green
 /// with every freeze in the venue disabled. Draining to a frame first proves
 /// the socket bound its lane and `resume` unfroze the account, so the only way
 /// back to collectable is a freeze this teardown performed.
 ///
-/// WHAT IT STILL DOES NOT REACH, stated because a bite-check went looking. The
-/// case the attach count was ADDED for is the upgrade abandoned before
+/// What it still does not reach, stated because a bite-check went looking. The
+/// case the attach count was added for is the upgrade abandoned before
 /// `handle_socket` ever runs - no lane bound, no lane released - and no consumer
 /// behaviour reaches it from outside: writing the request and resetting the
 /// connection at once still loses to the venue, which has read the request,
@@ -1764,7 +1764,7 @@ async fn a_departing_socket_freezes_its_account_into_collection() {
 
     // An observable rather than a sleep: `connect_async` returns at the 101,
     // and the feed task that writes this frame is spawned after `bind_lanes`
-    // and after `resume`. One frame therefore proves the account is ATTACHED,
+    // and after `resume`. One frame therefore proves the account is attached,
     // which is the premise the assertion below rests on.
     let bound = common::deadline(Duration::from_secs(10));
     loop {
@@ -1856,7 +1856,7 @@ async fn a_ride_ends_with_its_passenger_while_the_account_stays() {
     }
 }
 
-/// An account not funded in what its symbol settles in is refused AT BIND,
+/// An account not funded in what its symbol settles in is refused at bind,
 /// naming the currency.
 ///
 /// The venue's `[balances]` is only what an unnamed account opens with, so a
@@ -1879,7 +1879,7 @@ async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
         "the account opens on whatever it named: {body}"
     );
 
-    // Through a real upgrade attempt: the refusal is a STATUS before the 101,
+    // Through a real upgrade attempt: the refusal is a status before the 101,
     // and a plain GET never reaches the handler because the upgrade extractor
     // rejects it first.
     let refused = tokio_tungstenite::connect_async(format!(
@@ -1894,7 +1894,7 @@ async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
     // `contains("400") || contains("HTTP")` was close to unfalsifiable: the
     // second arm matches the Display of essentially every tungstenite error,
     // a connection refusal and a 500 included, and the docstring's own claim -
-    // that the refusal NAMES THE CURRENCY - was never asserted at all. Both are
+    // that the refusal names the currency - was never asserted at all. Both are
     // read off the structured response now.
     let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
         panic!("the refusal is an HTTP status before the upgrade, got {error}");
@@ -1909,19 +1909,19 @@ async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
         body.contains("WYRD-600") && body.contains("not funded in"),
         "the refusal is the funding check rather than some other 400: {body}"
     );
-    // USDT as a LITERAL, not resolved through the same config code the venue
+    // USDT as a literal, not resolved through the same config code the venue
     // runs: this is the settlement currency of the default boot river, and a
     // derived expectation would compare the venue's answer to itself.
     //
-    // THE WHOLE PHRASE, not `contains("USDT")`. The boot river here is the
+    // The whole phrase, not `contains("USDT")`. The boot river here is the
     // default preset BTCUSDT, and "USDT" is a substring of "BTCUSDT" - so a bare
     // `contains("USDT")` was implied by the symbol assertion beside it and said
-    // nothing on its own. A venue that had regressed to echoing the ACCOUNT's
+    // nothing on its own. A venue that had regressed to echoing the account's
     // own currency back - "not funded in JPY, which is what BTCUSDT settles in",
     // a plausible real bug - would have satisfied it.
     assert!(
         body.contains("not funded in USDT"),
-        "the refusal names the SETTLEMENT currency, not the account's own: {body}"
+        "the refusal names the settlement currency, not the account's own: {body}"
     );
     assert!(
         body.contains(&*venue.symbol),
@@ -1929,7 +1929,7 @@ async fn an_account_funded_in_the_wrong_currency_is_refused_at_bind() {
     );
 }
 
-/// A perpetual position PAYS FUNDING, which is the only thing tying a perp to
+/// A perpetual position pays funding, which is the only thing tying a perp to
 /// spot when it has no expiry to converge at.
 ///
 /// Without it a strategy holding a perp across funding instants has forward P
@@ -1952,7 +1952,7 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
         .await
         .expect("open a long perpetual position");
 
-    // The CONDITION this test needs is "the position is open", and the venue
+    // The condition this test needs is "the position is open", and the venue
     // states it on the wire. Waiting a fixed 500 ms for it instead both bet on
     // the host and left the socket unread on an unpaced tape, where an unread
     // socket is eventually ejected by the bounded fanout ring - and the funding
@@ -1972,7 +1972,7 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
         }
     }
     // Nothing else on this socket is read, but it must keep being drained for
-    // the rest of the run for the same reason - and the drain REMEMBERS how the
+    // the rest of the run for the same reason - and the drain remembers how the
     // stream ended, so an eviction during the funding wait is named as one
     // instead of surfacing as an unmoved balance.
     let drain = BackgroundDrain::spawn(socket);
@@ -1995,13 +1995,13 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
     // Several sweep passes, each crossing at least one one-second funding
     // instant on this venue's clock.
     //
-    // This one STAYS a wall sleep, and the reason is worth writing down because
+    // This one stays a wall sleep, and the reason is worth writing down because
     // the obvious replacement was tried and is vacuous here. The binding
-    // resource is the SWEEPER, which runs on a WALL cadence; funding is charged
+    // resource is the sweeper, which runs on a wall cadence; funding is charged
     // by a sweep pass, not by the clock reaching an instant. And this config is
     // `speed = 0.0`, where the two axes come apart in a way that defeats the
-    // obvious poll: the boat's CLOCK is still built wall-rated (a zero speed is
-    // replaced by 1.0 when the `SimClock` is constructed), while DELIVERY is
+    // obvious poll: the boat's clock is still built wall-rated (a zero speed is
+    // replaced by 1.0 when the `SimClock` is constructed), while delivery is
     // unpaced, so the tape's `ts_event` runs far ahead of `venue_now_ns`.
     // Anchoring a clock target on a tape stamp therefore satisfies it at once
     // and the test fails on an unmoved balance, which is what was measured.
@@ -2020,7 +2020,7 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
     );
 }
 
-/// Two sockets that name NO account both live. Only a CLAIMED account evicts.
+/// Two sockets that name no account both live. Only a claimed account evicts.
 ///
 /// This is the shape the default account exists to serve, and the eviction
 /// landing broke it: both sockets resolve to the default, so keying eviction on
@@ -2040,7 +2040,7 @@ async fn two_sockets_naming_no_account_both_stay_open() {
         .expect("open the second socket");
 
     // Both are still being served: neither closed, and both keep receiving.
-    // ONE shared deadline rather than a fresh 10 s per socket, which summed to
+    // One shared deadline rather than a fresh 10 s per socket, which summed to
     // the whole per-test watchdog and would have been killed rather than
     // reported.
     let deadline = common::deadline(Duration::from_secs(10));
@@ -2098,19 +2098,19 @@ async fn an_armed_divergence_reaches_every_connection() {
         }
     }
 
-    // Arm a blackout over the control plane. It is armed against the RUN, not
+    // Arm a blackout over the control plane. It is armed against the run, not
     // against an account, so it must gate this socket's market data.
     let armed = post_divergence(&venue.http_base(), r#"{"type":"StallData","ms":180000}"#);
     assert_eq!(armed, 202, "the divergence is accepted");
-    // NO CEILING, AND NO CLOCK READ. This used to read `/clock?symbol=` for the
+    // No ceiling, and no clock read. This used to read `/clock?symbol=` for the
     // boat's own published instant and assert that nothing arriving was stamped
     // past it. That route no longer answers on a boat - a per-boat clock on an
     // anonymous endpoint was a boat-discovery channel - and the venue clock
-    // cannot stand in for it: it runs AHEAD of what a boat has published, so it
+    // cannot stand in for it: it runs ahead of what a boat has published, so it
     // is a generous ceiling that post-arm water can pass under.
     //
     // What replaces it is stronger rather than weaker. A blackout is gated at
-    // SEND time, so the venue chooses to write nothing at all once the arm
+    // send time, so the venue chooses to write nothing at all once the arm
     // lands, and the honest assertion is silence rather than an ordering bound.
     // The only frames that may still arrive are bytes already on the wire when
     // the ack came back, so they are drained explicitly and named as such
@@ -2120,9 +2120,9 @@ async fn an_armed_divergence_reaches_every_connection() {
 
     // Within the window no market data may arrive on this socket.
     //
-    // DELIBERATELY NOT BUDGET-CLAMPED, unlike every deadline above it. This is
-    // not a bound on how long the test may wait for something, it is the LENGTH
-    // OF THE OBSERVATION the property is asserted over: shortening it does not
+    // Deliberately not budget-clamped, unlike every deadline above it. This is
+    // not a bound on how long the test may wait for something, it is the length
+    // of the observation the property is asserted over: shortening it does not
     // make the test fail sooner, it makes the test pass on less evidence. Two
     // seconds is what the arming above was sized against.
     let quiet_until = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -2150,7 +2150,7 @@ async fn an_armed_divergence_reaches_every_connection() {
 /// span its trigger waits on, and the venue would be accepting orders it can
 /// never execute.
 ///
-/// ITS PREMISE IS NOT ENFORCED BY CONSTRUCTION and is asserted rather than
+/// Its premise is not enforced by construction and is asserted rather than
 /// assumed: the limit is placed 2.01 below the last historical print, and if
 /// the market falls that far between reading the anchor and the submit landing
 /// the order is marketable on arrival and never rests at all. That is a lost
@@ -2201,7 +2201,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
             Ok(VenueMessage::OrderAccepted { ts_event, .. }) => accepted_ts = Some(ts_event),
             Ok(VenueMessage::OrderFilled(fill)) => {
                 assert_eq!(fill.client_order_id, "BAND-1");
-                // The LIQUIDITY SIDE, not the timestamp, is what names the case.
+                // The liquidity side, not the timestamp, is what names the case.
                 // A swept fill is a Maker fill; a limit that was already
                 // marketable when the submit landed fills as a Taker in the
                 // accept's own engine batch. The premise this test rests on is
@@ -2240,7 +2240,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
                 panic!("the venue read the submit as malformed: {reason}")
             }
             // Everything else is ignored, `FeedLagged` included. A declared
-            // market-view hole says NOTHING about the fill: order events ride
+            // market-view hole says nothing about the fill: order events ride
             // the held lane, which is unbounded and pumped into the writer, and
             // only the market ring overruns. This used to panic on it, on the
             // assumption the two shared a fate.
@@ -2255,7 +2255,7 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
 /// engine that slips perfectly would otherwise never receive a reading in
 /// production while every engine-side unit test passed.
 ///
-/// THE FILL PRICE CANNOT PROVE IT ON THE PRICE-LESS ARM, which is why this test
+/// The fill price cannot prove it on the price-less arm, which is why this test
 /// reads the venue's log. On the priced arm the price is evidence: the order
 /// states an absurd 9000000, the no-reading fallback fills at that stated price,
 /// and a fill near the tape is therefore only possible if the venue read. On the
@@ -2263,21 +2263,21 @@ async fn a_banded_limit_fills_from_the_run_sweep() {
 /// stamps the order with the last print either way, from the reading when there
 /// is one and from `fills::read_last` when there is not, and the engine's
 /// no-reading branch then fills at that same stamp. Both outcomes land on the
-/// tape, so `fill.last_px < last * 2` is satisfied by a fill decided off NO
-/// READING AT ALL - it was green by construction for the very arm the docstring
+/// tape, so `fill.last_px < last * 2` is satisfied by a fill decided off no
+/// reading at all - it was green by construction for the very arm the docstring
 /// says this test exists for.
 ///
-/// The one observable that separates them is the engine's own WARN, `market
+/// The one observable that separates them is the engine's own `warn`, `market
 /// order has no market reading; using its stated price`, emitted with the
 /// client order id. An attempt whose id never appears in it took a reading.
 /// The two evidences are cross-checked against each other on the priced arm,
 /// so neither the log nor the wire is trusted alone.
 ///
-/// Retried, because `read_market` legitimately REFUSES at any instant whose
+/// Retried, because `read_market` legitimately refuses at any instant whose
 /// trailing window carries fewer than `MIN_VOL_SAMPLES` returns, and the fitted
 /// BTCUSDT tape does that at a substantial fraction of instants. A refused
-/// reading is the documented fallback - stated price, no slippage, WARN - so a
-/// single attempt would be a coin flip. What is pinned is that a reading IS
+/// reading is the documented fallback - stated price, no slippage, warn - so a
+/// single attempt would be a coin flip. What is pinned is that a reading is
 /// taken on both paths: every attempt warning would mean the path never reads at
 /// all, which is the defect this test exists for.
 #[tokio::test]
@@ -2288,8 +2288,8 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
     const NO_READING: &str = "market order has no market reading";
     let venue = spawn(&["--config", &band_config()]);
     let log = &venue.log;
-    // BEFORE anything is concluded from an absence in that buffer. The property
-    // below is scored on attempts whose id does NOT appear beside the WARN, and
+    // Before anything is concluded from an absence in that buffer. The property
+    // below is scored on attempts whose id does not appear beside the warn, and
     // an empty buffer satisfies that for every attempt - a silenced filter, a
     // dead capture thread or a closed pipe would all render as "the venue always
     // took a reading". `common::spawn` pins `RUST_LOG` so the ambient
@@ -2310,17 +2310,17 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
         let mut attempts: Vec<(String, bool)> = Vec::new();
         for attempt in 0..ATTEMPTS {
             let id = format!("MKT-{path}-{attempt}");
-            // The LOWER end of the bracket the floor below is taken over: the
-            // last market instant THIS SOCKET has actually been given before the
+            // The lower end of the bracket the floor below is taken over: the
+            // last market instant this socket has actually been given before the
             // submit goes out. Delivery is monotone and the handler reads a tape
             // at or beyond what it has already published, so this is a true
-            // lower bound. Anchoring the window on the ACCEPTANCE instant
-            // instead, which is what this did, put the window's start AFTER
+            // lower bound. Anchoring the window on the acceptance instant
+            // instead, which is what this did, put the window's start after
             // prints the reading could legitimately have been taken at, and the
             // floor then rejected honest fills.
             //
-            // NOT `/clock`, and not because the read is expensive: that route is
-            // a run fact now and the run clock runs AHEAD of what any boat has
+            // Not `/clock`, and not because the read is expensive: that route is
+            // a run fact now and the run clock runs ahead of what any boat has
             // published, so it is not a lower bound at all and would reinstate
             // exactly the too-late anchor described above. What the socket has
             // been handed is its own knowledge and needs no route.
@@ -2362,10 +2362,10 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
             };
 
             // The venue decides a market submit against `MarketReadingCache`,
-            // which memoizes `read_market` on the SWEEP-INTERVAL bucket (10 ms
+            // which memoizes `read_market` on the sweep-interval bucket (10 ms
             // under band.toml). The reading therefore names the last print at or
             // before the start of the acceptance instant's bucket, and the
-            // adverse-slippage invariant has to be asserted against THAT print,
+            // adverse-slippage invariant has to be asserted against that print,
             // not against the last print at the fill instant - the tape moves on
             // between the reading and the fill, and a buy filling below a print
             // it could not have seen is not favourable slippage.
@@ -2373,25 +2373,25 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
             // Worse, the reading instant is not the acceptance instant either:
             // it is whenever the submit reached the handler, which at speed 100
             // can be many sim seconds earlier. So the print the venue read
-            // cannot be identified from outside - only BRACKETED. What is
+            // cannot be identified from outside - only bracketed. What is
             // asserted is therefore the strongest statement that survives the
             // bracket: the reading's print lies somewhere in the lookback below,
-            // and the fill band is adverse, so a market BUY must fill at or
-            // above the LOWEST price in that window. Recovering the exact
+            // and the fill band is adverse, so a market buy must fill at or
+            // above the lowest price in that window. Recovering the exact
             // per-fill statement means putting the reading instant on the
             // `OrderFilled` event or dropping the cache's bucketing; neither is
             // this test's call to make.
             const BUCKET_NS: u64 = 10_000_000;
             let reading_ts = accepted_ts.unwrap_or(fill.ts_event) / BUCKET_NS * BUCKET_NS;
-            // A 60 s lookback BELOW the pre-submit instant, not below the
+            // A 60 s lookback below the pre-submit instant, not below the
             // acceptance one, so the window covers every print the reading could
             // have named. Not 1 s, because the arrival clock's quiet state runs a
             // mean gap of several seconds and a one-second window is legitimately
             // empty often enough to make this flaky for a reason that has nothing
             // to do with fills.
             //
-            // Fetched through `trade_window`, which PAGES. A single `/trades`
-            // query returns the window's OLDEST prints when the page fills, and
+            // Fetched through `trade_window`, which pages. A single `/trades`
+            // query returns the window's oldest prints when the page fills, and
             // the floor was then taken over stale water the market had since
             // fallen through - asserted as favourable slippage that never
             // happened. Guarding that with `trades.len() < PAGE` instead would
@@ -2432,9 +2432,9 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // The venue writes the WARN before it emits the fill, but that is its
+        // The venue writes the warn before it emits the fill, but that is its
         // stderr pipe and this is a websocket, so the draining thread is allowed
-        // a settle. Bounded because the question is an ABSENCE, which nothing
+        // a settle. Bounded because the question is an absence, which nothing
         // can signal; the loop's own last inter-attempt sleep already gave it
         // 500 ms, and this adds a second one rather than betting on a single.
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2448,7 +2448,7 @@ async fn a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths(
              a reading at all",
             attempts.len()
         );
-        // The log and the wire must AGREE, which is what keeps this from being
+        // The log and the wire must agree, which is what keeps this from being
         // a test of the log alone. On the priced arm the two are independently
         // observable: an attempt that did not warn took a reading, and a fill
         // that took a reading cannot have landed on the order's own absurd
@@ -2481,7 +2481,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
     let (socket, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
         .expect("open order socket");
-    // The socket is SPLIT and drained while the submits go out. Pushing a
+    // The socket is split and drained while the submits go out. Pushing a
     // hundred submits with nothing reading left the socket unread for the whole
     // burst, and this venue's fanout is a bounded ring: an unread socket on a
     // live tape loses market frames and is told so, which the drain below then
@@ -2500,7 +2500,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
         }
         Ok::<_, String>(())
     };
-    // Drain to the LAST acceptance before re-reading. Comparing the pages while
+    // Drain to the last acceptance before re-reading. Comparing the pages while
     // the submits were still in flight would let a clean run and a broken one
     // look alike.
     let draining = async {
@@ -2541,7 +2541,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
 /// The tape-purity property, extended to conditionals: no consumer conditional
 /// advances any generator state.
 ///
-/// A resting conditional is the one order shape that puts a SECOND kind of scan
+/// A resting conditional is the one order shape that puts a second kind of scan
 /// into the sweeper's per-symbol walk (`ScanKind::TriggerTouch` beside the
 /// limits' `FillThrough`), and the walk drains the tape source. If a trigger
 /// scan drained prints the canonical `/trades` page would otherwise have served,
@@ -2571,7 +2571,7 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     // tape-purity failure.
     let (mut writer, mut reader) = socket.split();
     // Sell stops at a trigger of 1: unreachable by any BTCUSDT print, so every
-    // one of them REMAINS resting and untriggered for the whole test, which is
+    // one of them remains resting and untriggered for the whole test, which is
     // the state that puts a touch scan into every sweep pass. Half stop-market
     // and half stop-limit, because the two rest identically as
     // `Resting::Conditional` but reach the walk through different submit paths.
@@ -2633,12 +2633,12 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     let (submitted, drained) = tokio::join!(submitting, draining);
     submitted.unwrap_or_else(|why| panic!("{why}"));
     drained.unwrap_or_else(|why| panic!("{why}"));
-    // Let several sweep passes run WITH the hundred touch scans in the book.
+    // Let several sweep passes run with the hundred touch scans in the book.
     // Draining to the last acceptance only proves the submit path is pure; the
     // walk is what this test is actually about, and it runs on its own cadence
     // (`fill_sweep_interval_ms = 10`).
     //
-    // This waits on the VENUE'S OWN CLOCK rather than on a wall sleep. Nothing
+    // This waits on the venue's own clock rather than on a wall sleep. Nothing
     // the venue serves counts sweep passes, so no observable here can prove one
     // ran; what a clock poll does establish is that the boat is alive and its
     // sim axis has moved far past the last acceptance, which a fixed sleep does
@@ -2647,7 +2647,7 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
     // second, so fifty sweep opportunities at the 10 ms cadence, and the poll
     // waits longer if the venue is slow instead of proceeding early.
     //
-    // `reader` keeps being drained across that wait. It is the ONLY socket on
+    // `reader` keeps being drained across that wait. It is the only socket on
     // this venue and it is attached to the live tape at speed 100, so parking it
     // for the half wall second below reopens the very window the split was
     // introduced to close - and the eviction would not even surface as a tape
@@ -2680,13 +2680,13 @@ async fn the_tape_is_identical_with_and_without_a_resting_stop() {
 type WsSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// A background drain that REMEMBERS how the stream ended.
+/// A background drain that remembers how the stream ended.
 ///
 /// The naive shape, a spawned `while s.next().await.is_some() {}`, ends
 /// identically on a close frame, a transport error and end of stream,
 /// and since the handle is only ever aborted, nothing ever reads that. A venue
 /// that ejects the socket mid-wait is then invisible, and whatever the test
-/// asserts afterwards fails as if the PROPERTY had broken. That is the exact
+/// asserts afterwards fails as if the property had broken. That is the exact
 /// misdiagnosis this file spent a pass removing from the foreground drains, so
 /// the background ones may not reintroduce it: this records the ending and
 /// `assert_still_serving` is what turns it back into a truthful message.
@@ -2723,14 +2723,14 @@ impl BackgroundDrain {
     }
 
     /// Panics naming `subject` if the venue ended the stream while it drained.
-    /// Call this BEFORE asserting the property the wait was for.
+    /// Call this before asserting the property the wait was for.
     ///
-    /// IT READS A RECORD ANOTHER TASK WRITES, so a silent return means "nothing
-    /// recorded YET" rather than "the stream is alive" - the drain runs on its
+    /// It reads a record another task writes, so a silent return means "nothing
+    /// recorded yet" rather than "the stream is alive" - the drain runs on its
     /// own task and only writes after it has been polled. That is why [`stop`]
     /// yields first and why the fixture below yields a hundred times before
     /// checking. Every call site here sits downstream of a real await, so the
-    /// drain has run; a call placed after a stretch of BLOCKING work on the
+    /// drain has run; a call placed after a stretch of blocking work on the
     /// runtime thread would be reading a record nothing had a chance to write.
     ///
     /// [`stop`]: BackgroundDrain::stop
@@ -2750,9 +2750,9 @@ impl BackgroundDrain {
 
     /// Checks the ending one last time, then stops draining.
     ///
-    /// IT YIELDS BEFORE IT CHECKS, and the yield is the whole difference between
+    /// It yields before it checks, and the yield is the whole difference between
     /// a guard and a decoration. The last thing before a `stop` is often a
-    /// BLOCKING `http_get`, which holds the runtime thread, so a close frame
+    /// blocking `http_get`, which holds the runtime thread, so a close frame
     /// that arrived during it is sitting unpolled: checking straight through
     /// would report "still serving" on exactly the branch this exists to catch,
     /// and the caller's assertion would then blame the property. Best-effort
@@ -2765,10 +2765,10 @@ impl BackgroundDrain {
     }
 }
 
-/// Runs `work` while `idle` is DRAINED, and panics if the venue ends `idle`
+/// Runs `work` while `idle` is drained, and panics if the venue ends `idle`
 /// first.
 ///
-/// A socket the test is not reading YET is not exempt from the bounded fanout
+/// A socket the test is not reading yet is not exempt from the bounded fanout
 /// ring: every socket is attached to the live tape on upgrade, so on an unpaced
 /// tape an unread one is exactly what gets ejected - and the subsequent
 /// `expect("the socket stays open")` would report that as the property failing.
@@ -2796,7 +2796,7 @@ where
 }
 
 /// The two drain helpers above are what every socket-backed test in this file
-/// now relies on to tell a CLOSE from the property under test, so they are
+/// now relies on to tell a close from the property under test, so they are
 /// pinned directly rather than only through the venues that use them. No
 /// listener is bound: the streams are fabricated, which is the point - a venue
 /// cannot be made to evict on command, and the behaviour being pinned is the
@@ -2819,7 +2819,7 @@ async fn a_background_drain_names_a_close_instead_of_swallowing_it() {
 
 /// `stop`'s own yield, pinned. Nothing awaits between the spawn and the stop
 /// here, which is the shape at every call site: the last thing before a `stop`
-/// is a BLOCKING `http_get`, so a close that arrived during it is sitting
+/// is a blocking `http_get`, so a close that arrived during it is sitting
 /// unpolled and a check placed straight through reports "still serving" on
 /// precisely the branch this machinery exists to catch.
 #[tokio::test]
@@ -2892,9 +2892,9 @@ async fn await_acceptance(socket: &mut WsSocket, client_order_id: &str) {
     }
 }
 
-/// EVERY trade in `[start, end]`, paged - never a prefix of them.
+/// Every trade in `[start, end]`, paged - never a prefix of them.
 ///
-/// `/trades` fills its page from the OLDEST end of the window and stops at the
+/// `/trades` fills its page from the oldest end of the window and stops at the
 /// limit, so one query over a window wider than a page returns the window's
 /// oldest prints and says nothing about it. A statistic taken over that - a
 /// minimum, a last price - is then a statistic over stale water the market has
@@ -2902,8 +2902,8 @@ async fn await_acceptance(socket: &mut WsSocket, client_order_id: &str) {
 /// the test hunt found a live instance asserting favourable slippage that never
 /// happened.
 ///
-/// The cursor obeys the frontier rule: a full page's LAST INSTANT may be cut off
-/// mid-instant, so that whole instant is dropped and the next query resumes AT
+/// The cursor obeys the frontier rule: a full page's last instant may be cut off
+/// mid-instant, so that whole instant is dropped and the next query resumes at
 /// it rather than past it. A timestamp-only cursor may only advance onto an
 /// instant once every row at that instant has been seen.
 fn trade_window(base: &str, symbol: &str, start: u64, end: u64) -> Vec<TradeTick> {
@@ -2938,7 +2938,7 @@ fn trade_window_paged(
             .into_iter()
             .filter(|trade| trade.ts_event < boundary)
             .collect();
-        // A full page carrying ONE instant cannot be paged by a timestamp
+        // A full page carrying one instant cannot be paged by a timestamp
         // cursor at all, and silently advancing past it would drop rows. It
         // cannot happen on a generated tape - said out loud rather than
         // absorbed, because absorbing it is the defect this helper exists for.
@@ -2955,7 +2955,7 @@ fn trade_window_paged(
 /// The helper the slippage floor rests on is itself checked, against the venue.
 ///
 /// `trade_window` exists because a single `/trades` query silently returns the
-/// window's OLDEST prints once the page fills, and a statistic over that is
+/// window's oldest prints once the page fills, and a statistic over that is
 /// wrong rather than absent. That is a claim about paging, and a helper whose
 /// paging is wrong fails the same way its caller did - quietly, with a plausible
 /// number. So it is pinned against the answer the venue gives when the page
@@ -2968,12 +2968,12 @@ fn trade_window_paged(
 /// would never exercise the loop at all - measured, dropping the boundary row
 /// turned 13780 prints into 9187.
 ///
-/// WHAT THIS DOES NOT COVER, stated because a green test is otherwise read as
-/// covering everything: the COLLIDING half of the cursor rule. `trade_window`
-/// resumes AT a full page's last instant rather than past it, because rows at
+/// What this does not cover, stated because a green test is otherwise read as
+/// covering everything: the colliding half of the cursor rule. `trade_window`
+/// resumes at a full page's last instant rather than past it, because rows at
 /// that instant may have been cut off - but this tape stamps every print at a
 /// distinct nanosecond, asserted below, so the two forms are indistinguishable
-/// on it. Advancing past the boundary was tried as a bite-check and PASSED. The
+/// on it. Advancing past the boundary was tried as a bite-check and passed. The
 /// defensive form is kept because a merged river or a coarser tape would collide
 /// and nothing here would say so.
 #[test]
@@ -3040,8 +3040,8 @@ fn a_paged_tape_window_equals_the_same_window_read_in_one_query() {
 /// The last market instant this socket has actually been handed, draining
 /// whatever is already queued on it.
 ///
-/// A SOCKET'S OWN DELIVERY IS ITS OWN KNOWLEDGE, which is why this exists rather
-/// than a clock read. `/clock` is a run fact and the run clock runs AHEAD of what
+/// A socket's own delivery is its own knowledge, which is why this exists rather
+/// than a clock read. `/clock` is a run fact and the run clock runs ahead of what
 /// any boat has published, so it is not a lower bound on what a handler could
 /// have read; the frames this socket already holds are. Returns the tape origin
 /// when nothing has arrived yet, which is a true lower bound too.
@@ -3158,20 +3158,20 @@ async fn websocket_commands_cannot_overtake_each_other() {
     }
 }
 
-/// The per-connection command queue is bounded, and overflowing it is REFUSED
+/// The per-connection command queue is bounded, and overflowing it is refused
 /// rather than buffered - with no modeled act latency anywhere, so nothing but
 /// the venue's own dispatch rate is holding the queue.
 ///
-/// WHAT THIS USED TO BE, and why it was not a gate: 50 submits fired in a burst,
+/// What this used to be, and why it was not a gate: 50 submits fired in a burst,
 /// then a read for the refusal. Whether a one-deep queue ever overflowed was a
 /// race between the consumer's send rate and the dispatcher's drain rate, with no
-/// condition controlling it - and it got MORE reliable under load, which is the
+/// condition controlling it - and it got more reliable under load, which is the
 /// worst kind of reliability, because the arm that would catch a regression is
 /// the one that only fires on an idle host. It also fired all 50 sends before
 /// reading a byte, so the venue's writer could be backpressured by this very
 /// test while it waited to be told about capacity.
 ///
-/// What replaces the bet is SUSTAINED PRESSURE with a stated stopping rule. One
+/// What replaces the bet is sustained pressure with a stated stopping rule. One
 /// task sends continuously while another drains, and the loop ends on the first
 /// refusal, on the deadline, or at a blast-radius cap - and the failure says
 /// which, together with how much was sent and answered, so "the venue kept up"
@@ -3269,9 +3269,9 @@ async fn websocket_rejects_messages_over_the_protocol_ceiling() {
         ))
         .await
         .expect("send oversized message");
-    // The socket is a LIVE market-data feed, so frames the venue had already
+    // The socket is a live market-data feed, so frames the venue had already
     // written when the oversized frame landed are still in flight and arrive
-    // first: the assertion is that the connection ENDS, not that the close is
+    // first: the assertion is that the connection ends, not that the close is
     // the very next frame. It must still end promptly, so the deadline is the
     // real assertion - a venue that kept serving this connection indefinitely
     // would time out here rather than quietly pass.
@@ -3285,7 +3285,7 @@ async fn websocket_rejects_messages_over_the_protocol_ceiling() {
             Some(Ok(Message::Close(_)) | Err(_)) | None => ended = true,
             Some(Ok(Message::Text(text))) => {
                 // Market data may precede the close. What must never appear is
-                // a protocol-level ANSWER to the oversized input: that would
+                // a protocol-level answer to the oversized input: that would
                 // mean the venue reassembled and parsed it.
                 assert!(
                     !text.contains("ProtocolError"),
@@ -3297,8 +3297,8 @@ async fn websocket_rejects_messages_over_the_protocol_ceiling() {
     }
 }
 
-/// One `POST /control/divergence`, returning the status code AND the body,
-/// because a refusal that must NAME something is only half asserted by its
+/// One `POST /control/divergence`, returning the status code and the body,
+/// because a refusal that must name something is only half asserted by its
 /// status.
 fn post_divergence_body(base: &str, body: &str) -> (u16, String) {
     use std::io::{Read, Write};
@@ -3336,7 +3336,7 @@ fn post_divergence_body(base: &str, body: &str) -> (u16, String) {
 /// river of the same label - concurrently, with neither seeing the other's
 /// weather.
 ///
-/// A SOCKET PLACES THE FIRST BOAT here rather than the boot river, because no
+/// A socket places the first boat here rather than the boot river, because no
 /// river is boated at boot: a version of this that never boarded would exercise
 /// the empty-boatyard path and prove nothing about coexistence.
 #[tokio::test]
@@ -3383,7 +3383,7 @@ async fn a_neutral_generator_arm_upgrades_like_no_arm_at_all() {
 /// strictly after the last row rather than at it, and a completed session says
 /// so rather than trailing off.
 ///
-/// A SOCKET IS ATTACHED TO THE LIVE TAPE AT UPGRADE, so live market frames are
+/// A socket is attached to the live tape at upgrade, so live market frames are
 /// already arriving while this runs. The loop therefore drains to a deadline
 /// looking for the correlated reply rather than asserting on the next frame,
 /// which would be asserting on whatever the tape happened to publish.
@@ -3445,7 +3445,7 @@ async fn a_passenger_pages_its_own_history_over_its_own_socket() {
         let (rows, page_cutoff, next, complete) = page;
         pages += 1;
 
-        // ONE CUTOFF FOR THE WHOLE SESSION. Recomputed per page it would move
+        // One cutoff for the whole session. Recomputed per page it would move
         // with the run present, and a consumer paginating a live river would
         // never reach the end because each page pushed the finish line out.
         match cutoff {
@@ -3463,7 +3463,7 @@ async fn a_passenger_pages_its_own_history_over_its_own_socket() {
                 "a row at {ts} is past the session's cutoff {page_cutoff}"
             );
             if let Some(previous) = last_ts {
-                // STRICTLY increasing across the page boundary too, which is
+                // Strictly increasing across the page boundary too, which is
                 // what the continuation resuming after - rather than at - the
                 // last row buys. Resuming at it would re-deliver one row per
                 // page, and that duplicate is invisible to a consumer folding
@@ -3545,7 +3545,7 @@ async fn a_fabricated_history_continuation_is_refused() {
     }
 }
 
-/// A malformed arm is refused BEFORE the account is claimed.
+/// A malformed arm is refused before the account is claimed.
 ///
 /// The ordering matters and is not incidental: an upgrade that evicted the
 /// incumbent on its way to a `400` would let a consumer knock its own peer off
@@ -3575,17 +3575,17 @@ async fn a_generator_arm_outside_its_bounds_is_refused_on_the_upgrade() {
     );
 }
 
-/// AN EVICTED PASSENGER ENDS ITS RIDE WITHOUT THE PEER'S COOPERATION.
+/// An evicted passenger ends its ride without the peer's cooperation.
 ///
 /// `evict_account` writes a close frame and retires the lane, but the evicted
 /// socket's own read loop used to leave only on the peer's close, the peer's
 /// EOF, or the run ending. A consumer that ignores its close frame - or is merely
 /// slow to act on it - therefore kept its `Passenger`, and with it the
-/// account's RIDE on that boat's cadence, for as long as it liked. The next
-/// connection wanting that account at a DIFFERENT speed was then refused with
+/// account's ride on that boat's cadence, for as long as it liked. The next
+/// connection wanting that account at a different speed was then refused with
 /// "already seated", by a passenger the venue had already thrown off.
 ///
-/// THE EVICTED SOCKET IS NEVER READ AFTER THE EVICTION, deliberately: reading
+/// The evicted socket is never read after the eviction, deliberately: reading
 /// it is what a cooperative consumer does, and a test that reads it is testing
 /// the cooperative path. It is held in scope so its TCP connection stays up.
 ///
@@ -3652,22 +3652,22 @@ async fn an_evicted_passenger_gives_up_its_cadence_without_the_peer_reading() {
     drop(ignored);
 }
 
-/// A SILENT CANCEL NAMING AN ACCOUNT SEARCHES THAT ACCOUNT'S BOOK AND NO
-/// OTHER.
+/// A silent cancel naming an account searches that account's book and no
+/// other.
 ///
-/// Client order ids are CONSUMER-CHOSEN, so two subagents numbering their orders
+/// Client order ids are consumer-chosen, so two subagents numbering their orders
 /// from one collide on a shared exchange. The lookup walked every account and
 /// took the first match, so a scenario cancelling `ORD-1` on one subagent could
 /// cancel a stranger's `ORD-1` instead - and a silent cancel emits no lifecycle
 /// event by design, so the victim would learn of it only by querying.
 ///
-/// THE SUBJECT IS AN ACCOUNT WHOSE BOOK IS EMPTY, and that is what makes the
-/// statement deterministic rather than a coin flip. Two accounts BOTH resting
+/// The subject is an account whose book is empty, and that is what makes the
+/// statement deterministic rather than a coin flip. Two accounts both resting
 /// the same id is the scenario, but it is not a testable one: which book an
 /// unqualified walk finds first is `HashMap` iteration order, so a test built
 /// that way passes against the defect half the time and a bite-check on it
-/// proves nothing. Asking a book that holds NOTHING to cancel an id another
-/// book DOES hold has one right answer whatever the order - a miss - and the
+/// proves nothing. Asking a book that holds nothing to cancel an id another
+/// book does hold has one right answer whatever the order - a miss - and the
 /// unqualified walk always reaches the holder, so the perturbation fires every
 /// run.
 #[tokio::test]
@@ -3687,7 +3687,7 @@ async fn a_silent_cancel_naming_an_account_reaches_only_that_accounts_book() {
     ))
     .await
     .expect("submit");
-    // Waited for BEFORE the control request, or the cancel below can
+    // Waited for before the control request, or the cancel below can
     // legitimately find nothing resting and the whole test passes vacuously.
     await_acceptance(&mut mine, "COLLIDE-1").await;
 
@@ -3721,26 +3721,26 @@ async fn a_silent_cancel_naming_an_account_reaches_only_that_accounts_book() {
     );
 }
 
-/// AND THE MISS PATH'S DIAGNOSIS DOES NOT CANCEL EITHER.
+/// And the miss path's diagnosis does not cancel either.
 ///
-/// The scoped lookup above closes the SEARCH, and the round-3 cold review found
+/// The scoped lookup above closes the search, and the round-3 cold review found
 /// the same round's fix reintroducing the defect one line below it. When the
-/// scoped search misses, the handler asks a ledger WHY, so it can tell "unknown
+/// scoped search misses, the handler asks a ledger why, so it can tell "unknown
 /// id" from "already terminal" - and it asked by running
 /// `cancel_open_order_silently` and reading the `Err`. That call is not a query:
 /// on `Ok` it closes the order out and reaps its held children. It also asked
-/// the DEFAULT account rather than the one the request named, which was safe
+/// the default account rather than the one the request named, which was safe
 /// only while the search was unscoped, because then any id the default rested
 /// had already been found and the diagnosis could only ever err.
 ///
-/// SO THE HOLDER HERE IS THE DEFAULT ACCOUNT, which is exactly what the scoping
+/// So the holder here is the default account, which is exactly what the scoping
 /// test above cannot express: its holder is a named account, so the default's
 /// ledger has nothing to lose and the perturbation is invisible. A socket that
 /// names no account rests the id; a named account that does not hold it is the
 /// target; and the resting order must still be there afterwards.
 ///
-/// THE BITE IS THE SECOND CANCEL, not the 404. Both shapes answer `404 unknown
-/// order` - under the defect because the cancel SUCCEEDED and `.err()` was
+/// The bite is the second cancel, not the 404. Both shapes answer `404 unknown
+/// order` - under the defect because the cancel succeeded and `.err()` was
 /// `None`. The only observable difference is whether the order survived, and an
 /// unqualified cancel of it afterwards is how the venue states that: `202` if it
 /// was still resting, `404` if the diagnosis ate it.
@@ -3748,7 +3748,7 @@ async fn a_silent_cancel_naming_an_account_reaches_only_that_accounts_book() {
 #[ignore = "binds a loopback listener"]
 async fn a_missed_silent_cancel_diagnoses_without_cancelling_the_default_accounts_order() {
     let venue = spawn(&["--config", &fast_config()]);
-    // NO `account=`, so this socket trades the venue's default account - the
+    // No `account=`, so this socket trades the venue's default account - the
     // ledger the miss path used to diagnose off.
     let (mut mine, _) = tokio_tungstenite::connect_async(venue.ws_url())
         .await
@@ -3791,16 +3791,16 @@ async fn a_missed_silent_cancel_diagnoses_without_cancelling_the_default_account
     );
 }
 
-/// A PULLED SNAPSHOT DOES NOT OPEN THE ACCOUNT IT REPORTS ON.
+/// A pulled snapshot does not open the account it reports on.
 ///
 /// `GET /account?account=` is unauthenticated and resolved through the same
 /// account id space `/ws` and `POST /accounts` use. It used to resolve through
-/// the create-on-first-sight mint, so reading about an id CREATED a ledger
+/// the create-on-first-sight mint, so reading about an id created a ledger
 /// under it - and the default `account_ttl_ms = 0` never collects one, so a
 /// scanner walking ids left one ledger behind per id, permanently.
 ///
-/// THE OBSERVABLE IS `POST /accounts`, NOT THE SNAPSHOT, and that is the whole
-/// design of this test. The snapshot's CONTENT is identical either way, by
+/// The observable is `POST /accounts`, not the snapshot, and that is the whole
+/// design of this test. The snapshot's content is identical either way, by
 /// construction - the preview is built from the same opening terms the mint
 /// uses -
 /// so asserting on the body would pass against both shapes and prove nothing.
@@ -3850,7 +3850,7 @@ fn a_pulled_snapshot_does_not_open_the_account_it_reports_on() {
     );
 }
 
-/// `CancelOpenOrderSilently` takes its clock from the TARGETED ORDER: the id
+/// `CancelOpenOrderSilently` takes its clock from the targeted order: the id
 /// already determines the order, hence its symbol and its river. A request that
 /// also supplies a `symbol` may not disagree - the venue refuses rather than
 /// silently preferring one of two answers - and an id naming no resting order
@@ -3872,7 +3872,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
         .expect("submit");
 
     // A `/ws` socket is attached to the live tape on upgrade, so the accept is
-    // drained for, never asserted on as the NEXT frame.
+    // drained for, never asserted on as the next frame.
     let deadline = common::deadline(Duration::from_secs(10));
     let mut resting = false;
     while !resting {
@@ -3923,7 +3923,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
     );
 }
 
-/// `/clock` is a RUN fact and says nothing about any boat.
+/// `/clock` is a run fact and says nothing about any boat.
 ///
 /// The property under test is opacity, not the payload: a caller must not be
 /// able to learn from this route that a boat exists, what cadence it runs, or
@@ -3931,7 +3931,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
 /// made the route a boat-discovery surface - and with no speed named, another
 /// account placing a faster boat moved every field of somebody else's answer.
 ///
-/// So the two halves here are that the retired parameters are REFUSED rather
+/// So the two halves here are that the retired parameters are refused rather
 /// than ignored, and that placing a second boat at a different cadence does not
 /// move the answer at all.
 #[tokio::test]
@@ -3955,7 +3955,7 @@ async fn the_clock_is_a_run_fact_and_no_boat_moves_it() {
     assert_eq!(status, 200, "the clock answers: {before}");
     let before: mogwai_protocol::VenueClock = serde_json::from_str(&before).unwrap();
 
-    // A SECOND CADENCE ON THE SAME WATER is the case that used to be visible.
+    // A second cadence on the same water is the case that used to be visible.
     // This socket boards at a speed nobody else is riding, so under the old
     // reducer it would have become the lead boat and moved the ceiling every
     // other caller was answered on.
@@ -3984,7 +3984,7 @@ async fn the_clock_is_a_run_fact_and_no_boat_moves_it() {
     );
 }
 
-/// A duration is a property of the PASSENGER. One passenger's deadline closes
+/// A duration is a property of the passenger. One passenger's deadline closes
 /// its own socket and leaves the boat carrying everyone else.
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
@@ -4001,18 +4001,18 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
     .await
     .expect("the bounded passenger boards the same boat");
 
-    // `staying` is read CONTINUOUSLY from here, not left parked while the
+    // `staying` is read continuously from here, not left parked while the
     // bounded passenger runs its 1.5 s down. This venue's fanout is a bounded
     // ring: a socket nobody reads loses market frames, so the old shape - drain
     // `leaving` for 1.5 s, then ask whether `staying` has a frame - could
     // observe that loss and report it as "one passenger's
     // deadline wound down the boat under another", sending the reader after a
-    // serving defect that is not there. The reader task also reports HOW the
+    // serving defect that is not there. The reader task also reports how the
     // socket ended, so a close is named as a close.
     //
-    // The socket is SPLIT so the test keeps the write half: the post-exit
-    // evidence below is a ROUND TRIP, which the reader alone cannot stage. What
-    // crosses is a pair of monotone COUNTS - query answers and tape prints - on
+    // The socket is split so the test keeps the write half: the post-exit
+    // evidence below is a round trip, which the reader alone cannot stage. What
+    // crosses is a pair of monotone counts - query answers and tape prints - on
     // a `watch` that overwrites rather than a queue that grows. The queue shape
     // it replaced accumulated one entry per frame across a 1.5 s window of
     // unpaced firehose; monotone counts coalesce losslessly under a watch,
@@ -4050,7 +4050,7 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
         }
     });
 
-    // WHAT IT ANNOUNCES IS THE POINT, not merely that it announced. The run is
+    // What it announces is the point, not merely that it announced. The run is
     // still going for `staying`, so a `RunComplete` here would tell this
     // consumer the venue had finished when only its own deadline had - which is
     // exactly what both completions sharing one frame used to say. The close
@@ -4102,20 +4102,20 @@ async fn a_passenger_duration_closes_one_socket_and_leaves_the_boat_running() {
     );
 
     // The boat is still carrying the other passenger. Establishing that takes a
-    // print the venue produced AFTER the exit, and the query is what makes one
+    // print the venue produced after the exit, and the query is what makes one
     // provable: it goes out once the bounded passenger has closed, so its answer
     // cannot have been sitting in a buffer, and the stream's own ordering makes
     // everything the venue writes after that answer post-exit too. A print past
     // it is therefore a print the boat made with the other passenger gone.
     //
-    // NEITHER CHEAPER SHAPE ESTABLISHES THAT. "Discard whatever is queued, then
+    // Neither cheaper shape establishes that. "Discard whatever is queued, then
     // take the next frame" empties only what the reader task has already
-    // FORWARDED, so frames that reached the socket before the exit and had not
+    // forwarded, so frames that reached the socket before the exit and had not
     // been polled yet land afterwards and are counted as post-exit evidence -
     // and this test is current-thread, so that scheduling lag is real rather
     // than theoretical. Comparing tape stamps against the venue's clock fails
     // for a different reason: `fast.toml` is `speed = 0.0`, where delivery is
-    // UNPACED while the boat clock is still built wall-rated, so `ts_event` runs
+    // unpaced while the boat clock is still built wall-rated, so `ts_event` runs
     // far ahead of `venue_now_ns` and says nothing about when a frame was
     // served.
     staying_writer

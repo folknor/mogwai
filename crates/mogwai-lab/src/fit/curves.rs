@@ -51,7 +51,7 @@ pub fn exposure_by_hour_dow(sessions: &[String]) -> Vec<Vec<i64>> {
 
 /// One canonical calendar week's open minutes per `(UTC hour, UTC dow)`:
 /// the `W[h,d]` table the conditional intensity normalization sums over
-/// (spec 4.3), built from the frozen holiday-free SEARCH week.
+/// (spec 4.3), built from the frozen holiday-free search week.
 #[must_use]
 pub fn weekly_exposure_table() -> Vec<Vec<i64>> {
     exposure_by_hour_dow(&[
@@ -94,7 +94,7 @@ pub fn hour_exposure_weights() -> Vec<i64> {
 /// UTC-hour order in binary64. Hour 21 is set to exactly 1.0.
 ///
 /// The Python accumulates with `+=` over a sorted dict walk, which is a
-/// NAIVE left fold - deliberately not `kernel::py_sum`, because CPython's
+/// naive left fold - deliberately not `kernel::py_sum`, because CPython's
 /// compensated summation applies to the `sum(...)` builtin alone.
 pub fn normalize_hour_curve(raw: &BTreeMap<usize, f64>) -> LabResult<Vec<f64>> {
     let weights = hour_exposure_weights();
@@ -120,7 +120,7 @@ pub fn normalize_hour_curve(raw: &BTreeMap<usize, f64>) -> LabResult<Vec<f64>> {
              evidence produces this",
         ));
     }
-    // Python returns a dict over ALL 24 hours; an unexposed hour absent from
+    // Python returns a dict over all 24 hours; an unexposed hour absent from
     // `raw` would KeyError, so every caller supplies the exposed 23 and hour
     // 21 is the conventional 1.0.
     Ok((0..24)
@@ -129,7 +129,7 @@ pub fn normalize_hour_curve(raw: &BTreeMap<usize, f64>) -> LabResult<Vec<f64>> {
 }
 
 /// `SESSION_ARRAY_DECIMALS` materialization (spec 4.2): the materialized
-/// array, not the unrounded one, is what scratch profiles carry, FINAL
+/// array, not the unrounded one, is what scratch profiles carry, final
 /// gates judge, and the preset ships.
 #[must_use]
 pub fn materialize_curve(normalized: &[f64]) -> Vec<f64> {
@@ -174,7 +174,7 @@ fn null_at_21(values: &[f64]) -> Value {
     )
 }
 
-/// The raw / normalized_unrounded / materialized record a FITTED curve
+/// The raw / normalized_unrounded / materialized record a fitted curve
 /// carries in the artifact (spec Brick H).
 pub fn curve_triple(raw: &BTreeMap<usize, f64>) -> LabResult<Value> {
     let normalized = normalize_hour_curve(raw)?;
@@ -185,7 +185,7 @@ pub fn curve_triple(raw: &BTreeMap<usize, f64>) -> LabResult<Value> {
     }))
 }
 
-/// Raw and normalized only - the shape of observed EVIDENCE targets, never
+/// Raw and normalized only - the shape of observed evidence targets, never
 /// installed into a preset and judged unrounded.
 pub fn curve_pair(raw: &BTreeMap<usize, f64>) -> LabResult<Value> {
     let normalized = normalize_hour_curve(raw)?;
@@ -196,7 +196,7 @@ pub fn curve_pair(raw: &BTreeMap<usize, f64>) -> LabResult<Value> {
 }
 
 /// The per-hour robust scale (spec 4.1 steps 4-6): every session must supply
-/// a qualifying cell for every exposed hour or the refit REFUSES; the hourly
+/// a qualifying cell for every exposed hour or the refit refuses; the hourly
 /// value is the nearest-rank median of cell scales.
 pub fn hourly_robust_curve(
     cells: &Value,
@@ -262,7 +262,7 @@ pub fn fit_intensity_hour(observed: &Value, usable: &[String]) -> LabResult<Valu
         // `sum()` over ints.
         let counts: i64 = row.iter().map(|v| v.as_i64().unwrap_or(0)).sum();
         let exposure: i64 = e_hd[hour].iter().sum();
-        // `sum(...)` over FLOATS: CPython's compensated Kahan-Babuska-Neumaier
+        // `sum(...)` over floats: CPython's compensated Kahan-Babuska-Neumaier
         // summation, not a naive fold (the phase-2b pin). A naive fold here
         // moves the last ulp of every normalized intensity value.
         let weighted: f64 = crate::kernel::py_sum((0..7).map(|d| (e_hd[hour][d] as f64) * w[d]));
@@ -295,7 +295,7 @@ pub fn fit_intensity_hour(observed: &Value, usable: &[String]) -> LabResult<Valu
                 py_format_fixed(conditional[h], SESSION_ARRAY_DECIMALS as usize)
             })
             .collect::<Vec<f64>>(),
-        // The MARGINAL target the session_arrival gate compares generated
+        // The marginal target the session_arrival gate compares generated
         // marginal rates against - never the conditional array (spec 4.3).
         "marginal_target": curve_pair(&marginal_raw)?,
         "parent_count_by_hour_dow": c_hd.clone(),
@@ -355,12 +355,12 @@ mod tests {
     /// Selftest: "the hour normalization centers the exposure-weighted mean
     /// on one" and hour 21 is exactly 1.0.
     ///
-    /// THE RAW CURVE IS NOT FLAT, and that is the whole test. Under a flat
+    /// The raw curve is not flat, and that is the whole test. Under a flat
     /// input every exposed hour normalizes to exactly 1.0 whatever the
     /// weighting scheme is - any weighted average of a constant is that
     /// constant, so the weights cancel identically and the assertion pins
     /// nothing. Hour 20 carries 45 open minutes against every other exposed
-    /// hour's 60, so putting the outlier THERE is what makes the weights
+    /// hour's 60, so putting the outlier there is what makes the weights
     /// observable: the weighted mean and the plain mean over 23 hours differ,
     /// and only one of them centers this curve.
     #[test]
@@ -386,7 +386,7 @@ mod tests {
         }
         assert_eq!(norm[21], 1.0);
 
-        // The property the name claims, stated directly: the EXPOSURE-weighted
+        // The property the name claims, stated directly: the exposure-weighted
         // mean of the normalized curve is one.
         let exposed = exposed_utc_hours();
         let centered = exposed
@@ -397,7 +397,7 @@ mod tests {
         assert!((centered - 1.0).abs() < 1e-12);
 
         // And the sensitivity that makes the two schemes distinguishable: an
-        // UNWEIGHTED mean over the same 23 hours is emphatically not one, so a
+        // unweighted mean over the same 23 hours is emphatically not one, so a
         // normalization that dropped the weights would fail above rather than
         // pass for free.
         let unweighted = exposed.iter().map(|&h| norm[h]).sum::<f64>() / (exposed.len() as f64);
@@ -412,7 +412,7 @@ mod tests {
     /// Non-flat for the same reason: a curve that is already exact at
     /// `SESSION_ARRAY_DECIMALS` is a fixed point of any rounding, so a flat
     /// input tests only that the second pass leaves an integer alone. These
-    /// values do not survive six decimals untouched - the first pass MOVES
+    /// values do not survive six decimals untouched - the first pass moves
     /// them - and idempotence is then a claim about the rounding.
     #[test]
     fn materialization_is_idempotent() {

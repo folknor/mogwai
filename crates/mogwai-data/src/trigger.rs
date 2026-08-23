@@ -19,7 +19,7 @@ pub const VOL_WINDOW_NS: u64 = 300_000_000_000;
 /// comfortably above any sweep interval the config validator permits is what
 /// makes the band a claim about the span an order actually waits out.
 pub const FILL_HORIZON_NS: u64 = 60_000_000_000;
-/// The COUNT of returns below which a reading is REFUSED rather than reported -
+/// The count of returns below which a reading is refused rather than reported -
 /// a sample-size floor, not a threshold on the return values. Refusing is
 /// the conservative answer: a zero band is the most permissive fill regime the
 /// venue has, so answering "no evidence" with it would be backwards.
@@ -43,7 +43,7 @@ pub struct Walk {
     /// Per scan, in the input's order: the first print in
     /// `(scan.from_ns, reached_ns]` that satisfied its predicate, or `None`.
     pub hits: Vec<Option<Hit>>,
-    /// Where the drain ACTUALLY got to, which its budget may leave short of
+    /// Where the drain actually got to, which its budget may leave short of
     /// `to_ns`. A caller advances its frontier to exactly this, never past it.
     pub reached_ns: u64,
     /// Ticks pulled, for the cost gates.
@@ -53,10 +53,10 @@ pub struct Walk {
 #[derive(Debug, Clone, Copy)]
 pub struct VolReading {
     /// Last print at or before `to_ns`. Only ever produced by a walk that
-    /// actually REACHED `to_ns`.
+    /// actually reached `to_ns`.
     pub last_px: Decimal,
     /// Instant of that last print. Carried so a stop that triggers on arrival
-    /// can name a REAL print off the canonical tape rather than inventing one.
+    /// can name a real print off the canonical tape rather than inventing one.
     pub last_ts_ns: u64,
     /// RMS of one print's return, unitless.
     pub rms_return: f64,
@@ -85,15 +85,15 @@ pub fn scan_triggers(
     budget: usize,
 ) -> Walk {
     let Some(earliest) = scans.iter().map(|scan| scan.from_ns).min() else {
-        // THE ONE PLACE IN EITHER WALK WHERE `reached_ns` IS ASSERTED RATHER
-        // THAN PROVED, and it is sound only because of what a frontier MEANS
+        // The one place in either walk where `reached_ns` is asserted rather
+        // than proved, and it is sound only because of what a frontier means
         // here. It is not a claim that the tape up to `to_ns` was read; it is a
         // claim that nothing between the caller's old frontier and `to_ns` can
         // still be owed a hit. With no scans there is no predicate to owe one
         // to, and this branch reads no tick, so it consumes no frontier either -
         // `drained: 0` is the proof of that, and every other exit below earns
         // its `reached_ns` from an event with a later timestamp. If a caller
-        // ever derives something from `reached_ns` OTHER than "no scan was
+        // ever derives something from `reached_ns` other than "no scan was
         // missed" - a data-completeness claim, a checkpoint, a cache key - this
         // branch stops being true and must start returning the caller's own
         // `from`.
@@ -106,7 +106,7 @@ pub fn scan_triggers(
     let mut hits = vec![None; scans.len()];
     // Per-print pre-filter, added when the tape went to ~50 raw fills a second:
     // a pass that used to see a handful of prints now sees thousands, and the
-    // inner loop is O(scans) per print. Each of the four bounds is the EXTREME
+    // inner loop is O(scans) per print. Each of the four bounds is the extreme
     // of one (kind, side) group in the direction that group's predicate opens,
     // so "no scan in this group can hit" is exact rather than heuristic -
     // FillThrough Buy hits on `price < px`, so nothing hits once the price is
@@ -117,10 +117,10 @@ pub fn scan_triggers(
     let mut fill_sell_min: Option<Decimal> = None;
     let mut touch_buy_min: Option<Decimal> = None;
     let mut touch_sell_max: Option<Decimal> = None;
-    // `TriggerToward` - the TOUCHED-order family, not to be confused with
-    // `TriggerTouch`, which is the STOP family despite the name. It opens in the
+    // `TriggerToward` - the touched-order family, not to be confused with
+    // `TriggerTouch`, which is the stop family despite the name. It opens in the
     // opposite direction to the stop family and the same one as a limit: a
-    // touched BUY hits at or below its trigger, so its bound is the largest such
+    // touched buy hits at or below its trigger, so its bound is the largest such
     // trigger, and symmetrically for a sell. Kept
     // as its own pair rather than folded into the `fill_*` slots, because the
     // strictness differs - `<=` against `<` - and sharing a bound would make the
@@ -137,7 +137,7 @@ pub fn scan_triggers(
             (ScanKind::TriggerToward, Side::Sell) => &mut toward_sell_min,
         };
         // Which extreme this group's predicate opens toward: a group whose
-        // predicate admits prices BELOW its bound keeps the largest, one that
+        // predicate admits prices below its bound keeps the largest, one that
         // admits prices above keeps the smallest.
         let keeps_max = matches!(
             (scan.kind, scan.side),
@@ -150,10 +150,10 @@ pub fn scan_triggers(
             None => scan.px,
         });
     }
-    // `reached_ns` names a timestamp this walk has drained COMPLETELY, because
+    // `reached_ns` names a timestamp this walk has drained completely, because
     // the caller advances an exclusive frontier to it and never revisits what it
     // passed. Completeness at an instant is only established by an event with a
-    // LATER one, or by the source ending: a parent publishes its quote and its
+    // later one, or by the source ending: a parent publishes its quote and its
     // first print at a single instant, and a source at coarser resolution can
     // carry many prints there, so stopping at the first event whose timestamp
     // equals `to_ns` would let the caller step over everything else sharing it -
@@ -207,7 +207,7 @@ pub fn scan_triggers(
             }
             if hits.iter().all(Option::is_some) {
                 // Every scan is answered, so the walk stops here - but the
-                // frontier it reports is still only what it PROVED, which is the
+                // frontier it reports is still only what it proved, which is the
                 // last instant it saw past. Reporting this print's own timestamp
                 // would hand the caller a frontier covering events at that
                 // instant the walk never read.
@@ -220,7 +220,7 @@ pub fn scan_triggers(
         }
     }
     if !proved_past && let Some(last) = last_ts {
-        // The budget ran out mid-stream. Every instant STRICTLY BEFORE the last
+        // The budget ran out mid-stream. Every instant strictly before the last
         // one seen is drained - the source is time-ordered and was read
         // contiguously - so the frontier can advance to just short of it. That
         // instant itself may still carry events this walk never pulled.
@@ -259,12 +259,12 @@ pub fn vol_reading(
     // Same frontier rule as `scan_triggers`, and the stake here is `last_px`.
     // That field is contractually the last print at or before the reading
     // instant, and the submit path decides marketability against exactly it, so
-    // stopping at the first event that merely EQUALS `to_ns` returns whichever
+    // stopping at the first event that merely equals `to_ns` returns whichever
     // print happened to come first at that instant - the quote's own parent when
     // the tape is protocol 7, an arbitrary one when the source is coarser.
     let mut reached_ns = from_ns;
-    // Distinct from `last_ts`, which is the last PRINT and feeds `last_ts_ns`
-    // and `span_ns`. This one is the last EVENT of any kind, and exists only to
+    // Distinct from `last_ts`, which is the last print and feeds `last_ts_ns`
+    // and `span_ns`. This one is the last event of any kind, and exists only to
     // decide when an instant has been drained.
     let mut last_event_ts: Option<u64> = None;
     let mut drained = 0;
@@ -305,7 +305,7 @@ pub fn vol_reading(
     if !proved_past && let Some(last) = last_event_ts {
         reached_ns = reached_ns.max(last.saturating_sub(1));
     }
-    // A walk that stopped short holds the OLDEST part of the window - it starts
+    // A walk that stopped short holds the oldest part of the window - it starts
     // at a checkpoint before the window opens and collects forward - so its
     // `last_px` would be a print from well before `to_ns`. Whether the budget
     // was spent or the tape ended, short of `to_ns` is no reading at all.
@@ -511,7 +511,7 @@ mod tests {
     fn vol_reading_refuses_a_window_it_stopped_inside() {
         // The budget ends immediately after the quote at the horizon, so the
         // print sharing that instant was never consumed. Reporting a reading
-        // here hands back the PREVIOUS print as `last_px` while claiming the
+        // here hands back the previous print as `last_px` while claiming the
         // window was covered - the silent staleness this function refuses.
         let mut ticks = Vec::new();
         for i in 1..=12_u64 {
@@ -603,7 +603,7 @@ mod tests {
     fn walk_with_a_spent_budget_reports_only_what_it_proved() {
         // Was `(1, 1)`. Consuming the print at instant 1 does not establish that
         // instant 1 is finished - another event could share it - and the caller
-        // advances an EXCLUSIVE frontier to this number, so claiming 1 here
+        // advances an exclusive frontier to this number, so claiming 1 here
         // would let it step over anything else at that instant. Under-claiming
         // costs a re-walk; over-claiming loses a fill permanently.
         let mut source = MemorySource::new(vec![trade(1, 100), trade(2, 100)]);
@@ -614,7 +614,7 @@ mod tests {
     fn walk_pulls_exactly_one_event_past_the_boundary_to_prove_it() {
         // Was `walk_stops_at_an_exact_boundary_without_pulling_past_it`,
         // asserting `(2, 2)`. That efficiency property is incompatible with
-        // correctness: the ONLY evidence that instant 2 is fully drained is an
+        // correctness: the only evidence that instant 2 is fully drained is an
         // event at a later instant, so the walk must pull it. One extra tick of
         // budget buys the frontier its exclusive semantics depend on.
         let mut source = MemorySource::new(vec![trade(1, 100), trade(2, 100), trade(3, 100)]);

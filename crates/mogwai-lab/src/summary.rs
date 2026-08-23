@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The `gen --type summary` accumulator: the MNQ TBBO fit's calibration
-//! instrument, MOVED here from `mogwai-cli`'s `gen.rs` at phase 3b so the
-//! protocol-11 fit driver can run its walks IN-PROCESS instead of shelling
+//! instrument, moved here from `mogwai-cli`'s `gen.rs` at phase 3b so the
+//! protocol-11 fit driver can run its walks in-process instead of shelling
 //! the `gen --type summary` subcommand the way `mnq_fit.py` did.
 //!
 //! `gen.rs` keeps its CLI surface unchanged and calls straight into
@@ -21,7 +21,7 @@ use rust_decimal::Decimal;
 
 // ---------------------------------------------------------------------------
 // Summary mode: the MNQ TBBO fit's calibration instrument. One JSON object of
-// BOUNDED sufficient statistics per run (one seed per invocation; the harness
+// bounded sufficient statistics per run (one seed per invocation; the harness
 // pools seeds). Every distributional field is a histogram or a
 // count/sum/sum-of-squares accumulator, never a raw array - a simulated month
 // is order 10^7 parents. Consumes the full `next_tick()` walk: every draw
@@ -154,18 +154,18 @@ pub struct SessionSegment {
     pub segment_end_ns: u64,
 }
 
-/// Maps an OPEN instant to its session segment per spec 4.5: a local minute
+/// Maps an open instant to its session segment per spec 4.5: a local minute
 /// at or past 17:00 opens the session dated the next civil day; one before
 /// 15:15 belongs to the overnight segment of the prior day's open; the span
 /// from 15:30 to 16:00 is the post-halt segment. Closed instants (halt,
 /// break) return None - the calendar keeps generated events out of them, so
 /// a None on a real event is a session-math defect, not a data case.
 ///
-/// ONE IMPLEMENTATION, IN [`crate::session`]. This was a second copy of the
+/// One implementation, in [`crate::session`]. This was a second copy of the
 /// branch structure and of the four session-minute constants, kept honest by
 /// `mogwai-cli`'s `session_segment_at_agrees_with_mogwai_lab` - a gate whose
 /// own comment called it a temporary bridge until `mogwai-cli` was rewired
-/// onto the lab. That rewire has since landed (this module IS what `gen.rs`
+/// onto the lab. That rewire has since landed (this module is what `gen.rs`
 /// calls), leaving a permanent two-copy gate with no external anchor: if the
 /// session definition moved, both copies moved together and the gate stayed
 /// green. The copy is gone rather than the gate strengthened, because one
@@ -209,7 +209,7 @@ pub struct SummaryAcc {
     mid_return_count: u64,
     mid_return_sum: f64,
     mid_return_sumsq: f64,
-    // Per-minute trade-price ranges in INTEGER TICKS over minutes carrying
+    // Per-minute trade-price ranges in integer ticks over minutes carrying
     // at least one in-window trade (the successor spec 3.3; the observed
     // side uses the identical convention). The per-seed maxima feed the
     // envelope gates seed by seed - never pooled.
@@ -224,7 +224,7 @@ pub struct SummaryAcc {
     // calendar construct, and the crypto presets have none.
     session_cells: Vec<GeneratedSessionCells>,
     // Protocol-11 worst-minute records (spec 4.7): the tail-location evidence
-    // the protocol-12 spec consumes. Bounded at TOP_MINUTE_RECORDS.
+    // the protocol-12 spec consumes. Bounded at `TOP_MINUTE_RECORDS`.
     top_minutes: Vec<TopMinuteRecord>,
     first_book_mid: Option<String>,
     measured_from_ns: u64,
@@ -297,7 +297,7 @@ struct OpenParent {
 }
 
 /// Fold the tick stream into the summary. Accumulation covers exactly
-/// `[start, end)` by each parent's FIRST child timestamp; a burn-in walk
+/// `[start, end)` by each parent's first child timestamp; a burn-in walk
 /// before `start` is consumed and discarded. The source must already sit at
 /// its walk start (possibly `start - burn_in`).
 pub fn summarize(
@@ -351,10 +351,10 @@ pub fn summarize(
     // transition breaks it without extra bookkeeping (spec 4.1).
     let mut prev_vol_parent: Option<(u64, f64)> = None;
     // The active segment's fixed-horizon boundary state: per horizon,
-    // (horizon_ns, next_k, prev_boundary_mid), plus the SEGMENT-LOCAL
+    // (horizon_ns, next_k, prev_boundary_mid), plus the segment-local
     // as-of mid. Boundaries are segment_origin + k * horizon, k >= 1,
     // strictly inside the segment (spec 4.6); the first boundary having
-    // an as-of mid establishes. The as-of is deliberately NOT the global
+    // an as-of mid establishes. The as-of is deliberately never the global
     // last_mid: state is independent per segment (rule 1), so a pre-halt
     // quote must never establish or price a post-halt boundary - the
     // as-of resets to None on every segment change, exactly as the
@@ -417,7 +417,7 @@ pub fn summarize(
                         }
                         *prev_boundary_mid = as_of;
                     }
-                    // Rule 4: the first boundary HAVING an as-of mid
+                    // Rule 4: the first boundary having an as-of mid
                     // establishes and emits nothing; a boundary before any
                     // quote neither establishes nor emits.
                     (None, Some(_)) => *prev_boundary_mid = as_of,
@@ -438,7 +438,7 @@ pub fn summarize(
     // The as-of mid AT `start`, frozen when the first post-start quote
     // arrives: the first boundary's window opens at `start`, and a burn-in
     // quote at or before it is its legitimate as-of observation. The flag
-    // marks the freeze, because the frozen VALUE is legitimately None when
+    // marks the freeze, because the frozen value is legitimately None when
     // no quote precedes `start` - an Option's is_none cannot distinguish
     // not-yet-frozen from frozen-empty and would re-freeze every quote.
     let mut asof_start: Option<f64> = None;
@@ -545,7 +545,7 @@ pub fn summarize(
         }
         match event {
             TickEvent::Quote(q) => {
-                // A quote closes the parent that ran under the PREVIOUS book.
+                // A quote closes the parent that ran under the previous book.
                 if let Some(parent) = open.take() {
                     finalize(
                         &mut acc,
@@ -641,7 +641,7 @@ pub fn summarize(
                     }
                 }
                 last_mid = Some(mid);
-                // Segment-local as-of: only a quote INSIDE the active
+                // Segment-local as-of: only a quote inside the active
                 // segment feeds it - never one from closed time or another
                 // segment (rule 1's independence).
                 if let Some(offset) = cal_offset
@@ -666,7 +666,7 @@ pub fn summarize(
                             minute_state = Some((minute, price, price));
                         }
                     }
-                    // Protocol-11 worst-minute detail on the EXACT grid: the
+                    // Protocol-11 worst-minute detail on the exact grid: the
                     // records serialize decimal prices and an exact integer
                     // tick range, where the legacy histogram rounds in f64.
                     minute_detail
@@ -769,7 +769,7 @@ pub fn summarize(
         }
     }
     flush_minute(&mut acc, &mut minute_state, tick_f);
-    // The two largest minute ranges OBSERVED (not distinct values): a
+    // The two largest minute ranges observed (not distinct values): a
     // repeated maximum is its own second maximum.
     let mut ranges = acc.minute_range_ticks_hist.iter().rev();
     if let Some((&largest, &count)) = ranges.next() {

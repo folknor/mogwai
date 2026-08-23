@@ -51,7 +51,7 @@ impl RunSeeds {
         }
     }
 
-    /// Root of the tape generator's stream for one requested SYMBOL LABEL.
+    /// Root of the tape generator's stream for one requested symbol label.
     ///
     /// The label, not the resolved shape's symbol: two labels that resolve to
     /// the same default shape are different rivers and must not share a path.

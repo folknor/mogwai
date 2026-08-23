@@ -3,16 +3,16 @@
 
 //! How late a paced tape arrives at a consumer that keeps up, under acceleration.
 //!
-//! THIS WAS A TEST AND SHOULD NOT HAVE BEEN. It asserted a 50 ms p99 and was
+//! This was a test and should not have been. It asserted a 50 ms p99 and was
 //! excluded from every lane that could have run it, because the budget is a
-//! statement about the HOST rather than about this code: a release build failed
+//! statement about the host rather than about this code: a release build failed
 //! at 311 ms p99 under a load average of 1.46 across 32 visible CPUs, and no
 //! admission test distinguishes a machine that can judge 50 ms from one that
 //! cannot. An excluded gate measures nothing; a recorded number measures the
 //! machine and the commit it ran on, and a series of them is what makes a
 //! regression visible without pretending a threshold is portable.
 //!
-//! It measures the SHIPPED venue through the SHIPPED launcher, not an in-process
+//! It measures the shipped venue through the shipped launcher, not an in-process
 //! venue, because pacing is a property of the serving path as it is deployed -
 //! process boundary, socket and all.
 //!
@@ -23,7 +23,7 @@
 //! Reports on stderr as scraped `key=value` counters: `frames`,
 //! `non_trade_text`, `control_frames`, `ending`, `sample_ms`,
 //! `p50_lateness_ns`, `p99_lateness_ns`,
-//! `max_lateness_ns`. `frames` is the WORK SIZE, and it is reported for the
+//! `max_lateness_ns`. `frames` is the work size, and it is reported for the
 //! usual reason - a wall alone cannot tell "faster" from "did less". `ending` is
 //! reported for the same reason one step further out: a frame count is only
 //! comparable against another if both loops ended the same way, so the loop
@@ -40,7 +40,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// The venue binary sits beside the `examples/` directory this was built into.
 /// Resolved rather than assumed on `PATH`: a measurement of "what ships" must be
-/// of the binary built from THIS tree, not of whatever a shell happens to find.
+/// of the binary built from this tree, not of whatever a shell happens to find.
 fn venue_binary() -> OsString {
     let exe = std::env::current_exe().expect("this example has a path");
     let profile_dir = exe
@@ -59,7 +59,7 @@ fn venue_binary() -> OsString {
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
-    // An EMPTY first argument means "the default config", so a caller who only
+    // An empty first argument means "the default config", so a caller who only
     // wants to change the sample length does not have to restate the fixture
     // path to reach the second positional.
     let config = args
@@ -99,12 +99,12 @@ async fn main() {
     let deadline = tokio::time::Instant::now() + sample;
     let mut lateness = Vec::new();
     // Split, because the two populations mean different things. A text frame
-    // that is not a trade was always counted and skipped; a NON-text frame - a
-    // Ping, a Pong, a Binary - used to END the loop, silently truncating the
+    // that is not a trade was always counted and skipped; a non-text frame - a
+    // Ping, a Pong, a Binary - used to end the loop, silently truncating the
     // sample. Reporting them apart is what makes that visible if it recurs.
     let mut non_trade_text = 0u64;
     let mut control_frames = 0u64;
-    // HOW THE LOOP ENDED IS PART OF THE MEASUREMENT. Only `sample_complete`
+    // How the loop ended is part of the measurement. Only `sample_complete`
     // means the sample covers `sample_ms`; every other ending means `frames` is
     // a prefix, and two runs with different frame counts are not comparable
     // unless the reason is on the record beside them.
@@ -118,10 +118,10 @@ async fn main() {
             }
             // A Ping, a Pong or a Binary frame is not a tick and is not a reason
             // to stop counting: ending the loop on one would silently truncate
-            // the sample and understate the WORK SIZE.
+            // the sample and understate the work size.
             Ok(Some(Ok(Message::Text(text)))) => {
                 if let Ok(VenueMessage::Trade(trade)) = serde_json::from_str(&text) {
-                    // When this tick was DUE on the wall, per the clock the venue
+                    // When this tick was due on the wall, per the clock the venue
                     // reported at boot. Lateness is how far past that it actually
                     // arrived here, so it folds in the venue's pacing sleep, the
                     // socket and this reader.

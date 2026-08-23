@@ -11,7 +11,7 @@ use crate::{Engine, MAX_ARMED_DIVERGENCES};
 impl Engine {
     /// Arm a divergence to fire on the next matching trigger (control plane).
     ///
-    /// Returns the entry SHED to make room, if the queue was already at
+    /// Returns the entry shed to make room, if the queue was already at
     /// `MAX_ARMED_DIVERGENCES`. The caller is expected to relay that upward:
     /// an arming ack that says only "accepted" while an older armed divergence
     /// was silently discarded is an ack that lies about what it did, and a
@@ -30,12 +30,12 @@ impl Engine {
             // Reaching `arm` with it would leak a dead queue entry, so it is
             // dropped alongside the venue-owned temporal variants.
             // `FlowSurge` is named here for the same reason and one more: it is
-            // the first arm that reaches into GENERATOR state (a sim-time window
+            // the first arm that reaches into generator state (a sim-time window
             // on the tape source), so it has no engine-side trigger at all.
             //
-            // BOTH SIDES OF THIS MATCH ARE ENUMERATED, and that is the whole
+            // Both sides of this match are enumerated, and that is the whole
             // mechanism behind the paragraph above: with no `_` arm the crate
-            // does not BUILD until a new `Divergence` variant is deliberately
+            // does not build until a new `Divergence` variant is deliberately
             // classified as venue-owned or engine-armed. A catch-all would let
             // a new venue-owned variant fall through into the queue as a dead
             // entry that nothing consumes, and no test can hold a claim about
@@ -49,7 +49,7 @@ impl Engine {
             | Divergence::StallData { .. }
             | Divergence::FeeSurcharge { .. }
             | Divergence::CancelOpenOrderSilently { .. }
-            // `FaultTape` is venue-owned and TERMINAL. It acts on the run's
+            // `FaultTape` is venue-owned and terminal. It acts on the run's
             // fault channel at post time and takes the process down, so there is
             // no trigger for the engine to wait on and no later ledger for it to
             // be replayed onto - queueing it would leave a dead entry in a book
@@ -61,7 +61,7 @@ impl Engine {
             | Divergence::DuplicateNextFill
             | Divergence::DropNextAccountUpdate) => {
                 // Bound the queue so control-plane arms cannot accumulate
-                // without limit. At the cap, shed the OLDEST entry: a
+                // without limit. At the cap, shed the oldest entry: a
                 // never-triggered targeted `PartialFillNext` sits at the front
                 // (its order may never arrive), so dropping the front sheds the
                 // accumulated stale leftovers rather than the arm just
@@ -87,13 +87,13 @@ impl Engine {
     ///
     /// The single-shot divergences (`PartialFillNext`, `RejectNextSubmit`,
     /// `DuplicateNextFill`, `DropNextAccountUpdate`) normally self-disarm on
-    /// their own trigger, but a TARGETED `PartialFillNext` whose order never
+    /// their own trigger, but a targeted `PartialFillNext` whose order never
     /// arrives has no trigger and would sit armed forever - a leftover from one
     /// scenario can otherwise ambush a later scenario that reuses the same order
     /// id. This is the explicit escape hatch for an in-process harness that
     /// wants a clean slate between scenarios without minting a fresh engine.
     ///
-    /// THERE IS NO WIRE ROUTE TO IT, deliberately, and nothing outside this
+    /// There is no wire route to it, deliberately, and nothing outside this
     /// crate calls it today. An armed single-shot reaches the engine by way of
     /// the control plane, and the control plane has no clear: a one-shot posted
     /// against an account is spent by its trigger or it is spent by the run

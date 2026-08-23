@@ -15,7 +15,7 @@ use rust_decimal::{Decimal, prelude::FromPrimitive};
 // preserve); +/-inf and out-of-range finite magnitudes saturate to
 // Decimal::MAX / Decimal::MIN by sign.
 //
-// Deliberately NOT unified with `mogwai_protocol::decimal_from_f64`, which
+// Deliberately not unified with `mogwai_protocol::decimal_from_f64`, which
 // zeroes +/-inf instead of saturating (it has a test pinning that behaviour).
 // For a generated price/size, clamping an overflowed draw to a huge-but-valid
 // magnitude is a safer failure mode than collapsing it to zero, so this stays
@@ -34,8 +34,8 @@ pub(super) fn decimal_from_f64(value: f64) -> Decimal {
     }
 }
 
-/// Snap a size draw to the venue's round-lot grid, where the grid is DECADE
-/// RELATIVE to the derived median rather than absolute.
+/// Snap a size draw to the venue's round-lot grid, where the grid is decade
+/// relative to the derived median rather than absolute.
 ///
 /// The old rule snapped to whole units above 1.0 and to 0.1 below it. At the
 /// raw-fill size scale (a 0.0027 BTC median) that turned every round-lot draw

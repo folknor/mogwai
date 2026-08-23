@@ -117,7 +117,7 @@ impl Default for MogwaiDataClientConfig {
 
 /// Serde default for both configs' `callsign`: this process's identity.
 ///
-/// PINNED END TO END by
+/// Pinned end to end by
 /// `adapter_smoke::both_legs_disclose_one_process_callsign_on_the_upgrade`,
 /// which reads the two upgrade request lines off the stub and asserts they
 /// carry one wire-legal callsign minted from this pid. Until it existed, making
@@ -440,7 +440,7 @@ impl MogwaiExecClientConfig {
 
 /// Build the `/ws` upgrade URL both clients dial.
 ///
-/// THE ACCOUNT IS ALWAYS NAMED, which is the whole point of it being here. The
+/// The account is always named, which is the whole point of it being here. The
 /// venue resolves accounts totally - a socket naming none is served under the
 /// venue's default - so an unnamed socket silently traded whatever ledger the
 /// venue happened to call default, whatever the host's config said. That was
@@ -484,7 +484,7 @@ fn validate_callsign(callsign: Option<&str>) -> anyhow::Result<()> {
 
 /// Refuse a symbol the `/ws` URL cannot carry.
 ///
-/// The URL is built by CONCATENATION, so an illegal symbol must fail at config
+/// The URL is built by string concatenation, so an illegal symbol must fail at config
 /// validation rather than as an unreadable `400` from inside the reconnect
 /// loop. The rule is `mogwai_protocol::validate_wire_symbol`, the one the
 /// venue judges the decoded value by, so the two ends cannot drift.
@@ -647,7 +647,7 @@ mod tests {
         assert_eq!(config.ws_url(), "ws://127.0.0.1:1/ws?account=MOGWAI-001");
     }
 
-    /// The ledger is NAMED, and it is the configured one rather than whatever
+    /// The ledger is always named, and it is the configured one rather than whatever
     /// the venue calls default. This is the whole of the consumer-visible fix:
     /// without it every attached worker traded one shared book.
     #[test]

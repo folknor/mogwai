@@ -137,11 +137,11 @@ async fn fetch_account(
 
 /// Notes the venue's account label when it differs from the configured one.
 ///
-/// This was a FATAL equality check, and killing it is the point. Under the
+/// This was once a fatal equality check, and killing it is the point. Under the
 /// retired per-account model a client named a slot and the venue honoured it, so
 /// a snapshot bearing another id meant the venue had routed someone else's
 /// account here and adopting it would have corrupted this one. One venue is now
-/// one run is one LEDGER: the connection carries the only account there is,
+/// one run is one ledger: the connection carries the only account there is,
 /// there is nothing to be misrouted from, and the venue's id is a label rather
 /// than a key. An equality check is a per-slot invariant that outlived the
 /// slots.
@@ -153,7 +153,7 @@ async fn fetch_account(
 /// but a check that can deadlock a run over a label is worth removing on its own
 /// terms rather than repairing.
 ///
-/// Differing is still worth SAYING once, at connect: it means the venue config
+/// Differing is still worth saying once, at connect: it means the venue config
 /// and the client config name the account differently, which is confusing when
 /// reading two logs side by side even though nothing downstream depends on it.
 fn note_account_label(state: &mogwai_protocol::AccountState, configured: AccountId) {
@@ -261,12 +261,12 @@ impl MogwaiExecutionClient {
     }
 
     /// Retires the current transport generation's connectivity flag by
-    /// REPLACING the shared cell, not by storing `false` into it.
+    /// replacing the shared cell outright, not by storing `false` into it.
     ///
     /// `abort_tasks` is not synchronous: cancellation is delivered at the
     /// aborted task's next await point, so a reader caught between
     /// `connect_async(..).await` returning and its first select can still run
-    /// `connected.store(true)` AFTER the caller has stored `false`. That
+    /// `connected.store(true)` after the caller has stored `false`. That
     /// leaves a stopped client reporting itself connected, and a subsequent
     /// `wait_connected` returning success for a socket that never opened.
     /// Swapping the `Arc` means the retired reader writes to a cell nobody
@@ -282,7 +282,7 @@ impl MogwaiExecutionClient {
     /// Read-only, and deliberately the mirror rather than venue truth: the
     /// mirror is the adapter's own belief about an order, and a class of defect
     /// exists that is invisible from every other surface - an amend ack that
-    /// recomputes status from fill progress alone walks a TRIGGERED conditional
+    /// recomputes status from fill progress alone walks a `Triggered` conditional
     /// back to `Accepted`, desyncing the mirror from the engine for the rest of
     /// the run without changing a single emitted event. Nautilus' own FSM keeps
     /// `(Triggered, Updated) => Triggered`. Exposed so that invariant can be
@@ -342,7 +342,7 @@ impl MogwaiExecutionClient {
                 _ => init.price.map(|p| p.as_decimal()),
             },
             trigger_price: init.trigger_price.map(|p| p.as_decimal()),
-            // Nautilus states a trailing offset with a TYPE beside it - price,
+            // Nautilus states a trailing offset with a type beside it - price,
             // ticks, basis points. Only the price form maps: the venue's trail
             // is an absolute distance, and converting the others needs a
             // reference price the two ends would have to agree on separately.
@@ -352,7 +352,7 @@ impl MogwaiExecutionClient {
             )?,
             // The limit half of a trailing stop limit, under the same
             // offset-type restriction and for the same reason. The venue
-            // DERIVES the limit price from it, so a nautilus-stated `price` on
+            // derives the limit price from it, so a nautilus-stated `price` on
             // this type is dropped rather than forwarded - the wire refuses one
             // there, and forwarding it would trade a working order for a
             // rejection over a field the first ratchet would have overwritten.
@@ -397,7 +397,7 @@ impl MogwaiExecutionClient {
         Ok(())
     }
 
-    /// The FALLIBLE half of an announcement: resolve the cached order and build
+    /// The fallible half of an announcement: resolve the cached order and build
     /// its `OrderSubmitted`. Nothing here is observable, which is what lets a
     /// multi-leg submission resolve every leg before any leg is announced.
     fn build_submitted(&self, client_order_id: &ClientOrderId) -> anyhow::Result<OrderSubmitted> {
@@ -415,18 +415,18 @@ impl MogwaiExecutionClient {
         ))
     }
 
-    /// The INFALLIBLE half: insert the mirror record and emit the event. It
+    /// The infallible half: insert the mirror record and emit the event. It
     /// takes no `Result` on purpose - once the first leg of a list has been
     /// announced there is no honest way to fail the second, so the mutex is
     /// taken through `lock_recover` (poison-recovering, as everywhere else in
     /// this client) rather than through a `?`.
     ///
-    /// THIS APPLIES TO BOTH CALLERS, and the single-order path inherits a
-    /// CHANGE: `announce_submitted` used to return `Err("execution state mutex
+    /// This applies to both callers, and the single-order path inherits a
+    /// behavior change: `announce_submitted` used to return `Err("execution state mutex
     /// poisoned")`, and through `submit_order` that failure mode is now gone.
     /// Deliberate, and not merely collateral to the list fix. `lock_recover` is
     /// the idiom everywhere else in this client and in the data client, for the
-    /// reason it was adopted: this mutex guards a MIRROR of venue state, a
+    /// reason it was adopted: this mutex guards a mirror of venue state, a
     /// poisoning means some other thread panicked mid-update, and refusing
     /// every subsequent submission forever is a worse answer than recovering
     /// the guard and continuing against a possibly-stale mirror that the next
@@ -479,7 +479,7 @@ impl MogwaiExecutionClient {
         if let Err(err) = self.send_ws(cmd) {
             // The WS command channel is gone (reconnect exhausted, or the client
             // was stopped), so the command never reached the venue. Nautilus only
-            // LOGS an Err from cancel_order/modify_order (no event), so without
+            // logs an Err from cancel_order/modify_order (no event), so without
             // this a cancel/modify would sit forever in PendingCancel/PendingUpdate
             // (and a submit in Submitted) with no reject to restore it - unlike the
             // HTTP path, which already synthesizes the matching reject on transport
@@ -586,7 +586,7 @@ impl VenueQuery {
         .await
     }
 
-    /// Register the waiter BEFORE sending the command, so a reply racing back
+    /// Register the waiter before sending the command, so a reply racing back
     /// faster than this task resumes still finds its slot; unregister on a
     /// send failure so a dead socket does not leak the entry.
     fn register_ws_query<T>(
@@ -936,12 +936,12 @@ impl ExecutionClient for MogwaiExecutionClient {
             pending.orders.clear();
             pending.fills.clear();
         }
-        // THE GROUP RING IS TRANSPORT STATE, NOT MIRROR STATE, so it dies with
+        // The group ring is transport state, never mirror state, so it dies with
         // the transport. `reset()` cleared it only incidentally, by replacing
         // the whole `ExecState`; a plain stop-and-connect left it standing, and
         // a list id repeating across generations - nautilus ids are per-strategy
-        // and a restarted strategy reuses them - would then attribute the NEW
-        // generation's group refusal to the OLD generation's legs, rejecting
+        // and a restarted strategy reuses them - would then attribute the new
+        // generation's group refusal to the old generation's legs, rejecting
         // orders that were never refused. The mirror's orders and account
         // watermark deliberately survive a stop; these do not, because their
         // whole purpose is to answer a refusal from the socket that just died.
@@ -971,7 +971,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     async fn connect(&mut self) -> anyhow::Result<()> {
         // A client owns exactly one transport generation. This cleanup is
         // unconditional and independent of the component started flag: a host
-        // may reconnect after stop. It may NOT connect without starting - see
+        // may reconnect after stop. It may never connect without starting - see
         // the emitter guard below, which refuses that ordering outright. The
         // host-facing statement of this contract is `docs/adapter-lifecycle.md`.
         self.ws_cmd = None;
@@ -982,8 +982,8 @@ impl ExecutionClient for MogwaiExecutionClient {
             pending.orders.clear();
             pending.fills.clear();
         }
-        // REFUSE A DEAF CONNECTION (AE20). Nautilus's `ExecutionEventEmitter`
-        // derives Clone and owns `sender: Option<..>` BY VALUE, so every
+        // Refuse a deaf connection outright (AE20). Nautilus's `ExecutionEventEmitter`
+        // derives Clone and owns `sender: Option<..>` by value, so every
         // `exec_context()` clone - the WS pump's above all - freezes whatever
         // sender state exists at the instant it is taken. The sender is
         // installed exactly once, by `start()`, and `send_order_event` on an
@@ -994,10 +994,10 @@ impl ExecutionClient for MogwaiExecutionClient {
         // vanish for the life of the connection, silently.
         //
         // The sender cannot simply be resolved here for everyone:
-        // `try_get_exec_event_sender` reads a THREAD_LOCAL set on the runner's
+        // `try_get_exec_event_sender` reads a thread-local set on the runner's
         // thread, and this async fn may already be polled on another. Try it
         // anyway - it costs nothing and succeeds whenever connect really is on
-        // that thread - and REFUSE loudly when it does not, rather than
+        // that thread - and refuse loudly when it does not, rather than
         // proceeding into a run whose every venue event is dropped.
         if !self.emitter.is_initialized()
             && let Some(sender) = try_get_exec_event_sender()
@@ -1050,8 +1050,8 @@ impl ExecutionClient for MogwaiExecutionClient {
         // pass through, by design: the snapshot is a point-in-time query, not a
         // tape frame, so a DropNextAccountUpdate divergence does not suppress it.
         //
-        // Scope: this runs on CONNECT (and so on reset/reconnect driven by
-        // nautilus, which calls connect again), NOT on the transport's own
+        // Scope: this runs on connect (and so on reset/reconnect driven by
+        // nautilus, which calls connect again), never on the transport's own
         // internal reconnect - the lifecycle reattach replays WS commands only.
         // A pushed account update lost to a blackout spanning an internal
         // reconnect therefore stays lost until the next snapshot any order
@@ -1061,7 +1061,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         //
         // Failure policy: a 404 means a venue predating GET /account; warn and
         // fall back to the legacy reactive path (the account seeds off the first
-        // fill, as before this fix). Any OTHER failure against a venue that does
+        // fill, as before this fix). Any other failure against a venue that does
         // publish the route is fatal - warn-and-continue there would silently
         // recreate the exact first-fill cache-miss this fix exists to eliminate.
         match fetch_account(&self.http, &self.http_quota, &http_base_url).await {
@@ -1100,8 +1100,8 @@ impl ExecutionClient for MogwaiExecutionClient {
         // The delivery barrier. The venue attaches this socket to the live tape
         // at upgrade, so frames can arrive before the post-bind reseed below has
         // read `/instruments` - and a frame naming an instrument the cache has
-        // not got is DROPPED, not retried. The reader still enqueues; the pump
-        // holds its FIRST delivery until the reseed says go, so nothing reaches
+        // not got is dropped, not retried. The reader still enqueues; the pump
+        // holds its first delivery until the reseed says go, so nothing reaches
         // a handler before the def it needs is resident. Held, not dropped: the
         // frames are real tape.
         let (delivery_ready, pump_ready) = tokio::sync::watch::channel(false);
@@ -1162,7 +1162,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                         flush_havoc_into_pump(&mut filter, sim, &disconnect_deliver);
                     }
                 },
-                // A COMMAND THE SOCKET SWALLOWED IS A TRANSPORT FAILURE, and it
+                // A command the socket swallowed is a transport failure, and it
                 // is reported through exactly the path that already handles the
                 // channel-closed case: the same synthesized reject, from the
                 // same context. Before this existed, a submit queued in the
@@ -1171,7 +1171,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                 // AE9 closed for the channel-closed case, still open for the
                 // writer-aborted one.
                 //
-                // The context is CLONED here rather than resolved per call:
+                // The context is cloned here rather than resolved per call:
                 // this closure lives in the reader task and `&self` is not
                 // available there. Every field is an `Arc` or a `Copy` handle
                 // onto the same shared state `dispatch_order` uses, so a reject
@@ -1192,7 +1192,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             self.ws_cmd = None;
             return Err(err);
         }
-        // The post-bind reseed. Binding is what REGISTERS an unconfigured symbol
+        // The post-bind reseed. Binding is what registers an unconfigured symbol
         // venue-side, so the pre-dial seed above cannot have carried its def;
         // only a read after the socket is up can. The pre-dial seed and the
         // account snapshot keep their order deliberately - the snapshot resolves
@@ -1227,7 +1227,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     }
 
     fn submit_order(&self, cmd: SubmitOrder) -> anyhow::Result<()> {
-        // Build the wire order FIRST (AE8). An unsupported side/type/TIF errors
+        // Build the wire order first (AE8). An unsupported side/type/TIF errors
         // out of convert::wire_* here; emitting OrderSubmitted before this - as
         // the code used to - queued a Submitted event that nautilus then had to
         // apply to an order it had already denied (Initialized -> Denied) on the
@@ -1252,16 +1252,16 @@ impl ExecutionClient for MogwaiExecutionClient {
         self.dispatch_order(&ExecWsCommand::Submit(wire))
     }
 
-    /// An ORDER LIST, submitted leg by leg in the list's own order.
+    /// An order list, submitted leg by leg in the list's own order.
     ///
-    /// The legs go out as ordinary submits carrying their LINKAGE, because that
+    /// The legs go out as ordinary submits carrying their linkage, because that
     /// is what the venue models: a group id plus a rule each member holds, not a
     /// list object the venue would have to own. Order matters and is nautilus's,
     /// not ours - an `OrderList` puts the parent first, and the venue refuses a
     /// child whose parent it has not seen, so re-ordering here would break a
     /// bracket that nautilus assembled correctly.
     ///
-    /// A leg that fails conversion aborts the whole list BEFORE anything is
+    /// A leg that fails conversion aborts the whole list before anything is
     /// dispatched, which is the only honest failure mode: half a bracket is
     /// worse than none, and a strategy that gets a rejection for its entry can
     /// retry, while one whose stop silently never reached the venue cannot.
@@ -1281,15 +1281,15 @@ impl ExecutionClient for MogwaiExecutionClient {
                 )?,
             ));
         }
-        // ANNOUNCE EVERY LEG FIRST, then dispatch ONE frame. The announcement
+        // Announce every leg first, then dispatch one frame. The announcement
         // is nautilus-side bookkeeping and has to precede the venue's answer;
         // the dispatch is a single `SubmitOrderGroup`, because per-leg submits
         // are what let leg one fill before leg two is admitted. That is the
         // hazard the group frame exists to close, and the venue now refuses the
         // per-leg route for linked orders outright.
         //
-        // THE ANNOUNCEMENT LOOP IS PASS-INVARIANT BY CONSTRUCTION. Resolving
-        // the cached order is fallible, and doing it INSIDE the announcing loop
+        // The announcement loop is pass-invariant by construction. Resolving
+        // the cached order is fallible, and doing it inside the announcing loop
         // meant a failure on leg three left legs one and two already emitted as
         // `OrderSubmitted` and already mirrored, while the `?` returned before
         // `dispatch_order` - so no `SubmitGroup` frame went out, no reject was
@@ -1321,7 +1321,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             orders.push(wire);
         }
         // Remembered so an `AdmissionSubject::SubmitGroup` refusal - which names
-        // the LIST rather than its members, because a group is refused whole -
+        // the list rather than its members, because a group is refused whole -
         // can be turned back into one `OrderRejected` per leg. Without it a
         // refused bracket would leave every leg of it waiting on an answer the
         // venue has already given.
@@ -1395,7 +1395,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         Ok(())
     }
 
-    /// Order status reports from VENUE TRUTH, not the adapter-side mirror.
+    /// Order status reports from venue truth, not the adapter-side mirror.
     ///
     /// The mirror is populated by the same lifecycle stream havoc corrupts,
     /// so a report built from it can only repeat the client's (possibly
@@ -1405,7 +1405,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// over the wire makes this generator a second, independent witness: the
     /// reply content is always a truthful engine book read (honest-content
     /// contract on `Command::QueryOrders`), while havoc may still
-    /// delay or drop its DELIVERY - which surfaces here as a query timeout,
+    /// delay or drop its delivery - which surfaces here as a query timeout,
     /// exercising the consumer's own timeout path.
     async fn generate_order_status_reports(
         &self,
@@ -1446,7 +1446,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// The singular twin, backing the execution manager's in-flight re-query
     /// (`QueryOrder` probes past the inflight threshold) - previously the
     /// trait's log-and-`None` default, which left mogwai unable to resolve an
-    /// in-flight order and forced the consumer's local INFLIGHT_TIMEOUT
+    /// in-flight order and forced the consumer's local `INFLIGHT_TIMEOUT`
     /// reject. Same venue-truth source as the plural generator.
     async fn generate_order_status_report(
         &self,
@@ -1477,7 +1477,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         Ok(report)
     }
 
-    /// Fill reports from VENUE TRUTH (see `generate_order_status_reports`):
+    /// Fill reports from venue truth (see `generate_order_status_reports`):
     /// the engine books each fill exactly once regardless of how many
     /// `OrderFilled` events the wire carried, so this reply is the ground
     /// truth a duplicated or dropped fill stream reconciles against.
@@ -1506,14 +1506,14 @@ impl ExecutionClient for MogwaiExecutionClient {
         Ok(reports)
     }
 
-    /// Position status reports from VENUE TRUTH, completing the set alongside
+    /// Position status reports from venue truth, completing the set alongside
     /// `generate_order_status_reports` and `generate_fill_reports`.
     ///
     /// These used to be rebuilt from the adapter-side account-snapshot mirror,
     /// which is populated by the same pushed `AccountState` stream havoc
     /// corrupts - and mogwai ships a divergence, `DropNextAccountUpdate`, whose
     /// entire purpose is swallowing one of those pushes. A mirror-built report
-    /// therefore confidently CONFIRMS a stale position in precisely the fault
+    /// therefore confidently confirms a stale position in precisely the fault
     /// class position reconciliation exists to catch, which is the same
     /// argument that moved the order and fill generators onto the venue-truth
     /// surface.
@@ -1527,7 +1527,7 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// A failed pull propagates rather than falling back to any client-side
     /// belief: an error makes reconciliation fail loudly, whereas a silent
     /// fallback would reintroduce the stale confirmation this exists to remove.
-    /// The ONE exception is a 404, which `connect` already treats as a venue
+    /// The one exception is a 404, which `connect` already treats as a venue
     /// predating the route and continues past - failing here would turn that
     /// documented legacy path into a hard failure of the whole mass status,
     /// taking the order and fill reports down with it.
@@ -1560,21 +1560,21 @@ impl ExecutionClient for MogwaiExecutionClient {
             .positions
             .iter()
             .filter(|position| {
-                // Match the WHOLE instrument id, venue included. The wire rows
+                // Match the whole instrument id, venue included. The wire rows
                 // carry only a symbol, so comparing symbols alone would let a
                 // request scoped to BTCUSDT on some other venue match this
                 // venue's BTCUSDT position - a filter the caller asked for and
-                // did not get. Every row here is by construction a MOGWAI one.
+                // did not get. Every row here is by construction a `MOGWAI` one.
                 cmd.instrument_id.is_none_or(|id| {
                     id.venue == *MOGWAI_VENUE && symbol_from_instrument(id) == position.symbol
                 })
             })
             .filter(|position| {
-                // Every position the venue reports is a current OPEN (nonzero)
+                // Every position the venue reports is a current open (nonzero)
                 // one - the engine removes a symbol from its position map the
                 // moment it goes flat - so a lookback-bounded `start` must not
                 // hide a long-quiet resting position; reconciliation would
-                // otherwise have to re-adopt it as EXTERNAL mid-run (AE10).
+                // otherwise have to re-adopt it as external mid-run (AE10).
                 // The time filter therefore only guards a defensive flat row.
                 !position.quantity.is_zero() || in_time_range(ts_event, cmd.start, cmd.end)
             })
@@ -1620,9 +1620,9 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// Composes the three report generators into the mass status the live
     /// node's startup reconciliation consumes. The trait default returns
     /// `Ok(None)`, which the node logs as "no mass status available (likely
-    /// adapter error)" and then reconciles NOTHING - a worker restarted while
+    /// adapter error)" and then reconciles nothing at all - a worker restarted while
     /// holding an open mogwai position would boot flat and only discover the
-    /// venue net via the periodic position poll, mid-run, as a late EXTERNAL
+    /// venue net via the periodic position poll, mid-run, as a late external
     /// adoption. Following the canonical adapter shape (e.g. kraken spot):
     /// open orders, their fills, and current positions, bounded by the
     /// caller's lookback.
@@ -1659,9 +1659,9 @@ impl ExecutionClient for MogwaiExecutionClient {
             .iter()
             .map(|report| report.venue_order_id)
             .collect();
-        // The lookback is asked UNBOUNDED and narrowed here rather than being
+        // The lookback is asked unbounded and narrowed here rather than being
         // pushed into the generator, for two reasons. An order report carries
-        // no `avg_px`, so a partially filled OPEN order can only be paired from
+        // no `avg_px`, so a partially filled open order can only be paired from
         // its own fills, including the ones older than the lookback - dropping
         // those makes the host reconcile a wrong average price. And a single
         // pass keeps every fill of an order in the venue's own chronological
@@ -1715,9 +1715,9 @@ impl ExecutionClient for MogwaiExecutionClient {
 #[derive(Debug, Clone)]
 enum ExecWsCommand {
     Submit(mogwai_protocol::SubmitOrder),
-    /// A whole linked group in ONE frame, which is the only way a bracket may
+    /// A whole linked group in one frame, which is the only way a bracket may
     /// reach this venue. Sending the legs as separate `Submit`s lets leg one
-    /// FILL before leg two is admitted - the `Ouo` shrink then adjusts a
+    /// fill before leg two is admitted - the `Ouo` shrink then adjusts a
     /// sibling that is not on the book, leg two arrives at full size, and the
     /// pair's aggregate fill is twice the bracket quantity. The venue refuses a
     /// linked bare `Submit` for exactly that reason, so this is not merely the
@@ -1746,7 +1746,7 @@ enum ExecWsCommand {
     },
 }
 
-/// Takes the command BY REFERENCE and clones what the wire message needs,
+/// Takes the command by reference and clones what the wire message needs,
 /// because the lifecycle keeps the original until it has observed the frame
 /// reach the socket - that is what lets it report the command back if the
 /// socket dies first. The clone is one order's worth of `String`s and
@@ -1829,19 +1829,19 @@ fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> VenueM
     }
 }
 
-/// The prefix a RETRYABLE venue refusal's reason carries, so a consumer can
+/// The prefix a retryable venue refusal's reason carries, so a consumer can
 /// tell backpressure from a business rejection without reading prose.
 ///
 /// This exists because nautilus's `OrderRejected` has one free field - the
 /// reason string - and both kinds of refusal arrive through it. Without a
 /// marker a consumer's only lever is matching the venue's own sentence, which
 /// makes its quarantine path's safety depend on wording nobody promised to
-/// keep. This IS that promise: a public constant, prepended by this adapter and
+/// keep. This is that promise: a public constant, prepended by this adapter and
 /// pinned by a test, so a consumer matches an identifier rather than a phrase.
 ///
-/// WHAT IT MEANS is exactly what the wire's `retryable` says: the venue was
-/// FULL, not that it said no, and the same command sent later could succeed. It
-/// says nothing about whether retrying is WISE - that is the consumer's
+/// What it means is exactly what the wire's `retryable` says: the venue was
+/// full, not that it said no, and the same command sent later could succeed. It
+/// says nothing about whether retrying is wise - that is the consumer's
 /// judgement, and a consumer that prefers to stop when the venue said no is
 /// still right to. Absent the prefix, a rejection is terminal and must be
 /// treated as such.
@@ -1861,7 +1861,7 @@ fn mark_retryable(reason: &str, retryable: bool) -> String {
     }
 }
 
-/// The `order_list_id` a dispatched group is remembered under: ANY leg's link,
+/// The `order_list_id` a dispatched group is remembered under: any leg's link,
 /// not leg 0's.
 ///
 /// A nautilus order list need not link every member, so a list whose first leg
@@ -1869,13 +1869,13 @@ fn mark_retryable(reason: &str, retryable: bool) -> String {
 /// used to read `orders.first()` alone, which left such a list unremembered -
 /// and an `AdmissionSubject::SubmitGroup` refusal for it then attributed to no
 /// leg at all, so every member sat waiting on an answer the venue had already
-/// given. A group is admitted or refused WHOLE and its members share one list
+/// given. A group is admitted or refused whole and its members share one list
 /// id, so the first link that exists is the group's id whichever leg carries it.
 fn group_id_of<'a>(links: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
     links.into_iter().flatten().next().map(ToOwned::to_owned)
 }
 
-/// Reports a command the websocket ACCEPTED and never wrote - see
+/// Reports a command the websocket accepted and never wrote - see
 /// `lifecycle::run_ws_connection`'s `on_undelivered`.
 ///
 /// An `Ok` from the command channel means queued, not sent, so a socket that
@@ -1884,7 +1884,7 @@ fn group_id_of<'a>(links: impl IntoIterator<Item = Option<&'a str>>) -> Option<S
 /// caller waits out its whole timeout for a reply nobody will ever send.
 ///
 /// Order commands take the same synthesized reject as any other transport
-/// failure. Queries CANNOT: `reject_for` has no shape for them, and the right
+/// failure. Queries cannot: `reject_for` has no shape for them, and the right
 /// report is to retire the waiter, which drops its oneshot sender and makes
 /// `await_reply` fail fast with "venue query abandoned" instead of parking for
 /// the full request timeout. Retiring a slot that is already gone is a no-op,
@@ -1935,7 +1935,7 @@ fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &E
             );
         }
     } else if let ExecWsCommand::SubmitGroup(orders) = cmd {
-        // EVERY leg, because the frame carrying them all never left. A group is
+        // Every leg, because the frame carrying them all never left. A group is
         // dispatched as one send, so its transport failure is one failure with
         // as many wedged orders as it had members, and rejecting one would
         // leave the rest in `Submitted` forever.
@@ -1958,7 +1958,7 @@ fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &E
 /// Reports a rejected `Cancel` as a nautilus `OrderCancelRejected` without
 /// touching the mirrored order's status. Serves both origins:
 ///
-/// - a `Cancel` that failed at TRANSPORT (the HTTP POST never reached the
+/// - a `Cancel` that failed at transport (the HTTP POST never reached the
 ///   venue): `ts_event` is sim-now and `wire_venue_order_id` is `None`, and
 /// - a venue-originated `VenueMessage::OrderCancelRejected` (the engine could
 ///   not honor the cancel): `ts_event` is the venue's stamp and the wire may
@@ -2029,7 +2029,7 @@ struct ExecState {
     orders: HashMap<ClientOrderId, OrderRecord>,
     /// `ts_event` of the last account snapshot forwarded to nautilus.
     ///
-    /// Snapshots must apply in VENUE order, not arrival order: nautilus applies
+    /// Snapshots must apply in venue order, not arrival order: nautilus applies
     /// account states in arrival order with no staleness guard of its own, so
     /// an older snapshot delivered late by reorder or duplicate havoc would
     /// overwrite newer balances and stay wrong until the next fill-driven
@@ -2045,15 +2045,15 @@ struct ExecState {
     /// wrong.
     account_ts_last: UnixNanos,
     /// Which legs went out under which `order_list_id`, so a group refusal that
-    /// names only the LIST can be answered per leg.
+    /// names only the list can be answered per leg.
     ///
     /// Bounded and FIFO rather than a growing map: the entry is wanted for the
     /// round trip between a group's dispatch and the venue's answer, which is
     /// one command's worth of time, and a long forward run must not accumulate
     /// one row per bracket it ever sent. Losing an old row costs a refusal's
-    /// legibility and nothing else - the ERROR still names the list.
+    /// legibility and nothing else - the `error` line still names the list.
     groups: std::collections::VecDeque<(String, Vec<ClientOrderId>)>,
-    /// Map size at which the unbounded-growth WARN next fires - see `prune`.
+    /// Map size at which the unbounded-growth `warn` next fires - see `prune`.
     /// Doubles each time it fires, so a genuinely large book says so once per
     /// doubling instead of once per insert.
     growth_warned_at: usize,
@@ -2076,16 +2076,16 @@ impl ExecState {
     /// Decides an arriving account snapshot against the staleness watermark and
     /// moves the watermark. Returns whether the snapshot should be forwarded.
     ///
-    /// Nautilus applies account states in ARRIVAL order with no staleness guard
+    /// Nautilus applies account states in arrival order with no staleness guard
     /// of its own, so an older snapshot delivered late by reorder or duplicate
     /// havoc would overwrite newer balances and stay wrong until the next
     /// fill-driven one, which may never come. Anything below the watermark is
     /// therefore refused; equal-ts duplicates pass and re-apply idempotently.
     ///
-    /// THE WATERMARK ADVANCES ONLY OVER A SNAPSHOT THAT ARRIVED WHOLE - the
+    /// The watermark advances only over a snapshot that arrived whole - the
     /// frontier rule, that a cursor may not advance over work whose success the
     /// same expression did not check. `handle_account_state` builds its balances
-    /// and margins with `filter_map`s that DROP a row they cannot represent (an
+    /// and margins with `filter_map`s that drop a row they cannot represent (an
     /// unknown currency, an amount that will not fit `Money`, a `locked + free
     /// != total` that `AccountBalance` refuses), each a warning rather than a
     /// failure. Advancing unconditionally meant a snapshot that lost half its
@@ -2107,13 +2107,13 @@ impl ExecState {
         true
     }
 
-    /// The group's legs, LEFT IN PLACE.
+    /// The group's legs, left in place.
     ///
-    /// This used to remove the entry, which made a DUPLICATED refusal
+    /// This used to remove the entry, which made a duplicated refusal
     /// unattributable - and duplicates are not hypothetical here,
     /// `duplicate_prob` exists to produce them. The first copy consumed the row
     /// and rejected every leg; the second found nothing and took the "cannot
-    /// attribute" ERROR path, which reads exactly like a real attribution
+    /// attribute" error path, which reads exactly like a real attribution
     /// failure.
     ///
     /// Leaving the row costs nothing: the ring is already bounded by
@@ -2139,17 +2139,17 @@ impl ExecState {
 const MAX_TERMINAL_ORDERS: usize = 10_000;
 
 impl ExecState {
-    /// Prunes the oldest TERMINAL order records past `MAX_TERMINAL_ORDERS`.
+    /// Prunes the oldest terminal order records past `MAX_TERMINAL_ORDERS`.
     /// Called after each mirror mutation that can grow the map (a submit
     /// insert), and does real work only when the cap is exceeded.
     ///
-    /// THIS DOES NOT BOUND THE MAP, and the AE6 note that said it did was
+    /// This does not bound the map, and the AE6 note that said it did was
     /// wrong. Open orders are never pruned, because they are live
     /// reconciliation truth and an adapter that forgot one would report a
     /// standing order as unknown - a strictly worse failure than memory. So a
     /// run that accumulates open (or permanently-`Submitted`) records grows
     /// linearly no matter what this function does, and the only honest
-    /// response is to say so where an operator can see it. That is the WARN
+    /// response is to say so where an operator can see it. That is the `warn`
     /// below, raised on each doubling past the cap rather than per insert.
     ///
     /// The main source of permanent `Submitted` strays was a command the
@@ -2253,7 +2253,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
             };
             let Some((record, stale)) = with_order_record(&ctx.state, client_order_id, |record| {
                 // Terminal-state guard: reorder/duplicate havoc can deliver this
-                // Accepted AFTER the fill or cancel that ended the order (the
+                // Accepted after the fill or cancel that ended the order (the
                 // engine emits Accepted and Filled adjacently for immediate
                 // fills - exactly the pair a reorder transposes). Nautilus's own
                 // order FSM has no terminal-to-Accepted arm, and this mirror is
@@ -2319,7 +2319,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
             let Some(record) = with_order_record(&ctx.state, client_order_id, |record| {
                 // Unconditional, unlike the terminal-state guards on the other
                 // arms, and deliberately so: the engine emits `Rejected` as an
-                // order's SOLE lifecycle event, so no reordered pair can arrive
+                // order's sole lifecycle event, so no reordered pair can arrive
                 // to regress a later terminal state. The one reachable overwrite
                 // is the HTTP carrier synthesizing a reject for an order the
                 // venue actually processed, which is the known unrecoverable
@@ -2421,7 +2421,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
             ctx.emitter.send_order_event(OrderEventAny::Canceled(event));
         }
         // Deliberately a copy of the Canceled arm rather than a shared helper
-        // over both: the two are the same SHAPE and different FACTS, and the
+        // over both: the two are the same shape carrying different facts, and the
         // pressure to fold them is what collapsed expiry into cancellation in
         // the first place. Everything below - the terminal-state guard, the
         // forward-only `ts_last`, the A.11 unknown-order warning - is the same
@@ -2567,7 +2567,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                     record.venue_order_id = Some(venue_order_id);
                     let filled_qty = (quantity - leaves_qty).max(Decimal::ZERO);
                     // An amend never reverses an in-progress fill: an order with a
-                    // non-zero filled_qty stays PARTIALLY_FILLED (or flips to FILLED
+                    // non-zero filled_qty stays `PartiallyFilled` (or flips to `Filled`
                     // when the amend leaves nothing outstanding) so the mirror does
                     // not report Accepted alongside a non-zero filled_qty.
                     record.status = if filled_qty.is_zero() {
@@ -2748,16 +2748,16 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
             retryable,
             ts_event,
         } => {
-            // THE MARKER, and it is the whole reason `retryable` is on the wire.
+            // The marker itself, and it is the whole reason `retryable` is on the wire.
             //
             // Nautilus's `OrderRejected` carries a reason string and nothing
             // else this adapter may set, so an admission refusal and a business
             // rejection ("insufficient balance", "market closed") arrive at a
             // strategy in the same shape. A consumer that wanted to treat
-            // backpressure as retryable had only the venue's WORDING to key on,
+            // backpressure as retryable had only the venue's wording to key on,
             // and correctly refused to hang a quarantine decision on our prose.
             //
-            // So the wording stops being prose and becomes a CONTRACT: a
+            // So the wording stops being prose and becomes a contract: a
             // retryable refusal's reason is prefixed with
             // `RETRYABLE_REJECT_PREFIX`, that prefix is a public constant of
             // this crate, and `a_retryable_admission_refusal_is_marked_for_the_consumer`
@@ -2777,7 +2777,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 );
             }
             mogwai_protocol::AdmissionSubject::SubmitGroup { order_list_id } => {
-                // The venue refused the whole group and named the LIST, because
+                // The venue refused the whole group and named the list, because
                 // a group is admitted or refused whole and naming one member
                 // would be as wrong as naming none. Fan it back out to every
                 // leg: nautilus has no order-list-scoped rejection event, so a
@@ -2831,11 +2831,11 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 );
             }
             mogwai_protocol::AdmissionSubject::Query { request_id, query } => {
-                // DROP the waiter rather than answer it. An empty snapshot
+                // Drop the waiter rather than answer it. An empty snapshot
                 // would be a false venue truth - "you have no orders" when the
                 // venue in fact never looked - and the mirror would reconcile
                 // against it. Dropping the oneshot sender wakes the requester
-                // with a RecvError immediately, exactly as a disconnect does,
+                // with a `RecvError` immediately, exactly as a disconnect does,
                 // so it fails fast instead of waiting out its query timeout for
                 // a reply the venue has said it will never send.
                 //
@@ -2851,7 +2851,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                     mogwai_protocol::QueryKind::Fills => {
                         pending.fills.remove(&request_id).is_some()
                     }
-                    // History waiters live on the DATA leg, which owns the
+                    // History waiters live on the data leg, which owns the
                     // river and is the only half that asks for a page. An
                     // execution socket holds no such waiter, so there is
                     // nothing here to wake - and probing the order or fill maps
@@ -2870,9 +2870,9 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 );
             }
             mogwai_protocol::AdmissionSubject::Frame => {
-                // A whole outbound BATCH the venue discarded, so the events it
+                // A whole outbound batch the venue discarded, so the events it
                 // carried are simply gone. Same severity and same wording as
-                // the FeedLagged arm below, and for the same reason: the
+                // the `FeedLagged` arm below, and for the same reason: the
                 // mirror may now disagree with venue truth and only a host-
                 // driven reconciliation can settle it. Nothing here can
                 // trigger that; see the cross-repo item in notes/todo.md.
@@ -2890,20 +2890,20 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
             skipped_total,
             ..
         } => {
-            // NOT an execution signal, and it used to be logged as one. This
-            // frame reports that the boat's MARKET ring overwrote frames before
+            // Never an execution signal, and it used to be logged as one. This
+            // frame reports that the boat's market ring overwrote frames before
             // this socket read them. Execution output never travels that ring:
             // it is queued on the held lane and pumped into the same writer, so
             // a ring overrun cannot drop, reorder or overwrite an order event.
             // Claiming the mirror might disagree with venue truth here asked a
             // host to reconcile a book that was never in doubt.
             //
-            // The venue DOES have a signal for genuinely lost execution output,
+            // The venue does have a signal for genuinely lost execution output,
             // and it is the `AdmissionSubject::Frame` arm above: a whole
             // outbound batch the venue refused. That one means what this one was
             // saying.
             //
-            // WARN rather than ERROR: this socket consumes the market tape only
+            // `warn` rather than `error`: this socket consumes the market tape only
             // to discard it, so the loss costs the execution leg nothing. What
             // it indicates is that this connection is not draining fast enough,
             // which is worth knowing and is not a fault.
@@ -3013,7 +3013,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
     // so the second sighting skips the mutation.
     // The duplicate flag guards only the mirror mutation inside the closure;
     // the wire event is forwarded either way (the intended divergence), and
-    // fill REPORTS now come from the venue-truth QueryFills rather than any
+    // fill reports now come from the venue-truth QueryFills rather than any
     // mirror fill store, so nothing outside the closure branches on it.
     let Some((record, _is_duplicate)) = with_order_record(&ctx.state, client_order_id, |record| {
         let is_duplicate = !record.seen_trades.insert(trade_id);
@@ -3021,7 +3021,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
             // Terminal-state guard (see the OrderAccepted arm): a partial fill
             // transposed behind the cancel (or the final fill) that ended the
             // order must still book its economics - money moved at the venue,
-            // but must not regress the terminal status back to PartiallyFilled
+            // but must not regress the terminal status back to `PartiallyFilled`
             // and re-open a closed order in the reconciliation mirror.
             if !record.status.is_closed() {
                 record.status = if fill.leaves_qty.is_zero() {
@@ -3031,7 +3031,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
                 };
             }
             record.venue_order_id = Some(venue_order_id);
-            // A reordered fill carries an OLDER ts_event than the event that
+            // A reordered fill carries an older ts_event than the event that
             // already advanced the record; only ever move ts_last forward so
             // the mirror's in_time_range filtering does not walk backward.
             record.ts_last = record.ts_last.max(UnixNanos::from(fill.ts_event));
@@ -3111,18 +3111,18 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
 }
 
 fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext) {
-    // The wire's account id is deliberately NOT compared against the configured
+    // The wire's account id is deliberately not compared against the configured
     // one here, and the difference matters more on this path than on the connect
-    // path: this used to DROP a snapshot whose label differed, so a venue and a
+    // path: this used to drop a snapshot whose label differed, so a venue and a
     // client that named the account differently produced a client whose balances
     // silently stopped updating while every fill still arrived.
     //
-    // The drop guarded against adopting a MISROUTED snapshot back when the
-    // account was an addressable SLOT a venue could route one to the wrong one
-    // of. THE SCOPE THAT SURVIVES IS THE CONNECTION, not the venue: a venue does
+    // The drop guarded against adopting a misrouted snapshot back when the
+    // account was an addressable slot a venue could route one to the wrong one
+    // of. The scope that survives is the connection, not the venue: a venue does
     // hold several ledgers, one per account id, but a socket names
     // exactly one on its `/ws?account=` upgrade and only that one's state comes
-    // back down it. So there is nothing to be misrouted from HERE, and a dropped
+    // back down it. So there is nothing to be misrouted from on this path, and a dropped
     // snapshot can only lose state that was correct. The configured id is
     // stamped on below, as it always was; `note_account_label` says once at
     // connect if the two names differ. `reference/architecture.md` carries the
@@ -3216,7 +3216,7 @@ fn handle_account_state(state: &mogwai_protocol::AccountState, ctx: &ExecContext
         let mut mirror = lock_recover(&ctx.state, "execution state");
         // Snapshots must forward in venue order, not arrival order: nautilus
         // applies account states in arrival order with no staleness guard of
-        // its own, so an OLDER snapshot delivered late by reorder/duplicate
+        // its own, so an older snapshot delivered late by reorder/duplicate
         // havoc would overwrite newer balances and stay wrong until the next
         // fill-driven snapshot, which may be never. Skip any snapshot below the
         // applied watermark. Equal-ts duplicates pass; they re-apply
@@ -3328,7 +3328,7 @@ fn in_time_range(ts: UnixNanos, start: Option<UnixNanos>, end: Option<UnixNanos>
 mod tests {
     use super::*;
 
-    /// THE CONTRACT A CONSUMER MATCHES ON, pinned so it cannot drift into
+    /// The contract a consumer matches on, pinned so it cannot drift into
     /// prose.
     ///
     /// Nautilus's `OrderRejected` gives this adapter one free field, so an
@@ -3353,20 +3353,20 @@ mod tests {
         );
 
         // The negative, without which the assertion above holds for a marker
-        // applied to everything: a rejection the venue did NOT call retryable
+        // applied to everything: a rejection the venue did not call retryable
         // passes through untouched and stays terminal.
         let business = mark_retryable("insufficient balance", false);
         assert_eq!(business, "insufficient balance");
         assert!(!business.starts_with(RETRYABLE_REJECT_PREFIX));
     }
 
-    /// A DEGRADED account snapshot must not retire the well-formed ones.
+    /// A degraded account snapshot must not retire the well-formed ones.
     ///
     /// The frontier rule: the watermark may only advance over a snapshot every
     /// row of which survived conversion. Advancing unconditionally meant a
     /// snapshot that dropped rows (unknown currency, `locked + free != total`)
     /// still claimed its instant, and the well-formed snapshot that reorder
-    /// havoc delivered a moment later for an EARLIER instant was then refused
+    /// havoc delivered a moment later for an earlier instant was then refused
     /// as stale - leaving the account row degraded until a newer fill produced
     /// another, which may never come.
     #[test]
@@ -3384,18 +3384,18 @@ mod tests {
         );
         assert!(
             !state.admit_account_snapshot(UnixNanos::from(14), true),
-            "the whole snapshot at 15 DID claim it, so anything older is stale - \
+            "the whole snapshot at 15 did claim it, so anything older is stale - \
              without this the test would pass against a watermark that never moves"
         );
     }
 
-    /// A DUPLICATED group refusal must still name the legs.
+    /// A duplicated group refusal must still name the legs.
     ///
     /// `duplicate_prob` and `DuplicateNextFill` exist to deliver the same frame
     /// twice, so a second `AdmissionRejected` for one list is an expected
-    /// arrival, not a corruption. The lookup used to REMOVE the row, which made
+    /// arrival, not a corruption. The lookup used to remove the row, which made
     /// the second copy unattributable and sent it down the "cannot attribute"
-    /// ERROR path - a log line that reads exactly like a real attribution
+    /// error path - a log line that reads exactly like a real attribution
     /// failure, on a duplicate that was working as designed.
     #[test]
     fn a_group_refusal_can_be_attributed_twice() {
@@ -3416,12 +3416,12 @@ mod tests {
         );
     }
 
-    /// A group is remembered by ANY leg's link, not leg 0's.
+    /// A group is remembered by whichever leg's link comes first, not leg 0's.
     ///
     /// A nautilus order list need not link every member, so a list whose first
     /// leg is unlinked is ordinary. Keying attribution off `orders.first()`
-    /// left that list unremembered, and a refusal for it then rejected NO leg -
-    /// it fell through to the "cannot attribute" ERROR. The selection lives in
+    /// left that list unremembered, and a refusal for it then rejected not a single leg -
+    /// it fell through to the "cannot attribute" error. The selection lives in
     /// `group_id_of` precisely so it can be bitten here; the submit path around
     /// it needs a live emitter and a socket.
     #[test]

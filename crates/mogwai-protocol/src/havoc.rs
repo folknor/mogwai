@@ -38,10 +38,10 @@ pub struct HavocSpec {
 /// production-shaped reconnecting transport; hostile values drive realistic
 /// transport pathologies.
 ///
-/// `#[serde(default)]` at the container fills any OMITTED field from
+/// `#[serde(default)]` at the container fills any omitted field from
 /// `ConnHavoc::default()`, so a partial `[havoc.conn]` table (arming one knob,
 /// e.g. only `heartbeat_interval_ms`) loads the way partial `[havoc.inbound]`
-/// and `[havoc.data]` tables already do. It must be the CONTAINER default, not
+/// and `[havoc.data]` tables already do. It must be the container default, not
 /// per-field: per-field `#[serde(default)]` pulls each field type's own
 /// `Default` (`0.0` for `reconnect_backoff_factor`, `0` for the delays), and a
 /// zeroed `reconnect_backoff_factor` fails `validate_conn_havoc`. The container
@@ -122,12 +122,12 @@ pub fn validate_conn_havoc(conn: &ConnHavoc) -> Result<(), &'static str> {
         return Err("reconnect_delay_max_ms must be > 0 when reconnect_delay_initial_ms > 0");
     }
     // The mirror image of the gate above: a zero initial under a positive
-    // ceiling is the SAME spin loop from the other side. The lifecycle backoff
+    // ceiling is the same spin loop from the other side. The lifecycle backoff
     // is multiplicative (`initial * factor^attempt`), so `initial == 0` yields
     // a zero delay on every attempt no matter how large the ceiling - while
     // the venue is down the reconnect loop redials with `Duration::ZERO`, an
     // unthrottled CPU spin the positive max appears to rule out but cannot.
-    // Disabling backoff is a deliberate two-knob act: BOTH bounds must be
+    // Disabling backoff is a deliberate two-knob act: both bounds must be
     // zero. This also fails loud for a partial `[havoc.conn]` table that arms
     // only `reconnect_delay_initial_ms = 0` and inherits the default ceiling
     // (10000): add `reconnect_delay_max_ms = 0` to actually disable backoff.
@@ -220,7 +220,7 @@ pub fn validate_market_regime(regime: &MarketRegime) -> Result<(), &'static str>
             halt_secs,
             gap_frac,
         } => {
-            // `at_ts` is a forward-replay UNIX-nanosecond instant. `0` is the
+            // `at_ts` is a forward-replay unix-nanosecond instant. `0` is the
             // degenerate "halt at epoch" - a halt that, on any real forward
             // replay, has already passed before the first tick, so the regime
             // never actually fires. Reject it the way every sibling rejects its
@@ -283,8 +283,8 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             Ok(())
         }
         // Bounded by `MAX_DIVERGENCE_MS`, the same ceiling as every other ms
-        // window, and deliberately NOT `MAX_LATENCY_NANOS`: that 60 s ceiling is
-        // argued from a per-event network delay on the INBOUND stream, while
+        // window, and deliberately not `MAX_LATENCY_NANOS`: that 60 s ceiling is
+        // argued from a per-event network delay on the inbound stream, while
         // these are venue windows on the same axis as `DelayAcks`.
         control::Divergence::CommandLatency {
             submit_act_ms,
@@ -417,7 +417,7 @@ impl HavocLatency {
     #[must_use]
     pub fn delay_for(&self, kind: EventKind) -> std::time::Duration {
         let extra = match kind {
-            // Admission frames bucket with exec: the simulated INBOUND latency
+            // Admission frames bucket with exec: the simulated inbound latency
             // is an adapter-side consumer knob, not a venue contract, and a
             // refusal is exec-adjacent from the consumer's point of view.
             // Giving it its own configured field would be a knob nobody asked
@@ -425,7 +425,7 @@ impl HavocLatency {
             // admission traffic is exempt from.
             EventKind::Exec | EventKind::Admission => self.exec_event_nanos,
             EventKind::Fill => self.fill_nanos,
-            // History buckets with data because that is what it IS - a read of
+            // History buckets with data because that is what it is - a read of
             // the same river the data knob covers, differing only in being
             // pulled rather than pushed. This is the adapter's own inbound
             // simulation, so bucketing it here says nothing about the venue's
@@ -477,12 +477,12 @@ pub enum EventKind {
     /// Transport/admission truth: what the venue's request handling refused,
     /// clamped, or could not decode. Never engine output, so the knob that
     /// holds engine output (`DelayAcks`) legitimately does not reach it - see
-    /// `docs/havoc.md`. `is_execution()` is FALSE for this kind, which is
+    /// `docs/havoc.md`. `is_execution()` is false for this kind, which is
     /// what implements that exemption in one place.
     Admission,
     /// A pulled history page or its refusal.
     ///
-    /// A CLASS OF ITS OWN, because both of the obvious homes decide something
+    /// A class of its own, because both of the obvious homes decide something
     /// by accident. Calling it execution would hand `DelayAcks` authority over
     /// market history, which is a data question wearing an order-path knob.
     /// Calling it market data would enrol it in `FeedLagged` and the broadcast
@@ -496,12 +496,12 @@ pub enum EventKind {
     /// delay pump and rides the priority lane.
     ///
     /// Riding that lane means a page can reach the socket ahead of live frames
-    /// the passenger has not read yet, and that is IMMATERIAL rather than
+    /// the passenger has not read yet, and that is immaterial rather than
     /// tolerated: the splice is decided by the session's cutoff, not by arrival
     /// order. A consumer buffers live rows from before it sent the request and
     /// drops those at or below the cutoff once the session completes, so which
     /// order the two streams interleave in changes nothing about which rows
-    /// survive. What would matter is a page held BEHIND an ack delay, since
+    /// survive. What would matter is a page held behind an ack delay, since
     /// that is an order-path knob reaching a data read, and that is what the
     /// execution exemption prevents.
     History,
@@ -518,8 +518,8 @@ impl EventKind {
     /// (the split-brain that classified `AccountState` as data on one end and
     /// execution on the other).
     ///
-    /// Written as an EXHAUSTIVE MATCH rather than `matches!` so the compiler
-    /// carries the claim: a new kind must opt IN to being delayed, and a
+    /// Written as an exhaustive match rather than `matches!` so the compiler
+    /// carries the claim: a new kind must opt in to being delayed, and a
     /// `matches!` would silently opt it out (or, phrased as `!matches!(Data)`,
     /// silently opt it in) the day it is added. Here the crate does not build
     /// until the new variant is classified deliberately.
@@ -604,7 +604,7 @@ mod tests {
         );
         // The tightened bound: start_hour at 24 with a larger end_hour would
         // still index past a 24-element curve. (The old check `start_hour >=
-        // end_hour || end_hour > 24` would have ACCEPTED start_hour=24 had
+        // end_hour || end_hour > 24` would have accepted start_hour=24 had
         // end_hour been representable above it - here we make start_hour=24
         // reject outright.)
         assert!(
@@ -717,7 +717,7 @@ mod tests {
 
         assert_eq!(decoded, spec);
 
-        // A FIELDLESS variant still carries its tag and nothing else, which is
+        // A fieldless variant still carries its tag and nothing else, which is
         // what an externally-tagged enum has to get right for the venue to
         // route it at all.
         let fault_json = serde_json::to_string(&control::Divergence::FaultTape).unwrap();
@@ -766,13 +766,13 @@ mod tests {
 
     #[test]
     fn partial_conn_havoc_fills_omitted_fields_from_default() {
-        // An operator arming ONE conn knob (here `heartbeat_interval_ms`) must
+        // An operator arming one conn knob (here `heartbeat_interval_ms`) must
         // not be forced to spell out the other eight fields. A partial
         // `[havoc.conn]` table fills every omission from `ConnHavoc::default()`
         // (the container `#[serde(default)]`), matching how partial
         // `[havoc.inbound]` / `[havoc.data]` tables already load, and the result
         // still passes `validate_conn_havoc` - which a per-field default would
-        // NOT, since it would zero `reconnect_backoff_factor` below its 1.0 floor.
+        // not, since it would zero `reconnect_backoff_factor` below its 1.0 floor.
         let decoded: ConnHavoc = serde_json::from_str(r#"{"heartbeat_interval_ms":2000}"#).unwrap();
         assert_eq!(
             decoded,
@@ -789,12 +789,12 @@ mod tests {
             serde_json::from_str(r#"{"conn":{"heartbeat_interval_ms":2000}}"#).unwrap();
         assert_eq!(spec.conn, decoded);
 
-        // A partial table arming ONLY `reconnect_delay_initial_ms = 0` still
+        // A partial table arming only `reconnect_delay_initial_ms = 0` still
         // decodes (the container default fills the rest), but it inherits the
         // default ceiling (10000) and the validator rejects the combination
         // loudly - a zero initial under a positive max is a zero-delay
         // reconnect spin, and the error tells the operator the way out (zero
-        // BOTH bounds to disable backoff) rather than silently arming it.
+        // both bounds to disable backoff) rather than silently arming it.
         let zero_initial: ConnHavoc =
             serde_json::from_str(r#"{"reconnect_delay_initial_ms":0}"#).unwrap();
         assert_eq!(
@@ -874,7 +874,7 @@ mod tests {
         );
 
         // But a zero initial with a zero max is still fine (backoff disabled
-        // takes BOTH knobs), as is the honest default.
+        // takes both knobs), as is the honest default.
         let mut both_zero = conn;
         both_zero.reconnect_delay_initial_ms = 0;
         both_zero.reconnect_delay_max_ms = 0;
@@ -904,9 +904,9 @@ mod tests {
     }
 
     /// The whole classification table, enumerated. The exhaustive `match` below
-    /// is what makes this a claim about EVERY kind rather than a spot check:
+    /// is what makes this a claim about every kind rather than a spot check:
     /// adding a variant fails to compile here and in `is_execution` /
-    /// `is_admission`, so the "a new kind must opt IN to being delayed" comment
+    /// `is_admission`, so the "a new kind must opt in to being delayed" comment
     /// cannot outlive its implementation.
     #[test]
     fn every_event_kind_is_classified_deliberately() {
@@ -933,7 +933,7 @@ mod tests {
                 // exempts it from the venue's `DelayAcks` hold.
                 EventKind::Admission => (false, true, 1),
                 // History is exempt from the ack delay for the same reason and
-                // rides the same priority lane, but buckets with DATA on the
+                // rides the same priority lane, but buckets with data on the
                 // adapter's own inbound knob, because it is the same river
                 // pulled rather than pushed. That split - admission on the
                 // venue's outbound classes, data on the adapter's inbound
@@ -1052,7 +1052,7 @@ mod tests {
         // Every non-numeric variant is unconditionally valid. The two reason
         // carriers and the id carrier are here at legal values because the
         // loop used to skip them entirely, so nothing established that a
-        // well-formed arm of theirs is ACCEPTED - only that a malformed one is
+        // well-formed arm of theirs is accepted - only that a malformed one is
         // refused, which a validator refusing everything also satisfies.
         for div in [
             control::Divergence::RejectNextSubmit {
@@ -1112,7 +1112,7 @@ mod tests {
         );
     }
 
-    /// The half that only exists because the arm is now IDENTITY.
+    /// The half that only exists because the arm is now identity.
     ///
     /// Two spellings that generate the same water must key the same river, or
     /// ordinary use strands rivers against a cap that never evicts. The
@@ -1123,7 +1123,7 @@ mod tests {
     fn equivalent_generator_arms_normalize_to_one_identity() {
         // Accumulated rather than written: a scenario that builds a multiplier
         // by adding steps lands one ulp away from the literal, which is the
-        // whole hazard. Asserted to differ FIRST, because a pair that happens
+        // whole hazard. Asserted to differ first, because a pair that happens
         // to be bit-equal would make the equality below vacuous - and the
         // obvious candidate, 11.0/10.0 against 1.1, is exactly that trap: those
         // two are the same double and prove nothing.
@@ -1147,7 +1147,7 @@ mod tests {
             assert_eq!(neutral, Ok(None), "a neutral arm collapses to no arm");
         }
 
-        // An arm whose window has closed is NOT neutral: it moved the warmup,
+        // An arm whose window has closed is not neutral: it moved the warmup,
         // the history and the generator's path-dependent state, so the water
         // after it is not the water that never had it.
         let expired = control::GeneratorArm::normalize(0, 1, 4.0, 4.0).unwrap();

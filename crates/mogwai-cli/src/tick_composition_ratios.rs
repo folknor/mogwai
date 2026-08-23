@@ -3,8 +3,8 @@
 
 //! `mogwai tick-composition-ratios`: the BBO budget sizing policy.
 //!
-//! ITS OWN SUBCOMMAND, not a `--report` mode on `tick-composition`. That
-//! command MEASURES a tape; this one turns a measurement into proposed
+//! Its own subcommand, not a `--report` mode on `tick-composition`. That
+//! command measures a tape; this one turns a measurement into proposed
 //! constants and refuses landings that fail its acceptance gates. Fusing them
 //! would let one invocation measure a fixture and bless it in the same breath,
 //! which is how a sizing policy stops being evidence about anything.
@@ -113,7 +113,7 @@ pub(crate) fn run(args: &RatiosArgs) -> anyhow::Result<()> {
             let before = read(&before_path)?;
             let after = read(&after_path)?;
 
-            // The calendar classification is DERIVED from the presets the
+            // The calendar classification is derived from the presets the
             // fixture actually carries, not from a hardcoded tuple: a new
             // instrument appears here and gets classified, where a literal list
             // would have left it unchecked while still passing.
@@ -121,7 +121,7 @@ pub(crate) fn run(args: &RatiosArgs) -> anyhow::Result<()> {
             let presets = tcr::PresetCalendars::derive(&names)?;
 
             let result = tcr::compare(mode, &before, &after, &presets)?;
-            // The PROPOSALS render as integers, matching the Python, because
+            // The proposals render as integers, matching the Python, because
             // they are integers by construction - `power_of_two` and `million`
             // both produce whole numbers, and `max_extend_ticks` is carried
             // through unchanged. Printing `67108864.0` for a value somebody

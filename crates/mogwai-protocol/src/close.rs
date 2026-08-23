@@ -1,24 +1,24 @@
 //! Websocket close semantics, shared by the venue and by every consumer that
 //! reads a close frame.
 //!
-//! THE CLOSE CODE DOES NOT CARRY THE SEMANTIC, and this module exists because
-//! an adapter once believed it did. WS 1000 is the ordinary code for ANY
+//! The close code does not carry the semantic, and this module exists because
+//! an adapter once believed it did. WS 1000 is the ordinary code for any
 //! graceful close: the venue sends it when a run completes, when a passenger's
 //! configured duration elapses, and when a newer connection evicts this one -
 //! and a proxy or a load balancer closing an idle socket sends it too, on
 //! behalf of nobody in this protocol. Three different terminal meanings and one
 //! non-meaning share two bytes.
 //!
-//! So the REASON string is the discriminator, and it is a protocol contract
+//! So the reason string is the discriminator, and it is a protocol contract
 //! rather than a log line: the venue writes these exact strings and a consumer
-//! classifies against them. The terminal FRAMES - `VenueMessage::RunComplete`
+//! classifies against them. The terminal frames - `VenueMessage::RunComplete`
 //! and `VenueMessage::PassengerDurationComplete` - remain the primary signals,
 //! one per terminal this module names except eviction, which has no frame at
 //! all. The close is their socket-level fallback for a reader that loses the
 //! final text frame while the venue drains, and it agrees with the frame rather
 //! than refining it.
 //!
-//! A reason this module does not recognize is NOT terminal. That is the safe
+//! A reason this module does not recognize is not terminal. That is the safe
 //! default in both directions: an unrecognized graceful close is a transport
 //! event a consumer may redial through, where treating it as completion would
 //! silently end a run that is still going.
@@ -28,14 +28,14 @@ pub const NORMAL: u16 = 1000;
 
 /// The most reason bytes a close frame can carry.
 ///
-/// RFC 6455 caps a CONTROL frame's payload at 125 bytes and a close frame
+/// RFC 6455 caps a control frame's payload at 125 bytes and a close frame
 /// spends the first two of them on the status code, so 123 is the whole budget
-/// for the reason. This is NOT the same cap as `MAX_REASON_LEN`, which bounds a
-/// reason travelling inside a TEXT frame and is four times larger; a close
+/// for the reason. This is not the same cap as `MAX_REASON_LEN`, which bounds a
+/// reason travelling inside a text frame and is four times larger; a close
 /// reason trimmed only to that one is still four times too long for the frame
 /// it goes in.
 ///
-/// AN OVER-LONG REASON IS NOT A COSMETIC DEFECT HERE, which is why the cap
+/// An over-long reason is not a cosmetic defect here, which is why the cap
 /// lives beside `classify` rather than at a call site. A conforming peer must
 /// fail the connection on an oversized control frame, so the close that carries
 /// the discriminator either never leaves or never arrives - and a consumer that
@@ -46,9 +46,9 @@ pub const MAX_REASON_BYTES: usize = 123;
 
 /// Trim a close reason to `MAX_REASON_BYTES` on a char boundary.
 ///
-/// TRIM THE TAIL, NEVER THE HEAD, and compose the reason before calling this:
+/// Trim the tail, never the head, and compose the reason before calling this:
 /// every discriminator this module reads is either a whole short constant or a
-/// PREFIX, so a reason built prefix-first survives the trim as the same
+/// prefix, so a reason built prefix-first survives the trim as the same
 /// terminal while the droppable detail is what gets spent. A caller that
 /// appended its discriminator would classify differently after a trim than
 /// before it.
@@ -74,7 +74,7 @@ pub const RUN_COMPLETE: &str = "run complete";
 ///
 /// The venue sends `VenueMessage::PassengerDurationComplete` ahead of this
 /// close, so a consumer classifying on the frame and one classifying on the
-/// close reach the SAME answer. That is what this reason could not promise
+/// close reach the same answer. That is what this reason could not promise
 /// while both completions announced one frame: a frame-reading consumer called
 /// a passenger's own deadline a finished run and never read the close, so this
 /// arm was reachable only when the frame was lost, and nothing could be built on
@@ -83,7 +83,7 @@ pub const DURATION_COMPLETE: &str = "passenger duration complete";
 
 /// Prefix on the eviction close's reason. The remainder names the account.
 ///
-/// Terminal for this consumer, and terminal for a DIFFERENT reason than
+/// Terminal for this consumer, and terminal for a different reason than
 /// completion: nothing failed and nothing finished, but a consumer that redialled
 /// here would evict whatever evicted it, forever.
 pub const EVICTED_PREFIX: &str = "evicted: ";
@@ -119,7 +119,7 @@ pub fn classify(code: u16, reason: &str) -> Option<Terminal> {
 mod tests {
     use super::*;
 
-    /// The three reasons the venue writes are the ones that MUST survive
+    /// The three reasons the venue writes are the ones that must survive
     /// intact: a trimmed constant classifies as nothing, and nothing is
     /// non-terminal. `EVICTED_PREFIX` needs room for a detail after it too,
     /// which is what makes this an inequality rather than a bare fit check.

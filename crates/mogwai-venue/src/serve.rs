@@ -4,7 +4,7 @@
 //! One foreground mogwai venue run: boot, bind, announce readiness, serve.
 //!
 //! This is the entry the `mogwai` binary's `serve` subcommand calls. The
-//! argument parsing lives with the CLI; everything the venue actually DOES with
+//! argument parsing lives with the CLI; everything the venue actually does with
 //! those three values lives here, next to the state it builds.
 
 use std::{io::Write, path::PathBuf, sync::Arc, time::Duration};
@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Raw fills the generator synthesizes per wall second, used only to project
-/// warmup cost at boot. It is a MEASURED number, not a target: see the
+/// warmup cost at boot. It is a measured number, not a target: see the
 /// "warmup materialization throughput" section of `reference/performance.md`,
 /// which records the boots it comes from and the method. Re-measure the same way
 /// whenever the generator, the checkpoint stride or the tape protocol changes,
@@ -32,17 +32,17 @@ use crate::{
 /// It drifted exactly that way once. This read 5_000_000 while three measured
 /// boots agreed on 2.9 M, so the projection ran 1.7x optimistic and the
 /// `WARMUP_WARN_SECS` threshold below fired at roughly 104 seconds of real cost
-/// rather than the 60 it names. The number covers the WHOLE boot interval -
+/// rather than the 60 it names. The number covers the whole boot interval -
 /// walk, checkpoint retention and the frontier draw - because that is what an
 /// operator actually waits through.
 const SYNTHESIS_TICKS_PER_SEC: f64 = 2_900_000.0;
-/// Projected warmup synthesis above this escalates the boot line from INFO to
-/// WARN. No refusal: warmup length is the operator's call, and the obligation
+/// Projected warmup synthesis above this escalates the boot line from info to
+/// warn. No refusal: warmup length is the operator's call, and the obligation
 /// this discharges is only that an extreme warmup fails loudly rather than
 /// looking like a hung boot.
 const WARMUP_WARN_SECS: f64 = 60.0;
 
-/// The venue always binds loopback on an EPHEMERAL port, and there is no flag to
+/// The venue always binds loopback on an ephemeral port, and there is no flag to
 /// change either half.
 ///
 /// The port is not choosable because one venue serves one run: a fixed default
@@ -52,7 +52,7 @@ const WARMUP_WARN_SECS: f64 = 60.0;
 /// bookkeeping. The kernel allocates, and the endpoint reaches its owner through
 /// the readiness record (or, for a human, the `mogwai listening` log line).
 ///
-/// The HOST is not choosable because the venue models latency on the sim axis
+/// The host is not choosable because the venue models latency on the sim axis
 /// only and runs on the same machine as its consumer, where physical latency is
 /// negligible by construction. Serving another interface would put a real
 /// network under a fixture that does not model one.
@@ -61,20 +61,20 @@ const BIND_ADDR: &str = "127.0.0.1:0";
 /// Arms the kernel's parent-death signal, and refuses to serve if the launcher
 /// is already gone.
 ///
-/// `PR_SET_PDEATHSIG` fires only on a FUTURE death of the parent, so on its own
+/// `PR_SET_PDEATHSIG` fires only on a future death of the parent, so on its own
 /// it carries a race: a launcher that dies between forking this process and this
 /// call is never signalled for, and the venue serves a run nobody owns, forever,
 /// holding a port whose number died with the launcher that was going to read it.
 /// With no PID file and no `stop` subcommand, the kernel is the only reaper
 /// there is, so that window has to be closed here rather than tolerated.
 ///
-/// Reading the parent BEFORE arming and again after closes it: if the two
+/// Reading the parent before arming and again after closes it: if the two
 /// differ, this process was reparented in between, which means the launcher died
 /// inside the window and no signal is coming. Comparing against the observed
 /// value rather than against pid 1 keeps this correct under a subreaper, where
 /// an orphan is reparented to the subreaper and never to init.
 ///
-/// Comparing samples cannot see a launcher that was ALREADY gone before the
+/// Comparing samples cannot see a launcher that was already gone before the
 /// first instruction ran: both reads return the reaper's pid, nothing changed,
 /// and the venue serves a run nobody owns. That is not theoretical - a launcher
 /// that spawns and exits immediately reproduces it every time. `expected` closes
@@ -83,7 +83,7 @@ const BIND_ADDR: &str = "127.0.0.1:0";
 /// passes it.
 ///
 /// A launcher that cannot pass it is not defenceless, and this is why the
-/// contract says to CAPTURE stdout rather than merely suggesting it. The venue
+/// contract says to capture stdout rather than merely suggesting it. The venue
 /// writes its readiness line to a pipe whose read end died with the launcher, so
 /// the write fails and the venue exits - later than this check, since it happens
 /// after warmup, but before it has served anything. A launcher that both
@@ -111,7 +111,7 @@ fn arm_parent_death_signal(expected: Option<i32>) -> anyhow::Result<()> {
             return Err(std::io::Error::last_os_error().into());
         }
     }
-    // A blocked SIGTERM is INHERITED ACROSS EXEC, and a blocked parent-death
+    // A blocked SIGTERM is inherited across exec, and a blocked parent-death
     // signal is simply never delivered - the venue outlives its launcher with
     // the signal pending forever. That makes the whole cleanup story depend on
     // a property of whichever process happened to spawn us, which no launcher
@@ -189,7 +189,7 @@ async fn serve_async(
         Arc::clone(&profiles),
     );
     // Boot projections. Both are advisory - warmup length and ring depth are
-    // the operator's call - but an extreme warmup must fail LOUDLY rather than
+    // the operator's call - but an extreme warmup must fail loudly rather than
     // look like a hung boot, and an undersized ring costs every passenger on
     // that boat declared holes in its market view, which is worth a warning at
     // boot rather than a stream of them at run time. A missing profile is not
@@ -223,17 +223,17 @@ async fn serve_async(
             );
         }
     }
-    // NO RIVER IS WARMED HERE, and none is boated. Boot used to materialize the
+    // No river is warmed here, and none is boated. Boot used to materialize the
     // default symbol's whole warmup span before writing its readiness line and
     // then keep a boat on it for the life of the process, which made one river a
     // privileged object: warm before anyone named it, and never wound down. Every
     // other river has always been synthesized inside the request that first named
     // it, so what this removes is an exception rather than a rule.
     //
-    // WHAT BOOT STILL OWES IS VALIDATION, and that has already run above: label
+    // What boot still owes is validation, and that has already run above: label
     // legality, every configured shape, funding for each settlement currency, the
     // scalar bounds. What it cannot owe is proof that a validated shape will
-    // GENERATE - only generating proves that - so a generator failure during a
+    // generate - only generating proves that - so a generator failure during a
     // first materialization is a venue fault raised then, not a refusal to start.
     let sim = build_run_clock(&cfg, now_ns())?;
     let data_origin_ns = source::TAPE_ORIGIN_NS;
@@ -332,7 +332,7 @@ async fn serve_async(
         .route("/account", get(account))
         .route("/instruments", get(instruments))
         // Namespaced, because demotion by prose is not a transport boundary.
-        // These serve the UNARMED river of a label on the run clock, which is
+        // These serve the unarmed river of a label on the run clock, which is
         // the operator's view and not any passenger's: a passenger carrying a
         // generator arm is on other water, a passenger on a slow boat is behind
         // the run clock so these can hand it rows still in its future, and a
@@ -345,13 +345,13 @@ async fn serve_async(
         .route("/clock", get(clock))
         .route("/ws", get(ws_upgrade))
         .route("/accounts", post(http::open_account))
-        // HAVOC IS PER-ACCOUNT CONFIGURATION, POSTED ON CONNECT, AND CONSTANT
-        // FOR THAT CONNECTION. An account's knobs arrive as it connects and do
+        // Havoc is per-account configuration, posted on connect, and constant
+        // for that connection. An account's knobs arrive as it connects and do
         // not change again while it is connected; no consumer arms a divergence
         // against an account already trading, and no strategy ever sees its
         // knobs move underneath it.
         //
-        // THE VENUE DOES NOT ENFORCE THIS, and the gap is stated rather than
+        // The venue does not enforce this, and the gap is stated rather than
         // implied: this route accepts an arm at any instant of a run, including
         // against an account mid-connection, and answers 202 for it. The
         // constraint is a convention held by the callers, so an operator who
@@ -366,13 +366,13 @@ async fn serve_async(
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(BIND_ADDR).await?;
     let bound_addr = listener.local_addr()?;
-    // The readiness record goes to STDOUT, unconditionally, as the first and
+    // The readiness record goes to stdout, unconditionally, as the first and
     // only thing this process ever writes there. A launcher captures stdout and
     // reads one line; a human running by hand sees the same line in the
     // terminal. It is not gated behind a flag because the earlier `--ready-fd
     // <FD>` form took an unvalidated integer straight into `from_raw_fd`: a
-    // number naming some OTHER inherited fd wrote the record into whatever that
-    // was and then CLOSED it, while the launcher blocked forever on a pipe that
+    // number naming some other inherited fd wrote the record into whatever that
+    // was and then closed it, while the launcher blocked forever on a pipe that
     // received neither a line nor an EOF. Stdout cannot be misaddressed, needs
     // no coordination between the spawn call and the argv, and is a first-class
     // primitive in every process API a launcher might be written against.
@@ -406,36 +406,36 @@ async fn serve_async(
     // Without a deadline the sender is parked here rather than dropped: a
     // dropped sender makes `changed()` resolve immediately, which would shut an
     // indefinite run down the instant it started serving.
-    // Set by the deadline task and read by `serve_until_drained`: a PLANNED
+    // Set by the deadline task and read by `serve_until_drained`: a planned
     // completion owes its announcement to every open socket, a signal does not.
     let planned_completion = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let deadline_completion = Arc::clone(&planned_completion);
     let _stop_tx_parked = match completing_run.deadline_ns {
         Some(deadline_ns) => {
-            // SLEPT TO AN INSTANT, NOT FOR A SPAN. `sim` is anchored at
+            // Slept to an instant, not for a span. `sim` is anchored at
             // `build_run_clock(&cfg, now_ns())`, taken right after warmup, and
             // everything between that anchor and here - boat placement, the
             // listener bind, the readiness write - is wall time the run has
-            // already spent. Sleeping `deadline_ns - started_ns` from HERE
+            // already spent. Sleeping `deadline_ns - started_ns` from here
             // measured the declared duration from the wrong epoch and overran
             // it by the whole boot interval, which at speed 100 is a large
             // multiple of the declared duration in sim terms.
             //
-            // The remainder is already WALL nanoseconds - `wall_ns` did the
+            // The remainder is already wall nanoseconds - `wall_ns` did the
             // scaling - so it is slept raw rather than through `wall_duration`,
             // which would scale it a second time.
             //
-            // SLEPT IN A LOOP UNTIL THE SIM CLOCK IS ACTUALLY PAST THE
-            // DEADLINE, rather than once to a computed instant. `wall_ns`
+            // Slept in a loop until the sim clock is actually past the
+            // deadline, rather than once to a computed instant. `wall_ns`
             // truncates through the scaled conversion, so waking exactly at
             // `wall_ns(deadline_ns)` can leave `sim_ns(now)` a few hundred
-            // nanoseconds SHORT of `deadline_ns` at a high speed - and the run
+            // nanoseconds short of `deadline_ns` at a high speed - and the run
             // would then announce a completion carrying less elapsed sim time
             // than it declared. Nothing but the scheduler's own overshoot
             // covered that. The loop makes serving the whole declared duration
-            // a property of this code instead - ON THE RUN CLOCK, which is the
+            // a property of this code instead - on the run clock, which is the
             // only clock it can be a property of. A socket re-derives its
-            // `RunComplete` on ITS BOAT's clock, and a boat is anchored at its
+            // `RunComplete` on its boat's clock, and a boat is anchored at its
             // own placement, so the announcement one socket reads can still
             // carry slightly less elapsed sim time than the run declared. See
             // `reference/clock.md`; nothing here can close that, and the wait
@@ -484,15 +484,15 @@ async fn serve_async(
 }
 
 /// How long the deadline task sleeps before asking again, or `None` once the
-/// RUN CLOCK is genuinely past `deadline_ns`.
+/// run clock is genuinely past `deadline_ns`.
 ///
-/// THE ONE RULE IS THAT `None` MEANS PAST, NEVER "CLOSE ENOUGH". `wall_ns`
+/// The one rule is that `None` means past, never "close enough". `wall_ns`
 /// truncates through the scaled conversion, so the wall instant it computes for
-/// a deadline can map back to a sim instant a few hundred nanoseconds SHORT of
+/// a deadline can map back to a sim instant a few hundred nanoseconds short of
 /// it at a high speed - and a task that woke there and stopped would announce a
 /// completion carrying less elapsed sim time than the run declared, with only
 /// the scheduler's own sleep overshoot standing between it and a false claim.
-/// The remainder is already WALL nanoseconds, so it is returned raw rather than
+/// The remainder is already wall nanoseconds, so it is returned raw rather than
 /// through `wall_duration`, which would scale it a second time; a truncated
 /// remainder can be zero while the sim clock is still short, so the wait floors
 /// at a nanosecond and yields rather than spinning.
@@ -523,8 +523,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// unbounded wait would turn a completed or signalled venue into exactly the
 /// orphan this lifecycle exists to remove.
 ///
-/// AXUM'S DRAIN IS NOT THE WHOLE DRAIN, and that gap is what `run` and
-/// `planned_completion` close. `axum::serve` waits on hyper CONNECTION futures,
+/// Axum's drain is not the whole drain, and that gap is what `run` and
+/// `planned_completion` close. `axum::serve` waits on hyper connection futures,
 /// and an upgraded connection's resolves at the 101 - so its serve future can
 /// complete while every passenger is still mid-frame. Returning there
 /// drops the runtime and every passenger with it, which is how a planned
@@ -605,12 +605,12 @@ mod tests {
         assert_eq!(addr.port(), 0, "{addr}");
     }
 
-    /// THE DEADLINE TASK MAY NOT STOP EARLY, and the case that would is the
+    /// The deadline task may not stop early, and the case that would is the
     /// wall instant its own conversion computes.
     ///
     /// Waking at `wall_ns(deadline)` and stopping there is the shape this
     /// replaced: at speed 100 the scaled conversion truncates, so that instant
-    /// maps back SHORT of the deadline for most deadlines and the run would
+    /// maps back short of the deadline for most deadlines and the run would
     /// announce less elapsed sim time than it declared. The scan asserts the
     /// biconditional - a wait is owed exactly while the sim clock is short -
     /// and then asserts that the truncating case was actually reached, because
@@ -635,7 +635,7 @@ mod tests {
             if short {
                 truncated += 1;
             }
-            // And once the sim clock IS past it, the task stops rather than
+            // And once the sim clock is past it, the task stops rather than
             // sleeping the run out one nanosecond at a time.
             assert!(
                 deadline_wait(sim, deadline_ns, converted + 1_000_000).is_none(),

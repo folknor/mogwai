@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The UNIFIED protocol-12a block engine (the retired rewrite plan, phase
+//! The unified protocol-12a block engine (the retired rewrite plan, phase
 //! 2a). Blocks 1-4, the permutation records and the Block-5 forensics exist
-//! here ONCE, and both measurement sides drive them:
+//! here once, and both measurement sides drive them:
 //!
-//! - the OBSERVED side ([`observed`]) feeds TBBO rows through the phase-1
+//! - the observed side ([`observed`]) feeds TBBO rows through the phase-1
 //!   stream layer, inferring parents from contiguous `(ts, side)` runs;
-//! - the GENERATED side ([`generated`]) feeds `mogwai-data` `TickEvent`s and
+//! - the generated side ([`generated`]) feeds `mogwai-data` `TickEvent`s and
 //!   per-parent `VolTrace` records from a walk.
 //!
 //! Until this engine lands, the two sides were two independent
@@ -16,9 +16,9 @@
 //! agreement was checked only by comparing artifacts. That is the
 //! cross-language float-mismatch defect class the rewrite exists to kill.
 //! Both originals stay on disk and authoritative until phase 2c: where this
-//! port and the Python disagree on the OBSERVED side the Python wins; where
-//! it disagrees with `measure12a.rs` on the GENERATED side, `measure12a.rs`
-//! wins (its outputs ARE the committed walk caches).
+//! port and the Python disagree on the observed side the Python wins; where
+//! it disagrees with `measure12a.rs` on the generated side, `measure12a.rs`
+//! wins (its outputs are the committed walk caches).
 //!
 //! ## The arithmetic conventions, and why each is spelled out
 //!
@@ -26,7 +26,7 @@
 //!   arrives that way; the generated side converts its `Decimal` prices
 //!   exactly, refusing anything off the 1e-9 grid. No price is ever rounded
 //!   through `f64`.
-//! - **The log mid is `ln((bid_nanos + ask_nanos) as f64 / 2.0)`.** The SUM
+//! - **The log mid is `ln((bid_nanos + ask_nanos) as f64 / 2.0)`.** The sum
 //!   is formed in exact integers, halved in `f64`, and only then logged. Log
 //!   differences are not invariant under rescaling of the input, so feeding
 //!   `ln` a mid in points rather than in nano-units shifts every block-3 and
@@ -34,7 +34,7 @@
 //!   class (3.55e-15 relative) was caught here once already.
 //! - **Tick ranges are exact integer divisions that refuse off-grid.** The
 //!   trade range divides by the full tick; the quote-mid range divides the
-//!   PRICE SUM by the full tick, which is why it is in HALF ticks.
+//!   price sum by the full tick, which is why it is in half ticks.
 //! - **Segment iteration follows insertion order**, matching the Python's
 //!   `state.order`, because block-3 and block-4 sums are float
 //!   accumulations whose value depends on the order the segments contribute.
@@ -113,9 +113,9 @@ pub(crate) struct SegmentAcc {
     pub(crate) end_ns: u64,
     /// First-child timestamps of the session's sided parents.
     pub(crate) parent_ts: Vec<u64>,
-    /// Endpoint timestamps and log mids of the VALID-BOOK parents only. The
+    /// Endpoint timestamps and log mids of the valid-book parents only. The
     /// two arrays are index-parallel; `mid_log[i]` is the endpoint at
-    /// `mid_ts[i]`, and return `i` is the adjacent difference ENDING at
+    /// `mid_ts[i]`, and return `i` is the adjacent difference ending at
     /// `mid_ts[i + 1]`.
     pub(crate) mid_ts: Vec<u64>,
     pub(crate) mid_log: Vec<f64>,
@@ -140,7 +140,7 @@ pub struct SessionAcc {
     pub date: String,
     pub session_start_ns: u64,
     pub session_end_ns: u64,
-    /// Segment INSERTION order, mirroring the Python `state.order`. Both
+    /// Segment insertion order, mirroring the Python `state.order`. Both
     /// calendar segments are materialized at close (an empty segment still
     /// contributes its scheduled zero-count windows and its never-established
     /// horizon chains), so the order is data-dependent only in which of the
@@ -148,10 +148,10 @@ pub struct SessionAcc {
     order: Vec<u8>,
     segments: [Option<SegmentAcc>; 2],
     bounds: [(u64, u64); 2],
-    /// minute -> (trade lo, trade hi) in 1e-9 price units, over ALL
+    /// minute -> (trade lo, trade hi) in 1e-9 price units, over all
     /// structurally valid prints (unsided and invalid-book included).
     trade_min: BTreeMap<u64, (i64, i64)>,
-    /// minute -> (lo, hi) quote-mid HALF ticks, valid-book parents only.
+    /// minute -> (lo, hi) quote-mid half ticks, valid-book parents only.
     quote_min: BTreeMap<u64, (i64, i64)>,
     /// minute -> sided parent count by first-child timestamp.
     n_min: BTreeMap<u64, u64>,
@@ -293,7 +293,7 @@ impl SessionAcc {
         *self.n_min.entry(minute).or_insert(0) += 1;
         if book_normal {
             let sum = bid_nanos + ask_nanos;
-            // The quote-mid range in HALF ticks: the price SUM divided by the
+            // The quote-mid range in half ticks: the price sum divided by the
             // full tick. Both prices are on the tick grid, so the sum always
             // divides exactly.
             let mid2 = exact_div(sum, TICK_UNITS, "quote-mid half-ticks")?;
@@ -304,7 +304,7 @@ impl SessionAcc {
             if mid2 > entry.1 {
                 entry.1 = mid2;
             }
-            // THE canonical log-mid: exact integer nano-unit sum, halved in
+            // The canonical log-mid: exact integer nano-unit sum, halved in
             // f64, then ln. See the module docs.
             #[expect(
                 clippy::cast_precision_loss,
@@ -357,7 +357,7 @@ impl SessionAcc {
     /// block implementations as `close` and deliberately avoids blocks 3 and
     /// 4 and permutation work.
     ///
-    /// A STABLE PROFILE FRAME: once per session rotation, roughly 23 times per
+    /// A stable profile frame: once per session rotation, roughly 23 times per
     /// seed-month, so the annotation is free and the frame separates the
     /// per-print accumulation from the per-session reduction - the split the
     /// Stage A round's lean-accumulator hypothesis turns on.
@@ -377,7 +377,7 @@ impl SessionAcc {
     /// The exact sparse joint histogram (spec 3.5), one record per distinct
     /// key with its occurrence count.
     fn block1(&self) -> LabResult<serde_json::Value> {
-        // Keyed for the frozen ascending sort: (n, quote with null FIRST as
+        // Keyed for the frozen ascending sort: (n, quote with null first as
         // -1, trade, hour, since, until).
         let mut hist: BTreeMap<(u64, i64, i64, u64, &'static str, &'static str), u64> =
             BTreeMap::new();
@@ -461,7 +461,7 @@ impl SessionAcc {
                     let count = (j - i) as u64;
                     i = j;
                     let Some(hour) = hour else {
-                        // Hour-crossing - INCLUDING a window ending exactly ON
+                        // Hour-crossing - including a window ending exactly on
                         // the hour boundary (endpoint-hour attribution,
                         // matching the fixed-horizon convention): excluded;
                         // runs and pairs reset.
@@ -493,7 +493,7 @@ impl SessionAcc {
                     if count > 0 {
                         run += 1;
                     } else {
-                        // Closed AFTER prev_hour advanced: an interrupted run
+                        // Closed after prev_hour advanced: an interrupted run
                         // is attributed to the hour of the zero window that
                         // ended it, exactly as the Python closure reads it.
                         close_run(&mut run, prev_hour, w, &mut cells);
@@ -528,7 +528,7 @@ impl SessionAcc {
         let mut perm_windows: PermWindows = BTreeMap::new();
 
         for seg in self.ordered() {
-            // Amendment A: every (segment, hour) the segment SPANS - every UTC
+            // Amendment A: every (segment, hour) the segment spans - every UTC
             // hour interval with a positive intersection with [origin, end) -
             // materializes a permutation cell, so hours with no emitted
             // windows still emit all-zero PermRecords.
@@ -601,7 +601,7 @@ impl SessionAcc {
                 }
             }
             // Permutation window index ranges: for 60/300, emitted windows map
-            // to the half-open RETURN index range whose endpoint ts lies in
+            // to the half-open return index range whose endpoint ts lies in
             // (b - W, b]. Return i is the adjacent-mid return ending at
             // mid_ts[i + 1], so the endpoint index is one ahead.
             let ts = &seg.mid_ts;
@@ -630,7 +630,7 @@ impl SessionAcc {
                 }
             }
             // Lag-1 parent-return scalar: consecutive adjacent-mid returns in
-            // the segment, attributed by the LATER return's endpoint hour.
+            // the segment, attributed by the later return's endpoint hour.
             let mut prev_r: Option<f64> = None;
             for idx in 1..seg.mid_ts.len() {
                 let r = seg.mid_log[idx] - seg.mid_log[idx - 1];
@@ -725,11 +725,11 @@ impl SessionAcc {
 
     /// The model-free past-only standardizer: trailing 300 s same-segment
     /// history, minimum 1000 returns, one-max-trimmed mean absolute scale
-    /// EXCLUDING the current return, `z = r / scale`. Zeros stay in history
-    /// and in the population. A nonpositive or non-finite scale OMITS that
+    /// excluding the current return, `z = r / scale`. Zeros stay in history
+    /// and in the population. A nonpositive or non-finite scale omits that
     /// residual (the return still enters history) per the rev-11 frozen
     /// exception; the omissions come back as one Amendment-F RefusalRec per
-    /// (session, hour) - the sole RefusalRec class owning OMITTED
+    /// (session, hour) - the sole RefusalRec class owning omitted
     /// observations rather than refusal-caused nulls. No duplicate record for
     /// the pooled "all" cell.
     fn block4(&self, scope: Scope) -> (serde_json::Value, Vec<serde_json::Value>) {
@@ -807,7 +807,7 @@ impl SessionAcc {
             }
         }
         // The Python sorts `per_hour` by `str(key)`, i.e. the numeric hours in
-        // lexicographic order ("0", "1", "10", ...) and "all" LAST - which is
+        // lexicographic order ("0", "1", "10", ...) and "all" last - which is
         // exactly BTreeMap<String> order.
         let mut out = serde_json::Map::new();
         for (key, acc) in &mut per_hour {
@@ -874,7 +874,7 @@ impl SessionAcc {
     /// The 5.1 counterfactuals: per (segment, hour) cell, both variants, 16
     /// replicates. The boundary partition and establishment depend only on
     /// timestamps, so each emitted window's permuted return is the sum of
-    /// permuted cell values over its FIXED index range.
+    /// permuted cell values over its fixed index range.
     fn permutations(&self, perm_windows: &PermWindows) -> Vec<serde_json::Value> {
         let mut records = Vec::new();
         let date_int = session_date_int(&self.date);
@@ -903,7 +903,7 @@ impl SessionAcc {
                 let pw = perm_windows.get(&(seg.index, hour)).unwrap_or(&empty);
                 // The cell's return positions: endpoint hour == hour. The
                 // emitted windows lie wholly inside the hour, so every index
-                // they cover belongs to the cell. A cell with ZERO adjacent
+                // they cover belongs to the cell. A cell with zero adjacent
                 // returns still emits its records (Amendment A).
                 let cell_idx: &[usize] = by_hour.get(&hour).map_or(&[], Vec::as_slice);
                 let values: Vec<f64> = cell_idx.iter().map(|&i| returns[i]).collect();
@@ -943,7 +943,7 @@ impl SessionAcc {
                         fisher_yates(&mut perm, state_seed);
                         let mut shuffled = values.clone();
                         if *variant == "sign" {
-                            // Shuffle SIGNS among the nonzero: magnitude order
+                            // Shuffle signs among the nonzero: magnitude order
                             // fixed, sign sequence permuted.
                             let signs: Vec<f64> = perm
                                 .iter()
@@ -953,7 +953,7 @@ impl SessionAcc {
                                 shuffled[p] = values[p].abs() * signs[k];
                             }
                         } else {
-                            // Shuffle MAGNITUDES among the nonzero: sign
+                            // Shuffle magnitudes among the nonzero: sign
                             // sequence fixed, magnitudes permuted.
                             let mags: Vec<f64> = perm.iter().map(|&p| values[p].abs()).collect();
                             for (k, &p) in nz_pos.iter().enumerate() {
@@ -982,11 +982,11 @@ impl SessionAcc {
 }
 
 /// Permutation index ranges: `(segment index, hour) -> horizon -> [(lo, hi)]`
-/// half-open RETURN index ranges of the emitted windows.
+/// half-open return index ranges of the emitted windows.
 type PermWindows = BTreeMap<(u8, u64), BTreeMap<u64, Vec<(usize, usize)>>>;
 
 /// `(count, sum_abs, max_abs)` over the emitted windows' return sums - the
-/// Amendment-A sufficient statistics. Emitted zero returns COUNT; an all-zero
+/// Amendment-A sufficient statistics. Emitted zero returns count; an all-zero
 /// population has zero sums.
 fn windows_stats(values: &[f64], windows: &[Vec<usize>]) -> (u64, f64, f64) {
     let mut cnt = 0u64;
@@ -1120,12 +1120,12 @@ fn close_run(
     *run = 0;
 }
 
-/// The pure-calendar window schedule ONE iterator both the block-2
+/// The pure-calendar window schedule one iterator both the block-2
 /// accumulator and (in phase 2b) the expected-exposure judge consume, so
 /// their endpoint rules cannot drift: `(start, stop, endpoint_hour | None)`
-/// for every segment-origin-aligned half-open window STRICTLY CONTAINED in
+/// for every segment-origin-aligned half-open window strictly contained in
 /// the segment. `None` marks an hour-crossing window - endpoint-hour
-/// attribution, so a window ending exactly ON the hour boundary crosses.
+/// attribution, so a window ending exactly on the hour boundary crosses.
 pub fn window_schedule(origin_ns: u64, end_ns: u64, w_ns: u64) -> Vec<(u64, u64, Option<u64>)> {
     let mut out = Vec::new();
     let mut start = origin_ns;
@@ -1150,8 +1150,8 @@ type Boundary = (u64, Option<f64>, bool, u64, Option<f64>);
 
 /// The 4.6-convention fixed-horizon chain over one segment's valid-mid
 /// endpoint series. `asof` at a boundary is the log mid of the last endpoint
-/// with `ts <= boundary` (EQUAL timestamps update first - the protocol-11
-/// pending rule). The first boundary with an `asof` ESTABLISHES the chain; a
+/// with `ts <= boundary` (equal timestamps update first - the protocol-11
+/// pending rule). The first boundary with an `asof` establishes the chain; a
 /// boundary emits unless its window crosses a UTC hour; boundaries run
 /// `origin + k*W` strictly inside the segment.
 fn wall_boundaries(seg: &SegmentAcc, h_ns: u64) -> Vec<Boundary> {

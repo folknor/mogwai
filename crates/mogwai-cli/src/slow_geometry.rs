@@ -325,7 +325,7 @@ fn cross_fit(
             });
             continue;
         }
-        // Stage M Amendment 1: COMPLETE-CASE TRAINING. A training session
+        // Stage M Amendment 1: complete-case training. A training session
         // with any excluded cell is removed from the fold entirely - before
         // every per-hour moment and the correlation - and the drop is
         // recorded. The estimand is the complete-case training population.

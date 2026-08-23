@@ -33,7 +33,7 @@ const BUDGET: usize = 1_434_000_000;
 /// positioning benchmark restores from the same grid and pays the same residual
 /// drain the sweeper does.
 const CHECKPOINT_K: usize = 8_192;
-/// This BENCH's own walk length. It has no venue counterpart: the venue's
+/// This benchmark's own walk length. It has no venue counterpart: the venue's
 /// per-request seek budget (`MAX_HISTORY_SEEK_TICKS`) died with the lazy
 /// history path, because a declared warmup is materialized eagerly and a
 /// request below the floor is refused by name rather than served short. What
@@ -136,7 +136,7 @@ fn benches(c: &mut Criterion) {
     c.bench_function("source_positioning", |b| {
         b.iter_batched(
             || (),
-            // Batched with a unit setup so the positioned source is an OUTPUT
+            // Batched with a unit setup so the positioned source is an output
             // and its teardown falls outside the timed region, as in the walk
             // benchmarks above.
             |()| {

@@ -4,15 +4,15 @@
 //! `analysis/tick_composition_ratios.py`: the BBO budget sizing policy.
 //!
 //! Pairs protocol composition fixtures and applies the budget policy that
-//! decides the shipped REACH ceilings - the sweep drain budget, the extend
+//! decides the shipped reach ceilings - the sweep drain budget, the extend
 //! ceiling, the warmup materialization ceiling and `fanout_depth`. It is an
 //! independent estimator, not a report generator: the resize rule in
 //! [`compare`] (worst p999 ratio, two-times headroom, power-of-two or
 //! next-million rounding, then the larger of that and the required reach) is
 //! the decision procedure those constants come from.
 //!
-//! `checkpoint_k` is still computed and reported, but it is NO LONGER a
-//! constant this policy decides. Checkpoint spacing bounds a residual REPLAY,
+//! `checkpoint_k` is still computed and reported, but it is no longer a
+//! constant this policy decides. Checkpoint spacing bounds a residual replay,
 //! not a reach: the index extends as far as it is asked to either way, and a
 //! wider stride buys only fewer retained generator clones at the cost of a
 //! longer restore. Sizing it by tick density therefore grew it to 67,108,864
@@ -22,8 +22,8 @@
 //! proposal here is advisory, and the baselines below stay as the historical
 //! record of what the policy proposed when it did decide it.
 //!
-//! ITS OWN SUBCOMMAND, deliberately, rather than a `--report` mode on
-//! `tick-composition`. That command MEASURES a tape and this one BLESSES the
+//! Its own subcommand, deliberately, rather than a `--report` mode on
+//! `tick-composition`. That command measures a tape and this one blesses the
 //! measurement into constants; fusing them would let one invocation measure a
 //! fixture and accept it in the same breath.
 //!
@@ -33,22 +33,22 @@
 //! which is exactly why they are not duplicated: two copies of a sizing rule
 //! drift, and the drift arrives as a constant nobody can re-derive.
 //!
-//! - `projection` compares versions 6 and 7 from ONE traversal. Protocol 6 is a
+//! - `projection` compares versions 6 and 7 from one traversal. Protocol 6 is a
 //!   count projection of the protocol-7 stream, because quote placement draws no
-//!   randomness, so the fixtures SHARE a `pairing_id` and a mismatch means one
+//!   randomness, so the fixtures share a `pairing_id` and a mismatch means one
 //!   is stale.
-//! - the `independent` modes compare TWO traversals. The pairings MUST differ;
+//! - the `independent` modes compare two traversals. The pairings must differ;
 //!   equal pairings would mean one run was compared with itself.
 //!
 //! # Why each mode carries its own baseline
 //!
 //! A ratio is meaningless without the number it resizes, and that number is
-//! whatever shipped at the mode's BEFORE version - not whatever ships today.
+//! whatever shipped at the mode's before version - not whatever ships today.
 //! Sharing one table resized the protocol-7 constants by the pre-protocol-7
 //! baseline and under-proposed checkpoint and fanout by the factor protocol 7
-//! had already absorbed, WHILE EVERY ACCEPTANCE ASSERTION STILL PASSED. So a
+//! had already absorbed, while every acceptance assertion still passed. So a
 //! baseline is a historical record, frozen once its mode's resize has landed,
-//! and it lives in [`MODES`] as committed DATA that is never re-derived.
+//! and it lives in [`MODES`] as committed data that is never re-derived.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -60,11 +60,11 @@ use crate::error::{LabError, LabResult};
 /// Which acceptance gate a mode runs before any ratio is computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Acceptance {
-    /// Only the session shape moved: `parents` AND `ticks_per_parent` are
+    /// Only the session shape moved: `parents` and `ticks_per_parent` are
     /// frozen for every pairing, and the calendar-free presets byte-identical.
     /// A fanout change proves the landing touched something outside its scope.
     SessionReshape,
-    /// A preset fit: the futures' cadence and fanout MAY move, since fitted
+    /// A preset fit: the futures' cadence and fanout may move, since fitted
     /// scalars change what a parent looks like. The calendar-free presets are
     /// still frozen.
     PresetFit,
@@ -104,7 +104,7 @@ pub struct Mode {
 
 /// The mode table, verbatim from the Python's `MODES`.
 ///
-/// EVERY BASELINE HERE IS HISTORY. A protocol-12 comparison adds a mode whose
+/// Every baseline here is history. A protocol-12 comparison adds a mode whose
 /// baseline is the protocol-11 column; it does not edit the ones below.
 pub const MODES: [Mode; 4] = [
     Mode {
@@ -175,7 +175,7 @@ pub const MODES: [Mode; 4] = [
     },
 ];
 
-/// The three fields the 8/9 identity gate validates SEPARATELY before the
+/// The three fields the 8/9 identity gate validates separately before the
 /// generic equality comparison omits them. They are not ignored: the version
 /// labels are asserted directly, the pairing ids must both exist and differ,
 /// and `projection` must equal the producer's canonical label for its own
@@ -183,10 +183,10 @@ pub const MODES: [Mode; 4] = [
 pub const IDENTITY_SEPARATELY_VALIDATED: [&str; 3] =
     ["tape_protocol_version", "pairing_id", "projection"];
 
-/// THE REJECTED PROTOCOL-11 FANOUT PROPOSAL, carried forward as DATA.
+/// The rejected protocol-11 fanout proposal, carried forward as data.
 ///
 /// `independent_10_11` mechanically proposes a `fanout_depth` of 16,777,216.
-/// That proposal was REJECTED - `mogwai-venue`'s
+/// That proposal was rejected - `mogwai-venue`'s
 /// `the_fanout_default_carries_the_protocol_11_exception` pins the exception -
 /// and without this record the next comparison re-proposes it and re-litigates
 /// a settled ruling. A sizing tool that cannot remember a refusal will keep
@@ -219,14 +219,14 @@ fn million(value: f64) -> f64 {
     (value / 1_000_000.0).ceil() * 1_000_000.0
 }
 
-/// The presets a comparison holds byte-identical, derived from the CALENDAR
+/// The presets a comparison holds byte-identical, derived from the calendar
 /// rather than hardcoded.
 ///
 /// The Python carried `CALENDAR_FREE` and `CALENDAR_BEARING` as literal tuples
 /// of preset names. That does not survive an open instrument set: the next
 /// instrument would silently fall into neither list and its rows would be
 /// checked by nothing. A preset is calendar-free exactly when it has no
-/// calendar - its normalizer is then the literal 1.0, which is WHY its tape is
+/// calendar - its normalizer is then the literal 1.0, which is why its tape is
 /// byte-identical across a session reshape - so the classification is a
 /// property of the preset and is read from it.
 pub struct PresetCalendars {
@@ -235,7 +235,7 @@ pub struct PresetCalendars {
 }
 
 /// Presets that committed historical fixtures name but the tree no longer
-/// ships, with whether each carried a calendar. Committed DATA in the same
+/// ships, with whether each carried a calendar. Committed data in the same
 /// spirit as the per-mode baseline tables: history does not re-derive.
 ///
 /// ETHUSDT and SOLUSDT were retired 2026-08-09 by owner ruling - both were
@@ -255,16 +255,16 @@ impl PresetCalendars {
         }
     }
 
-    /// DERIVES the split by asking each preset whether it has a calendar,
+    /// Derives the split by asking each preset whether it has a calendar,
     /// through the venue's own loader.
     ///
     /// This is the replacement for the Python's hardcoded tuples, and the
     /// reason is the open instrument set: a sixth preset added to a hardcoded
     /// list would fall into neither class, and the acceptance gate would then
-    /// check NOTHING for it while still passing. Derivation cannot have that
+    /// check nothing for it while still passing. Derivation cannot have that
     /// gap - a preset either carries a calendar or it does not.
     ///
-    /// A RETIRED preset - one a committed historical fixture names but the
+    /// A retired preset - one a committed historical fixture names but the
     /// tree no longer ships - classifies through [`RETIRED_PRESETS`], the same
     /// remember-the-history principle as [`MODES`]' baseline tables: a
     /// comparison tool that cannot classify a historical fixture cannot audit
@@ -363,15 +363,15 @@ fn index(fixture: &Value) -> LabResult<BTreeMap<RowKey, &Value>> {
     Ok(out)
 }
 
-/// EVERY numeric measurement leaf, not merely the ratio inputs: a NaN in a
+/// Every numeric measurement leaf, not merely the ratio inputs: a NaN in a
 /// field today's ratios skip would survive into a fixture the next comparison
-/// reads. Shared by BOTH independent acceptance gates - a validator present in
+/// reads. Shared by both independent acceptance gates - a validator present in
 /// only one path is a validator the other path silently lacks.
 fn assert_leaves_finite_positive(key: &RowKey, path: &str, node: &Value) -> LabResult<()> {
     match node {
         // Booleans are skipped rather than treated as 1/0, matching the
         // Python's `isinstance(node, bool)` guard ahead of its numeric check -
-        // in Python a bool IS an int, so without that guard `False` would fail
+        // in Python a bool is itself an int, so without that guard `False` would fail
         // the positivity assertion.
         Value::Number(number) => {
             let value = number
@@ -416,9 +416,9 @@ fn field<'a>(row: &'a Value, key: &RowKey, name: &str) -> LabResult<&'a Value> {
         .ok_or_else(|| LabError::refusal(format!("{key:?}: entry carries no `{name}`")))
 }
 
-/// The `session_reshape` acceptance gate, run BEFORE any ratio.
+/// The `session_reshape` acceptance gate, run before any ratio.
 ///
-/// The session profile changes WHEN events happen, never how many: child count
+/// The session profile changes when events happen, never how many: child count
 /// comes from the arrival-state chain and the surge window, neither of which
 /// reads the profile, so the draw sequence is identical across the change. That
 /// is why `ticks_per_parent` is frozen for all five presets, and why a fanout
@@ -459,12 +459,12 @@ fn assert_unchanged_where_the_tape_did_not_move(
     Ok(())
 }
 
-/// The `preset_fit` acceptance gate, run BEFORE any ratio.
+/// The `preset_fit` acceptance gate, run before any ratio.
 ///
 /// The fit touches only the calendar-bearing presets, so the calendar-free
-/// tapes must be byte-identical. The futures MAY move - cadence and fanout
+/// tapes must be byte-identical. The futures may move - cadence and fanout
 /// both, since the fitted scalars change what a parent looks like - but every
-/// measurement entering a ratio must be finite and positive on BOTH sides: a
+/// measurement entering a ratio must be finite and positive on both sides: a
 /// NaN would poison the maximum silently and a zero would divide loudly, and
 /// neither is a verdict.
 fn assert_crypto_frozen_and_futures_finite(
@@ -541,7 +541,7 @@ const SPEEDS: [&str; 2] = ["1.0", "10.0"];
 /// # Errors
 /// [`LabError::Refusal`] on a version mismatch, a pairing relation the mode
 /// forbids, a row-key disagreement, or any acceptance-gate failure. Every one
-/// of these refuses BEFORE a ratio is computed, because a ratio over a tape
+/// of these refuses before a ratio is computed, because a ratio over a tape
 /// that moved for the wrong reason is a number with no meaning rather than a
 /// slightly wrong one.
 pub fn compare(
@@ -584,7 +584,7 @@ pub fn compare(
     }
 
     // Matching row keys prove only that the two files describe the same
-    // combinations, never the same TAPE. The pairing identifier carries that,
+    // combinations, never the same tape. The pairing identifier carries that,
     // and which relation it must satisfy is the whole difference between the
     // modes. Fixtures predating the identifier carry no such evidence at all,
     // which is a refusal with a reason rather than a missing key.
@@ -868,7 +868,7 @@ mod tests {
         assert_eq!(million(281_999_999.0), 282_000_000.0);
     }
 
-    /// The baselines are HISTORY, not current values, and the table must not be
+    /// The baselines are history, not current values, and the table must not be
     /// silently re-derived from whatever ships today. Pinned so an edit is a
     /// deliberate act with a failing test attached.
     #[test]
@@ -881,7 +881,7 @@ mod tests {
         assert_eq!(independent.baseline.checkpoint_k, 1_048_576.0);
         assert_eq!(independent.baseline.warmup_baseline, 81_124_000_000.0);
 
-        // `max_extend_ticks` is 1 << 30 in EVERY mode: it is a per-lock runaway
+        // `max_extend_ticks` is 1 << 30 in every mode: it is a per-lock runaway
         // backstop rather than a reach ceiling, and is deliberately never
         // scaled by a ratio.
         for m in &MODES {

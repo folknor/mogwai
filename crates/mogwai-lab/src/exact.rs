@@ -3,15 +3,15 @@
 
 //! Exact population variance, matching `statistics.pvariance` bit for bit.
 //!
-//! WHY THIS EXISTS. `check_cadence_feasible.py:187` calls
-//! `statistics.pvariance(gaps)`, which evaluates the variance as an EXACT
-//! RATIONAL over its binary64 inputs and rounds once at the end. The obvious
+//! Why this exists. `check_cadence_feasible.py:187` calls
+//! `statistics.pvariance(gaps)`, which evaluates the variance as an exact
+//! rational over its binary64 inputs and rounds once at the end. The obvious
 //! port - sum the squared deviations from the rounded mean with `py_fsum` and
 //! divide - is not merely a last-bit difference from that. It is
 //! ill-conditioned: when the series is clustered, the true variance is a
 //! difference of quantities that agree in almost every bit, so the rounding of
 //! each individual square dominates the answer. On three nearly-equal gaps it
-//! comes out WRONG BY A FACTOR OF THREE. Three separate ULP ceilings were
+//! comes out wrong by a factor of three. Three separate ULP ceilings were
 //! claimed for that approach and all three were refuted, because the error has
 //! no bound to find.
 //!
@@ -26,7 +26,7 @@
 //! including the pathological ones before a line of this was written; it is not
 //! an inference from reading the module.
 //!
-//! HOW IT IS EXACT WITHOUT RATIONALS. Every finite binary64 is an integer times
+//! How it is exact without rationals. Every finite binary64 is an integer times
 //! a power of two, `x = m * 2^e`. Writing `s` for the smallest `e` in the
 //! sample, both sums become integers against one shared scale:
 //!
@@ -345,20 +345,20 @@ pub fn population_variance(values: &[f64]) -> f64 {
     let leading =
         i64::try_from(quotient.bit_len() - 1).expect("bit length fits") + quotient_exponent;
 
-    // WHERE TO ROUND, and this is the whole subtlety. A normal result keeps 53
+    // Where to round, and this is the whole subtlety. A normal result keeps 53
     // significant bits, so its least significant bit sits at `leading - 52`. A
-    // SUBNORMAL result has no such freedom: every subnormal is an integer
+    // subnormal result has no such freedom: every subnormal is an integer
     // multiple of 2^-1074, so the rounding position is pinned there and the
     // result keeps fewer than 53 bits.
     //
     // Rounding to 53 bits first and scaling afterwards - which is what this
-    // function used to do - therefore rounds TWICE for a subnormal result, once
+    // function used to do - therefore rounds twice for a subnormal result, once
     // to 53 bits and again on the way down into the subnormal range. That is a
     // real defect and not a theoretical one: five specific finite inputs made it
     // return one ULP below `statistics.pvariance`, and the 820-case sweep missed
     // it because none of its families produce a nonzero subnormal variance. Its
-    // 39 zero results exercise underflow TO zero, which is a different class
-    // from correct rounding WITHIN the subnormal range.
+    // 39 zero results exercise underflow to zero, which is a different class
+    // from correct rounding within the subnormal range.
     const MIN_SUBNORMAL_EXPONENT: i64 = -1074;
     let round_position = (leading - 52).max(MIN_SUBNORMAL_EXPONENT);
 
@@ -400,11 +400,11 @@ pub fn population_variance(values: &[f64]) -> f64 {
     // Assemble the bit pattern directly rather than scaling by a power of two,
     // so the single rounding above is the only one.
     if round_position == MIN_SUBNORMAL_EXPONENT {
-        // This branch covers MORE than the subnormals, and the extra coverage is
+        // This branch covers more than the subnormals, and the extra coverage is
         // correct rather than accidental. `round_position` is
         // `max(leading - 52, -1074)`, so it pins to the floor for every result
         // whose leading bit sits at or below 2^-1022 - which is every subnormal
-        // AND the whole lowest normal binade, from 2^-1022 up to just under
+        // and the whole lowest normal binade, from 2^-1022 up to just under
         // 2^-1021.
         //
         // Direct assembly handles all of it in one expression, because binary64
@@ -479,8 +479,8 @@ mod tests {
         );
     }
 
-    /// THE DOUBLE-ROUNDING CASE. Five finite inputs whose exact variance is a
-    /// nonzero SUBNORMAL, which is the one output class the generated sweep did
+    /// The double-rounding case. Five finite inputs whose exact variance is a
+    /// nonzero subnormal, which is the one output class the generated sweep did
     /// not reach: its zero results exercise underflow to zero, a different
     /// thing from correct rounding inside the subnormal range.
     ///
@@ -543,7 +543,7 @@ mod tests {
         );
     }
 
-    /// INSIDE THE LOWEST NORMAL BINADE, which the boundary case above does not
+    /// Inside the lowest normal binade, which the boundary case above does not
     /// reach and which is a separate branch condition in disguise.
     ///
     /// `round_position` pins to the subnormal floor for every result whose
@@ -551,7 +551,7 @@ mod tests {
     /// spans the subnormals AND all of `[2^-1022, 2^-1021)`. Landing exactly ON
     /// the join leaves `mantissa` at exactly `2^52` - which is why the test
     /// above passed against an assertion that was too narrow by a whole binade.
-    /// Anything strictly inside has `mantissa > 2^52` and used to panic in DEBUG
+    /// Anything strictly inside has `mantissa > 2^52` and used to panic in debug
     /// builds only, while release computed the correct value throughout. A
     /// wrong bound is worse than no bound for exactly that reason: it fails in
     /// the configuration that is supposed to be the stricter one.
@@ -602,7 +602,7 @@ mod tests {
     /// Both of these underflow to exactly zero, and CPython agrees: the true
     /// variance of `[0, 5e-324]` is `2^-2150`, far below the smallest
     /// representable subnormal, so the single final rounding takes it to zero.
-    /// That is the RIGHT answer rather than a lost one, and it is worth pinning
+    /// That is the right answer rather than a lost one, and it is worth pinning
     /// because an implementation that scaled through an intermediate could
     /// return a denormal here instead.
     #[test]
@@ -619,7 +619,7 @@ mod tests {
         let shifted = population_variance(&[1.0, 3.0, 5.0]);
         let centred = population_variance(&[-1.0, 1.0, 3.0]);
         assert_eq!(shifted.to_bits(), centred.to_bits());
-        // AND THE VALUE, because agreement alone is the one shape in this
+        // And the value itself, because agreement alone is the one shape in this
         // module that a broken implementation can satisfy for free: both sides
         // returning zero, or both NaN, agree perfectly. 8/3 exactly, which the
         // nearest double renders as 0x4005555555555555.

@@ -97,7 +97,7 @@ pub(crate) fn flush_havoc_into_pump(
 /// message finds its deadline already elapsed and forwards at once. This models
 /// a network that delays every frame in parallel at full throughput, replacing
 /// the old inline `sleep_havoc_delay` that realized the delay as inter-message
-/// SPACING - a ~33 msg/s ceiling that head-of-line-blocked pings/commands and
+/// spacing - a ~33 msg/s ceiling that head-of-line-blocked pings/commands and
 /// grew the inbound queue without bound under any burst (AD4). It mirrors the
 /// deadline discipline of the mogwai venue's own `spawn_exec_pump`.
 ///
@@ -172,7 +172,7 @@ pub(crate) fn warn_missing_instrument_once(
     symbol: &str,
 ) {
     let mut warned = lock_recover(warned, "missing-instrument warn set");
-    // The set is keyed by an arbitrary WIRE symbol, so it is bounded for the
+    // The set is keyed by an arbitrary wire symbol, so it is bounded for the
     // same reason the orphan quote cache is: a venue emitting endless distinct
     // unknown symbols must not grow adapter state without limit. Past the
     // ceiling the dedup stops recording and every further miss warns, which is
@@ -238,7 +238,7 @@ pub(crate) fn emit_seeded_instruments(
 /// warning loudly on failure instead of swallowing it. `convert::instrument_any`
 /// errors when the def carries a base/quote currency unknown to nautilus (an
 /// exotic pair), and a silent drop here cascades: the instrument never reaches
-/// the Nautilus cache, so a host executor gating on it refuses EVERY bar for the
+/// the Nautilus cache, so a host executor gating on it refuses every single bar for the
 /// symbol with no log line pointing at the cause - the exact failure
 /// `emit_seeded_instruments` exists to prevent. Naming the symbol and the error
 /// at every swallow site turns that into a diagnosable log.
@@ -387,10 +387,10 @@ pub(crate) fn conn_havoc(spec: &Option<HavocSpec>) -> ConnHavoc {
 }
 /// Wall floor for the scaled HTTP request timeout, in seconds. Unlike the other
 /// scaled durations (whose floor is the ~1ms tokio granularity), this one guards
-/// a REAL local-IO round trip whose wall cost does NOT compress with `speed`:
+/// a real local-IO round trip whose wall cost never compresses with `speed`:
 /// dividing a sim-seconds timeout by a high `speed` would otherwise yield a
 /// sub-second wall budget that the actual HTTP round trip blows, spuriously
-/// timing out every order. Clamping UP to one wall second keeps the request
+/// timing out every order. Clamping up to one wall second keeps the request
 /// survivable; the consequence is that `request_timeout_secs` is the tightest
 /// contributor to the usable-speed ceiling. Documented in `reference/clock.md`.
 const MIN_WALL_REQUEST_TIMEOUT_SECS: u64 = 1;
@@ -419,7 +419,7 @@ pub(crate) async fn fetch_clock_or_identity(
     http_base: &str,
 ) -> (VenueClock, bool) {
     // Retry before committing to identity (AD16): the identity fallback silently
-    // puts EVERY ts_init, havoc sleep, quota interval, backoff and timeout on the
+    // puts every ts_init, havoc sleep, quota interval, backoff and timeout on the
     // wrong axis for the life of the connection if the venue actually runs at
     // speed != 1, and nothing re-fetches the clock later. A couple of quick
     // retries ride out a transient fetch blip; only a persistent failure falls
@@ -476,7 +476,7 @@ pub(crate) async fn fetch_clock_or_identity(
 ///
 /// Reachability and identity are separated deliberately. A health probe fails
 /// for the same transport reasons a socket does, so an unanswered probe is
-/// reported with the [`IDENTITY_UNREACHABLE`] prefix and does NOT refuse the
+/// reported with the [`IDENTITY_UNREACHABLE`] prefix and never refuses the
 /// connection; only a venue that answers, with a different run, does.
 pub(crate) fn run_identity_check(
     http: HttpClient,
@@ -486,9 +486,9 @@ pub(crate) fn run_identity_check(
     label: &'static str,
 ) -> Option<RunIdentityCheck> {
     let Some(expected) = expected else {
-        // DIALLING BLIND, said once per client rather than per dial. An address
+        // Dialling blind, said once per client rather than per dial. An address
         // and the run it belongs to arrive together in the readiness record, so
-        // a config without a seed is one that DISCARDED the identity, never one
+        // a config without a seed is one that discarded the identity, never one
         // that could not have it - which is why this is worth a line rather
         // than being the silent default it looks like at the call site.
         //
@@ -562,7 +562,7 @@ pub(crate) fn join_url(base: &str, path: &str) -> String {
 pub(crate) fn symbol_from_instrument(instrument_id: InstrumentId) -> mogwai_protocol::Symbol {
     instrument_id.symbol.as_str().into()
 }
-/// Maps an optional request bound onto the u64 nanosecond axis, SATURATING
+/// Maps an optional request bound onto the u64 nanosecond axis, saturating
 /// out-of-range datetimes at the axis bounds instead of dropping them to
 /// `None`. `None` means "unbounded" to every caller, so silently mapping a
 /// pre-epoch end to `None` would widen the request (an end of 1950 becoming
@@ -635,7 +635,7 @@ mod tests {
     /// to be pinned in `mogwai-protocol` by an assertion against its own
     /// literal, which has no second referent: the constant is defined once and
     /// every adapter site reads it, so that assertion could only restate the
-    /// definition. The claim with a referent is the SUBSTITUTION here - that an
+    /// definition. The claim with a referent is the substitution itself - that an
     /// unconfigured client gets the shipped default rather than a zero-second
     /// timeout that fails every request instantly. The clamp is deliberately
     /// out of the way (speed 1.0, so no scaling and no `MIN_WALL` floor).
@@ -647,7 +647,7 @@ mod tests {
             mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS
         );
         // `ConnHavoc::default()` already carries `request_timeout_secs: 0`, so
-        // this case states no timeout of its own: what it varies is the SPEC
+        // this case states no timeout of its own: what it varies is the spec itself
         // being present at all, taking `conn_havoc`'s `Some` branch rather than
         // the `None` one above, and it must land on the same default.
         assert_eq!(
@@ -801,8 +801,8 @@ mod tests {
             assert_eq!(ts_event, expected, "the pump preserves arrival order");
         }
         let elapsed = start.elapsed();
-        // THE BOUND IS STATED AGAINST THE DEFECT, NOT AGAINST THE MEASUREMENT.
-        // A pipelined drain is ONE window (measured 31.1-31.6 ms over 60 runs
+        // The bound is stated against the defect, never against the measurement.
+        // A pipelined drain is one window (measured 31.1-31.6 ms over 60 runs
         // against a 30 ms `per_msg`); the serialization this exists to catch is
         // forty of them, 1.2 s. Anything strictly between is not a shape the
         // pump can take - the deadlines are either arrival-anchored or they
@@ -811,18 +811,18 @@ mod tests {
         // further from the pipelined side, which is the side a loaded host
         // pushes on.
         //
-        // AND IT CATCHES BOTH SHAPES, which was doubted and then measured. The
-        // worry was that a pump RE-ANCHORING each deadline at the previous
-        // RELEASE rather than at arrival would slip through, on the reasoning
+        // And it catches both shapes, which was doubted and then measured. The
+        // worry was that a pump re-anchoring each deadline at the previous
+        // release rather than at arrival would slip through, on the reasoning
         // that a simultaneous burst makes the two anchors coincide. They
-        // coincide for the FIRST message only: chaining releases gives
+        // coincide for the first message only: chaining releases gives
         // `i * per_msg`, so this burst finishes at 40 windows, and the defect
         // installed as a text edit in `havoc_deadline` fails this assertion at
         // 1.202 s against its 300 ms bound. A staggered-arrival twin was built
         // to cover the supposed gap, measured 127-129 ms honest against the same
         // 600 ms compounded defect, and deleted as strictly weaker than this
         // one - twenty windows of separation where this has forty. Per-message
-        // SPACING and compounding deadlines are the same failure here because
+        // spacing and compounding deadlines are the same failure here because
         // the only way to space the output is to stop anchoring at arrival.
         let serial = per_msg * u32::try_from(N).unwrap();
         assert!(

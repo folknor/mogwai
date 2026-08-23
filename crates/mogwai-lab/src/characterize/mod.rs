@@ -7,7 +7,7 @@
 //! fraction, per-second counts. This module is the estimand layer the
 //! synthesis modules (`fingerprint`, `cadence`) build on. It is a byte-level
 //! port; every constant and formula below is named after its Python
-//! counterpart in `analysis/characterize.py`. That file is RETIRED and no
+//! counterpart in `analysis/characterize.py`. That file is retired and no
 //! longer in the tree - the names are the record of how the port was proven,
 //! not a pointer to something a reader can open.
 //!
@@ -152,7 +152,7 @@ impl LevelVisits {
         let size_p90 = histogram_quantile(&self.size_hist, 0.9);
         let vol_p50 = histogram_quantile(&self.vol_hist, 0.5);
         let vol_p90 = histogram_quantile(&self.vol_hist, 0.9);
-        // Both of these are INTEGERS in the Python - `DWELL_ERA_START_TS` and
+        // Both of these are integers in the Python - `DWELL_ERA_START_TS` and
         // `LVL_PER_DEC` are int literals - and the typed-canonical comparator
         // distinguishes int from float, so emitting them as floats is a real
         // difference rather than a formatting one. They are held as f64
@@ -366,7 +366,7 @@ pub fn characterize(path: &Path) -> LabResult<Value> {
 
     let mut zero_change: i64 = 0;
     let mut change_n: i64 = 0;
-    // Insertion-ordered: `max(items(), key=count)` on ties keeps the FIRST
+    // Insertion-ordered: `max(items(), key=count)` on ties keeps the first
     // inserted key in CPython dict iteration order, so an ordered map
     // (rather than a HashMap) is load-bearing for `modal_tick` on a tie.
     let mut tick_counts: Vec<(String, i64)> = Vec::new();
@@ -374,7 +374,7 @@ pub fn characterize(path: &Path) -> LabResult<Value> {
     let mut tick_capped = false;
     // Insertion-ordered for the same reason as `tick_counts`:
     // `characterize.py:387` takes `max(price_dec_hist.items(), key=count)` over
-    // a plain dict, so a tie keeps the first decimal count SEEN. A `HashMap`
+    // a plain dict, so a tie keeps the first decimal count seen. A `HashMap`
     // here made the tie-break not merely divergent but nondeterministic across
     // runs of the same input.
     let mut price_dec_counts: Vec<(usize, i64)> = Vec::new();
@@ -503,9 +503,9 @@ pub fn characterize(path: &Path) -> LabResult<Value> {
     let mut tick_p10: Option<f64> = None;
     let mut tick_p50: Option<f64> = None;
     if !tick_counts.is_empty() {
-        // `max_by_key` returns the LAST maximal element, which defeats the
+        // `max_by_key` returns the last maximal element, which defeats the
         // insertion-ordered `tick_counts` above: CPython's `max` keeps the
-        // FIRST. Fold explicitly with a strict `>` so a tie holds the
+        // first. Fold explicitly with a strict `>` so a tie holds the
         // earliest-inserted key, matching `max(items(), key=count)`.
         let (mtkey, _) = tick_counts
             .iter()

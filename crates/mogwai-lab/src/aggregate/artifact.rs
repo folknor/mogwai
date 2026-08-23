@@ -84,7 +84,7 @@ fn strict_f64(v: &Value) -> Option<f64> {
 // -- The public entrypoint and its internal body -----------------------------
 
 /// `assemble_measure12a_artifact`: the production entrypoint. Refuses
-/// UNCONDITIONALLY unless `mults` is exactly `BOOTSTRAP_REPLICATES` long -
+/// unconditionally unless `mults` is exactly `BOOTSTRAP_REPLICATES` long -
 /// the hard gate a truncated selftest/parity fixture must go around by
 /// calling [`assemble_measure12a_body`] directly.
 pub fn assemble_measure12a_artifact(
@@ -193,7 +193,7 @@ pub fn assemble_measure12a_body(
     // hour (as a string key, the Python dict-with-int-keys JSON-serializes the
     // same way), over every hour any session's block4 carries other than the
     // literal "all". The `warmup` spelling in this artifact and in the block4
-    // cells it reads is INHERITED AND FROZEN: every committed measurement
+    // cells it reads is inherited and frozen: every committed measurement
     // carries it, and the parity gate reproduces those artifacts key for key.
     let mut hours: BTreeSet<i64> = BTreeSet::new();
     for rec in &per_session {
@@ -1517,7 +1517,7 @@ pub fn measure12a_semantic_errors(artifact: &Value, usable: &[Value]) -> Vec<Str
 
 // -- The Brick G walk cache ---------------------------------------------------
 
-/// `load_brick_g_walks`: a READ-ONLY index of the Brick G walk cache,
+/// `load_brick_g_walks`: a read-only index of the Brick G walk cache,
 /// grouped by the seed embedded in each record. Refuses an absent cache
 /// directory, an ambiguous seed, a non-integer/malformed seed field, or a
 /// seed set other than exactly 1..8.

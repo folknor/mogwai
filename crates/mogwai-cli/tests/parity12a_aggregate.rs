@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE PARITY GATE of the retired rewrite plan, phase 2b: the aggregation
+//! The parity gate of the retired rewrite plan, phase 2b: the aggregation
 //! and inference layer must reproduce the committed artifact's inference
 //! sections typed-canonical-identically, from the cached per-session records
 //! phase 2a already proved.
@@ -22,10 +22,10 @@
 //! `diagnostics.worsening_23`.
 //!
 //! Binding, cost, `refused_cells` and the validators are phase 2c's scope
-//! and are deliberately NOT compared here.
+//! and are deliberately not compared here.
 //!
 //! The artifact's semantics exercise the dark corners on purpose, and this
-//! gate passing means the port reproduces them THROUGH the frozen rules
+//! gate passing means the port reproduces them through the frozen rules
 //! rather than by special case: the arrival family is incomplete with five
 //! `force_refused` conditional metrics, the count substitution refuses most
 //! hours, `worsening_23` is null via an unfired reversion rung, and the

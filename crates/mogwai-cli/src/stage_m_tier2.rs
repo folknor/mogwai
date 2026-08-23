@@ -45,7 +45,7 @@ enum Tier2Command {
     Close(ArtifactArgs),
     /// Apply the frozen mechanical designation rule.
     Designate(DesignateArgs),
-    /// Compute and record the once-only EXCESS baseline W.
+    /// Compute and record the once-only `excess` baseline W.
     Baseline(CommonArgs),
     /// Materialize the 24 shipped-generator control fields.
     Controls(ControlsArgs),
@@ -1430,16 +1430,16 @@ mod tests {
         assert!((f_quantile_90(4, 3) - 5.342_644).abs() < 1e-5);
     }
 
-    /// The `excess` draw is keyed on the session DATE, so the order the cells
+    /// The `excess` draw is keyed on the session date, so the order the cells
     /// happen to sit in must not reach it.
     ///
-    /// THE FIXTURE IS DELIBERATELY NOT DEGENERATE. Zero residuals on one date
+    /// The fixture is deliberately not degenerate. Zero residuals on one date
     /// make this a comparison of all-zeros against all-zeros: every cell would
     /// carry the same value whether the draw were per-date, per-cell, or
     /// chained across the vector in iteration order, so no order-dependent
     /// defect could be seen. It needs distinct per-cell residuals, at least two
-    /// COMPLETE dates (one date cannot show a draw taken in the wrong order),
-    /// and an INCOMPLETE one, which is what the return count is about.
+    /// complete dates (one date cannot show a draw taken in the wrong order),
+    /// and an incomplete one, which is what the return count is about.
     #[test]
     fn excess_draw_is_session_order_independent() {
         let residual = |day: usize, hour: u64| (day as f64) * 100.0 + (hour as f64);
@@ -1515,7 +1515,7 @@ mod tests {
             }
         }
 
-        // One draw PER DATE, shared by that date's cells - and the two dates
+        // One draw per date, shared by that date's cells - and the two dates
         // draw differently, which is what makes a per-date stream observable
         // at all.
         let delta_of = |date: &str| {

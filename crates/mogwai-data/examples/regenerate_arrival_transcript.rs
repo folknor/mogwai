@@ -1,31 +1,31 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! AMENDMENT-ONLY regeneration of the shot-noise layer-2 transcript fixture.
+//! Amendment-only regeneration of the shot-noise layer-2 transcript fixture.
 //!
 //! `crates/mogwai-data/tests/fixtures/arrival-transcript-*.json` are committed
-//! REGRESSION PINS. They are never regenerated to match a later change, except
+//! regression pins. They are never regenerated to match a later change, except
 //! under a signed section 17 amendment that authorizes a one-time replacement
 //! and is cited in the commit carrying the new fixtures. Last sanctioned use:
 //! the 2026-08-10 screen-recalibration and family-extension amendment
 //! (`ARRIVAL_KERNEL_VERSION` 3).
 //!
-//! WHY THIS IS AN EXAMPLE TARGET AND NOT A TEST, which is the whole point of
+//! Why this is an example target and not a test - which is the whole point of
 //! the file. It used to be `regenerate_arrival_transcripts_amendment_only`, an
 //! `#[ignore]`d `#[test]` in `generated::arrival`'s test module, and the doc
 //! comment justifying that rested on `#[ignore]` keeping it out of the suite.
-//! IT DOES NOT, in this workspace, BY DESIGN: the gate profile sets
+//! It does not, in this workspace, by design: the gate profile sets
 //! `include_ignored` - that is how the socket-backed suites get covered - so
 //! the regenerator ran on every full gate and overwrote the pin it exists to
 //! protect. Today the output happens to be identical, which is why nobody
 //! noticed; the failure mode is the one the pin was written against. A kernel
 //! change lands, run 1 fails `arrival_transcripts_replay_bit_exact` (correctly)
 //! and rewrites the fixture in the same run, and run 2 recompiles against the
-//! rewritten `include_str!` and reports green. ONE RE-RUN CONVERTS A REGRESSION
-//! INTO A BLESSING.
+//! rewritten `include_str!` and reports green. One re-run is all it takes to
+//! convert a regression into a blessing.
 //!
 //! An example target is compiled by every check lane, so this code cannot rot
-//! unnoticed, and it is RUN by nothing at all. That is the property that was
+//! unnoticed, and it is never run by anything at all. That is the property that was
 //! wanted; `#[ignore]` never provided it.
 //!
 //! Invocation, which deliberately refuses to do anything without the citation:
@@ -61,7 +61,7 @@ const RECORDS: usize = 10_000;
 const CADENCE_STREAM_TAG: u64 = 0x6D6F_6777_6169_3132;
 
 fn main() {
-    // THE CITATION IS THE GATE. A regeneration with no amendment behind it is
+    // The citation is itself the gate. A regeneration with no amendment behind it is
     // exactly what the pin exists to refuse, and a tool that regenerates on a
     // bare invocation is one shell-history recall away from doing it by
     // accident.

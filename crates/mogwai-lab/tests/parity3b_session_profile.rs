@@ -7,9 +7,9 @@
 //!
 //! `#[ignore]`d: needs `research/market-data/nq-1m_bk.zip` on local disk.
 //!
-//! WHAT THIS SCRIPT ACTUALLY FEEDS THE PRESET, checked rather than assumed.
+//! What this script actually feeds the preset, checked rather than assumed.
 //! `crates/mogwai-venue/presets/mnq.toml`'s provenance table names three
-//! `[instrument.session]` entries; only ONE of them still descends from this
+//! `[instrument.session]` entries; only one of them still descends from this
 //! fit:
 //!
 //! - `session.dow_weight` - "NQ one-minute ratio-back-adjusted bars; contract
@@ -58,8 +58,8 @@ fn parity3b_session_profile_preflight_matches_the_python() {
     .expect("write");
     eprintln!("{}", serde_json::to_string_pretty(&report).expect("pretty"));
 
-    // The invariants the Python's own NOTE calls out: the archive carries no
-    // zero-volume rows, so exposure MUST come from the calendar.
+    // The invariants the Python's own note calls out: the archive carries no
+    // zero-volume rows, so exposure must come from the calendar.
     assert_eq!(report["present_zero_volume_rows"], 0);
     assert!(report["rows"].as_u64().expect("a count") > 5_000_000);
     assert!(
@@ -106,7 +106,7 @@ fn parity3b_session_profile_reproduces_the_preset_dow_weight() {
         .collect();
     assert_eq!(rounded, shipped, "the recent-era day factors");
 
-    // The ACCEPTANCE ARTIFACTS, at the resolution
+    // The acceptance artifacts, at the resolution
     // `analysis/fit_session_profile.py` prints them - checked against a
     // direct run of that script over the same archive, scope by scope.
     let scope = |name: &str| -> (String, u64, String, String, String, String) {

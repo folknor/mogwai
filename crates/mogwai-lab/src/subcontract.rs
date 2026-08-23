@@ -53,7 +53,7 @@ impl PyValue {
 // `decpt <= 17` where CPython uses 16, so it would have formatted 1e16 as
 // `10000000000000000.0` instead of `1e+16` - invisible here only because every
 // sub-contract float is small. The one implementation now lives in
-// `crate::kernel`; this module's test still pins the shapes IT depends on.
+// `crate::kernel`; this module's test still pins the shapes it depends on.
 use crate::kernel::py_float_repr;
 
 fn escape_str(s: &str, out: &mut String) {
@@ -341,17 +341,17 @@ impl PyValue {
 /// Build the sub-contract value tree, mirroring
 /// `{k: globals()[k] for k in SUBCONTRACT_KEYS}` key-for-key.
 ///
-/// A STALE-LOOKING HASH IN A COMMITTED ARTIFACT IS NOT NECESSARILY STALE, and
+/// A stale-looking hash in a committed artifact is not necessarily stale, and
 /// the owner ruled on exactly this case on 2026-08-08: do not "fix" it.
 /// `analysis/mnq-fit.json` records `binding.subcontract_hash` 35e5b033, while
 /// this function returns 1ca79d9c today. The difference is correct history
-/// rather than drift - the protocol-12a constants joined this key set AFTER
+/// rather than drift - the protocol-12a constants joined this key set after
 /// the protocol-11 fit ran, and that fit never read one of them. The rewrite's
 /// phase-3b parity gate demonstrated it: every fitted number in the artifact
 /// reproduced at 132/132 walk-cache hits while only the binding differed.
 /// Editing the artifact's hash to today's value would assert a binding that
 /// never happened, which is precisely what the harness's own tamper check
-/// exists to refuse. The artifact is therefore readable but NOT extensible
+/// exists to refuse. The artifact is therefore readable but not extensible
 /// until a fresh fit runs; that re-run buys extensibility, not correctness.
 ///
 /// The design defect this exposes is the flat namespace, not the hash: one
@@ -571,7 +571,7 @@ fn tree() -> PyValue {
 /// The protocol-12a half of the key set, verbatim from `mnq_fit.py`'s own
 /// section marker: everything after the `# Protocol 12a` comment in
 /// `SUBCONTRACT_KEYS`. Taken from that comment rather than inferred, because
-/// the boundary is a claim about which constants a MODE reads and the Python
+/// the boundary is a claim about which constants a mode reads and the Python
 /// is the only place that records it.
 const PROTOCOL_12A_KEYS: &[&str] = &[
     "BOOTSTRAP_BASE_SEED",
@@ -618,7 +618,7 @@ const PROTOCOL_12A_KEYS: &[&str] = &[
 
 /// Which measurement mode a sub-contract hash binds.
 ///
-/// THE DEFECT THIS FIXES, restated from `tree`'s note: one flat key set
+/// The defect this fixes, restated from `tree`'s note: one flat key set
 /// spanning every mode means any constant edit retroactively unbinds every
 /// prior fit, including fits that never read the constant that moved. Adding a
 /// single protocol-12a constant already unbound `mnq-fit.json` once, and the
@@ -644,7 +644,7 @@ impl Mode {
     }
 }
 
-/// The sub-contract bytes for ONE mode, in the same canonical form as
+/// The sub-contract bytes for one mode, in the same canonical form as
 /// [`subcontract_dumps`].
 #[must_use]
 pub fn subcontract_dumps_for(mode: Mode) -> String {
@@ -660,16 +660,16 @@ pub fn subcontract_dumps_for(mode: Mode) -> String {
     out
 }
 
-/// The sub-contract hash for ONE mode.
+/// The sub-contract hash for one mode.
 ///
-/// A NEW binding, with no Python counterpart: `mnq_fit.py` has only the flat
+/// A new binding, with no Python counterpart: `mnq_fit.py` has only the flat
 /// [`subcontract_hash`], and that flat hash is what cross-language parity is
 /// checked against, so it is untouched. These are for artifacts written from
 /// here on, which record the hash of the constants their own mode actually
 /// reads - so a protocol-12a constant moving no longer unbinds a protocol-11
 /// fit.
 ///
-/// It does NOT retroactively rebind anything. `analysis/mnq-fit.json` keeps
+/// It does not retroactively rebind anything. `analysis/mnq-fit.json` keeps
 /// `binding.subcontract_hash` 35e5b033 as committed, per the owner's 2026-08-08
 /// ruling: that value accurately records what the protocol-11 fit ran under,
 /// and rewriting it would assert a binding that never happened.
@@ -734,23 +734,23 @@ mod tests {
         assert!(!dumps.contains("DELIVERY_KEY"));
     }
 
-    /// TWO CONSTANTS ENCODE ONE QUANTITY, so one of them must be derived from
+    /// Two constants encode one quantity, so one of them must be derived from
     /// the other or they need a gate. The final window's length is written
     /// twice here - as the `FINAL_END_NS - FINAL_START_NS` difference and as
-    /// the `FINAL_LENGTH` seconds string - and the two are read by DIFFERENT
+    /// the `FINAL_LENGTH` seconds string - and the two are read by different
     /// consumers: `measure`'s artifact writer and `count_curve`'s binding check
     /// take the difference, while `run_final_walk` and the `fit` driver parse
     /// the string, so the walk that produces the exposure record and the
     /// artifact that records its window disagree about which is authoritative.
-    /// Neither can be deleted while the fit driver needs a duration STRING and
+    /// Neither can be deleted while the fit driver needs a duration string and
     /// the artifact needs nanoseconds, so this is the gate. Without it, editing
     /// `FINAL_LENGTH` alone moves the measured window and nothing says so until
     /// a ten-minute equality pin fails as an opaque diff of two 20 KB
     /// accumulator records.
     ///
-    /// `hash_matches_the_python_reference` is NOT this gate, though a bare edit
+    /// `hash_matches_the_python_reference` is not this gate, though a bare edit
     /// to `FINAL_LENGTH` does redden it: the hash covers every sub-contract
-    /// constant against the retired Python oracle's snapshot, so the SANCTIONED
+    /// constant against the retired Python oracle's snapshot, so the sanctioned
     /// way to move one is to re-bless `EXPECTED_HASH` in the same change - and
     /// that re-bless says nothing about whether the two encodings still agree.
     /// A frozen-snapshot hash catches an unintended edit; only this catches an
@@ -769,11 +769,11 @@ mod tests {
         );
     }
 
-    /// WHAT SURVIVES THE ORACLE, and - said plainly - what does not.
+    /// What survives the oracle, and - said plainly - what does not.
     ///
     /// Until phase 4b item 7 this file carried a test that parsed
     /// `mnq_fit.py`'s `SUBCONTRACT_KEYS` at its `# Protocol 12a` section marker
-    /// and compared the two sides. That marker was the only INDEPENDENT
+    /// and compared the two sides. That marker was the only independent
     /// authority on the classification, because the boundary is a claim about
     /// which mode reads which constant, and no amount of Rust can settle that
     /// from the inside. It was deliberately landed before the retirement, ran
@@ -782,11 +782,11 @@ mod tests {
     /// list matches itself while looking like a cross-check.
     ///
     /// So `PROTOCOL_12A_KEYS` is now the authority. These assertions are real
-    /// but NARROWER, and the difference is worth being explicit about: they
+    /// but narrower, and the difference is worth being explicit about: they
     /// catch a typo or a stale name, not a misclassification.
     ///
-    /// Note also what is deliberately NOT asserted. "Every key belongs to
-    /// exactly one mode" is true BY CONSTRUCTION, since `Mode::Protocol11` is
+    /// Note also what is deliberately not asserted. "Every key belongs to
+    /// exactly one mode" is true by construction, since `Mode::Protocol11` is
     /// defined as "not in `PROTOCOL_12A_KEYS`", so such an assertion could
     /// never fail - a tautology wearing the costume of a partition proof.
     #[test]
@@ -820,7 +820,7 @@ mod tests {
     /// The scoped hashes are distinct from each other and from the flat one.
     /// If any two coincided the split would be decorative.
     ///
-    /// These are REGRESSION PINS on values of our own, not parity claims:
+    /// These are regression pins on values of our own, not parity claims:
     /// `mnq_fit.py` has no per-mode hash to compare against, which is the whole
     /// reason these are new rather than ported.
     #[test]

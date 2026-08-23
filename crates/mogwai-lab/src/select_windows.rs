@@ -6,11 +6,11 @@
 //! Chooses which tick-data windows to buy, using cheap 1-minute bars as a
 //! sampling frame. Bars cannot see microstructure - aggregation destroys
 //! arrival burstiness, bounce and size dispersion - so this stratifies on what
-//! a bar CAN measure and picks the calendar months whose feature vectors are
+//! a bar can measure and picks the calendar months whose feature vectors are
 //! farthest apart. Whether those proxies coincided with microstructure regimes
 //! is then a finding rather than an assumption.
 //!
-//! PORTED WHOLE, all four phases, because the corpus is OPEN: every new
+//! Ported whole, all four phases, because the corpus is open: every new
 //! instrument re-runs the purchase question, so this is reusable intake
 //! machinery rather than one instrument's spent history. The BTCUSDT rejection
 //! of volatility-stratified selection travels as a recorded prior on `select`
@@ -19,14 +19,14 @@
 //! a real rejection while `select`'s five-feature farthest-point method carries
 //! no verdict at all.
 //!
-//! NO FROZEN ARTIFACT EXISTED to port against: the Python prints its results
+//! No frozen artifact existed to port against: the Python prints its results
 //! and writes only a regenerable gitignored cache, and `targets-frozen.json` -
 //! called its gate in three documents - is the BTCUSDT target set this never
 //! touches. So `analysis/select-windows-blessed.json` was blessed from the
 //! Python first (`scripts/bless_select_windows.py`) and this is matched against
 //! it.
 //!
-//! ONE APPROVED DEVIATION, and it is NOT cosmetic - see [`squared`]. The Python
+//! One approved deviation, and it is not cosmetic - see [`squared`]. The Python
 //! squares with `** 2`, which routes through libm's `pow` and is not correctly
 //! rounded; this squares with a multiply, which always is. Eleven of the
 //! 111,396 cached feature values differ by one or two ULPs as a result. No
@@ -34,7 +34,7 @@
 //! passes by coincidence rather than by construction, which is stated here
 //! rather than left for someone to discover.
 //!
-//! ORDERING IS LOAD-BEARING THROUGHOUT. CPython's `sum()` over floats is
+//! Ordering is load-bearing throughout. CPython's `sum()` over floats is
 //! Neumaier-compensated, so every float accumulation here depends on the order
 //! its terms arrive in: the hourly volatility buckets keep first-seen hour
 //! order, the month table keeps first-seen month order, and both feed
@@ -48,7 +48,7 @@ use std::path::Path;
 use crate::error::{LabError, LabResult};
 use crate::kernel::{py_int_div, py_sum};
 
-/// `ARCHIVES`, in the Python's dict-literal order. That order IS the cache's
+/// `ARCHIVES`, in the Python's dict-literal order. That order is the cache's
 /// key order, which is the month table's first-seen order, which is the term
 /// order of every z-score sum - so it is a numerical input, not presentation.
 pub const ARCHIVES: [(&str, &str); 4] = [
@@ -72,8 +72,8 @@ pub const FEATURES: [&str; 6] = [
 /// stay in the features - they describe the instrument - but cannot be
 /// selected.
 ///
-/// LOAD-BEARING BEYOND ELIGIBILITY, and the Python says so in as many words:
-/// every z-score is computed over the eligible months ONLY, so moving this
+/// Load-bearing beyond eligibility, and the Python says so in as many words:
+/// every z-score is computed over the eligible months only, so moving this
 /// constant does not merely admit or exclude candidates, it re-centres and
 /// re-scales the whole feature space and can reshuffle a selection that looks
 /// stable. Change it and re-read the entire selection.
@@ -82,7 +82,7 @@ pub const DATABENTO_START: &str = "2010-06";
 /// How many month-equivalents of budget.
 pub const BUDGET_MONTHS: usize = 9;
 
-/// A full CME session is about 1380 one-minute bars. `rv` is an UNNORMALISED
+/// A full CME session is about 1380 one-minute bars. `rv` is an unnormalised
 /// sum over however many bars exist, so a stub session understates volatility
 /// purely by bar count; features are scaled to this.
 const FULL_SESSION: i64 = 1380;
@@ -95,11 +95,11 @@ const MIN_SESSION_BARS: i64 = 1000;
 /// A month needs this many sessions per symbol to contribute.
 const MIN_MONTH_SESSIONS: usize = 15;
 
-/// Squares a deviation, with ONE multiply.
+/// Squares a deviation, with one multiply.
 ///
-/// THE APPROVED DEVIATION FROM `select_windows.py`. The Python writes
+/// The approved deviation from `select_windows.py`. The Python writes
 /// `(v - mean) ** 2`, and CPython's `float ** int` calls libm's `pow`, which is
-/// NOT correctly rounded: over the domain these features occupy it disagrees
+/// not correctly rounded: over the domain these features occupy it disagrees
 /// with the correctly rounded product in roughly one value in 1,163. A single
 /// IEEE multiply always is correctly rounded, so this function is exact where
 /// the Python is not - verified against exact rational arithmetic, not merely
@@ -107,8 +107,8 @@ const MIN_MONTH_SESSIONS: usize = 15;
 /// `614219518925.9357` while `x * x` gives `614219518925.9358`, and the
 /// rational product rounds to the latter.
 ///
-/// APPROVED BY REVIEW 2026-08-08, session 019fe1ff, on the ground that the
-/// tool being OFFLINE makes correctness more important rather than less: a
+/// Approved by review 2026-08-08, session 019fe1ff, on the ground that the
+/// tool being offline makes correctness more important rather than less: a
 /// purchase decision should not depend on the host libm when a correctly
 /// rounded and portable operation exists. Reproducing `pow`'s error bug-for-bug
 /// would make this tool's output a function of whichever libm the machine
@@ -120,8 +120,8 @@ const MIN_MONTH_SESSIONS: usize = 15;
 /// itself to its authority. The signature this program runs under says any new
 /// parity deviation reopens the gate, so the ruling had to be someone else's.
 ///
-/// MEASURED CONSEQUENCE, so nobody has to guess at the blast radius: of the
-/// 111,396 values in a full feature sweep, ELEVEN differ from the Python's
+/// Measured consequence, so nobody has to guess at the blast radius: of the
+/// 111,396 values in a full feature sweep, eleven differ from the Python's
 /// cache, all `volume_cv` or `vol_of_vol`, all by one or two ULPs. None of them
 /// moves a monthly median on the committed archives, so
 /// `analysis/select-windows-blessed.json` still reproduces exactly. That is
@@ -161,7 +161,7 @@ impl DayFeatures {
 
 /// A parsed bar: timestamp parts, open, close, volume.
 struct Bar {
-    /// SECONDS since the epoch, not minutes.
+    /// Seconds since the epoch, not minutes.
     ///
     /// The Python builds a full `datetime` including seconds, compares whole
     /// timestamps for the duplicate/backwards check, and derives missing
@@ -173,7 +173,7 @@ struct Bar {
     /// found by review instead.
     second: i64,
     hour: u32,
-    /// Days since 1970-01-01 of the SESSION this bar belongs to.
+    /// Days since 1970-01-01 of the session this bar belongs to.
     session_day: i64,
     open: f64,
     close: f64,
@@ -251,7 +251,7 @@ fn parse_line(line: &str) -> Option<Bar> {
         None => 0,
     };
     // `datetime` refuses these outright and the Python turns that into a
-    // skipped row. Day-of-month is validated against the actual month LENGTH,
+    // skipped row. Day-of-month is validated against the actual month length,
     // not against 31: `31/02/2024` is a `ValueError` in Python, and accepting
     // it here would have manufactured a bar on a date that does not exist and
     // silently shifted it into March.
@@ -269,14 +269,14 @@ fn parse_line(line: &str) -> Option<Bar> {
     let volume: i64 = parts[6].parse().ok()?;
 
     let civil = days_from_civil(year, month, day);
-    // Full SECOND resolution: the Python compares whole `datetime`s, so two
+    // Full second resolution: the Python compares whole `datetime`s, so two
     // rows inside the same minute are distinct rather than duplicates.
     let stamp = civil * 86_400
         + i64::from(hour) * 3_600
         + i64::from(minute_of_hour) * 60
         + i64::from(second);
     // `session_date`: CME runs 17:00 to 16:00 US Central, so a bar at or after
-    // 17:00 belongs to the NEXT calendar day's session.
+    // 17:00 belongs to the next calendar day's session.
     let session_day = if hour >= 17 { civil + 1 } else { civil };
     Some(Bar {
         second: stamp,
@@ -319,7 +319,7 @@ struct Slot {
     vols: Vec<i64>,
     max_r2: f64,
     zero: i64,
-    /// INSERTION-ORDERED hourly squared-return buckets. A `HashMap` here would
+    /// Insertion-ordered hourly squared-return buckets. A `HashMap` here would
     /// change the term order of the `py_sum` over hourly volatilities and move
     /// the last ulp of `vol_of_vol`.
     hourly: Vec<(u32, f64)>,
@@ -420,7 +420,7 @@ pub fn build_features(path: &Path) -> LabResult<Vec<(String, DayFeatures)>> {
             // zero-volume bar. Those minutes are real zero-return, zero-volume
             // observations, and dropping them inflates `zero_change` and
             // `volume_cv` in exactly the illiquid regimes this cares about.
-            // `int((stamp - prev_stamp).total_seconds() // 60) - 1`: FLOOR
+            // `int((stamp - prev_stamp).total_seconds() // 60) - 1`: floor
             // division on the second difference, so two bars inside one minute
             // contribute no missing minutes rather than a negative count.
             let missing = (bar.second - prev_seconds).div_euclid(60) - 1;
@@ -432,7 +432,7 @@ pub fn build_features(path: &Path) -> LabResult<Vec<(String, DayFeatures)>> {
             }
             let r = (bar.close / close).ln();
             slot.ret2 += r * r;
-            // `gc-1m.zip` is RAW rather than back-adjusted, so its roll sessions
+            // `gc-1m.zip` is raw rather than back-adjusted, so its roll sessions
             // carry a contract switch as one enormous one-minute return.
             // Tracking the session maximum lets it be dropped below.
             if r * r > slot.max_r2 {
@@ -465,7 +465,7 @@ pub fn build_features(path: &Path) -> LabResult<Vec<(String, DayFeatures)>> {
         #[expect(clippy::cast_precision_loss, reason = "bar counts are far below 2^53")]
         let var_v = py_sum(slot.vols.iter().map(|v| squared(*v as f64 - mean_v))) / count as f64;
         // Buckets hold squared returns, so take the root to get an hourly
-        // VOLATILITY before measuring its dispersion; the coefficient of
+        // volatility before measuring its dispersion; the coefficient of
         // variation of a variance is a different, more skewed quantity.
         let hourly: Vec<f64> = slot.hourly.iter().map(|(_, v)| v.sqrt()).collect();
         #[expect(clippy::cast_precision_loss, reason = "at most 24 buckets")]
@@ -530,7 +530,7 @@ pub type MonthRow = std::collections::BTreeMap<String, f64>;
 /// One month's sessions grouped by symbol, both insertion-ordered.
 pub type PerSymbolRows = Vec<(String, Vec<DayFeatures>)>;
 
-/// A month table: months in FIRST-SEEN order, each with its feature row.
+/// A month table: months in first-seen order, each with its feature row.
 pub type MonthTable = Vec<(String, MonthRow)>;
 
 /// A month's z-scored feature vector, laid out in the sorted key order.
@@ -555,7 +555,7 @@ fn median(values: &mut [f64]) -> LabResult<f64> {
 
 /// `monthly`: collapse sessions to months, per symbol, as medians.
 ///
-/// Returns months in FIRST-SEEN order, which is the term order every later
+/// Returns months in first-seen order, which is the term order every later
 /// `py_sum` walks.
 ///
 /// # Errors
@@ -671,7 +671,7 @@ pub fn farthest_point(
                     py_sum(vector.iter().zip(other.iter()).map(|(a, b)| squared(a - b))).sqrt()
                 })
                 .fold(f64::INFINITY, f64::min);
-            // Strict `>`: on a tie the Python keeps the month it saw FIRST,
+            // Strict `>`: on a tie the Python keeps the month it saw first,
             // which is the month table's insertion order.
             if distance > best_distance {
                 best = Some(month.clone());
@@ -722,8 +722,8 @@ pub fn select(months: &[(String, MonthRow)]) -> LabResult<Selection> {
     // Seed with the two months that must be in any sample: the most volatile
     // (stress regime) and the most recent (current algo population).
     //
-    // `max()` on a tie keeps the FIRST maximal element in CPython, and
-    // `max(vectors)` over a dict maxes the KEYS, which is the lexicographic
+    // `max()` on a tie keeps the first maximal element in CPython, and
+    // `max(vectors)` over a dict maxes the keys, which is the lexicographic
     // month string rather than any feature.
     let stress = vectors
         .iter()
@@ -739,7 +739,7 @@ pub fn select(months: &[(String, MonthRow)]) -> LabResult<Selection> {
         .map(|(m, _)| m.clone())
         .max()
         .expect("nonempty");
-    // Dedupe: if the most volatile month IS the most recent one, seeding with
+    // Dedupe: if the most volatile month is itself the most recent one, seeding with
     // both yields a basket one month short while looking full.
     let seeds = if stress == recent {
         vec![stress.clone()]
@@ -774,8 +774,8 @@ pub const DRIFT_COLUMNS: [&str; 6] = [
 /// `phase_drift`: yearly medians, answering whether the microstructure proxies
 /// are era-stable, which decides how much budget may go on old data.
 ///
-/// NOTE THE DIFFERENT MEDIAN. This phase takes `vals[len(vals) // 2]`, the
-/// UPPER middle on an even count, where [`monthly`] uses the true median. That
+/// Note the different median. This phase takes `vals[len(vals) // 2]`, the
+/// upper middle on an even count, where [`monthly`] uses the true median. That
 /// is a real difference in the Python rather than a slip to be tidied: the two
 /// are separate estimators and only the monthly one was ever argued about, so
 /// the port keeps both exactly as they are.
@@ -817,13 +817,13 @@ pub fn drift(months: &[(String, MonthRow)]) -> LabResult<Vec<(String, Vec<f64>)>
         .collect()
 }
 
-/// CPython's `round()`: half to EVEN, unlike Rust's `round`, which goes half
+/// CPython's `round()`: half to even, unlike Rust's `round`, which goes half
 /// away from zero. `phase_plan` indexes with it, so the two disagree on an
 /// exact half and pick different months.
 fn py_round(value: f64) -> f64 {
     let floor = value.floor();
     let diff = value - floor;
-    // Round up on a clear majority, or on an exact half when the floor is ODD -
+    // Round up on a clear majority, or on an exact half when the floor is odd -
     // which is what carries a tie to the even neighbour.
     if diff > 0.5 || (diff == 0.5 && floor % 2.0 != 0.0) {
         floor + 1.0
@@ -879,14 +879,14 @@ pub fn plan(months: &[(String, MonthRow)]) -> LabResult<Plan> {
         return Err(LabError::refusal("no months are eligible"));
     }
 
-    // The last 30 ELIGIBLE months, which is not the last 30 CALENDAR months: a
+    // The last 30 eligible months, which is not the last 30 calendar months: a
     // month absent from the features silently extends the pool further back.
     // On the committed archives the two coincide, so the Python states this
     // rather than fixing it - and prints the pool's true span precisely so a
     // mismatch is visible rather than assumed away.
     let recent: Vec<&str> = eligible.iter().rev().take(30).rev().copied().collect();
     let mut ranked = recent.clone();
-    // `sorted` is STABLE, so ties keep the ascending month order `recent`
+    // `sorted` is stable, so ties keep the ascending month order `recent`
     // already carries.
     ranked.sort_by(|a, b| {
         table[a]["NQ.rv"]
@@ -922,7 +922,7 @@ pub fn plan(months: &[(String, MonthRow)]) -> LabResult<Plan> {
             if pool.is_empty() {
                 return Err(LabError::refusal(format!("{lo}..{hi} has no months")));
             }
-            // `max`/`min` keep the FIRST extremal element on a tie.
+            // `max`/`min` keep the first extremal element on a tie.
             let stress = pool
                 .iter()
                 .copied()
@@ -971,7 +971,7 @@ pub fn nq_rv_percentiles(
         .iter()
         .filter(|(m, _)| m.as_str() >= DATABENTO_START)
         .collect();
-    // `sorted(eligible, key=...)` is STABLE, so ties keep the month table's
+    // `sorted(eligible, key=...)` is stable, so ties keep the month table's
     // order rather than falling back to the month name.
     let mut ordered: Vec<&str> = eligible.iter().map(|(m, _)| m.as_str()).collect();
     ordered.sort_by(|a, b| {
@@ -1002,7 +1002,7 @@ pub fn nq_rv_percentiles(
 mod tests {
     use super::*;
 
-    /// THE DISCRIMINATING CASE FOR THE SQUARING DEVIATION. Pinned so nobody
+    /// The discriminating case for the squaring deviation. Pinned so nobody
     /// "restores parity" by reaching for `powf(2.0)` - which is the same libm
     /// `pow` CPython calls, and therefore the same wrong answer.
     ///
@@ -1024,7 +1024,7 @@ mod tests {
         assert_eq!(by_pow.to_bits(), 614_219_518_925.935_7_f64.to_bits());
     }
 
-    /// `py_round` is half-to-EVEN, like CPython's `round`, not half-away-from-
+    /// `py_round` is half-to-even, like CPython's `round`, not half-away-from-
     /// zero like Rust's. `phase_plan` indexes with it, so the two rules pick
     /// different months on an exact half.
     #[test]
@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     /// The session label follows the CME convention: 17:00 CT or later belongs
-    /// to the NEXT calendar day's session, and the weekday helper has to agree
+    /// to the next calendar day's session, and the weekday helper has to agree
     /// with Python's `date.weekday()` so the Saturday filter drops the right
     /// bars.
     #[test]
@@ -1058,13 +1058,13 @@ mod tests {
         assert_eq!(morning.session_day, days_from_civil(2024, 1, 5));
     }
 
-    /// SECONDS PARTICIPATE IN ORDER. The Python compares whole `datetime`s, so
+    /// Seconds participate in order. The Python compares whole `datetime`s, so
     /// two rows inside one minute are distinct observations. Holding minute
     /// precision made the second one look like a duplicate and dropped it,
     /// which no corpus gate could expose because the committed archives are
     /// minute-aligned.
     ///
-    /// The assertion is on the ORDERING CONSEQUENCE rather than on the field,
+    /// The assertion is on the ordering consequence rather than on the field,
     /// because that is what the feature loop acts on.
     #[test]
     fn seconds_distinguish_two_bars_inside_one_minute() {

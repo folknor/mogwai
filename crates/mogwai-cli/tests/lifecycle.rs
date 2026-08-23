@@ -48,7 +48,7 @@ fn the_ready_record_names_the_tape_protocol_version() {
     );
 }
 
-/// The whole point of the ephemeral port: the venue picks one and REPORTS it,
+/// The whole point of the ephemeral port: the venue picks one and reports it,
 /// so a launcher never has to pick a port and never collides with another run.
 #[test]
 #[ignore = "binds a loopback listener"]
@@ -151,14 +151,14 @@ fn sigterm_stops_the_venue_within_the_shutdown_grace() {
         i32::try_from(venue.record.pid).expect("a pid fits in the signal type"),
     );
 
-    // THE BOUND IS THE GRACE THIS TEST IS NAMED FOR, not an arbitrary round
+    // The bound is the grace this test is named for, not an arbitrary round
     // number twice its size. `serve.rs`'s `SHUTDOWN_GRACE` is five seconds - the
     // window a completed or signalled venue gives its live connections to drain
     // before exiting regardless - and this venue holds no connection at all, so
     // the docstring's property is that it does not need that window. Ten seconds
     // asserted something weaker than the sentence above it. Measured at 0.2 s, so
     // five is still twenty-five times the observed cost; if the shutdown path
-    // ever grows a drain that an IDLE venue waits on, this is supposed to fail.
+    // ever grows a drain that an idle venue waits on, this is supposed to fail.
     const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
     let sent = Instant::now();
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).expect("signal the venue");
@@ -180,19 +180,19 @@ fn sigterm_stops_the_venue_within_the_shutdown_grace() {
 }
 
 /// The harness's own wall budget, pinned where it is weakest: a test that spends
-/// budget BEFORE the harness has a venue to count.
+/// budget before the harness has a venue to count.
 ///
 /// `spawn` opens the budget when no venue is live, and `Venue`'s `Drop` clears
 /// the anchor when the last one goes - bookkeeping that only ever sees venues
 /// the harness launched. `a_faulted_venue_exits_nonzero_and_an_exhausted_one_
-/// does_not` drives two through `launch` DIRECTLY and then calls `spawn`, so the
+/// does_not` drives two through `launch` directly and then calls `spawn`, so the
 /// counter has never left zero while up to ten seconds of the test's budget is
 /// gone. An `open_budget` that re-anchored on a zero count would restart the
-/// budget there and put the ceiling PAST `HANG_WATCHDOG`, which is the one
+/// budget there and put the ceiling past `HANG_WATCHDOG`, which is the one
 /// failure the whole mechanism exists to prevent: the deadline that should have
 /// reported arrives as an unattributed kill instead.
 ///
-/// THE CEILING IS WHAT IS ASSERTED, not the anchor, because the ceiling is what
+/// The ceiling is what is asserted, not the anchor, because the ceiling is what
 /// a bound is clamped to. Both bounds ask for the whole budget, so both are the
 /// clamp rather than the cap, and a re-anchor between them moves the second one
 /// forward by however long the untracked phase took.
@@ -214,43 +214,43 @@ fn a_venue_launched_after_untracked_work_inherits_that_works_budget() {
     );
 }
 
-/// The intermediate launcher's whole PROCESS GROUP, killed on drop.
+/// The intermediate launcher's whole process group, killed on drop.
 ///
-/// A GROUP RATHER THAN A CHILD, because the child is not what leaks. The venue
+/// A group rather than a child, because the child is not what leaks. The venue
 /// dies with the shell through `PR_SET_PDEATHSIG` and the shell dies when this
-/// test kills it - but `sleep 3600` is a SEPARATE process the shell forked, so
+/// test kills it - but `sleep 3600` is a separate process the shell forked, so
 /// killing the shell orphans it onto init and it sits there for an hour. That
-/// was happening on the SUCCESS path, every green run, and the machine this was
+/// was happening on the success path, every green run, and the machine this was
 /// written on was carrying five of them from earlier runs when the guard went
 /// in. `Child::kill` cannot reach it: the sleep is a grandchild and the test
 /// never learns its pid.
 ///
 /// `process_group(0)` therefore makes the shell a group leader, so the sleep and
 /// the venue inherit the group and one `killpg` reaches all three. It runs on
-/// DROP rather than at the end of the test because the leak's other half is a
+/// drop rather than at the end of the test because the leak's other half is a
 /// panic between the spawn and the kill - and an explicit cleanup on the path
 /// that does not fail is not a guard at all.
 ///
-/// It does NOT replace the explicit kill below. That one must signal the SHELL
-/// ALONE: the property under test is that the kernel reaps the venue when its
+/// It does not replace the explicit kill below. That one must signal the shell
+/// alone: the property under test is that the kernel reaps the venue when its
 /// launcher dies, and a group kill would have killed the venue directly and
 /// proven nothing.
 ///
-/// TWO THINGS IT DEPENDS ON, both load-bearing and neither obvious.
+/// Two things it depends on, both load-bearing and neither obvious.
 ///
-/// THE PGID SURVIVES THE LEADER BEING REAPED. The test kills and `wait()`s the
+/// The pgid survives the leader being reaped. The test kills and `wait()`s the
 /// shell, so by the time this runs the pid it names has been released - and a
 /// pgid is only safe from reuse while the group still has a member. `sleep 3600`
 /// is that member: it holds the group open, which is why a `killpg` up to ten
 /// seconds later reaches the right processes rather than whatever group
-/// inherited a recycled pid. CHANGE THE SCRIPT SO NOTHING OUTLIVES THE SHELL AND
-/// THIS GUARD BECOMES A SIGKILL AIMED AT A STRANGER. If the sleep ever goes, the
+/// inherited a recycled pid. Change the script so nothing outlives the shell and
+/// this guard becomes a SIGKILL aimed at a stranger. If the sleep ever goes, the
 /// group must be signalled before the shell is reaped, not after.
 ///
-/// WHETHER THE SLEEP IS FORKED IS SHELL-DEPENDENT. A shell may exec the last
+/// Whether the sleep is forked is shell-dependent. A shell may exec the last
 /// command of `A & B` in place, in which case there is no grandchild and nothing
 /// leaks; `/bin/sh` on the machine this was written on does not, and nine orphans
-/// had accumulated. The guard is correct either way - it is the fix's NECESSITY
+/// had accumulated. The guard is correct either way - it is the fix's necessity
 /// that varies by shell, not its safety.
 struct ReapedGroup(Child);
 
@@ -271,7 +271,7 @@ impl Drop for ReapedGroup {
 
 /// Reads one line from a child's stdout, bounded by the test's wall budget.
 ///
-/// `BufRead::read_line` IS UNBOUNDED, and on a pipe a child holds open it blocks
+/// `BufRead::read_line` is unbounded, and on a pipe a child holds open it blocks
 /// forever. A venue that never writes its readiness line would therefore be
 /// reported by the per-test hang watchdog - which names the whole test, kills
 /// the process group and says nothing about what was being waited for - rather
@@ -279,10 +279,10 @@ impl Drop for ReapedGroup {
 /// is no portable way to bound a blocking pipe read in place; that thread ends
 /// when the pipe closes, which the drop guard above guarantees.
 ///
-/// THAT RECLAMATION IS AN ORDERING DEPENDENCY, so it is written down. On the
+/// That reclamation is an ordering dependency, so it is written down. On the
 /// panic path the reader thread is still blocked on the pipe, and what closes
 /// the pipe is `ReapedGroup`'s drop killing the shell. The guard must therefore
-/// already be CONSTRUCTED when this is called - which it is, the `Child` is
+/// already be constructed when this is called - which it is, the `Child` is
 /// moved into it at spawn. Reorder those two and a failing test leaks a thread
 /// blocked forever on a live child's stdout.
 fn read_line_within(stdout: ChildStdout, cap: Duration) -> String {
@@ -354,7 +354,7 @@ fn venue_dies_when_its_launcher_is_killed_without_cleanup() {
     // process to disappear instead.
     //
     // On `teardown_deadline` rather than `wall_deadline`: this is the wait that
-    // runs LAST and its failure message is a claim about the VENUE, so it is
+    // runs last and its failure message is a claim about the venue, so it is
     // entitled to the reserve the budget holds back for exactly that. Twenty
     // seconds was never a bound at all - it sits past the per-test watchdog, so
     // a venue that outlived its launcher arrived as an unattributed kill.
@@ -372,7 +372,7 @@ fn venue_dies_when_its_launcher_is_killed_without_cleanup() {
     }
 }
 
-/// Starting a venue takes NO endpoint flags at all: no port to pick and no fd to
+/// Starting a venue takes no endpoint flags at all: no port to pick and no fd to
 /// nominate. The endpoint is the kernel's choice and it comes back on stdout, so
 /// this pins both halves of what a launcher may assume - loopback, and a port
 /// nobody chose.

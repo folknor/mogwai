@@ -4,17 +4,17 @@
 //! `analysis/check_cadence_feasible.py`'s L0 structural-proceed verdict.
 //!
 //! Ported in full: [`next_count`] (the parent/child geometric-mixture
-//! inverse-CDF draw), [`verdict`] (the structural PROCEED/CLOSE/STOP AND
-//! ASK threshold read directly off `cadence.json`'s measured
+//! inverse-CDF draw), [`verdict`] (the structural `PROCEED`/`CLOSE`/`STOP AND
+//! ASK` threshold read directly off `cadence.json`'s measured
 //! `children_mean`/`children_single_frac`) and [`density_passes`] (the
 //! per-second density feasibility bands).
 //!
-//! [`simulate_markov`] is the default CLI path's density RE-simulation, and
-//! it is a GATE rather than a diagnostic: `check_cadence_feasible.py` exits
+//! [`simulate_markov`] is the default CLI path's density re-simulation, and
+//! it is a gate rather than a diagnostic: `check_cadence_feasible.py` exits
 //! non-zero when the realized density misses the feasibility bands, so a port
 //! that stops after the structural verdict exits 0 where the script it
 //! replaces does not. The phase-3a record called this a secondary diagnostic;
-//! that is true of the VERDICT and false of the COMMAND, and the difference
+//! that is true of the verdict and false of the command, and the difference
 //! was found by the 2026-08-08 program review.
 //!
 //! It was originally skipped as needing a from-scratch CPython Mersenne
@@ -22,7 +22,7 @@
 //! the remaining work was `random()`, `weibullvariate` and the simulation
 //! loop - see [`crate::fit::mtrand`], whose stream is pinned against CPython.
 //!
-//! STILL NOT PORTED: the `--fit` and `--fit-markov` grid searches. They are
+//! Still not ported: the `--fit` and `--fit-markov` grid searches. They are
 //! search tools rather than gates, and both need `math.gamma` at arbitrary
 //! shape - the default path only ever evaluates `gamma(2.0)`, which is
 //! exactly 1. That is why [`simulate_markov`] takes `innovation_mean` as a
@@ -275,7 +275,7 @@ pub fn simulate_markov(
 /// Population variance of the gap series, exactly as
 /// `statistics.pvariance` computes it.
 ///
-/// NO DEVIATION REMAINS HERE. Every field of the density report is now bit-exact
+/// No deviation remains here. Every field of the density report is now bit-exact
 /// against CPython, and the history is kept because it is the reason this
 /// delegates rather than computing in floating point.
 ///
@@ -284,10 +284,10 @@ pub fn simulate_markov(
 /// evaluates `(n * sum(x^2) - sum(x)^2) / n^2` as an exact rational over the
 /// binary64 inputs and rounds once at the end. The obvious port - `py_fsum` over
 /// squared deviations from the rounded mean - is not a last-bit difference from
-/// that. It is ILL-CONDITIONED: for a clustered series the true variance is a
+/// that. It is ill-conditioned: for a clustered series the true variance is a
 /// difference of quantities agreeing in almost every bit, so the rounding of
 /// each individual square dominates the answer. On three nearly-equal gaps it
-/// came out WRONG BY A FACTOR OF THREE.
+/// came out wrong by a factor of three.
 ///
 /// That approach was defended here across three revisions of this comment, each
 /// claiming a tighter ULP ceiling than the last - one from a constructed
@@ -310,7 +310,7 @@ mod gap_cv2_parity {
     use super::*;
 
     /// The reported `gap_cv2`, computed the way `density` reports it, so these
-    /// cases pin the FIELD rather than the intermediate variance. That
+    /// cases pin the field rather than the intermediate variance. That
     /// distinction matters: the variance could be exact while the division that
     /// forms `gap_cv2` reintroduced a platform-dependent rounding, which is
     /// precisely what `powi(2)` would have done.
@@ -319,7 +319,7 @@ mod gap_cv2_parity {
         gap_pvariance(gaps) / (gap_mean * gap_mean)
     }
 
-    /// THE THREE-GAP CASE, the vector originally built to discriminate against
+    /// The three-gap case, the vector originally built to discriminate against
     /// the old ill-conditioned implementation. CPython 3.14.6:
     /// `statistics.pvariance(gaps)` is `0.14509134298012094` and `gap_cv2` is
     /// `0.33706429233938623`. The old code returned `0.3370642923393863`.
@@ -364,7 +364,7 @@ mod gap_cv2_parity {
         }
     }
 
-    /// THE `--events 14` PATH, which is what refuted the first ULP ceiling.
+    /// The `--events 14` path, which is what refuted the first ULP ceiling.
     /// This is a real CLI invocation rather than a constructed vector, and it
     /// used to disagree by two ULPs on `gap_cv2` while every other field agreed
     /// bit for bit.
@@ -399,7 +399,7 @@ mod gap_cv2_parity {
         }
     }
 
-    /// THE DEFAULT 3,000,000-EVENT RUN, the one the subcommand performs with no
+    /// The default 3,000,000-event run, the one the subcommand performs with no
     /// arguments and the one whose exit status is the gate. Pinned bit-exact
     /// against `python3 analysis/check_cadence_feasible.py` on CPython 3.14.6,
     /// `gap_cv2` included, because before this the density report at the
@@ -434,9 +434,9 @@ mod gap_cv2_parity {
         }
     }
 
-    /// THE CASE THAT KILLED THE ULP FRAMING, now exact. Three nearly-equal gaps
+    /// The case that killed the ULP framing, now exact. Three nearly-equal gaps
     /// make the true variance a difference of quantities agreeing in all but
-    /// the last two bits; the old implementation was WRONG BY A FACTOR OF THREE
+    /// the last two bits; the old implementation was wrong by a factor of three
     /// here, returning `0x1.5555555555555p-107` against CPython's
     /// `0x1.c71c71c71c71cp-109`. Kept as the sharpest regression case in the
     /// suite, with inputs as bit patterns so it cannot drift through decimal
@@ -468,8 +468,8 @@ mod gap_cv2_parity {
 /// # Errors
 /// [`LabError::Refusal`] if either anchor is absent or non-numeric. This
 /// previously read a missing anchor as zero, which let a document carrying
-/// `children_mean` but no `children_single_frac` return CLOSE, and one
-/// carrying neither return CLOSE as well - a verdict fabricated from input
+/// `children_mean` but no `children_single_frac` return `CLOSE`, and one
+/// carrying neither return `CLOSE` as well - a verdict fabricated from input
 /// the Python rejects outright.
 pub fn verdict(cadence: &Value) -> LabResult<&'static str> {
     let mean = required(cadence, &["targets", "children_mean", "anchor"])?;
@@ -487,7 +487,7 @@ pub fn verdict(cadence: &Value) -> LabResult<&'static str> {
 mod tests {
     use super::*;
 
-    /// THE SMALL-EVENT SIMULATION FIXTURE. Five thousand events over the
+    /// The small-event simulation fixture. Five thousand events over the
     /// committed cadence and fingerprint, against a direct run of
     /// `check_cadence_feasible.simulate_markov` with the same arguments. Small
     /// enough to run in a unit test, long enough that a draw-consumption,
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(got["median"], 4);
         assert_eq!(got["p95"], 385);
         assert_eq!(got["truncation_frac"], 0.0);
-        // EXACT, not within a tolerance. The `1e-12` relative band this loop
+        // Exact, not within a tolerance. The `1e-12` relative band this loop
         // used to carry was wide enough to hide a real defect: every one of
         // these fields is bit-reproducible against CPython, so a tolerance
         // bought nothing except silence about the one field that genuinely
@@ -541,11 +541,11 @@ mod tests {
                  bit-exact rather than to a tolerance"
             );
         }
-        // `gap_cv2` AGREES BIT FOR BIT AT THIS EVENT COUNT, and that agreement
+        // `gap_cv2` agrees bit for bit at this event count, and that agreement
         // is incidental rather than guaranteed - see `gap_pvariance` for why no
         // bound holds in general, and the `deviation` module for two real cases
         // where this same field disagrees. Pinned exactly anyway: if it ever
-        // moves HERE, something changed in the summation or the draw stream,
+        // moves here, something changed in the summation or the draw stream,
         // which is worth a loud failure even though cross-language agreement is
         // not claimed.
         let cv2 = got["gap_cv2"].as_f64().expect("numeric gap_cv2");
@@ -556,9 +556,9 @@ mod tests {
         );
     }
 
-    /// THE CASE THAT PASSED OPEN. A document carrying `children_mean` but no
+    /// The case that passed open. A document carrying `children_mean` but no
     /// `children_single_frac` used to read the missing anchor as zero, so
-    /// `single < 0.90` held and the malformed measurement returned PROCEED.
+    /// `single < 0.90` held and the malformed measurement returned `PROCEED`.
     /// The Python raises `KeyError` on the same input.
     #[test]
     fn a_measurement_missing_an_anchor_refuses_rather_than_proceeding() {

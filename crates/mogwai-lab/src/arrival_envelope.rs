@@ -120,7 +120,7 @@ pub struct MonthStats {
     pub hourly_rate: [f64; 24],
     pub hourly_zero_fraction: [f64; 24],
     /// The simulated month left the representable intensity range. Spec 9.7's
-    /// replicate ceiling rule: this is a REPLICATE outcome, not a run-ending
+    /// replicate ceiling rule: this is a replicate outcome, never a run-ending
     /// fault - the replicate's max deviation becomes infinite and evaluation
     /// continues. A4 still refuses actual candidate walks that breach.
     pub ceiling_breached: bool,
@@ -143,13 +143,13 @@ pub struct EnvelopeRecord {
     pub replicates: usize,
     pub order: usize,
     pub k: usize,
-    /// Replicate INDICES with at least one ceiling-breached constituent month,
+    /// Replicate indices with at least one ceiling-breached constituent month,
     /// observed or generated alike (spec 9.7 and the 9.5 field list).
     pub ceiling_breached_replicates: Vec<usize>,
     /// Where this gate's deviations stood: inside base, in the marginal shell,
     /// or past the cap. Recorded whether or not an envelope was evaluated.
     pub classification: EnvelopeDemand,
-    /// Why a MARGINAL gate went unevaluated, per the 2026-08-11
+    /// Why a marginal gate went unevaluated, per the 2026-08-11
     /// decision-relevant envelope amendment. `None` when the gate needed no
     /// envelope or actually got one.
     pub skip_reason: Option<String>,
@@ -173,7 +173,7 @@ pub struct EnvelopeStreamIdentity {
 pub struct EnvelopeProbeCost {
     pub family: Family,
     pub k: usize,
-    /// DERIVED, not measured: `per_month_s * ENVELOPE_REPLICATES * (1 + k)`.
+    /// Derived, not measured: `per_month_s * ENVELOPE_REPLICATES * (1 + k)`.
     pub cost_s: f64,
     pub budget_s: f64,
     pub passed: bool,
@@ -327,13 +327,13 @@ fn level(cell: &Cell, state: &State) -> f64 {
     }
 }
 
-/// Everything a family's per-cell transition needs that does NOT vary from cell
+/// Everything a family's per-cell transition needs that does not vary from cell
 /// to cell, built once per walk.
 ///
 /// The loop below runs 2.67 million times per month at the frozen exposure, and
 /// it used to rebuild `Poisson`, `Exp` and `exp(-dt/tau)` inside every one of
 /// them - constants, all of them, since `dt`, `tau`, `k` and `m` are fixed for
-/// the walk. Hoisting is BIT-IDENTICAL rather than merely law-preserving: the
+/// the walk. Hoisting is bit-identical rather than merely law-preserving: the
 /// distribution objects are the same values built by the same code, sampled by
 /// the same algorithm against the same stream, so no envelope number, gate
 /// verdict or conformance figure moves. That is why this is an optimization
@@ -492,13 +492,13 @@ pub fn simulate_month(cell: &Cell, grid: &ExposureGrid, seed: u64) -> LabResult<
                 // moves with the latent state on every pass, so there is
                 // nothing to hoist - only the construction to remove. The
                 // scaling reproduces `Exp`'s own arithmetic (it stores the
-                // reciprocal and multiplies), so this is BIT-IDENTICAL.
+                // reciprocal and multiplies), so this is bit-identical.
                 //
-                // Inverse CDF was tried here and measured 10 percent SLOWER on
+                // Inverse CDF was tried here and measured 10 percent slower on
                 // this toolchain and RNG than the ziggurat, which takes its
                 // rejection branch rarely enough to beat an unconditional
                 // logarithm. Recorded so the substitution is not made blindly,
-                // NOT as a claim about every future toolchain: a cheaper `ln`
+                // never as a claim about every future toolchain: a cheaper `ln`
                 // or a different sampler could reverse it, and the way to know
                 // is to measure again. The durable figure is in
                 // `reference/performance.md`.
@@ -726,8 +726,8 @@ pub fn predictive_envelopes(
         let observed = simulate_month(cell, grid, envelope_seed(cell, k, grid, replicate, 0, 0))?;
         let mut generated_rate = [0.0; 24];
         let mut generated_zero = [0.0; 24];
-        // Spec 9.7's replicate ceiling rule: ANY breached constituent month
-        // makes this replicate's max deviation infinite for EVERY requested
+        // Spec 9.7's replicate ceiling rule: any breached constituent month
+        // makes this replicate's max deviation infinite for every requested
         // gate, the remaining members are not simulated, and evaluation
         // continues with the next replicate. Up to 16 such replicates leave
         // rank 484 finite; 17 or more make the envelope infinite, which the
@@ -804,7 +804,7 @@ pub const fn envelope_probe_cell(family: Family) -> Cell {
             tau_s: 1.0,
         },
         // 1.4, not 2.0: a real candidate walk at sigma 2.0 breaches
-        // ARRIVAL_X_CEILING within a month and refuses under A4, so it can
+        // `ARRIVAL_X_CEILING` within a month and refuses under A4, so it can
         // probe neither cost nor fidelity. tau stays at its minimum.
         Family::LogOuCox => Cell::LogOuCox {
             sigma_y: 1.4,
@@ -833,14 +833,14 @@ pub fn probe_envelope_costs(
     let mut costs = Vec::with_capacity(Family::ALL.len() * ENVELOPE_CELL_BUDGET_S.len());
     for family in Family::ALL {
         let cell = envelope_probe_cell(family);
-        // UNIT AND DERIVE, per the 2026-08-11 pricing amendment. The old probe
-        // ran a FULL evaluation per tier - 8,500 months per family, about 2.5
+        // Unit and derive, per the 2026-08-11 pricing amendment. The old probe
+        // ran a full evaluation per tier - 8,500 months per family, about 2.5
         // hours in total - to learn a price that is nothing but a month count
         // times a unit. Measuring the unit once and multiplying costs about 34
         // seconds for the whole probe and is strictly more informative, because
         // the artifact then carries the unit a later optimization moves.
         //
-        // The linearity is exact in WORK and estimated in WALL: the evidence is
+        // The linearity is exact in work and estimated in wall time: the evidence is
         // a real 1,500-month evaluation that measured 584.287 s against a
         // 558.8 s derivation, 4.5 percent apart on a fifty-fold extrapolation,
         // which the 15 percent headroom absorbs.
@@ -1003,7 +1003,7 @@ mod tests {
                 rate_ratio: 20.0,
                 tau_s: 46.4158883361278,
             },
-            // Corners CROSS-PAIRED per the 2026-08-11 conformance-cell
+            // Corners cross-paired per the 2026-08-11 conformance-cell
             // amendment: each parameter extreme meets the tau endpoint whose
             // estimator dispersion permits a discriminating test, so both tau
             // endpoints stay covered without the statistically unattainable
@@ -1028,7 +1028,7 @@ mod tests {
                 tau_s: 3600.0,
             },
             // 1.4, not the domain maximum 2.0: at sigma 2.0 an
-            // ARRIVAL_X_CEILING breach needs only a 5.6 sigma excursion,
+            // `ARRIVAL_X_CEILING` breach needs only a 5.6 sigma excursion,
             // which this workload's 3.3e8 effective draws hit near-certainly.
             Cell::LogOuCox {
                 sigma_y: 1.4,
@@ -1202,11 +1202,11 @@ mod tests {
                 );
             }
         }
-        // REPORTED, NOT ASSERTED, and the spec asks for exactly that: "the
+        // Reported, never asserted, and the spec asks for exactly that: "the
         // conformance gate reports its measured wall time in the artifact so
         // the claim is checked by running, not asserted". An `assert` here is a
-        // statement about the HOST sitting inside a correctness gate, so a
-        // loaded machine returns a CORRECTNESS failure for a load average -
+        // statement about the host sitting inside a correctness gate, so a
+        // loaded machine returns a correctness failure for a load average -
         // the `tape_lateness_under_acceleration` shape this workspace already
         // retired for the same reason. Measured 167.6 s on 2026-08-19 against
         // the 900 s budget, so nothing was being caught by asserting it; what
@@ -1229,40 +1229,40 @@ mod tests {
     /// The two-sided variance ratio the candidate sample may occupy around the
     /// idealized one.
     ///
-    /// IT IS THE ABSOLUTE ARM, and it exists because the mean comparison alone
+    /// This is the absolute arm, and it exists because the mean comparison alone
     /// derives its whole tolerance from the two samples' own dispersion - so a
-    /// regression that WIDENS the candidate walk's spread widens the band that
+    /// regression that widens the candidate walk's spread widens the band that
     /// is supposed to catch it, and a badly enough broken candidate passes
-    /// BECAUSE it is broken. With this arm, inflated dispersion is itself a
+    /// precisely because it is broken. With this arm, inflated dispersion is itself a
     /// failure rather than a licence, and the licence a still-passing candidate
     /// can buy is bounded: at the band edge the combined standard error is
     /// `sqrt((1 + 6.5) / 2)` = 1.94x its healthy value, not unbounded.
     ///
-    /// 6.5 IS MEASURED, NOT CHOSEN FOR ROUNDNESS. A full gate run makes 400
+    /// 6.5 is measured, never chosen for roundness. A full gate run makes 400
     /// comparisons - 20 gated hours x 2 statistics x 10 parts, so 40 per part -
-    /// and over those the observed ratio spans 0.34 to 2.95 BEFORE the
+    /// and over those the observed ratio spans 0.34 to 2.95 before the
     /// degeneracy floor below is applied, which is the
     /// F(31, 31) reference distribution to the quantile: the two
     /// implementations really do have equal variances, so the spread here is
     /// pure sampling noise at n = 32. F(31, 31) puts its two-sided 1.2e-6
     /// points at 0.154 and 6.5, so a band of 6.5 costs about one false failure
-    /// in two thousand runs. THAT IS AS TIGHT AS n = 32 PERMITS: a band tight
+    /// in two thousand runs. That is as tight as n = 32 permits: a band tight
     /// enough to catch a 2x dispersion regression would be red most runs.
     /// Buying more sensitivity here means more replicate months, which is wall
     /// time, not a smaller constant. The band assumes approximate normality of
     /// the per-month statistic, to which a variance ratio is sensitive; the
     /// observed extremes are consistent with it, which is the only check n = 32
     /// supports. The floor cannot cost a false red: it raises whichever
-    /// variance is below it, which moves any ratio MONOTONICALLY TOWARDS 1, so
+    /// variance is below it, which moves any ratio monotonically towards 1, so
     /// no comparison that passed the raw ratio can fail the floored one.
     const FIDELITY_DISPERSION_BAND: f64 = 6.5;
 
-    /// Below this, a sample is CONSTANT rather than dispersed, and the ratio is
+    /// Below this, a sample is constant rather than dispersed, and the ratio is
     /// taken between floored variances instead of raw ones.
     ///
-    /// THIS IS NOT A CONVENIENCE AGAINST DIVISION BY ZERO - it is what keeps
+    /// This is not a convenience against division by zero - it is what keeps
     /// the degenerate rows inside the arm instead of exempt from it. Skipping
-    /// the comparison whenever EITHER variance is zero reopens exactly the
+    /// the comparison whenever either variance is zero reopens exactly the
     /// self-widening hole the arm was added to close: with the idealized sample
     /// constant, the mean arm's band is `5 * sqrt(candidate_var / 32)`, which
     /// the candidate's own dispersion sets, so a candidate scattered
@@ -1272,7 +1272,7 @@ mod tests {
     /// samples give a ratio of exactly 1 and pass, a constant against a
     /// genuinely dispersed sample gives a ratio far outside the band and fails.
     ///
-    /// 1e-9 IS MEASURED. Both gated statistics are order one - `hourly_rate`
+    /// 1e-9 is measured. Both gated statistics are order one - `hourly_rate`
     /// runs 1e-4 to 1e0 in variance and `hourly_zero_fraction` is a fraction on
     /// the unit interval - so 1e-9 is a standard deviation of 3.2e-5, which is
     /// constancy at either statistic's own resolution. In a healthy run the
@@ -1291,7 +1291,7 @@ mod tests {
     }
 
     /// The gate's predicate, extracted so the test can run it against
-    /// DELIBERATELY BROKEN samples and prove its own bite. `None` is agreement.
+    /// deliberately broken samples and prove its own bite. `None` is agreement.
     fn fidelity_verdict(idealized: &[f64], candidate: &[f64]) -> Option<String> {
         let (idealized_mean, idealized_variance) = mean_and_variance(idealized);
         let (candidate_mean, candidate_variance) = mean_and_variance(candidate);
@@ -1304,7 +1304,7 @@ mod tests {
                 "mean: idealized={idealized_mean} candidate={candidate_mean} difference={difference} combined_se={combined_se}"
             ));
         }
-        // EVERY comparison reaches the ratio arm, degenerate ones included; the
+        // Every comparison reaches the ratio arm, degenerate ones included; the
         // floor is what makes that well defined. See
         // `FIDELITY_VARIANCE_FLOOR` for why exempting a zero variance rather
         // than flooring it reopens the self-widening hole in the one place the
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     /// The predicate's own bite, on cases the 640 walks behind the gate cannot
-    /// be relied on to contain - and specifically on the ONE-SIDED DEGENERATE
+    /// be relied on to contain - and specifically on the one-sided degenerate
     /// pair, where a reference sample that never moves leaves the mean arm's
     /// band entirely in the candidate's gift.
     ///
@@ -1343,8 +1343,8 @@ mod tests {
             "a displaced constant must be caught by the mean arm"
         );
 
-        // THE DEFECT ITSELF. A candidate scattered with variance 100 around a
-        // CONSTANT reference: the mean arm cannot see it, because the band it
+        // The defect itself. A candidate scattered with variance 100 around a
+        // constant reference: the mean arm cannot see it, because the band it
         // computes is `5 * sqrt(100 / 32)` = 8.84, which the candidate's own
         // dispersion bought. Exempting the ratio arm here - as a `both
         // variances strictly positive` guard does - passes it.
@@ -1370,7 +1370,7 @@ mod tests {
             "the dispersion arm must be what refuses it"
         );
 
-        // AND THE MIRROR IMAGE: a candidate that produced the identical value
+        // And the mirror image: a candidate that produced the identical value
         // in all 32 months against a reference that genuinely moves is the
         // loudest possible disagreement, and it is refused for the same reason.
         assert!(
@@ -1405,7 +1405,7 @@ mod tests {
             + candidate_variance / candidate.len() as f64)
             .sqrt();
         let difference = (idealized_mean - candidate_mean).abs();
-        // BOTH DIAGNOSTICS ARE FINITE ON EVERY ROW. The ratio is the gated one,
+        // Both diagnostics are finite on every row. The ratio is the gated one,
         // so it reads 1.0000 on a degenerate pair rather than NaN, and the raw
         // variances beside it still say which rows those are. The mean slack is
         // undefined rather than infinite where the band is exactly zero, and it
@@ -1426,15 +1426,15 @@ mod tests {
             verdict.unwrap_or_default()
         );
 
-        // THE SENSITIVITY IS PROVEN ON EVERY RUN, on this very sample, at no
+        // The sensitivity is proven on every run, on this very sample, at no
         // walk cost: both perturbations are arithmetic over the 32 values
         // already collected. A tolerance whose bite is demonstrated where it is
         // applied cannot decay into a shrug, which is the standard
         // `arch_coefficients_match_the_shipped_recursion` sets.
         //
-        // The shift is taken AWAY from the idealized mean rather than in a
+        // The shift is taken away from the idealized mean rather than in a
         // fixed direction: a candidate mean already sitting four standard
-        // errors low would be moved TOWARDS agreement by a blind `+`, and the
+        // errors low would be moved towards agreement by a blind `+`, and the
         // probe would then fail for being satisfied.
         let away = if candidate_mean >= idealized_mean {
             1.0
@@ -1443,9 +1443,9 @@ mod tests {
         };
         // Where the combined standard error is exactly zero the mean band is
         // zero too, so any displacement at all is a rejection - but it has to
-        // SURVIVE THE ADDITION. A fixed `1e-12` is a no-op once the sample
+        // survive the addition. A fixed `1e-12` is a no-op once the sample
         // exceeds about 1e4, which would report a green gate as a correctness
-        // failure; a few ulps AT THE SAMPLE'S OWN MAGNITUDE cannot be.
+        // failure; a few ulps at the sample's own magnitude cannot be.
         let level = idealized_mean.abs().max(candidate_mean.abs()).max(1.0);
         let shift = if combined_se > 0.0 {
             away * 6.0 * combined_se
@@ -1460,14 +1460,14 @@ mod tests {
             "{cell:?} step_ns={step_ns} {statistic} hour={hour}: the MEAN arm must be what rejects a candidate displaced from agreement, got {shifted_verdict}"
         );
 
-        // THE DISPERSION PROBE RUNS ON EVERY ROW, degenerate ones included -
+        // The dispersion probe runs on every row, degenerate ones included -
         // which is the whole point, since the degenerate rows are where the
         // arm's absence was the defect, and a probe guarded by the same
         // condition as the arm could never have shown it. Multiplying a
         // constant sample by a spread factor leaves it constant, so the
-        // dispersion is INJECTED ADDITIVELY instead: alternating plus and minus
+        // dispersion is injected additively instead: alternating plus and minus
         // about the candidate's own mean, over an even number of months, so the
-        // mean is preserved EXACTLY and the mean arm's band only widens. Any
+        // mean is preserved exactly and the mean arm's band only widens. Any
         // rejection is therefore the dispersion arm's, which the assertion
         // demands by name.
         let target_variance =
@@ -1495,15 +1495,15 @@ mod tests {
         );
     }
 
-    /// The spec 9.7 fidelity comparison for ONE probe family at ONE grid step.
+    /// The spec 9.7 fidelity comparison for one probe family at one grid step.
     ///
-    /// SPLIT BY (family, step) rather than run as one test, and the reason is a
+    /// Split by (family, step) rather than run as one test, and the reason is a
     /// harness ceiling rather than a contract change: the whole gate is 640
     /// month-scale walks, past the per-test hang watchdog every lane of this
     /// workspace runs under, so a single test would be permanently unrunnable -
     /// which section 18's "every gate needs a command that actually runs"
     /// ruling forbids. Every test below shares the frozen test name as its
-    /// PREFIX, so the Brick E gate command still selects the complete gate by
+    /// prefix, so the Brick E gate command still selects the complete gate by
     /// substring while each part gets its own watchdog budget. Nothing
     /// asserted, no constant and no cell moves.
     fn assert_family_fidelity(family: Family, step_ns: u64) {

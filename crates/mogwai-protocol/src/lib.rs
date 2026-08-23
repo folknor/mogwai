@@ -8,7 +8,7 @@
 //! mogwai never imports nautilus; nautilus types are mirrored here only as far as
 //! the wire needs them.
 //!
-//! THE TWO DIRECTIONS ARE NAMED ASYMMETRICALLY, AND THE ASYMMETRY IS THE POINT.
+//! The two directions are named asymmetrically, and the asymmetry is the point.
 //! Outbound frames are `VenueMessage`, named for the party that sends them,
 //! because the venue is one thing and every frame comes from it. Inbound frames
 //! are `Command`, named for what they carry, because there is no singular party
@@ -79,9 +79,9 @@ pub type VenueOrderId = String;
 /// the honest-transport default lives in exactly one spot.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// How long a consumer waits for ONE `/ws` upgrade before abandoning it.
+/// How long a consumer waits for one `/ws` upgrade before abandoning it.
 ///
-/// SIZED FOR A COLD RIVER, not for a handshake. The venue materializes no river
+/// Sized for a cold river, not for a handshake. The venue materializes no river
 /// until something names it, so the first boarding of a river pays that river's
 /// whole warmup synthesis inside the upgrade - the boat cannot be placed until
 /// the water it reads exists. This was five hardcoded seconds, chosen when one
@@ -89,14 +89,14 @@ pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// its water already there; with that privilege gone, five seconds refuses any
 /// warmup a consumer might reasonably configure.
 ///
-/// It is a CONSUMER policy and it belongs to the consumer: the venue declines to
+/// It is a consumer policy and it belongs to the consumer: the venue declines to
 /// promise a fast first boarding, because the honest cost of a long warmup is a
 /// long wait. Raising it past a nautilus node's own `timeout_connection`, which
 /// defaults to sixty seconds, buys nothing - that deadline governs the node's
 /// wait for every client to report connected, and it is the host's to raise.
 pub const DEFAULT_DIAL_TIMEOUT_SECS: u64 = 60;
 
-/// What a `/trades` request that states NO `limit` gets. This is the
+/// What a `/trades` request that states no `limit` gets. This is the
 /// no-opinion answer, deliberately split from the ceiling below: at the
 /// raw-fill cadence one page at `MAX_HISTORY_LIMIT` is roughly 7 MB of JSON,
 /// and serving that to a caller who expressed no opinion would be a 50x
@@ -104,14 +104,14 @@ pub const DEFAULT_DIAL_TIMEOUT_SECS: u64 = 60;
 pub const DEFAULT_HISTORY_LIMIT: usize = 1_000;
 
 /// Maximum number of trades a single `/trades` history page returns - the
-/// ceiling an EXPLICIT caller may ask for. The venue enforces it (it clamps
+/// ceiling an explicit caller may ask for. The venue enforces it (it clamps
 /// every request to it) and the adapter, which always states a limit, asks for
 /// exactly this; sourcing both from here keeps the two in lockstep, so the
 /// adapter never advertises a ceiling larger than the venue will honor.
 ///
 /// Sized against a loopback venue: ~1000 simulated seconds per page, ~7 MB of
-/// JSON, synthesized well inside `DEFAULT_REQUEST_TIMEOUT_SECS`. It is NOT
-/// sized for a real network, and the adapter additionally bounds a whole PAGED
+/// JSON, synthesized well inside `DEFAULT_REQUEST_TIMEOUT_SECS`. It is not
+/// sized for a real network, and the adapter additionally bounds a whole paged
 /// request with its own `MAX_TRADES_PER_REQUEST`.
 pub const MAX_HISTORY_LIMIT: usize = 50_000;
 

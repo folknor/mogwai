@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Saturating UNIX-nanoseconds clock reader: the single source of truth for
+/// Saturating unix-nanoseconds clock reader: the single source of truth for
 /// "now" on the wire's `ts_event` axis, shared by the venue (its `now_ns`) and
 /// the adapter (its `now_unix_nanos`, which wraps the result in `UnixNanos`).
 ///
@@ -94,7 +94,7 @@ impl SimClock {
     /// scales to zero nanos is clamped to 1ns so a `tokio::time::sleep` /
     /// `interval` derived from a configured (sim-intended) duration never
     /// degenerates to a zero-delay busy loop. This 1ns is only the code floor;
-    /// the EFFECTIVE floor is the tokio timer granularity (~1ms), below which a
+    /// the effective floor is the tokio timer granularity (~1ms), below which a
     /// scaled duration coalesces regardless. See `reference/clock.md`.
     #[must_use]
     pub fn wall_duration(&self, sim_dur_ns: u64) -> std::time::Duration {
@@ -107,7 +107,7 @@ impl SimClock {
 /// richer envelope publishes where the synthetic tape begins so a consumer can
 /// guard its own warmup window instead of issuing a doomed off-river fetch.
 ///
-/// ALWAYS THE RUN'S OWN CLOCK, never a boat's. It carried a `boat_clock` flag and
+/// Always the run's own clock, never a boat's. It carried a `boat_clock` flag and
 /// answered on a named river's boat until that was found to be a boat-discovery
 /// channel on a route that cannot tell who is asking - the flag was an existence
 /// bit and the map exposed another passenger's cadence and placement. Per-boat
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(decoded, clock);
     }
 
-    /// The snapshot `/clock` serves and the adapter reads. Its BYTE form is
+    /// The snapshot `/clock` serves and the adapter reads. Its byte form is
     /// pinned, not just its round trip: `backfill_horizon_ns` became
     /// `warmup_ns` when warmup stopped being a permission and became something
     /// the venue materializes, and the adapter's transport test pins this exact
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn now_unix_nanos_reads_a_post_epoch_clock() {
-        // A real post-epoch wall clock is well past zero. Deliberately NO
+        // A real post-epoch wall clock is well past zero. Deliberately no
         // ordering assertion across two reads: `now_unix_nanos` wraps
         // `SystemTime`, which is not monotonic - an NTP step between two reads
         // can legitimately go backward, and the helper's contract is exactly

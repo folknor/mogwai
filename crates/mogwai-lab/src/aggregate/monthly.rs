@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The MONTHLY aggregates (spec 3.5): pooling the per-session block records
+//! The monthly aggregates (spec 3.5): pooling the per-session block records
 //! into the descriptive month, plus the 8-seed central blocks.
 //!
 //! Ported from `analysis/mnq_fit.py`'s `pool_block1_hists`,
@@ -13,11 +13,11 @@
 //! neither is obvious:
 //!
 //! - **The monthly block-3/4 aggregates skip non-qualifying sessions
-//!   silently.** This is the DESCRIPTIVE record; the ladder's Q1 all-session
+//!   silently.** This is the descriptive record; the ladder's Q1 all-session
 //!   qualification is a separate, stricter rule enforced in
 //!   [`super::family`]. A cell can therefore carry a monthly median while
 //!   every metric over it is refused.
-//! - **`aggregate_block4` sorts its hours as STRINGS**, so the emitted key
+//! - **`aggregate_block4` sorts its hours as strings**, so the emitted key
 //!   order is `"0", "1", "10", ..., "all"` - the pooled `"all"` cell sorts
 //!   last by accident of the alphabet, not by design.
 
@@ -39,20 +39,20 @@ use crate::subcontract::{
 /// One pooled block-1 histogram key: `(n, quote half-ticks, trade ticks,
 /// hour, since-open bin, until-close bin)`. The quote range carries `-1` for
 /// the Python `None` (no valid-book parent in the minute), which is exactly
-/// the sort key `hist_to_records` uses - so the natural `BTreeMap` order IS
+/// the sort key `hist_to_records` uses - so the natural `BTreeMap` order is
 /// the frozen record order, with the null quote sorting first.
 pub type PooledKey = (i64, i64, i64, i64, &'static str, &'static str);
 
-/// The pooled sparse joint histogram: key -> minute count, in FIRST-INSERTION
+/// The pooled sparse joint histogram: key -> minute count, in first-insertion
 /// order.
 ///
 /// The order is not cosmetic. The 5.2 count substitution accumulates its
 /// weighted totals (`total_w`, `exceed_w` and the weighted cumulative counts
 /// of [`super::countsub::CountSubEval`]) by walking this map, and those are
-/// FLOAT sums: reordering them moves the last ulp of
+/// float sums: reordering them moves the last ulp of
 /// `counterfactual_exceed_968` and can move a binary search across a support
 /// boundary. The Python's `dict` is insertion-ordered, so this port is too.
-/// Everywhere a SORTED walk is what the Python asks for - the record order,
+/// Everywhere a sorted walk is what the Python asks for - the record order,
 /// the hour and label key sets - the call site sorts explicitly.
 #[derive(Debug, Default, Clone)]
 pub struct PooledHist {
@@ -73,12 +73,12 @@ impl PooledHist {
         }
     }
 
-    /// The entries in FIRST-INSERTION order - the Python `dict.items()`.
+    /// The entries in first-insertion order - the Python `dict.items()`.
     pub fn iter(&self) -> impl Iterator<Item = (&PooledKey, i64)> {
         self.keys.iter().zip(self.counts.iter().copied())
     }
 
-    /// The entries in ascending KEY order - the Python `sorted(...)`.
+    /// The entries in ascending key order - the Python `sorted(...)`.
     #[must_use]
     pub fn sorted(&self) -> Vec<(PooledKey, i64)> {
         let mut rows: Vec<(PooledKey, i64)> = self.iter().map(|(k, c)| (*k, c)).collect();
@@ -220,7 +220,7 @@ pub fn block1_summary(
         .collect();
     let tr_p99 = weighted_nearest_rank(&tr_pairs, 0.99);
     let qr_p99 = weighted_nearest_rank(&qr_pairs, 0.99);
-    // The half-ticks become ticks BEFORE the division, never after.
+    // The half-ticks become ticks before the division, never after.
     let ratio = match (tr_p99, qr_p99) {
         (Some(t), Some(q)) if q != 0 => {
             #[expect(clippy::cast_precision_loss, reason = "tick ranges stay small")]
@@ -288,7 +288,7 @@ fn bin_summary(rows: &[(&PooledKey, i64)], bin_name: &str) -> Value {
         .collect();
     let bt: Vec<(i64, i64)> = brows.iter().map(|(k, c)| (k.2, *c)).collect();
     // Bin "0" carries no sqrt(N) support: the statistic is undefined at
-    // n = 0, so the Python builds an EMPTY pair list rather than filtering.
+    // n = 0, so the Python builds an empty pair list rather than filtering.
     let bs: Vec<(f64, i64)> = if bin_name == "0" {
         Vec::new()
     } else {
@@ -363,7 +363,7 @@ struct Block2Pool {
 }
 
 /// `pool_block2`: pool the exact per-session histograms and lag-1 moments,
-/// then re-derive the scalars from the POOLED sufficient statistics (never a
+/// then re-derive the scalars from the pooled sufficient statistics (never a
 /// mean of per-session scalars).
 #[must_use]
 pub fn pool_block2(sessions: &[&Value]) -> Value {
@@ -418,7 +418,7 @@ fn finish_block2_cell(p: &Block2Pool) -> Value {
     let ssq: i64 = p.count_hist.iter().map(|(&k, &v)| k * k * v).sum();
     let mean = (total != 0).then(|| ssum as f64 / total as f64);
     let var = mean.map(|m| ssq as f64 / total as f64 - m * m);
-    // `fano = var / mean if mean else None`: a ZERO mean is falsey in the
+    // `fano = var / mean if mean else None`: a zero mean is falsey in the
     // Python, so an all-zero cell refuses rather than dividing.
     let fano = match (mean, var) {
         (Some(m), Some(v)) if m != 0.0 => Some(v / m),
@@ -478,7 +478,7 @@ type ScaleVote = (Option<f64>, Option<f64>, i64);
 /// One session's vote on a horizon pair: `(vr, cov, cov norm, windows)`.
 type PairVote = (Option<f64>, Option<f64>, Option<f64>, i64);
 
-/// `aggregate_block3`: one vote per QUALIFYING session, median across
+/// `aggregate_block3`: one vote per qualifying session, median across
 /// sessions. Return counts are summed over the same qualifying votes.
 #[must_use]
 pub fn aggregate_block3(sessions: &[&Value]) -> Value {
@@ -535,7 +535,7 @@ pub fn aggregate_block3(sessions: &[&Value]) -> Value {
         for (lp, per_h) in rec["hour20_labels"].as_object().expect("hour20_labels") {
             for (h_s, c) in per_h.as_object().expect("a horizon map") {
                 let h: i64 = h_s.parse().expect("a horizon key");
-                // The boundary cells carry their OWN 60 s floor: an hour-20
+                // The boundary cells carry their own 60 s floor: an hour-20
                 // label slice sees a fraction of the hour's boundaries.
                 let floor = if h == 60 {
                     MIN_BOUNDARY_60S_CELL_RETURNS
@@ -637,9 +637,9 @@ const BLOCK4_FIELDS: [&str; 9] = [
     "exceed_16",
 ];
 
-/// `aggregate_block4`: per hour KEY (string-sorted, so `"all"` lands last),
+/// `aggregate_block4`: per hour key (string-sorted, so `"all"` lands last),
 /// the median across sessions whose residual count reaches the floor, with
-/// the counts summed over EVERY session that carries the cell - qualifying
+/// the counts summed over every session that carries the cell - qualifying
 /// or not.
 #[must_use]
 pub fn aggregate_block4(sessions: &[&Value]) -> Value {
@@ -686,8 +686,8 @@ pub fn aggregate_block4(sessions: &[&Value]) -> Value {
 // -- Permutations -----------------------------------------------------------
 
 /// `aggregate_permutations`: the Amendment-A session-hour combination. Per
-/// session, the two segments' sufficient statistics are POOLED (counts and
-/// sums add, the max takes the max) and the floor applies to the COMBINED
+/// session, the two segments' sufficient statistics are pooled (counts and
+/// sums add, the max takes the max) and the floor applies to the combined
 /// count; then the median across qualifying sessions per replicate index,
 /// then the median across the 16 replicate medians.
 #[must_use]
@@ -792,9 +792,9 @@ pub fn reduced_blocks_from_sessions(per_session: &[Value]) -> LabResult<Value> {
 
 // -- Central blocks (the 8-seed median tree) --------------------------------
 
-/// `tree_median`: the recursive 8-seed median over IDENTICALLY SHAPED JSON
+/// `tree_median`: the recursive 8-seed median over identically shaped JSON
 /// trees. A key-set mismatch refuses (the seeds run one code path over one
-/// calendar, so shape drift is a defect); a numeric leaf where ANY seed is
+/// calendar, so shape drift is a defect); a numeric leaf where any seed is
 /// null centralizes to null - never a median over fewer than the full seed
 /// set; strings, booleans and arrays must agree exactly.
 pub fn tree_median(trees: &[&Value]) -> LabResult<Value> {
@@ -824,7 +824,7 @@ pub fn tree_median(trees: &[&Value]) -> LabResult<Value> {
         return Ok(Value::Null);
     }
     if trees.iter().all(|t| t.is_number()) {
-        // The median PRESERVES the winning seed's leaf type: a histogram
+        // The median preserves the winning seed's leaf type: a histogram
         // count medians to an integer leaf, a scale to a float leaf.
         let mut sorted: Vec<&Value> = trees.to_vec();
         sorted.sort_by(|a, b| {
@@ -856,14 +856,14 @@ fn canonical_text(v: &Value) -> String {
 /// scalar the 8-seed median.
 ///
 /// The `Block2Cell` `count_hist` and `run_length_hist` maps are histograms
-/// keyed by DATA-DEPENDENT support values, so their key sets legitimately
+/// keyed by data-dependent support values, so their key sets legitimately
 /// diverge across seeds. Per the signed union-zero-median ruling exactly
-/// those two paths centralize over the UNION of the seed supports, an absent
+/// those two paths centralize over the union of the seed supports, an absent
 /// support value reading as a zero count; every other dictionary keeps the
 /// strict identical-shape refusal. Two properties of the Python are
-/// deliberate and reproduced: the validation pass is COMPLETE before any
+/// deliberate and reproduced: the validation pass is complete before any
 /// padding (a refusal leaves nothing padded) and the padding operates on
-/// COPIES, so the per-seed evidence is never mutated.
+/// copies, so the per-seed evidence is never mutated.
 pub fn central_blocks_from_seeds(seed_blocks: &[&Value]) -> LabResult<Value> {
     let mut stripped: Vec<Value> = Vec::with_capacity(seed_blocks.len());
     for b in seed_blocks {
@@ -893,8 +893,8 @@ pub fn central_blocks_from_seeds(seed_blocks: &[&Value]) -> LabResult<Value> {
                 })
         })
         .collect();
-    // ONE complete validation pass over both fields and every present cell
-    // BEFORE any padding.
+    // One complete validation pass over both fields and every present cell
+    // before any padding.
     for (h, w) in &cells {
         for field in ["count_hist", "run_length_hist"] {
             for b in &stripped {

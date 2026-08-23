@@ -50,7 +50,7 @@ pub(super) struct SessionModulator {
     vol_hour: [f64; 24],
     // Exposure-weighted mean of `arr_hour * arr_dow` over the calendar's open
     // minutes, or exactly 1.0 when there is no calendar. Dividing by it is what
-    // makes the profile describe behaviour CONDITIONAL ON BEING OPEN: the
+    // makes the profile describe behaviour conditional on being open: the
     // calendar owns whether an event may exist, and this owns how intense it is
     // given that it may.
     arrival_normalizer: f64,
@@ -59,7 +59,7 @@ pub(super) struct SessionModulator {
 }
 
 impl SessionModulator {
-    /// The calendar is a CONSTRUCTOR input, not a later attachment, because the
+    /// The calendar is a constructor input, not a later attachment, because the
     /// normalizers below cannot be computed without it. A modulator built from
     /// the profile alone and corrected afterwards would be wrong for the window
     /// between the two, which is precisely the state this signature makes
@@ -77,7 +77,7 @@ impl SessionModulator {
             // Legacy exact branch. Without a calendar every minute is exposed,
             // and the schema's sum-to-one contract makes the week-mean of the
             // composite exactly 1.0 - so a literal 1.0 is not an approximation
-            // of a computed value, it IS the value, and dividing by it is exact
+            // of a computed value, it is the value itself, and dividing by it is exact
             // in IEEE 754. Recomputing it through a floating-point sum could
             // land a few ulps away and perturb every gap in every existing
             // operator profile, which no protocol migration should do silently.
@@ -86,7 +86,7 @@ impl SessionModulator {
                 let mut arrival = 0.0;
                 let mut vol = 0.0;
                 let mut open = 0.0;
-                // One week at minute resolution, using the runtime's OWN
+                // One week at minute resolution, using the runtime's own
                 // `is_open` and civil derivation. Re-deriving the local-to-UTC
                 // mapping here would be a second implementation that could
                 // disagree with the one that actually gates events. Any 10,080
@@ -122,7 +122,7 @@ impl SessionModulator {
     // day-of-week, divided by the exposure-weighted mean of that product over
     // open minutes. A duration is divided by this so a high-activity instant
     // produces shorter inter-arrivals. The division is what makes the stored
-    // factors SCALE-INVARIANT: a profile whose factors are all doubled, or all
+    // factors scale-invariant: a profile whose factors are all doubled, or all
     // ones, is exactly neutral rather than a 168x arrival multiplier.
     pub(super) fn arrival_mult(&self, clock_ns: u64) -> f64 {
         let (hour, dow) = utc_hour_dow(clock_ns);
@@ -130,7 +130,7 @@ impl SessionModulator {
     }
 
     // Volatility multiplier at this wall-clock instant. Normalized the same way
-    // and for the same reason: this value is applied RAW to a formed return, so
+    // and for the same reason: this value is applied unmodified to a formed return, so
     // without a normalizer nothing at all constrains its scale once the sum
     // guard is relaxed for calendar-bearing profiles, and a curve normalized
     // over 168 hours instead of the 113.75 a CME week actually trades would

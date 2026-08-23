@@ -6,18 +6,18 @@
 //! A passenger's outbound machinery is two lanes with explicit accounting, not
 //! one bounded channel both the engine and the socket read loop push into:
 //!
-//! - the HELD lane carries engine output through the `DelayAcks` shift, is
-//!   unbounded by channel capacity and bounded by a BYTE budget, because
+//! - the held lane carries engine output through the `DelayAcks` shift, is
+//!   unbounded by channel capacity and bounded by a byte budget, because
 //!   `AccountState` and the venue-truth snapshots have no per-frame size
-//!   ceiling a frame COUNT could stand in for;
-//! - the PRIORITY lane carries admission truth (`AdmissionRejected`,
+//!   ceiling a frame count could stand in for;
+//! - the priority lane carries admission truth (`AdmissionRejected`,
 //!   `ProtocolError`), is exempt from `DelayAcks`, is delivered ahead of held
-//!   traffic, and is bounded by a FRAME count - legitimate here and nowhere
+//!   traffic, and is bounded by a frame count - legitimate here and nowhere
 //!   else, because every frame on it is under
 //!   `mogwai_protocol::ADMISSION_FRAME_MAX_BYTES`.
 //!
 //! Every producer that runs on the socket read loop reserves worst-case
-//! capacity BEFORE the engine is allowed to mutate, refuses visibly when the
+//! capacity before the engine is allowed to mutate, refuses visibly when the
 //! reservation fails, and never awaits a full channel. Both lanes are
 //! unbounded-by-channel precisely so a read-loop `send` cannot block; the
 //! bounds are the budgets here.
@@ -38,7 +38,7 @@ use tokio::sync::{Semaphore, mpsc};
 /// into process-wide memory exhaustion.
 pub(crate) const EXEC_HELD_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
-/// Per-connection ceiling on QUEUED priority frames. 64 x
+/// Per-connection ceiling on queued priority frames. 64 x
 /// `ADMISSION_FRAME_MAX_BYTES` = 256 KiB, a real bound.
 pub(crate) const ADMISSION_LANE_FRAMES: usize = 64;
 
@@ -56,11 +56,11 @@ pub(crate) const CLOSE_ADMISSION_OVERLOAD: u16 = 1013;
 
 /// WS 1011 "Internal Error": the venue itself failed, in a way no consumer
 /// behavior caused and none can plan for. Reserved for one condition today - the
-/// tape moved BACKWARD in event time, which breaks the ascending order every
+/// tape moved backward in event time, which breaks the ascending order every
 /// reader of this protocol is entitled to assume and leaves the venue with no
 /// honest way to continue the stream.
 ///
-/// A LAGGED RING IS NOT THIS, and used to be. Losing frames to an overrun ring
+/// A lagged ring is not this, and used to be. Losing frames to an overrun ring
 /// is loss the consumer can be told about and reason over, so it is declared
 /// with `VenueMessage::FeedLagged` and the connection keeps serving; only a
 /// contradiction in the venue's own output ends a socket here. The difference is
@@ -69,12 +69,12 @@ pub(crate) const CLOSE_ADMISSION_OVERLOAD: u16 = 1013;
 /// step it cannot.
 pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
 
-/// A newer connection presented this connection's ACCOUNT ID, so the venue
+/// A newer connection presented this connection's account id, so the venue
 /// handed the ledger over and closed this one.
 ///
 /// The venue perceives a callsign, not a consumer, so a socket presenting a
 /// seated account id under a different callsign or none is indistinguishable
-/// from that trader RECONNECTING, and the venue does not try to tell them apart.
+/// from that trader reconnecting, and the venue does not try to tell them apart.
 /// Handing the account to the newcomer is what makes a reconnect work at all.
 /// Sockets sharing a callsign coexist instead, which is what lets one leg pair
 /// trade several rivers under one account without evicting itself.
@@ -83,9 +83,9 @@ pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
 /// distinction is what stops a consumer's reconnect ladder from firing. A consumer
 /// that redialled on this would evict whatever evicted it, forever.
 ///
-/// THE CODE ALONE CANNOT SAY THAT, because the venue also closes 1000 on run
+/// The code alone cannot say that, because the venue also closes 1000 on run
 /// completion and on a passenger duration elapsing, and a proxy closes 1000 for
-/// reasons of its own. The REASON string carries the meaning, and it is a
+/// reasons of its own. The reason string carries the meaning, and it is a
 /// protocol contract: `CloseSpec::evicted` is the only constructor for this
 /// code and it prepends `mogwai_protocol::close::EVICTED_PREFIX` itself, so a
 /// consumer can tell the three apart and no call site can forget to say which one
@@ -93,7 +93,7 @@ pub(crate) const CLOSE_VENUE_FAULT: u16 = 1011;
 pub(crate) const CLOSE_EVICTED: u16 = mogwai_protocol::close::NORMAL;
 
 /// How long the overload close may take to reach a peer before the connection
-/// is torn down anyway. WALL time, not sim time: this is a transport deadline.
+/// is torn down anyway. Wall time, not sim time: this is a transport deadline.
 /// The writer may already be parked in `sink.send()` against a full TCP window,
 /// in which case the close is never written; a reasoned close is best-effort by
 /// nature, but releasing the connection's resources is not.
@@ -113,7 +113,7 @@ pub(crate) const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_se
 /// injectable sizes the same branches are reached in milliseconds and
 /// deterministically, so the invariants get gates instead of arguments.
 ///
-/// `Default` IS production: every non-test construction path goes through
+/// `Default` is production: every non-test construction path goes through
 /// `Config`, whose own defaults are these constants, so the shipped venue
 /// behaves exactly as the constants say.
 #[derive(Debug, Clone, Copy)]
@@ -167,7 +167,7 @@ impl ByteBudget {
     /// Reserve `bytes`, or fail. Never blocks - this runs on the read loop.
     /// A request that does not fit `u32` (tokio's permit count) returns `None`
     /// rather than truncating: a truncating cast would grant a reservation
-    /// SMALLER than the output it is supposed to dominate, which is the one
+    /// smaller than the output it is supposed to dominate, which is the one
     /// failure mode this type exists to rule out.
     pub(crate) fn try_reserve(&self, bytes: usize) -> Option<Reservation> {
         let n = u32::try_from(bytes).ok()?;
@@ -244,7 +244,7 @@ impl Drop for Reservation {
 
 /// Bytes charged against a connection's held budget, released when the frame
 /// carrying it is dropped - which the writer does once the frame has been
-/// written to the socket OR dropped by an armed havoc window, and which happens
+/// written to the socket or dropped by an armed havoc window, and which happens
 /// for free when the writer task dies with frames still in hand. Release on
 /// drop rather than an explicit call is what makes those exits correct without
 /// a single call site remembering to.
@@ -260,7 +260,7 @@ impl Drop for HeldCharge {
 }
 
 /// Frame budget, same discipline in units of frames. Used twice per connection:
-/// once for priority QUEUE depth, once for outstanding PROMISES.
+/// once for priority queue depth, once for outstanding promises.
 #[derive(Clone)]
 pub(crate) struct FrameBudget {
     permits: Arc<Semaphore>,
@@ -280,12 +280,12 @@ impl FrameBudget {
     }
 }
 
-/// One reserved frame slot. Single-use BY TYPE: spending it consumes it. A
+/// One reserved frame slot. Single-use by type: spending it consumes it. A
 /// ticket may outlive the call that took it - it travels with the frame it
 /// reserved and is released when the writer drops that frame - so the slot is
 /// given up by dropping, wherever that turns out to happen.
 pub(crate) struct Ticket {
-    /// Never read: the permit's whole job is to be RELEASED when this value is
+    /// Never read: the permit's whole job is to be released when this value is
     /// dropped, wherever that turns out to be.
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
@@ -302,7 +302,7 @@ pub(crate) struct Ticket {
 /// is stated rather than inherited. `GoDark` drops it, because a blackout is
 /// the whole socket going quiet and a page is output like any other - the
 /// consumer armed that and its request timeout is the path being exercised,
-/// exactly as for a query reply. `StallData` does NOT, because that arm
+/// exactly as for a query reply. `StallData` does not, because that arm
 /// withholds the channel feed to make a stalled feed distinguishable from a
 /// dead venue, and a correlated request-response is not the channel: silently
 /// eating it would leave the consumer with a backfill it can never resolve and
@@ -316,7 +316,7 @@ pub(crate) enum FrameClass {
 }
 
 /// A frame already rendered to its wire bytes, plus the facts the writer needs.
-/// Serializing at the PRODUCER (the tape thread, the admission path, the
+/// Serializing at the producer (the tape thread, the admission path, the
 /// order path) is what makes the byte budget exact rather than estimated: the
 /// charge is the true length of what goes on the socket. It also moves JSON
 /// cost off the single writer task.
@@ -350,7 +350,7 @@ pub(crate) struct CloseSpec {
     pub(crate) reason: String,
 }
 
-/// THE CLOSE REASON IS TRIMMED TO ITS FRAME, NOT TO `MAX_REASON_LEN`.
+/// The close reason is trimmed to its frame, not to `MAX_REASON_LEN`.
 ///
 /// Every constructor below used `truncate_reason`, the 512-byte cap that bounds
 /// a reason travelling inside a TEXT frame - and a close reason does not travel
@@ -391,24 +391,24 @@ impl CloseSpec {
     /// this constructor composes the whole sentence, prefix included -
     /// `mogwai_protocol::close::EVICTED_PREFIX` first.
     ///
-    /// THE SENTENCE IS COMPOSED HERE AND NOWHERE ELSE, because the frame-budget
+    /// The sentence is composed here and nowhere else, because the frame-budget
     /// test below asserts on the reason that actually goes on the wire. When the
     /// call site owned the wording, the test hand-built its own copy of it, and
     /// the two drifted the moment the wording changed - one implementation
     /// pinned against itself, both halves green.
     ///
-    /// The prefix lives HERE rather than at the call site because it is the wire
+    /// The prefix lives here rather than at the call site because it is the wire
     /// contract, not a phrasing: `close::classify` reads it to distinguish this
     /// close from the other two 1000s the venue sends. A call site that composed
     /// the prefix by hand would let the next one forget it, and a forgotten
     /// prefix is not a cosmetic defect - the adapter would classify the close as
     /// non-terminal and redial, evicting whatever evicted it, forever. Prefixing
     /// before the trim keeps the discriminator intact and spends the cap on the
-    /// detail, which is the half that may be dropped - and the cap BINDS here:
+    /// detail, which is the half that may be dropped - and the cap binds here:
     /// this reason reaches 135 bytes at `MAX_ACCOUNT_ID_LEN` against a
     /// 123-byte close frame. See `close_reason`.
     ///
-    /// `CLOSE_EVICTED` and NOT a venue fault: nothing failed. Telling the two
+    /// `CLOSE_EVICTED` and not a venue fault: nothing failed. Telling the two
     /// apart matters to a consumer, because a fault is a reason to distrust the
     /// venue and an eviction is a reason to stop reconnecting.
     pub(crate) fn evicted(account_id: &str) -> Self {
@@ -454,12 +454,12 @@ pub(crate) struct ExecLanes {
     /// Fires once `send_close` has been called on this connection, so the
     /// socket's own read loop can end rather than waiting on a peer.
     ///
-    /// WRITING THE CLOSE IS NOT ENDING THE PASSENGER, which is the gap this
+    /// Writing the close is not ending the passenger, which is the gap this
     /// closes. `run_writer` writes the frame and breaks, but `handle_socket`'s
     /// loop only leaves on the peer's close, the peer's EOF or the run's
     /// completion - so a consumer that ignores its close frame (or is simply
     /// slow to act on it) kept its `Passenger` alive, and with it the
-    /// account's RIDE on that boat. The newcomer that evicted it was then
+    /// account's ride on that boat. The newcomer that evicted it was then
     /// refused its own reconnect at a different speed, because the account
     /// was still riding the old cadence. The venue must not need the evicted peer's
     /// cooperation to finish evicting it.
@@ -529,7 +529,7 @@ impl ExecLanes {
     }
 
     /// Reserve worst-case output for `cmd` against `shape`. `None` means the
-    /// caller must refuse WITHOUT letting the engine see the command.
+    /// caller must refuse without letting the engine see the command.
     pub(crate) fn reserve(&self, cmd: &Command, shape: &BookShape) -> Option<Reservation> {
         self.held_budget
             .try_reserve(worst_case_output_bytes(cmd, shape))
@@ -551,12 +551,12 @@ impl ExecLanes {
     }
 
     /// Reserve capacity for `frames` protocol-boundary refusals, whose worst
-    /// case is a constant PER FRAME because each is one order-shaped frame and
+    /// case is a constant per frame because each is one order-shaped frame and
     /// no `AccountState`. Used by the pre-engine refusal paths, which have no
     /// `BookShape` in hand.
     ///
     /// A `SubmitOrderGroup` is refused
-    /// WHOLE, so its refusal is one frame per member rather than one frame -
+    /// whole, so its refusal is one frame per member rather than one frame -
     /// and the count is bounded by `MAX_GROUP_ORDERS`, which is what keeps this
     /// a reservation rather than an unbounded write.
     pub(crate) fn try_reserve_boundary_frames(&self, frames: usize) -> Option<Reservation> {
@@ -564,7 +564,7 @@ impl ExecLanes {
             .try_reserve(frames.max(1) * BOUNDARY_REFUSAL_BYTES)
     }
 
-    /// Reserve one priority-lane QUEUE slot. `None` is the overload condition.
+    /// Reserve one priority-lane queue slot. `None` is the overload condition.
     pub(crate) fn reserve_admission(&self) -> Option<Ticket> {
         self.prio_budget.try_ticket()
     }
@@ -572,7 +572,7 @@ impl ExecLanes {
     /// Emit an admission frame against a queue slot. Never blocks.
     ///
     /// The slot travels with the frame and is released when the writer drops
-    /// it, so the budget is what it claims: a ceiling on QUEUED priority
+    /// it, so the budget is what it claims: a ceiling on queued priority
     /// frames. The reason is truncated here rather than at each of the dozen
     /// call sites, which is what actually makes `ADMISSION_FRAME_MAX_BYTES`
     /// hold for every one of them.
@@ -622,7 +622,7 @@ impl ExecLanes {
 
     /// Emit an already-serialized history frame against a queue slot.
     ///
-    /// Takes BYTES rather than a `VenueMessage` because a page is serialized on
+    /// Takes bytes rather than a `VenueMessage` because a page is serialized on
     /// the blocking task that synthesized it, beside the walk that produced the
     /// rows. That keeps the JSON cost off the single writer task and off this
     /// caller, and it is what makes the frame's charge its true length rather
@@ -692,11 +692,11 @@ impl ExecLanes {
     /// Deliberately needs no ticket: a close is the venue's last word, and
     /// making it queue behind the market data the peer is not reading is how a
     /// reasoned close turns into a bare socket teardown.
-    /// NOTIFIED AS WELL AS QUEUED, and both halves of that are load-bearing.
-    /// The frame is handed to the writer FIRST, so a reader woken by the
+    /// Notified as well as queued, and both halves of that are load-bearing.
+    /// The frame is handed to the writer first, so a reader woken by the
     /// notification cannot tear the passenger down before the close it is
     /// reacting to was queued. And `notify_one`, never `notify_waiters`,
-    /// because `notify_waiters` wakes only tasks ALREADY parked: a close that
+    /// because `notify_waiters` wakes only tasks already parked: a close that
     /// beats the reader to its own `select!` would be lost and the ride held
     /// exactly as before. `notify_one` stores a permit for a reader that is not
     /// there yet, and tokio returns the permit if the `Notified` holding it is
@@ -882,7 +882,7 @@ mod tests {
         );
     }
 
-    /// Every close this venue can send must FIT ITS FRAME, at the worst input
+    /// Every close this venue can send must fit its frame, at the worst input
     /// each constructor can be handed.
     ///
     /// The eviction reason is the one that overflowed: `run.rs` interpolates an
@@ -896,7 +896,7 @@ mod tests {
     fn every_close_reason_fits_the_control_frame_that_carries_it() {
         let account_id = "A".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN);
         let evicted = CloseSpec::evicted(&account_id);
-        // THE TRIM MUST ACTUALLY RUN HERE, or the assertions below pass without
+        // The trim must actually run here, or the assertions below pass without
         // exercising the path they exist for. At a maximal account id the
         // composed sentence overruns the frame, so a reason shorter than the cap
         // means the wording shrank under the test and the trim is no longer

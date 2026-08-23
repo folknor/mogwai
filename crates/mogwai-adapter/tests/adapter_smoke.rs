@@ -81,7 +81,7 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
     assert!(client.is_connected());
 }
 
-/// THE TWO LEGS OF ONE HOST DISCLOSE ONE CALLSIGN, and it is this process's.
+/// The two legs of one host disclose one callsign, and it is this process's.
 ///
 /// This is the property `process_callsign`'s whole design rests on, and until
 /// this test it had no end-to-end coverage at all: `MogwaiDataClientConfig` and
@@ -98,8 +98,8 @@ async fn a_cash_configured_client_still_connects_to_a_futures_run() {
 /// invisible from either client's own side, which is why the assertion has to
 /// be on what crossed the wire.
 ///
-/// THREE THINGS, and each is separately losable. The parameter is PRESENT on
-/// both upgrades; the two values are EQUAL, which is the anti-eviction property
+/// Three things, and each is separately losable. The parameter is present on
+/// both upgrades; the two values are equal, which is the anti-eviction property
 /// itself; and the value is wire-legal by the venue's own rule, because the
 /// URL is built by concatenation and a callsign needing percent-encoding would
 /// fail as an unreadable 400 from inside the reconnect loop.
@@ -111,7 +111,7 @@ async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
     let base_url = bound_stub(Arc::clone(&state)).await;
 
     // The exec leg, built exactly as every other test in this binary builds one,
-    // so what is asserted here is the DEFAULT a host gets rather than a fixture.
+    // so what is asserted here is the default a host gets rather than a fixture.
     let (exec_tx, mut exec_rx) = unbounded_channel::<ExecutionEvent>();
     replace_exec_event_sender(exec_tx);
     let _exec = connected_exec_client(
@@ -137,7 +137,7 @@ async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
     data.start().expect("start grabs the data-event sink");
     data.connect().await.expect("the data leg connects");
 
-    // POLLED, NOT READ ON THE NEXT LINE: `ws_requests` is written by the stub's
+    // Polled, not read on the next line: `ws_requests` is written by the stub's
     // per-connection handler tasks, so an empty or short list means "not
     // recorded yet" exactly as readily as "never sent". The two seconds are a
     // failure deadline, not a wait this test spends on its passing path.
@@ -172,7 +172,7 @@ async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
     mogwai_protocol::validate_callsign(first).unwrap_or_else(|reason| {
         panic!("the minted callsign {first:?} is not wire-legal: {reason}")
     });
-    // ...and it is THIS PROCESS's, which is what makes a restarted worker get a
+    // ...and it is this process's own, which is what makes a restarted worker get a
     // fresh identity and reclaim its ledger from the sockets of the dead one. A
     // constant compiled into the adapter would satisfy everything above.
     let expected_prefix = format!("mogwai-{pid}-", pid = std::process::id());
@@ -184,7 +184,7 @@ async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
 
 /// Reads `callsign=` out of a recorded `/ws` request line. Deliberately exact on
 /// the key rather than a substring search for the word: a future query
-/// parameter merely CONTAINING it must not stand in for the disclosure.
+/// parameter merely containing it must not stand in for the disclosure.
 fn callsign_query_value(request_line: &str) -> Option<String> {
     request_line
         .split_whitespace()
@@ -229,10 +229,10 @@ async fn a_submitted_position_id_reaches_the_wire() {
             None,
         ))
         .unwrap();
-    // DRAINED TO A DEADLINE, the same discipline as
+    // Drained to a deadline, the same discipline as
     // `an_order_list_reaches_the_wire_as_linked_legs`, which asks the same
     // question of the same list. This used to drain two execution events and
-    // then read `ws_client_messages` once, which was SAFE - the accept can only
+    // then read `ws_client_messages` once, which was safe - the accept can only
     // exist because the submit crossed - but safe by an inference about the
     // stub's reply rather than by observing the thing asserted on, and the two
     // tests then answered "did this field reach the wire" two different ways.
@@ -353,14 +353,14 @@ async fn adapter_submit_drives_live_exec_events() {
     }
 }
 
-/// A venue that labels its ledger differently from this client is SERVED, not
+/// A venue that labels its ledger differently from this client is served, not
 /// refused and not silently ignored.
 ///
 /// Both halves of that used to fail. The connect path asserted equality and
 /// killed the client; the pushed path dropped every mismatched snapshot, so a
 /// client would take its fills while its balances quietly stopped moving. Both
-/// were per-account-slot invariants that outlived the slots, and THE SCOPE THAT
-/// SURVIVES IS THE CONNECTION rather than the venue: a venue does hold several
+/// were per-account-slot invariants that outlived the slots, and the scope that
+/// survives is the connection rather than the venue: a venue does hold several
 /// ledgers, one per account id, but a socket names exactly one on its
 /// `/ws?account=` upgrade, so the account this connection carries is the only
 /// one it can ever see and a label cannot mean it belongs elsewhere. The full
@@ -415,17 +415,17 @@ async fn an_account_labelled_differently_is_still_served() {
         ))
         .expect("submit order");
 
-    // DRAINED TO A DEADLINE RATHER THAN COUNTED, because `next_exec_event`
-    // PANICS on timeout: a regression that drops the differently-labelled
+    // Drained to a deadline rather than counted, because `next_exec_event`
+    // panics on timeout: a regression that drops the differently-labelled
     // snapshot produces fewer than four events, so the loop died on the panic
     // "execution event arrives" and the written message below was unreachable -
     // the failure named the harness instead of the property. Running out of
     // events is now the loop's normal exit and the assertion does the talking.
     //
-    // SELECTED BY BALANCE, and the LABEL IS ASSERTED. `9900` is the seeded
+    // Selected by balance, and the label is asserted. `9900` is the seeded
     // snapshot's fingerprint against the connect-time snapshot's `10000`, so the
     // right event is picked rather than assumed to be first. The id it carries
-    // must be the CONFIGURED `MOGWAI-001`, not the wire's `SANDBOX-042`: the
+    // must be the configured `MOGWAI-001`, not the wire's `SANDBOX-042`: the
     // venue's label is a label and `note_account_label` says so out loud while
     // the client keeps its own id. Asserting the wire id here would pin the
     // opposite of the design; asserting nothing, as this test did, would let a
@@ -540,8 +540,8 @@ async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
         Some(OrderStatus::Filled)
     );
 
-    // The trigger price, the reduce-only flag and the type must have CROSSED
-    // THE WIRE, not merely been accepted by the client: a submit that dropped
+    // The trigger price, the reduce-only flag and the type must have crossed
+    // the wire, not merely been accepted by the client: a submit that dropped
     // them would still produce the event sequence above against this stub.
     let sent = state
         .ws_client_messages
@@ -557,14 +557,14 @@ async fn adapter_submits_a_stop_market_and_sees_triggered_then_filled() {
     assert!(submit.contains(r#""reduce_only":true"#), "{submit}");
 }
 
-/// An ORDER LIST reaching the wire as ONE `SubmitOrderGroup`, its legs in the
+/// An order list reaching the wire as one `SubmitOrderGroup`, its legs in the
 /// list's own order and each carrying its own rule.
 ///
 /// The venue models a linkage rather than a list object, so what has to arrive
 /// is each leg's rule: the entry naming what it triggers, the exit naming the
-/// entry as its parent. What must NOT arrive is two separate submits - and this
+/// entry as its parent. What must never arrive is two separate submits - and this
 /// test used to assert exactly that, because the adapter used to send them.
-/// Per-leg dispatch lets the entry FILL before the exit is admitted, at which
+/// Per-leg dispatch lets the entry fill before the exit is admitted, at which
 /// point the entry's rule adjusts a sibling that is not on the book and the
 /// exit arrives at full size. One frame is what makes the admission atomic, and
 /// the venue now refuses a linked bare submit outright.
@@ -615,7 +615,7 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
     client.submit_order_list(cmd).expect("the list is served");
 
     // Dispatch is a channel hop to the websocket task, so the assertion drains
-    // to a DEADLINE rather than reading the stub once: reading immediately would
+    // to a deadline rather than reading the stub once: reading immediately would
     // race the flush, and reading `the next` message would be the same mistake
     // in the other direction.
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -651,7 +651,7 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
         group.contains(r#""parent_order_id":"O-1""#),
         "the exit names the entry as its parent: {group}"
     );
-    // ORDER MATTERS and is the list's own: a child must follow the parent it
+    // Order matters here and is the list's own: a child must follow the parent it
     // names, which is the order nautilus's `OrderList` already puts them in.
     assert!(
         group.find(r#""client_order_id":"O-1""#) < group.find(r#""client_order_id":"O-STOP""#),
@@ -659,8 +659,8 @@ async fn an_order_list_reaches_the_wire_as_linked_legs() {
     );
 }
 
-/// The refusal that REMAINS on a trailing stop, now that the TYPE itself is
-/// served: an offset stated in anything but PRICE. The venue trails by an
+/// The refusal that remains on a trailing stop, now that the type itself is
+/// served: an offset stated in anything but price. The venue trails by an
 /// absolute price distance, and converting ticks or basis points needs a
 /// reference price the two ends would have to agree on independently - the exact
 /// silent disagreement that leaves a stop somewhere neither side intended.
@@ -704,7 +704,7 @@ async fn a_trailing_offset_the_venue_cannot_read_is_refused_by_name() {
     );
 }
 
-/// The order-init shapes the venue cannot honor, each refused BEFORE any
+/// The order-init shapes the venue cannot honor, each refused before any
 /// `OrderSubmitted`. Table-driven because the three are one rule - the venue
 /// refuses what it cannot serve rather than serving something else quietly -
 /// and because each is built by mutating a legal init, which is the only way
@@ -737,7 +737,7 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
     };
     // A linkage with no list to key it by. The four nautilus fields are
     // independent, so this shape assembles - and means nothing, since the venue
-    // keys a linkage by `order_list_id`. Refused HERE rather than at the venue:
+    // keys a linkage by `order_list_id`. Refused right here rather than at the venue:
     // a venue-side refusal of something the host could have caught reads to a
     // strategy author as the venue being broken.
     let unkeyed_linkage = {
@@ -789,7 +789,7 @@ async fn unsupported_init_shapes_are_refused_before_submitted() {
 
 /// The mirror regression section 3.5 names: an amend ack recomputes status from
 /// fill progress, and with no `Triggered` case a quantity or price amend on a
-/// TRIGGERED stop-limit walks the mirror back to `Accepted` and desyncs it from
+/// triggered stop-limit walks the mirror back to `Accepted` and desyncs it from
 /// the engine for the rest of the run. Nautilus' own FSM keeps
 /// `(Triggered, Updated) => Triggered`. The amend ack must also carry the new
 /// trigger price, or the amend is unverifiable.
@@ -923,16 +923,16 @@ fn unconnected_exec_client(cache: Rc<RefCell<Cache>>) -> MogwaiExecutionClient {
     MogwaiExecutionClient::new(core, config).expect("client builds")
 }
 
-/// AE20. A CONNECTION WITH NO EVENT SINK IS DEAF, AND MUST REFUSE.
+/// AE20. A connection with no event sink is deaf, and must refuse.
 ///
-/// Nautilus's `ExecutionEventEmitter` is `Clone` and owns its sender BY VALUE,
+/// Nautilus's `ExecutionEventEmitter` is `Clone` and owns its sender by value,
 /// so the WS pump's context freezes the sender state at connect time and
 /// `send_order_event` on a sender-less emitter only logs. A client that
 /// connected without one would report success and then drop every accept,
 /// fill, cancel and reject the venue pushed, for the whole run, silently.
 ///
-/// This test installs NO sender - `replace_exec_event_sender` is a
-/// `thread_local!` and libtest gives each test its own thread (in EVERY lane,
+/// This test installs no sender at all - `replace_exec_event_sender` is a
+/// `thread_local!` and libtest gives each test its own thread (in every lane,
 /// `--test-threads=1` included - see `common`'s header), so the runner slot
 /// this test's client reads is genuinely empty. That premise is asserted
 /// rather than assumed: were it ever to break, this test would otherwise fail
@@ -958,9 +958,9 @@ async fn connect_refuses_a_client_with_no_execution_event_sink() {
     );
 }
 
-/// A LIST THAT CANNOT RESOLVE EVERY LEG ANNOUNCES NO LEG.
+/// A list that cannot resolve every leg announces no leg.
 ///
-/// `submit_order_list` announces each leg and then dispatches ONE group frame.
+/// `submit_order_list` announces each leg and then dispatches one group frame.
 /// Announcing inside the fallible loop meant a leg the cache could not resolve
 /// returned after the earlier legs had already been emitted as `OrderSubmitted`
 /// and mirrored, and before any frame went out - half a bracket announced, none
@@ -974,13 +974,13 @@ async fn a_list_whose_second_leg_is_unresolvable_announces_neither() {
 
     let cache = Rc::new(RefCell::new(Cache::default()));
     let entry = cached_order(&cache);
-    // Built against a THROWAWAY cache: a well-formed second leg that the
+    // Built against a throwaway cache: a well-formed second leg that the
     // client's own cache has never heard of, which is what `get_order` fails on.
     let orphan_cache = Rc::new(RefCell::new(Cache::default()));
     let exit = cached_stop_market(&orphan_cache);
 
     let mut client = unconnected_exec_client(Rc::clone(&cache));
-    // START IT. Without this the emitter holds no sender and every emitted
+    // Start it. Without this the emitter holds no sender and every emitted
     // event is swallowed by nautilus's warn - which would leave
     // `assert_no_exec_event` below passing against the defect it exists to
     // catch, with only the mirror assertion doing any work.

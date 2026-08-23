@@ -7,7 +7,7 @@
 //! carries a trigger only a tape walk can advance. A pass with nothing resting
 //! is still just one lock acquisition and a `continue`.
 //!
-//! Owned by the RUN rather than by an account or a passenger: the run holds
+//! Owned by the run rather than by an account or a passenger: the run holds
 //! every ledger, and a passenger-owned sweep would freeze a disconnected consumer's
 //! book mid-window, make the `QueryOrders` truth store honestly report a venue
 //! that cannot execute, and double the tape walk when two sockets are open on
@@ -43,18 +43,18 @@ pub(crate) struct FillSweep {
 
 /// Three phases per pass, and the split is load-bearing: the tape walk costs a
 /// checkpoint restore plus a bounded drain against a process-wide mutex, so it
-/// runs OFF the engine lock and on `spawn_blocking` or it stalls both order
+/// runs off the engine lock and on `spawn_blocking` or it stalls both order
 /// entry and a runtime worker. The engine re-validates every result against its
 /// order revision in phase three, which is what makes the off-lock gap safe.
 pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut completion = sweep.run.completion();
-        // EARLIEST-DEADLINE SCHEDULE, one task. The sweep interval is SIMULATED
+        // Earliest-deadline schedule, one task. The sweep interval is simulated
         // milliseconds, so it converts through a clock before it becomes a wall
         // sleep - and since `/ws?speed=` landed, the boats on one venue no
         // longer share a speed, so there is no single conversion. Each boat
         // therefore carries its own next-due instant and the task sleeps to the
-        // EARLIEST of them. Deliberately not one task per boat: N tasks contend
+        // earliest of them. Deliberately not one task per boat: N tasks contend
         // the single engine lock and multiply the completion fan-out, to buy
         // cadence granularity that settlement correctness does not rest on
         // (per-boat `to_ns` and per-boat `last_swept_ns` already carry that).
@@ -99,15 +99,15 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
                 _ = completion.changed() => break 'passes,
             }
-            // One acquisition PER ACCOUNT, so each ledger's scans and mark
+            // One acquisition per account, so each ledger's scans and mark
             // symbols come from one consistent read of it.
             //
             // Gathered across every account before the walk, deliberately: the
             // tape walk is the expensive part of a pass and is a property of the
             // river, not of any ledger, so N accounts resting orders on one
-            // symbol still walk it ONCE. Results are grouped back per account
+            // symbol still walk it once. Results are grouped back per account
             // afterwards.
-            // ATTACHED accounts only. An account nobody is reading is FROZEN:
+            // Attached accounts only. An account nobody is reading is frozen:
             // its orders do not rest, its positions do not mark, its funding
             // does not accrue and its policy cannot liquidate somebody who is
             // not there. That is a deliberate departure from a real venue, where
@@ -117,14 +117,14 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             // run spanning a disconnect has a gap in its risk history.
             //
             // It also closes the boatless-river gap from the other side. Every
-            // resting order belongs to the river its account is BOUND to, which
+            // resting order belongs to the river its account is bound to, which
             // has a boat for as long as the account is attached, so a frozen
             // account is the only way an order can end up on a river nobody
             // reads - and a frozen account is skipped here rather than swept
             // against a clock that no longer exists.
             let all_accounts = sweep.run.accounts();
             // Whether this run holds exactly one ledger, which is what the
-            // terminating breach below is conditioned on. Asked BEFORE the
+            // terminating breach below is conditioned on. Asked before the
             // frozen filter, and asked through a named function so the question
             // has one implementation a test can read rather than an expression
             // buried in a loop.
@@ -133,12 +133,12 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 .into_iter()
                 .filter(|account_state| !account_state.is_frozen())
                 .collect();
-            // What a cursor is actually reading right now. An ATTACHED account's
+            // What a cursor is actually reading right now. An attached account's
             // order outside this set rests on a river with no clock: nothing can
             // sweep it, nothing can expire it, and it cannot be told apart from
             // an order the tape has not reached. The venue refuses to leave it
             // there rather than letting it sit forever - the consumer is attached,
-            // so it can be told. A FROZEN account is not here at all, and its
+            // so it can be told. A frozen account is not here at all, and its
             // book survives for the socket that returns to it.
             let readable: Vec<mogwai_protocol::Symbol> = next_due
                 .values()
@@ -149,7 +149,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             let venue_now = sim_now_ns(sweep.run.sim);
             for (index, account_state) in attached_accounts.iter().enumerate() {
                 let mut engine = account_state.engine.lock().await;
-                // Stamped on the VENUE clock, which is the only one that
+                // Stamped on the venue clock, which is the only one that
                 // answers here: the order being cancelled is on a river with no
                 // boat, so there is no river clock to date it by.
                 let cancelled = engine.cancel_unreadable_orders(&readable, venue_now);
@@ -175,7 +175,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
             mark_symbols.sort();
             mark_symbols.dedup();
             // Only the boats whose own converted interval has elapsed, each
-            // re-armed on ITS clock and floored at `MIN_SWEEP_WALL` as before.
+            // re-armed on its clock and floored at `MIN_SWEEP_WALL` as before.
             let now = Instant::now();
             let due_boats: Vec<_> = next_due
                 .values_mut()
@@ -212,7 +212,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 let rivers = Arc::clone(&sweep.rivers);
                 let scans_for_walk: Vec<PendingScan> =
                     boat_scans.iter().map(|(_, scan)| scan.clone()).collect();
-                // THE BOAT'S OWN RIVER, not a key re-derived from the label it
+                // The boat's own river, not a key re-derived from the label it
                 // carries. A sweep pass belongs to one boat, that boat holds
                 // the exact water its passengers are reading, and a scan
                 // decided against any other river would fill an order on prints
@@ -253,9 +253,9 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // every river, and every non-perp would otherwise pay that
                 // on every pass.
                 //
-                // AN INDEX IS THE SECOND SELECTOR QUESTION the river fork has to
+                // An index is the second selector question the river fork has to
                 // answer, and it is worth naming beside the mark one below. A
-                // perpetual's boat names an index SYMBOL it does not itself
+                // perpetual's boat names an index symbol it does not itself
                 // ride, so it holds no key for that index and cannot hold one.
                 // While a label names one river the registry answers
                 // unambiguously; once generator havoc enters river identity,
@@ -285,7 +285,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     })
                     .cloned()
                     .collect();
-                // Whether THIS boat's river crossed a session close in the span
+                // Whether this boat's river crossed a session close in the span
                 // just swept, which is what expires a Day order. Asked of the
                 // calendar rather than derived from a clock: the venue already
                 // knows when a session ends, and only an instrument that HAS a
@@ -297,7 +297,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     .and_then(|profile| profile.calendar.clone())
                     .filter(|calendar| calendar.is_open(last_swept_ns) && !calendar.is_open(to_ns))
                     .map(|_| mogwai_protocol::Symbol::from(symbol.as_str()));
-                // Settlements belong to THIS boat's instrument, never to a
+                // Settlements belong to this boat's instrument, never to a
                 // funding index. `read_marks` fails the whole pass if any
                 // settlement instant is unpriceable, and an index can carry a
                 // calendar the account holds nothing in; walking that list
@@ -345,7 +345,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // `last_swept_ns..to_ns`.
                     continue;
                 };
-                // One pass PER ACCOUNT over the shared reading. Each ledger
+                // One pass per account over the shared reading. Each ledger
                 // books its own fills, settles its own positions and marks its
                 // own exposure against the same prices - which is what makes the
                 // tape common and the money private. Deliveries are separate
@@ -354,7 +354,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                 // by order ownership otherwise.
                 //
                 // The settlement marks are cloned per account rather than
-                // moved: a settlement instant belongs to the CALENDAR, so every
+                // moved: a settlement instant belongs to the calendar, so every
                 // ledger holding that symbol crosses it.
                 let symbol_key = mogwai_protocol::Symbol::from(symbol.as_str());
                 let extremes: Vec<_> = span
@@ -383,7 +383,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                         boat.sim,
                     );
                     // The account's own rules, judged against the equity this
-                    // pass just produced. HERE rather than after delivery,
+                    // pass just produced. Here rather than after delivery,
                     // because a breach flattens - and a consumer must not be told
                     // its position is open in one batch and gone in the next
                     // when both describe the same instant.
@@ -411,10 +411,10 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                             to_ns,
                         );
                     }
-                    // A TERMINATING breach on the venue's ONLY account ends the
+                    // A terminating breach on the venue's only account ends the
                     // run: its one account is dead, so there is nothing left to
                     // serve, which is the same "no consumer, no job" rule that
-                    // governs disconnection. Announced AFTER the batch is
+                    // governs disconnection. Announced after the batch is
                     // delivered, so the consumer learns why rather than seeing a
                     // bare close.
                     //
@@ -423,7 +423,7 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     // down the batch, and the count is the only thing that
                     // distinguishes the two modes at runtime.
                     //
-                    // ACCOUNTS HELD, NOT ACCOUNTS ATTACHED, and the difference
+                    // Accounts held, not accounts attached, and the difference
                     // is the whole gate. A frozen account has no boat and is
                     // filtered out of the sweep above, so counting the attached
                     // set let one breaching account end a run whose other
@@ -457,16 +457,16 @@ type MarkReads = (
 /// Every tape price one sweep pass needs: the futures marks at `to_ns` and the
 /// price at each settlement instant the pass crossed.
 ///
-/// Both are EXACT-INSTANT last-print reads rather than `MarketReadingCache`
+/// Both are exact-instant last-print reads rather than `MarketReadingCache`
 /// lookups. That cache buckets by fill-sweep interval, which is a defensible
 /// coarseness for a volatility band and is not one for a mark price: unrealized
 /// P and L and the margin evaluation that follows it would freeze for every pass
 /// sharing a bucket, which under an accelerated clock is several of them.
 ///
-/// The two halves fail DIFFERENTLY, and that asymmetry is the point. An
+/// The two halves fail differently, and that asymmetry is the point. An
 /// unreadable ordinary mark costs one pass of unrealized P and L freshness and
 /// is asked again five milliseconds later, so it is dropped. An unreadable
-/// SETTLEMENT price cannot be asked again: `last_swept_ns` is about to move past
+/// settlement price cannot be asked again: `last_swept_ns` is about to move past
 /// its instant and nothing looks further back, so the whole read is refused and
 /// the caller leaves the watermark where it stands. A `filter_map` here - which
 /// is what this was - loses that instant permanently and silently, the same
@@ -478,8 +478,8 @@ fn read_marks(
     to_ns: u64,
     rivers: &Rivers,
 ) -> Option<MarkReads> {
-    // A MARK NAMES AN INSTRUMENT, NOT A RIVER, and this is where that becomes a
-    // problem the fork has to answer. These symbols come from the LEDGER - a
+    // A mark names an instrument, not a river, and this is where that becomes a
+    // problem the fork has to answer. These symbols come from the ledger - a
     // position is aggregated per instrument - so nothing here carries the river
     // the position was traded against. Today one label resolves to one river and
     // the two are the same answer; once generator havoc enters river identity,
@@ -509,7 +509,7 @@ fn read_marks(
 
 /// Where the settlement frontier stands after a pass.
 ///
-/// `last_swept_ns` is a WATERMARK, and the only record that a span is still
+/// `last_swept_ns` is a watermark, and the only record that a span is still
 /// owed settlement: the next pass asks the calendar for the instants inside
 /// `last_swept_ns..to_ns` and nothing ever looks further back than that. So it
 /// may only move over a span whose settlement prices were actually read.
@@ -517,7 +517,7 @@ fn read_marks(
 /// as an empty result does - retires every settlement instant the span crossed
 /// without anyone having priced them, permanently and silently.
 ///
-/// `read` is therefore the success of BOTH halves: the reading task surviving,
+/// `read` is therefore the success of both halves: the reading task surviving,
 /// and every settlement instant in the span having yielded a price. A partial
 /// settlement answer never reaches here, because `read_marks` collects its
 /// settlement prices into an `Option` rather than filtering the unreadable ones
@@ -529,13 +529,13 @@ fn frontier_after(last_swept_ns: u64, to_ns: u64, read: bool) -> u64 {
     if read { to_ns } else { last_swept_ns }
 }
 
-/// Commit one pass to the reading it just took, and only then CONSUME the
+/// Commit one pass to the reading it just took, and only then consume the
 /// river's price span.
 ///
-/// THE FRONTIER RULE APPLIED TO A DESTRUCTIVE READ. `PriceExtremes::take` bumps
+/// The frontier rule applied to a destructive read. `PriceExtremes::take` bumps
 /// the epoch and clears the published span, so it retires the high and the low
 /// the tape reached exactly the way `last_swept_ns` retires a settlement
-/// interval - and it may therefore only run over a pass that is going to USE
+/// interval - and it may therefore only run over a pass that is going to use
 /// them. Taking it before the reading was checked threw the extremes away on a
 /// failed pass, over an interval the unadvanced watermark then makes the next
 /// pass re-sweep: the account was marked across that span with its extremes
@@ -543,7 +543,7 @@ fn frontier_after(last_swept_ns: u64, to_ns: u64, read: bool) -> u64 {
 /// is precisely the spike-between-two-passes hole `extremes.rs` exists to
 /// close, reopened on the failure path.
 ///
-/// Ordering alone is what enforces this, so the two steps are HERE, in one
+/// Ordering alone is what enforces this, so the two steps are here, in one
 /// expression a reordering has to delete rather than move.
 fn commit_pass(
     reads: Option<MarkReads>,
@@ -631,14 +631,14 @@ fn apply_engine_pass_on_clock(
     // order must stop resting when its session closes whether or not the tape
     // came near it.
     events.extend(engine.expire_orders(to_ns, session_closed, to_ns));
-    // Marked FIRST, then funded: funding is paid on notional at the mark, so
+    // Marked first, then funded: funding is paid on notional at the mark, so
     // paying before the mark moved would charge this interval at the last
     // interval's price.
     let funded = engine.apply_funding(from_ns, to_ns, to_ns);
     events.extend(funded.events);
     originated += marked.originated_orders;
     events.extend(marked.events);
-    // EXACTLY one `AccountState` per pass, and it is the LAST one: scans,
+    // Exactly one `AccountState` per pass, and it is the last one: scans,
     // every settlement and the mark each snapshot, and every snapshot but the
     // final one reports a stale `mark_px` and `unrealized_pnl`. Dropping the
     // earlier ones unconditionally is what makes the invariant hold on a pass
@@ -665,23 +665,23 @@ fn apply_engine_pass_on_clock(
 
 /// Hand one executed batch to the connections it belongs to.
 ///
-/// Execution is run-scoped; DELIVERY stays per connection, because `ExecLanes`
+/// Execution is run-scoped; delivery stays per connection, because `ExecLanes`
 /// is per connection. A connection whose reservation is refused gets the
 /// ordinary `AdmissionRejected` on its priority lane and learns the real state
-/// from `QueryOrders`/`QueryFills`; the EXECUTION is never rolled back. A
+/// from `QueryOrders`/`QueryFills`; the execution is never rolled back. A
 /// consumer's byte budget does not get to decide whether the market traded
 /// through a price, and making it decide is what would wedge a book permanently
 /// once a batch outgrew the fixed per-connection budget.
 ///
-/// ATTRIBUTED, not broadcast. An order-scoped frame reaches only the connection
+/// Attributed, not broadcast. An order-scoped frame reaches only the connection
 /// that submitted the order, and an account-scoped one only the connections
 /// bound to that account; what reaches everyone is what is genuinely about the
-/// VENUE - a fault, a completion, a feed gap. This used to
+/// venue - a fault, a completion, a feed gap. This used to
 /// broadcast unconditionally, so a socket received `OrderFilled` for orders
 /// another socket placed. That was invisible while one connection per venue was
 /// the only shape.
 ///
-/// THE ACCOUNT SNAPSHOT WAS THE RESIDUAL HOLE, and it was the expensive one.
+/// The account snapshot was the residual hole, and it was the expensive one.
 /// Order attribution alone left `AccountState` unaddressed, so it fanned to
 /// every lane - and the sweep takes one engine pass per account, so an
 /// N-account venue sent each socket N snapshots per pass, N-1 of them somebody
@@ -689,7 +689,7 @@ fn apply_engine_pass_on_clock(
 /// an exhaustive classification with no catch-all, so the next ledger-owned
 /// frame variant is a compile error rather than a silent broadcast.
 ///
-/// The reservation is taken against the UNFILTERED batch size, so a connection
+/// The reservation is taken against the unfiltered batch size, so a connection
 /// reserves for frames it may not receive. Over-reserving is the safe direction:
 /// sizing per connection would mean walking the ownership table once per lane
 /// before knowing what to reserve, and a refusal costs the consumer only a
@@ -741,7 +741,7 @@ fn deliver(
             // Every order-scoped frame reaching this point is claimed: the
             // dispatcher claims consumer submissions at acceptance, and
             // `deliver_produced` claims venue-originated orders for the
-            // ledger that produced them. A miss is therefore a BUG in whoever
+            // ledger that produced them. A miss is therefore a bug in whoever
             // built the batch, not a class of order - reported, then routed
             // to everyone, because an account missing its own fill is still
             // the worse wrong while the bug lives.
@@ -803,10 +803,10 @@ fn deliver(
     // 2026-08-20 and the old one is recorded so it is not re-derived: this
     // function used to argue a sweep-produced order had "nobody to claim it
     // for". It does - the account whose ledger produced it - and
-    // `deliver_produced` claims it BEFORE this function runs, because the only
+    // `deliver_produced` claims it before this function runs, because the only
     // place the producer is knowable without ambient delivery context is at
     // production. Delivery itself stays a pure function of the batch. Claims
-    // retire with the ACCOUNT, never on a terminal frame, because
+    // retire with the account, never on a terminal frame, because
     // `QueryOrders` reports terminal rows by design.
     // A lane whose receiver is gone is a connection that is already tearing
     // down; retiring it here means a wedged socket cannot make every later pass
@@ -821,22 +821,22 @@ fn deliver(
 /// Returns the possibly-grown admission counts, because a flatten produces
 /// venue-originated orders and fills that the delivery reservation has to cover.
 ///
-/// A BREACH FLATTENS AND THEN LOCKS. Flattening is the enforcement: the whole
+/// A breach flattens and then locks. Flattening is the enforcement: the whole
 /// point is that a strategy which would have been liquidated actually is. The
 /// lock is what the breach action decides - until the next reset for a daily
 /// limit, forever for a trailing drawdown - and it is read by the order-entry
 /// gate rather than here.
 ///
-/// EVALUATED AT TICK RESOLUTION, which is what `span` buys. Equity is linear in
+/// Evaluated at tick resolution, which is what `span` buys. Equity is linear in
 /// the price of the one instrument an account can be holding, so its extreme
 /// over the span is attained at a price extreme: replaying the span's two
-/// extremes IN THE ORDER THE TAPE REACHED THEM reproduces what a per-tick walk
+/// extremes in the order the tape reached them reproduces what a per-tick walk
 /// would have found, at two valuations rather than thousands. A spike that
 /// opened and closed between two passes now spends drawdown budget, and a
 /// collapse that recovered before the pass now breaches, both of which they did
 /// at the venue being modelled.
 ///
-/// The CLOSING equity is observed last regardless, because that is the reading
+/// The closing equity is observed last regardless, because that is the reading
 /// the published risk state has to agree with.
 #[expect(
     clippy::too_many_arguments,
@@ -875,7 +875,7 @@ fn enforce_policy(
         return (emitted, originated, false);
     };
     // The span's extremes first, in time order, then the close. A breach found
-    // at an extreme is the FIRST verdict returned: the account was liquidated at
+    // at an extreme is the first verdict returned: the account was liquidated at
     // that instant, so a later reading cannot un-breach it, and `observe`
     // refuses to re-evaluate a breached ledger anyway.
     let mut verdict = crate::risk::Verdict::Clear;
@@ -942,10 +942,10 @@ fn refuse(
 
 /// Whether this run holds exactly one ledger.
 ///
-/// A FROZEN ACCOUNT COUNTS, and that is the whole of what this function is for.
+/// A frozen account counts, and that is the whole of what this function is for.
 /// The sweep skips frozen accounts because they have no boat and therefore no
 /// clock to be swept against, so every other question in that loop is asked of
-/// the attached set - and asking THIS one of the attached set is what let a
+/// the attached set - and asking this one of the attached set is what let a
 /// breaching account end a run whose other ledgers were merely between sockets.
 /// The venue still holds those ledgers, with their positions, orders and
 /// balances, and a returning passenger can claim any of them; they are the run
@@ -969,7 +969,7 @@ mod tests {
     };
     use rust_decimal::Decimal;
 
-    /// A terminating breach ends the run only when the run holds ONE ledger,
+    /// A terminating breach ends the run only when the run holds one ledger,
     /// and a frozen account is one the run still holds.
     ///
     /// The gate reads `accounts_held`, taken before the frozen filter. Reading
@@ -980,7 +980,7 @@ mod tests {
     /// whose other ledgers are still holding positions, orders and balances a
     /// returning socket can claim.
     ///
-    /// What is asserted is the DISCRIMINATOR rather than the sweep, because the
+    /// What is asserted is the discriminator rather than the sweep, because the
     /// two counts differing is the whole of the defect: if a frozen account
     /// could never make them differ, the fix would be vacuous and this test
     /// would pass against the old code.
@@ -991,7 +991,7 @@ mod tests {
         let (theirs, _their_rx) = ExecLanes::detached();
         let mine_id = run.bind_lanes(mine, "MOGWAI-001", None);
         run.bind_lanes(theirs, "MOGWAI-002", None);
-        // An account is minted FROZEN and thawed when a passenger resumes it,
+        // An account is minted frozen and thawed when a passenger resumes it,
         // so both are resumed and only one is then released. A test that
         // resumed neither would find both frozen and prove nothing about the
         // split the gate turns on.
@@ -1006,7 +1006,7 @@ mod tests {
         run.release_lanes(mine_id);
 
         let held = run.accounts();
-        // THE FIXTURE'S OWN PREMISE FIRST. If the release did not actually
+        // The fixture's own premise first. If the release did not actually
         // freeze anything, the two sets below are equal and the assertion that
         // matters would hold for a reason that has nothing to do with the gate.
         assert_eq!(
@@ -1016,7 +1016,7 @@ mod tests {
              cannot tell the two counts apart"
         );
 
-        // Read through the gate's OWN function rather than recomputed here. A
+        // Read through the gate's own function rather than recomputed here. A
         // test that counted `accounts()` itself would pass whatever the gate
         // did, which is how the first version of this test came to pass against
         // the defect it names.
@@ -1043,7 +1043,7 @@ mod tests {
         let order: mogwai_protocol::VenueOrderId = "V-1".into();
         run.claim_order(order.clone(), "MOGWAI-001");
 
-        // A PARTIAL fill, so the batch does not also retire the claim it is
+        // A partial fill, so the batch does not also retire the claim it is
         // being attributed by; the assertion is about delivery, not cleanup.
         let events = vec![VenueMessage::OrderFilled(mogwai_protocol::OrderFilled {
             client_order_id: "C-1".into(),
@@ -1095,7 +1095,7 @@ mod tests {
     /// ownership table missed, and the fill broadcast to every lane. Ruled
     /// closed 2026-08-20. `deliver_produced` is what the sweep's production
     /// sites call, so this test drives the same fused claim-then-deliver path
-    /// and MUST NOT claim by hand - the absence of a hand claim is the case
+    /// and must not claim by hand - the absence of a hand claim is the case
     /// under test, and reverting the claim inside `deliver_produced` makes the
     /// stranger's assertion fail.
     #[tokio::test(flavor = "current_thread")]
@@ -1162,7 +1162,7 @@ mod tests {
     /// so order-only attribution read it as venue-wide and fanned one
     /// account's balances and positions to every other account. The sweep
     /// takes a pass per account, so this happened on every pass rather than at
-    /// some edge. Asserting on the FRAME rather than on receipt is the point -
+    /// some edge. Asserting on the frame rather than on receipt is the point -
     /// the wrong lane receiving something is only a bug because of what the
     /// something is.
     #[tokio::test(flavor = "current_thread")]
@@ -1271,11 +1271,11 @@ mod tests {
         );
     }
 
-    /// The DESTRUCTIVE-READ half of the same guard: a pass that abandons its
+    /// The destructive-read half of the same guard: a pass that abandons its
     /// interval must not have consumed that interval's price extremes.
     ///
     /// `take` is a consuming read, so taking it before the reading was checked
-    /// left the high and the low of an interval the venue then RE-SWEPT gone
+    /// left the high and the low of an interval the venue then re-swept gone
     /// permanently - the account marked over a span whose extremes had been
     /// dropped, which is the hole `extremes.rs` exists to close.
     #[test]
@@ -1298,7 +1298,7 @@ mod tests {
         assert_eq!(span.high_px, rust_decimal::Decimal::from(140));
         assert_eq!(span.low_px, rust_decimal::Decimal::from(90));
 
-        // And a committed pass DOES consume it, so the next span starts from
+        // And a committed pass does consume it, so the next span starts from
         // its own prints rather than re-ratcheting a peak already spent.
         let (_reads, span) =
             commit_pass(Some((Vec::new(), Vec::new())), &extremes).expect("the reading succeeded");
@@ -1307,8 +1307,8 @@ mod tests {
 
     /// The settlement half of the frontier guard, at the layer that decides it.
     ///
-    /// An unreadable ORDINARY mark is dropped and the pass proceeds; an
-    /// unreadable SETTLEMENT price refuses the whole read, which is what makes
+    /// An unreadable ordinary mark is dropped and the pass proceeds; an
+    /// unreadable settlement price refuses the whole read, which is what makes
     /// `frontier_after` leave the span owed. Before this, `read_marks` filtered
     /// both alike, so a settlement instant whose price could not be read was
     /// retired by a watermark that then never looked back at it.
@@ -1441,7 +1441,7 @@ mod tests {
         account_state
     }
 
-    /// THE GAP THIS CLOSES. A spike that opened and closed entirely between two
+    /// The gap this closes. A spike that opened and closed entirely between two
     /// sweep passes used to be invisible: the pass saw only the closing mark, so
     /// the account kept drawdown room it had actually spent. The span carries
     /// the high, so the ratchet sees it.
@@ -1498,7 +1498,7 @@ mod tests {
         );
     }
 
-    /// The other half: a COLLAPSE that recovered before the pass. A
+    /// The other half: a collapse that recovered before the pass. A
     /// mark-cadence evaluation sees an account comfortably inside its floor; the
     /// account was liquidated at the venue being modelled.
     #[tokio::test(flavor = "current_thread")]
@@ -1543,7 +1543,7 @@ mod tests {
         );
     }
 
-    /// A trailing stop follows the SPAN'S HIGH rather than its closing mark,
+    /// A trailing stop follows the span's high rather than its closing mark,
     /// which is the same tick-resolution fix on the order side.
     #[test]
     fn a_trailing_stop_ratchets_to_the_span_high_not_the_close() {
@@ -1690,7 +1690,7 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
-        // SURVIVES, which is the half the fill assertion below cannot see: a
+        // Survives, which is the half the fill assertion below cannot see: a
         // closure that cancelled the order would also produce no fill here.
         assert!(
             engine
@@ -1735,7 +1735,7 @@ mod tests {
         let before = engine.account_snapshot(2).positions[0].clone();
         assert_eq!(before.mark_px, Decimal::from(21_001));
 
-        // A closure is an EMPTY mark set: there is no tape inside it, so the
+        // A closure is an empty mark set: there is no tape inside it, so the
         // sweeper reads no price and hands the engine nothing. Re-passing the
         // same price instead would assert nothing at all - it holds whether or
         // not the mark is frozen.

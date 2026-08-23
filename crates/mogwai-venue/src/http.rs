@@ -35,14 +35,14 @@ use crate::source;
 pub(crate) struct DivergenceRequest {
     #[serde(default)]
     symbol: Option<String>,
-    /// Which account a TRANSPORT divergence corrupts the view of. Absent means
+    /// Which account a transport divergence corrupts the view of. Absent means
     /// every account, which is what an operator on a single-account venue wants
     /// and what every existing scenario file already writes.
     ///
     /// Only the transport arms honour it. `GoDark` and `StallData` change what
-    /// one connection RECEIVES, so they blur the eyesight of every passenger
+    /// one connection receives, so they blur the eyesight of every passenger
     /// under that account;
-    /// generator arms change the WATER, which is a property of the river and
+    /// generator arms change the water itself, which is a property of the river and
     /// reaches everyone reading it whatever account they trade.
     #[serde(default)]
     account: Option<String>,
@@ -55,18 +55,18 @@ pub(crate) struct DivergenceRequest {
 ///
 /// The account a control request targets, as `Run::arm` takes it.
 ///
-/// NAMING AN ACCOUNT NEVER CREATES ONE. Arming a blackout is not a reason to
+/// Naming an account never creates one. Arming a blackout is not a reason to
 /// bring a ledger into existence - a typo would otherwise mint `WYRD-01` and
 /// arm a ledger nothing ever connects to, and would answer the real consumer's own
-/// `POST /account` with a `409`. The arm is RECORDED against the name instead,
+/// `POST /account` with a `409`. The arm is recorded against the name instead,
 /// and the account's first mint consumes it; see `VenueArms`. A stale line here
-/// said the request "resolves to the EMPTY set", which was the finding-5
+/// said the request "resolves to the empty set", which was the finding-5
 /// behaviour and stopped being true when the record landed.
 ///
-/// `None` is not "all the ledgers that exist", it is THE VENUE: the arm is
+/// `None` is not "all the ledgers that exist", it is the venue itself: the arm is
 /// recorded on the run, so a late-connecting account gets it too.
 ///
-/// A MALFORMED id IS REFUSED rather than quietly targeting nothing. An id that
+/// A malformed id is refused rather than quietly targeting nothing. An id that
 /// cannot be parsed can never be presented by a socket, so no ledger will ever
 /// carry the arm; the arm used to filter to the empty set and answer `202`,
 /// which is the same silent success finding 5 was about. Reading it as
@@ -98,11 +98,11 @@ pub(crate) enum OrderOutcome {
         reservation: Reservation,
     },
     /// Admission refused: outbound capacity could not cover the worst case, so
-    /// the engine was never asked. Carries the frame for the PRIORITY lane.
+    /// the engine was never asked. Carries the frame for the priority lane.
     NotAdmitted(VenueMessage),
     /// A malformed request with no order-shaped frame to answer it (a query
     /// whose `request_id` is over-length names no order), so the answer is the
-    /// untargeted diagnostic. Also a priority-lane frame, but deliberately NOT
+    /// untargeted diagnostic. Also a priority-lane frame, but deliberately not
     /// an `AdmissionRejected`: conflating malformed with over-capacity would
     /// make an admission refusal unreadable as a load signal.
     Diagnostic(VenueMessage),
@@ -115,7 +115,7 @@ pub(crate) fn admission_subject(cmd: &Command) -> AdmissionSubject {
         Command::SubmitOrder(o) => AdmissionSubject::Submit {
             client_order_id: o.client_order_id.clone(),
         },
-        // Named by the LIST, because a group is admitted or refused whole.
+        // Named by the list, because a group is admitted or refused whole.
         // A group whose first member carries no link is one
         // `validate_submit_group` refuses anyway, so the empty id here is a
         // subject for a frame that only ever accompanies that refusal.
@@ -156,10 +156,10 @@ pub(crate) fn admission_subject(cmd: &Command) -> AdmissionSubject {
 /// checks that were always here, because both are malformed-request failures.
 pub(crate) fn boundary_error(cmd: &Command) -> Option<&'static str> {
     match cmd {
-        // A LINKED order may not arrive alone on the wire, and this is the
+        // A linked order may not arrive alone on the wire, and this is the
         // refusal that makes the group frame's guarantee worth anything.
         //
-        // Per-leg dispatch of a bracket is the whole hazard: leg one can FILL
+        // Per-leg dispatch of a bracket is the whole hazard: leg one can fill
         // before leg two is admitted, the rule adjusts a sibling that is not
         // there, and leg two then arrives at full size - so a two-leg `Ouo`
         // pair's aggregate fill is twice the bracket quantity, which for a
@@ -168,9 +168,9 @@ pub(crate) fn boundary_error(cmd: &Command) -> Option<&'static str> {
         // linkage at all, only as a property of one code path, and a consumer
         // cannot cite that.
         //
-        // The ENGINE still accepts a linked standalone submit: it is the
+        // The engine still accepts a linked standalone submit: it is the
         // in-process API the group path itself is built on, and the venue's own
-        // liquidation submits go through it. This is a WIRE rule, refused where
+        // liquidation submits go through it. This is a wire rule, refused where
         // the consumer's choice of route is actually made.
         Command::SubmitOrder(order) => validate_submit_order(order).err().or_else(|| {
             order.link.is_some().then_some(
@@ -209,7 +209,7 @@ pub(crate) fn boundary_error(cmd: &Command) -> Option<&'static str> {
                 .and_then(|id| validate_client_order_id(id).err())
         }),
         // The window is checked against the river later, where the run clock
-        // and the passenger's key are both in hand; what is decidable HERE is
+        // and the passenger's key are both in hand; what is decidable here is
         // the shape of the request itself. A start after its own end is a
         // caller error rather than an empty window, and saying so at the
         // boundary keeps it from becoming a page that completes with nothing.
@@ -241,14 +241,14 @@ pub(crate) fn boundary_error(cmd: &Command) -> Option<&'static str> {
 }
 
 /// The refusal frames for a malformed order-entry command, echoing the
-/// offending id TRUNCATED to `MAX_ECHOED_ID_LEN`. Echoing it at full length
+/// offending id truncated to `MAX_ECHOED_ID_LEN`. Echoing it at full length
 /// would turn an 8 MiB `client_order_id` into an 8 MiB `OrderRejected`,
 /// recreating exactly the unbounded frame the cap exists to prevent; a
 /// truncated echo cannot be mistaken for a live correlation because the venue
 /// would never have accepted the id under either spelling, and the reason says
 /// so.
 ///
-/// A VEC rather than one frame, because a `SubmitOrderGroup` is refused whole
+/// A `Vec` rather than one frame, because a `SubmitOrderGroup` is refused whole
 /// and owes every member its own rejection. Every other command answers with
 /// exactly one, which is what `boundary_frame_count` states and what the
 /// reservation is sized from.
@@ -285,10 +285,10 @@ fn boundary_refusal(cmd: &Command, reason: &str, ts: u64) -> Vec<VenueMessage> {
             reason: note(&order.client_order_id),
             ts_event: ts,
         }],
-        // A group is refused WHOLE, so every member gets its own rejection.
+        // A group is refused whole, so every member gets its own rejection.
         // Answering with one frame naming one member would leave the consumer
         // waiting on the others, and answering with none would leave it waiting
-        // on all of them. An EMPTY group has no member to answer, so it falls
+        // on all of them. An empty group has no member to answer, so it falls
         // through to the untargeted diagnostic like a malformed query.
         Command::SubmitOrderGroup { orders } if !orders.is_empty() => orders
             .iter()
@@ -307,12 +307,12 @@ fn boundary_refusal(cmd: &Command, reason: &str, ts: u64) -> Vec<VenueMessage> {
     }
 }
 
-/// The orders a command SUBMITS: one for a `SubmitOrder`, every member for a
+/// The orders a command submits: one for a `SubmitOrder`, every member for a
 /// `SubmitOrderGroup`, none for anything else.
 ///
 /// It exists so the pre-engine refusals below - bound symbol, policy currency,
 /// locked account, position cap, market synthesis, session closed - are written
-/// ONCE over both carriers. A guard that only looked at `SubmitOrder` would let
+/// once over both carriers. A guard that only looked at `SubmitOrder` would let
 /// a group walk past it, and every one of those guards is a rule about capital
 /// rather than a formality.
 fn submitted_orders(cmd: &Command) -> &[mogwai_protocol::SubmitOrder] {
@@ -325,7 +325,7 @@ fn submitted_orders(cmd: &Command) -> &[mogwai_protocol::SubmitOrder] {
 
 /// Refuse everything a command submitted, blaming `blamed` for the reason.
 ///
-/// A group is refused WHOLE, so one bad member rejects all of them - which is
+/// A group is refused whole, so one bad member rejects all of them - which is
 /// the same rule the atomic-admission guarantee states, applied at the pre-engine
 /// guards rather than inside the engine. Each frame names the member it is
 /// addressed to, and a group's frames say which member was actually at fault so
@@ -395,8 +395,8 @@ fn boundary_frame_count(cmd: &Command) -> usize {
 ///    re-sample `ts`: stamping the engine's events with the entry-time `ts`
 ///    would date them up to a seek's worth of sim-time before they logically
 ///    occur.
-/// 3. The post-stamp synthesis-failure refusal (a MARKET order still priceless
-///    for a symbol this venue DOES list), which is the venue's own failure and
+/// 3. The post-stamp synthesis-failure refusal (a market order still priceless
+///    for a symbol this venue does list), which is the venue's own failure and
 ///    is not the engine's to blame on the consumer.
 /// 4. Take the engine lock, read `book_shape()`, reserve worst-case output.
 ///    The lock spans the shape read and the processing, so the shape cannot
@@ -447,22 +447,22 @@ pub(crate) async fn process_order_cmd(
     if let Some(outcome) = boundary_outcome(&order_cmd, lanes, ts) {
         return outcome;
     }
-    // A submit names its own symbol on the wire; it is CHECKED against the
+    // A submit names its own symbol on the wire; it is checked against the
     // river this socket bound, never overridden by it. Without the check a
     // consumer could bind one river and trade another.
     //
-    // PLACEMENT IS THE CONTRACT: right after the protocol boundary and BEFORE
+    // Placement is the contract: right after the protocol boundary and before
     // the act delay, the market reading, the calendar lookup and the engine
-    // lock. A check placed lower would let a mismatched MARKET order drive
+    // lock. A check placed lower would let a mismatched market order drive
     // price synthesis, checkpoint-mutex and cache work for a river the socket
     // is not bound to before being refused. Refusing here also dates the
     // refusal at the entry-time `ts`, like its boundary neighbours.
     //
-    // The frame is `OrderRejected`, NOT `AdmissionRejected`: a mismatch is a
+    // The frame is `OrderRejected`, never `AdmissionRejected`: a mismatch is a
     // consumer error, and `AdmissionRejected` reads as a capacity signal at every
     // observer. Only the failure to reserve a boundary slot is capacity.
     //
-    // EVERY member of a group is checked, and one mismatch refuses all of them.
+    // Every member of a group is checked, and one mismatch refuses all of them.
     // The same is true of every guard below: a group is refused whole, which is
     // the atomic-admission rule applied at the pre-engine gates rather than only
     // inside the engine.
@@ -482,11 +482,11 @@ pub(crate) async fn process_order_cmd(
             ts,
         );
     }
-    // A POLICED ACCOUNT TRADES ONLY WHAT ITS POLICY CAN VALUE, refused here
+    // A policed account trades only what its policy can value, refused here
     // rather than discovered as a mis-valued threshold later.
     //
     // Equity is stated in the policy's currency, and the venue prices an asset
-    // only through an instrument that QUOTES it in that currency. A future
+    // only through an instrument that quotes it in that currency. A future
     // settling in it qualifies, and so does a spot pair quoted in it - buying
     // BTC on BTCUSDT under a USDT policy leaves a BTC balance the BTCUSDT mark
     // can value. What does not qualify is a shape that would leave a holding
@@ -518,9 +518,9 @@ pub(crate) async fn process_order_cmd(
             ts,
         );
     }
-    // A LOCKED ACCOUNT OPENS NOTHING. This is the other half of enforcement: the
+    // A locked account opens nothing. This is the other half of enforcement: the
     // breach flattened the book, and this is what stops the strategy putting it
-    // straight back on. Placed with the other consumer-error refusals and BEFORE
+    // straight back on. Placed with the other consumer-error refusals and before
     // the act delay and market reading, because a locked account's order needs
     // no price to be refused.
     //
@@ -545,23 +545,23 @@ pub(crate) async fn process_order_cmd(
             ts,
         );
     }
-    // Register the symbol lazily, BEFORE the act delay and any market reading.
+    // Register the symbol lazily, before the act delay and any market reading.
     // A `false` here means no profile resolves the symbol; fall through rather
     // than short-circuit, so an unconfigured symbol still meets the engine's
     // existing unknown-instrument rejection with its existing wording instead of
     // a second one invented here.
     //
-    // A group names ONE symbol - `validate_submit_group` refuses anything else -
+    // A group names one symbol - `validate_submit_group` refuses anything else -
     // so registering the first member's registers the group's.
     if let Some(order) = submitted_orders(&order_cmd).first() {
         let _configured = run.ensure_instrument(account_state, &order.symbol).await;
     }
-    // A POSITION CAP is refused here, by name, before the act delay. An
+    // A position cap is refused here, by name, before the act delay. An
     // oversized submit is a consumer error: the firm would not have taken the
     // order, so the venue must not either. Reduce-only never grows the book
     // and is left alone.
     //
-    // The risk guard is dropped BEFORE the engine await: holding a
+    // The risk guard is dropped before the engine await: holding a
     // `std::sync::Mutex` across `.await` makes this future `!Send`, and the
     // socket task has to be Send.
     let position_cap = account_state
@@ -570,7 +570,7 @@ pub(crate) async fn process_order_cmd(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .max_position();
     //
-    // A GROUP IS JUDGED ON ITS WHOLE WORST CASE, not member by member. Every
+    // A group is judged on its whole worst case, not member by member. Every
     // opening member's quantity is summed onto the projection before the cap is
     // compared, because the members are admitted together and the venue must not
     // admit a pair that individually fits and jointly does not - which is the
@@ -609,15 +609,15 @@ pub(crate) async fn process_order_cmd(
             }
         }
     }
-    // The venue's ACT delay sits BETWEEN the protocol boundary and the market
+    // The venue's act delay sits between the protocol boundary and the market
     // price stamp. After the boundary, because a malformed command is refused
     // by the protocol and a refusal is not a venue act - and the same reason
     // puts it after the bound-symbol check above. Before the stamp, because a
-    // delayed submit must meet the tape as it is when the venue ACTS, not as it
+    // delayed submit must meet the tape as it is when the venue acts, not as it
     // was when the command arrived - and because the `ts` re-sample below then
     // dates the engine's events at act time with no second re-sample needed.
     //
-    // It LIVES HERE, not in the ws dispatcher that used to hold it, because
+    // It lives here, not in the ws dispatcher that used to hold it, because
     // only here is "after the boundary" expressible; the dispatcher ran it
     // before `boundary_outcome`, which contradicted this paragraph and delayed
     // refusals that are not acts.
@@ -626,24 +626,24 @@ pub(crate) async fn process_order_cmd(
     if act_ms > 0 {
         tokio::time::sleep(sim.wall_duration(sim_duration_from_millis(act_ms))).await;
     }
-    // Re-sampled BEFORE the reading, not after the act sleep only in name: the
-    // reading is "the last print at or before the venue ACTED", so
+    // Re-sampled before the reading, not after the act sleep only in name: the
+    // reading is "the last print at or before the venue acted", so
     // handing it the entry-time `ts` would judge a delayed submit against the
     // tape as it was when the command arrived - the exact staleness the act
     // delay is placed above the reading to avoid.
     let ts = sim_now_ns(sim);
     let (order_cmd, market_px) = market_reading(order_cmd, state, boat, ts, socket_symbol).await;
-    // Re-sample after the market-price synthesis, which for a price-less MARKET
+    // Re-sample after the market-price synthesis, which for a price-less market
     // order may block ~100 ms on the checkpoint mutex and seek (S16). The
     // synthesis-failure reject and the engine events below all occur now.
     let ts = sim_now_ns(sim);
-    // A MARKET order still price-less after the stamp, for a symbol this venue
-    // DOES list, means market price synthesis failed (most likely the task
+    // A market order still price-less after the stamp, for a symbol this venue
+    // does list, means market price synthesis failed (most likely the task
     // itself died).
     // Reject it here with the honest story - the consumer correctly sent no price
     // (nautilus never stamps a market order), so letting the engine's "submit
     // price required" fire would blame the consumer for the venue's own synthesis
-    // failure. A symbol the resolver REFUSES - illegal, funding-barred, or one
+    // failure. A symbol the resolver refuses - illegal, funding-barred, or one
     // whose resolved shape does not validate - is deliberately left price-less:
     // the engine checks instrument existence before the price, so its "unknown
     // instrument" rejection tells that story unaltered. Resolution is otherwise
@@ -667,7 +667,7 @@ pub(crate) async fn process_order_cmd(
         );
     }
     if let Some(order) = submitted_orders(&order_cmd).iter().find(|order| {
-        // The RESOLVED shape's calendar, not the configured map's: a symbol
+        // The resolved shape's calendar, not the configured map's: a symbol
         // nobody configured is served on a resolved bundle whose tape is
         // generated with that calendar, so its orders owe the same
         // session-closed refusal.
@@ -699,10 +699,10 @@ pub(crate) async fn process_order_cmd(
         });
     };
     let events = engine.process_with_market_on_clock(order_cmd, ts, market_px, sim);
-    // RELEASED BEFORE THESE EVENTS ARE PUBLISHED, which makes the order visible
+    // Released before these events are published, which makes the order visible
     // to the sweeper while its own `OrderAccepted` is still in this vec. The
-    // engine mutex establishes MUTATION order; it does not establish
-    // PUBLICATION order, and nothing else does either. See the note at the
+    // engine mutex establishes mutation order; it does not establish
+    // publication order, and nothing else does either. See the note at the
     // `submit_produced` call in `ws::dispatch_command` for why that is currently
     // harmless and what would stop it being so.
     drop(engine);
@@ -714,7 +714,7 @@ pub(crate) async fn process_order_cmd(
 
 /// Would this order execute off a print the closure has made stale?
 ///
-/// THIS ENUMERATES ORDER TYPES, so a type whose semantics change owes this
+/// This enumerates order types, so a type whose semantics change owes this
 /// function a re-read. `MarketToLimit` cost exactly that on 2026-08-19: it used
 /// to fill at its own stated price with no reference to the tape, so its
 /// absence here was defensible, and the moment it started taking the market it
@@ -723,7 +723,7 @@ pub(crate) async fn process_order_cmd(
 /// filled against a stale reading, which is the one thing this guard exists to
 /// prevent.
 ///
-/// Marketability is judged against the STATED price, while the engine judges it
+/// Marketability is judged against the stated price, while the engine judges it
 /// against the band-drawn trigger. The two can disagree by up to the band, so
 /// this is an approximation in both directions: an order admitted here as
 /// non-marketable can be marketable to the engine (and fill off the stale
@@ -740,7 +740,7 @@ fn reject_while_closed(
     market_px: Option<mogwai_engine::MarketReading>,
 ) -> bool {
     // A market order takes whatever the tape last said, so a closure refuses it
-    // outright. Every type that STATES A LIMIT - the limit itself and the
+    // outright. Every type that states a limit - the limit itself and the
     // market-to-limit, whose first act is judged by its limit exactly as a
     // limit's is - is refused only when that limit is marketable against the
     // stale print, and rests through the closure otherwise.
@@ -766,14 +766,14 @@ pub(crate) struct AppState {
     pub(crate) run: Arc<Run>,
     pub(crate) cfg: Config,
     pub(crate) rivers: Arc<source::Rivers>,
-    /// Process-wide ceiling on websocket commands sleeping out an armed ACT
+    /// Process-wide ceiling on websocket commands sleeping out an armed act
     /// delay. The per-connection lane bounds one consumer; this bounds the run.
     pub(crate) pending_commands: Arc<tokio::sync::Semaphore>,
-    /// Slots for history syntheses IN FLIGHT, which is what bounds resident
-    /// page memory. A caller over the cap WAITS for one; see
+    /// Slots for history syntheses in flight, which is what bounds resident
+    /// page memory. A caller over the cap waits for one; see
     /// `acquire_history_slot`.
     pub(crate) history_slots: Arc<tokio::sync::Semaphore>,
-    /// Callers QUEUED for one of those slots and holding no page yet. The
+    /// Callers queued for one of those slots and holding no page yet. The
     /// waiter permit is given up the instant a slot is won, so this counts
     /// waiting and never synthesis. This is the fail-fast half, and the only
     /// one that still refuses on contention.
@@ -784,13 +784,13 @@ pub(crate) struct AppState {
 pub(crate) struct Health {
     status: &'static str,
     oms_type: mogwai_protocol::OmsType,
-    /// Identifies this RUN, not this process.
+    /// Identifies this run, not this process.
     ///
     /// The endpoint is an ephemeral port, and a port outlives nothing: once a
     /// venue exits, the number is free and anything may take it. A consumer
     /// holding that address has no way to tell the run it was launched against
     /// from whatever now answers there, and the window is not hypothetical -
-    /// this venue stops accepting BEFORE it exits, draining live connections for
+    /// this venue stops accepting before it exits, draining live connections for
     /// up to the shutdown grace, so the port is free while the process is still
     /// alive and any consumer watching for child exit sees nothing.
     ///
@@ -798,31 +798,31 @@ pub(crate) struct Health {
     /// record, so a launcher can hand it to its consumers and they can check they
     /// are still talking to the venue they were given.
     run_seed: u64,
-    /// A FAULTED TAPE ON ANY BOATED RIVER, not merely on the boot one.
+    /// A faulted tape on any boated river, not merely on the boot one.
     ///
     /// This used to read `boat_for_symbol(default_symbol)` and report that one
     /// boat's tape fault, which was exactly right when a run had one paced
     /// tape. Under the open instrument set a run places a boat per keyed river,
     /// every one owns its own tape and can fault independently, and the boot
-    /// river is the one a strategy under test is LEAST likely to have bound -
+    /// river is the one a strategy under test is least likely to have bound -
     /// so a consumer whose own arrival draw refused was reading a healthy
     /// `/health`. That is not cosmetic: a launcher and an orchestrator poll
     /// this to decide whether a fire-and-forget run is worth keeping, and a
     /// fault that never reaches the poll gets the run scored healthy and its
     /// output silently trusted.
     ///
-    /// ONE OPTIONAL OBJECT, N BOATS, so the choice is which boat answers. It is
-    /// the faulted river with the smallest SYMBOL, which keeps the field
+    /// One optional object, N boats, so the choice is which boat answers. It is
+    /// the faulted river with the smallest symbol, which keeps the field
     /// deterministic across polls (reporting whichever the registry iterated
     /// first would not be), keeps the wire shape every existing consumer
-    /// already reads, and still answers "is ANY river faulted" - the question a
+    /// already reads, and still answers "is any river faulted" - the question a
     /// fleet poller actually has. `symbol` says which river it is, so the
     /// narrowing costs no information about the fault that is reported; what it
-    /// does not report is a SECOND simultaneous fault, which changes no
+    /// does not report is a second simultaneous fault, which changes no
     /// decision, because one faulted river already condemns the run.
     ///
     /// Separate from the venue's terminal fault shutdown path: this is what a
-    /// poller can see BEFORE a run dies, not when it dies.
+    /// poller can see before a run dies, not when it dies.
     fault: Option<HealthFault>,
 }
 
@@ -836,7 +836,7 @@ struct HealthFault {
 }
 
 /// Which faulted river `/health` reports, given every boated river that has
-/// one. Split out from the handler so the SELECTION is testable without a
+/// one. Split out from the handler so the selection is testable without a
 /// boatyard: forcing a real arrival refusal on a chosen river is far more
 /// machinery than the rule deserves, and the rule - smallest symbol wins,
 /// whatever order the registry iterated in - is the whole of what could
@@ -870,7 +870,7 @@ fn health_fault(
             kind: "arrival.non_finite_state",
             clock_ns,
         },
-        // ZERO IS THE HONEST CLOCK, not a missing one. An injected fault is not
+        // Zero is the honest clock, not a missing one. An injected fault is not
         // dated by any source's cursor, and reporting the venue's current sim
         // instant instead would read as the moment a tape gave out - which is
         // exactly the thing that did not happen. The `kind` says where it came
@@ -905,7 +905,7 @@ impl AppState {
     /// How far a request that owns no boat may be answered: one snapshot of the
     /// run clock, taken when the request is admitted.
     ///
-    /// IT CONSULTS NO BOAT, and that is the whole of the rule. This used to
+    /// It consults no boat, and that is the whole of the rule. This used to
     /// reduce over every boat on the river and take the furthest-published one,
     /// which reported one passenger's delivery frontier to another: board the
     /// same river at a faster cadence and you moved somebody else's history
@@ -914,13 +914,13 @@ impl AppState {
     /// hull.
     ///
     /// The reduction was incoherent on its own terms too. Speed is not part of
-    /// a river's identity but it IS part of a boat's, and a tape is what one
-    /// boat publishes - so a maximum over boats is a maximum across DIFFERENT
-    /// TAPES, reported as if it were a property of the water. A river has no
+    /// a river's identity but it is part of a boat's, and a tape is what one
+    /// boat publishes - so a maximum over boats is a maximum across different
+    /// tapes, reported as if it were a property of the water. A river has no
     /// present: it is deterministic water with no cursor of its own. Only a tape
     /// has a delivery frontier, and every tape belongs to a boat.
     ///
-    /// WHAT THIS COSTS, stated because it is a surrender rather than a free win.
+    /// What this costs, stated because it is a surrender rather than a free win.
     /// A delivery-shaped ceiling and a boat-free one cannot both exist: a
     /// firehose that has delivered through some instant and a river nobody has
     /// generated past are indistinguishable to anything that does not consult a
@@ -936,7 +936,7 @@ impl AppState {
 }
 
 /// Control plane: arm a divergence to fire on its next trigger. It is armed
-/// against the RUN, so it reaches every open connection: there is no account to
+/// against the run, so it reaches every open connection: there is no account to
 /// divert it onto.
 pub(crate) async fn arm_divergence(
     State(state): State<AppState>,
@@ -970,8 +970,8 @@ pub(crate) async fn arm_divergence(
         Divergence::DelayAcks { ms } => {
             run.arm(target, VenueArm::DelayAcks { ms }).await;
         }
-        // STORE-not-merge, like every other venue-owned window: one arm
-        // REPLACES all six values, so an omitted field is armed as zero rather
+        // Store-not-merge, like every other venue-owned window: one arm
+        // replaces all six values, so an omitted field is armed as zero rather
         // than left standing from an earlier arm.
         Divergence::CommandLatency {
             submit_act_ms,
@@ -994,20 +994,20 @@ pub(crate) async fn arm_divergence(
             )
             .await;
         }
-        // GoDark/StallData windows are STORE-not-extend (S18): each arm replaces
-        // the whole armed span under one lock, so re-arming with a SMALLER `ms`
+        // GoDark/StallData windows are store-not-extend (S18): each arm replaces
+        // the whole armed span under one lock, so re-arming with a smaller `ms`
         // shortens an in-flight blackout rather than lengthening it. This is
         // deliberate - re-arming sets the window, it does not accumulate - and lets
         // a test cut a window short by re-posting a small one; an operator wanting a
         // longer window re-arms with the longer `ms`.
         //
-        // The window is stored CLOCK-NEUTRALLY, as a wall arming instant plus a
+        // The window is stored clock-neutrally, as a wall arming instant plus a
         // simulated span, because the armer cannot know who will read it: a
         // passenger may board afterwards, and every reader judges the span on
         // its own boat clock.
         //
-        // TARGETED at one account when the request names one, and at the VENUE
-        // otherwise. Transport havoc rides the ACCOUNT, so blacking out one
+        // Targeted at one account when the request names one, and at the venue
+        // otherwise. Transport havoc rides the account, so blacking out one
         // subagent on a shared exchange must not black out the batch - and an
         // operator on a single-account venue still writes what it always did,
         // because naming no account still means everyone, now including the
@@ -1025,7 +1025,7 @@ pub(crate) async fn arm_divergence(
                 .await;
         }
         Divergence::FeeSurcharge { mult, window_ms } => {
-            // VENUE-WIDE WHATEVER THE REQUEST NAMED, which is why this passes
+            // Venue-wide whatever the request named, which is why this passes
             // `None` rather than `target`: a surcharge is a statement about the
             // venue's fees, not about one trader's connection, and the wire has
             // never let a consumer be charged differently. An account opened
@@ -1049,12 +1049,12 @@ pub(crate) async fn arm_divergence(
         // miss - unknown id, or already terminal - is refused with a 404 so
         // a scenario cannot believe it armed a fault that never happened.
         Divergence::CancelOpenOrderSilently { client_order_id } => {
-            // The clock comes from the TARGETED ORDER, never from a request
+            // The clock comes from the targeted order, never from a request
             // field: `client_order_id` already determines the order, hence its
             // symbol and its river, and a request-supplied `symbol` can disagree
             // with it. A mismatch is refused rather than silently preferred
             // either way.
-            // SCOPED BY THE REQUEST'S `account` WHEN IT NAMES ONE, exactly like
+            // Scoped by the request's `account` when it names one, exactly like
             // every other arm on this plane. Client order ids are unique within
             // a trader's own book and not across the venue's, so an unqualified
             // search on a multi-account exchange can silently cancel a
@@ -1062,17 +1062,17 @@ pub(crate) async fn arm_divergence(
             // driving fifty subagents says which book it meant.
             let Some((holder, order_symbol)) = run.account_holding(target, &client_order_id).await
             else {
-                // No account rests this id. Let a ledger say WHY - unknown id
+                // No account rests this id. Let a ledger say why - unknown id
                 // and already-terminal are different diagnoses, and this arm
                 // must not flatten them into one message.
                 //
-                // OFF THE LEDGER THE REQUEST TARGETED, which is the same scope
-                // the search above used. Diagnosing off the DEFAULT account
+                // Off the ledger the request targeted, which is the same scope
+                // the search above used. Diagnosing off the default account
                 // whatever the request named - which is what this did - asks
                 // the wrong book, and the answer it gives is about an account
                 // the operator did not name.
                 //
-                // AND WITH A QUERY, NEVER THE CANCEL. This ran
+                // And with a query, never the cancel. This ran
                 // `cancel_open_order_silently` for its `Err`, which is not a
                 // read: on `Ok` it closes the order out and reaps its held
                 // children. So a request naming an account that does NOT hold
@@ -1134,15 +1134,15 @@ pub(crate) async fn arm_divergence(
         // arms above intercept - `DelayAcks`, `CommandLatency`, `GoDark`,
         // `StallData`, `FeeSurcharge` and
         // `CancelOpenOrderSilently` - are venue-owned controls with no
-        // synchronous engine-side trigger. The venue owns them and must NEVER
+        // synchronous engine-side trigger. The venue owns them and must never
         // forward them to `engine.arm()`, which would drop them on the floor.
         //
-        // THIS ARM IS ENUMERATED RATHER THAN A CATCH-ALL, and that is the whole
-        // guard: this is the ROUTING site, so a misclassification here loses a
+        // This arm is enumerated rather than a catch-all, and that is the whole
+        // guard: this is the routing site, so a misclassification here loses a
         // user-visible control silently. A catch-all guarded by a
         // `debug_assert!` cannot carry that, because the release profile the
         // socket suites run in compiles the assert out entirely. With every
-        // variant named, a new `Divergence` fails to BUILD here until someone
+        // variant named, a new `Divergence` fails to build here until someone
         // routes it, in both profiles and on every toolchain.
         //
         // The five names below are the same engine-armed set `Engine::arm`
@@ -1150,10 +1150,10 @@ pub(crate) async fn arm_divergence(
         // exhaustive too, so a variant classified venue-owned there and
         // forwarded here would fail this crate's build rather than being
         // queued as a dead entry.
-        // TERMINAL, so it is handled before the engine-armed set and never
+        // terminal, so it is handled before the engine-armed set and never
         // recorded: there is no later ledger for a venue arm to replay onto.
         Divergence::FaultTape => {
-            // The account scope is REFUSED rather than ignored. A venue fault is
+            // The account scope is refused rather than ignored. A venue fault is
             // the whole process going away, so naming one account reads as a
             // request nothing here can honour, and silently widening it to the
             // venue is how an operator ends up killing a run they meant to
@@ -1186,20 +1186,20 @@ pub(crate) async fn arm_divergence(
         | Divergence::DuplicateNextFill
         | Divergence::DropNextAccountUpdate) => {
             // Relay an eviction in the ack body. The queue is bounded
-            // (`MAX_ARMED_DIVERGENCES`), and at the cap `arm` sheds the OLDEST
+            // (`MAX_ARMED_DIVERGENCES`), and at the cap `arm` sheds the oldest
             // entry - so a bare `202` with an empty body would tell an armer
             // "accepted" while an earlier armed divergence it is still counting
             // on has just been discarded. That silence cost a QA run a full
             // misdiagnosis: a bracket of arms was posted, the order it targeted
-            // filled in FULL, and the obvious reading ("an armed PartialFillNext
+            // filled in full, and the obvious reading ("an armed PartialFillNext
             // does not fire") was wrong - the arm had been evicted. The status
-            // stays `202` because the requested arm WAS accepted; the body is
+            // stays `202` because the requested arm was accepted; the body is
             // where the collateral damage is named.
             //
-            // VENUE-WIDE WHATEVER THE REQUEST NAMED, hence the `None` rather
+            // Venue-wide whatever the request named, hence the `None` rather
             // than `target`: an engine divergence is a statement about the
             // venue's matching, and the wire has never routed one to a single
-            // account. It reaches every ledger AND THE RUN, so a ledger minted
+            // account. It reaches every ledger and the run, so a ledger minted
             // later opens holding it. Walking only the ledgers that already
             // exist - which is what this did - meant an operator could arm a
             // `PartialFillNext`,
@@ -1226,7 +1226,7 @@ pub(crate) async fn arm_divergence(
     (StatusCode::ACCEPTED, String::new())
 }
 
-/// Every shape this run configured UNION every symbol it has since
+/// Every shape this run configured, union every symbol it has since
 /// materialized, sorted by symbol, each of them servable for history.
 ///
 /// Websocket upgrades place paced boats on demand for any served symbol, and a
@@ -1235,9 +1235,9 @@ pub(crate) async fn instruments(State(state): State<AppState>) -> Json<Vec<Instr
     Json(state.rivers.instrument_defs())
 }
 
-/// The HTTP shape of a PULLED account snapshot.
+/// The HTTP shape of a pulled account snapshot.
 ///
-/// `AccountState` itself is UNCHANGED - it is also the pushed frame's payload,
+/// `AccountState` itself is unchanged - it is also the pushed frame's payload,
 /// and the pushed path is per-boat and already correct. The label is added by
 /// this response only, and `serde(flatten)` keeps every existing field at the
 /// same position in the object, so a consumer that ignores unknown fields
@@ -1250,7 +1250,7 @@ pub(crate) struct AccountSnapshot {
     #[serde(flatten)]
     account: AccountState,
     /// What the venue is enforcing against this account right now. A sibling
-    /// rather than part of `AccountState`, because that type is also the PUSHED
+    /// rather than part of `AccountState`, because that type is also the pushed
     /// frame's payload and risk state is an evaluator's concern rather than
     /// something every fill should carry.
     risk: mogwai_protocol::risk::RiskState,
@@ -1271,13 +1271,13 @@ enum ClockAxis {
 /// exists before the first order is worked, rather than learning the account
 /// only when the first fill's `AccountState` arrives.
 ///
-/// WHOSE ACCOUNT is named by `?account=`, defaulting to the venue's default
+/// Whose account is named by `?account=`, defaulting to the venue's default
 /// account - the same resolution the socket does, so a consumer that named no
 /// account on either surface sees one ledger. An id nobody has traded under is
 /// not an error: the answer is the opening balances a ledger under that id
-/// WOULD carry, which is what a consumer asking before its first order expects.
+/// would carry, which is what a consumer asking before its first order expects.
 ///
-/// A READ DOES NOT ALLOCATE, and it used to. This resolved through
+/// A read does not allocate, and it used to. This resolved through
 /// `Run::account`, which is create-on-first-sight, so an unauthenticated GET
 /// minted a ledger for any id in the query string - born frozen and collectable
 /// only when `account_ttl_ms > 0`, and the default is to keep accounts forever.
@@ -1285,12 +1285,12 @@ enum ClockAxis {
 /// the mint would have and then throws it away; what changed is that asking
 /// about an account is no longer the same act as opening one.
 ///
-/// STAMPED ON THE VENUE CLOCK, deliberately. A ledger spans every river its
+/// Stamped on the venue clock, deliberately. A ledger spans every river its
 /// account's passengers have boarded, so there is no boat axis to put it on: stamp from one
-/// boat and a push from a later-placed boat on another river is AHEAD of the
+/// boat and a push from a later-placed boat on another river is ahead of the
 /// pull; stamp from the newest and it is behind. No choice can keep a
 /// cross-clock monotonicity promise, so the answer keeps the venue stamp and
-/// says so, and a consumer orders pulls against pushes BY SEQUENCE.
+/// says so, and a consumer orders pulls against pushes by sequence.
 pub(crate) async fn account(
     Query(query): Query<AccountQuery>,
     State(state): State<AppState>,
@@ -1313,7 +1313,7 @@ pub(crate) async fn account(
         Some(account_state) => {
             let mut engine = account_state.engine.lock().await;
             let account = engine.account_snapshot(ts);
-            // Published for the EVALUATOR, not for the strategy. A real trader
+            // Published for the evaluator, not for the strategy. A real trader
             // reads its remaining drawdown off the firm's dashboard; mogwai
             // presents none, so a run that ended flat having spent 90 percent
             // of its budget would be indistinguishable from one that never came
@@ -1372,9 +1372,9 @@ pub(crate) struct AccountQuery {
 /// Whether an account measured in `currency` can state what trading this shape
 /// leaves it holding.
 ///
-/// A FUTURE settling in `currency` moves only that currency and carries its own
-/// unrealized, so it always qualifies. A SPOT pair leaves the base asset in the
-/// ledger as a balance, which is valuable exactly when this pair QUOTES it in
+/// A future settling in `currency` moves only that currency and carries its own
+/// unrealized, so it always qualifies. A spot pair leaves the base asset in the
+/// ledger as a balance, which is valuable exactly when this pair quotes it in
 /// `currency` - that pair's own mark is the price. Anything else would leave a
 /// holding nothing prices.
 fn settles_only_in(def: &InstrumentDef, currency: &str) -> bool {
@@ -1382,7 +1382,7 @@ fn settles_only_in(def: &InstrumentDef, currency: &str) -> bool {
 }
 
 /// The one currency an account holds, or `None` if it holds none or several.
-/// Used only to report an UNPOLICED account's equity, where no policy names a
+/// Used only to report an unpoliced account's equity, where no policy names a
 /// currency to compute it in; a policed account always has one.
 fn sole_currency(account: &AccountState) -> Option<String> {
     let mut held = account
@@ -1401,8 +1401,8 @@ fn sole_currency(account: &AccountState) -> Option<String> {
 /// query string carries scalars. A socket then names the account it opened with
 /// `?account=`, and only that id crosses the upgrade.
 ///
-/// OPTIONAL, and that is the design rather than a convenience. Account
-/// resolution is TOTAL: a connection that never calls this is served under the
+/// Optional, and that is the design rather than a convenience. Account
+/// resolution is total: a connection that never calls this is served under the
 /// default account, so the ephemeral single-consumer venue needs no call at all.
 /// What this buys is the case the default cannot express - a batch of subagents
 /// on one exchange, each sized differently.
@@ -1415,25 +1415,25 @@ pub(crate) struct OpenAccountRequest {
     /// is what makes a 25k experiment and a 100k experiment runnable on one
     /// venue.
     ///
-    /// STRING-SPELLED, like every other money quantity that crosses into the
+    /// String-spelled, like every other money quantity that crosses into the
     /// venue: `{"USDT":"250000"}`, never `{"USDT":250000}`. A bare JSON number
     /// goes through `f64`, so a wide opening balance would be silently rounded
     /// and `1e-30` would fund the account with zero. This is a live decode path
     /// the wire-decimal round nearly missed - it is not in `messages` and does
     /// not look like a frame - and it is pinned by
     /// `an_opening_balance_must_be_spelled_as_a_string`. The policy fields
-    /// BELOW stay number-tolerant on purpose: they are thresholds and fractions
+    /// below stay number-tolerant on purpose: they are thresholds and fractions
     /// that are also spelled in TOML.
     #[serde(with = "mogwai_protocol::decimal::str_map")]
     balances: std::collections::HashMap<String, rust_decimal::Decimal>,
-    /// The rules the venue ENFORCES against this account, stated inline.
+    /// The rules the venue enforces against this account, stated inline.
     /// Absent means unpoliced unless `policy_preset` names one.
     #[serde(default)]
     policy: mogwai_protocol::risk::AccountPolicy,
     /// A registered or shipped policy to use instead of restating one.
     ///
     /// Resolution is total and three-step, the same shape a symbol resolves in:
-    /// inline knobs win, else this name, else unpoliced. A name NOBODY has is an
+    /// inline knobs win, else this name, else unpoliced. A name nobody has is an
     /// error rather than a silent fall to unpoliced, because a run that believes
     /// it is enforced and is not is the worst of the three outcomes.
     #[serde(default)]
@@ -1470,7 +1470,7 @@ pub(crate) async fn open_account(
         Ok(policy) => policy,
         Err(refusal) => return (StatusCode::BAD_REQUEST, refusal.to_string()),
     };
-    // Validated where the policy ENTERS the venue, so a nonsense rule is a
+    // Validated where the policy enters the venue, so a nonsense rule is a
     // refused request rather than an account that behaves strangely hours in.
     // After resolution, so a shipped preset is held to the same bar as an inline
     // policy rather than trusted for being ours.
@@ -1492,7 +1492,7 @@ pub(crate) async fn open_account(
 
 /// The venue clock, and nothing about any boat.
 ///
-/// IT TAKES NO PARAMETERS, and it took `symbol` and `speed` and answered on a
+/// It takes no parameters, and it took `symbol` and `speed` and answered on a
 /// boat's clock until that turned out to be a boat-discovery surface on a route
 /// that cannot tell who is asking. The `boat_clock` flag was an existence bit,
 /// the returned map carried another passenger's cadence and placement anchor,
@@ -1507,13 +1507,13 @@ pub(crate) async fn open_account(
 /// boat, and sweeps are paced there. What is gone is projecting any of it
 /// through a route that cannot attribute the question.
 ///
-/// This is also the axis a caller needs for what this route is FOR - history
+/// This is also the axis a caller needs for what this route is for - history
 /// admissibility, request validation, the run duration - because anonymous
 /// history is answered on exactly this clock. A consumer paginating history
 /// reads this once and passes the instant as `end` on every page, which is what
 /// makes one logical window stop moving under it.
 /// Deliberately empty, and `deny_unknown_fields` is the point: a consumer still
-/// sending `?symbol=` or `?speed=` is REFUSED rather than quietly handed a venue
+/// sending `?symbol=` or `?speed=` is refused rather than quietly handed a venue
 /// clock it will read as a boat's. Accepted-and-ignored is the failure mode this
 /// venue's carriers exist to prevent, and it is the worst available reading here
 /// - the caller would pace against an axis it did not ask for and never learn.
@@ -1541,22 +1541,22 @@ pub(crate) async fn clock(
 
 /// The venue's tape reading for one command, taken on the way in.
 ///
-/// EVERY submit takes one, and so does every PRICE amend: a limit needs it to
+/// Every submit takes one, and so does every price amend: a limit needs it to
 /// size the band its trigger is drawn from and to judge marketability, a market
 /// order needs it to price its slippage, and an amend needs it so the re-draw
 /// adopts the current regime instead of the acceptance one. A quantity-only
 /// amend and every non-order message take none.
 ///
-/// A wire MARKET order carries no price (mirroring Nautilus, which never stamps
+/// A wire market order carries no price (mirroring Nautilus, which never stamps
 /// one), but the engine has no book of its own, so a price-less market order is
-/// additionally STAMPED here with the last print at or before `ts`. That is the
+/// additionally stamped here with the last print at or before `ts`. That is the
 /// same number the reading carries; the former separate price path returned
-/// the first tick at or AFTER sim-now, which is a
+/// the first tick at or after sim-now, which is a
 /// look-ahead, and keeping two sources of "what is the market" is how they drift
 /// apart. `fills::read_last` is consulted only when `read_market` refuses
 /// outright, since the protocol still requires a price on the wire.
 ///
-/// The reading is otherwise RETURNED, never stamped - an order keeps its own
+/// The reading is otherwise returned, never stamped - an order keeps its own
 /// stated price, and what the venue read is the engine's business.
 ///
 /// Synthesis (`build_history_source` -> `source_at_or_before`) locks the run's
@@ -1575,7 +1575,7 @@ async fn market_reading(
     ts: u64,
     socket_symbol: &mogwai_protocol::Symbol,
 ) -> (Command, Option<mogwai_engine::MarketReading>) {
-    // Whether this command needs a reading at all. WHICH river it is read for
+    // Whether this command needs a reading at all. Which river it is read for
     // is never in question: a submit's wire symbol was already refused unless
     // it equals the socket's, an amend names no symbol at all, and the socket's
     // symbol is the one its boat was boarded on. Both the memoized walk and the
@@ -1618,7 +1618,7 @@ async fn market_reading(
             tracing::error!(%e, "market reading task failed");
             (None, None)
         });
-        // EVERY member of a group is stamped, off the SAME reading. A bracket
+        // Every member of a group is stamped, off the same reading. A bracket
         // whose market entry took one price while a sibling took another would
         // have met two markets in one atomic admission, which is the property
         // the group frame exists to guarantee against.
@@ -1671,7 +1671,7 @@ pub(crate) async fn trades(
     // river cap - and they are decided HERE so each is a 400 naming its reason
     // rather than a 500 raised out of the synthesis task below.
     //
-    // THE OPERATOR VIEW MATERIALIZES, and that was argued the other way before
+    // The operator view materializes, and that was argued the other way before
     // it was checked. A read that creates has real costs - a typo permanently
     // spends one of 256 never-evicted rivers, and `/instruments` changes as a
     // result of being looked at - but the glossary settles it: nothing has to
@@ -1682,7 +1682,7 @@ pub(crate) async fn trades(
     if let Err(error) = rivers.materialize(&symbol) {
         return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
-    // ONE SNAPSHOT OF THE RUN CLOCK, taken here and used for both bounds below,
+    // One snapshot of the run clock, taken here and used for both bounds below,
     // so a single request cannot be answered against a moving present. It
     // consults no boat: see `AppState::run_now`.
     let run_now = state.run_now();
@@ -1697,7 +1697,7 @@ pub(crate) async fn trades(
     // ordinary "give me everything up to now" request, which a consumer writes
     // by stamping a clock of its own.
     //
-    // AN EXPLICIT END IS A BOUND, NEVER AN AUTHORIZATION. It is clamped exactly
+    // An explicit end is a bound, never an authorization. It is clamped exactly
     // like an absent one, so no request of any shape crosses the run present.
     // That is what keeps a wrong sign in a window computation, an over-eager
     // backfill, or a plain request for tomorrow from being served real generated
@@ -1718,8 +1718,8 @@ pub(crate) async fn trades(
     // tokio worker, so a burst of `/trades` requests cannot stall the async
     // runtime's worker pool.
     //
-    // Serialization runs on the SAME blocking task as the synthesis, and the
-    // history slot RIDES that task rather than staying a handler local: hyper
+    // Serialization runs on the same blocking task as the synthesis, and the
+    // history slot rides that task rather than staying a handler local: hyper
     // drops this handler future the moment the connection drops, but a running
     // blocking task cannot be cancelled, so a slot left out here would be
     // released while the synthesis it covers was still resident -
@@ -1731,13 +1731,13 @@ pub(crate) async fn trades(
     let named = truncated_symbol(&symbol);
     let run_start_ns = state.run.started_ns;
     let (history_slot, body) = match tokio::task::spawn_blocking(move || {
-        // EVERY RIVER OWES THE WHOLE WARMUP SPAN BEFORE IT CAN BE SERVED, and a
+        // Every river owes the whole warmup span before it can be served, and a
         // history poll is a first requester like any other. Without this a small
         // window near the tape origin returned having generated only as far as
         // its own `end`, so the river was served while still owing most of the
         // span - and the next reader paid a walk this one should have. Reaching
         // is idempotent: a river already past `run_start_ns` walks nothing.
-        // RESOLVED ONCE, AT THE BOUNDARY. A history poll names a symbol and no
+        // Resolved once, at the boundary. A history poll names a symbol and no
         // passenger, so this is one of the few places allowed to turn a label
         // into water - see `Rivers::key_for_symbol`. Which river a poll should
         // read once a label names several is an open wire question; while one
@@ -1756,7 +1756,7 @@ pub(crate) async fn trades(
     .await
     {
         Ok((slot, Ok(body))) => (slot, body),
-        // A synthesis failure is NOT an empty window. Naming the symbol and the
+        // A synthesis failure is not an empty window. Naming the symbol and the
         // window here is what keeps a blown reach or a stopped generator
         // distinguishable from a span nothing traded in.
         Ok((_slot, Err(e))) => {
@@ -1794,7 +1794,7 @@ pub(crate) async fn quotes(
     // river cap - and they are decided HERE so each is a 400 naming its reason
     // rather than a 500 raised out of the synthesis task below.
     //
-    // THE OPERATOR VIEW MATERIALIZES, and that was argued the other way before
+    // The operator view materializes, and that was argued the other way before
     // it was checked. A read that creates has real costs - a typo permanently
     // spends one of 256 never-evicted rivers, and `/instruments` changes as a
     // result of being looked at - but the glossary settles it: nothing has to
@@ -1805,7 +1805,7 @@ pub(crate) async fn quotes(
     if let Err(error) = rivers.materialize(&symbol) {
         return Err((StatusCode::BAD_REQUEST, error.to_string()));
     }
-    // ONE SNAPSHOT OF THE RUN CLOCK, taken here and used for both bounds below,
+    // One snapshot of the run clock, taken here and used for both bounds below,
     // so a single request cannot be answered against a moving present. It
     // consults no boat: see `AppState::run_now`.
     let run_now = state.run_now();
@@ -1823,7 +1823,7 @@ pub(crate) async fn quotes(
     let run_start_ns = state.run.started_ns;
     let (history_slot, body) = match tokio::task::spawn_blocking(move || {
         // Resolved once at the boundary and reached to the run start, exactly as
-        // `/trades` does. This route was MISSED when the reach landed - the edit
+        // `/trades` does. This route was missed when the reach landed - the edit
         // matched only the sibling handler - so a quote window near the origin
         // was served while its river still owed most of its warmup.
         let body = rivers
@@ -1859,12 +1859,12 @@ pub(crate) async fn quotes(
 }
 
 /// How many `/trades` or `/quotes` syntheses may be in flight at once. A fifth
-/// request WAITS for a slot rather than starting one - see
+/// request waits for a slot rather than starting one - see
 /// [`HISTORY_SLOT_WAIT`] - so history can neither fill Tokio's blocking pool
 /// ahead of order-entry market readings nor accumulate response buffers
 /// without a ceiling.
 ///
-/// The memory bound this buys is MEASURED rather than asserted, by
+/// The memory bound this buys is measured rather than asserted, by
 /// `worst_case_history_page_bytes` and recorded in `reference/performance.md`:
 /// a full `/quotes` page is 4.40 MB of `QuoteTick` vector and 5.90 MB of JSON
 /// resident together while it serializes, so four of them peak near 41 MB.
@@ -1876,7 +1876,7 @@ pub(crate) const MAX_CONCURRENT_HISTORY_SLOTS: usize = 4;
 /// A serialized history page that owns its history slot.
 ///
 /// The permit cannot simply be a handler local. Axum serializes a returned
-/// `Json` value AFTER the handler future resolves, so a permit dropped at the
+/// `Json` value after the handler future resolves, so a permit dropped at the
 /// end of the handler is released while multi-megabyte responses are still
 /// being built - four completed syntheses would free four slots while their
 /// bytes were still resident, and the ceiling above would bound nothing. So
@@ -1884,7 +1884,7 @@ pub(crate) const MAX_CONCURRENT_HISTORY_SLOTS: usize = 4;
 /// travels with the finished bytes: it is released when hyper drops this body,
 /// which is after the response has been written.
 ///
-/// The permit's OTHER end is guarded too: it is moved INTO the blocking
+/// The permit's other end is guarded too: it is moved into the blocking
 /// closure, not merely awaited past, because a dropped connection drops the
 /// handler future while the blocking task keeps running to completion. A
 /// permit held by the dropped future would free its slot for a new synthesis
@@ -1932,15 +1932,15 @@ fn history_page(
     response
 }
 
-/// How long a history request WAITS for a slot before the venue refuses it.
+/// How long a history request waits for a slot before the venue refuses it.
 ///
 /// The gate was fail-fast, and that was wrong for the topology this venue is
-/// for. The cap exists to bound RESIDENT MEMORY - four multi-megabyte pages -
+/// for. The cap exists to bound resident memory - four multi-megabyte pages -
 /// and a request that is merely waiting holds no page, so refusing it bought
 /// the memory bound nothing and cost the consumer everything: nautilus's
 /// historical response types carry no error channel, so an adapter's only
-/// alternative to an unresolvable hang is to resolve the request EMPTY and log
-/// why. A refused warmup therefore reaches the consumer as a QUIET WINDOW,
+/// alternative to an unresolvable hang is to resolve the request empty and log
+/// why. A refused warmup therefore reaches the consumer as a quiet window,
 /// indistinguishable from a tape that genuinely printed nothing, and the run
 /// then reasons about a market it was never shown.
 ///
@@ -1951,9 +1951,9 @@ fn history_page(
 /// each taking dozens of sequential pages against four slots. Ordinary paging
 /// would fire the gate constantly, and silently.
 ///
-/// WAITING FIXES THAT WITHOUT WEAKENING THE BOUND. Four syntheses are resident
+/// Waiting fixes that without weakening the bound. Four syntheses are resident
 /// at once whatever the queue does, so the measured ~41 MB ceiling is untouched;
-/// what changes is that the fifth caller is SERVED LATE instead of told nothing
+/// what changes is that the fifth caller is served late instead of told nothing
 /// happened. The deadline is what keeps "late" from becoming "never": a consumer
 /// that waits this long is looking at a venue that is genuinely saturated rather
 /// than merely busy, and a refusal it can see beats a hang it cannot.
@@ -1963,7 +1963,7 @@ fn history_page(
 /// reintroduce the refusal for exactly the paging this exists to absorb.
 pub(crate) const HISTORY_SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// How many history requests may be QUEUED for a slot at once.
+/// How many history requests may be queued for a slot at once.
 ///
 /// The wait above needs its own bound or it is not a bound at all: an unbounded
 /// queue turns a saturated venue into one that accepts everything and answers
@@ -1977,16 +1977,16 @@ pub(crate) const MAX_QUEUED_HISTORY_REQUESTS: usize = 128;
 /// The one slot decision both history endpoints make, so the cap and its
 /// refusal cannot drift apart between `/trades` and `/quotes`.
 ///
-/// TWO GATES, and they answer different questions. `queue` is fail-fast and asks
-/// whether the venue is genuinely overloaded; `gate` is a bounded WAIT and asks
+/// Two gates, and they answer different questions. `queue` is fail-fast and asks
+/// whether the venue is genuinely overloaded; `gate` is a bounded wait and asks
 /// only whether a slot is free yet. See [`HISTORY_SLOT_WAIT`] for why the
 /// second is a wait rather than a refusal.
 ///
 /// The queue permit is dropped as soon as a slot is won: it counts callers
-/// still QUEUEING, and a caller holding a slot has stopped. The returned
-/// permit is the SLOT, which travels with the finished bytes.
+/// still queueing, and a caller holding a slot has stopped. The returned
+/// permit is the slot, which travels with the finished bytes.
 /// Shared with the socket's history path deliberately: the synthesis slots
-/// bound the VENUE's concurrent generator walks, so an operator poke and a
+/// bound the venue's concurrent generator walks, so an operator poke and a
 /// passenger's page have to contend for the same four rather than for four
 /// each.
 pub(crate) async fn acquire_history_slot(
@@ -2038,7 +2038,7 @@ fn history_failure_body(symbol: &str, start: Option<u64>, end: Option<u64>) -> S
 /// How much of a caller-supplied symbol any refusal body, log line or reject
 /// reason may echo.
 ///
-/// Echo the request back TRUNCATED, for the reason `truncate_echoed_id` exists
+/// Echo the request back truncated, for the reason `truncate_echoed_id` exists
 /// on the order path: none of those may become an amplifier for an arbitrarily
 /// long caller-supplied string. The cap is far above any symbol a run can
 /// serve, so it only ever shortens a request that was going to be refused
@@ -2049,7 +2049,7 @@ const MAX_ECHOED_SYMBOL: usize = 64;
 /// The symbol one `/ws` upgrade binds to, or the refusal body for a request
 /// that is not a legal symbol at all.
 ///
-/// WIRE LEGALITY IS THE ONLY GATE HERE. Resolution is total, so this function
+/// Wire legality is the only gate here. Resolution is total, so this function
 /// no longer asks whether anybody configured the label; the shape refusals -
 /// an invalid resolved shape, a funding-barred one, an exhausted river cap -
 /// belong to `Run::ensure_instrument` and the boatyard, which is where the
@@ -2059,14 +2059,14 @@ const MAX_ECHOED_SYMBOL: usize = 64;
 /// `run.default_symbol`, and taking the whole run would make the unit tests
 /// below impossible to write without spawning a tape.
 ///
-/// The charset rule is stated on the DECODED value, which is the whole of it
+/// The charset rule is stated on the decoded value, which is the whole of it
 /// venue-side: `axum::extract::Query` percent-decodes before serde sees the
 /// field, so `?symbol=%4DNQ` arrives as `MNQ` and passes, exactly as it should.
 /// The needs-no-encoding framing belongs to the consumer-side caller of
 /// `validate_wire_symbol`, which builds a URL by concatenation.
 ///
-/// The comparison against `bound` is EXACT and case-sensitive, and so is
-/// resolution: `mnq` is a DIFFERENT label from `MNQ` and therefore a different
+/// The comparison against `bound` is exact and case-sensitive, and so is
+/// resolution: `mnq` is a different label from `MNQ` and therefore a different
 /// river, even though `[symbols.*]` overlays match case-insensitively. That is
 /// the symbol-as-a-label model applied consistently; a case-folding `/ws` would
 /// bind a socket under one label whose history fetches name another.
@@ -2123,7 +2123,7 @@ mod health_fault_tests {
         TickFault::Arrival(ArrivalRefusal::NonFiniteState { clock_ns })
     }
 
-    /// A fault on a NON-BOOT river reaches the poll. The handler used to read
+    /// A fault on a non-boot river reaches the poll. The handler used to read
     /// one boat - the boot river's - so a consumer bound to any other river got a
     /// healthy answer while its own tape was stuck, and a fire-and-forget run
     /// was scored keepable on the strength of a river nobody was using.
@@ -2168,12 +2168,12 @@ mod history_slot_tests {
         )
     }
 
-    /// THE FIFTH REQUEST WAITS, and this is the whole point of the change.
+    /// The fifth request waits, and this is the whole point of the change.
     ///
-    /// It used to be refused, and a refusal reaches the consumer as an EMPTY
+    /// It used to be refused, and a refusal reaches the consumer as an empty
     /// window rather than as an error - nautilus's historical response types
     /// carry no error channel - so a run read a refused warmup as a market that
-    /// printed nothing. The cap bounds RESIDENT pages, and a waiter holds no
+    /// printed nothing. The cap bounds resident pages, and a waiter holds no
     /// page, so waiting costs the bound nothing.
     ///
     /// Drives the endpoints' own slot decision rather than a semaphore of its
@@ -2203,7 +2203,7 @@ mod history_slot_tests {
             "the fifth request waits rather than being answered"
         );
 
-        // And it is SERVED when a slot returns, which is what the consumer gets
+        // And it is served when a slot returns, which is what the consumer gets
         // instead of a silently empty window.
         drop(held);
         assert!(fifth.await.is_ok(), "a returned slot wakes the waiter");
@@ -2230,7 +2230,7 @@ mod history_slot_tests {
         assert_eq!(reason, "history request capacity exhausted");
     }
 
-    /// The queue has its own bound, and it is the one that still fails FAST. An
+    /// The queue has its own bound, and it is the one that still fails fast. An
     /// unbounded queue would turn a saturated venue into one that accepts
     /// everything and answers nothing, holding a task per waiter.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -2349,7 +2349,7 @@ mod history_slot_tests {
         assert!(!refusal.contains(&"X".repeat(65)), "the echo is capped");
     }
 
-    /// The bound is only real if the slot outlives the RESPONSE, not the
+    /// The bound is only real if the slot outlives the response, not the
     /// handler. Reverting `history_page` to drop the permit at handler exit
     /// makes the second assertion read one permit early.
     #[tokio::test]
@@ -2435,7 +2435,7 @@ pub(crate) fn normalize_limit(limit: Option<usize>) -> usize {
         .min(MAX_HISTORY_LIMIT)
 }
 
-/// A PAGE MAY BE CUT MID-INSTANT, and that is safe ONLY because the generator
+/// A page may be cut mid-instant, and that is safe only because the generator
 /// never prints two trades at one instant. The rule a consumer is held to -
 /// `AGENTS.md`'s frontier family: a timestamp-only cursor may advance onto an
 /// instant only once every row at that instant has been seen - would be
@@ -2446,7 +2446,7 @@ pub(crate) fn normalize_limit(limit: Option<usize>) -> usize {
 /// `a_river_never_prints_two_trades_at_one_instant`. Children are stamped at a
 /// 1 us stride and the arrival kernel floors a parent's advance at the same
 /// stride, so one river's trades are strictly increasing. A quote ties with its
-/// FIRST CHILD only, and `/trades` and `/quotes` are separate pages, so no tie
+/// first child only, and `/trades` and `/quotes` are separate pages, so no tie
 /// can cut either. Break that generator property and this surface is wrong; the
 /// `mogwai-data` test is what says so.
 pub(crate) fn bounded_trades(
@@ -2505,7 +2505,7 @@ pub(crate) fn bounded_quotes(
         };
         // No `>= start` guard, and deliberately none: `history_source` hands
         // `start` to `MergeSource::starting_at`, which seeks each child and
-        // retains the first tick AT OR AFTER it, and every `seek_to` - the
+        // retains the first tick at or after it, and every `seek_to` - the
         // default drain and `GeneratedSource`'s checkpoint-skipping one alike -
         // returns only `ts_event >= start_ts`. Nothing this loop sees can
         // precede `start`. A guard here used to compensate for a contract that
@@ -2530,8 +2530,8 @@ mod calendar_tests {
         crate::fills::test_rivers()
     }
 
-    /// `POST /accounts` IS THE THIRD LIVE DECODE PATH CARRYING MONEY INTO THE
-    /// VENUE, after the execution wire and the market-data wire, and it was
+    /// `POST /accounts` is the third live decode path carrying money into the
+    /// venue, after the execution wire and the market-data wire, and it was
     /// missed when those were annotated - it is not a frame, it does not live
     /// in `messages`, and it looks like config while behaving like a request.
     ///
@@ -2540,7 +2540,7 @@ mod calendar_tests {
     /// hazard the wire fields carry. Every in-tree caller already spells these
     /// as strings, so refusing numbers breaks no known peer.
     ///
-    /// THE POLICY FIELDS BESIDE IT ARE DELIBERATELY STILL TOLERANT, and the
+    /// The policy fields beside it are deliberately still tolerant, and the
     /// second half of this test says so: they are thresholds and fractions that
     /// are also spelled in TOML, so `max_position = 5` is their natural form.
     #[test]
@@ -2604,9 +2604,9 @@ mod calendar_tests {
     }
 
     /// The contract `bounded_quotes` dropped its own `>= start` guard onto:
-    /// a start instant landing in a GAP between ticks - the case an
+    /// a start instant landing in a gap between ticks - the case an
     /// on-a-tick start cannot distinguish - still yields nothing earlier than
-    /// it, on both routes. If a seek ever starts returning the tick BEFORE the
+    /// it, on both routes. If a seek ever starts returning the tick before the
     /// target, this is what says so.
     #[test]
     fn a_mid_gap_start_yields_nothing_earlier_on_either_route() {
@@ -2687,7 +2687,7 @@ mod calendar_tests {
     fn a_market_order_while_closed_is_rejected_not_filled_off_a_stale_print() {
         let calendar = SessionCalendar {
             utc_offset_minutes: 0,
-            // Minutes count from local SUNDAY 00:00, and the unix epoch is a
+            // Minutes count from local Sunday 00:00, and the unix epoch is a
             // Thursday, so an open window covering `ts = 0` starts at 5_760.
             open_windows: vec![WeeklyWindow {
                 start_minute: 5_760,
@@ -2741,8 +2741,8 @@ mod calendar_tests {
             "a limit marketable against the stale print is refused with the market orders"
         );
 
-        // A MARKET-TO-LIMIT TAKES THE MARKET, so it owes the same refusal as the
-        // marketable limit above. The two cases run the IDENTICAL order but for
+        // A market-to-limit takes the market, so it owes the same refusal as the
+        // marketable limit above. The two cases run the identical order but for
         // the stated price, so the refusal cannot be coming from the type alone:
         // the non-marketable one must still be admitted, exactly as its limit
         // sibling is.
@@ -2785,8 +2785,8 @@ mod calendar_tests {
         }
     }
 
-    /// THE WIRE RULE that makes the group frame's guarantee worth anything: a
-    /// linked order sent ALONE is refused, because the per-leg route is what
+    /// The wire rule that makes the group frame's guarantee worth anything: a
+    /// linked order sent alone is refused, because the per-leg route is what
     /// lets leg one fill before leg two is admitted.
     #[test]
     fn a_linked_order_may_not_be_submitted_alone() {
@@ -2795,7 +2795,7 @@ mod calendar_tests {
         assert!(reason.contains("SubmitOrderGroup"), "{reason}");
 
         // The negative, without which the assertion above holds for a boundary
-        // that refuses every submit: an UNLINKED order still goes alone, which
+        // that refuses every submit: an unlinked order still goes alone, which
         // is every order this venue served before linkage existed.
         let mut standalone = linked_leg("A", &[]);
         standalone.link = None;
@@ -2821,7 +2821,7 @@ mod calendar_tests {
         );
     }
 
-    /// A refused group answers EVERY member. One frame naming one member would
+    /// A refused group answers every member. One frame naming one member would
     /// leave the consumer waiting on the rest of a bracket the venue has already
     /// refused whole.
     #[test]

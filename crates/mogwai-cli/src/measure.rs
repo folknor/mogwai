@@ -3,8 +3,8 @@
 
 //! `mogwai measure`: slice 2c-ii of the retired rewrite plan, ported
 //! from `analysis/mnq_fit.py`'s `mode_measure12a`. The live Brick M run -
-//! the observed pass over the delivered corpus, the eight FINAL walks run
-//! IN-PROCESS through the lab engine and content-compared (cost excluded)
+//! the observed pass over the delivered corpus, the eight final walks run
+//! in-process through the lab engine and content-compared (cost excluded)
 //! against the read-only Brick G cache, phase-2b/2c-i aggregation and
 //! assembly, both validators, the fresh-tree gate and the atomic artifact
 //! write.
@@ -62,7 +62,7 @@ pub struct MeasureArgs {
     /// cache root.
     #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
-    /// Where to write the section-10 artifact. An ARTIFACT (storage
+    /// Where to write the section-10 artifact. An artifact (storage
     /// policy): never cached, never auto-deleted.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,
@@ -114,7 +114,7 @@ pub struct MeasureOutcome {
 /// The run's work size, in the units the measured phases actually scale with.
 ///
 /// Carried out of the run rather than recovered from the artifact because the
-/// artifact does not keep it: `generated.per_seed` records reduced BLOCKS, and
+/// artifact does not keep it: `generated.per_seed` records reduced blocks, and
 /// the session count that produced them - the thing a walk's wall is
 /// proportional to - is gone by the time the artifact exists.
 #[derive(Debug, Clone, Copy, Default)]
@@ -129,7 +129,7 @@ pub struct MeasureWork {
 
 /// Where a run's eight `generated_seeds` come from. The production CLI
 /// always uses [`WalkSource::LiveAttested`]; [`WalkSource::PreAttestedCacheOnly`]
-/// exists ONLY for the parity gate, which cannot fit the full live walk set
+/// exists only for the parity gate, which cannot fit the full live walk set
 /// (eight in-process month-long walks, ~26 s apiece per the phase-2a gate
 /// timings) inside the runner's hard per-test ceiling alongside the ~85 s
 /// observed pass. It proves nothing about walk determinism itself - that is
@@ -139,11 +139,11 @@ pub struct MeasureWork {
 /// it relocates the coverage to gates that already fit.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WalkSource {
-    /// The real `mogwai measure` behavior: run each FINAL walk fresh,
+    /// The real `mogwai measure` behavior: run each final walk fresh,
     /// in-process, and content-compare (cost excluded) against the
     /// read-only Brick G record before trusting it.
     LiveAttested,
-    /// TEST-ONLY. Skip the walk and the attestation entirely; use the
+    /// Test-only. Skip the walk and the attestation entirely; use the
     /// cached Brick G record's `per_session`/`forensic`/`cost` as-is.
     /// `cost.generated_s` reads as `0.0` under this mode - there is no
     /// live generated-side measurement to report.
@@ -171,7 +171,7 @@ pub fn run(args: MeasureArgs) -> anyhow::Result<()> {
 
 /// The benchmark row for a measure run.
 ///
-/// THE ONE SELF-REPORTING WORKLOAD, and the reason is this run's shape rather
+/// The one self-reporting workload, and the reason is this run's shape rather
 /// than a preference: everything before the observed marker is corpus
 /// verification and cache loading - real work, but not the work being
 /// optimized - and an externally timed wall would fold a multi-gigabyte hash
@@ -208,7 +208,7 @@ fn report_cost(outcome: &MeasureOutcome) {
 
 /// The driver: `mode_measure12a`, callable directly (with `cfg.out`
 /// overridden to a scratch path) by the golden-gate parity test as well as
-/// by the CLI. WRITES the artifact atomically to `cfg.out` on success.
+/// by the CLI. Writes the artifact atomically to `cfg.out` on success.
 /// Always runs the real live walk attestation - see [`run_measure_with`]
 /// for the test-only pre-attested seam.
 pub fn run_measure(cfg: &MeasureConfig) -> anyhow::Result<MeasureOutcome> {
@@ -222,7 +222,7 @@ pub fn run_measure_with(
 ) -> anyhow::Result<MeasureOutcome> {
     let harness_commit = require_clean_tree().map_err(|e| anyhow!("{e}"))?;
 
-    // The Brick G references load READ-ONLY before anything runs.
+    // The Brick G references load read-only before anything runs.
     let brick_g = load_brick_g_walks(&cfg.walk_cache_dir)
         .map_err(|e| anyhow!("loading the Brick G walk cache: {e}"))?;
 
@@ -239,8 +239,8 @@ pub fn run_measure_with(
         Some(cfg.walk_cache_dir.clone()),
     );
 
-    // -- Observed pass, LIVE (the authoritative input). The pre-existing
-    // observed cache is a MANDATORY structural cross-check: absence or
+    // -- Observed pass, live (the authoritative input). The pre-existing
+    // observed cache is a mandatory structural cross-check: absence or
     // mismatch refuses.
     mogwai_lab::sidecar::marker("observed");
     let t0 = std::time::Instant::now();
@@ -261,11 +261,11 @@ pub fn run_measure_with(
         .map_err(|e| anyhow!("writing {}: {e}", cfg.observed_cache_path.display()))?;
     println!("observed pass: {observed_s:.1}s");
 
-    // -- The eight FINAL walks as cost-attestation replays, IN-PROCESS: run
+    // -- The eight final walks as cost-attestation replays, in-process: run
     // through the lab engine and content-compare (cost excluded) against
     // the read-only Brick G record. Under `PreAttestedCacheOnly` (test-only
     // seam, see `WalkSource`) the walk and the attestation are both
-    // SKIPPED and the cached record is used as-is.
+    // skipped and the cached record is used as-is.
     mogwai_lab::sidecar::marker("walks");
     let t1 = std::time::Instant::now();
     let mut generated_seeds: Vec<GeneratedSeed> = Vec::with_capacity(FINAL_SEEDS.len());
@@ -334,7 +334,7 @@ pub fn run_measure_with(
         bail!("the generated seeds disagree on session dates");
     }
 
-    // -- Assembly with a provisional MUTABLE cost record (two-phase: the
+    // -- Assembly with a provisional mutable cost record (two-phase: the
     // bootstrap clock stops after assembly, then the fields finalize in
     // place before validation).
     mogwai_lab::sidecar::marker("bootstrap");
@@ -360,7 +360,7 @@ pub fn run_measure_with(
         assemble_measure12a_artifact(&observed, &generated_seeds, &binding_extra, &mults, &cost)
             .map_err(|e| anyhow!("assembly refused: {e}"))?;
     // A throwaway serialization pass realizes the late json_safe memory
-    // peak while the sampler still runs and BEFORE the cost freezes.
+    // peak while the sampler still runs and before the cost freezes.
     drop(serde_json::to_string(
         &mogwai_lab::aggregate::artifact::json_safe(artifact.clone()),
     ));
@@ -419,12 +419,12 @@ pub fn run_measure_with(
 }
 
 /// The input-side population gate on one seed's generated `per_session` array:
-/// 23 sessions, every `session_date` a string, all distinct, IN ASCENDING
-/// ORDER.
+/// 23 sessions, every `session_date` a string, all distinct, in ascending
+/// order.
 ///
-/// THE ORDER HALF WAS DECORATION UNTIL 2026-08-20. The gate sorted its own copy
+/// The order half was decoration until 2026-08-20. The gate sorted its own copy
 /// of the dates before comparing it against the sorted-deduped copy, so the
-/// comparison could only ever detect a DUPLICATE - two sorted vectors of the
+/// comparison could only ever detect a duplicate - two sorted vectors of the
 /// same multiset are equal by construction - while the refusal it raised said
 /// "not 23 sorted unique". A shuffled calendar passed it. The dates are
 /// compared in the order they arrive now, which is the only comparison that
@@ -445,7 +445,7 @@ fn session_dates_are_23_sorted_unique(per_session: &[Value]) -> anyhow::Result<(
     if as_read.len() != 23 {
         bail!("carries {} session dates, not 23", as_read.len());
     }
-    // THE THREE REFUSALS ARE SEPARATE MESSAGES ON PURPOSE. A shared one reads
+    // The three refusals are separate messages on purpose. A shared one reads
     // as a contradiction on the ordering path - an out-of-order calendar of 23
     // distinct dates would report "carries 23 sessions, not 23 sorted unique" -
     // and, worse, it leaves a test unable to name which half it selected.
@@ -485,10 +485,10 @@ pub(crate) fn run_measure12a_observed(
         .map_err(|e| anyhow!("the observed pass refused: {e}"))?;
 
     // `blocks_from_sessions` extracts each session's `block2`/`block3`/
-    // `block4` SUB-OBJECT before pooling - passing the whole per-session
+    // `block4` sub-object before pooling - passing the whole per-session
     // records to `pool_block2` et al. directly (as this function used to)
     // is a defect: `rec.as_object()` still succeeds (the whole session
-    // record IS an object), so it silently iterates `session_date`,
+    // record is an object), so it silently iterates `session_date`,
     // `segments`, `permutations`, etc. as if they were per-hour window
     // maps, and panics the moment it reaches a key whose value is not an
     // object (found live: the 2c-ii golden-gate run over the real corpus,
@@ -612,7 +612,7 @@ pub(crate) fn run_observed_ordered(
     ))
 }
 
-/// One FINAL walk, constructed exactly the way `gen.rs`'s `build_source`
+/// One final walk, constructed exactly the way `gen.rs`'s `build_source`
 /// does and exactly as `crates/mogwai-cli/tests/parity12a.rs`'s
 /// `run_final_walk` does: the committed MNQ preset, no overrides, the walk
 /// starting at `FINAL_START_NS - SUMMARY_BURN_IN` with the vol trace
@@ -698,7 +698,7 @@ mod tests {
     }
 
     /// The gate's refusal says "23 sorted unique" and all three words must be
-    /// load-bearing. The ORDER one was not: the gate sorted its own copy first,
+    /// load-bearing. The order one was not: the gate sorted its own copy first,
     /// so a shuffled calendar of 23 distinct dates passed - and a sorted
     /// comparison against a sorted-deduped copy can, by construction, only
     /// report duplicates.
@@ -709,7 +709,7 @@ mod tests {
         session_dates_are_23_sorted_unique(&sessions(&refs))
             .expect("an ascending calendar of 23 distinct dates passes");
 
-        // Each arm is selected BY ITS OWN MESSAGE. A substring two refusals
+        // Each arm is selected by its own message. A substring two refusals
         // share cannot tell which half fired, and this arc has already been
         // burned by a bite-check that asserted on exactly that.
         let mut shuffled = refs.clone();
@@ -747,10 +747,10 @@ mod tests {
     }
 
     /// Regression for the 2c-ii golden-gate finding: `run_measure12a_observed`
-    /// once passed whole PER-SESSION records (carrying sibling non-object
+    /// once passed whole per-session records (carrying sibling non-object
     /// fields like `segments` and `permutations`, both arrays) straight into
     /// `pool_block2`/`aggregate_block3`/`aggregate_block4`, which expect the
-    /// `block2`/`block3`/`block4` SUB-OBJECT. `rec.as_object()` still
+    /// `block2`/`block3`/`block4` sub-object. `rec.as_object()` still
     /// succeeded (a whole session record is an object too), so nothing
     /// refused until the pooler tried to treat `segments` (an array) as an
     /// hour's window map and panicked - a defect the 2b/2c-i gates never hit
@@ -758,8 +758,8 @@ mod tests {
     /// extracts the named sub-objects first.
     ///
     /// This is a real crash the 2a per-session typed-canon parity gate could
-    /// never catch: canon compares the VALUE at each already-agreed-upon
-    /// path, so a call site indexing the WRONG path entirely is invisible to
+    /// never catch: canon compares the value at each already-agreed-upon
+    /// path, so a call site indexing the wrong path entirely is invisible to
     /// it. The regression here is a shape-strict smoke test over a
     /// minimal but realistically-shaped live per-session record - one
     /// that carries the array-typed sibling fields the bug tripped on -
@@ -787,7 +787,7 @@ mod tests {
         });
         let per_session = vec![session];
 
-        // The bug: calling the block-2/3/4 poolers directly on the WHOLE
+        // The bug: calling the block-2/3/4 poolers directly on the whole
         // per-session records panics on the first non-object sibling field
         // (`segments` is an array) - documented here so the trap stays
         // visible, not exercised as the "fix".

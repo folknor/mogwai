@@ -1207,10 +1207,10 @@ mod tests {
             .expect("event depth-2 probability cell exists");
         cell.lattice[0] = u32::MAX;
         manifest.plan_sha256 = manifest_hash(&manifest).expect("hashes");
-        // NAMED, not merely `is_err()`. The plan hash is recomputed above so
+        // Named, not merely `is_err()`. The plan hash is recomputed above so
         // the mutation is not caught for free by the identity check, which
         // means the refusal that fires is the whole content of the test - and
-        // an unnamed `is_err()` is satisfied by any OTHER check tripping,
+        // an unnamed `is_err()` is satisfied by any other check tripping,
         // including one broken by the re-hash itself.
         let text = format!("{:#}", validate_manifest(&manifest).expect_err("refuses"));
         assert!(
@@ -1230,9 +1230,9 @@ mod tests {
         let mut changed_quick = manifest.clone();
         changed_quick.quick[0].seeds.push(999);
         changed_quick.plan_sha256 = manifest_hash(&changed_quick).expect("hashes");
-        // Both refusals are NAMED for the reason given in
+        // Both refusals are named for the reason given in
         // `malformed_lattice_refuses_instead_of_indexing_out_of_bounds`: the
-        // hash is re-blessed first, so which check fires IS the property.
+        // hash is re-blessed first, so which check fires is itself the property.
         let quick_text = format!(
             "{:#}",
             validate_manifest(&changed_quick).expect_err("refuses")

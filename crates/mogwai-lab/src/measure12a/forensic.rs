@@ -1,22 +1,22 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Block 5, the trace-grounded forensic record set (spec 3.4b). GENERATED
+//! Block 5, the trace-grounded forensic record set (spec 3.4b). Generated
 //! side only: every field here is grounded in a `VolTrace`, which the
 //! observed corpus has no analogue of.
 //!
 //! The conventions that had to be pinned, each with a test vector in
 //! `super::tests`:
 //!
-//! - minute CLOSURE is PARENT-driven, never trade-driven: a burst's later
+//! - minute closure is parent-driven, never trade-driven: a burst's later
 //!   children can cross the minute boundary before their parent finalizes,
 //!   and closing on the trade would resolve initiation without that parent's
 //!   quote extrema and breakpoint;
-//! - a SUPERSEDING largest innovation nulls the stale `arch_share_next` -
+//! - a superseding largest innovation nulls the stale `arch_share_next` -
 //!   the deferred share described the previous largest parent, not this one;
-//! - a control shared by two extremes refuses exactly ONCE per logical cell,
+//! - a control shared by two extremes refuses exactly once per logical cell,
 //!   even though the record is emitted once per extreme;
-//! - the frozen tie-breaks: the EARLIER minute wins a range tie, and the
+//! - the frozen tie-breaks: the earlier minute wins a range tie, and the
 //!   control tie resolves on `tuple_mix(CONTROL_TIE_BASE_SEED, [seed,
 //!   extreme minute start, candidate minute start])`, then on the earlier
 //!   minute.
@@ -55,7 +55,7 @@ pub(crate) struct MinuteRec {
     pub(crate) arch_share_next: Option<f64>,
     pub(crate) arch_share_max: Option<f64>,
     /// `(parent ts, running quote-mid range in half ticks)` breakpoints,
-    /// retained only while the minute is OPEN; initiation resolves at minute
+    /// retained only while the minute is open; initiation resolves at minute
     /// close and the vector is dropped.
     pub(crate) breakpoints: Vec<(u64, i64)>,
     pub(crate) quote_lo: Option<i64>,
@@ -121,7 +121,7 @@ pub(crate) fn select(
     if populated.is_empty() {
         return Ok((records, refusals));
     }
-    // Extreme by trade range, EARLIER minute on ties (matching
+    // Extreme by trade range, earlier minute on ties (matching
     // rank_top_minutes).
     let mut ranked: Vec<(i64, u64)> = Vec::new();
     for &(m, r) in &populated {
@@ -146,7 +146,7 @@ pub(crate) fn select(
             _ => Some((v, m)),
         };
     }
-    // Deduplicate: a shared minute emits ONCE, as extreme_range.
+    // Deduplicate: a shared minute emits once, as extreme_range.
     let mut extremes: Vec<(u64, &'static str)> = vec![(extreme_range_minute, "extreme_range")];
     if let Some((_, m)) = best_sqrt
         && m != extreme_range_minute
@@ -285,8 +285,8 @@ fn record(
     } else {
         0.0
     };
-    // Exactly ONE logical refusal per refused cell, even when the same minute
-    // serves as the control for BOTH extremes and this function runs twice.
+    // Exactly one logical refusal per refused cell, even when the same minute
+    // serves as the control for both extremes and this function runs twice.
     let mut refuse_once = |cell: String, reason: &str| {
         let entry = serde_json::json!({
             "scope": format!("seed {seed} forensic"),
@@ -297,7 +297,7 @@ fn record(
             refusals.push(entry);
         }
     };
-    // sigma_start: null with ONE refusal owning both it and the dependent
+    // sigma_start: null with one refusal owning both it and the dependent
     // sigma_escalation when the minute opens the measured walk.
     let escalation = match rec.sigma_start {
         None => {
@@ -317,7 +317,7 @@ fn record(
         }
         Some(s) => Some(rec.sigma_peak / s),
     };
-    // Ratio nulls from an absent or zero denominator are DEFINED EMPTINESS,
+    // Ratio nulls from an absent or zero denominator are defined emptiness,
     // never refusals.
     #[expect(clippy::cast_precision_loss, reason = "tick ranges stay small")]
     let trade_to_quote = quote_half

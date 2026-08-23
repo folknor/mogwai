@@ -103,12 +103,12 @@ impl SessionCalendar {
         self.settlement_scan(from_ns, to_ns).0
     }
 
-    /// The scan behind `settlement_instants`, returning the crossings AND how
+    /// The scan behind `settlement_instants`, returning the crossings and how
     /// many day-step candidates it considered to find them.
     ///
     /// The count is what separates "steps a day at a time from the first
     /// crossing" from "steps a minute at a time and filters", and only a test
-    /// wants it - but it is RETURNED rather than recorded in a counter. The
+    /// wants it - but it is returned rather than recorded in a counter. The
     /// previous shape was a `#[cfg(test)]` `thread_local!` incremented from
     /// this loop and read one line after a `.set(0)` in the single test that
     /// looked at it. That was safe only for as long as libtest gives each test
@@ -225,7 +225,7 @@ mod tests {
                 .map(|day| expected_first + day * day_ns)
                 .collect::<Vec<_>>()
         );
-        // Ten days, ten candidates: the scan steps a DAY from the first
+        // Ten days, ten candidates: the scan steps a day from the first
         // crossing rather than walking minutes and filtering. Without this the
         // instant list above is satisfied by either implementation.
         assert_eq!(candidates, 10);

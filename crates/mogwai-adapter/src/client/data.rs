@@ -157,12 +157,12 @@ impl MogwaiDataClient {
     }
 
     /// Retires the current transport generation's connectivity flag by
-    /// REPLACING the shared cell, not by storing `false` into it.
+    /// replacing the shared cell outright, not by storing `false` into it.
     ///
     /// `abort_tasks` is not synchronous: cancellation is delivered at the
     /// aborted task's next await point, so a reader caught between
     /// `connect_async(..).await` returning and its first select can still run
-    /// `connected.store(true)` AFTER the caller has stored `false`. That
+    /// `connected.store(true)` after the caller has stored `false`. That
     /// leaves a dead client reporting itself connected, and a subsequent
     /// `wait_connected` returning success for a socket that never opened.
     /// Swapping the `Arc` means the retired reader writes to a cell nobody
@@ -187,14 +187,14 @@ impl MogwaiDataClient {
                 "subscription symbol {symbol} does not match the symbol this connection is bound to ({bound})"
             );
         }
-        // The subscription is satisfied LOCALLY. Nautilus still calls
+        // The subscription is satisfied entirely locally. Nautilus still calls
         // subscribe/unsubscribe and this client must still implement them, but
         // the venue serves one run's one tape and pushes it unbidden, so there
         // is no frame to send: this table only gates which arriving ticks are
         // forwarded to the message bus.
         //
-        // THE SEEDED INSTRUMENT SET IS NOT AN ADMISSION LIST. The venue resolves
-        // any wire-legal symbol and registers it on BIND, so a symbol absent
+        // The seeded instrument set is never an admission list. The venue resolves
+        // any wire-legal symbol and registers it on bind, so a symbol absent
         // from the seed is routinely one this run will serve; refusing on the
         // seed refused exactly the passengers piece 13 exists to support. The
         // bound-symbol check above stays, because a subscription for a symbol
@@ -212,13 +212,13 @@ impl MogwaiDataClient {
         // matching kind's count is non-zero, and the venue pushes the run's one
         // tape whether or not anybody asked.
         //
-        // THERE IS NO RESUME CURSOR, and a `start_ts` request parameter is
+        // There is no resume cursor at all, and a `start_ts` request parameter is
         // therefore not honoured on the subscribe path at all. There used to be
         // one - a per-symbol `SubState.start_ts` seeded here and advanced on
         // every delivered trade - written in three places and read in none,
         // because the reattach hook this client passes to `run_ws_connection`
         // is `Vec::new` and the historical request paths take their start from
-        // `request.start`. Reintroducing a cursor means reintroducing a READER
+        // `request.start`. Reintroducing a cursor means reintroducing a reader
         // in the same change; until then, maintaining one would be a mutex
         // acquisition per tick on the hot path for a value nobody consumes.
         Ok(())
@@ -297,13 +297,13 @@ impl MogwaiDataClient {
 
     /// Flush every completed-but-withheld bar window on teardown (AD19). A time
     /// window whose `close_ts` has already passed but that never got a later
-    /// trade to cross its boundary is a GENUINELY COMPLETE bar that the lazy
+    /// trade to cross its boundary is a genuinely complete bar that the lazy
     /// emit-on-next-trade rule would otherwise discard when the subscription
     /// state is torn down (`stop`, and through it `reset`/`dispose`) - the same
     /// discard `unsubscribe_bars` already guards for a single removed bar type,
     /// generalized to the whole table so a shutdown or a reconnect-driven
     /// `reset` does not silently drop the newest complete bar of every live bar
-    /// feed. An IN-PROGRESS window (close_ts still in the future) is left
+    /// feed. A still-in-progress window (close_ts still in the future) is left
     /// untouched: shipping it would inject a future-stamped, incomplete bar a
     /// consumer could not tell from a real one. Each flushed window is cleared
     /// so a second teardown call cannot double-emit, and the send is
@@ -449,9 +449,9 @@ impl DataClient for MogwaiDataClient {
         let (deliver_tx, deliver_rx) = unbounded_channel::<HavocDelivery>();
         // The delivery barrier. The venue attaches this socket to the live tape
         // at upgrade, so trade and quote frames can arrive before the post-bind
-        // reseed below has read `/instruments` - and `instrument_def` BLACK-HOLES
+        // reseed below has read `/instruments` - and `instrument_def` black-holes
         // a frame whose def is missing. The reader still enqueues; the pump holds
-        // its FIRST delivery until the reseed says go, so nothing reaches a
+        // its first delivery until the reseed says go, so nothing reaches a
         // handler before the def it needs is resident. Holding rather than
         // dropping is the point: those frames are real tape.
         let (delivery_ready, pump_ready) = tokio::sync::watch::channel(false);
@@ -509,7 +509,7 @@ impl DataClient for MogwaiDataClient {
                     dial_timeout,
                 },
                 Some(cmd_rx),
-                // The client's command type IS the wire command here: this leg
+                // The client's command type is itself the wire command here: this leg
                 // sends only history requests, which need no per-connection
                 // rewriting the way a resubscribe would.
                 mogwai_protocol::Command::clone,
@@ -522,7 +522,7 @@ impl DataClient for MogwaiDataClient {
                     let handler_deliver = handler_deliver.clone();
                     let reply_history = Arc::clone(&reply_history);
                     async move {
-                        // Resolved HERE rather than through the market pump. A
+                        // Resolved right here rather than through the market pump. A
                         // page is a correlated reply, not channel data: sending
                         // it through the pump would hold it behind the delivery
                         // barrier that exists to keep tape frames from
@@ -580,7 +580,7 @@ impl DataClient for MogwaiDataClient {
             self.retire_connected_flag();
             return Err(err);
         }
-        // The post-bind reseed. Binding is what REGISTERS an unconfigured symbol
+        // The post-bind reseed. Binding is what registers an unconfigured symbol
         // venue-side, so the pre-dial seed cannot have carried its def; only a
         // read after the socket is up can. `cache_instruments` overwrites by key
         // and re-emitting an unchanged def is idempotent at the nautilus cache,
@@ -703,7 +703,7 @@ impl DataClient for MogwaiDataClient {
             let mut bars = lock_recover(&self.bars, "bar");
             bars.entry(cmd.bar_type).or_default().refs += 1;
         }
-        // ROLL THE REF BACK WHEN THE SYMBOL SUBSCRIPTION REFUSES (AD27). The
+        // Roll the ref back when the symbol subscription refuses (AD27). The
         // per-`BarType` ref and the per-symbol `SubState.bars` count are the
         // two halves of one subscription and must move together - that is the
         // whole of AD10's rule in `unsubscribe_bars`, stated there from the
@@ -711,7 +711,7 @@ impl DataClient for MogwaiDataClient {
         // and a ref left standing over a refusal is the same cross-counter
         // desync arriving from the subscribe side: a later `unsubscribe_bars`
         // for that bar type finds `refs > 0`, so it matches, and it spends a
-        // symbol-count decrement belonging to a DIFFERENT bar type's live
+        // symbol-count decrement belonging to a different bar type's live
         // subscription - which, at zero, darkens the surviving feed.
         if let Err(err) = self.subscribe_symbol(symbol, SubKind::Bars) {
             let mut bars = lock_recover(&self.bars, "bar");
@@ -736,13 +736,13 @@ impl DataClient for MogwaiDataClient {
 
     fn unsubscribe_bars(&mut self, cmd: &UnsubscribeBars) -> anyhow::Result<()> {
         let symbol = symbol_from_instrument(cmd.bar_type.instrument_id());
-        // Decrement the per-symbol bars count ONLY when this bar type actually had
+        // Decrement the per-symbol bars count only when this bar type actually had
         // a live subscription to release (AD10). The per-BarType refs and the
         // per-symbol SubState.bars count are incremented together on subscribe, so
         // they must be decremented together. An unmatched unsubscribe_bars (a bar
         // type never subscribed, or a double-unsubscribe interleaved by nautilus
         // command replay) that still decremented the symbol count would steal a
-        // decrement belonging to a DIFFERENT bar type's live subscription and, if
+        // decrement belonging to a different bar type's live subscription and, if
         // that dropped the symbol total to 0, fire a wire Unsubscribe that darkens
         // the surviving feed. Saturating arithmetic prevents underflow, not this
         // cross-type theft - so gate the symbol decrement on a real match.
@@ -778,7 +778,7 @@ impl DataClient for MogwaiDataClient {
             // dropped, not emitted: shipping it would inject a future-stamped,
             // incomplete bar a consumer could not tell from a real completed one.
             // The teardown twin of this flush lives in `flush_completed_bars`
-            // (called from `stop`). Closing a live in-progress window ON TIME on
+            // (called from `stop`). Closing a live in-progress window on time on
             // a clock timer is a separate feature, deliberately not built - see
             // `flush_completed_bars` and the AD19 note in havoc.md.
             if let Some(active) = to_flush {
@@ -821,24 +821,24 @@ impl DataClient for MogwaiDataClient {
         let client_id = request.client_id.unwrap_or(self.client_id);
         let sim = self.sim;
         let start = date_to_unix_nanos(request.start);
-        // PINNED ONCE, BEFORE ANY PAGE GOES OUT. The venue answers history as of
+        // Pinned once, before any page goes out. The venue answers history as of
         // the run clock when each request is admitted, so a paged window with no
-        // stated end would be cut against a LATER present on every page and the
+        // stated end would be cut against a later present on every page and the
         // logical window would grow as the pages were fetched. Naming the end up
         // front makes one logical request one fixed window; the venue clamps it
         // against its own snapshot regardless, so a pin slightly ahead converges
         // rather than reaching past the run present.
         //
-        // ONLY WHEN THE CLOCK IS AUTHORITATIVE. `data_origin_ns` is `Some`
+        // Only when the clock is authoritative. `data_origin_ns` is `Some`
         // exactly when `/clock` was actually fetched; when it was not, `sim` is
-        // an IDENTITY projection standing in for an axis this client never read,
+        // an identity projection standing in for an axis this client never read,
         // and pinning from it would cut every window against a wall-clock instant
         // that has nothing to do with the run - silently returning less than the
         // caller asked for. Leaving the end absent hands the choice to the venue,
         // which is the only party that knows its own present.
         let end = date_to_unix_nanos(request.end)
             .or_else(|| self.data_origin_ns.is_some().then(|| now_unix_nanos(sim)));
-        // Refuse an off-river window at the boundary, loudly - but ANSWER it.
+        // Refuse an off-river window at the boundary, loudly - but answer it anyway.
         // Returning the error to nautilus is not a refusal the requester ever
         // sees: `DataEngine::execute` log::error!s a synchronous client error
         // and emits no correlated response, so `?` here leaves the request
@@ -865,7 +865,7 @@ impl DataClient for MogwaiDataClient {
             // Page the window rather than issuing one MAX_HISTORY_LIMIT-capped
             // request: a window with more than 1000 trades used to return only
             // its oldest 1000, with the response still claiming the full range.
-            // `request.limit` counts TRADES here, so it becomes the pagination
+            // `request.limit` counts trades here, so it becomes the pagination
             // ceiling.
             let max_trades = request.limit.map(std::num::NonZeroUsize::get);
             // Always-yields block, for the reason spelled out in `request_bars`:
@@ -1050,7 +1050,7 @@ impl DataClient for MogwaiDataClient {
         let end = date_to_unix_nanos(request.end)
             .or_else(|| self.data_origin_ns.is_some().then(|| now_unix_nanos(sim)));
         // Refuse an off-river history window at the boundary, naming the floor -
-        // but ANSWER it, for the reason spelled out in `request_trades`: a
+        // but answer it anyway, for the reason spelled out in `request_trades`: a
         // synchronous `Err` is logged by the data engine and never turned into
         // a response, so `?` here would leave the history request unresolved.
         if let Err(err) = ensure_on_river(start, self.data_origin_ns) {
@@ -1072,21 +1072,21 @@ impl DataClient for MogwaiDataClient {
         track_task(&self.task_handles, get_runtime().spawn(async move {
             let instrument_id = request.bar_type.instrument_id();
             let symbol = symbol_from_instrument(instrument_id);
-            // Page the window, translating nautilus's BAR-count limit into a
+            // Page the window, translating nautilus's bar-count limit into a
             // bar-span pagination target: the old single request applied a
-            // BAR-count limit as a TRADE-page limit, so a history request for
+            // bar-count limit as a trade-page limit, so a history request for
             // N bars fetched at most N trades (~N/5 bars on the fitted tape)
             // covering only the oldest edge, under-delivering or timing out
             // the history request.
             let bar_limit = request.limit.map(std::num::NonZeroUsize::get);
             let interval = get_bar_interval_ns(&request.bar_type).as_u64();
             // Every exit from this block yields bars, so the response below is
-            // ALWAYS sent. A failure arm used to `return` straight out of the
+            // always sent. A failure arm used to `return` straight out of the
             // task, which left the nautilus request unresolved forever: from the
             // consumer that is indistinguishable from a hang, and it burns the
             // whole history-request timeout before dying with nothing but a
             // line in the worker log to show for it. An empty response is a
-            // truthful answer that at least RESOLVES; the error detail rides
+            // truthful answer that at least resolves; the error detail rides
             // the log.
             let bars: Vec<Bar> = 'bars: {
                 let def = match ensure_instrument(&http, &http_quota, &base, &instruments, &symbol).await
@@ -1140,9 +1140,9 @@ impl DataClient for MogwaiDataClient {
                 // An on-river window that under-delivers is a real, reachable
                 // state, not an error: mogwai's fitted arrival process is
                 // heavy-tailed, and a measured sweep of the default 24h-horizon
-                // tape found stretches of 15+ SIMULATED HOURS running at 3-10
+                // tape found stretches of 15+ simulated hours running at 3-10
                 // trades per hour (see reference/architecture.md, "Tape arrival
-                // droughts"). Bars exist only for intervals that CONTAIN a
+                // droughts"). Bars exist only for intervals that contain a
                 // trade, so inside a drought a request for N bars typically
                 // comes back with a handful - non-empty, so nothing downstream
                 // objects, and the strategy silently warms from a fraction of
@@ -1239,7 +1239,7 @@ impl DataClient for MogwaiDataClient {
             &self.task_handles,
             get_runtime().spawn(async move {
                 let symbol = symbol_from_instrument(request.instrument_id);
-                // The one generator that CANNOT answer on failure:
+                // The one generator that cannot answer on failure at all:
                 // `InstrumentResponse` carries exactly one `InstrumentAny` and
                 // has no empty form, so there is no truthful response to send
                 // when the instrument cannot be resolved - unlike the bars,
@@ -1342,7 +1342,7 @@ impl HistorySession {
     /// is what bounds how much of a window the venue has resident for a reader
     /// that has stopped reading.
     ///
-    /// `max_rows` bounds what the CALLER wanted; the venue bounds each page
+    /// `max_rows` bounds what the caller wanted; the venue bounds each page
     /// independently. Reaching the caller's ceiling stops the session with rows
     /// in hand rather than failing it, and the caller is told the window was
     /// truncated - the same contract the HTTP pagination had.
@@ -1369,7 +1369,7 @@ impl HistorySession {
     }
 
     /// The same session, stopping on a caller's own predicate rather than on a
-    /// row count - which is what a bar request needs, since it wants a SPAN of
+    /// row count - which is what a bar request needs, since it wants a span of
     /// trades rather than a number of them.
     async fn collect_until(
         &self,
@@ -1389,7 +1389,7 @@ impl HistorySession {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             );
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            // Registered BEFORE the command goes out, so a reply racing back
+            // Registered before the command goes out, so a reply racing back
             // faster than this task resumes still finds its slot; removed again
             // on a send failure so a dead socket does not leak the entry.
             self.pending
@@ -1537,16 +1537,16 @@ async fn handle_market_message(
             tracing::trace!("ignoring venue heartbeat on data path");
         }
         VenueMessage::ProtocolError { reason, .. } => {
-            // ProtocolError is now narrowed to WHOLE-FRAME faults the venue
+            // ProtocolError is now narrowed to whole-frame faults the venue
             // could not attribute to any entry (a Subscribe refused at the
             // validation boundary, an unsupported carrier). Per-entry subscribe
             // outcomes arrive as SubscriptionIssues, handled below.
             // Swallowing this here left the feed silent with
             // no downstream signal, indistinguishable from a quiet market.
-            // Surface the venue's reason VERBATIM and do not guess at causes:
+            // Surface the venue's reason verbatim and do not guess at causes:
             // an earlier version of this line enumerated three candidates, and
             // when a venue restart rewound sim-now under a surviving client's
-            // cursor the enumeration named only wrong ones - at ~11 WARN/s it
+            // cursor the enumeration named only wrong ones - at ~11 `warn`/s it
             // was the loudest thing in the log, pointing every operator at a
             // phantom subscription bug instead of the venue bounce.
             tracing::warn!(
@@ -1561,13 +1561,13 @@ async fn handle_market_message(
             after_ts_event,
             resumed_ts_event,
         } => {
-            // ERROR, not warn, and the level is a RULING rather than taste.
+            // `error`, not `warn`, and the level is a ruling rather than taste.
             // `FeedLagged` is the venue declaring that this client's tape has
             // a hole: bars aggregate wrong, a `PollCursor` resumes past the
             // missing span, and nothing downstream can tell the difference
             // between a quiet market and a dropped one. The standing
             // preference is an assert, a type or a guard over a verification,
-            // and none of the three is available HERE: nautilus's `DataEvent`
+            // and none of the three is available here: nautilus's `DataEvent`
             // carries no gap or degradation variant (`Response`, `Data`,
             // `Instrument`, `FundingRate`, `InstrumentStatus`, `OptionGreeks`
             // only), the client is handed to the host as a `dyn DataClient`
@@ -1579,7 +1579,7 @@ async fn handle_market_message(
             // real fix is a declared feed-gap event upstream; see the
             // cross-repo entry in `notes/todo.md`.
             //
-            // THE BOUNDARIES ARE THE ACTIONABLE PART for whoever reads this
+            // The boundaries are the actionable part for whoever reads this
             // log: they delimit the affected span, so a bar folded across it or
             // a cursor advanced through it can be identified rather than
             // guessed at. `episode` and `skipped_total` separate a client that
@@ -1608,7 +1608,7 @@ async fn handle_market_message(
             elapsed_ns,
             declared_duration_ns,
         } => {
-            // ITS OWN RECORD, and not folded into the arm above. The run may
+            // Its own record, and deliberately not folded into the arm above. The run may
             // still be going for everyone else, so logging this as a completed
             // run would tell an operator the venue had finished when only this
             // socket had. Both spans are reported because they can differ: the
@@ -1655,7 +1655,7 @@ fn retain_quote(
     // One run serves one configured instrument, so more than this many orphan
     // symbols is malformed input and is dropped without allocating a row.
     //
-    // The bound counts ORPHANS ONLY - rows no subscription refers to - so a
+    // The bound counts only orphans - rows no subscription refers to - so a
     // client with many live subscriptions cannot crowd itself out of the
     // pre-subscription cache. Nothing here evicts: an existing row is always
     // updated, so a symbol that once got a cache row can never lose it to a
@@ -1838,10 +1838,10 @@ fn aggregate_bars(
             out.push(bar);
         }
     }
-    // Flush the trailing window ONLY when the request's `end` proves it fully
-    // elapsed. A window's bar is otherwise emitted lazily, when a LATER trade
+    // Flush the trailing window only when the request's `end` proves it fully
+    // elapsed. A window's bar is otherwise emitted lazily, when a later trade
     // crosses its `close_ts` - but a historical request over a window that has
-    // already passed gets no such trade, so the newest COMPLETE window would be
+    // already passed gets no such trade, so the newest complete window would be
     // silently dropped (the always-stale or missing last bar of every history
     // request). If
     // `end >= acc.close_ts` the window closed within the requested range and
@@ -1898,7 +1898,7 @@ impl From<&SubState> for SubStateSnapshot {
         }
     }
 }
-// THE HTTP HISTORY CARRIER IS GONE FROM THIS CLIENT, and with it the whole
+// The HTTP history carrier is gone from this client entirely, and with it the whole
 // timestamp-cursor apparatus that made it survivable: the paged trade and quote
 // fetchers, the per-request trade ceiling and page cap, and
 // `final_ts_group_start`, which existed because a timestamp-only cursor cannot
@@ -1978,7 +1978,7 @@ mod quote_cache_tests {
     }
 
     /// AD27. The bar ref and the per-symbol bars count are one subscription in
-    /// two counters, and a refused `subscribe_bars` must leave BOTH at zero.
+    /// two counters, and a refused `subscribe_bars` must leave both at zero.
     /// A ref surviving the refusal makes a later `unsubscribe_bars` for that
     /// bar type "match", so it spends a symbol decrement belonging to another
     /// bar type's live subscription.

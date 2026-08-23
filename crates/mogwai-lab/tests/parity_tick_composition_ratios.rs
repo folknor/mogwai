@@ -4,14 +4,14 @@
 //! Phase 4b item 3: the `tick_composition_ratios.py` port against its blessed
 //! reference.
 //!
-//! NOT `#[ignore]`d, and that is the point of this one. Every input is
+//! Not `#[ignore]`d, and that is the point of this one. Every input is
 //! committed - the six `analysis/tick-composition-protocol-N.json` fixtures and
 //! `analysis/tick-composition-ratios-blessed.json` - so unlike the corpus gates
 //! this runs on any clone, in the ordinary gate, every time. A sizing policy
 //! that decides four shipped constants should not be checked only on the one
 //! machine holding a data delivery.
 //!
-//! Floats are compared BIT-EXACTLY. The policy is `max` over ratios of
+//! Floats are compared bit-exactly. The policy is `max` over ratios of
 //! committed p999 values, then a power-of-two or next-million rounding, so
 //! every step is exactly reproducible and a tolerance would only hide a defect.
 
@@ -125,7 +125,7 @@ fn every_mode_reproduces_the_blessed_result() {
     }
 }
 
-/// The mode table is committed DATA and must match what the blessing ran under,
+/// The mode table is committed data and must match what the blessing ran under,
 /// baselines included. Sharing or re-deriving a baseline is the defect this
 /// whole per-mode structure exists to prevent: it once under-proposed two
 /// constants while every acceptance assertion still passed.
@@ -187,7 +187,7 @@ fn the_mode_table_matches_the_blessed_constants() {
     }
 }
 
-/// The 8/9 identity gate, which produces no ratios: its VERDICT is the claim.
+/// The 8/9 identity gate, which produces no ratios: its verdict is the claim.
 /// The blessing recorded that it passed, so a port that cannot pass it has not
 /// reproduced the Python.
 #[test]
@@ -207,7 +207,7 @@ fn the_eight_nine_identity_gate_passes_as_it_did_for_the_python() {
 }
 
 /// A gate that only ever passes proves nothing about what it refuses, so the
-/// identity check is shown to REFUSE on a fixture pair it should reject: the
+/// identity check is shown to refuse on a fixture pair it should reject: the
 /// same file twice carries one pairing id, which is the "compared with itself"
 /// case the gate exists to catch.
 #[test]
@@ -222,12 +222,12 @@ fn the_eight_nine_identity_gate_refuses_a_self_comparison() {
     );
 }
 
-/// THE DERIVATION REPRODUCES THE HARDCODED SPLIT. Without this the claim that
+/// The derivation reproduces the hardcoded split. Without this the claim that
 /// the classification is now preset-derived would be untested prose: the port
 /// could derive something different and the parity gate above would not notice,
 /// because it feeds the blessed lists in deliberately.
 ///
-/// Presets come from the FIXTURE rather than a constant, which is the whole
+/// Presets come from the fixture rather than a constant, which is the whole
 /// point - a sixth instrument appears in the fixture and gets classified,
 /// where a hardcoded tuple would have left it in neither class and silently
 /// unchecked.

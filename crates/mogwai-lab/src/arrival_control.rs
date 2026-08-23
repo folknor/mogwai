@@ -25,7 +25,7 @@ use crate::measure12a::generated::GeneratedAcc;
 
 /// The 12b section 7 and 16 seed sets, verbatim. Pairwise disjoint from every
 /// other 12b seed set, and in particular from CONFIRMATION_SEEDS = 1..8: the
-/// ratios are MEASURED on the fit seeds and the corrected curve is JUDGED out
+/// ratios are measured on the fit seeds and the corrected curve is judged out
 /// of sample on the test seeds.
 pub const CONTROL_FIT_SEEDS: [u64; 4] = [301, 302, 303, 304];
 pub const CONTROL_TEST_SEEDS: [u64; 4] = [305, 306, 307, 308];
@@ -38,8 +38,8 @@ pub const WALLTIME_BAND: (f64, f64) = (0.8, 1.25);
 pub const WALLTIME_HORIZONS_S: [i64; 2] = [60, 300];
 
 /// The gate index set: the hours the instrument's calendar actually opens, in
-/// ascending order. An hour with zero scheduled minutes is OUTSIDE the set -
-/// not refused, not skipped, ABSENT, exactly as B8 is absent by
+/// ascending order. An hour with zero scheduled minutes is outside the set -
+/// not refused, not skipped, absent, exactly as B8 is absent by
 /// inapplicability. MNQ yields 23 hours; hour 21 UTC is the daily break and
 /// no session ever exposes it, so judging it would fail B6 and B7 by
 /// construction whatever the mechanism does.
@@ -71,7 +71,7 @@ pub struct HourRate {
     pub mean: Option<f64>,
 }
 
-/// Mean parents per SCHEDULED minute, per hour, over a whole context.
+/// Mean parents per scheduled minute, per hour, over a whole context.
 /// Scheduled, not populated: an empty minute is a zero, not an absence, so the
 /// denominator is the block2 `(hour, 60)` `scheduled_windows` sum rather than
 /// the number of block1 rows that happen to carry mass.
@@ -126,7 +126,7 @@ pub fn hourly_zero_second_fraction(ctx: &ObsContext) -> BTreeMap<i64, Option<f64
 }
 
 /// The median over the four fit seeds. 5.5 says "median over seeds" and the
-/// seed count is EVEN, so the convention is pinned here rather than left to the
+/// seed count is even, so the convention is pinned here rather than left to the
 /// implementer: average the two middle readings - the ordinary arithmetic
 /// median, not lower-median, not upper-median. Non-finite readings are dropped
 /// first, and fewer than four finite readings yields `None`, which leaves that
@@ -152,7 +152,7 @@ pub fn seed_median(readings: &[Option<f64>]) -> Option<f64> {
 
 /// The section 5.5 correction, closed form, one pass, no search: divide each
 /// hour by its ratio and rescale to sum to 1. An hour absent from `ratios` is
-/// carried through UNCHANGED - the control corrects what it measured and
+/// carried through unchanged - the control corrects what it measured and
 /// invents nothing where it did not. The rescale is canonical serialization for
 /// the `SessionProfile` schema and moves no generated rate, because
 /// `SessionModulator`'s `arrival_normalizer` divides the scale straight back
@@ -174,7 +174,7 @@ pub fn recentred_curve(old: &[f64; 24], ratios: &BTreeMap<i64, f64>) -> [f64; 24
 /// `K` of the spec's section 2.4: the exposure-weighted normalizer ratio
 /// between the shipped and the re-centred curve, over the calendar's open
 /// minutes of one week, formed the way `SessionModulator::new` forms its
-/// normalizer. Both curves are divided by their own sum FIRST, so `K` is
+/// normalizer. Both curves are divided by their own sum first, so `K` is
 /// scale-invariant and is exactly 1 when the per-hour ratio is constant -
 /// without that, the sum-to-1 rescale alone would report the shipped curve's
 /// mean-1 scale factor of about 23.86 and carry no information. Reported in the
@@ -249,7 +249,7 @@ impl GeneratedBinding {
                 .to_string(),
         })
     }
-    /// `window_length_ns` as the duration STRING `run_summary_walk` takes,
+    /// `window_length_ns` as the duration string `run_summary_walk` takes,
     /// `"<n>s"`, refusing a length that is not a whole number of seconds.
     pub fn length_arg(&self) -> LabResult<String> {
         if !self.window_length_ns.is_multiple_of(1_000_000_000) {
@@ -261,9 +261,9 @@ impl GeneratedBinding {
     }
 }
 
-/// One seed, one curve, both passes. `curve` is `None` for the SHIPPED curve
+/// One seed, one curve, both passes. `curve` is `None` for the shipped curve
 /// (the ratio measurement) and `Some(new_curve)` for the corrected one (the
-/// judgement). The exposure is 12b section 8, read FROM the 12a binding rather
+/// judgement). The exposure is 12b section 8, read from the 12a binding rather
 /// than restated: MNQ, no divergence, regime neutral, vol trace on, the walk
 /// starting at `window_start - burn_in` and the half-open measured window.
 pub fn control_walk(
@@ -308,14 +308,14 @@ pub fn control_walk(
 /// already costs a month-long walk on each side - running the `summarize` pass
 /// too would double a cost the pin has no use for.
 ///
-/// This is the SECOND copy of the 12b section 8 exposure contract (the first is
+/// This is the second copy of the 12b section 8 exposure contract (the first is
 /// `run_final_walk`, which lives in `mogwai-cli` and is therefore unreachable
 /// from this crate). Every element is matched deliberately: the MNQ profile
 /// resolved through the shipped MNQ preset, with
 /// `calendar.utc_offset_minutes` as the accumulator's hour offset,
 /// `scalars.modal_tick` as its tick size, the vol trace enabled before the
 /// loop, the walk starting at `window_start - burn_in` and the half-open
-/// measured window. The scratch `[instrument.override]` curve is the ONLY
+/// measured window. The scratch `[instrument.override]` curve is the only
 /// intended difference, and it applies to the corrected-curve pass alone.
 pub fn control_generated_pass(
     scratch_dir: &Path,
@@ -333,7 +333,7 @@ pub fn control_generated_pass(
     // Section 2.7: the shipped-curve pass resolves MNQ exactly as
     // `mogwai_cli::measure::run_final_walk` does, through the shipped MNQ
     // preset, and the scratch `[instrument.override]`
-    // is the ONE difference the corrected-curve pass introduces.
+    // is the one difference the corrected-curve pass introduces.
     let profile = if overrides.is_empty() {
         default_mnq_profile()?
     } else {
@@ -403,7 +403,7 @@ pub struct GateRec {
     pub refusals: Vec<RefusalRec>,
 }
 /// The shared per-hour per-seed ratio-band gate behind B6 and B7. A cell that
-/// cannot be evaluated is a RECORDED REFUSAL and any refusal fails the gate:
+/// cannot be evaluated is a recorded refusal and any refusal fails the gate:
 /// 12b section 8 forbids dropping an inconvenient hour, and a refusal is
 /// exactly the state a dropped hour would hide.
 fn ratio_gate(
@@ -454,7 +454,7 @@ fn ratio_gate(
     }
 }
 
-/// B6, mean-rate preservation: per hour AND per seed, generated over observed
+/// B6, mean-rate preservation: per hour and per seed, generated over observed
 /// mean parents per scheduled minute inside `MEAN_RATE_BAND`.
 pub fn gate_b6(obs: &ObsContext, tests: &[ControlWalk], hours: &[i64]) -> LabResult<GateRec> {
     let o = hourly_mean_parents(obs)
@@ -468,7 +468,7 @@ pub fn gate_b6(obs: &ObsContext, tests: &[ControlWalk], hours: &[i64]) -> LabRes
             .collect()
     }))
 }
-/// B7, sub-second composition: per hour AND per seed, the 1 s zero-count
+/// B7, sub-second composition: per hour and per seed, the 1 s zero-count
 /// fraction ratio inside `ZERO_COUNT_BAND`.
 pub fn gate_b7(obs: &ObsContext, tests: &[ControlWalk], hours: &[i64]) -> LabResult<GateRec> {
     let o = hourly_zero_second_fraction(obs);
@@ -523,7 +523,7 @@ pub fn gate_b3(obs: &ObsContext, tests: &[ControlWalk], hours: &[i64]) -> LabRes
 }
 /// B2, support and conditional adequacy - the gate 12b exists to move, since
 /// the committed 12a artifact records the shipped generator refusing 22 of 24
-/// hours here. `hours` is unused BY DESIGN: 10.2 words this gate over all 24
+/// hours here. `hours` is unused by design: 10.2 words this gate over all 24
 /// hours the substitution implicates, not over the calendar-exposed index set,
 /// and the substitution refuses on its own support rule rather than per hour.
 pub fn gate_b2(obs: &ObsContext, tests: &[ControlWalk], _hours: &[i64]) -> LabResult<GateRec> {
@@ -552,12 +552,12 @@ pub fn gate_b2(obs: &ObsContext, tests: &[ControlWalk], _hours: &[i64]) -> LabRe
         refusals: refs,
     })
 }
-/// B4, the two-sided minute-range envelope. The bounds are READ from brick B4's
+/// B4, the two-sided minute-range envelope. The bounds are read from brick B4's
 /// committed artifact and never recomputed, per that brick's amendment 2.
 pub fn gate_b4(envelope: &Value, tests: &[ControlWalk]) -> LabResult<GateRec> {
     use crate::fit::observe::nearest_rank_of;
-    // The protocol-11 comparison tolerance, applied on BOTH sides of the band
-    // so one band is not judged with two arithmetics. It is 1e-12 ABSOLUTE and
+    // The protocol-11 comparison tolerance, applied on both sides of the band
+    // so one band is not judged with two arithmetics. It is 1e-12 absolute and
     // every quantity here is an integer tick count, so it changes no verdict.
     use crate::fit::solve::SLACK;
     let e = &envelope["envelope"];
@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn hourly_mean_parents_divides_by_scheduled_not_populated_minutes() {
         // Two sessions, one hour, three block1 rows of which one is the empty
-        // minute. The mean is 6 parents over 120 SCHEDULED minutes, not over
+        // minute. The mean is 6 parents over 120 scheduled minutes, not over
         // the rows that happen to carry mass.
         let session = |date: &str| {
             json!({
@@ -821,21 +821,21 @@ mod tests {
 
     /// Section 2.5's determinism claim: the two accumulator passes drive one
     /// generator over one tape, so they agree on how many parents they saw.
-    /// Run at ONE DAY, which is short relative to the artifact run's month but
-    /// is NOT a round number chosen for comfort: it is the SHORTEST WINDOW THAT
-    /// MEASURES ANYTHING HERE, and shortening it does not weaken the pin, it
+    /// Run at one day, which is short relative to the artifact run's month but
+    /// is not a round number chosen for comfort: it is the shortest window that
+    /// measures anything here, and shortening it does not weaken the pin, it
     /// empties it.
     ///
-    /// `window_start_ns` is 2026-06-30T22:00:00Z, which is an MNQ SESSION OPEN,
-    /// and the accumulator's `per_session` records are emitted per COMPLETED
+    /// `window_start_ns` is 2026-06-30T22:00:00Z, which is an MNQ session open,
+    /// and the accumulator's `per_session` records are emitted per completed
     /// session. So a window that ends mid-session yields no records at all.
-    /// Measured, at this start: 1 h, 6 h and 12 h each give ZERO hours and ZERO
+    /// Measured, at this start: 1 h, 6 h and 12 h each give zero hours and zero
     /// parents; 24 h gives 23 hours (hour 21 is the unexposed one) and
     /// 1,455,942 parents. The cliff is the session boundary, not a gradient.
     ///
     /// The sibling `arrival_control_refuses_a_tree_that_changed_during_the_run`
     /// argues for a one-hour window, and that argument does not transfer: it
-    /// pins STEP ORDERING and needs only that the run reach its gates, whereas
+    /// pins step ordering and needs only that the run reach its gates, whereas
     /// this pin's content is that two passes agree over the tape they walked.
     ///
     /// It is not `#[ignore]`d and does not want to be: it measures comfortably
@@ -853,15 +853,15 @@ mod tests {
         // The workspace scratch, not a relative `target/`: a unit test's
         // working directory is its crate, so the relative form wrote
         // `crates/mogwai-lab/target/`, which the root .gitignore hides and
-        // `cargo clean` never reaches. HOLD THE GUARD - it is what removes the
+        // `cargo clean` never reaches. Hold the guard - it is what removes the
         // directory, on the panic path included.
         let scratch = crate::storage::unit_test_scratch("arrival-control-walk");
         let walk = control_walk(scratch.path(), &binding, None, 301).unwrap();
         let by_hour = hourly_mean_parents(&walk.ctx);
         // The coverage assertion, not just a nonzero total: a shortened window
-        // that still catches ONE busy hour would satisfy `parents > 0` and
+        // that still catches one busy hour would satisfy `parents > 0` and
         // quietly reduce this from an agreement-over-the-tape pin to an
-        // agreement-over-one-hour pin. The expected count is DERIVED from the
+        // agreement-over-one-hour pin. The expected count is derived from the
         // preset rather than written down, so a legitimate MNQ calendar change
         // fails at `gate_hours_excludes_the_unexposed_hour`, which owns that
         // fact, instead of failing here behind a message about window length.
@@ -898,10 +898,10 @@ mod tests {
         assert!((normalizer_drift(&old, &new, &profile).unwrap() - 1.0).abs() < 1e-12);
     }
 
-    /// This is NOT a two-copy gate owing a `*_conformance.json`, though it has
+    /// This is not a two-copy gate owing a `*_conformance.json`, though it has
     /// been graded as one. `hourly_zero_second_fraction` is the sole
-    /// implementation of the quantity; the test recomputes it from a DIFFERENT
-    /// FIELD of the committed artifact (production sums the per-hour
+    /// implementation of the quantity; the test recomputes it from a different
+    /// field of the committed artifact (production sums the per-hour
     /// `zero_windows`, this sums `count_hist["0"]`), and two independent
     /// producer fields agreeing is an external anchor, not a second copy of
     /// one convention. A fixture would buy nothing the count histogram does

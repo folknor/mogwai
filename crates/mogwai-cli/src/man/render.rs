@@ -368,7 +368,7 @@ where
                 if !self.end_newline {
                     out.push('\n');
                 }
-                // The marker opens a fresh line; record that so a LOOSE item's
+                // The marker opens a fresh line; record that so a loose item's
                 // following `Paragraph` does not push a SECOND newline and open a
                 // stray blank line between the item and its body (S23).
                 self.end_newline = true;
@@ -393,7 +393,7 @@ where
                 }
                 out.push_str(": ");
             }
-            // Inline formatting can be the FIRST child of a list item (e.g.
+            // Inline formatting can be the first child of a list item (e.g.
             // `- **Bold lead** - ...`). These arms emit their markup directly,
             // so flush any pending list marker first or it lands mid-markup
             // (`* ` + `**` rendering as `*** `).

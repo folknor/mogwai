@@ -1,33 +1,33 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE SECOND OF THE TWO GUARDS on the tree-state seam, in one place so the
+//! The second of the two guards on the tree-state seam, in one place so the
 //! set of artifact writers that carry it is countable.
 //!
 //! `mogwai_lab::delivery`'s `TreeOracle` seam is compiled out of a production
 //! build - it lives behind the lab's `test-seam` feature, which `mogwai-cli`
 //! enables only in `[dev-dependencies]`. That is the first guard. It is not
 //! the only one needed, because an `--all-features` build switches the seam
-//! back on, and one installed double would then attest BOTH ends of an
+//! back on, and one installed double would then attest both ends of an
 //! artifact's provenance claim: the `require_clean_tree` that opens the run
 //! and the `fresh_tree_state` re-attestation that precedes the write.
 //!
 //! So every command that writes `binding.harness_tree_commit` calls
 //! [`refuse_scripted_tree_attestation`] immediately before its write. The
 //! guard was originally inlined in two of them and the module comment on the
-//! seam claimed the set was two; it is SIX - `arrival_control`,
+//! seam claimed the set was two; it is six - `arrival_control`,
 //! `arrival_screen`, `fit`, `measure`, `minute_range_envelope` and
 //! `arrival_envelope_diagnostic` - and a bare copy per writer is exactly the
 //! shape that lets the seventh be forgotten. Adding a writer means calling
 //! this; `tree_writers_all_refuse_a_scripted_attestation` in this module
 //! holds the roster against the sources so a new call site that forgets is
 //! named rather than assumed. It sees the five writers that serialize the
-//! binding HERE; `fit` is the sixth and is invisible to it, because the
+//! binding here; `fit` is the sixth and is invisible to it, because the
 //! artifact it binds is serialized by `mogwai_lab::fit::driver` out of the
 //! commit `fit::run` hands it. A writer that delegates its serialization the
 //! same way is likewise the reviewer's to catch.
 //!
-//! AND THE SEAM IS NOT THE ONLY WAY THE CLAIM GOES FALSE. A writer that takes
+//! And the seam is not the only way the claim goes false. A writer that takes
 //! `require_clean_tree` at entry and then runs for minutes binds a commit that
 //! may no longer be checked out by the time the bytes land - no double
 //! required, just a `git checkout` in another shell.
@@ -71,11 +71,11 @@ mod tests {
         assert!(err.to_string().contains("scripted tree reader"), "{err}");
     }
 
-    /// THE ROSTER IS HELD AGAINST THE SOURCES, because nothing else can
+    /// The roster is held against the sources, because nothing else can
     /// detect the defect this module exists to close: a command that writes
     /// `harness_tree_commit` and never calls the guard reads as gated and is
     /// not. Every source in this crate that writes the key must also name the
-    /// guard, and the check is on the FILE SET rather than on a list of
+    /// guard, and the check is on the file set rather than on a list of
     /// expected names, so a new writer is caught without anybody remembering
     /// to extend a list.
     ///
@@ -96,7 +96,7 @@ mod tests {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("a source file");
-            // The WRITE of the binding, not a mention of it: the test modules
+            // The write of the binding, not a mention of it: the test modules
             // and the doc comments in this crate name both keys repeatedly.
             // Either key counts - `arrival_envelope_diagnostic` names its
             // commit field `commit` and carries `clean_tree` beside it.
@@ -121,9 +121,9 @@ mod tests {
         );
     }
 
-    /// THE OTHER HALF OF THE SAME CONTRACT, and it went missing in two writers
+    /// The other half of the same contract, and it went missing in two writers
     /// of six before anything looked. A tree-attested binding names the commit
-    /// a gate read at the TOP of a run that then takes minutes; the claim is
+    /// a gate read at the top of a run that then takes minutes; the claim is
     /// only true if the tree is read again immediately before the write and
     /// the run refuses when it moved. `measure`, `arrival-control`,
     /// `arrival-screen` and `arrival-envelope-diagnostic` did this; `fit` and
@@ -132,7 +132,7 @@ mod tests {
     /// `mogwai measure` carries". A doc stating an attestation the code does
     /// not perform is worse than no doc.
     ///
-    /// THE ROSTER IS KEYED ON THE GUARD CALL, not on the binding key, and that
+    /// The roster is keyed on the guard call, not on the binding key, and that
     /// is deliberate: `fit.rs` does not contain `"harness_tree_commit"` at
     /// all, because `mogwai_lab::fit::driver` serializes it out of the commit
     /// `fit::run` hands over, so the roster above cannot see it and this one
@@ -155,12 +155,12 @@ mod tests {
             if !text.contains("refuse_scripted_tree_attestation()") {
                 continue;
             }
-            // THE DEFECT IS AN ENTRY GATE WHOSE VERDICT IS RESTATED AT THE
-            // WRITE, so a writer that takes no entry gate is a different
+            // The defect is an entry gate whose verdict is restated at the
+            // write, so a writer that takes no entry gate is a different
             // shape and not one of these. `arrival_envelope_diagnostic` reads
-            // the tree ONCE, immediately before assembling, and records
+            // the tree once, immediately before assembling, and records
             // `clean_tree: <what it read>` rather than a constant `true` - a
-            // MEASUREMENT, which cannot go stale between a gate and a write
+            // measurement, which cannot go stale between a gate and a write
             // because there is no gate. Requiring a refusal there would
             // demand it invent a claim it deliberately does not make.
             if !text.contains("require_clean_tree()") {

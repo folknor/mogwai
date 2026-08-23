@@ -365,7 +365,7 @@ fn estimate_statistic(
     let mut scheduled_work_s = serial_cpu_s;
     let mut scheduled_wall_s = scheduled_wall(&coarse_tasks, jobs);
 
-    // The frozen cap is TOTAL across the two rounds. Each family is replayed
+    // The frozen cap is total across the two rounds. Each family is replayed
     // independently across every feasible split, preserving its round
     // barrier. Summing the four worst family replays also preserves the
     // current driver's family serialization, so the budget-facing result is

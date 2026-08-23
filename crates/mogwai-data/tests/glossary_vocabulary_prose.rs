@@ -6,11 +6,11 @@
 //! no legitimate live use. Sense-scoped words such as `session`, `ledger`,
 //! `tape`, `warmup` and `reservation` are therefore not banned bare.
 //!
-//! The allowlist is part of the contract, and it is cut in TWO SHAPES because
+//! The allowlist is part of the contract, and it is cut in two shapes because
 //! the two are not interchangeable.
 //!
 //! `ALLOWED_SITES` is the shape used for a live production file: an exemption
-//! is a PAIR of path and spelling, applied at match time. `config.rs` is exempt
+//! is a pair of path and spelling, applied at match time. `config.rs` is exempt
 //! for `server_heartbeat_ms` and for nothing else, `ws.rs` for the retired
 //! websocket query key and for nothing else, `count_curve.rs` for the frozen
 //! `first_divergence` artifact key and for nothing else. A whole-file exemption
@@ -18,11 +18,11 @@
 //! retired spelling introduced anywhere in that file passes silently.
 //!
 //! `ALLOWED_FILES` and `ALLOWED_PREFIXES` skip a whole file, and they are
-//! correct only where NOTHING in the file is live repository vocabulary:
+//! correct only where nothing in the file is live repository vocabulary:
 //! frozen preregistrations and specs, the historical arc records, generated or
 //! vendored content, and this gate's own reviewed data table.
 //!
-//! Every `ALLOWED_SITES` entry must still MATCH something, or the gate carries
+//! Every `ALLOWED_SITES` entry must still match something, or the gate carries
 //! an exemption nobody needs and the next reader cannot tell a live carve-out
 //! from a dead one. Adding a spelling or an exemption is one reviewed data
 //! edit; weakening the walk or teaching the matcher ad hoc exceptions is not.
@@ -166,7 +166,7 @@ struct AllowedSite {
     reason: &'static str,
 }
 
-/// Scoped exemptions: one path, one spelling, applied at MATCH time. Every
+/// Scoped exemptions: one path, one spelling, applied at match time. Every
 /// other retired spelling in these files is still refused, which is the whole
 /// difference between this table and a skipped file.
 const ALLOWED_SITES: &[AllowedSite] = &[
@@ -255,9 +255,9 @@ struct SkippedDir {
     reason: &'static str,
 }
 
-/// Directories the walk never descends into, matched by NAME at any depth.
+/// Directories the walk never descends into, matched by name at any depth.
 ///
-/// Every DOT-DIRECTORY is skipped in addition to these, and that is not
+/// Every dot-directory is skipped in addition to these, and that is not
 /// tidiness: `.git` holds git's own object store, and `.gitignore` puts the
 /// tooling and agent scratch trees at the repository root outside the
 /// repository while leaving them squarely inside a filesystem walk. Scratch

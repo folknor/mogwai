@@ -58,7 +58,7 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// `build_fingerprint.py:61-64` indexes `single_print_frac`,
 /// `vol_dispersion` and `size_dispersion` directly, so a level block missing
 /// any of them raises `KeyError`. Substituting `0.0` did not merely diverge:
-/// it manufactured a PASS, because two of the four conditions are lower
+/// it manufactured a pass, because two of the four conditions are lower
 /// bounds. A block with no `single_print_frac` read as `0.0`, which clears
 /// `<= 0.50`, and a missing `size_dispersion` read as `0.0`, which clears
 /// `vol_dispersion >= 1.5 * size_dispersion` for any dispersion at all. The
@@ -340,7 +340,7 @@ fn hour_vol(rep: &Value) -> Vec<f64> {
                 .iter()
                 .map(|v| v.as_f64().unwrap_or(0.0)),
         );
-        // APPROVED SEMANTIC CHANGE, not an oversight: the Python writes
+        // An approved semantic change, not an oversight: the Python writes
         // `(ssq / cnt) ** 0.5`, which CPython delegates to platform libm
         // `pow` - it does not special-case the half power. Matching that
         // bug-for-bug would make this artifact, which is compiled into the
@@ -397,10 +397,10 @@ fn avg_curves(curves: &[Vec<f64>]) -> Vec<f64> {
 /// Reads `char_<PAIR>.json` files from `char_dir`, keyed by the `pair` field
 /// inside each report.
 ///
-/// ORDERING, and why a `BTreeMap` is faithful here rather than merely
+/// Ordering, and why a `BTreeMap` is faithful here rather than merely
 /// convenient. The Python builds a dict by walking `sorted(glob(...))` -
-/// FILENAME order - and keying each entry by the report's own `pair` field, so
-/// its iteration order is filename order. A `BTreeMap` gives PAIR order. Those
+/// filename order - and keying each entry by the report's own `pair` field, so
+/// its iteration order is filename order. A `BTreeMap` gives pair order. Those
 /// coincide exactly when every report's embedded pair matches its filename,
 /// which is a convention nothing previously enforced: a `char_AAA.json`
 /// declaring `"pair": "ZZZ"` put the two orders in different places, and the
@@ -409,7 +409,7 @@ fn avg_curves(curves: &[Vec<f64>]) -> Vec<f64> {
 /// only ever meaningful under the convention, this refuses the mismatch. The
 /// invariant is then provable rather than incidental.
 ///
-/// FAIL-CLOSED on both required fields. The Python indexes `r["pair"]` and
+/// Fail-closed on both required fields. The Python indexes `r["pair"]` and
 /// `r["n_trades"]`, so a malformed report raises `KeyError` there. This
 /// previously substituted `""` and `0`, inventing an identity for one and
 /// silently changing an aggregate for the other - the worst class under the
@@ -658,7 +658,7 @@ mod loader_contract_tests {
         assert!(err.to_string().contains("no integer `n_trades`"), "{err}");
     }
 
-    /// THE APPROVED-DEVIATION PIN. `hour_vol` deliberately uses `sqrt` where
+    /// The approved-deviation pin. `hour_vol` deliberately uses `sqrt` where
     /// the Python uses `** 0.5`, because CPython routes that through platform
     /// libm `pow` and the result is compiled into the generator. This asserts
     /// the two genuinely differ at a value in the call site's own domain, so a
@@ -678,7 +678,7 @@ mod loader_contract_tests {
         );
     }
 
-    /// THE ORDERING DISCRIMINATOR. Under the old loader this file silently
+    /// The ordering discriminator. Under the old loader this file silently
     /// keyed itself as `ZZZUSD` while sorting at the filename position of
     /// `DDDUSD`, so a `BTreeMap` and the Python dict iterated differently.
     /// Refusing is what makes pair order and filename order provably the same.
@@ -744,13 +744,13 @@ mod tests {
         assert!(err.to_string().contains("ETHUSD"));
     }
 
-    /// THE FALSE PROCEED. Two of the four conditions are lower bounds, so
+    /// The false proceed. Two of the four conditions are lower bounds, so
     /// reading a missing field as `0.0` did not merely diverge from the
     /// Python's `KeyError` - it cleared conditions on evidence that was never
     /// measured. A block with no `single_print_frac` scored `0.0 <= 0.50` as
     /// held, and one with no `size_dispersion` cleared
     /// `vol_dispersion >= 1.5 * size_dispersion` for any dispersion at all.
-    /// Each field is dropped INDIVIDUALLY here: a single fixture missing all
+    /// Each field is dropped individually here: a single fixture missing all
     /// three would pass the moment any one of them started refusing, and would
     /// not tell you which.
     #[test]
@@ -779,7 +779,7 @@ mod tests {
         }
     }
 
-    /// The fail-open direction was toward PASS, which is the part that makes it
+    /// The fail-open direction was toward pass, which is the part that makes it
     /// a defect rather than a difference. Pinned as its own case so nobody
     /// "fixes" the refusal by substituting a value that still scores.
     #[test]

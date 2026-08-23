@@ -25,9 +25,9 @@ pub const MAX_INBOUND_MESSAGE_BYTES: usize = 64 * 1024;
 ///
 /// The single definition of the trigger predicate. The engine applies it to
 /// the acceptance-time reading and the data walk applies it to every later
-/// print. A print AT the trigger is touching, not trading through. Both sides
-/// of the seam use this copy so arrival and sweep decisions cannot disagree.
-/// Deliberately a TRADE
+/// print. A print exactly at the trigger is touching, not trading through.
+/// Both sides of the seam use this copy so arrival and sweep decisions cannot
+/// disagree. Deliberately a trade
 /// predicate, not a quote predicate: this venue has a trades-only tape.
 #[must_use]
 pub fn trades_through(side: Side, limit: Decimal, traded: Decimal) -> bool {
@@ -38,19 +38,19 @@ pub fn trades_through(side: Side, limit: Decimal, traded: Decimal) -> bool {
 }
 
 /// True when a traded price has reached or passed a conditional order's
-/// trigger. TOUCH, not through: `trades_through`'s strictness is a QUEUE
+/// trigger. Touch, not through: `trades_through`'s strictness is a queue
 /// argument - at your own limit price you are behind the resting queue, so the
-/// tape merely reaching your price is not evidence flow reached YOU - and a
+/// tape merely reaching your price is not evidence flow reached you - and a
 /// stop holds no queue position. Its trigger is a pure price predicate the
 /// venue evaluates on its own book, and every real venue fires it on touch.
 ///
-/// Note the sides mirror `trades_through`: a buy LIMIT rests below the market
-/// and waits for the tape to come DOWN, a buy STOP rests above and waits for it
-/// to come UP. For the SAME side and the SAME price the two are exact logical
+/// Note the sides mirror `trades_through`: a buy limit rests below the market
+/// and waits for the tape to come down, a buy stop rests above and waits for it
+/// to come up. For the same side and the same price the two are exact logical
 /// complements, which is precisely why they must not be collapsed into one
 /// function with a strictness flag - they are never handed the same price
-/// (a limit is scanned against its DRAWN band trigger, a conditional against
-/// its STATED stop).
+/// (a limit is scanned against its drawn band trigger, a conditional against
+/// its stated stop).
 #[must_use]
 pub fn touches_trigger(side: Side, trigger: Decimal, traded: Decimal) -> bool {
     match side {
@@ -67,14 +67,14 @@ pub fn touches_trigger(side: Side, trigger: Decimal, traded: Decimal) -> bool {
 pub enum ScanKind {
     /// `trades_through` against a live limit's drawn band trigger.
     FillThrough,
-    /// `touches_trigger` against an untriggered STOP's trigger price.
+    /// `touches_trigger` against an untriggered stop's trigger price.
     TriggerTouch,
-    /// `touches_toward` against an untriggered TOUCHED order's trigger price.
+    /// `touches_toward` against an untriggered touched order's trigger price.
     ///
     /// The complement of `TriggerTouch` in direction and its twin in strictness.
     /// A stop protects - buy above the market, sell below - so it fires when
-    /// price runs AWAY from where you are. A touched order enters - buy below,
-    /// sell above - so it fires when price comes TOWARD its level. Same
+    /// price runs away from where you are. A touched order enters - buy below,
+    /// sell above - so it fires when price comes toward its level. Same
     /// machinery, opposite comparison; collapsing them into one predicate with a
     /// flag would put the two most easily confused behaviours in the venue
     /// behind one boolean.
@@ -92,11 +92,11 @@ impl ScanKind {
     }
 }
 
-/// True when a traded price has reached a TOUCHED order's trigger from the
-/// entry side: a buy waits for the tape to come DOWN to it, a sell for it to
-/// come UP.
+/// True when a traded price has reached a touched order's trigger from the
+/// entry side: a buy waits for the tape to come down to it, a sell for it to
+/// come up.
 ///
-/// TOUCH rather than through, exactly like `touches_trigger`, and for the same
+/// Touch rather than through, exactly like `touches_trigger`, and for the same
 /// reason: a conditional holds no queue position, so its trigger is a pure price
 /// predicate the venue evaluates on its own book.
 #[must_use]
@@ -176,21 +176,22 @@ impl<'de> Deserialize<'de> for AccountId {
 /// `MAX_ECHOED_ID_LEN`.
 pub const MAX_SYMBOL_LEN: usize = 32;
 
-/// Validate an INBOUND symbol, wherever one arrives.
+/// Validate an inbound symbol, wherever one arrives.
 ///
 /// The alphabet was chosen for the URL ingresses - it needs no percent encoding,
 /// and is shared by the adapter constructing the URL and the venue validating
 /// its decoded value - but the rule is no longer scoped to them. As of
 /// 2026-08-19 [`validate_submit_order`] calls this too, so order entry and the
-/// `/trades`, `/quotes` and `source` query strings judge a symbol by ONE rule.
+/// `/trades`, `/quotes` and `source` query strings judge a symbol by one rule.
 /// That is what makes "a symbol is 1 to 32 bytes of the URL-safe alphabet" a
 /// sentence about the venue rather than about two of its three doors.
 ///
-/// SO RELAXING THIS FOR A URL REASON WOULD RELAX ORDER ENTRY WITH IT. The
-/// callers are `validate_submit_order` (and `validate_submit_group` through it),
-/// `mogwai-venue`'s `http.rs` and `source.rs`, `config.rs` for an instrument's
-/// `index_symbol`, and `mogwai-adapter`'s config check. `config.rs` does NOT
-/// apply it to an instrument's own `symbol`, which is a recorded asymmetry
+/// Relaxing this for a URL reason would therefore relax order entry with it.
+/// The callers are `validate_submit_order` (and `validate_submit_group` through
+/// it), `mogwai-venue`'s `http.rs` and `source.rs`, `config.rs` for an
+/// instrument's `index_symbol`, and `mogwai-adapter`'s config check. `config.rs`
+/// does not apply it to an instrument's own `symbol`, which is a recorded
+/// asymmetry
 /// rather than an oversight.
 pub fn validate_wire_symbol(symbol: &str) -> Result<(), &'static str> {
     if symbol.is_empty() || symbol.len() > MAX_SYMBOL_LEN {
@@ -214,7 +215,7 @@ pub const MAX_CALLSIGN_LEN: usize = 64;
 /// query string with no percent encoding, and it is retained per socket for the
 /// life of the connection.
 ///
-/// Empty is REFUSED rather than treated as absent. A consumer that sends
+/// Empty is refused rather than treated as absent. A consumer that sends
 /// `callsign=` has said something, and reading an empty string as "no opinion"
 /// would silently give it the always-evict behaviour it was trying to leave.
 pub fn validate_callsign(callsign: &str) -> Result<(), &'static str> {
@@ -237,13 +238,13 @@ pub fn validate_callsign(callsign: &str) -> Result<(), &'static str> {
 pub const MAX_REASON_LEN: usize = 512;
 
 /// The refusal a `post_only` order on the wrong type earns, at the wire gate
-/// and in the engine's own validator alike. ONE STRING, because the two gates
+/// and in the engine's own validator alike. One string, because the two gates
 /// carried two copies of it and a consumer cannot tell which of them spoke.
 ///
-/// IT NAMES BOTH SETS - the legal types and then the refused ones - rather than
+/// It names both sets - the legal types and then the refused ones - rather than
 /// stating a rule the consumer has to apply. The rule it used to state, "legal
-/// only on orders that rest as a limit", is FALSE for `MarketToLimit`, which
-/// rests its remainder as a limit and is refused anyway. The LEGAL half is what
+/// only on orders that rest as a limit", is false for `MarketToLimit`, which
+/// rests its remainder as a limit and is refused anyway. The legal half is what
 /// `mogwai-engine`'s admission-table test parses, up to the first " orders", so
 /// the second half may grow or change freely.
 pub const POST_ONLY_REFUSAL: &str = "post_only is legal only on Limit, StopLimit, LimitIfTouched and TrailingStopLimit orders; not on Market, StopMarket, TrailingStopMarket, MarketIfTouched or MarketToLimit";
@@ -259,7 +260,7 @@ pub const MAX_CURRENCY_LEN: usize = 16;
 
 /// Worst-case expansion factor `serde_json` applies to an arbitrary string of
 /// N bytes: a byte that must be escaped as `\uXXXX` costs six output bytes.
-/// Every `*_MAX_BYTES` constant is stated in SERIALIZED bytes, so each embedded
+/// Every `*_MAX_BYTES` constant is stated in serialized bytes, so each embedded
 /// string contributes `JSON_ESCAPE_FACTOR * cap`, never its raw cap. Sizing
 /// against raw lengths - which an implementer measuring with ordinary ASCII
 /// test strings would never catch - makes a reservation a typical case rather
@@ -270,18 +271,18 @@ pub const JSON_ESCAPE_FACTOR: usize = 6;
 /// `AdmissionRejected` and `ProtocolError`, since both ride the venue's
 /// priority lane. `AdmissionRejected` is the widest: one capped client id, one
 /// capped reason and its fixed envelope. This bound is
-/// what makes the priority lane's FRAME count a memory bound, so every
+/// what makes the priority lane's frame count a memory bound, so every
 /// `ProtocolError` construction site must route its reason through
 /// `truncate_reason`.
 ///
 /// The figure is the next power of two above `JSON_ESCAPE_FACTOR *
 /// (MAX_ECHOED_ID_LEN + MAX_REASON_LEN) + ADMISSION_ENVELOPE_BYTES` - 3712,
 /// so 4096 - and `admission_frames_fit_their_ceiling` runs that derivation
-/// rather than trusting this comment. NO SYMBOL TERM: neither admission frame
+/// rather than trusting this comment. No symbol term: neither admission frame
 /// carries a symbol. `AdmissionSubject` names the refused command by ID, never
 /// by instrument, and every one of its id-shaped fields is truncated to
-/// `MAX_ECHOED_ID_LEN` by the hand-written `Serialize` below, so ONE CAPPED ID
-/// IS THE ONLY UNBOUNDED SUBJECT CONTRIBUTION. The variants are not otherwise
+/// `MAX_ECHOED_ID_LEN` by the hand-written `Serialize` below, so one capped id
+/// is the only unbounded subject contribution. The variants are not otherwise
 /// identical and this bound does not need them to be: they differ in key name,
 /// in the width of the `kind` tag, and - for `Query` alone - by a serialized
 /// `QueryKind` value. Those deltas are fixed scaffolding, charged to
@@ -314,7 +315,7 @@ pub fn truncate_reason(mut reason: String) -> String {
 }
 
 /// Truncate a consumer-supplied identifier to `MAX_ECHOED_ID_LEN` bytes on a
-/// char boundary, for ECHOING back in a refusal. An over-length id is never
+/// char boundary, for echoing back in a refusal. An over-length id is never
 /// accepted, so a truncated echo cannot be mistaken for a live correlation: a
 /// consumer matching on it finds no order, which is the truth. Echoing the id at
 /// full length would recreate the unbounded frame the cap exists to prevent.
@@ -331,7 +332,7 @@ pub fn truncate_echoed_id(mut id: String) -> String {
     id
 }
 
-/// Boundary guard for a client order id: over-length is a MALFORMED request,
+/// Boundary guard for a client order id: over-length is a malformed request,
 /// refused with the existing rejection mechanism, never with
 /// `AdmissionRejected` (which reads as a capacity signal).
 pub fn validate_client_order_id(id: &ClientOrderId) -> Result<(), &'static str> {
@@ -368,14 +369,14 @@ pub enum AggressorSide {
 pub enum OrderType {
     Market,
     Limit,
-    /// Untriggered conditional carrying a trigger price and NO price: the fill
+    /// Untriggered conditional carrying a trigger price and no price: the fill
     /// comes from the print that triggered it and the reservation from the
     /// trigger, so a stamped price would be a number nothing reads.
     StopMarket,
     /// Untriggered conditional carrying both. `price` is the limit price the
-    /// order takes AFTER it triggers.
+    /// order takes after it triggers.
     StopLimit,
-    /// A stop whose trigger RATCHETS with the tape and fires on touch like any
+    /// A stop whose trigger ratchets with the tape and fires on touch like any
     /// other stop.
     ///
     /// The trigger follows the extreme the tape has reached since the order
@@ -392,7 +393,7 @@ pub enum OrderType {
     /// an indicator value, and covers neither `trail_points` nor `trail_offset`.
     TrailingStopMarket,
     /// The mirror of a stop: fires when the tape touches `trigger_price` coming
-    /// from the OTHER side, then takes liquidity.
+    /// from the other side, then takes liquidity.
     ///
     /// A stop protects a position (sell below, buy above); a touched order
     /// enters on strength or weakness (buy below, sell above). The trigger
@@ -402,7 +403,7 @@ pub enum OrderType {
     /// `MarketIfTouched` that rests as a limit at `price` once touched, exactly
     /// as `StopLimit` is to `StopMarket`.
     LimitIfTouched,
-    /// A market order that RESTS as a limit at the price it could not fill at,
+    /// A market order that rests as a limit at the price it could not fill at,
     /// rather than sweeping through the book.
     ///
     /// The venue's fill model has no book to sweep, so what this expresses here
@@ -410,37 +411,37 @@ pub enum OrderType {
     /// is the behaviour a real market-to-limit gives and which an IOC market
     /// cannot, since IOC cancels its remainder instead of resting it.
     ///
-    /// THAT ARGUMENT IS ABOUT WHY THE TYPE EXISTS, NOT A REFUSAL OF `Ioc` ON
-    /// IT, and the wire admits the combination deliberately. The precedence,
-    /// which the crate previously left unstated: THE TIME IN FORCE GOVERNS THE
-    /// REMAINDER. Where a remainder exists, `Fok` rejects the order before
+    /// That argument is about why the type exists, not a refusal of `Ioc` on
+    /// it, and the wire admits the combination deliberately. The precedence,
+    /// which the crate previously left unstated: the time in force governs the
+    /// remainder. Where a remainder exists, `Fok` rejects the order before
     /// acceptance, `Ioc` cancels the remainder, and `Gtc`/`Day`/`Gtd` keep it.
     /// Pinned by `mogwai-engine`'s test
     /// `a_market_to_limit_remainder_is_governed_by_its_time_in_force`.
     ///
-    /// WHAT THE ENGINE ACTUALLY DOES WITH THIS TYPE TODAY IS BROKEN IN BOTH
-    /// HALVES, and neither half is a design choice this doc endorses. Its fill
-    /// takes the WHOLE quantity at the order's OWN limit price with no
+    /// What the engine actually does with this type today is broken in both
+    /// halves, and neither half is a design choice this doc endorses. Its fill
+    /// takes the whole quantity at the order's own limit price with no
     /// reference to the tape, so a buy limited at 200 against a last print of
     /// 100 fills at 200 - the opposite of taking what the touch offers - which
     /// is also why no remainder arises on the clean path at all. Where an armed
-    /// divergence manufactures one, the kept remainder rests INERT rather than
+    /// divergence manufactures one, the kept remainder rests inert rather than
     /// as a limit, so it is scanned by nothing and can never fill or expire.
     /// The two are one open engine defect with two symptoms, recorded here so a
     /// reader does not mistake either for the intended model.
     MarketToLimit,
-    /// A trailing stop that RESTS AS A LIMIT once it fires, rather than taking
+    /// A trailing stop that rests as a limit once it fires, rather than taking
     /// liquidity - `TrailingStopMarket` is to this what `StopMarket` is to
     /// `StopLimit`.
     ///
-    /// It carries TWO distances. `trail_offset` holds the trigger away from the
+    /// It carries two distances. `trail_offset` holds the trigger away from the
     /// extreme the tape has reached, exactly as on `TrailingStopMarket`.
     /// `limit_offset` holds the limit away from that trigger, on the fillable
     /// side of it: a sell rests at `trigger - limit_offset`, a buy at
-    /// `trigger + limit_offset`. The limit is DERIVED and re-derived on every
+    /// `trigger + limit_offset`. The limit is derived and re-derived on every
     /// ratchet, so it follows the trigger rather than drifting away from it.
     ///
-    /// WHAT IT BUYS over `TrailingStopMarket`: a bound on the price the exit
+    /// What it buys over `TrailingStopMarket`: a bound on the price the exit
     /// accepts. A trailing stop that takes liquidity fills at whatever the
     /// triggering print slipped to, which is the shape a consumer uses when
     /// certainty of exit beats price; this one refuses to fill through its
@@ -465,7 +466,7 @@ impl OrderType {
         )
     }
 
-    /// Whether the order becomes a LIMIT once its trigger fires, rather than
+    /// Whether the order becomes a limit once its trigger fires, rather than
     /// taking liquidity.
     #[must_use]
     pub const fn rests_after_trigger(self) -> bool {
@@ -475,16 +476,16 @@ impl OrderType {
         )
     }
 
-    /// Whether `post_only` means anything on this type - THE ONE RULE, read by
+    /// Whether `post_only` means anything on this type - the one rule, read by
     /// the wire gate and by the engine's own validator, which used to spell it
     /// twice and disagree about `TrailingStopLimit`.
     ///
     /// `post_only` says "reject rather than take liquidity", so it is legal
-    /// exactly where the order's whole purpose is to REST: a `Limit`, and the
+    /// exactly where the order's whole purpose is to rest: a `Limit`, and the
     /// three types that become a limit once their trigger fires. It is refused
     /// on `MarketToLimit` even though that type does rest a remainder as a
     /// limit, and the exclusion is deliberate rather than an oversight: its
-    /// FIRST act is to take what the touch offers, which is the thing
+    /// first act is to take what the touch offers, which is the thing
     /// `post_only` forbids, so the two together ask for an order that must not
     /// do the one thing the type exists to do.
     #[must_use]
@@ -492,12 +493,12 @@ impl OrderType {
         matches!(self, Self::Limit) || self.rests_after_trigger()
     }
 
-    /// Whether the trigger fires when the tape reaches it from BELOW for a buy
-    /// and from ABOVE for a sell - the touched family - rather than the stop
+    /// Whether the trigger fires when the tape reaches it from below for a buy
+    /// and from above for a sell - the touched family - rather than the stop
     /// family's opposite convention.
     ///
-    /// A STOP buy triggers when price rises to it and a stop sell when price
-    /// falls to it: that is protection. A TOUCHED buy triggers when price falls
+    /// A stop buy triggers when price rises to it and a stop sell when price
+    /// falls to it: that is protection. A touched buy triggers when price falls
     /// to it and a touched sell when price rises to it: that is entry. Same
     /// machinery, opposite comparison, and getting it backwards turns every
     /// protective order into an entry.
@@ -514,11 +515,11 @@ impl OrderType {
     }
 
     /// The limit price a trailing stop limit rests at, given where its trigger
-    /// now sits. ONE implementation, called at acceptance and again on every
+    /// now sits. One implementation, called at acceptance and again on every
     /// ratchet, so the two can never disagree about which side of the trigger
     /// the limit belongs on.
     ///
-    /// The limit sits on the FILLABLE side: a sell triggers as price falls, so
+    /// The limit sits on the fillable side: a sell triggers as price falls, so
     /// resting below the trigger is what makes it reachable, and the offset is
     /// the slippage the consumer will accept before it would rather not trade.
     /// Putting it on the other side would rest a limit the tape has already
@@ -541,9 +542,9 @@ pub enum TimeInForce {
     Gtc,
     Ioc,
     Fok,
-    /// Rests until the end of the trading DAY, then expires.
+    /// Rests until the end of the trading day, then expires.
     ///
-    /// Not optional trivia: this is the DEFAULT on equity venues, so a surface
+    /// Not optional trivia: this is the default on equity venues, so a surface
     /// offering only Gtc, Ioc and Fok is not an equity surface. The day boundary
     /// comes from the instrument's calendar - a session close is a real instant
     /// the venue already knows - rather than from a wall clock.
@@ -573,49 +574,49 @@ impl TimeInForce {
 #[serde(tag = "type")]
 pub enum Command {
     SubmitOrder(SubmitOrder),
-    /// Submit a LINKED GROUP in one step: every member accepted, or the whole
+    /// Submit a linked group in one step: every member accepted, or the whole
     /// group rejected and nothing on the book.
     ///
-    /// WHY THE WIRE NEEDS THIS AT ALL, because a consumer can obviously send the
+    /// Why the wire needs this at all: a consumer can obviously send the
     /// legs one at a time and the venue will take them. It can, and that is the
-    /// hazard. A two-leg `Ouo` bracket dispatched per leg lets leg one FILL
+    /// hazard. A two-leg `Ouo` bracket dispatched per leg lets leg one fill
     /// before leg two has been admitted: the shrink runs against a sibling that
-    /// is not on the book yet, so leg two arrives at FULL size and the pair's
+    /// is not on the book yet, so leg two arrives at full size and the pair's
     /// aggregate fill is unbounded at twice the intended quantity. For a
     /// crossed slice that is an account reversal, which is exactly what a
     /// consumer consumes bracket linkage to prevent, so the guarantee it needs
     /// is not "the venue serves Ouo" but "the venue admits the group before any
     /// member can fill". Per-leg submission cannot state that and this can.
     ///
-    /// WHAT IS GUARANTEED, stated precisely so a consumer can cite it:
+    /// What is guaranteed, stated precisely so a consumer can cite it:
     ///
-    /// 1. ATOMIC ADMISSION. Every member is validated against the book and
-    ///    against the rest of the group BEFORE any of them is accepted. One
+    /// 1. Atomic admission. Every member is validated against the book and
+    ///    against the rest of the group before any of them is accepted. One
     ///    unacceptable member rejects the whole group, and the consumer sees one
     ///    `OrderRejected` per member and no `OrderAccepted` at all.
-    /// 2. NO TAPE ADVANCE BETWEEN MEMBERS. The whole group is one engine call at
+    /// 2. No tape advance between members. The whole group is one engine call at
     ///    one instant against one market reading, so no member meets a market
     ///    a sibling did not.
-    /// 3. FILL-ATOMIC LINKAGE. A member that fills during the group has its rule
-    ///    applied to every sibling, including the ones admitted AFTER it, before
+    /// 3. Fill-atomic linkage. A member that fills during the group has its rule
+    ///    applied to every sibling, including the ones admitted after it, before
     ///    the group returns and therefore before any sweep can look at them.
     ///
-    /// THE ONE CARVE-OUT, and it is funds. The dry pass judges every member
-    /// against the book as it is BEFORE the group runs, so it cannot see money
+    /// The one carve-out, and it is funds. The dry pass judges every member
+    /// against the book as it is before the group runs, so it cannot see money
     /// an earlier member's fill is about to spend. A member the venue can no
-    /// longer fund when its own turn comes is REJECTED on the second pass, with
+    /// longer fund when its own turn comes is rejected on the second pass, with
     /// its earlier siblings already accepted - so on this one axis guarantee 1
     /// holds for everything the venue can decide in advance and not for a
     /// balance the group's own fills moved.
     ///
-    /// Whether your group can meet it is a question about YOUR orders. A
+    /// Whether your group can meet it is a question about your own orders. A
     /// reduce-only member places no hold and cannot meet it; a member without
-    /// that flag takes a hold like any other order, and whether an exit CAN be
+    /// that flag takes a hold like any other order, and whether an exit can be
     /// reduce-only depends on the run's `oms_type` and is on your side of the
     /// wire. Size a group so its members are jointly affordable against the
     /// balance the venue holds at submission, and the carve-out is unreachable.
     ///
-    /// The group is SELF-CONTAINED: every id a member names must be another
+    /// The group is self-contained: every id a member names must be another
     /// member, which is what makes "admit the group" and "admit every sibling"
     /// the same statement.
     SubmitOrderGroup {
@@ -630,7 +631,7 @@ pub enum Command {
         price: Option<Decimal>,
         #[serde(default, with = "crate::decimal::str_option")]
         quantity: Option<Decimal>,
-        /// Amending the trigger of an UNTRIGGERED conditional restarts its
+        /// Amending the trigger of an untriggered conditional restarts its
         /// trigger window; on anything else it is rejected.
         #[serde(
             default,
@@ -639,7 +640,7 @@ pub enum Command {
         )]
         trigger_price: Option<Decimal>,
     },
-    /// Reconciliation query: ask the venue for the CURRENT status of its
+    /// Reconciliation query: ask the venue for the current status of its
     /// orders, answered from the engine's own book - not from any event the
     /// consumer may or may not have received. This is the second, independent
     /// witness Nautilus' reconciliation (startup mass-status and the
@@ -647,8 +648,8 @@ pub enum Command {
     /// resting order venue-side and drops the lifecycle event, this query
     /// still reports the truth.
     ///
-    /// Honest-content invariant: the reply's CONTENT is always a truthful
-    /// read of the venue book. Havoc may delay or drop the reply's DELIVERY
+    /// Honest-content invariant: the reply's content is always a truthful
+    /// read of the venue book. Havoc may delay or drop the reply's delivery
     /// (the snapshot classifies as execution, so `DelayAcks` holds it and
     /// `GoDark` drops it - transport faults are fair game and exercise the
     /// consumer's query-timeout path), but no divergence may ever alter what
@@ -672,7 +673,7 @@ pub enum Command {
     },
     /// Reconciliation query for the venue's fill history, the fill-report
     /// twin of [`Command::QueryOrders`] with the same honest-content /
-    /// havoc-able-delivery contract. The venue records each fill ONCE as it
+    /// havoc-able-delivery contract. The venue records each fill once as it
     /// books - a `DuplicateNextFill` doubles the wire event, not the truth -
     /// so this reply is the ground truth a dropped or duplicated
     /// `OrderFilled` stream can be reconciled against.
@@ -716,7 +717,7 @@ pub enum Command {
         end: Option<u64>,
         /// The token from the previous page of this session, echoed verbatim.
         ///
-        /// OPAQUE ON PURPOSE. It is the venue's own bookkeeping - which river,
+        /// Opaque on purpose. It is the venue's own bookkeeping - which river,
         /// which kind, the immutable cutoff, the next position - and a consumer
         /// that treats it as anything but a token to hand back is relying on
         /// something the venue has not promised. Keeping it opaque is what lets
@@ -812,7 +813,7 @@ pub enum WireOrderStatus {
     /// havoc cancel).
     Canceled,
     /// Terminal: the order's own time in force ended it - a `Gtd` reaching its
-    /// instant, or a `Day` whose session closed. DISTINCT FROM `Canceled`
+    /// instant, or a `Day` whose session closed. Distinct from `Canceled`
     /// because nobody cancelled it: a cancel is an actor's decision and an
     /// expiry is the clock, and a venue that reports one as the other tells a
     /// consumer its order was pulled when the consumer's own stated lifetime
@@ -820,7 +821,7 @@ pub enum WireOrderStatus {
     /// `OrderStatus::Expired` and an `OrderExpired` event, so the fidelity is
     /// available end to end rather than collapsing at the adapter.
     Expired,
-    /// Terminal: refused AFTER acceptance - today only a post-only stop-limit
+    /// Terminal: refused after acceptance - today only a post-only stop-limit
     /// that would take liquidity against its own triggering print. A
     /// pre-acceptance refusal never becomes a truth-store row at all.
     Rejected,
@@ -829,7 +830,7 @@ pub enum WireOrderStatus {
 impl WireOrderStatus {
     #[must_use]
     pub fn is_open(self) -> bool {
-        // `Triggered` is OPEN: a triggered stop-limit is resting and fillable,
+        // `Triggered` is open: a triggered stop-limit is resting and fillable,
         // and omitting it would make it vanish from open-order reconciliation
         // between its trigger and its fill.
         matches!(
@@ -918,7 +919,7 @@ pub struct SubmitOrder {
     #[serde(default, with = "crate::decimal::str_option")]
     pub price: Option<Decimal>,
     /// The price the tape must touch for a conditional to become live.
-    /// REQUIRED on StopMarket/StopLimit, refused on Market/Limit.
+    /// Required on `StopMarket`/`StopLimit`, refused on `Market`/`Limit`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -926,7 +927,7 @@ pub struct SubmitOrder {
     )]
     pub trigger_price: Option<Decimal>,
     /// How far a trailing stop's trigger sits from the extreme the tape has
-    /// reached. REQUIRED on `TrailingStopMarket` and `TrailingStopLimit`, and
+    /// reached. Required on `TrailingStopMarket` and `TrailingStopLimit`, and
     /// refused on every other type.
     ///
     /// An absolute price distance, not a fraction: Pine states a trail in points
@@ -938,8 +939,8 @@ pub struct SubmitOrder {
         with = "crate::decimal::str_option"
     )]
     pub trail_offset: Option<Decimal>,
-    /// How far a `TrailingStopLimit`'s LIMIT sits from its own trigger, on the
-    /// fillable side of it. REQUIRED on that type and refused on every other.
+    /// How far a `TrailingStopLimit`'s limit sits from its own trigger, on the
+    /// fillable side of it. Required on that type and refused on every other.
     ///
     /// Distinct from `trail_offset`, which holds the trigger away from the
     /// tape's extreme: this one holds the limit away from the trigger, so a
@@ -947,7 +948,7 @@ pub struct SubmitOrder {
     /// them would silently tie how far the stop trails to how much slippage the
     /// consumer tolerates.
     ///
-    /// The limit price is DERIVED from it rather than stated, at acceptance and
+    /// The limit price is derived from it rather than stated, at acceptance and
     /// again on every ratchet, which is why `price` is refused on this type: a
     /// trigger that moves and a limit that does not would drift apart until the
     /// limit is unreachable, and nautilus models the same materialization.
@@ -958,7 +959,7 @@ pub struct SubmitOrder {
     )]
     pub limit_offset: Option<Decimal>,
     pub time_in_force: TimeInForce,
-    /// Sim instant a `Gtd` order expires at. REQUIRED on `Gtd` and refused on
+    /// Sim instant a `Gtd` order expires at. Required on `Gtd` and refused on
     /// every other time-in-force, including `Day` - a day order's expiry comes
     /// from the instrument's calendar, not from the consumer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -978,7 +979,7 @@ pub struct SubmitOrder {
     /// sentence as its spelling.
     #[serde(default)]
     pub post_only: bool,
-    /// The order list this order belongs to, and what its membership MEANS.
+    /// The order list this order belongs to, and what its membership means.
     /// Absent for a standalone order, which is every order this venue served
     /// before linkage existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -993,7 +994,7 @@ pub const MAX_LINKED_ORDERS: usize = 8;
 /// How many orders one `SubmitOrderGroup` may carry.
 ///
 /// A bracket is two or three. The cap exists for the same reason
-/// `MAX_LINKED_ORDERS` does: a group is admitted and executed as ONE batch, so
+/// `MAX_LINKED_ORDERS` does: a group is admitted and executed as one batch, so
 /// its worst-case output has to be bounded before the batch runs, and the bound
 /// is per member. One more than `MAX_LINKED_ORDERS`, so a parent naming the
 /// maximum number of siblings can travel with all of them.
@@ -1001,25 +1002,25 @@ pub const MAX_GROUP_ORDERS: usize = MAX_LINKED_ORDERS + 1;
 
 /// The wire-shape guard for a `SubmitOrderGroup`, which is
 /// `validate_submit_order` for every member plus the rules that only exist
-/// because the members arrived TOGETHER.
+/// because the members arrived together.
 ///
 /// Those rules are what make the atomicity guarantee statable:
 ///
-/// - THE GROUP IS SELF-CONTAINED. Every `linked_order_ids` entry and every
+/// - The group is self-contained. Every `linked_order_ids` entry and every
 ///   `parent_order_id` must name another member. A group naming an outsider
 ///   could not promise that admitting the group admits every sibling, which is
 ///   the whole guarantee - the outsider might be rejected, or might already be
 ///   filled, and the consumer would have a bracket with a leg missing.
-/// - EVERY MEMBER IS LINKED, and to the SAME list. An unlinked order in a group
+/// - Every member is linked, and to the same list. An unlinked order in a group
 ///   frame is a standalone order asking for a guarantee that means nothing for
 ///   it; two list ids in one frame are two groups, and admitting them together
 ///   would promise an atomicity neither one asked for.
-/// - IDS ARE UNIQUE WITHIN THE GROUP. Two members under one id cannot both be
+/// - Ids are unique within the group. Two members under one id cannot both be
 ///   admitted, and deciding which one wins is a choice the venue must not make.
-/// - ONE SYMBOL. Atomic admission is a property of ONE book at ONE instant, and
+/// - One symbol. Atomic admission is a property of one book at one instant, and
 ///   a cross-symbol group would need two, so it is refused rather than served
 ///   with a guarantee that quietly does not hold across the pair.
-/// - NO `Ioc` OR `Fok`. A now-or-never order's fate is decided by the market
+/// - No `Ioc` or `Fok`. A now-or-never order's fate is decided by the market
 ///   rather than by admission, so it cannot be part of a promise about
 ///   admission; and it is the one verdict the venue cannot reach before it has
 ///   already accepted the members beside it.
@@ -1082,10 +1083,10 @@ pub fn validate_submit_group(orders: &[SubmitOrder]) -> Result<(), &'static str>
 
 /// What one order's membership of an order list means.
 ///
-/// A linkage is a GROUP ID plus a RULE, and nothing else: the venue holds no
+/// A linkage is a group id plus a rule, and nothing else: the venue holds no
 /// tree of orders, it holds a rule each member carries and applies at the
 /// instant a member fills. That is what makes a genuine bracket expressible -
-/// the sibling is reaped where the fill is COMMITTED, in the same batch, rather
+/// the sibling is reaped where the fill is committed, in the same batch, rather
 /// than on a later sweep that a second fill could beat.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrderLink {
@@ -1100,7 +1101,7 @@ pub struct OrderLink {
     /// child (one carrying `parent_order_id` and `NoContingency`).
     #[serde(default)]
     pub linked_order_ids: Vec<ClientOrderId>,
-    /// The order this one WAITS FOR. A child rests inert - unscanned, holding
+    /// The order this one waits for. A child rests inert - unscanned, holding
     /// no hold - until its parent fills, which is the whole of
     /// one-triggers-the-other. `None` for a parent or a standalone member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1112,21 +1113,21 @@ pub struct OrderLink {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Contingency {
     /// The order names siblings for the venue's records but a fill of it does
-    /// nothing to them. What a bare OTO PARENT carries: its children are named
+    /// nothing to them. What a bare `Oto` parent carries: its children are named
     /// by their own `parent_order_id`, and releasing them is not a rule about
     /// cancellation.
     #[default]
     NoContingency,
-    /// One-cancels-the-other: a fill of this order CANCELS every sibling it
+    /// One-cancels-the-other: a fill of this order cancels every sibling it
     /// names that is still resting. Any fill, not only a full one - a venue
     /// that let a partially-filled take-profit leave its stop live would let a
     /// bracket hold two live exits for one position.
     Oco,
-    /// One-triggers-the-other. Carried by a PARENT whose children wait on it;
+    /// One-triggers-the-other. Carried by a parent whose children wait on it;
     /// the release itself is driven by each child's `parent_order_id`, so this
     /// value is a declaration of intent rather than a second mechanism.
     Oto,
-    /// One-updates-the-other: a fill of this order SHRINKS every sibling it
+    /// One-updates-the-other: a fill of this order shrinks every sibling it
     /// names by the filled quantity, cancelling a sibling the shrink would take
     /// to zero. This is the bracket that survives partial fills - the stop
     /// tracks how much of the position is left.
@@ -1137,28 +1138,28 @@ pub enum Contingency {
 /// `validate_market_regime` / `validate_divergence` / `validate_inbound_havoc`
 /// in style and message convention. `quantity` must be strictly positive, and
 /// a `Limit` order must carry a strictly positive `price` (a `Market` order's
-/// price is legitimately absent - Nautilus MARKET orders carry no price).
+/// price is legitimately absent - nautilus `Market` orders carry no price).
 ///
 /// This is the crate's own gate, not a substitute for the venue-side check:
 /// `mogwai-engine`'s `validate_submit` is the authoritative, instrument-aware
 /// guard (grid alignment, instrument lookup, precision) and remains the last
 /// line of defense regardless of whether a caller runs this first.
 ///
-/// The apparent disagreement with the engine - this validator ACCEPTS a
-/// priceless `Market` order while `mogwai-engine`'s `validate_submit` REJECTS
+/// The apparent disagreement with the engine - this validator accepts a
+/// priceless `Market` order while `mogwai-engine`'s `validate_submit` rejects
 /// one ("submit price required") - is a deliberate two-phase split, not a
-/// drift. This gate validates the PRE-stamp wire, exactly what the adapter puts
-/// on the socket: a nautilus MARKET order legitimately carries no price there.
-/// The venue then STAMPS a synthetic execution price onto every Market order
+/// drift. This gate validates the pre-stamp wire, exactly what the adapter puts
+/// on the socket: a nautilus `Market` order legitimately carries no price there.
+/// The venue then stamps a synthetic execution price onto every Market order
 /// (on both the WS and HTTP carriers, failing loudly if synthesis fails) before
 /// the engine ever sees it, so by the time `validate_submit` runs the order
 /// always carries a price and a still-priceless one is a genuine post-stamp
-/// bug. The engine is the authoritative POST-stamp gate; this is the honest
-/// PRE-stamp one, and the two are consistent precisely because the stamp sits
+/// bug. The engine is the authoritative post-stamp gate; this is the honest
+/// pre-stamp one, and the two are consistent precisely because the stamp sits
 /// between them.
 pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
     validate_client_order_id(&order.client_order_id)?;
-    // The SAME rule the URL-carried ingresses use, not a length check of its
+    // The same rule the URL-carried ingresses use, not a length check of its
     // own. An order-entry symbol used to be bounded only by `MAX_SYMBOL_LEN`,
     // so the empty string and any byte outside the wire alphabet - a newline, a
     // control character, markup - reached the engine's instrument lookup and
@@ -1225,7 +1226,7 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         _ if order.trail_offset.is_some() && !order.order_type.trails() => {
             Err("trail_offset is legal only on a trailing order")
         }
-        // The limit price is DERIVED from the trigger and this offset, and is
+        // The limit price is derived from the trigger and this offset, and is
         // re-derived on every ratchet. A consumer-stated price would be
         // overwritten by the first trail, so accepting one would be a lie
         // rather than a harmless redundancy.
@@ -1250,26 +1251,26 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
         {
             Err("trail_offset must be > 0")
         }
-        // NAMES THE LEGAL SET rather than stating a rule. The message used to
-        // read "legal only on orders that rest as a limit", which is FALSE for
+        // Names the legal set rather than stating a rule. The message used to
+        // read "legal only on orders that rest as a limit", which is false for
         // `MarketToLimit` - a type that does rest its remainder as a limit and
         // is refused here anyway, for the reason on `may_be_post_only`. A
         // refusal whose stated reason does not hold for one of the orders it
         // refuses is how the rule gets "corrected" wrongly later.
         //
-        // IT SITS AHEAD OF THE CONDITIONAL-IOC ARM DELIBERATELY, and
-        // `Engine::validate_submit` checks the two in the SAME order. An order
+        // It sits ahead of the conditional-IOC arm deliberately, and
+        // `Engine::validate_submit` checks the two in the same order. An order
         // can break both rules at once - a post-only `StopMarket` marked
         // `Ioc` - and if the two gates reached them in opposite orders they
         // would name different reasons for one order, which is the exact
         // defect the shared predicate exists to remove.
         _ if order.post_only && !order.order_type.may_be_post_only() => Err(POST_ONLY_REFUSAL),
         // A conditional cannot be now-or-never: an order that must fill
-        // immediately cannot also wait for a trigger. Day and Gtd CAN wait, so
+        // immediately cannot also wait for a trigger. Day and Gtd can wait, so
         // they are admitted where Ioc and Fok are not.
         //
-        // `MarketToLimit` IS NOT CONDITIONAL AND IS DELIBERATELY NOT CAUGHT
-        // HERE. It waits for nothing - it acts at once and only its REMAINDER
+        // `MarketToLimit` is not conditional and is deliberately not caught
+        // here. It waits for nothing - it acts at once and only its remainder
         // is in question - so the type and the time in force are not in
         // conflict, and the precedence between them is stated on the variant.
         _ if order.order_type.is_conditional()
@@ -1295,15 +1296,15 @@ pub fn validate_submit_order(order: &SubmitOrder) -> Result<(), &'static str> {
 /// The wire-shape half of the linkage contract: bounded, self-consistent, and
 /// refusing the shapes whose meaning the venue would have to invent.
 ///
-/// The rules that are NOT arbitrary:
+/// The rules that are not arbitrary:
 ///
 /// - A rule that acts on siblings must NAME some. `Oco` and `Ouo` with nothing
 ///   linked is an order that silently behaves like a standalone one, which is
 ///   the failure a consumer would discover only by watching a stop it thought was
 ///   reaped go on to fill.
-/// - An order may not link ITSELF. A self-cancelling `Oco` would try to cancel
+/// - An order may not link itself. A self-cancelling `Oco` would try to cancel
 ///   the order whose fill triggered it.
-/// - A CHILD must be able to wait. A market child released by its parent's fill
+/// - A child must be able to wait. A market child released by its parent's fill
 ///   would have to execute against a reading the release path does not take, and
 ///   a now-or-never child would expire at submit, before its parent ever fills.
 ///   Both are refused rather than reinterpreted.
@@ -1350,7 +1351,7 @@ fn validate_order_link(order: &SubmitOrder, link: &OrderLink) -> Result<(), &'st
 /// What an `AdmissionRejected` refers to. Present because the refusal must be
 /// translatable: the adapter turns a refused submit into nautilus
 /// `OrderRejected` but a refused cancel into `OrderCancelRejected` - flipping a
-/// live order to Rejected because its CANCEL was refused would be an invalid
+/// live order to Rejected because its cancel was refused would be an invalid
 /// transition (see `VenueMessage::OrderCancelRejected`).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind")]
@@ -1358,7 +1359,7 @@ pub enum AdmissionSubject {
     Submit {
         client_order_id: ClientOrderId,
     },
-    /// A whole `SubmitOrderGroup`, named by its LIST id rather than by its
+    /// A whole `SubmitOrderGroup`, named by its list id rather than by its
     /// members. One id keeps the frame bounded the way every other subject is,
     /// and it loses nothing: a group is admitted or refused whole, so naming
     /// one member would be as wrong as naming none, and the consumer knows which
@@ -1376,7 +1377,7 @@ pub enum AdmissionSubject {
     /// echoed on the reply (bounded by `validate_request_id`, which is what
     /// makes this subject's contribution to `ADMISSION_FRAME_MAX_BYTES`
     /// computable), so a waiting requester can fail its own wait instead of
-    /// timing out. `query` names WHICH query, because a consumer keeps two
+    /// timing out. `query` names which query, because a consumer keeps two
     /// separate waiter maps keyed by request id and the protocol nowhere
     /// requires ids to be unique across the two.
     Query {
@@ -1392,9 +1393,9 @@ pub enum AdmissionSubject {
 /// of any length, which makes `ADMISSION_FRAME_MAX_BYTES` - and therefore the
 /// priority lane's frame-count memory bound - fictional.
 ///
-/// THE INVARIANT IS HELD AT SERIALIZATION, NOT AT CONSTRUCTION, deliberately.
+/// The invariant is held at serialization, not at construction, deliberately.
 /// Making the variants unconstructible from a raw `String` was proposed in the
-/// 2026-08 hunt and DECLINED: the subject is built at many refusal sites from
+/// 2026-08 hunt and declined: the subject is built at many refusal sites from
 /// ids the venue has already refused, so a fallible constructor would put an
 /// error path inside error handling. The residual is disclosed rather than
 /// fixed - an in-memory `AdmissionSubject` may hold an over-length id, and only
@@ -1516,44 +1517,44 @@ pub fn validate_modify_order(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum VenueMessage {
-    /// THE RUN reached its declared simulated duration. Venue-wide: it is true
+    /// The run reached its declared simulated duration. Venue-wide: it is true
     /// for every passenger at once and nothing further comes from this venue.
     /// Sent immediately before a normal close, which makes a planned exit
     /// distinguishable from a failed connection.
     ///
-    /// A passenger boarding a run that has ALREADY completed is told at once,
+    /// A passenger boarding a run that has already completed is told at once,
     /// and that is the same event rather than a third one - it is learning a
     /// run-wide fact, not causing a new kind of completion.
     ///
-    /// BOTH FIELDS ARE THIS PASSENGER'S OBSERVATION of a run-wide fact, read on
+    /// Both fields are this passenger's observation of a run-wide fact, read on
     /// its own boat clock. `elapsed_ns` is therefore the span that boat has
-    /// covered, NOT the run's declared duration: a boat placed late, or a
+    /// covered, not the run's declared duration: a boat placed late, or a
     /// passenger that boards after completion, reports a shorter span for the
     /// same event. See `reference/clock.md`.
     RunComplete {
         sim_now_ns: u64,
         elapsed_ns: u64,
     },
-    /// THIS PASSENGER's own declared duration elapsed. The run continues for
+    /// This passenger's own declared duration elapsed. The run continues for
     /// everyone else; for this socket it is over, and redialling would start a
     /// fresh duration rather than resume anything.
     ///
-    /// A SEPARATE VARIANT RATHER THAN A FIELD, deliberately. Both events end a
+    /// A separate variant rather than a field, deliberately. Both events end a
     /// socket with WS 1000, and they were once the same frame - so a consumer
     /// classifying on the frame called a passenger's own deadline a finished
     /// run and stopped, while the close reason that could have told it apart
     /// was documented as unreliable. A new field would not have cured that: an
     /// older decoder ignores an unknown field and commits the same false
-    /// transition, where an unknown TAG fails outright and makes version skew
+    /// transition, where an unknown tag fails outright and makes version skew
     /// visible instead of silent.
     ///
-    /// THE RUN WINS A TIE. If the run's own deadline has passed, the venue
+    /// The run wins a tie: if the run's own deadline has passed, the venue
     /// announces `RunComplete` even when this passenger's timer fired in the
     /// same instant: the run-wide fact is the stronger one, and it is the one
     /// that stays true for a consumer deciding whether to redial.
     ///
-    /// `elapsed_ns` is the span observed on the boat clock SINCE THIS PASSENGER
-    /// BOARDED, which is the same kind of quantity `RunComplete` carries and is
+    /// `elapsed_ns` is the span observed on the boat clock since this passenger
+    /// boarded, which is the same kind of quantity `RunComplete` carries and is
     /// not the same as the deadline that fired - a boat can predate its
     /// passenger, and a timer can wake late. `declared_duration_ns` states the
     /// deadline itself, so a consumer can see the difference rather than infer
@@ -1563,14 +1564,14 @@ pub enum VenueMessage {
         elapsed_ns: u64,
         declared_duration_ns: u64,
     },
-    /// The venue REFUSED to do the work, before any engine state was touched:
+    /// The venue refused to do the work, before any engine state was touched:
     /// its per-connection outbound capacity could not cover the command's
     /// worst-case output, or the request could not be decoded at all.
     /// `subject` names what was refused so the refusal is translatable per
     /// command (a refused cancel is not a rejected order).
     ///
     /// Admission truth, not engine output: it classifies `EventKind::Admission`,
-    /// rides the venue's priority lane, and is deliberately NOT held by a
+    /// rides the venue's priority lane, and is deliberately not held by a
     /// `DelayAcks` window - the knob that holds engine output does not reach
     /// something the engine never produced. See `docs/havoc.md`.
     /// `reason` is venue-generated and truncated to `MAX_REASON_LEN`, which
@@ -1579,8 +1580,8 @@ pub enum VenueMessage {
     /// The venue could not admit a command or a frame, and said so instead of
     /// dropping it.
     ///
-    /// EVERY ADMISSION REFUSAL IS BACKPRESSURE, which is what `retryable` says
-    /// as DATA rather than as prose. It matters because of what happens to this
+    /// Every admission refusal is backpressure, which is what `retryable` says
+    /// as data rather than as prose. It matters because of what happens to this
     /// frame downstream: a consumer's adapter has to map it onto its own stack's
     /// event for the same subject, and nautilus's `OrderRejected` carries a
     /// reason string and nothing else - so a refused submit reaches a strategy
@@ -1591,13 +1592,13 @@ pub enum VenueMessage {
     /// distinction a field.
     ///
     /// `true` on every variant this venue constructs today, and the field is not
-    /// therefore pointless: it is the CONTRACT that an admission refusal means
+    /// therefore pointless: it is the contract that an admission refusal means
     /// "the venue was full, not that it said no", stated where a consumer can
     /// read it. A future refusal on this frame that is genuinely not retryable
     /// sets it `false` and no consumer has to be told.
     ///
     /// `#[serde(default)]` because absent must mean the safe reading, which is
-    /// NOT retryable: a consumer that infers retryability from a venue predating
+    /// not retryable: a consumer that infers retryability from a venue predating
     /// the field would retry against a refusal nobody promised was transient.
     AdmissionRejected {
         subject: AdmissionSubject,
@@ -1638,7 +1639,7 @@ pub enum VenueMessage {
     /// because the order's own `time_in_force` already says which clock ran
     /// out and the venue has nothing to add.
     ///
-    /// A SEPARATE FRAME rather than an `OrderCanceled` with a flag: a consumer
+    /// A separate frame rather than an `OrderCanceled` with a flag: a consumer
     /// matching on the frame is the one that has to act differently, and a
     /// flag on the cancel arm is a distinction every consumer must remember to
     /// read. It is not duplicated by `DuplicateNextFill` for the same reason
@@ -1683,8 +1684,8 @@ pub enum VenueMessage {
     /// unknown, already terminal (filled or canceled), or the cancel is
     /// otherwise illegal.
     ///
-    /// Distinct from `OrderRejected`, which terminates the ORDER. A rejected
-    /// cancel does NOT kill the order - it is still whatever it was (Accepted,
+    /// Distinct from `OrderRejected`, which terminates the order. A rejected
+    /// cancel does not kill the order - it is still whatever it was (Accepted,
     /// PartiallyFilled, or already terminal), and nautilus's own FSM restores
     /// the pre-cancel status on `CancelRejected`. Overloading `OrderRejected`
     /// for a cancel failure (as the engine once did) would wrongly flip a live
@@ -1711,12 +1712,12 @@ pub enum VenueMessage {
     /// reason history moved onto the socket, and it is why the page names no
     /// symbol: the connection already did.
     ///
-    /// SPLICING ONTO LIVE, which is the part a consumer has to get right. A
+    /// Splicing onto live, which is the part a consumer has to get right. A
     /// socket is attached to the live tape at upgrade, so live frames keep
     /// crossing while a history session paginates. The venue fixes `cutoff` at
     /// the first page and every later page of that session uses the same one,
     /// so pagination cannot chase a moving present and never finish. The
-    /// consumer starts buffering live rows BEFORE it sends the first
+    /// consumer starts buffering live rows before it sends the first
     /// `QueryHistory` - otherwise a frame can arrive between deciding to
     /// backfill and the command reaching the venue - and once the session
     /// completes it drops buffered rows of that kind at or below `cutoff` and
@@ -1766,13 +1767,13 @@ pub enum VenueMessage {
     /// the venue declares the loss and keeps serving, and the reader decides its
     /// own response.
     ///
-    /// POSITIONAL, which is why it rides the market lane rather than the
+    /// Positional, which is why it rides the market lane rather than the
     /// priority lane. It is written immediately before the first market frame
     /// delivered after the loss, so the hole it names is the one the reader is
     /// about to read across. A diagnostic that overtook the market backlog would
     /// name a boundary the reader had not reached.
     ///
-    /// THE BOUNDARIES ARE AGGREGATION BOUNDS, NOT FRAME IDENTITIES. Several
+    /// The boundaries are aggregation bounds, not frame identities. Several
     /// trades and quotes can share one `ts_event`, so these delimit the affected
     /// span for a reader folding bars or advancing a cursor; they do not say
     /// which frames were lost. `after_ts_event` is the last market frame that
@@ -1780,7 +1781,7 @@ pub enum VenueMessage {
     /// one; `resumed_ts_event` is the first frame delivered after it, absent
     /// when the tape ended inside the hole.
     ///
-    /// EVERY DECLARED LOSS IS UNARMED. A frame the venue deliberately withheld
+    /// Every declared loss is unarmed. A frame the venue deliberately withheld
     /// under `GoDark` or `StallData` is not loss - the consumer armed it - and a
     /// hole discovered while such a window is open is held back until delivery
     /// resumes rather than announced into a blackout. The venue does not claim
@@ -1795,7 +1796,7 @@ pub enum VenueMessage {
     /// the passenger's life. The venue never ends a connection for either - what
     /// to do about a lossy view is the consumer's decision, not the venue's.
     ///
-    /// DELIVERY IS NOT GUARANTEED WHEN THE TRANSPORT FAILS. This declares
+    /// Delivery is not guaranteed when the transport fails. This declares
     /// recoverable loss while the connection is still writable; a sink failure
     /// can leave an already-owed declaration undeliverable, and socket
     /// termination is then the only observable.
@@ -1824,11 +1825,11 @@ pub enum VenueMessage {
     /// fault has no target to name.
     ///
     /// Classifies `EventKind::Admission`, not `Exec`: it reports what the
-    /// venue's REQUEST HANDLING refused, which is never something the matching
+    /// venue's request handling refused, which is never something the matching
     /// engine produced, so `DelayAcks` (a hold on engine output) does not reach
     /// it and it rides the venue's priority lane ahead of held traffic.
     ///
-    /// `reason` is venue-generated prose and MUST be routed through
+    /// `reason` is venue-generated prose and must be routed through
     /// `truncate_reason` at every construction site: serde's decode-error text
     /// echoes consumer-controlled field names, and without the truncation
     /// `ADMISSION_FRAME_MAX_BYTES` - hence the priority lane's frame count as a
@@ -1843,7 +1844,7 @@ pub enum VenueMessage {
 /// without buffering the frame.
 ///
 /// The tag is a `Cow`, not a `&str`, and that is load-bearing rather than
-/// stylistic: serde_json can only hand out a BORROWED string when the JSON
+/// stylistic: serde_json can only hand out a borrowed string when the JSON
 /// scalar contains no escape sequence, so a borrowed probe would refuse
 /// a tag written with a `\uXXXX` escape - a valid, if noncanonical, spelling that
 /// the fully general enum decoder accepts. Refusing it would narrow what this
@@ -1922,7 +1923,7 @@ impl VenueMessage {
             | VenueMessage::OrderUpdated { .. }
             | VenueMessage::OrderModifyRejected { .. }
             | VenueMessage::OrderCancelRejected { .. } => EventKind::Exec,
-            // TRANSPORT CLASSIFICATION, not a claim that these are admissions
+            // Transport classification, not a claim that these are admissions
             // in the ordinary sense. This bucket is what `DelayAcks` is exempt
             // from and what rides the priority lane; the two terminal
             // announcements sit here because a completion must not be held
@@ -2101,15 +2102,15 @@ mod tests {
         }
     }
 
-    /// ORDER ENTRY JUDGES A SYMBOL BY THE SAME ALPHABET THE URL INGRESSES DO.
+    /// Order entry judges a symbol by the same alphabet the URL ingresses do.
     /// It did not until 2026-08-19: `validate_submit_order` carried a bare
-    /// `symbol.len() > MAX_SYMBOL_LEN` check, so the EMPTY string and any byte
+    /// `symbol.len() > MAX_SYMBOL_LEN` check, so the empty string and any byte
     /// outside the wire alphabet were admitted at the one inbound symbol
     /// ingress this workspace has, while a 2026-08 audit's record asserted
     /// that all three ingresses validated. The claim was wrong at exactly
     /// this call.
     ///
-    /// BOTH INGRESS SHAPES ARE COVERED, because `SubmitOrderGroup` carries up
+    /// Both ingress shapes are covered, because `SubmitOrderGroup` carries up
     /// to `MAX_GROUP_ORDERS` symbols of its own and reaches this validator only
     /// through `validate_submit_group`. A fix applied to the single-order path
     /// alone would leave the group path open and this test would say so.
@@ -2153,16 +2154,16 @@ mod tests {
             let order = submit(illegal);
             let refusal = validate_submit_order(&order)
                 .expect_err(&format!("{illegal:?} must be refused at order entry"));
-            // THE GROUP ASSERTION IS AN EQUALITY, not an `is_err`. A group of
+            // The group assertion is an equality, not an `is_err`. A group of
             // one unlinked order is refused for want of a link whatever its
             // symbol says, so `is_err` would pass over a group path that never
             // looked at the symbol at all. `validate_submit_group` runs the
-            // per-member validator BEFORE any linkage rule, so the symbol's
+            // per-member validator before any linkage rule, so the symbol's
             // refusal is the one that must come back.
             assert_eq!(
                 validate_submit_group(std::slice::from_ref(&order)),
                 Err(refusal),
-                "{illegal:?} must be refused through the group carrier for the SAME reason"
+                "{illegal:?} must be refused through the group carrier for the same reason"
             );
         }
     }
@@ -2171,7 +2172,7 @@ mod tests {
     /// test. `validate_callsign` has two production callers - `ws.rs`'s
     /// upgrade refusal and the adapter's config check - and one use in
     /// `adapter_smoke.rs` as an oracle on a minted callsign, so every existing
-    /// use is a POSITIVE case. A body of `Ok(())` passed the whole workspace:
+    /// use is a positive case. A body of `Ok(())` passed the whole workspace:
     /// the refusals are what those two call sites exist for, and nothing
     /// exercised one.
     ///
@@ -2179,7 +2180,7 @@ mod tests {
     /// alphabet and a different cap, so a drift between them is representable;
     /// this pins the half that is not a symbol. The empty case is called out
     /// because the function makes an explicit ruling on it: `callsign=` with
-    /// nothing after it is a consumer that HAS spoken, and reading it as absent
+    /// nothing after it is a consumer that has spoken, and reading it as absent
     /// would silently hand back the always-evict behaviour it was trying to
     /// leave.
     #[test]
@@ -2214,7 +2215,7 @@ mod tests {
                 "{illegal:?} must be refused"
             );
         }
-        // THE MESSAGE AND THE CONSTANT ARE CHECKED AGAINST EACH OTHER, not the
+        // The message and the constant are checked against each other, not the
         // constant against a literal. The refusal text is a hardcoded
         // "callsigns are 1 to 64 characters" and nothing else would notice the cap
         // moving out from under it - the durable-prose-asserting-a-live-fact
@@ -2228,7 +2229,7 @@ mod tests {
     }
 
     /// The two echo guards, which bound what a refusal frame may carry back.
-    /// Both are one-liners and both are exercised only INDIRECTLY today -
+    /// Both are one-liners and both are exercised only indirectly today -
     /// `validate_client_order_id` through `validate_submit_order`, and
     /// `validate_request_id` through the venue's query path - so neither had a
     /// case at its own boundary.
@@ -2240,8 +2241,8 @@ mod tests {
         assert!(validate_client_order_id(&over).is_err());
         assert!(validate_request_id(&at_cap).is_ok());
         assert!(validate_request_id(&over).is_err());
-        // EMPTY IS ACCEPTED BY BOTH, deliberately rather than by omission:
-        // these are LENGTH guards for an echo, and the emptiness rules live
+        // Empty is accepted by both, deliberately rather than by omission:
+        // these are length guards for an echo, and the emptiness rules live
         // where they mean something (the engine refuses an empty
         // `client_order_id` on submit, with its own message). Pinned so a
         // reader does not infer a rule these functions do not make.
@@ -2250,19 +2251,19 @@ mod tests {
     }
 
     /// The two truncations, whose whole content is the char-boundary walk.
-    /// Both run on the ECHO path of a refusal, so a panic here is a panic on
+    /// Both run on the echo path of a refusal, so a panic here is a panic on
     /// the frame that reports someone else's error - and a multi-byte
     /// character straddling the cap is the only input that reaches the loop at
     /// all.
     #[test]
     fn truncation_cuts_on_a_char_boundary_and_leaves_short_values_alone() {
-        // Untouched below the cap, and AT it: the guard is `<=`.
+        // Untouched below the cap, and at it: the guard is `<=`.
         let at_cap = "x".repeat(MAX_ECHOED_ID_LEN);
         assert_eq!(truncate_echoed_id(at_cap.clone()), at_cap);
         let short = "O-1".to_string();
         assert_eq!(truncate_reason(short.clone()), short);
 
-        // A four-byte character straddling the cap: the cut lands BEFORE it,
+        // A four-byte character straddling the cap: the cut lands before it,
         // never inside it, so the result is short of the cap rather than at it.
         let straddling = format!("{}\u{1f600}", "x".repeat(MAX_ECHOED_ID_LEN - 2));
         let cut = truncate_echoed_id(straddling);
@@ -2278,10 +2279,10 @@ mod tests {
         assert_eq!(cut.len(), MAX_REASON_LEN - 1);
         assert!(cut.chars().all(|ch| ch == 'y'));
 
-        // An ASCII overflow cuts exactly AT the cap on both, which is the term
+        // An ASCII overflow cuts exactly at the cap on both, which is the term
         // `ORDER_EVENT_MAX_BYTES` charges `MAX_REASON_LEN` and
         // `2 * MAX_ECHOED_ID_LEN` for. Asserted on both because the straddling
-        // case above lands SHORT of the cap and so cannot pin the ceiling the
+        // case above lands short of the cap and so cannot pin the ceiling the
         // reservation is derived from.
         assert_eq!(
             truncate_reason("z".repeat(MAX_REASON_LEN * 3)).len(),
@@ -2293,14 +2294,14 @@ mod tests {
         );
     }
 
-    /// The three tape predicates AT the price, which is the only argument that
+    /// The three tape predicates at the price, which is the only argument that
     /// separates them and the one a fixture built from a market away from the
     /// level cannot reach. They are exercised through the engine and the data
     /// walk today, never directly, and the strictness split is the whole
     /// design: a limit is behind the queue at its own price, a conditional
     /// holds no queue position at all.
     ///
-    /// THE COMPLEMENT CLAIM IS `trades_through`'s DOC COMMENT MADE RUNNABLE -
+    /// The complement claim is `trades_through`'s doc comment made runnable -
     /// it states that for the same side and the same price the two are exact
     /// logical complements, and that is what silently stops being true if
     /// either comparison is relaxed.
@@ -2321,7 +2322,7 @@ mod tests {
             }
         }
 
-        // A print AT the level: through for neither side, touching for both.
+        // A print at the level: through for neither side, touching for both.
         assert!(!trades_through(Side::Buy, px, px));
         assert!(!trades_through(Side::Sell, px, px));
         assert!(touches_trigger(Side::Buy, px, px));
@@ -2337,8 +2338,8 @@ mod tests {
         assert!(touches_toward(Side::Sell, px, above) && !touches_trigger(Side::Sell, px, above));
 
         // `ScanKind::hit` is a three-arm match over exactly these three
-        // functions, so what this holds is NARROW and worth stating as such:
-        // THE ARMS ARE NOT TRANSPOSED. It cannot see the engine assigning the
+        // functions, so what this holds is narrow and worth stating as such:
+        // the arms are not transposed. It cannot see the engine assigning the
         // wrong `ScanKind` to an order, which is the drift that would actually
         // bite - that classification is held where an order is built, not here.
         for side in [Side::Buy, Side::Sell] {
@@ -2359,27 +2360,27 @@ mod tests {
         }
     }
 
-    /// THE HOLE THE REFUSAL FIX OPENED ONE LAYER UP, and the reason
+    /// The hole the refusal fix opened one layer up, and the reason
     /// `crate::decimal::str_option` exists instead of
     /// `rust_decimal::serde::str_option`.
     ///
-    /// An optional wire decimal has TWO legal spellings for "no value" - the
-    /// field ABSENT, or present and `null` - and the first cut of the numeric
-    /// refusal broke BOTH of them, each by a different mechanism. (An earlier
+    /// An optional wire decimal has two legal spellings for "no value" - the
+    /// field absent, or present and `null` - and the first cut of the numeric
+    /// refusal broke both of them, each by a different mechanism. (An earlier
     /// draft of this comment counted three by listing "absent" and "omitted"
     /// as separate spellings; they are one.) The dependency's
-    /// `str_option` REFUSES an explicit `null`, which is exactly what the venue
+    /// `str_option` refuses an explicit `null`, which is exactly what the venue
     /// and the adapter emit for a priceless order - a stop-market submit, an
     /// amend that does not touch the price - and it made
     /// `adapter_submits_a_stop_market_and_sees_triggered_then_filled` and
     /// `a_trigger_amend_on_a_triggered_stop_limit_keeps_it_triggered` fail with
     /// no execution event at all, because the stub decodes with a silent
     /// `if let Ok`. And a `with = ...` field loses serde's implicit
-    /// Option-is-optional handling, so an ABSENT `price` - which every
+    /// Option-is-optional handling, so an absent `price` - which every
     /// `Market`-order fixture in the serving suite sends - became a
     /// missing-field error until the `default`s went back on.
     ///
-    /// Both are pinned HERE rather than left to the socket suites, which the
+    /// Both are pinned here rather than left to the socket suites, which the
     /// changed-files check lane does not run.
     #[test]
     fn an_absent_or_null_optional_wire_decimal_is_still_none() {
@@ -2398,8 +2399,8 @@ mod tests {
         }
 
         // The two order shapes that actually reach the venue without a price.
-        // The Market one OMITS the field, exactly as the serving suite's
-        // fixtures do; the StopMarket one spells it NULL, exactly as the
+        // The Market one omits the field, exactly as the serving suite's
+        // fixtures do; the StopMarket one spells it null, exactly as the
         // adapter's `Command` serialization does.
         for frame in [
             r#"{"type":"SubmitOrder","client_order_id":"O-1","symbol":"BTCUSDT","side":"Buy","order_type":"Market","quantity":"1","time_in_force":"Gtc"}"#,
@@ -2419,26 +2420,26 @@ mod tests {
         assert_eq!(reserialized, modify_null);
     }
 
-    /// EVERY `Decimal` ON THE WIRE IS A JSON STRING, IN BOTH DIRECTIONS, AND A
-    /// NUMERIC SPELLING IS REFUSED RATHER THAN ROUNDED.
+    /// Every `Decimal` on the wire is a JSON string, in both directions, and a
+    /// numeric spelling is refused rather than rounded.
     ///
-    /// `rust_decimal`'s DEFAULT `Deserialize` accepts a JSON number as well as
+    /// `rust_decimal`'s default `Deserialize` accepts a JSON number as well as
     /// a string, and the number goes through `f64`. Measured before the fix,
     /// against these same types: `{"price": 12345678901234567890.123}` decoded
     /// to `12345678901234567000`, `0.1234567890123456789` to
     /// `0.12345678901234568`, and - the asymmetry that shows the two grammars
-    /// are not even nested - `1e-30` decoded as a NUMBER to `Decimal::ZERO`
-    /// while the same text as a STRING was refused outright. A price or a
+    /// are not even nested - `1e-30` decoded as a number to `Decimal::ZERO`
+    /// while the same text as a string was refused outright. A price or a
     /// quantity whose value depends on how the peer spelled it is not a source
     /// of truth, so the `with = "rust_decimal::serde::str"` annotations make
     /// the string spelling the only one.
     ///
-    /// THE LINE IS MONEY, NOT "Decimal everywhere", and the split is by what
-    /// the number MEANS rather than by which module it lives in. Prices,
-    /// quantities, balances and equity are STRING-ONLY wherever they decode;
+    /// The line is money, not "Decimal everywhere", and the split is by what
+    /// the number means rather than by which module it lives in. Prices,
+    /// quantities, balances and equity are string-only wherever they decode;
     /// operator-supplied fractions and thresholds stay tolerant.
     ///
-    /// STRING-ONLY, and this table is only PART of that set: the frames here
+    /// String-only, and this table is only part of that set: the frames here
     /// (execution, account and market data), `risk::RiskState` and its nested
     /// `Breach` (published on `GET /account`, pinned by
     /// `a_published_risk_state_refuses_a_numeric_decimal`), and
@@ -2446,14 +2447,14 @@ mod tests {
     /// opening balances, pinned by
     /// `an_opening_balance_must_be_spelled_as_a_string`).
     ///
-    /// TOLERANT, deliberately, and the list is exhaustive as of this round:
+    /// Tolerant, deliberately, and the list is exhaustive as of this round:
     /// `control::Divergence` (`POST /control/divergence`), `risk::RiskPolicy`
     /// and `risk::AccountPolicy` around it, and `instruments::InstrumentSpec`.
     /// The last three are also TOML config, where `multiplier = 2` is the
     /// natural spelling, and all of them carry fractions and thresholds rather
     /// than a booked quantity.
     ///
-    /// NOTHING DETECTS A NEW `Decimal` FIELD THAT FORGETS THE ANNOTATION. The
+    /// Nothing detects a new `Decimal` field that forgets the annotation. The
     /// table below is exhaustive by hand over this module's 35 serde `Decimal`
     /// fields across ten struct shapes - `SubmitOrder` 5, `ModifyOrder` 3,
     /// `OrderUpdated` 4, `OrderFilled` 4, `OrderStatusInfo` 4, `Balance` 3,
@@ -2468,13 +2469,13 @@ mod tests {
         const TRADE: &str = r#"{"type":"Trade","symbol":"BTCUSDT","price":"100.5","size":"2","aggressor":"Buyer","ts_event":1}"#;
         const QUOTE: &str = r#"{"type":"Quote","symbol":"BTCUSDT","bid_px":"99.5","ask_px":"100.5","bid_sz":"2","ask_sz":"3","ts_event":1}"#;
 
-        // FIRST, because the hot path has its own decoder and this is the
+        // First, because the hot path has its own decoder and this is the
         // only block that reaches it: `from_json_str` short-circuits the
         // internally-tagged content buffer for Trade and Quote, so it is a
         // second decode path over the same fields. Placed after the tables it
         // could never fail first, which would make it unbite-checkable.
         //
-        // EVERY decimal field of both frames, not a sample of them: the fields
+        // Every decimal field of both frames, not a sample of them: the fields
         // do share one `Deserialize`, but this block's whole claim is that the
         // second path refuses what the first does, and a claim stated over
         // "the same fields" has to be checked over all of them.
@@ -2497,8 +2498,8 @@ mod tests {
 
         // (label, a fully valid frame, every Decimal field in it).
         //
-        // THE SUBMIT SHAPE NEEDS TWO ROWS BECAUSE NO SINGLE ORDER TYPE CARRIES
-        // ALL FIVE OF ITS DECIMALS LEGALLY - `TrailingStopLimit` REFUSES
+        // The submit shape needs two rows because no single order type carries
+        // all five of its decimals legally - `TrailingStopLimit` refuses
         // `price`, whose value it derives from `limit_offset`. A one-row
         // fixture spelling all five was a frame `validate_submit_order` would
         // reject; decode-only tests never call the validator, so it passed
@@ -2557,13 +2558,13 @@ mod tests {
             ("Quote", QUOTE, &["bid_px", "ask_px", "bid_sz", "ask_sz"]),
         ];
 
-        // Strip the quotes off ONE field's value, leaving the rest of the frame
+        // Strip the quotes off one field's value, leaving the rest of the frame
         // untouched, so a refusal can only be about that field's spelling.
         //
-        // THE RENAME CASE - a field renamed out from under this table - is
+        // The rename case - a field renamed out from under this table - is
         // caught by the `find` panic below and by nothing else. An earlier
         // draft added a trailing `assert_ne!(out, frame)` claiming to guard it;
-        // `out` is `frame` minus two quote characters and so ALWAYS differs, so
+        // `out` is `frame` minus two quote characters and so always differs, so
         // that assertion could not fail and the guard it advertised did not
         // exist.
         fn unquote(frame: &str, field: &str) -> String {
@@ -2586,7 +2587,7 @@ mod tests {
         for (label, frame, fields) in commands {
             let decoded = serde_json::from_str::<Command>(frame)
                 .unwrap_or_else(|e| panic!("{label}: the string spelling must still decode: {e}"));
-            // EVERY FIXTURE IS A FRAME THE VENUE WOULD ACTUALLY ADMIT. Decode
+            // Every fixture is a frame the venue would actually admit. Decode
             // tests skip validation, so without this a fixture can pin an
             // illegal shape and a reader auditing the table for exhaustiveness
             // will believe that shape is legal.
@@ -2622,7 +2623,7 @@ mod tests {
         }
     }
 
-    /// The post-subscription-retirement wire surface, pinned by BYTE form.
+    /// The post-subscription-retirement wire surface, pinned by byte form.
     ///
     /// `Subscribe`, `Unsubscribe` and the nine `SubscriptionIssue` variants are
     /// gone; the two that carried surviving meaning became top-level frames.
@@ -2716,7 +2717,7 @@ mod tests {
                 r#"{"type":"RunComplete","sim_now_ns":123,"elapsed_ns":45}"#,
             ),
             (
-                // A DISTINCT TAG, which is the whole point: an older consumer
+                // A distinct tag, which is the whole point: an older consumer
                 // fails to decode this rather than reading it as a finished run.
                 VenueMessage::PassengerDurationComplete {
                     sim_now_ns: 123,
@@ -2769,13 +2770,13 @@ mod tests {
         }
     }
 
-    /// Both `FeedLagged` boundaries are OPTIONAL, and each absence means a
+    /// Both `FeedLagged` boundaries are optional, and each absence means a
     /// distinct thing a consumer has to be able to tell apart: no lower bound
     /// says the loss preceded the first frame this passenger was ever given, so
     /// there is no instant to aggregate back to; no upper bound says the tape
     /// ended inside the hole, so nothing resumed and the span is open.
     ///
-    /// Pinned as WIRE SHAPE rather than left to the round-trip list above,
+    /// Pinned as wire shape rather than left to the round-trip list above,
     /// because `null` versus an absent key is the kind of thing a serde
     /// attribute changes silently. A consumer branching on the absence would
     /// read a skipped key as "no gap boundary" and a `null` as the same, but
@@ -2817,7 +2818,7 @@ mod tests {
         }
     }
 
-    /// The tag-probe decoders must accept EXACTLY what the fully general
+    /// The tag-probe decoders must accept exactly what the fully general
     /// internally tagged decoder accepts. A JSON string may spell any character
     /// as a `\uXXXX` escape, so `"type"` carrying an escaped tag is a valid
     /// frame from a noncanonical but conforming peer. A probe deserialized as
@@ -2826,7 +2827,7 @@ mod tests {
     /// regression rather than a visible one.
     #[test]
     fn tag_probe_accepts_escaped_tags_exactly_as_the_general_decoder_does() {
-        // Rewrite a canonical frame's tag so its FIRST character is spelled as
+        // Rewrite a canonical frame's tag so its first character is spelled as
         // a JSON `\uXXXX` escape. Built rather than written literally so the
         // escape introducer - ASCII 92 - cannot be lost to a source-level
         // escape of its own.
@@ -2889,8 +2890,8 @@ mod tests {
         }
     }
 
-    /// `ADMISSION_FRAME_MAX_BYTES` is what makes the priority lane's FRAME
-    /// count a memory bound, so it must be PROVEN rather than asserted.
+    /// `ADMISSION_FRAME_MAX_BYTES` is what makes the priority lane's frame
+    /// count a memory bound, so it must be proven rather than asserted.
     ///
     /// The old bound was 8192, sized by a list of `MAX_SUBSCRIPTION_ISSUES_LISTED`
     /// rows. With `SubscriptionIssues` retired the widest admission frame is a
@@ -2905,7 +2906,7 @@ mod tests {
         let worst_id = "\u{7}".repeat(MAX_ECHOED_ID_LEN);
         let worst_reason = "\u{7}".repeat(MAX_REASON_LEN);
 
-        // EVERY subject variant, not just `Submit`. The variants differ in key
+        // Every subject variant, not just `Submit`. The variants differ in key
         // name, in `kind` tag width, and `Query` carries a serialized
         // `QueryKind` on top of its capped id - so which one is widest is a
         // measurement, and taking the max is what makes the constant's
@@ -2965,7 +2966,7 @@ mod tests {
             "the widest admission frame is {widest_len} bytes, over the {ADMISSION_FRAME_MAX_BYTES} ceiling"
         );
 
-        // The analytic bound the constant is derived FROM, so the constant is
+        // The analytic bound the constant is derived from, so the constant is
         // not merely large enough for the case above by luck.
         let analytic =
             JSON_ESCAPE_FACTOR * (MAX_ECHOED_ID_LEN + MAX_REASON_LEN) + ADMISSION_ENVELOPE_BYTES;

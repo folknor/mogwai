@@ -30,7 +30,7 @@ fn parity3a_fingerprint_matches_the_committed_artifact() {
     )
     .expect("fingerprint synthesis");
 
-    // NO EXCEPTIONS. This gate carried one until 2026-08-08:
+    // No exceptions. This gate carried one until 2026-08-08:
     // `empirical_ranges.modal_tick.max` read 0.25 in the committed artifact
     // while every input reproduced 0.1, because the `char_*.json` reports had
     // been regenerated after the commit that produced `fingerprint.json` and
@@ -88,7 +88,7 @@ fn parity3a_cadence_feasible_verdict_matches_the_committed_cadence() {
         serde_json::from_str(&std::fs::read_to_string(root.join("analysis/cadence.json")).unwrap())
             .unwrap();
     // `check_cadence_feasible.py`'s `verdict()` over the committed
-    // cadence.json prints "parent/child verdict: PROCEED" and proceeds -
+    // cadence.json prints `parent/child verdict: PROCEED` and proceeds -
     // reproduced exactly here.
     assert_eq!(
         mogwai_lab::cadence_feasible::verdict(&cadence).expect("committed cadence is well formed"),

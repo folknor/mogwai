@@ -88,8 +88,8 @@ impl Tape {
                     break;
                 }
                 let ts_event = tick.ts_event();
-                // TRADES only, and that is the same rule the mark reads follow:
-                // a mark is a last-PRINT read, so an extreme drawn from quotes
+                // Trades only, and that is the same rule the mark reads follow:
+                // a mark is a last-print read, so an extreme drawn from quotes
                 // would be an extreme no fill or valuation could ever have been
                 // taken at. Recorded before publication, so a reader that takes
                 // the span after seeing a frame cannot miss that frame's price.
@@ -118,7 +118,7 @@ impl Tape {
         });
         (tape, handle)
     }
-    /// Subscribe, plus the last quote this boat PUBLISHED if it has published
+    /// Subscribe, plus the last quote this boat published if it has published
     /// one. The option is the contract, not an implementation detail: a socket
     /// binding between a boat's first trade and its first quote gets `None` and
     /// therefore sees a trade as its first market frame. Callers must not turn
@@ -199,9 +199,9 @@ fn pace(
 
 /// How many ticks an unpaced tape publishes between scheduling points.
 ///
-/// RECEIVER-BLIND, AND THAT IS THE POINT. An unpaced tape used to park while the
-/// ring was more than half full, which made the SLOWEST subscriber the thing
-/// that decided when a SHARED boat published. That was tolerable only while a
+/// Receiver-blind, and that is the point. An unpaced tape used to park while the
+/// ring was more than half full, which made the slowest subscriber the thing
+/// that decided when a shared boat published. That was tolerable only while a
 /// lagging passenger was ejected: one dead consumer cost one stall and then
 /// left. A declared hole is no longer fatal, so the ejection is gone - and a
 /// passenger whose sustainable read rate is below the publish rate would then
@@ -212,7 +212,7 @@ fn pace(
 /// What replaces it depends on production work alone, never on ring occupancy
 /// or the slowest cursor: a fixed cadence bounds how long one unpaced river can
 /// hold a core, without letting any consumer influence the tape. The ring is now
-/// the only delivery slack a passenger has, and overrunning it is DECLARED
+/// the only delivery slack a passenger has, and overrunning it is declared
 /// rather than waited out.
 const UNPACED_YIELD_TICKS: u32 = 64;
 

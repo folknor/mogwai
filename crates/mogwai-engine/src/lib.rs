@@ -37,12 +37,12 @@ use account::{Account, Warned};
 /// Upper bound on the engine-side armed-divergence queue.
 ///
 /// Single-shot divergences normally self-disarm on their own trigger, but a
-/// TARGETED `PartialFillNext` whose order never arrives has no trigger and
-/// would sit armed forever (see `take_armed`). Without a cap a stream of
+/// `PartialFillNext` targeted at an order that never arrives has no trigger
+/// and would sit armed forever (see `take_armed`). Without a cap a stream of
 /// control-plane arms - or a scenario that keeps arming targeted partials whose
 /// orders never show up - grows the queue without bound (a test-harness DoS).
 /// This ceiling is far above any legitimate scenario's arm count, so reaching
-/// it means the queue is leaking; `arm` sheds the OLDEST entry at the cap,
+/// it means the queue is leaking; `arm` always sheds the oldest entry at the cap,
 /// exactly the accumulated never-triggered leftovers. `clear_armed` is the
 /// explicit flush for the same leak.
 ///
@@ -60,10 +60,10 @@ pub enum Resting {
     /// Live limit. A print strictly through `fill_trigger_px` fills it at its
     /// own stated price.
     Limit { fill_trigger_px: Decimal },
-    /// Untriggered conditional. A print TOUCHING `stop_px` triggers it.
+    /// Untriggered conditional. A print touching `stop_px` triggers it.
     ///
-    /// `toward` picks which direction closes the gap: a STOP fires when price
-    /// runs away from the position it protects, a TOUCHED order when price comes
+    /// `toward` picks which direction closes the gap: a stop fires when price
+    /// runs away from the position it protects, a touched order when price comes
     /// toward the level it is waiting at. The flag lives on the resting state
     /// rather than being re-derived from the order type at every scan, so the
     /// scan planner and the trigger handler cannot disagree about which
@@ -72,7 +72,7 @@ pub enum Resting {
     /// Never scanned: a market remainder left by a partial fill, which has no
     /// meaningful price for the tape to reach. Ends only on a consumer cancel.
     Inert,
-    /// An order-list CHILD waiting for its parent to fill. Accepted, on the
+    /// An order-list child waiting for its parent to fill. Accepted, on the
     /// book, answerable to `QueryOrders` - and inert in every other respect: it
     /// is never scanned and it places no hold, because an order that
     /// cannot execute must not tie up funds the parent's own fill will need.
@@ -88,7 +88,7 @@ pub enum Resting {
 ///
 /// Instants sit on multiples of `interval_ns` from the unix epoch, which is the
 /// convention every venue publishing an eight-hour cycle follows and makes the
-/// schedule a property of the CLOCK rather than of when a run happened to boot.
+/// schedule a property of the clock rather than of when a run happened to boot.
 /// Half-open with `from_ns` exclusive, so a span abutting the previous one funds
 /// each instant exactly once however the sweep passes are cut.
 fn funding_instants(from_ns: u64, to_ns: u64, interval_ns: u64) -> u64 {
@@ -127,14 +127,14 @@ pub struct OpenOrder {
     /// function of how often the sweeper ran.
     pub band_draw: u32,
     /// Sim unix-ns instant the trigger walk has already covered, the exclusive
-    /// lower bound for the next pass. Advanced by the ENGINE when it accepts a
-    /// result, never by the walker: a walk whose result is discarded must
+    /// lower bound for the next pass. Advanced by the engine only when it accepts
+    /// a result, never by the walker: a walk whose result is discarded must
     /// re-cover the same span rather than lose it.
     pub scanned_ns: u64,
     /// Bumped on every mutation of this order's identity for gating purposes -
     /// reprice, quantity amend, fill, frontier advance. A `ScanResult` carries
     /// the revision its walk was planned against, so a result computed against
-    /// state that has since moved is DROPPED rather than applied. Liveness
+    /// state that has since moved is always dropped rather than applied. Liveness
     /// alone is not enough: two overlapping walks can both name a still-resting
     /// order, and applying both double-counts the span they share.
     pub revision: u64,
@@ -168,7 +168,7 @@ pub struct EngineConfig {
 /// default, so an engine built standalone behaves like a default venue.
 pub const DEFAULT_LIQUIDATION_BAND_TICKS: u32 = 200;
 
-/// THE CLIENT ORDER ID PREFIXES THE VENUE MINTS FOR ITSELF, and therefore the
+/// The client order id prefixes the venue mints for itself, and therefore the
 /// ones a consumer may not submit under. Both are venue-originated reduce-only
 /// closes: `LQ-` is a margin-maintenance liquidation, `RISK-` an account-policy
 /// flatten. The restriction is not cosmetic - a consumer that claims one of these
@@ -183,14 +183,14 @@ pub const RISK_FLATTEN_ID_PREFIX: &str = "RISK-";
 /// See `LIQUIDATION_ID_PREFIX`.
 pub const RESERVED_ID_PREFIXES: [&str; 2] = [LIQUIDATION_ID_PREFIX, RISK_FLATTEN_ID_PREFIX];
 
-/// Per-instrument collateral policy. The settlement SCHEDULE is not here: it
+/// Per-instrument collateral policy. The settlement schedule is not here: it
 /// is the session calendar's `settlement_minute_of_day`, read in exchange-local
 /// time, and the sweeper strikes each instant it names.
 #[derive(Debug, Clone, Copy)]
 pub struct MarginPolicy {
     /// What one contract costs to open and to hold.
     ///
-    /// A FIXED CURRENCY AMOUNT PER CONTRACT, which is how exchange-listed
+    /// A fixed currency amount per contract, which is how exchange-listed
     /// futures state performance bonds: CME publishes a dollar figure per MNQ,
     /// not a ratio. `basis` decides whether these are read that way or as
     /// leverage ratios; the fields are shared because the arithmetic downstream
@@ -201,7 +201,7 @@ pub struct MarginPolicy {
     pub basis: MarginBasis,
 }
 
-/// How a margin requirement is DERIVED, which is the difference between a
+/// How a margin requirement is derived, which is the difference between a
 /// futures account and a leveraged one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MarginBasis {
@@ -209,7 +209,7 @@ pub enum MarginBasis {
     /// Exchange-listed futures.
     #[default]
     PerContract,
-    /// A FRACTION OF NOTIONAL, so the requirement moves with the price. This is
+    /// A fraction of notional, so the requirement moves with the price. This is
     /// what forex, crypto margin and Reg-T equity margin actually do, and it is
     /// the account type the venue had no way to express: "10x leverage" is
     /// `initial = 0.1`, and holding it as a per-contract constant would make a
@@ -233,7 +233,7 @@ impl MarginPolicy {
     fn required(&self, rate: Decimal, def: &InstrumentDef, qty: Decimal, px: Decimal) -> Decimal {
         match self.basis {
             MarginBasis::PerContract => rate.saturating_mul(qty.abs()),
-            // Through `notional`, so an INVERSE contract's requirement is
+            // Through `notional`, so an `Inverse` contract's requirement is
             // computed in its settlement asset rather than in the currency it
             // happens to be quoted in.
             MarginBasis::Notional => def
@@ -245,35 +245,35 @@ impl MarginPolicy {
 }
 
 /// One position's unrealized P and L through the instrument's OWN arithmetic,
-/// `None` ONLY when the arithmetic overflowed.
+/// `None` only when the arithmetic overflowed.
 ///
 /// The single expression every unrealized reader in this crate uses -
 /// `unrealized_pnl` (and thence the margin breach test), the `positions()` wire
 /// rows, `settle`'s realized credit and `valuation_at`'s derivative
 /// contribution. It exists because those readers each carried a hand-rolled
-/// `(mark - avg) * qty * multiplier`, which is the LINEAR form: for an
+/// `(mark - avg) * qty * multiplier`, which is the linear form: for an
 /// `Inverse` contract that is wrong by up to four orders of magnitude, so a
 /// coin-margined book was liquidated on a number `apply_fill` disagreed with
-/// while booking the same position's REALIZED P and L through `InstrumentDef`.
+/// while booking the same position's realized P and L through `InstrumentDef`.
 /// (It is wrong in magnitude only - `1/avg - 1/mark` and `mark - avg` always
 /// carry the same sign, so an earlier claim of a sign error here was false.)
 /// `apply_fill`'s rule - realized and unrealized must come from the same
 /// expression - now holds by construction rather than by comment.
 ///
-/// UNDEFINED IS NOT OVERFLOW, and this function is where the two are separated,
+/// Undefined is not overflow, and this function is where the two are separated,
 /// because `InstrumentDef::unrealized` answers `None` for both.
 ///
-/// - A FLAT POSITION IS ZERO. A closed position is stored with `qty`, `avg_px`
-///   and `mark_px` all zero and is never removed from the map, so every reader
-///   would otherwise have to guard it and `valuation_at` would answer `None`
-///   for a whole account holding one flat inverse row.
-/// - AN INVERSE POSITION AT A ZERO PRICE IS ZERO. The inverse form is `1/price`,
-///   which has no value at zero, and a zero price is REACHABLE: `apply_fill`
-///   warns about a zero-price fill and books it, and `settle` passes the
-///   caller's settlement price through with no guard of its own. Answering zero
-///   says the position contributed no mark-to-market, which is the conservative
-///   reading; treating it as overflow credited `Decimal::MAX` to the balance.
-///   Whether the venue should instead REFUSE a zero price on an inverse
+/// - A flat position is always zero. A closed position is stored with `qty`,
+///   `avg_px` and `mark_px` all zero and is never removed from the map, so
+///   every reader would otherwise have to guard it and `valuation_at` would
+///   answer `None` for a whole account holding one flat inverse row.
+/// - An inverse position at a zero price is always zero. The inverse form is
+///   `1/price`, which has no value at zero, and a zero price is reachable:
+///   `apply_fill` warns about a zero-price fill and books it, and `settle`
+///   passes the caller's settlement price through with no guard of its own.
+///   Answering zero says the position contributed no mark-to-market, which is
+///   the conservative reading; treating it as overflow credited `Decimal::MAX`
+///   to the balance. Whether the venue should instead refuse a zero price on an inverse
 ///   instrument is a product question, filed in `notes/todo.md`.
 fn position_unrealized_checked(
     def: &mogwai_protocol::InstrumentDef,
@@ -348,7 +348,7 @@ pub struct MarketReading {
     pub last_px: Decimal,
     /// Instant of that canonical last print.
     pub ts_ns: u64,
-    /// Band half width in TICKS, already scaled by trailing realized volatility
+    /// Band half width in ticks, already scaled by trailing realized volatility
     /// and clamped by the venue. The engine multiplies it by the instrument's
     /// price increment, because the instrument table lives here.
     pub band_ticks: u32,
@@ -398,10 +398,10 @@ pub struct ScanResult {
     pub from_ns: u64,
     pub revision: u64,
     /// The print that satisfied the scan in `(from_ns, scanned_to_ns]`, or
-    /// `None` if the span held nothing. The FIRST such print - there is no
+    /// `None` if the span held nothing. The first such print - there is no
     /// accumulation - and a triggered stop-market prices its fill off it.
     pub hit: Option<Hit>,
-    /// The instant the walk ACTUALLY reached, which its drain budget may have
+    /// The instant the walk actually reached, which its drain budget may have
     /// cut short of the pass's target. The frontier advances to exactly this,
     /// never past it.
     pub scanned_to_ns: u64,
@@ -490,11 +490,11 @@ pub struct Engine {
     order_holds_clipped: HashSet<String>,
     account: Account,
     /// Whether submits and amends are checked against free balance. Set once
-    /// at construction: a FUNDED account (non-empty seed) is an honest cash
+    /// at construction: a funded account (non-empty seed) is an honest cash
     /// venue, so an order the account cannot cover is rejected like a real
     /// exchange would - otherwise the ledger goes negative and a nautilus
     /// cash-account consumer refuses every snapshot after it, silently
-    /// desyncing. An UNFUNDED account keeps the permissive delta-off-zero
+    /// desyncing. An unfunded account keeps the permissive delta-off-zero
     /// ledger with no funds checks: its documented purpose is exercising
     /// exactly that negative-balance path, which enforcement would make
     /// unreachable. Constructor-time, not derived from the live balance map:
@@ -506,12 +506,12 @@ pub struct Engine {
     /// precision/increment fields the fill and hold path needs, so the
     /// engine keeps no parallel struct that could drift from the wire type.
     instruments: HashMap<Symbol, InstrumentDef>,
-    /// Every ACCEPTED client order id, mapped to the venue order id it was
+    /// Every accepted client order id, mapped to the venue order id it was
     /// assigned. Never cleared (a deliberate, unbounded retention): key
     /// presence distinguishes "was once a real order, now terminal" from
     /// "never accepted at all", and the retained venue id lets a cancel/modify
     /// reject for a terminal order still name the order it targets - the wire
-    /// contract says `venue_order_id` is absent ONLY for genuinely unknown ids.
+    /// contract says `venue_order_id` is absent only for genuinely unknown ids.
     seen_client_order_ids: HashMap<ClientOrderId, VenueOrderId>,
     /// Terminal order records, the closed half of the `QueryOrders` truth
     /// store: every order that reached `Filled` or `Canceled`, frozen at its
@@ -520,7 +520,7 @@ pub struct Engine {
     /// order regardless of how long ago it closed, and a test-lifetime venue
     /// accumulates orders at test scale, not exchange scale.
     closed: HashMap<ClientOrderId, OrderStatusInfo>,
-    /// Every fill as it BOOKED, in booking order - the `QueryFills` truth
+    /// Every fill as it booked, in booking order - the `QueryFills` truth
     /// store. One entry per booked fill regardless of wire duplication (a
     /// `DuplicateNextFill` doubles the event, not this record), so the reply
     /// is the ground truth a corrupted `OrderFilled` stream reconciles
@@ -532,7 +532,7 @@ pub struct Engine {
     trade_seq: u64,
     position_seq: u64,
     /// The last price each symbol was marked at, kept for every class rather
-    /// than only the ones that post margin. This is what lets a SPOT holding be
+    /// than only the ones that post margin. This is what lets a spot holding be
     /// valued: the base asset sits in the ledger as a currency balance and the
     /// pair that quotes it is the only thing that can price it.
     last_marks: HashMap<Symbol, Decimal>,
@@ -547,14 +547,14 @@ pub struct Engine {
     /// The clock of the boat whose pass is currently being processed.
     ///
     /// The engine is venue-wide but every pass through it belongs to exactly
-    /// ONE boat, and the fee surcharge is the only state that must be judged on
+    /// one boat, and the fee surcharge is the only state that must be judged on
     /// that boat's axis. Carrying it as one field set at each pass entry
     /// (`process_with_market_on_clock`, `apply_scans_on_clock`) rather than as
     /// a parameter threaded through the fill-booking helpers is a deliberate
     /// narrowing: those helpers are reached from a dozen places and none of the
     /// others has any business knowing a clock.
     ///
-    /// THE INVARIANT THAT KEEPS IT HONEST: every entry point that can book a
+    /// The invariant that keeps it honest: every entry point that can book a
     /// fill sets this first. `settle` and `mark` do not, because they are only
     /// ever called inside a pass that already did, and their venue-originated
     /// fills pay no surcharge. A new entry point that books fills owes an
@@ -606,7 +606,7 @@ impl Engine {
         }
     }
 
-    /// Arm the surcharge for a SIMULATED span, stamped at a WALL instant.
+    /// Arm the surcharge for a simulated span, stamped at a wall instant.
     ///
     /// Deliberately not an absolute `start..end` on one sim axis: the venue has
     /// no single such axis, and an interval on boat A's axis applied verbatim
@@ -628,7 +628,7 @@ impl Engine {
     ///
     /// The window names no axis of its own: it is a wall arming instant plus a
     /// simulated span, so one arm means the same number of simulated
-    /// milliseconds to a slow boat and a fast one. The LATE-BOARDER RULE opens
+    /// milliseconds to a slow boat and a fast one. The late-boarder rule opens
     /// it at `max(sim.sim_ns(armed), sim.sim_epoch_ns)`, so a boat whose anchor
     /// is later than the arm gets the full span from its own epoch instead of a
     /// window that already closed in its past.
@@ -643,10 +643,10 @@ impl Engine {
         })
     }
 
-    /// The river a RESTING order belongs to, so a control targeting that order
+    /// The river a resting order belongs to, so a control targeting that order
     /// by id can resolve the clock its timestamps live on. `None` for an id
     /// that is unknown or already terminal - exactly the ids
-    /// `cancel_open_order_silently` refuses, and resolved through the SAME
+    /// `cancel_open_order_silently` refuses, and resolved through the same
     /// index so the two can never disagree about what is open.
     #[must_use]
     pub fn open_order_symbol(&self, client_order_id: &str) -> Option<Symbol> {
@@ -673,8 +673,8 @@ impl Engine {
 
     /// Whether this ledger holds a balance line in `currency` at all.
     ///
-    /// PRESENCE, not sufficiency. An account funded in a currency can still run
-    /// out of it, and that is DEPLETION - a trading outcome. An account with no
+    /// Presence, not sufficiency. An account funded in a currency can still run
+    /// out of it, and that is depletion - a trading outcome. An account with no
     /// line at all was never funded for the shape it is asking to trade, which
     /// is a configuration mistake knowable with no order at all. Collapsing the
     /// two would make a typo look like a market result and waste a whole run.
@@ -686,18 +686,18 @@ impl Engine {
     /// Every symbol this account needs a price for in order to state its worth.
     ///
     /// A superset of `futures_mark_symbols`: that answers "what must be marked
-    /// to run the margin ledger", this answers "what must be priced to VALUE the
-    /// account". The difference is SPOT. A spot fill credits the base asset as a
+    /// to run the margin ledger", this answers "what must be priced to value the
+    /// account". The difference is spot. A spot fill credits the base asset as a
     /// currency balance, so an account holding BTC is worth nothing statable
     /// until something prices BTC, and the instrument that prices it is the pair
     /// whose base it is.
     ///
-    /// Derived from the BALANCES rather than from the positions, because the
+    /// Derived from the balances rather than from the positions, because the
     /// balance is what the account actually holds: a position may be closed
     /// while the asset it was opened with is still sitting in the ledger.
     pub fn valuation_symbols(&self) -> Vec<Symbol> {
         let mut symbols = self.futures_mark_symbols();
-        // Every MARKED position, not only the margin-posting ones: an equity or
+        // Every marked position, not only the margin-posting ones: an equity or
         // a perpetual is worth nothing statable until its own symbol is priced,
         // and `futures_mark_symbols` only answers what the margin ledger needs.
         for (symbol, _) in self
@@ -728,7 +728,7 @@ impl Engine {
         }
         // A perpetual that funds against another symbol needs that symbol
         // priced, even when the account does not hold it. The sweeper still
-        // refuses to MATERIALIZE a river nobody asked for; this only names
+        // refuses to materialize a river nobody asked for; this only names
         // what to read if the index river already exists.
         for def in self.instruments.values() {
             if let Some(index) = def.class.funding().and_then(|terms| terms.index_symbol) {
@@ -742,7 +742,7 @@ impl Engine {
 
     /// What this account is worth, stated in `currency`.
     ///
-    /// The balance in `currency`, plus every OTHER currency balance valued at
+    /// The balance in `currency`, plus every other currency balance valued at
     /// the last price of an instrument quoting it in `currency`, plus the
     /// unrealized on positions - which futures carry in their settlement
     /// currency.
@@ -752,7 +752,7 @@ impl Engine {
     /// that silently omitted part of the account would look enforced while
     /// enforcing the wrong thing.
     ///
-    /// A LAST MARK, NOT A LIVE QUOTE. The value is only as fresh as the last
+    /// A last mark, not a live quote. The value is only as fresh as the last
     /// `mark` this engine saw, which the fill sweeper drives once per pass, so
     /// this inherits exactly the staleness the margin ledger already runs on.
     /// [`Engine::valuation_at`] is how a caller holding a fresher price - the
@@ -766,17 +766,17 @@ impl Engine {
     /// priced at the given prices instead of at their last marks.
     ///
     /// This is what makes tick-resolution risk possible without a tick-resolution
-    /// evaluation. Equity is MONOTONE in the price of a held instrument, so its
+    /// evaluation. Equity is monotone in the price of a held instrument, so its
     /// extreme over a span is attained at a price extreme; asking this question
     /// at the span's high and its low answers what a per-tick walk would have
     /// found, at two evaluations rather than thousands. The engine lock is taken
     /// once, by the sweeper, exactly as before.
     ///
-    /// MONOTONE, NOT LINEAR, and the distinction is load-bearing now that the
+    /// Monotone, not linear, and the distinction is load-bearing now that the
     /// derivative contribution runs the instrument's own arithmetic. A linear
     /// class contributes `(mark - avg) * qty * multiplier`, which is affine in
     /// `mark`; an `Inverse` contributes `(1/avg - 1/mark) * qty * multiplier`,
-    /// which is strictly convex or concave and NOT affine. What the two-point
+    /// which is strictly convex or concave and never affine. What the two-point
     /// evaluation actually needs is only that the contribution never turns
     /// around inside the span, and `-1/mark` is monotonically increasing over
     /// every positive price, so it does not. The property fails only at a price
@@ -821,21 +821,21 @@ impl Engine {
             if !def.class.is_marked() || def.class.settlement_currency() != currency {
                 continue;
             }
-            // EQUITY contributes its MARKET VALUE, every other marked class its
-            // UNREALIZED. The difference is what the cash leg already did: a
+            // Equity contributes its market value, every other marked class its
+            // unrealized. The difference is what the cash leg already did: a
             // share purchase debited the whole notional, so the shares must be
             // added back at their current worth or the account reads as having
             // spent the money and received nothing. A derivative's cash never
             // moved on open, so only the gain since entry is outstanding.
-            // A POSITION carries its own mark, which is not always the last mark
+            // A position carries its own mark, which is not always the last mark
             // of its symbol - a fresh position is marked at its fill price
             // before any pass has marked it - so only an explicit override
             // displaces it.
-            // THROUGH THE SAME ONE EXPRESSION the other unrealized readers use,
+            // Through the same one expression the other unrealized readers use,
             // in its checked form: a flat inverse row (stored with every field
             // zero and never removed from the map) made the raw
             // `InstrumentDef::unrealized` answer `None`, and this `?` turned
-            // that into a `None` for the WHOLE ACCOUNT - the risk sweep silently
+            // that into a `None` for the whole account - the risk sweep silently
             // declining to value an account that held one closed coin-margined
             // position. `None` survives here for genuine overflow only, which is
             // the case this function's refusal-to-answer contract is about.
@@ -878,12 +878,12 @@ impl Engine {
         self.mark_over(marks, &[], ts)
     }
 
-    /// As `mark`, told what the tape's HIGH and LOW were over the span this mark
+    /// As `mark`, told what the tape's high and low were over the span this mark
     /// closes.
     ///
     /// The mark itself is still the span's closing price - that is what a
     /// position is worth now, and nothing about the extremes changes it. What
-    /// the extremes decide is the TRAILING STOP: a trail follows the running
+    /// the extremes decide is the trailing stop: a trail follows the running
     /// extreme rather than the close, so a spike between two passes drags it
     /// even though the price came back. Passing an empty slice is the
     /// pre-extremes behaviour and is what every caller with no tape under it
@@ -895,7 +895,7 @@ impl Engine {
         ts: u64,
     ) -> MarkOutcome {
         let mut moved = false;
-        // Recorded for EVERY class, before the futures-only position update
+        // Recorded for every class, before the futures-only position update
         // below. A spot pair posts no margin and holds no marked position, so
         // nothing else here would remember its price - and without it the base
         // asset sitting in the ledger cannot be valued.
@@ -922,14 +922,14 @@ impl Engine {
                 }
             }
         }
-        // The trail follows the marks this pass saw, BEFORE the margin walk, so
+        // The trail follows the marks this pass saw, before the margin walk, so
         // a stop that just ratcheted is the one a breach liquidation sees.
         self.ratchet_trailing_stops(marks, extremes, ts);
         let mut events = Vec::new();
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if moved || originated_orders > 0 {
             events.retain(|event| !matches!(event, VenueMessage::AccountState(_)));
-            // VENUE MAINTENANCE, so this consults no `DropNextAccountUpdate`
+            // Venue maintenance, so this consults no `DropNextAccountUpdate`
             // and calls `push_account_snapshot` not at all - one of the three
             // sites that helper's doc names. A re-mark is not a consumer command
             // and originates its own liquidations, so spending an arm the
@@ -944,7 +944,7 @@ impl Engine {
         }
     }
 
-    /// Posted collateral, ONE row per symbol - never one per position. Two
+    /// Posted collateral, one row per symbol - never one per position. Two
     /// hedged positions in the same symbol post against one instrument, and
     /// `book_shape().margins` counts symbols, so a per-position row would both
     /// misreport the requirement and under-reserve the admission budget.
@@ -954,10 +954,10 @@ impl Engine {
     /// hold. Reduce-only orders place no hold and appear here as
     /// nothing.
     ///
-    /// WHAT RECONCILES, EXACTLY. Every `initial` row here is a settlement-
+    /// What reconciles, exactly. Every `initial` row here is a settlement-
     /// currency term `held_balances` also folds, computed by the same
     /// expression, so no `initial` row can disagree with the hold it reports.
-    /// The reported `locked` is nonetheless a WIDER sum than
+    /// The reported `locked` is nonetheless a wider sum than
     /// `sum(initial) + sum(maintenance)`, and the difference is not a defect on
     /// either side - it is three deliberate carve-outs:
     ///
@@ -975,12 +975,12 @@ impl Engine {
     /// unsettled, and it is a `<=` in general. Do not read the tests that pin
     /// the equality as pinning more than that case.
     ///
-    /// BOTH HALVES READ THE DERIVATIONS `held_balances` READS rather than
+    /// Both halves read the derivations `held_balances` reads rather than
     /// restating them.
     /// This function used to multiply `maintenance_per_contract` by a contract
     /// count and `initial_per_contract` by a leaves quantity - the raw fields,
     /// not `policy.maintenance` and `policy.initial` - so under
-    /// `MarginBasis::Notional`, where those fields are FRACTIONS, a 40 percent
+    /// `MarginBasis::Notional`, where those fields are fractions, a 40 percent
     /// requirement on two contracts was reported as eighty cents while
     /// `held_balances` correctly held the notional fraction. The reported
     /// `margins` and the reported `locked` then contradicted each other on every
@@ -994,7 +994,7 @@ impl Engine {
             let Some(policy) = self.margin.get(symbol) else {
                 continue;
             };
-            // Only a MARKED class posts maintenance collateral, the same gate
+            // Only a marked class posts maintenance collateral, the same gate
             // `held_balances` applies: a margin policy attached to a spot
             // symbol must move no number on either side of the reconciliation.
             let Some(def) = self
@@ -1021,7 +1021,7 @@ impl Engine {
             else {
                 continue;
             };
-            // THE ORDER'S OWN HOLD, not a second derivation of it. This
+            // The order's own hold, not a second derivation of it. This
             // is what makes the stated reconciliation true for reduce-only
             // orders, held order-list children and the equity sell's
             // already-covered portion alike: each of those places no hold, so
@@ -1052,12 +1052,12 @@ impl Engine {
     }
 
     /// What one symbol's position contributes to the collateral the maintenance
-    /// test measures, ON TOP OF the settlement cash balance.
+    /// test measures, on top of the settlement cash balance.
     ///
     /// The split is the one `valuation_in` makes, and for the same reason. A
-    /// DERIVATIVE's cash never moved when it opened, so only the gain since
-    /// entry is outstanding: unrealized. An EQUITY's cash moved by the whole
-    /// notional, so what is outstanding is the shares' MARKET VALUE - and
+    /// derivative's cash never moved when it opened, so only the gain since
+    /// entry is outstanding: unrealized. An equity's cash moved by the whole
+    /// notional, so what is outstanding is the shares' market value - and
     /// counting only its unrealized would read a margin buy as an account that
     /// spent the money and received nothing, breaching it on the spot.
     fn collateral_contribution(&self, symbol: &str) -> Decimal {
@@ -1103,7 +1103,7 @@ impl Engine {
                 .balances
                 .get(currency)
                 .unwrap_or(&Decimal::ZERO);
-            // Deduplicated by SYMBOL: `unrealized_pnl` already sums every
+            // Deduplicated by symbol: `unrealized_pnl` already sums every
             // position keyed under a symbol, so folding it once per position
             // key would count a hedged book's two legs twice over and declare
             // a breach (or clear one) on twice the real P&L.
@@ -1129,8 +1129,8 @@ impl Engine {
                     let other_policy = self.margin.get(other)?;
                     let other_def = self.instruments.get(other)?;
                     (other_def.class.settlement_currency() == currency).then(|| {
-                        // THROUGH THE POLICY, which is what honours `basis`. A
-                        // NOTIONAL policy states its maintenance as a FRACTION,
+                        // Through the policy, which is what honours `basis`. A
+                        // notional policy states its maintenance as a fraction,
                         // so multiplying it by a contract count read a 40
                         // percent requirement on two contracts as eighty cents -
                         // a leveraged account that could never breach. The
@@ -1147,7 +1147,7 @@ impl Engine {
                 }
                 (true, BreachAction::Liquidate) => {
                     self.margin_breached.insert(std::sync::Arc::clone(&symbol));
-                    // One order per open POSITION, not one per symbol: under
+                    // One order per open position, not one per symbol: under
                     // hedging a symbol carries several, and closing only the
                     // first leaves the account still breached after the
                     // cascade it was supposed to end.
@@ -1205,7 +1205,7 @@ impl Engine {
                     last_px: mark,
                     ts_ns: ts,
                     // A venue-originated close has no consumer reading to inherit,
-                    // so it is judged against the run's CONFIGURED band cap
+                    // so it is judged against the run's configured band cap
                     // rather than an invented constant. That is deliberately
                     // pessimistic: a forced close is the one moment a venue is
                     // least likely to do better than its worst advertised
@@ -1223,14 +1223,14 @@ impl Engine {
     /// Close every open position and cancel every resting order, as the venue
     /// rather than as the consumer.
     ///
-    /// This is what enforcing an ACCOUNT POLICY does on breach: a strategy that
+    /// This is what enforcing an account policy does on breach: a strategy that
     /// would have been liquidated must actually be liquidated, or the forward
     /// claim is worth nothing. It is the same close the margin ledger performs
     /// under `BreachAction::Liquidate` - reduce-only IOC market orders at the
     /// mark, judged against the configured liquidation band - applied to the
     /// whole book instead of to one breached symbol.
     ///
-    /// RESTING ORDERS GO FIRST. A flatten that left them would leave the
+    /// Resting orders go first. A flatten that left them would leave the
     /// account able to re-open the position it was just closed out of, through
     /// a trigger nobody is watching.
     pub fn liquidate_all(&mut self, ts: u64) -> MarkOutcome {
@@ -1305,11 +1305,11 @@ impl Engine {
         }
     }
 
-    /// Retire everything this account holds that is NOT on `symbol`: cancel the
+    /// Retire everything this account holds that is not on `symbol`: cancel the
     /// resting orders, close the positions at their last mark.
     ///
-    /// AN ACCOUNT IS ON AT MOST ONE RIVER, and this is what makes that true of
-    /// the BOOK rather than only of the connection. A returning socket may name
+    /// An account is on at most one river, and this is what makes that true of
+    /// the book rather than only of the connection. A returning socket may name
     /// a different symbol than the account was trading, and a position carried
     /// across would be one the new session can neither see nor close: nothing
     /// prices it, no sweep marks it, and no order can reach it. The same is true
@@ -1317,7 +1317,7 @@ impl Engine {
     /// boat is reading, where nothing would ever sweep it and nothing would say
     /// so.
     ///
-    /// Closed AT THE LAST MARK, which is the best price that exists: the river
+    /// Closed at the last mark, which is the best price that exists: the river
     /// it traded on has no cursor, so there is no fresher one to be had.
     pub fn retire_off_river(&mut self, symbol: &str, ts: u64) -> Vec<VenueMessage> {
         let mut events = Vec::new();
@@ -1379,7 +1379,7 @@ impl Engine {
         before != self.account.unsettled.len()
     }
 
-    /// Cancel every resting order on a symbol NOBODY IS READING.
+    /// Cancel every resting order on a symbol nobody is reading.
     ///
     /// `readable` is the set of symbols a cursor is currently walking. An order
     /// outside it rests on a river with no clock: there is no instant to sweep
@@ -1388,7 +1388,7 @@ impl Engine {
     /// outcome that is neither of the two honest ones - so the venue refuses to
     /// leave it, and the consumer is told with an ordinary `OrderCanceled`.
     ///
-    /// A FROZEN account never reaches this: it is skipped by the sweeper
+    /// A frozen account never reaches this: it is skipped by the sweeper
     /// wholesale, and its book survives untouched for the socket that returns to
     /// it. The two rules are the same statement from opposite sides - an order
     /// nobody is reading either belongs to an account that will come back for
@@ -1414,7 +1414,7 @@ impl Engine {
     /// Re-base every resting order's scan frontier onto `now_ns`.
     ///
     /// A frozen account's orders carry the frontier of the boat that departed,
-    /// which sits in a returning boat's FUTURE: a cursor is placed at its
+    /// which sits in a returning boat's future: a cursor is placed at its
     /// river's origin, so without this the order waits for the new cursor to
     /// reach an instant the old one had already passed, which is as long as the
     /// previous session ran.
@@ -1436,10 +1436,10 @@ impl Engine {
         }
     }
 
-    /// Re-base only the frontiers that sit in `now_ns`'s FUTURE, and report how
+    /// Re-base only the frontiers that sit in `now_ns`'s future, and report how
     /// many there were.
     ///
-    /// A FRONTIER AHEAD OF THE CURSOR IS NEVER LEGITIMATE. An order's frontier
+    /// A frontier ahead of the cursor is never legitimate. An order's frontier
     /// is set to the instant it was accepted, or to how far a sweep has walked,
     /// and both are sampled on the cursor that is serving it - so under ordinary
     /// operation it trails `now_ns` and never leads it. When it leads, the
@@ -1447,13 +1447,13 @@ impl Engine {
     /// the cursor catches up, which is silent and looks exactly like an order
     /// that has not been hit yet.
     ///
-    /// THIS IS THE STATE ITSELF RATHER THAN A PROXY FOR IT, which is why it is
+    /// This is the state itself rather than a proxy for it, which is why it is
     /// preferred over identifying the cursor. [`Self::rebase_scans`] is applied
-    /// when an account is found FROZEN, and freezing was always standing in for
+    /// when an account is found frozen, and freezing was always standing in for
     /// "the cursor this book was marked on is gone". That proxy has a hole: a
     /// newcomer claiming an existing account is counted on before the incumbent is
     /// closed, deliberately, so the account never freezes - and if the newcomer
-    /// boards a DIFFERENT river, the departed one's boat is torn down with its
+    /// boards a different river, the departed one's boat is torn down with its
     /// worker, and a boat placed over that river again starts at the yard's
     /// origin. A placement nonce on the boat would let the proxy be repaired;
     /// asking whether any frontier is in the future needs no new identity, and
@@ -1522,7 +1522,7 @@ impl Engine {
         )
     }
 
-    /// Exchange FUNDING on every perpetual position, for each funding instant
+    /// Exchange funding on every perpetual position, for each funding instant
     /// the span `from_ns .. to_ns` crossed.
     ///
     /// A perpetual has no expiry to converge at, so funding is the only thing
@@ -1532,7 +1532,7 @@ impl Engine {
     /// without this reports P and L that is wrong by construction rather than by
     /// approximation.
     ///
-    /// PAID ON NOTIONAL AT THE MARK, not at entry: funding is a payment on what
+    /// Paid on notional at the mark, not at entry: funding is a payment on what
     /// the position is worth now, which is why a position that has moved against
     /// its holder pays less as it shrinks.
     ///
@@ -1576,8 +1576,8 @@ impl Engine {
                 let Some(notional) = def.notional(position.qty, position.mark_px) else {
                     continue;
                 };
-                // THE RATE IS COMPUTED at this mark against the index, if any.
-                // A LONG pays a positive rate, so the sign follows the
+                // The rate is computed at this mark against the index, if any.
+                // A long pays a positive rate, so the sign follows the
                 // position: the same amount debits a long and credits a short,
                 // which is what makes funding a transfer rather than a fee.
                 let rate = terms.rate(position.mark_px, index);
@@ -1598,7 +1598,7 @@ impl Engine {
         }
         let mut events = Vec::new();
         if paid {
-            // VENUE MAINTENANCE, the funding exchange: reports unconditionally
+            // Venue maintenance, the funding exchange: reports unconditionally
             // and consults no arm, on the same ruling as `on_mark` above.
             events.push(VenueMessage::AccountState(self.snapshot(ts)));
         }
@@ -1610,11 +1610,11 @@ impl Engine {
 
     /// Realize every futures position in `marks` at the settlement price given.
     ///
-    /// AN INVERSE INSTRUMENT REFUSES A NON-POSITIVE SETTLEMENT PRICE, and the
+    /// An inverse instrument always refuses a non-positive settlement price, and the
     /// refusal is to leave the position marked where it was rather than to
     /// settle it somewhere unpriceable. An inverse contract's value is
     /// `multiplier * qty / price`, which has no value at zero, and settlement
-    /// WRITES the price it was given into both `avg_px` and `mark_px` - so a
+    /// writes the price it was given into both `avg_px` and `mark_px` - so a
     /// zero here does not merely produce one bad number, it poisons the
     /// position for the rest of the run, and every later reader answers on a
     /// price that cannot be inverted.
@@ -1627,13 +1627,13 @@ impl Engine {
     /// zero. So a caller handing one over is supplying something no index
     /// construction produces, which is a caller defect and not a market event.
     ///
-    /// LINEAR CLASSES ARE LEFT ALONE deliberately: their value is
+    /// Linear classes are always left alone deliberately: their value is
     /// `multiplier * qty * price`, which is perfectly defined at zero and means
     /// what it says. The rule is about invertibility, not about zero being
     /// distasteful.
     ///
     /// `Engine::position_unrealized_checked` still answers zero for an
-    /// unpriceable position. That stays a BACKSTOP under a case this guard
+    /// unpriceable position. That stays a backstop under a case this guard
     /// makes unreachable from here, rather than the policy it was before.
     pub fn settle(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
         let mut settled = false;
@@ -1657,7 +1657,7 @@ impl Engine {
                     })
             {
                 // Through the instrument's own arithmetic, exactly as the
-                // unrealized readers and `apply_fill` do: settlement REALIZES
+                // unrealized readers and `apply_fill` do: settlement realizes
                 // the position at `settle_px`, so booking it linearly while the
                 // mark-to-market it replaces was inverse would move the
                 // account's value at the instant of settlement.
@@ -1677,7 +1677,7 @@ impl Engine {
         let originated_orders = self.apply_margin_breaches(marks, ts, &mut events);
         if settled || originated_orders > 0 {
             events.retain(|event| !matches!(event, VenueMessage::AccountState(_)));
-            // VENUE MAINTENANCE, settlement: reports unconditionally and
+            // Venue maintenance, settlement: reports unconditionally and
             // consults no arm, on the same ruling as `on_mark` above.
             events.push(VenueMessage::AccountState(self.snapshot(ts)));
         }
@@ -1719,7 +1719,7 @@ impl Engine {
     }
 
     /// Placeholder identity for `EngineConfig::unbound` and `new()`. Production
-    /// always builds an `EngineConfig` by hand, which REQUIRES the real id:
+    /// always builds an `EngineConfig` by hand, which requires the real id:
     /// an engine that guessed its own identity would stamp a wrong
     /// `AccountState.account_id` on the wire, and a snapshot is only
     /// self-describing if that field is the account the ledger belongs to.
@@ -1728,13 +1728,13 @@ impl Engine {
     /// Constructs the engine with the account pre-funded per currency, the
     /// venue's equivalent of a deposit made before the run. The ledger itself
     /// only ever books fill deltas, so without a seed the first buy drives the
-    /// quote leg negative - which a nautilus CASH account (the adapter's
+    /// quote leg negative - which a nautilus cash account (the adapter's
     /// default) refuses to apply, silently desyncing the consumer's account
     /// from the venue's. Funding is initial state, not a mutation: there is no
     /// deposit surface at runtime, so a scenario's capital is fixed at boot
     /// and every balance the venue ever reports is explained by fills alone.
     ///
-    /// A non-empty seed also arms funds ENFORCEMENT: a funded venue rejects
+    /// A non-empty seed also arms funds enforcement: a funded venue rejects
     /// submits and amends the free balance cannot cover, like a real cash
     /// exchange. An empty seed keeps the permissive unfunded ledger - see
     /// `enforce_funds`.
@@ -1810,7 +1810,7 @@ impl Engine {
 
     /// As `process`, with the tape reading the venue took at `ts`.
     ///
-    /// A submit needs it to size its band and to judge marketability; a PRICE
+    /// A submit needs it to size its band and to judge marketability; a price
     /// amend needs it so a re-draw adopts the current regime rather than the one
     /// the order was accepted under. `None` is a legitimate answer - the venue's
     /// estimator can be cold or its walk can be truncated - and every path here
@@ -1818,7 +1818,7 @@ impl Engine {
     /// later walk has evidence, an amend keeps the band it had, and a market
     /// order fills unslipped at its stated price.
     ///
-    /// Runs on the IDENTITY clock, which makes it a tests-and-benches
+    /// Runs on the identity clock, which makes it a tests-and-benches
     /// convenience rather than a serving path: an armed fee surcharge is then
     /// judged with simulated time equal to wall time. The venue calls
     /// `process_with_market_on_clock` with the commanding socket's boat clock.
@@ -1871,7 +1871,7 @@ impl Engine {
                 ts,
             ))],
             // Venue-owned and never routed here, like the transport controls.
-            // A history request reads the passenger's RIVER, and the engine
+            // A history request reads the passenger's river, and the engine
             // holds a book rather than water - it has no river to read and no
             // key to read one with. Enumerated rather than caught by a wildcard
             // so that a future command classified venue-owned at the routing
@@ -1886,28 +1886,28 @@ impl Engine {
     }
 
     /// Every resting order the tape can decide, each carrying the price the
-    /// walk applies its predicate to and WHICH predicate that is. There is no
+    /// walk applies its predicate to and which predicate that is. There is no
     /// off switch: the band is always on, so a venue always sweeps.
     ///
     /// The dispatch is a match on `Resting`, and each arm is load-bearing:
     ///
-    /// - `Limit` yields a `FillThrough` scan against the order's DRAWN band
+    /// - `Limit` yields a `FillThrough` scan against the order's drawn band
     ///   trigger. A print strictly through it fills the order at its own stated
     ///   price.
-    /// - `Conditional` yields a `TriggerTouch` scan against the consumer's STATED
+    /// - `Conditional` yields a `TriggerTouch` scan against the consumer's stated
     ///   stop price. A print merely reaching it triggers, because a stop holds
     ///   no queue position and so needs none of the strictness the limit case
     ///   does.
-    /// - `Inert` yields NOTHING, which is the naming of what an `order_type`
+    /// - `Inert` yields nothing, which is the naming of what an `order_type`
     ///   filter used to express here: an armed `PartialFillNext` can leave a
-    ///   MARKET remainder resting with a stamped price, and handing that to the
+    ///   market remainder resting with a stamped price, and handing that to the
     ///   tape walk would hold it until the market traded through a price the
     ///   venue itself synthesized. A market remainder, and a triggered
     ///   stop-market's remainder, have no meaningful price for the tape to
     ///   reach; they rest, are never scanned, and end only on a consumer cancel.
     #[must_use]
     pub fn pending_scans(&self) -> Vec<PendingScan> {
-        // The slot order is NOT stable - `OpenBook::remove` swaps - so the
+        // The slot order is never stable - `OpenBook::remove` swaps - so the
         // acceptance identity is carried alongside each scan and sorted on
         // explicitly. It is decorated here rather than looked up inside the
         // comparator: a comparator doing two hash lookups and two integer
@@ -1957,7 +1957,7 @@ impl Engine {
 
     /// Answer a `QueryOrders` truthfully from the book: the currently-open
     /// orders plus the retained terminal records. This is the reconciliation
-    /// witness, so its content is NEVER touched by divergences - havoc may
+    /// witness, so its content is never touched by divergences - havoc may
     /// only delay or drop the reply's delivery (the venue's writer windows),
     /// per the honest-content contract on `Command::QueryOrders`.
     ///
@@ -2019,12 +2019,12 @@ impl Engine {
     /// Why `cancel_open_order_silently` would refuse `client_order_id`, or
     /// `None` when it is resting and the cancel would succeed.
     ///
-    /// A QUERY, and it exists because the control plane's miss path needs one.
-    /// That path ran the CANCEL itself to obtain its diagnosis and read the
+    /// A query, and it exists because the control plane's miss path needs one.
+    /// That path ran the cancel itself to obtain its diagnosis and read the
     /// `Err`, which performs the operation it is explaining: on the ledger that
     /// happened to hold the id, the "diagnosis" silently cancelled a resting
     /// order and its held children and then reported `Ok` as "unknown order".
-    /// A DIAGNOSIS THAT MUTATES IS NOT A DIAGNOSIS.
+    /// A diagnosis that mutates is not a diagnosis.
     ///
     /// The wording is shared with the cancel through `not_resting_reason`, so
     /// the two can only agree.
@@ -2045,7 +2045,7 @@ impl Engine {
     }
 
     /// The control-plane out-of-band cancel (`CancelOpenOrderSilently`):
-    /// remove a RESTING order from the book and free its hold,
+    /// remove a resting order from the book and free its hold,
     /// emitting no lifecycle event - the fault class where the venue
     /// cancelled and the consumer never heard. The truth store records the
     /// order `Canceled` at `ts`, so a later `QueryOrders` reports it
@@ -2061,18 +2061,18 @@ impl Engine {
             return Err(self.not_resting_reason(client_order_id));
         };
         let order = self.open[pos].clone();
-        // CAUSALLY MONOTONE, and clamped here rather than in `record_closed`.
+        // Causally monotone, and clamped here rather than in `record_closed`.
         // The caller stamps this with the run clock, which is the honest
         // request-time instant but is not on the same axis as the boat clocks
         // that dated this order's acceptance and amends - so a raw stamp could
-        // record a cancellation BEFORE the amend it follows, inside one ledger,
+        // record a cancellation before the amend it follows, inside one ledger,
         // and `QueryOrders` reports both as `ts_last`. The floor covers the
         // children too, because they go terminal in the same call and each has
         // its own history; clamping only against the parent would still backdate
         // a child amended later.
         //
-        // NOT MOVED INTO `record_closed`, though every terminal transition runs
-        // through it: a fill sweep closes an order at the instant of the PRINT
+        // Not moved into `record_closed`, though every terminal transition runs
+        // through it: a fill sweep closes an order at the instant of the print
         // that closed it, and forcing that forward would misreport when the
         // market hit. Only this control-plane path has no market instant of its
         // own to be truthful about.
@@ -2091,11 +2091,11 @@ impl Engine {
         // order that will now never fill is waiting on a release nothing can
         // perform; the fault class here is "the venue cancelled and the consumer
         // never heard", so the reaped cancellations are recorded in the truth
-        // store and DROPPED rather than emitted, exactly as the parent's own is.
+        // store and always dropped rather than emitted, exactly as the parent's own is.
         //
-        // THIS WIDENS THE FAULT, deliberately, and a scenario author should
+        // This widens the fault, deliberately, and a scenario author should
         // know by how much: the divergence stops meaning "the consumer's view of
-        // ONE order is stale" and starts meaning "and of every held child of
+        // one order is stale" and starts meaning "and of every held child of
         // it", up to `MAX_LINKED_ORDERS` of them. That is the honest
         // simulation. The alternative - reap the children but emit their
         // cancels - would tell a consumer its bracket's exits were pulled while
@@ -2127,19 +2127,19 @@ impl Engine {
         self.snapshot(ts)
     }
 
-    /// The largest quantity of `symbol` that can execute on `side` in the WORST
-    /// FILL ORDER, over the working book plus `pending`.
+    /// The largest quantity of `symbol` that can execute on `side` in the worst
+    /// fill order, over the working book plus `pending`.
     ///
-    /// THE ONE HOME OF "WORST FILL ORDER" for this crate, because two consumers
+    /// The one home of "worst fill order" for this crate, because two consumers
     /// ask it - `projected_qty`'s magnitude cap and `validate_submit`'s equity
     /// short check - and a naive sum is wrong for both in the same two ways:
     ///
-    /// - A `Resting::Held` order-list child CANNOT EXECUTE until its parent
+    /// - A `Resting::Held` order-list child cannot execute until its parent
     ///   fills, so it contributes nothing. This is the same rule
     ///   `order_hold_entry` applies when it declines to hold funds
     ///   against a held child, and for the same reason; a bracket's two exit
     ///   legs must not be counted against the entry that has to fill first.
-    /// - MUTUALLY EXCLUSIVE LEGS CONTRIBUTE THEIR MAX, NOT THEIR SUM. An `Oco`
+    /// - Mutually exclusive legs contribute their max, not their sum. An `Oco`
     ///   group cancels its siblings on any fill and an `Ouo` group shrinks them
     ///   by the filled quantity, so in both cases the whole group can execute at
     ///   most its largest leg. Summing them is what made a plain bracket - a
@@ -2149,11 +2149,11 @@ impl Engine {
     ///   separated by the caller, so a parent and its children never share a
     ///   slot.
     ///
-    /// `pending` is the orders admitted in the SAME FRAME that are not resting
+    /// `pending` is the orders admitted in the same frame that are not resting
     /// yet - a `SubmitOrderGroup`'s members. A resting order whose
     /// `client_order_id` appears in `pending` is counted from `pending` and not
-    /// from the book, which is what makes this answer INDEPENDENT OF HOW MANY
-    /// MEMBERS HAVE ALREADY RESTED. Without that, the group's dry pass (nothing
+    /// from the book, which is what makes this answer independent of how many
+    /// members have already rested. Without that, the group's dry pass (nothing
     /// resting) and its real pass (earlier members resting) would compute
     /// different numbers, and a check reading it could admit a member on pass
     /// one and refuse it on pass two - an admission mismatch
@@ -2215,7 +2215,7 @@ impl Engine {
             );
         }
         for member in pending {
-            // A pending member's held-ness is read off its LINK rather than off
+            // A pending member's held-ness is read off its link rather than off
             // a `Resting` it does not have yet: a child naming a parent is
             // exactly what `on_submit_from` rests as `Resting::Held`.
             if member.symbol.as_ref() != symbol
@@ -2247,7 +2247,7 @@ impl Engine {
     /// How large a position in `symbol` this account can carry if `additional`
     /// (already signed: buy positive, sell negative) joins the live book.
     ///
-    /// THE CAP IS A SIZE, NOT A NET. A long ten plus a working sell ten plus
+    /// The cap is a size, not a net. A long ten plus a working sell ten plus
     /// an incoming buy ten can reach twenty long if the buy fills first; summing
     /// the signed quantities would call that ten and let it through. The number
     /// returned is the largest |qty| the book can reach given worst-case fill
@@ -2261,11 +2261,11 @@ impl Engine {
     /// a net that cancelled them.
     ///
     /// Reduce-only working orders are left out, because they cannot grow a
-    /// side. WHAT THE EXCLUSION ACTUALLY GUARDS is the OVERSIZED reduce-only
+    /// side. What the exclusion actually guards is the oversized reduce-only
     /// leave: a reduce-only no larger than the side it sits against only ever
     /// moves an extreme toward zero, which never wins the max, so counting it
     /// would change no answer. A reduce-only may rest for more than the
-    /// position - it is clamped at the FILL, not at rest - and counting that
+    /// position - it is clamped at the fill, not at rest - and counting that
     /// one would invent a short it can never open, refusing an order over a
     /// size the book cannot reach.
     ///
@@ -2273,7 +2273,7 @@ impl Engine {
     /// [`Engine::worst_case_leaves`], which is the one home of what "worst-case
     /// fill order" means; `additional` is added on top of it because the caller
     /// hands this function a bare quantity and not the order it came from, so
-    /// an incoming order that is ITSELF one leg of an exclusive pair is still
+    /// an incoming order that is itself one leg of an exclusive pair is still
     /// counted additively here. That is conservative for a magnitude cap - it
     /// can only make the projection larger - and is stated rather than hidden.
     #[must_use]
@@ -2508,13 +2508,13 @@ mod tests {
         );
     }
 
-    /// A RECORD THAT OUTLIVES ITS WALK MUST INVALIDATE THAT WALK'S RESULT.
+    /// A record that outlives its walk must always invalidate that walk's result.
     ///
     /// `apply_scans_on_clock` admits a result only while the order's
     /// `revision` and `scanned_ns` still equal the pair the walk was planned
     /// against - that is the whole staleness guard, and it is what makes a
     /// duplicate or late delivery harmless. A triggered stop-market whose
-    /// partial remainder rests `Inert` used to keep BOTH values from before the
+    /// partial remainder rests `Inert` used to keep both values from before the
     /// trigger, so the very result that triggered it still matched. Applied a
     /// second time it found an order that is no longer `Conditional`, fell
     /// through to the resting-limit arm, and panicked on a market-on-trigger
@@ -2548,7 +2548,7 @@ mod tests {
         );
         assert_eq!(e.open[0].leaves_qty, Decimal::ONE, "and rests the rest");
 
-        // THE SAME RESULT AGAIN. Nothing may happen: the walk it reports was
+        // The same result again. Nothing may happen: the walk it reports was
         // already spent on the trigger.
         let (again, emitted) = e.apply_scans(&results, 12);
         assert_eq!(emitted, 0, "a spent result emits nothing: {again:?}");
@@ -2680,7 +2680,7 @@ mod tests {
 
     #[test]
     fn a_triggered_stop_market_fills_slipped_off_the_triggering_print() {
-        // The fill comes from the print that MADE the order live, slipped
+        // The fill comes from the print that made the order live, slipped
         // adversely. Never the stop price (that is the consumer's own number) and
         // never the acceptance-time last price (that is the look-ahead's mirror
         // image: a reading the trigger did not happen at).
@@ -2819,14 +2819,14 @@ mod tests {
         }
     }
 
-    /// ONE post-only admission rule, stated once and read by both gates.
+    /// One post-only admission rule, stated once and read by both gates.
     ///
-    /// The wire gate and the engine gate used to carry SEPARATE spellings of
+    /// The wire gate and the engine gate used to carry separate spellings of
     /// it - the wire `Limit || rests_after_trigger()`, the engine a hand-rolled
     /// `Limit | StopLimit | LimitIfTouched` - and they disagreed on
     /// `TrailingStopLimit`, which the wire admitted and the engine then rejected
     /// after the consumer had already been told its order was on its way. The
-    /// order type that came apart is the one added LAST, which is what a
+    /// order type that came apart is the one added last, which is what a
     /// hand-rolled list does to the next type anyone adds.
     ///
     /// The table is exhaustive over `OrderType` deliberately: a new variant
@@ -2846,23 +2846,23 @@ mod tests {
             OrderType::LimitIfTouched,
             OrderType::MarketToLimit,
         ];
-        // THE MESSAGE NAMES THE SET, and this is checked rather than assumed:
+        // The message names the set, and this is checked rather than assumed:
         // both gates return the same constant, so an equality against it is
-        // vacuous by construction. What is not vacuous is that the text's LEGAL
-        // LIST holds every legal type and no illegal one. The message it
+        // vacuous by construction. What is not vacuous is that the text's legal
+        // list holds every legal type and no illegal one. The message it
         // replaced - "legal only on orders that rest as a limit" - names none of
         // them and is false for `MarketToLimit`, which rests its remainder as a
         // limit and is refused anyway.
         //
-        // THE LIST IS PARSED, NOT SEARCHED FOR SUBSTRINGS, and the difference is
+        // The list is parsed, not searched for substrings, and the difference is
         // the whole point of this block. A `contains` check asks only whether a
-        // name appears ANYWHERE in the message, so a strictly better message
+        // name appears anywhere in the message, so a strictly better message
         // that also spelled out the illegal types - "... and TrailingStopLimit
         // orders; not on Market, StopMarket, ..." - would fail it, reporting
-        // illegal types as named legal. A GUARD THAT REFUSES AN IMPROVEMENT TO
-        // THE ARTIFACT IT GUARDS GETS DELETED RATHER THAN UNDERSTOOD. Parsing
+        // illegal types as named legal. A guard that refuses an improvement to
+        // the artifact it guards gets deleted rather than understood. Parsing
         // the segment between "legal only on" and the first " orders" reads the
-        // list by POSITION, so any suffix the message grows is ignored, and
+        // list by position, so any suffix the message grows is ignored, and
         // exact name comparison removes the `StopLimit`-inside-`TrailingStopLimit`
         // hazard that the old anchored needles were working around.
         let list = POST_ONLY_REFUSAL
@@ -2960,9 +2960,9 @@ mod tests {
             }
         }
 
-        // AN ORDER THAT BREAKS BOTH RULES AT ONCE. Every case above carries the
+        // An order that breaks both rules at once. Every case above carries the
         // default `Gtc`, so none of them can see the second half of the defect:
-        // unifying the PREDICATE while the two gates reach it in opposite
+        // unifying the predicate while the two gates reach it in opposite
         // orders leaves one order earning two different refusals depending on
         // which gate spoke, which is the same "a consumer cannot tell which of
         // them spoke" the shared constant exists to remove. A post-only
@@ -2987,7 +2987,7 @@ mod tests {
     }
 
     /// The precedence a `MarketToLimit` order's type and its time in force
-    /// would otherwise argue over: THE TIME IN FORCE GOVERNS THE REMAINDER.
+    /// would otherwise argue over: the time in force governs the remainder.
     ///
     /// The type's own doc says it rests the remainder and an IOC's says it
     /// cancels one, which reads as a contradiction the venue admits. It is not
@@ -2995,16 +2995,16 @@ mod tests {
     /// whether there is one to keep, which is why the combination is admitted
     /// rather than refused.
     ///
-    /// BOTH HALVES OF THE TYPE ARE PINNED HERE, because until 2026-08-19 it
+    /// Both halves of the type are pinned here, because until 2026-08-19 it
     /// implemented neither and this test recorded that. It filled its whole
     /// quantity at its own stated limit with no reference to the tape - so no
     /// remainder arose on the clean path at all, and the only way to reach the
     /// remainder question was to manufacture one with an armed
     /// `PartialFillNext`, which is what this test still does because it is also
     /// the cheapest way to reach it. The fill price assertion is the first half:
-    /// the market here is 99 against a limit of 100, so a fill AT 100 is the old
+    /// the market here is 99 against a limit of 100, so a fill at 100 is the old
     /// behaviour and a fill at 99 is the type taking what the touch offers. The
-    /// GTC arm is the second half.
+    /// `Gtc` arm is the second half.
     #[test]
     fn a_market_to_limit_remainder_is_governed_by_its_time_in_force() {
         let armed = |id: &str, tif| {
@@ -3041,7 +3041,7 @@ mod tests {
         assert!(engine.open.is_empty(), "an IOC remainder does not rest");
         assert_eq!(engine.closed["mtl-ioc"].status, WireOrderStatus::Canceled);
 
-        // GTC keeps the remainder, and it rests AS A LIMIT at the order's own
+        // GTC keeps the remainder, and it rests as a limit at the order's own
         // stated price - which is what makes keeping it mean anything. An inert
         // remainder is on the book with a positive `leaves_qty` and offered to
         // no sweep, so it can neither fill nor expire.
@@ -3067,7 +3067,7 @@ mod tests {
             "a kept remainder is offered to the sweep"
         );
 
-        // AND THE LIMIT BINDS THE FIRST ACT TOO. A market at 101 is short of a
+        // And the limit binds the first act too. A market at 101 is short of a
         // buy limit of 100, so there is nothing to take: the whole quantity
         // rests rather than filling at a price the consumer refused. This is the
         // arm that separates "takes the market" from "fills at the market
@@ -3096,7 +3096,7 @@ mod tests {
 
     #[test]
     fn a_post_only_order_that_would_take_liquidity_is_rejected() {
-        // On arrival for a limit, and at TRIGGER time for a stop-limit - after
+        // On arrival for a limit, and at trigger time for a stop-limit - after
         // the trigger, which did happen. Rejected rather than canceled: it is
         // the venue refusing the order's own stated terms.
         let mut e = banded(15);
@@ -3312,7 +3312,7 @@ mod tests {
 
     #[test]
     fn partial_fill_next_lands_on_the_fill_the_trigger_produces() {
-        // The arm targets a FILL. A stop-limit that triggers and rests produced
+        // The arm targets a fill. A stop-limit that triggers and rests produced
         // none, so the arm must survive the trigger and fire on the sweep fill
         // that follows.
         let mut e = banded(20);
@@ -3340,7 +3340,7 @@ mod tests {
     fn a_silent_cancel_racing_a_trigger_leaves_the_order_canceled() {
         // The composition section 1.11 pins: `CancelOpenOrderSilently` takes the
         // engine lock while a walk that already found the trigger print is in
-        // flight. The silent cancel bumps no revision - it REMOVES the order -
+        // flight. The silent cancel bumps no revision - it removes the order -
         // so the in-flight `ScanResult` fails its `client_order_id` lookup and
         // is dropped. The order is canceled, no trigger is published, and no
         // fill is booked. This is the existing revision-guard contract reaching
@@ -3356,7 +3356,7 @@ mod tests {
             )),
             10,
         );
-        // Planned off the book BEFORE the cancel, exactly as the sweeper plans
+        // Planned off the book before the cancel, exactly as the sweeper plans
         // its walk off the lock and applies the result after re-taking it.
         let scan = e.pending_scans().remove(0);
         e.cancel_open_order_silently("raced", 11)
@@ -3431,7 +3431,7 @@ mod tests {
         assert_eq!(scan.px, Decimal::from(80));
 
         // After the trigger there is nothing left to trigger, and silently
-        // ignoring the field would make the amend a lie. A stop-LIMIT is the
+        // ignoring the field would make the amend a lie. A stop-limit is the
         // shape that survives its own trigger, so it is what proves the
         // refusal rather than the terminal-order one.
         let mut e = banded(21);
@@ -3460,7 +3460,7 @@ mod tests {
             "got {out:?}"
         );
 
-        // And on an order that never had a trigger, the reason says THAT.
+        // And on an order that never had a trigger, the reason says so.
         let mut e = banded(21);
         e.process(Command::SubmitOrder(limit_order("plain", 1)), 10);
         let out = e.process(
@@ -3480,7 +3480,7 @@ mod tests {
 
     #[test]
     fn a_price_amend_on_an_untriggered_stop_limit_keeps_it_conditional() {
-        // It changes the limit the order will TAKE, not the price the tape has
+        // It changes the limit the order will take, not the price the tape has
         // to touch: the trigger window stands and the order stays conditional.
         // Promoting it here would make the venue fill a stop that never fired.
         let mut e = banded(22);
@@ -3903,7 +3903,7 @@ mod tests {
             Command::SubmitOrder(mnq_order("F-2", Side::Buy, 1, 20_000)),
             3,
         );
-        // The refusal NAMES ITS CURRENCY. A consumer reads a margin breach as a
+        // The refusal always names its currency. A consumer reads a margin breach as a
         // funds outcome, and every neighbouring funds rejection carries its
         // unit; one that does not leaves the reader guessing which leg is
         // short in a multi-currency account.
@@ -4066,7 +4066,7 @@ mod tests {
     #[test]
     fn a_spot_symbol_carrying_a_margin_policy_still_holds_notional() {
         // `hold_for` and `held_balances` derive from one `order_hold`,
-        // so a margin policy attached to a SPOT symbol - which venue config
+        // so a margin policy attached to a spot symbol - which venue config
         // refuses at boot, but the public `set_margin_policy` cannot - changes
         // neither the account's hold nor the add-back the funds check makes
         // against it. Reading the margin map first would hand the fill check a
@@ -4180,7 +4180,7 @@ mod tests {
             Decimal::from(100)
         );
 
-        // The door check, not just the fill check: a limit that RESTS never
+        // The door check, not just the fill check: a limit that rests never
         // reaches `validate_fill_funds`, so only `validate_submit` can refuse
         // it. 50 of notional plus 1 of fee against a 50 balance.
         let mut engine = funded(50);
@@ -4432,7 +4432,7 @@ mod tests {
         })
     }
 
-    /// `order` is a MARKET order; a resting limit needs the type set.
+    /// `order` is a market order; a resting limit needs the type set.
     fn limit_order(id: &str, qty: i64) -> SubmitOrder {
         let mut order = order(id, qty);
         order.order_type = OrderType::Limit;
@@ -4523,7 +4523,7 @@ mod tests {
     #[test]
     fn a_zero_band_reduces_to_a_strict_through_trigger_at_the_stated_price() {
         // The degenerate case of the model, which `fill_band_vol_mult = 0.0`
-        // configures: the trigger IS the stated price, so a print AT it is the
+        // configures: the trigger is the stated price, so a print at it is the
         // market touching rather than trading through and does not fill.
         let mut e = banded(9);
         e.process(Command::SubmitOrder(limit_order("degenerate", 1)), 10);
@@ -4569,7 +4569,7 @@ mod tests {
 
     #[test]
     fn a_price_amend_redraws_the_trigger_and_a_quantity_amend_does_not() {
-        // Asserted on `band_draw` and `scanned_ns`, never on the trigger PRICE
+        // Asserted on `band_draw` and `scanned_ns`, never on the trigger price
         // being unequal: a redraw may legitimately land on the same offset, so
         // a test asserting the price moved would be flaky by construction.
         let mut e = banded(3);
@@ -4642,8 +4642,8 @@ mod tests {
         let scan = e.pending_scans().remove(0);
         let (out, emitted) = e.apply_scans(&[result(&scan, true, 20)], 20);
         assert_eq!(emitted, 1);
-        // Accept-free: the fill is unsolicited, and it prints at the ORDER'S
-        // price, never the triggering trade's - the trigger decides WHEN.
+        // Accept-free: the fill is unsolicited, and it prints at the order's
+        // price, never the triggering trade's - the trigger decides when.
         assert!(matches!(
             out.as_slice(),
             [VenueMessage::OrderFilled(fill), VenueMessage::AccountState(_)]
@@ -4682,7 +4682,7 @@ mod tests {
 
     #[test]
     fn a_swept_fill_sizes_off_the_remaining_quantity() {
-        // The second sweep multiplies its fraction by the LEAVES, not by the
+        // The second sweep multiplies its fraction by the leaves, not by the
         // original quantity, so it cannot over-fill a partly filled order.
         let mut e = banded(1);
         e.arm(Divergence::PartialFillNext {
@@ -4729,7 +4729,7 @@ mod tests {
         e.arm(Divergence::DuplicateNextFill);
         let scan = e.pending_scans().remove(0);
         let (out, emitted) = e.apply_scans(&[result(&scan, true, 20)], 20);
-        // Two wire fills, ONE booked into the truth store, one account state.
+        // Two wire fills, one booked into the truth store, one account state.
         assert_eq!(emitted, 1);
         assert_eq!(
             out.iter()
@@ -4751,7 +4751,7 @@ mod tests {
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
         );
 
-        // A MARKET order arrives price-stamped by the venue; it is marketable
+        // A market order arrives price-stamped by the venue; it is marketable
         // by definition and never rests on the honest path.
         let market = order_with("mkt", Side::Buy, "BTCUSDT", 1, None);
         let market = SubmitOrder {
@@ -4768,8 +4768,8 @@ mod tests {
 
     #[test]
     fn a_market_remainder_left_resting_by_havoc_is_never_scanned() {
-        // A MARKET order never draws a trigger, but an armed partial can leave one
-        // RESTING with a venue-stamped price. Handing that remainder to the
+        // A market order never draws a trigger, but an armed partial can leave one
+        // resting with a venue-stamped price. Handing that remainder to the
         // tape walk would hold it until the market traded through a price the
         // venue itself synthesized.
         let mut e = banded(1);
@@ -4851,7 +4851,7 @@ mod tests {
         );
         assert!(e.pending_scans().is_empty());
 
-        // A FOK short of its trigger is REJECTED rather than cancelled, and
+        // A FOK short of its trigger is rejected rather than cancelled, and
         // stops being the free fill it was: it is decided now or never, and now
         // means against the trigger like everything else.
         let mut fok = limit_order("fok-short", 1);
@@ -4978,7 +4978,7 @@ mod tests {
     }
 
     // The reconciliation is a `cfg!(debug_assertions)` check, so this pins it
-    // in the profile that runs it. Without the gate the test FAILS in a
+    // in the profile that runs it. Without the gate the test fails in a
     // release test sweep, where nothing panics by design.
     #[cfg(debug_assertions)]
     #[test]
@@ -5003,9 +5003,9 @@ mod tests {
 
     #[test]
     fn a_zero_initial_margin_policy_cannot_drift_the_hold_cache() {
-        // A zero hold must be NO cache entry, not an entry whose amount is
+        // A zero hold must be no cache entry, not an entry whose amount is
         // zero: the reconciliation fold and the incremental remove would
-        // otherwise disagree about whether the currency KEY exists while
+        // otherwise disagree about whether the currency key exists while
         // agreeing on every amount, and the debug reconciliation would panic
         // on states that are economically identical.
         let mut engine = futures_engine(10_000, BreachAction::Refuse);
@@ -5024,16 +5024,16 @@ mod tests {
             order.order_type = OrderType::Limit;
             engine.process(Command::SubmitOrder(order), 1);
         }
-        // READ THE CACHE WHILE THE ZERO-HOLD ORDERS ARE STILL RESTING, which is
+        // Read the cache while the zero-hold orders are still resting, which is
         // the only instant the defect is visible, and the reason this test does
         // not need a `#[cfg(debug_assertions)]` gate the way its sibling above
-        // does. The reconciliation panic is a DEBUG-only witness, so relying on
+        // does. The reconciliation panic is a debug-only witness, so relying on
         // it alone would make this test assert nothing but `open.is_empty()` in
         // a release sweep - and by the time both cancels have run the
         // incremental remove has deleted the key in the broken build too, so
         // the end state cannot tell the two apart either. With the zero-hold
         // filter in `order_hold_entry` removed, each submit inserts a
-        // zero-amount entry here and this fires in BOTH profiles.
+        // zero-amount entry here and this fires in both profiles.
         assert!(
             engine.order_holds.is_empty(),
             "a zero hold must be NO cache key, not a key holding zero: {:?}",
@@ -5261,10 +5261,10 @@ mod tests {
             ),
         ];
 
-        // A FUNDED book, deliberately. The refusals are pinned by exact reason
-        // AND by the ledger being untouched afterwards - but "untouched" read
+        // A funded book, deliberately. The refusals are pinned by exact reason
+        // and by the ledger being untouched afterwards - but "untouched" read
         // off `Engine::new()`, which starts with no balances at all, is only
-        // the claim "no row was CREATED". A refusal that debited or locked
+        // the claim "no row was created". A refusal that debited or locked
         // funds it had no right to would have left that reading green, because
         // there was nothing there to debit. With a stated 10,000 USDT the
         // assertion is a real before/after on a non-empty ledger, and `locked`
@@ -5282,9 +5282,9 @@ mod tests {
                 (Decimal::from(FUNDS), Decimal::from(FUNDS), Decimal::ZERO),
                 "a refusal held or spent funds: {expected}"
             );
-            // BOTH HALVES OF THE OLD CLAIM ARE KEPT. `funded` seeds exactly one
+            // Both halves of the old claim are kept. `funded` seeds exactly one
             // currency, so reading the USDT row alone would no longer see a
-            // refusal that MINTED a row - and the fill path mutates balances
+            // refusal that minted a row - and the fill path mutates balances
             // through `entry(..).or_default()`, so a refusal that reached it
             // before refusing would introduce a zero BTC row that the tuple
             // above cannot observe. The row count is the "no row was created"
@@ -5451,7 +5451,7 @@ mod tests {
     #[test]
     fn a_zero_quantity_partial_leaves_drop_next_account_update_armed() {
         // A wire-valid `PartialFillNext` fraction flooring below one size
-        // increment on a minimum-lot order fills NOTHING, so the order merely
+        // increment on a minimum-lot order fills nothing, so the order merely
         // comes to rest - exactly the carve-out that must not spend the arm,
         // even though this path runs `on_submit`'s marketable tail rather
         // than the not-marketable resting branch.
@@ -5496,7 +5496,7 @@ mod tests {
     ///
     /// Hand-built, and the compiler cannot check that it stays complete - which
     /// is exactly why `Engine::arm` and the expectation below are written as
-    /// EXHAUSTIVE matches rather than leaning on this list. A variant added to
+    /// exhaustive matches rather than leaning on this list. A variant added to
     /// the enum and forgotten here is still classified deliberately on both
     /// sides (neither match compiles until it is); what it loses is only the
     /// end-to-end exercise of that classification.
@@ -5537,21 +5537,21 @@ mod tests {
     }
 
     /// The classification `Engine::arm` performs, per variant, read off the
-    /// QUEUE rather than inferred from an event count.
+    /// queue rather than inferred from an event count.
     ///
     /// The production comment beside that match claims listing the venue-owned
     /// variants explicitly "stops a future enum variant from falling through
     /// into engine behaviour by accident" - a claim about variants that do not
     /// exist yet, which only the compiler can hold, and it does: both arms of
     /// that match are enumerated, so a new variant breaks the build there and
-    /// in the expectation below. What THIS test adds is the half the compiler
+    /// in the expectation below. What this test adds is the half the compiler
     /// cannot see - that today's seven venue-owned variants really do leave the
     /// queue empty (a dead entry nothing consumes, forever) and today's five
     /// engine-side ones really are stored.
     #[test]
     fn arm_classifies_every_divergence_variant() {
         for divergence in every_divergence_variant() {
-            // Exhaustive on purpose. Deliberately NOT `!is_venue_owned`: a
+            // Exhaustive on purpose. Deliberately not `!is_venue_owned`: a
             // single list would let a new variant be classified once and read
             // twice, which is the accident the production match is guarding.
             let queued = match divergence {
@@ -5598,8 +5598,8 @@ mod tests {
         e.arm(Divergence::StallData { ms: 100 });
         e.arm(Divergence::DuplicateNextFill);
 
-        // The QUEUE is the observable, not the event count: four arms, and the
-        // one engine-side arm is alone in it and at the FRONT, so the three
+        // The queue is the observable, not the event count: four arms, and the
+        // one engine-side arm is alone in it and at the front, so the three
         // drops neither queued a dead entry nor sat in front of it.
         assert_eq!(
             e.armed.iter().collect::<Vec<_>>(),
@@ -5608,7 +5608,7 @@ mod tests {
 
         let out = e.process(Command::SubmitOrder(order("O1", 10)), 1);
 
-        // Length FIRST: a regression emitting fewer events would otherwise
+        // Length first: a regression emitting fewer events would otherwise
         // panic on an index rather than naming the count it produced.
         assert_eq!(out.len(), 4);
         assert!(matches!(out[1], VenueMessage::OrderFilled(_)));
@@ -5745,10 +5745,10 @@ mod tests {
         // E7: an order of exactly one size increment (1e-8) with a wire-valid
         // armed fraction (0.3). `1e-8 * 0.3 = 3e-9` floors below the grid, so
         // the partial cannot be represented. The old code promoted this to a
-        // FULL fill with a misleading "produced non-positive last_qty" warn -
+        // full fill with a misleading "produced non-positive last_qty" warn -
         // silently inverting the divergence and, for a FOK, letting an order
         // the partial was armed to kill fully fill and pass. The fix fills
-        // ZERO: the FOK gate now rejects on the full leaves, and a GTC rests.
+        // zero: the FOK gate now rejects on the full leaves, and a GTC rests.
         let lot = Decimal::new(1, 8);
         let px = Decimal::from(100);
 
@@ -5767,7 +5767,7 @@ mod tests {
         assert!(e.account_snapshot(2).balances.is_empty());
         assert!(e.positions().is_empty());
 
-        // GTC: accepted, NO fill event emitted, and the order rests fully open
+        // GTC: accepted, no fill event emitted, and the order rests fully open
         // with the whole lot as leaves. The snapshot shows only the locked
         // quote hold - nothing filled, so no base/position leg.
         let mut e = Engine::new();
@@ -5817,7 +5817,7 @@ mod tests {
     fn armed_divergence_queue_is_bounded() {
         // E5: arming well past the cap with targeted partials whose orders
         // never arrive (no trigger to self-disarm) must not grow the queue
-        // without bound - it saturates at `MAX_ARMED_DIVERGENCES`, shedding the
+        // without bound - it saturates at `MAX_ARMED_DIVERGENCES`, always shedding the
         // oldest stale entry per arm past the cap.
         let mut e = Engine::new();
         for i in 0..(MAX_ARMED_DIVERGENCES + 50) {
@@ -5831,7 +5831,7 @@ mod tests {
 
     #[test]
     fn arm_reports_the_entry_it_shed_at_the_cap() {
-        // The eviction must be VISIBLE, not just logged: the control-plane ack
+        // The eviction must be visible, not just logged: the control-plane ack
         // is built from this return value, so an armer learns that its post
         // discarded an older armed divergence instead of reading a bare `202`
         // and later concluding that armed divergences do not fire.
@@ -5850,7 +5850,7 @@ mod tests {
             client_order_id: "OVERFLOW".to_string(),
             fraction: Decimal::ONE,
         });
-        // The OLDEST entry is the one that goes.
+        // The oldest entry is always the one that goes.
         assert!(matches!(
             shed,
             Some(Divergence::PartialFillNext { ref client_order_id, .. }) if client_order_id == "O-0"
@@ -5911,7 +5911,7 @@ mod tests {
 
     #[test]
     fn accumulated_notional_saturates_instead_of_panicking() {
-        // Two individually-valid orders whose COMBINED notional exceeds
+        // Two individually-valid orders whose combined notional exceeds
         // `Decimal::MAX` (~7.92e28): qty 7e20 is on the 1e-8 size grid (the
         // ratio, 7e28, still divides without overflowing), price 1e8 is on
         // the 0.01 grid, and the per-order notional 7e28 passes
@@ -5953,7 +5953,7 @@ mod tests {
 
     #[test]
     fn resting_holds_saturate_locked_instead_of_panicking() {
-        // Two resting buys whose SUMMED holds (`leaves_qty * price`,
+        // Two resting buys whose summed holds (`leaves_qty * price`,
         // each individually within range and `checked_mul`-approved at
         // submit) exceed `Decimal::MAX`. A tiny armed partial (1e-9 of 7e20
         // = 7e11, still on the 1e-8 grid) leaves almost the whole quantity
@@ -6155,7 +6155,7 @@ mod tests {
         );
     }
 
-    /// A buy trail is the mirror: it follows the tape DOWN.
+    /// A buy trail is the mirror: it follows the tape down.
     #[test]
     fn a_buy_trailing_stop_ratchets_down() {
         let mut e = Engine::build(EngineConfig {
@@ -6207,7 +6207,7 @@ mod tests {
             .expect("a trailing stop limit carries a derived limit")
     }
 
-    /// THE LIMIT RIDES THE TRIGGER. A trailing stop limit carries two
+    /// The limit rides the trigger. A trailing stop limit carries two
     /// distances, and the second one is what this type exists for: the trigger
     /// trails the tape, and the limit trails the trigger. A limit that stayed
     /// where it started would drift further behind on every ratchet until it
@@ -6235,7 +6235,7 @@ mod tests {
                 .any(|order| order.submit.client_order_id == "TL1"),
             "the trailing stop limit must rest: {accepted:?}"
         );
-        // The limit is DERIVED at acceptance, on the fillable side of the
+        // The limit is derived at acceptance, on the fillable side of the
         // trigger: a sell rests below it.
         assert_eq!(resting_trigger(&e, "TL1"), Decimal::from(90));
         assert_eq!(resting_limit_px(&e, "TL1"), Decimal::from(88));
@@ -6255,8 +6255,8 @@ mod tests {
         assert_eq!(resting_limit_px(&e, "TL1"), Decimal::from(138));
     }
 
-    /// A buy is the mirror on BOTH distances: the trigger follows the tape down
-    /// and the limit sits ABOVE the trigger, because that is the side a buy can
+    /// A buy is the mirror on both distances: the trigger follows the tape down
+    /// and the limit sits above the trigger, because that is the side a buy can
     /// fill from.
     #[test]
     fn a_buy_trailing_stop_limit_rests_its_limit_above_the_trigger() {
@@ -6281,10 +6281,10 @@ mod tests {
         assert_eq!(resting_limit_px(&e, "TL2"), Decimal::from(62));
     }
 
-    /// WHAT THE TYPE IS FOR, and it is the gap case rather than the ordinary
-    /// one. A sell's limit rests BELOW its trigger, so a print that merely
+    /// What the type is for, and it is the gap case rather than the ordinary
+    /// one. A sell's limit rests below its trigger, so a print that merely
     /// reaches the trigger is normally through the limit too and fills at once.
-    /// The limit is a floor, not a delay. It bites when the tape GAPS past
+    /// The limit is a floor, not a delay. It bites when the tape gaps past
     /// both: the trigger fires, the limit is not reachable, and the order rests
     /// instead of dumping into the hole. That is the whole difference from
     /// `TrailingStopMarket`, which would take whatever the gap offered.
@@ -6308,7 +6308,7 @@ mod tests {
         );
         assert_eq!(resting_limit_px(&e, "TL3"), Decimal::from(88));
 
-        // The tape GAPS from 100 straight to 70, through the trigger and
+        // The tape gaps from 100 straight to 70, through the trigger and
         // through the limit. The trigger fires on that print and the limit
         // cannot be met at it.
         let scan = e.pending_scans().remove(0);
@@ -6347,21 +6347,21 @@ mod tests {
         );
     }
 
-    /// A STOP protects and a TOUCHED order enters, so for the same side and the
+    /// A stop protects and a touched order enters, so for the same side and the
     /// same price they wait on opposite predicates. Getting this backwards turns
     /// every protective order into an entry.
     #[test]
     fn a_touched_order_triggers_from_the_opposite_side_of_a_stop() {
         use mogwai_protocol::{ScanKind, touches_toward, touches_trigger};
         let trigger = Decimal::from(100);
-        // A SELL stop protects a long: it fires when price falls to it.
+        // A sell stop protects a long: it fires when price falls to it.
         assert!(touches_trigger(Side::Sell, trigger, Decimal::from(99)));
         assert!(!touches_trigger(Side::Sell, trigger, Decimal::from(101)));
-        // A SELL touched order enters short on strength: it fires when price
+        // A sell touched order enters short on strength: it fires when price
         // rises to it.
         assert!(touches_toward(Side::Sell, trigger, Decimal::from(101)));
         assert!(!touches_toward(Side::Sell, trigger, Decimal::from(99)));
-        // Both are TOUCH rather than through, so the level itself fires them.
+        // Both are touch rather than through, so the level itself fires them.
         assert!(touches_trigger(Side::Sell, trigger, trigger));
         assert!(touches_toward(Side::Sell, trigger, trigger));
         assert!(ScanKind::TriggerToward.hit(Side::Buy, trigger, Decimal::from(99)));
@@ -6382,7 +6382,7 @@ mod tests {
         fixed.trail_offset = Some(Decimal::from(10));
         assert!(validate_submit_order(&fixed).is_err());
 
-        // A trailing stop LIMIT owes both distances, and the limit price is the
+        // A trailing stop limit owes both distances, and the limit price is the
         // venue's to derive - a consumer-stated one would be overwritten by the
         // first ratchet, so it is refused rather than silently replaced.
         let sound = trailing_stop_limit("TL9", Side::Sell, 90, 10, 2);
@@ -6530,7 +6530,7 @@ mod tests {
         )
     }
 
-    /// The defect this suite starts from: a funded equity account could not SELL
+    /// The defect this suite starts from: a funded equity account could not sell
     /// at all. The sell path fell through to the spot branch, which asks for the
     /// base currency an equity does not have, so closing a long was refused with
     /// a message about the futures margin ledger.
@@ -6557,7 +6557,7 @@ mod tests {
         );
     }
 
-    /// SHORTING IS A MARGIN ACTIVITY, which is the cash-versus-margin
+    /// Shorting is a margin activity, which is the cash-versus-margin
     /// distinction the class had no way to express.
     #[test]
     fn a_cash_equity_account_cannot_sell_short() {
@@ -6569,7 +6569,7 @@ mod tests {
         );
     }
 
-    /// With a margin policy the same account CAN short - up to its locate.
+    /// With a margin policy the same account can still short - up to its locate.
     #[test]
     fn a_margin_equity_account_shorts_within_its_borrow_and_no_further() {
         let mut e = equity_engine(&Shares {
@@ -6606,7 +6606,7 @@ mod tests {
         );
     }
 
-    /// REG-T: a margin account posts a fraction of the notional and borrows the
+    /// Reg T: a margin account posts a fraction of the notional and borrows the
     /// rest, so it can hold more stock than it has cash. A cash account, given
     /// the same money, cannot.
     #[test]
@@ -6642,7 +6642,7 @@ mod tests {
         );
     }
 
-    /// THE ROUND LOT, which is a rule about what may be submitted rather than
+    /// The round lot, which is a rule about what may be submitted rather than
     /// about what the size grid can represent.
     #[test]
     fn a_lot_size_refuses_an_order_that_is_not_a_whole_number_of_lots() {
@@ -6665,7 +6665,7 @@ mod tests {
         );
     }
 
-    /// THE SETTLEMENT PERIOD: the money is yours the moment the trade prints and
+    /// The settlement period: the money is yours the moment the trade prints and
     /// you cannot spend it until it settles.
     #[test]
     fn sale_proceeds_are_held_unsettled_until_their_instant() {
@@ -6698,7 +6698,7 @@ mod tests {
             "unsettled cash cannot be spent: {early:?}"
         );
 
-        // THE INSTANT ITSELF, not a step either side of it. The sale printed at
+        // The instant itself, not a step either side of it. The sale printed at
         // ts 2, so the credit settles at `2 * DAY + 2`; probing `2 * DAY` and
         // `2 * DAY + 3` steps over the boundary and cannot see a `>` / `<=`
         // flip in `release_settled_cash`.
@@ -6748,7 +6748,7 @@ mod tests {
         );
         assert_eq!(e.open.len(), 1);
 
-        // A cursor IS reading it: nothing happens.
+        // A cursor is reading it: nothing happens.
         let readable = vec![Symbol::from("BTCUSDT")];
         assert!(e.cancel_unreadable_orders(&readable, 5).is_empty());
         assert_eq!(e.open.len(), 1);
@@ -6763,7 +6763,7 @@ mod tests {
         assert!(e.open.is_empty());
     }
 
-    /// A returning account's orders carry the DEPARTED boat's frontier, which
+    /// A returning account's orders carry the departed boat's frontier, which
     /// sits in the new boat's future. Without a re-base the order waits for the
     /// new cursor to reach an instant the old one had already passed.
     #[test]
@@ -6787,7 +6787,7 @@ mod tests {
         );
         assert_eq!(e.pending_scans()[0].from_ns, 9_000);
 
-        // A fresh boat is placed at its river's origin, which is BEHIND where
+        // A fresh boat is placed at its river's origin, which is behind where
         // the departed one got to.
         e.rebase_scans(100);
         assert_eq!(
@@ -6797,10 +6797,10 @@ mod tests {
         );
     }
 
-    /// `rebase_future_scans` MOVES ONLY WHAT LEADS THE CURSOR.
+    /// `rebase_future_scans` moves only what leads the cursor.
     ///
-    /// BOTH HALVES ARE THE TEST. Rebasing a leading frontier is what closes the
-    /// eviction-reconnect stall; leaving a TRAILING one alone is what keeps this
+    /// Both halves are the test. Rebasing a leading frontier is what closes the
+    /// eviction-reconnect stall; leaving a trailing one alone is what keeps this
     /// from being `rebase_scans` under another name, applied on every bind. A
     /// trailing frontier names water the cursor has already covered and that
     /// this account is genuinely owed a scan over, so moving it forward would
@@ -6995,7 +6995,7 @@ mod tests {
             e.process_with_market(Command::SubmitOrder(order), 1, Some(away_reading()));
         }
         let scans = e.pending_scans();
-        // BOTH legs are handed back as triggered in one batch, which is exactly
+        // Both legs are handed back as triggered in one batch, which is exactly
         // what a tape crossing both prices in one span produces.
         let results: Vec<ScanResult> = scans.iter().map(|scan| result(scan, true, 5)).collect();
         let (out, _) = e.apply_scans(&results, 5);
@@ -7020,19 +7020,19 @@ mod tests {
         assert!(e.open.is_empty());
     }
 
-    /// THE HAZARD THE GROUP FRAME EXISTS TO CLOSE, driven per leg so it is
+    /// The hazard the group frame exists to close, driven per leg so it is
     /// visible, and then closed by the group frame in the test below.
     ///
     /// A two-leg `Ouo` bracket sent as two submits: the entry is marketable and
-    /// FILLS on arrival, and the shrink its rule owes runs against a sibling
+    /// fills on arrival, and the shrink its rule owes runs against a sibling
     /// that has not been submitted yet, so it adjusts nothing. The stop then
-    /// arrives at FULL size beside a position that is already open, and the
+    /// arrives at full size beside a position that is already open, and the
     /// pair's aggregate exposure is twice one bracket's.
     ///
     /// This is not a bug in the linkage - the rule cannot shrink an order the
-    /// venue has never seen - it is a property of PER-LEG DISPATCH, which is
+    /// venue has never seen - it is a property of per-leg dispatch, which is
     /// why the fix is a frame and not an arithmetic change. The wire refuses
-    /// this route now; the ENGINE still serves it, so the hazard stays
+    /// this route now; the engine still serves it, so the hazard stays
     /// reachable here and stays measured.
     #[test]
     fn per_leg_dispatch_lets_an_entry_fill_before_its_stop_is_admitted() {
@@ -7072,12 +7072,12 @@ mod tests {
         );
     }
 
-    /// The same bracket as ONE group, and the guarantee the consumer cites: the
+    /// The same bracket as one group, and the guarantee the consumer cites: the
     /// entry fills during the group and the stop is shrunk by that fill before
     /// the call returns, so the pair's aggregate fill is bounded at one bracket
     /// quantity rather than two.
     ///
-    /// The shrink here is the CLOSING PASS doing its job - at the instant the
+    /// The shrink here is the closing pass doing its job - at the instant the
     /// entry filled, the stop had not been admitted yet, exactly as in the
     /// per-leg test above. What differs is that the group has not returned, so
     /// nothing has been able to look at the stop in between.
@@ -7115,7 +7115,7 @@ mod tests {
         assert_eq!(filled, Decimal::from(2), "the entry filled whole: {out:?}");
 
         // Shrunk by the whole filled quantity, which takes it to zero, which is
-        // a cancel. The bracket's aggregate exposure is therefore ONE bracket
+        // a cancel. The bracket's aggregate exposure is therefore one bracket
         // quantity - the per-leg route above leaves it at two.
         assert_eq!(
             canceled_ids(&out),
@@ -7129,14 +7129,14 @@ mod tests {
         );
     }
 
-    /// THE MIRROR OF THE TEST ABOVE, and the one the closing pass got wrong.
-    /// There the sibling was admitted AFTER the fill, so only the closing pass
-    /// could adjust it. Here the sibling is admitted BEFORE, by sending the
+    /// The mirror of the test above, and the one the closing pass got wrong.
+    /// There the sibling was admitted after the fill, so only the closing pass
+    /// could adjust it. Here the sibling is admitted before, by sending the
     /// group stop-first - so the submit path's own linkage would adjust it too,
-    /// and `Ouo` SUBTRACTS rather than sets, so applying both shrank it twice.
+    /// and `Ouo` subtracts rather than sets, so applying both shrank it twice.
     ///
     /// The quantities are deliberately unequal: with a 2-lot stop and a 1-lot
-    /// entry, one shrink leaves 1 resting and two shrinks reach zero and CANCEL
+    /// entry, one shrink leaves 1 resting and two shrinks reach zero and cancel
     /// the stop outright. An equal-sized bracket cannot tell the two apart -
     /// both readings end at zero - which is exactly why the equal-sized test
     /// above passed against the double application.
@@ -7157,7 +7157,7 @@ mod tests {
             link_of(mogwai_protocol::Contingency::Ouo, &["STOP"], None),
         );
 
-        // Stop FIRST, so it is resting by the time the entry fills.
+        // Stop first, so it is resting by the time the entry fills.
         let out = e.process_with_market(
             Command::SubmitOrderGroup {
                 orders: vec![stop, entry],
@@ -7192,7 +7192,7 @@ mod tests {
     }
 
     /// A hedging reduce-only member naming no `position_id` is refused, and the
-    /// refusal reaches the DRY pass rather than pass two.
+    /// refusal reaches the dry pass rather than pass two.
     ///
     /// That refusal is the one `on_submit_from` makes before `validate_submit`,
     /// so a dry pass built only from the validator could not see it: the group
@@ -7240,12 +7240,12 @@ mod tests {
         assert!(e.open.is_empty(), "and nothing rests");
     }
 
-    /// THE DISCLOSED CARVE-OUT, and the test that keeps it distinguishable from
+    /// The disclosed carve-out, and the test that keeps it distinguishable from
     /// a defect. Two members are individually affordable against the balance the
     /// dry pass reads, and jointly are not - so the first fills, spends the
     /// money, and the second is refused on the second pass.
     ///
-    /// The group is right to refuse it and right NOT to call it an atomicity
+    /// The group is right to refuse it and right not to call it an atomicity
     /// defect: both passes agree about the state, and it was the state that
     /// moved. `report_group_member_refusal` decides that by re-asking the dry
     /// question rather than by reading the reason text, and the `debug_assert`
@@ -7306,8 +7306,8 @@ mod tests {
         );
     }
 
-    /// A CHILD LISTED BEFORE ITS PARENT. Nothing requires a group to list
-    /// parents first, so the group context has to travel into the SECOND pass
+    /// A child listed before its parent. Nothing requires a group to list
+    /// parents first, so the group context has to travel into the second pass
     /// as well as the dry one - a pass that dropped it refused the child for an
     /// unknown parent after the parent's siblings had been accepted.
     #[test]
@@ -7331,7 +7331,7 @@ mod tests {
             link_of(mogwai_protocol::Contingency::Oto, &["EXIT"], None),
         );
 
-        // Child FIRST.
+        // Child first.
         let out = e.process_with_market(
             Command::SubmitOrderGroup {
                 orders: vec![exit, entry],
@@ -7353,8 +7353,8 @@ mod tests {
         );
     }
 
-    /// ATOMIC ADMISSION, which is the other half. One unacceptable member
-    /// rejects the whole group and leaves NOTHING on the book - not the members
+    /// Atomic admission, which is the other half. One unacceptable member
+    /// rejects the whole group and leaves nothing on the book - not the members
     /// that were fine, and not an `OrderAccepted` for any of them.
     #[test]
     fn one_bad_member_rejects_a_whole_group_and_accepts_nothing() {
@@ -7365,10 +7365,10 @@ mod tests {
             good,
             link_of(mogwai_protocol::Contingency::Oco, &["BAD"], None),
         );
-        // Priced off the grid, which `validate_submit` refuses - and the ENGINE
+        // Priced off the grid, which `validate_submit` refuses - and the engine
         // is the only gate that can, since the price increment is an instrument
         // fact `mogwai_protocol::validate_submit_group` does not hold. The
-        // member used to be bad by naming an unknown SYMBOL, which the group
+        // member used to be bad by naming an unknown symbol, which the group
         // validator now refuses one step earlier for disagreeing with its
         // siblings, leaving this test green while testing a different rule.
         let mut bad = limit_order("BAD", 1);
@@ -7385,7 +7385,7 @@ mod tests {
             1,
             Some(away_reading()),
         );
-        // THE REASON IS ASSERTED, NOT JUST THE IDS. An id-only assertion cannot
+        // The reason is asserted, not just the ids. An id-only assertion cannot
         // tell the off-grid refusal this test is named for from whatever rule
         // refuses the group next - which is exactly how this test came to be
         // testing an unknown symbol instead.
@@ -7419,17 +7419,17 @@ mod tests {
         assert!(e.open.is_empty(), "nothing rests");
     }
 
-    /// THE GROUP'S CLOSING SNAPSHOT OBEYS `DropNextAccountUpdate`, because it
+    /// The group's closing snapshot obeys `DropNextAccountUpdate`, because it
     /// goes through `push_account_snapshot`, whose doc names exactly which
     /// sites do not. It used to be pushed unconditionally, which made the group
     /// one of three paths where a consumer could arm the divergence and still be
     /// told the truth about its balances. `expire_orders` was the second and
-    /// was closed alongside it. The third, `on_modify`, was RULED THE OTHER WAY
+    /// was closed alongside it. The third, `on_modify`, was ruled the other way
     /// rather than closed: `modify_does_not_consume_armed_drop` pins the arm
     /// surviving an amend so it lands on the next fill, so that site is a
     /// marked exemption and not an outstanding gap.
     ///
-    /// TWO ARMS, because the closing pass runs after pass two: the filling
+    /// Two arms, because the closing pass runs after pass two: the filling
     /// member spends the first on its own snapshot, and the second is the one
     /// this test is about. The unarmed run is what makes the assertion
     /// discriminating - the same group, the same closing linkage, and the
@@ -7492,10 +7492,10 @@ mod tests {
         );
     }
 
-    /// THE GROUP'S WIRE-SHAPE RULES ARE THE ENGINE'S OWN, not a courtesy the
+    /// The group's wire-shape rules are the engine's own, not a courtesy the
     /// caller performs first.
     ///
-    /// Both rules here are UNREACHABLE from the dry pass by construction, which
+    /// Both rules here are unreachable from the dry pass by construction, which
     /// is why the engine has to call `validate_submit_group` rather than trust
     /// what reached it: `validate_submit`'s duplicate test reads
     /// `seen_client_order_ids`, and on pass one no member is in it, so a group
@@ -7505,7 +7505,7 @@ mod tests {
     /// `Ioc`/`Fok` member is a now-or-never order whose fate admission does not
     /// decide, which no per-member check would ever have caught.
     ///
-    /// Each case asserts ITS OWN refusal text, because the group rejects whole
+    /// Each case asserts its own refusal text, because the group rejects whole
     /// under every one of these rules and an id-only assertion could not tell
     /// them apart.
     #[test]
@@ -7572,7 +7572,7 @@ mod tests {
         }
     }
 
-    /// A CHILD MAY NAME A PARENT THAT TRAVELS WITH IT. Sent per leg the child
+    /// A child may name a parent that travels with it. Sent per leg the child
     /// would have to follow its parent by a round trip; in one group they are
     /// admitted together, so the dry pass has to treat the group's own ids as
     /// known or the whole frame would refuse itself.
@@ -7691,7 +7691,7 @@ mod tests {
         );
     }
 
-    /// A CONDITIONAL PARENT CANCELLED AT ITS OWN TRIGGER REAPS ITS HELD CHILD.
+    /// A conditional parent cancelled at its own trigger reaps its held child.
     ///
     /// The reduce-only cap-zero cancel inside `on_trigger` is one of six
     /// terminal paths that used to take an order off the book without reaping:
@@ -7760,7 +7760,7 @@ mod tests {
         );
     }
 
-    /// A PRICE AMEND ON A HELD CHILD LEAVES IT HELD.
+    /// A price amend on a held child leaves it held.
     ///
     /// `Resting::Held` is not `Resting::Conditional`, so the amend's promotion
     /// guard used to let it through: the child became a live scannable limit,
@@ -7872,13 +7872,13 @@ mod tests {
         );
     }
 
-    /// A RELEASED `MarketToLimit` CHILD RESTS; IT DOES NOT TAKE THE MARKET.
+    /// A released `MarketToLimit` child rests; it does not take the market.
     ///
     /// The standalone submit path takes the market for this type, and
     /// `docs/oms-types.md` states the carve-out this test pins: `release_child`
     /// rests every non-conditional child at its stated price, because the
     /// linkage pass that releases it holds no `MarketReading` to price against.
-    /// The child here is MARKETABLE at release - a sell limited at 50 against a
+    /// The child here is marketable at release - a sell limited at 50 against a
     /// market of 99 - so "rested" and "took the market" are distinguishable
     /// outcomes rather than the same silence. Give the release a reading and
     /// this test fails on the fill it would produce, which is the point: that
@@ -7886,7 +7886,7 @@ mod tests {
     #[test]
     fn a_released_market_to_limit_child_rests_at_its_stated_price() {
         let mut e = linked_engine();
-        // The CHILD IS SENT FIRST so it is held when its parent fills: pass two
+        // The child is sent first so it is held when its parent fills: pass two
         // submits members in order, and a child of an already-filled parent is
         // live at once and never sees `release_child` at all.
         let mut exit = limit_order("EXIT", 1);
@@ -7986,7 +7986,7 @@ mod tests {
         assert!(e.open.is_empty());
     }
 
-    /// One-updates-the-other, which is the bracket that survives a PARTIAL fill:
+    /// One-updates-the-other, which is the bracket that survives a partial fill:
     /// the surviving leg shrinks to what is left of the position rather than
     /// staying sized for the whole of it.
     #[test]
@@ -8049,7 +8049,7 @@ mod tests {
             order("M", 1),
             link_of(mogwai_protocol::Contingency::NoContingency, &[], Some("P")),
         );
-        // NAMED, not merely `is_err`. Both of these orders break exactly one
+        // Named, not merely `is_err`. Both of these orders break exactly one
         // rule, so a bare `is_err` would go on passing if the child arm were
         // deleted and some unrelated arm caught them instead - which is how a
         // 2026-08-19 fix pass came to believe neither rule existed and started
@@ -8073,7 +8073,7 @@ mod tests {
              placed it to be released at all",
             "a now-or-never child would expire before its parent ever fills"
         );
-        // And it is reached on the GROUP route too, which is the only route a
+        // And it is reached on the group route too, which is the only route a
         // linked order may legally travel: `boundary_error` refuses a linked
         // standalone `SubmitOrder` outright.
         assert!(
@@ -8178,7 +8178,7 @@ mod tests {
                 .any(|event| matches!(event, VenueMessage::OrderExpired { .. })),
             "the order expires at its instant: {out:?}"
         );
-        // EXPIRED, never Canceled: nobody pulled this order, its stated
+        // Expired, never Canceled: nobody pulled this order, its stated
         // lifetime ran out, and a host reconciling the two facts acts on them
         // differently.
         assert!(
@@ -8194,7 +8194,7 @@ mod tests {
         );
     }
 
-    /// A `Day` order expires when ITS OWN symbol's session closes, and a
+    /// A `Day` order expires when its own symbol's session closes, and a
     /// symbol with no calendar never supplies one - so a day order on a 24/7
     /// instrument rests like a Gtc rather than expiring at an invented hour.
     #[test]
@@ -8274,8 +8274,8 @@ mod tests {
     }
 
     /// A perpetual has no expiry to converge at, so funding is the only thing
-    /// tying it to spot. A LONG pays a positive rate, and pays it on notional at
-    /// the MARK rather than at entry.
+    /// tying it to spot. A long pays a positive rate, and pays it on notional at
+    /// the mark rather than at entry.
     #[test]
     fn a_long_perpetual_pays_funding_on_its_marked_notional() {
         let mut e = Engine::build(EngineConfig {
@@ -8355,21 +8355,21 @@ mod tests {
         );
     }
 
-    /// THE SHORT SIDE, which is the half the sign convention is easy to get
-    /// wrong on and which no test held: both funding tests above hold a LONG
-    /// and vary the direction through the RATE alone, so `apply_funding` taking
+    /// The short side, which is the half the sign convention is easy to get
+    /// wrong on and which no test held: both funding tests above hold a long
+    /// and vary the direction through the rate alone, so `apply_funding` taking
     /// `qty.abs()` would make a short pay funding too - the transfer inverted -
     /// with nothing red.
     ///
-    /// Funding is a TRANSFER, so the short's flow is the long's mirror at the
+    /// Funding is a transfer, so the short's flow is the long's mirror at the
     /// same marks: the long above pays exactly 60 at a positive rate, and this
     /// short receives exactly 60.
     #[test]
     fn a_short_perpetual_receives_the_funding_a_long_pays() {
-        // (rate, mark, what the short's balance must do). ROW ONE IS THE EXACT
-        // MIRROR of the long test above - same rate, same mark, same size - so
-        // the 60 the long pays is the 60 this short receives. ROW TWO MIRRORS
-        // NOTHING: no long test runs a negative rate at mark 50,000 with the
+        // (rate, mark, what the short's balance must do). Row one is the exact
+        // mirror of the long test above - same rate, same mark, same size - so
+        // the 60 the long pays is the 60 this short receives. Row two mirrors
+        // nothing: no long test runs a negative rate at mark 50,000 with the
         // amount asserted, so it is a value pin on the negative-rate short
         // (10 contracts at 50,000 at one basis point, paid rather than
         // received), not a cross-check against a long.
@@ -8420,7 +8420,7 @@ mod tests {
     }
 
     /// A span crossing no instant funds nothing, and a span crossing two funds
-    /// twice. The schedule is a property of the CLOCK, so it cannot depend on
+    /// twice. The schedule is a property of the clock, so it cannot depend on
     /// how the sweep passes were cut.
     #[test]
     fn funding_instants_are_counted_once_per_interval_crossed() {
@@ -8436,7 +8436,7 @@ mod tests {
         assert_eq!(first + second, 2);
     }
 
-    /// A mark above the index makes the long pay MORE than the configured
+    /// A mark above the index makes the long pay more than the configured
     /// interest. That is the whole point of basis-responsive funding: a
     /// perpetual trading rich of spot transfers cash from long to short.
     #[test]
@@ -8485,7 +8485,7 @@ mod tests {
         assert_eq!(before - after, Decimal::from(6_060));
     }
 
-    /// No index mark means the configured interest, even when the class NAMES
+    /// No index mark means the configured interest, even when the class names
     /// an index. A missing tape is not a basis.
     #[test]
     fn a_named_index_without_a_mark_keeps_the_interest() {
@@ -8565,13 +8565,13 @@ mod tests {
     /// A reduce-only leave cannot grow a side, so it is not a sell for the
     /// projection's purposes.
     ///
-    /// THE LEAVE IS OVERSIZED ON PURPOSE - thirty against a long ten - because
+    /// The leave is oversized on purpose - thirty against a long ten - because
     /// that is the only shape in which the exclusion changes an answer. A
     /// reduce-only within the position only moves the `net - sells` extreme
     /// toward zero, which never wins the max, so a test using ten would pass
     /// against a projection that counted reduce-only orders and would guard
     /// nothing. Resting for more than the position is legal: reduce-only is
-    /// clamped at the FILL, not at rest.
+    /// clamped at the fill, not at rest.
     #[test]
     fn projected_qty_ignores_reduce_only_working_orders() {
         let mut e = funded(1_000_000);
@@ -8653,7 +8653,7 @@ mod tests {
         assert_eq!(e.projected_qty("MNQ", Decimal::from(10)), Decimal::from(20));
     }
 
-    /// A NOTIONAL margin basis is what makes a leveraged account expressible:
+    /// A notional margin basis is what makes a leveraged account expressible:
     /// the requirement moves with the price, where a per-contract one does not.
     #[test]
     fn a_notional_margin_basis_scales_with_price() {
@@ -8698,8 +8698,8 @@ mod tests {
         );
     }
 
-    /// A notional-basis policy states its maintenance as a FRACTION, and the
-    /// breach walk multiplied that fraction by a CONTRACT COUNT - reading a 25
+    /// A notional-basis policy states its maintenance as a fraction, and the
+    /// breach walk multiplied that fraction by a contract count - reading a 25
     /// percent requirement on 150 shares as 37 dollars and 50 cents, so a
     /// leveraged account could not breach at any price. The walk now asks the
     /// policy, which is what honours the basis.
@@ -8730,7 +8730,7 @@ mod tests {
         );
     }
 
-    /// `RejectNextCancel` refuses a cancel the venue COULD have honoured, and
+    /// `RejectNextCancel` refuses a cancel the venue could have honoured, and
     /// the order stays resting.
     ///
     /// The order staying resting is the whole arm: a consumer that published a
@@ -8777,12 +8777,12 @@ mod tests {
         );
     }
 
-    /// A VENUE-ORIGINATED CANCEL PAYS NO CONSUMER-ARMED DIVERGENCE, exactly as a
+    /// A venue-originated cancel pays no consumer-armed divergence, exactly as a
     /// venue-originated submit does not.
     ///
     /// `liquidate_all` flattens the book through `on_cancel`, and an armed
     /// `RejectNextCancel` used to be spent there: the first order the
-    /// liquidation tried to pull came back rejected AND STAYED RESTING, so the
+    /// liquidation tried to pull came back rejected and stayed resting, so the
     /// liquidation went on to close the positions while leaving a live order
     /// behind - the exact hazard its own "resting orders go first" rule exists
     /// to prevent. `retire_off_river` and `cancel_unreadable_orders` share the
@@ -8809,7 +8809,7 @@ mod tests {
             "and the liquidation really did clear the book"
         );
 
-        // The arm is UNSPENT: it is still there for the consumer cancel the
+        // The arm is unspent: it is still there for the consumer cancel the
         // scenario author aimed it at.
         e.process(Command::SubmitOrder(limit_order("O2", 10)), 3);
         let out = e.process(
@@ -8891,8 +8891,8 @@ mod tests {
 
     #[test]
     fn terminal_cancel_reject_carries_original_venue_id() {
-        // The wire contract: `venue_order_id` is absent ONLY when the order id
-        // is unknown. A terminal id WAS accepted, so its cancel reject must
+        // The wire contract: `venue_order_id` is absent only when the order id
+        // is unknown. A terminal id was accepted, so its cancel reject must
         // carry the venue id it was accepted under, while a genuinely unknown
         // id carries none - no venue id was ever assigned to it.
         let mut e = Engine::new();
@@ -9502,7 +9502,7 @@ mod tests {
 
     #[test]
     fn worst_case_byte_budget_covers_actual_output() {
-        // The sizing model's claim - `worst_case_output_bytes` DOMINATES what
+        // The sizing model's claim - `worst_case_output_bytes` always dominates what
         // `process` really produces - checked against a matrix of books crossed
         // with every command class, including the divergence-armed worst cases
         // and adversarially escaped identifiers. A finite matrix samples the
@@ -9511,15 +9511,15 @@ mod tests {
         // escapes to six bytes each: an ASCII fixture would pass a bound six
         // times too small.
         //
-        // THIS TEST IS DELIBERATELY ONE-SIDED, and that is a ruling rather than
+        // This test is deliberately one-sided, and that is a ruling rather than
         // an omission. An `actual <= bound` assertion is also satisfied by a
         // derivation that over-reserves wildly, and over-budgeting is not
-        // free - so every bound `worst_case_output_bytes` is BUILT from carries
+        // free - so every bound `worst_case_output_bytes` is built from carries
         // a two-sided bracket (`bound < 2 * actual` against its maximal
-        // fixture) in `mogwai_protocol::sizing`'s own tests. A ceiling HERE
+        // fixture) in `mogwai_protocol::sizing`'s own tests. A ceiling here
         // would be a different and much weaker claim, because this test feeds
         // one particular command to one particular book while the bound covers
-        // the widest output that command CLASS can produce. Measured over this
+        // the widest output that command class can produce. Measured over this
         // matrix the ratio runs from 2.2x (a query against the deep book, where
         // the row terms really do carry the bound) to 249x (a cancel refused on
         // the deep book: one 152-byte frame against a bound that must also
@@ -9529,7 +9529,7 @@ mod tests {
         let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_ECHOED_ID_LEN);
 
         // Book 1: an empty venue, and a submit that fills - the first fill in a
-        // fresh pair, which introduces TWO balance rows and one position the
+        // fresh pair, which introduces two balance rows and one position the
         // pre-command shape never had.
         let max_account_id = AccountId::parse(&"Z".repeat(mogwai_protocol::MAX_ACCOUNT_ID_LEN))
             .expect("max length account id");
@@ -9577,7 +9577,7 @@ mod tests {
             "the deep book must actually be deep: {deep_shape:?}"
         );
 
-        // An armed reject at the FULL post-truncation reason length: the engine
+        // An armed reject at the full post-truncation reason length: the engine
         // echoes it verbatim into `OrderRejected.reason`, which is exactly the
         // term `ORDER_EVENT_MAX_BYTES` charges `MAX_REASON_LEN` for.
         let mut armed = Engine::new();
@@ -9694,7 +9694,7 @@ mod tests {
                 &mut widest,
                 vec![Command::SubmitOrder(ioc), query_fills],
             ),
-            // A GROUP is the one command whose output scales with the command
+            // A group is the one command whose output scales with the command
             // rather than with the book, so its bound is the one most easily
             // written a factor too small - and a single-submit-sized
             // byte budget would be under by the group's size. Marketable legs,
@@ -9811,11 +9811,11 @@ mod tests {
 
     #[test]
     fn worst_case_byte_budget_covers_an_arrival_triggered_conditional() {
-        // The widest CONDITIONAL arrival, which the matrix above cannot express
+        // The widest conditional arrival, which the matrix above cannot express
         // because it drives `process` with no market reading and a stop needs
         // one to fire on arrival: accepted, triggered, the duplicated fill, the
         // fill, and the cancel that closes the remainder the reduce-only cap
-        // clamped. FIVE order events - one more than the IOC limit shape, and
+        // clamped. Five order events - one more than the IOC limit shape, and
         // the reason the submit multiplier is five rather than four.
         let esc_id = "\u{0001}".repeat(mogwai_protocol::MAX_ECHOED_ID_LEN);
         let mut e = Engine::build(EngineConfig {
@@ -9867,7 +9867,7 @@ mod tests {
 
     #[test]
     fn swept_fill_byte_budget_covers_a_multi_pair_sweep_batch() {
-        // THREE distinct pairs, none previously held: a single-pair batch cannot
+        // Three distinct pairs, none previously held: a single-pair batch cannot
         // distinguish per-batch from per-order account widening and would pass
         // against an under-reserving bound. Every fill duplicated and every id
         // at max length in `\u{0001}`, which serde escapes to six bytes each.
@@ -9931,7 +9931,7 @@ mod tests {
 
     #[test]
     fn swept_byte_budget_covers_a_trigger_that_fills_duplicates_and_cancels() {
-        // The widest SWEPT shape for one order: `OrderTriggered`, the
+        // The widest swept shape for one order: `OrderTriggered`, the
         // duplicated fill, the fill, and the cancel that closes the reduce-only
         // remainder the position cap clamped. Four order events, which is why
         // the per-order multiplier is four rather than three.
@@ -9969,7 +9969,7 @@ mod tests {
     #[test]
     fn a_trigger_only_sweep_pass_reserves_its_own_frame() {
         // The sharpest hole the reviews found: a pass in which a stop-limit
-        // triggers and RESTS books no fill, so a fill-keyed `emitted` would be
+        // triggers and rests books no fill, so a fill-keyed `emitted` would be
         // zero and the `OrderTriggered` frame would be written against a
         // zero-order byte budget.
         let mut e = banded(32);
@@ -10117,7 +10117,7 @@ mod tests {
 
     #[test]
     fn orders_of_one_account_never_interact() {
-        // Self-trade is IMPOSSIBLE rather than prevented: orders are judged
+        // Self-trade is impossible rather than prevented: orders are judged
         // only against the tape, never against each other.
         let mut e = banded(5);
         let mut buy = limit_order("cross-buy", 1);
@@ -10209,15 +10209,15 @@ mod tests {
         // `>=` / `<=` alone is satisfied by no slippage at all, so the claim is
         // asked of a fixture, the same way the trigger band's test does it: the
         // draw is uniform on `0 ..= band_ticks` and one order may legitimately
-        // draw zero, but SOME order in the fixture must slip, and every order
+        // draw zero, but some order in the fixture must slip, and every order
         // that slips must slip the adverse way. A zero band is the control -
-        // it pins that the LAST PRINT is where a fill lands when nothing
+        // it pins that the last print is where a fill lands when nothing
         // displaces it, so a fixture reporting no slip is distinguishable from
         // one whose engine ignores the band entirely.
         //
         // The control's last print is 99 against a stated price of 100, and
         // that split is what makes it a control at all: `draw_market_price`
-        // IGNORES the stated price, which is the property under test, so a
+        // ignores the stated price, which is the property under test, so a
         // control reading 100 against a stated 100 would still pass for an
         // engine that returned the stated price and never looked at the band.
         const CONTROL_LAST_PX: i64 = 99;
@@ -10302,9 +10302,9 @@ mod tests {
         );
     }
 
-    /// THE BAND BITES, which the fill golden cannot show. That artifact's five
-    /// BANDED cells are byte-identical to its five unbanded ones, so it
-    /// certifies the band pipeline RUNS and not that it MOVES anything: a
+    /// The band bites, which the fill golden cannot show. That artifact's five
+    /// banded cells are byte-identical to its five unbanded ones, so it
+    /// certifies the band pipeline runs and not that it moves anything: a
     /// regression that silently zeroed the band would pass it. The cause is
     /// resolution rather than calibration - the golden quantizes latency to a
     /// one-second sweep and the tape crosses a sub-basis-point displacement
@@ -10312,10 +10312,10 @@ mod tests {
     /// ladder, both of which cost runtime that harness deliberately does not
     /// spend.
     ///
-    /// This asserts the property DIRECTLY instead. It proves much less than a
+    /// This asserts the property directly instead. It proves much less than a
     /// distributional golden would, and it proves exactly the part that was
     /// unpinned: with a band, some trigger is displaced from its stated price,
-    /// and the displacement is ADVERSE on both sides. A zeroed band fails it.
+    /// and the displacement is adverse on both sides. A zeroed band fails it.
     #[test]
     fn a_nonzero_band_displaces_a_trigger_adversely_from_its_stated_price() {
         let stated = Decimal::from(100);
@@ -10343,7 +10343,7 @@ mod tests {
                 .next()
         };
 
-        // A BUY's trigger moves DOWN: it must wait for a better price than it
+        // A buy's trigger moves down: it must wait for a better price than it
         // asked for, never a worse one. Moving it up would fill a buy limit the
         // tape never actually reached.
         let buy = displaced(Side::Buy).expect("some buy in the fixture draws a nonzero offset");
@@ -10352,7 +10352,7 @@ mod tests {
             "a banded buy trigger sits below {stated}: {buy}"
         );
 
-        // A SELL's mirrors it and moves UP.
+        // A sell's mirrors it and moves up.
         let sell = displaced(Side::Sell).expect("some sell in the fixture draws a nonzero offset");
         assert!(
             sell > stated,
@@ -10400,7 +10400,7 @@ mod tests {
         assert_eq!(fill.position_id.as_deref(), Some("BTCUSDT-1"));
     }
 
-    /// "DID ANYTHING MOVE THE LEDGER" MEANS EVERY EVENT THAT DOES.
+    /// "Did anything move the ledger" means every event that does.
     ///
     /// `account_changed` gates the account snapshot a batch owes and the
     /// `DropNextAccountUpdate` arm it spends. It listed fills, cancels and
@@ -10439,7 +10439,7 @@ mod tests {
         );
     }
 
-    /// EVERY PREFIX THE VENUE MINTS IS RESERVED, not just the first one.
+    /// Every prefix the venue mints is reserved, not just the first one.
     ///
     /// The restriction is not cosmetic: a consumer that claims one of these ids
     /// burns it in `seen_client_order_ids`, so the forced close that later mints
@@ -10447,11 +10447,11 @@ mod tests {
     /// account that pre-claimed it. `RISK-`, which `liquidate_all` mints, was
     /// unreserved until 2026-08-19.
     ///
-    /// The loop runs over the constant the MINTING SITES read, so a prefix added
+    /// The loop runs over the constant the minting sites read, so a prefix added
     /// later is covered by this test the moment it exists.
     #[test]
     fn a_consumer_cannot_claim_the_liquidation_order_namespace() {
-        // The two prefixes are named LITERALLY as well as looped over, because a
+        // The two prefixes are named literally as well as looped over, because a
         // test that only reads the constant shrinks with it: deleting a prefix
         // from the list would delete the case that proves it reserved.
         for prefix in ["LQ-", "RISK-"] {
@@ -10469,7 +10469,7 @@ mod tests {
                 "{prefix}"
             );
         }
-        // AND ONLY THE PREFIX IS RESERVED. An id that merely starts with the
+        // And only the prefix is reserved. An id that merely starts with the
         // same letters is an ordinary client id - which is what makes the
         // refusals above a statement about the reserved namespace rather than
         // about ids that look vaguely like it.
@@ -10570,7 +10570,7 @@ mod tests {
     }
 
     /// A drain budget can end a walk short of the pass's `ts`. When the pass
-    /// then executes nothing, the frontier must stay where the walk REACHED:
+    /// then executes nothing, the frontier must stay where the walk reached:
     /// pulling it forward to `ts` would retire a span no pass ever scanned, and
     /// the prints in it could never fill the order.
     #[test]
@@ -10605,7 +10605,7 @@ mod tests {
         assert_eq!(e.open[0].leaves_qty, lot);
     }
 
-    /// The counterpart: a REAL execution opens a new tranche, which covers from
+    /// The counterpart: a real execution opens a new tranche, which covers from
     /// `ts` by construction, so the frontier does jump forward there.
     #[test]
     fn a_partial_execution_resets_the_scan_frontier_to_the_pass_time() {
@@ -10638,7 +10638,7 @@ mod tests {
     }
 
     /// The `DropNextAccountUpdate` carve-out that survives the widening: an
-    /// order COMING TO REST places a hold, but must not spend an arm the
+    /// order coming to rest places a hold, but must not spend an arm the
     /// author pointed at the fill it has not had yet.
     #[test]
     fn a_resting_acceptance_leaves_drop_next_account_update_armed() {
@@ -10670,13 +10670,13 @@ mod tests {
     /// The last site that pushed its closing snapshot unconditionally, found
     /// one function away from the group's after that one was closed.
     ///
-    /// An expiry FREES A HOLD, which is exactly what `DropNextAccountUpdate` is
+    /// An expiry frees a hold, which is exactly what `DropNextAccountUpdate` is
     /// armed against, and this path handed the consumer the fresh balances anyway
     /// while leaving the arm loaded for a later fill. The unarmed half is what
     /// makes the assertion discriminating: the same order, the same expiry, and
     /// the snapshot present.
     ///
-    /// `on_modify` is NOT here even though it also moves a hold:
+    /// `on_modify` is not here even though it also moves a hold:
     /// `modify_does_not_consume_armed_drop` rules the other way for it on
     /// purpose, and is cited at that site.
     #[test]
@@ -10723,7 +10723,7 @@ mod tests {
         assert!(armed.armed.is_empty(), "and the arm was spent, not left");
     }
 
-    /// The default seed's grid, read off the ENGINE rather than off the
+    /// The default seed's grid, read off the engine rather than off the
     /// function that produced it.
     ///
     /// `mogwai-protocol` cannot depend on `mogwai-engine`, so a test over there
@@ -10731,7 +10731,7 @@ mod tests {
     /// against a copy of its own literals; this is where both sides exist. The
     /// referent is the engine's own validation, which reads `price_increment`
     /// and `size_increment` out of the seeded definition - so widening either
-    /// increment in `default_instruments` moves what `Engine::new` ACCEPTS, and
+    /// increment in `default_instruments` moves what `Engine::new` accepts, and
     /// that is what is pinned here.
     #[test]
     fn the_default_seed_puts_the_engine_on_a_btcusdt_cent_and_satoshi_grid() {
@@ -10755,7 +10755,7 @@ mod tests {
             )
         };
 
-        // ON the grid: accepted, so the refusals below are about the increment
+        // On the grid: accepted, so the refusals below are about the increment
         // and not about some other rule the fixture tripped.
         for (id, quantity, price) in [
             ("on-grid", satoshi, Decimal::from(100)),
@@ -10770,9 +10770,9 @@ mod tests {
             );
         }
 
-        // A TENTH of each increment: refused, by the exact rule that reads it.
+        // A tenth of each increment: refused, by the exact rule that reads it.
         // The refusal is read from the event rather than through
-        // `reject_reason`, whose panic on an ACCEPTED order would name the
+        // `reject_reason`, whose panic on an accepted order would name the
         // helper's shape instead of the grid this test is about.
         let refusal = |out: &[VenueMessage], what: &str| match out {
             [VenueMessage::OrderRejected { reason, .. }] => reason.clone(),
@@ -10866,7 +10866,7 @@ mod tests {
     /// Ten inverse contracts bought at 100 and marked at 200.
     ///
     /// The inverse answer is `100 * 10 * (1/100 - 1/200)` = 5 settlement units.
-    /// The LINEAR answer the three readers used to hand-roll is
+    /// The linear answer the three readers used to hand-roll is
     /// `(200 - 100) * 10 * 100` = 100,000 - twenty thousand times larger, which
     /// is the discrimination this fixture is chosen for. No coincidence of
     /// rounding can put the wrong formula on 5.
@@ -10904,7 +10904,7 @@ mod tests {
         );
     }
 
-    /// Settlement REALIZES the position, so it must credit exactly what the
+    /// Settlement realizes the position, so it must credit exactly what the
     /// mark-to-market it replaces reported - otherwise an inverse account's
     /// value jumps at the settlement instant, which is the same discontinuity
     /// `apply_fill` refuses at a fill.
@@ -10921,13 +10921,13 @@ mod tests {
     }
 
     /// `margin_requirement`'s doc says its rows sum to exactly what
-    /// `held_balances` holds. Under a NOTIONAL basis it multiplied the raw
+    /// `held_balances` holds. Under a notional basis it multiplied the raw
     /// fraction by a contract count instead of asking the policy, so a Reg-T
     /// account's reported `margins` said 37.50 while its reported `locked` said
     /// 3,750 - the wire contradicting itself on every leveraged account. The
     /// assertion is the invariant itself, not a restatement of the number.
     ///
-    /// WHAT IT PINS IS THE EQUALITY CASE, deliberately: one margined marked
+    /// What it pins is the equality case, deliberately: one margined marked
     /// symbol, nothing unsettled, no base-currency hold. Those are exactly the
     /// three carve-outs `margin_requirement`'s doc now names, and the general
     /// statement is a `<=` rather than an equality, so a fixture sitting inside
@@ -11017,18 +11017,18 @@ mod tests {
         assert_eq!(held, Decimal::from(4_200));
     }
 
-    /// `on_modify`'s futures branch priced the AMENDED requirement at the
+    /// `on_modify`'s futures branch priced the amended requirement at the
     /// amend's own optional `price` rather than `effective_price`, so a
     /// quantity-only amend computed `initial(new_leaves, 0)` - zero under a
     /// notional basis - and the funds check could not fail however far the
     /// amend grew the position.
     ///
-    /// "insufficient USD balance" IS NOT A DISCRIMINATOR ON ITS OWN - several
+    /// "insufficient USD balance" is not a discriminator on its own - several
     /// branches of `on_modify` produce it - so the test runs the identical
     /// amend twice, once on an account that cannot afford it and once on one
     /// that can. Every other refusal `on_modify` can reach for these inputs
     /// (the increment checks, the notional overflow guard, the missing margin
-    /// ledger) is balance-independent and would refuse BOTH, so a refusal that
+    /// ledger) is balance-independent and would refuse both, so a refusal that
     /// flips with the balance can only be the funds comparison.
     #[test]
     fn a_quantity_only_amend_of_a_leveraged_future_is_checked_against_its_price() {
@@ -11070,7 +11070,7 @@ mod tests {
         );
 
         let mut e = leveraged_futures(5_000);
-        // RESTING, so the amend has something to amend: a buy limit under the
+        // Resting, so the amend has something to amend: a buy limit under the
         // market at 22,000 takes nothing.
         let mut resting = mnq_order("A1", Side::Buy, 1, 21_000);
         resting.order_type = OrderType::Limit;
@@ -11113,8 +11113,8 @@ mod tests {
         assert_eq!(reason, "insufficient USD balance");
     }
 
-    /// A cash equity account refuses shorting BY NAME, and could nonetheless end
-    /// the run short: the check asked how short THIS order alone would leave the
+    /// A cash equity account refuses shorting by name, and could nonetheless end
+    /// the run short: the check asked how short this order alone would leave the
     /// account, so a hundred held shares covered every resting sell
     /// independently. Two sells of a hundred against a hundred held both read
     /// `short = 0`, and both passed.
@@ -11144,7 +11144,7 @@ mod tests {
             reason.starts_with("a cash equity account cannot sell AAPL short"),
             "{reason}"
         );
-        // THE RESOURCE THE FINDING NAMED, not merely the refusal: the point is
+        // The resource the finding named, not merely the refusal: the point is
         // that the account cannot be made short, and an error message is not
         // evidence of that on its own.
         assert_eq!(e.net_position("AAPL"), Decimal::from(100));
@@ -11157,9 +11157,9 @@ mod tests {
 
     /// The bracket the first version of the short check broke. Two exit legs
     /// over one holding are an `Oco` group: whichever fills cancels the other,
-    /// so the pair can execute AT MOST its largest leg, and a hundred held
+    /// so the pair can execute at most its largest leg, and a hundred held
     /// shares cover it. Summing them read as a hundred-share short and a cash
-    /// equity account refused the second leg BY NAME - a refusal of the most
+    /// equity account refused the second leg by name - a refusal of the most
     /// ordinary order list there is.
     #[test]
     fn a_bracket_s_two_exit_legs_are_not_two_shorts() {
@@ -11190,7 +11190,7 @@ mod tests {
 
     /// A `Resting::Held` order-list child cannot execute until its parent fills,
     /// which is exactly why `order_hold_entry` holds no funds against
-    /// one. The worst-fill-order accounting has to apply the SAME rule, or a
+    /// one. The worst-fill-order accounting has to apply the same rule, or a
     /// bracket's held exit legs count as working shorts against an entry that
     /// has not filled.
     #[test]
@@ -11227,11 +11227,11 @@ mod tests {
         );
     }
 
-    /// THE GROUP'S TWO PASSES MUST AGREE, and a check reading the working book
+    /// The group's two passes must agree, and a check reading the working book
     /// is the way they stop agreeing: the dry pass runs before any member
     /// rests, the real pass after earlier members do. Two independent equity
     /// sells over one holding really are inadmissible, and the group must be
-    /// refused WHOLE on pass one - not admitted by the dry pass and then broken
+    /// refused whole on pass one - not admitted by the dry pass and then broken
     /// open on pass two, which `report_group_member_refusal` would have filed
     /// as the disclosed funds carve-out because re-asking after the refusal
     /// refuses again.
@@ -11239,7 +11239,7 @@ mod tests {
     fn a_group_of_two_equity_sells_over_one_holding_is_refused_whole() {
         let mut e = equity_engine(&Shares::default());
         trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
-        // Linked, but with no contingency between them: two INDEPENDENT sells
+        // Linked, but with no contingency between them: two independent sells
         // that happen to travel in one frame. The link is not decoration - a
         // member without one is refused by `validate_submit_group` before the
         // equity check this test is about is ever reached.
@@ -11282,7 +11282,7 @@ mod tests {
             vec!["G1", "G2"],
             "pass one refuses the group whole: {out:?}"
         );
-        // AND FOR THE RIGHT RULE. Every wire-shape refusal the group validator
+        // And for the right rule. Every wire-shape refusal the group validator
         // makes also refuses the group whole with these same two ids, so an
         // id-only assertion cannot tell this test's subject - the equity short
         // check reading the working book - from a link or symbol rule tripping
@@ -11298,7 +11298,7 @@ mod tests {
             "and no member is left resting: {:?}",
             e.open.len()
         );
-        // Whereas the SAME two legs as an exclusive pair are admissible, which
+        // Whereas the same two legs as an exclusive pair are admissible, which
         // is what makes the assertion above about the sells and not about
         // groups refusing sells in general.
         let legs = ["H1", "H2"];
@@ -11331,18 +11331,18 @@ mod tests {
         );
     }
 
-    /// `settle` DECLINES a non-positive price on an inverse instrument, and
+    /// `settle` always declines a non-positive price on an inverse instrument, and
     /// declining means the position keeps the mark it had.
     ///
     /// Two distinct failures live here and the test asserts against both. The
     /// first is arithmetic: `InstrumentDef::unrealized` answers `None` for an
-    /// inverse at zero because `1/0` has no value, which is a DIFFERENT answer
+    /// inverse at zero because `1/0` has no value, which is a different answer
     /// from "the arithmetic overflowed", and collapsing the two into one
     /// `unwrap_or(Decimal::MAX)` credited the whole Decimal range to the
     /// balance.
     ///
     /// The second is durability, and it is the one the guard exists for.
-    /// Settlement WRITES its price into both `avg_px` and `mark_px`, so a
+    /// Settlement writes its price into both `avg_px` and `mark_px`, so a
     /// booked zero does not produce one bad number - it leaves the position
     /// unpriceable for the rest of the run, and every later reader answers on a
     /// price that cannot be inverted. A credits-nothing assertion alone passes
@@ -11384,7 +11384,7 @@ mod tests {
 
     /// The other side of the same rule, without which the decline above is
     /// indistinguishable from a settlement path that refuses everything: a
-    /// POSITIVE price still settles, through the inverse arithmetic.
+    /// positive price still settles, through the inverse arithmetic.
     #[test]
     fn settling_an_inverse_at_a_positive_price_still_books() {
         let mut e = inverse_engine();
@@ -11397,7 +11397,7 @@ mod tests {
         );
     }
 
-    /// A closed position is stored with every field zero and is NEVER REMOVED
+    /// A closed position is stored with every field zero and is never removed
     /// from the map, so for an inverse instrument the raw `unrealized` answers
     /// `None` forever. `valuation_at` propagates a `None` to the whole account,
     /// so one flat coin-margined row made the tick-resolution risk sweep
@@ -11473,9 +11473,9 @@ mod tests {
         );
     }
 
-    /// `on_modify`'s pre-rework funds block sent every non-future SELL down a
+    /// `on_modify`'s pre-rework funds block sent every non-future sell down a
     /// branch that demanded a `base_currency`, which an `Equity` does not
-    /// have - so amending ANY equity sell was refused, with a message about the
+    /// have - so amending any equity sell was refused, with a message about the
     /// futures margin ledger. The rework fixed it incidentally; without a test
     /// the next person restoring the original condition restores the bug.
     #[test]

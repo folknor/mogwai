@@ -1,6 +1,6 @@
 //! What does `LogOuCox`'s `sigma_y` cost, one value at a time.
 //!
-//! WRITTEN TO CHOOSE A NUMBER. `reference/performance.md`'s cost-cliff table
+//! Written to choose a number. `reference/performance.md`'s cost-cliff table
 //! prices `sigma_y` 1, 8 and 12, and the owner ruled on 2026-08-20 that the knob
 //! gets an admission bound. Three points is not enough to place a ceiling: 8 is
 //! already pathological at milliseconds per draw and 12 walks to the terminal
@@ -16,7 +16,7 @@
 //! arm the table's 3.6 ms row was measured on and the one an operator can
 //! actually reach. Pass a different one to see the knob in isolation.
 //!
-//! NOT A GATE AND NOT A BENCHED ROW. It prints a table for a human to read and
+//! Not a gate and not a benched row. It prints a table for a human to read and
 //! exits; nothing asserts on its numbers, and a threshold derived from it
 //! belongs in `ArrivalConfig::is_valid` with the reasoning written beside it.
 //!
@@ -65,7 +65,7 @@ fn main() {
 }
 
 /// `LogOuCox`'s `sigma_y`, whose `x = exp(y - sigma^2 / 2)` latent is unbounded
-/// BELOW - so a thin latent stretches the budget traversal one cell at a time.
+/// below - so a thin latent stretches the budget traversal one cell at a time.
 fn sweep_sigma_y(draws: u64, thin: f64, fingerprint: &Fingerprint, session: &SessionProfile) {
     for tenths in 10..=90 {
         if tenths % 5 != 0 {
@@ -97,7 +97,7 @@ fn sweep_event_duration(
             let seconds = mantissa * 10_f64.powi(exponent);
             let mut scalars = GeneratorScalars::from_fingerprint_medians("BTCUSDT", fingerprint);
             scalars.mean_event_duration_s = seconds;
-            // A BENIGN KERNEL, held fixed. This knob reaches the budget
+            // A benign kernel, held fixed. This knob reaches the budget
             // traversal through the kernel rather than instead of it - with no
             // arrival family there is no integrated walk to measure at all - so
             // the family is pinned at the healthy `sigma_y` the sweep above
@@ -116,7 +116,7 @@ fn sweep_event_duration(
 /// Time `draws` parent draws off one configuration, reporting mean, median, max
 /// and whether the walk ever refused.
 ///
-/// A REFUSAL ENDS THE ROW rather than being folded into the timings: past some
+/// A refusal always ends the row rather than being folded into the timings: past some
 /// setting the walk stops succeeding-but-slow and starts refusing outright, and
 /// those are different failures with different remedies.
 fn time_walk(

@@ -111,9 +111,9 @@ fn quiet() -> mogwai_data::VolTrace {
 
 #[test]
 fn the_log_mid_is_ln_of_the_nano_unit_price_sum_halved() {
-    // THE convention, pinned against an explicit hand-computed vector: the
-    // price sum is formed in EXACT integer 1e-9 units, halved in f64, and
-    // only then logged. Logging a mid expressed in POINTS instead shifts the
+    // The convention, pinned against an explicit hand-computed vector: the
+    // price sum is formed in exact integer 1e-9 units, halved in f64, and
+    // only then logged. Logging a mid expressed in points instead shifts the
     // value by ln(1e9), and every difference-based statistic downstream by a
     // term that does not cancel across segments - the 3.55e-15 mismatch
     // class this port exists to kill.
@@ -138,10 +138,10 @@ fn the_log_mid_is_ln_of_the_nano_unit_price_sum_halved() {
         want.to_bits(),
         "the log-mid must be bit-exact"
     );
-    // And it is NOT the log of the mid in points.
+    // And it is never the log of the mid in points.
     let in_points = (23_000.0f64).ln();
     assert!((got - in_points - (1.0e9f64).ln()).abs() < 1e-9);
-    // The half-tick quote-mid divides the SUM by the FULL tick.
+    // The half-tick quote-mid divides the sum by the full tick.
     assert_eq!(
         acc.quote_min[&((OPEN_NS + 1) / NS_PER_MIN)],
         (184_000, 184_000)
@@ -178,23 +178,23 @@ fn off_grid_prices_refuse_rather_than_flooring() {
 
 #[test]
 fn the_window_schedule_excludes_hour_crossing_by_endpoint_attribution() {
-    // A window ending EXACTLY on the hour boundary crosses and is excluded -
+    // A window ending exactly on the hour boundary crosses and is excluded -
     // the endpoint-hour rule, matching the fixed-horizon convention.
     let origin = 3_600_000_000_000u64 - 120_000_000_000; // 00:58:00
     let end = origin + 300_000_000_000;
     let sched = window_schedule(origin, end, 60_000_000_000);
     let hours: Vec<Option<u64>> = sched.iter().map(|&(_, _, h)| h).collect();
-    // 00:58->00:59 in hour 0; 00:59->01:00 ends exactly ON the boundary and
-    // therefore CROSSES (excluded); the rest attribute to hour 1.
+    // 00:58->00:59 in hour 0; 00:59->01:00 ends exactly on the boundary and
+    // therefore crosses (excluded); the rest attribute to hour 1.
     assert_eq!(hours, vec![Some(0), None, Some(1), Some(1), Some(1)]);
-    // Only windows STRICTLY contained in the segment are scheduled.
+    // Only windows strictly contained in the segment are scheduled.
     assert_eq!(window_schedule(0, 90_000_000_000, 60_000_000_000).len(), 1);
 }
 
 #[test]
 fn wall_boundaries_follow_the_protocol_11_pending_rule() {
     // Establishment (the first boundary with an as-of emits nothing),
-    // segment-local as-of, and the PENDING rule: an endpoint exactly ON the
+    // segment-local as-of, and the pending rule: an endpoint exactly on the
     // boundary updates first, so it is the as-of of its own boundary.
     let mut seg = SegmentAcc::new(0, 0, 10_000_000_000);
     seg.mid_ts = vec![1_000_000_000, 2_000_000_000, 4_000_000_000];
@@ -205,9 +205,9 @@ fn wall_boundaries_follow_the_protocol_11_pending_rule() {
     assert_eq!(
         summary,
         vec![
-            // b = 2 s: the endpoint AT 2 s is included (ts <= b) - the
+            // b = 2 s: the endpoint at 2 s is included (ts <= b) - the
             // pending rule - so the as-of is 2.0, not 1.0. This boundary
-            // ESTABLISHES the chain and emits nothing.
+            // establishes the chain and emits nothing.
             (2_000_000_000, Some(2.0), false, None),
             (4_000_000_000, Some(4.0), true, Some(2.0)),
             (6_000_000_000, Some(4.0), true, Some(0.0)),
@@ -226,8 +226,8 @@ fn wall_boundaries_follow_the_protocol_11_pending_rule() {
 #[test]
 fn block4_omits_a_nonpositive_scale_with_one_refusal_per_session_hour() {
     // A flat mid drives the trailing one-max-trimmed scale to zero once the
-    // 1000-return history fills: the residuals are OMITTED (Amendment F) and
-    // recorded, never a hard error, and the hour gets exactly ONE record.
+    // 1000-return history fills: the residuals are omitted (Amendment F) and
+    // recorded, never a hard error, and the hour gets exactly one record.
     let mut fx = Fixture::new();
     let flat = vt(0.0, 1.0e-8, 1.0e-8, 0.0, 0.0, 23_000.0, false, false);
     for k in 0..1500u64 {
@@ -250,7 +250,7 @@ fn block4_omits_a_nonpositive_scale_with_one_refusal_per_session_hour() {
             .expect("cell")
             .contains("standardizer")
     );
-    // The generated scope carries the SEED; the observed scope does not.
+    // The generated scope carries the seed; the observed scope does not.
     assert_eq!(refusals[0]["scope"], "seed 9 session 2026-07-07");
 }
 
@@ -271,7 +271,7 @@ fn the_refusal_scope_distinguishes_the_two_sides() {
 // -- The generated side, end to end -----------------------------------------
 
 /// The Brick G gate test, carried over from the `mogwai-cli` twin: the
-/// accumulator's serialized blocks against an INDEPENDENT recompute over the
+/// accumulator's serialized blocks against an independent recompute over the
 /// same crafted parent stream.
 #[test]
 fn measure12a_matches_independent_recompute() {
@@ -297,7 +297,7 @@ fn measure12a_matches_independent_recompute() {
     assert_eq!(sessions.len(), 1);
     let s = &sessions[0];
     assert_eq!(s["session_date"], "2026-07-07");
-    // Spec 5.1 is observed-side only: the generated side emits an EMPTY array.
+    // Spec 5.1 is observed-side only: the generated side emits an empty array.
     assert_eq!(s["permutations"], serde_json::json!([]));
     assert_eq!(s["segments"][0]["open_ns"].as_u64(), Some(OPEN_NS));
     assert_eq!(s["segments"][0]["segment_index"], 0);
@@ -443,7 +443,7 @@ fn measure12a_matches_independent_recompute() {
 fn initiation_survives_a_minute_straddling_burst() {
     // A burst whose later children cross the minute boundary must not resolve
     // the minute's initiation before its own parent is attributed back to the
-    // first-child minute: minute closure is PARENT-driven, not trade-driven.
+    // first-child minute: minute closure is parent-driven, not trade-driven.
     let mut fx = Fixture::new();
     let minute = |m: u64| H23_NS + m * NS_PER_MIN;
     fx.parent(minute(0) + 10_000_000_000, 0, quiet(), &[0]);
@@ -476,9 +476,9 @@ fn initiation_survives_a_minute_straddling_burst() {
 
 #[test]
 fn a_shared_control_refuses_once_and_a_new_largest_clears_the_share() {
-    // Both extremes select the SAME sole eligible control: the control emits
-    // one record per extreme, but a refused cell on it carries exactly ONE
-    // logical RefusalRec.
+    // Both extremes select the same sole eligible control: the control emits
+    // one record per extreme, but a refused cell on it carries exactly one
+    // logical `RefusalRec`.
     let mut fx = Fixture::new();
     let minute = |m: u64| H23_NS + m * NS_PER_MIN;
     for m in 0..29 {
@@ -544,7 +544,7 @@ fn a_shared_control_refuses_once_and_a_new_largest_clears_the_share() {
 fn a_new_largest_innovation_nulls_the_stale_share() {
     // Within one minute: parent A (inn 9) resolves a share when parent B
     // arrives; B (inn 12) becomes the largest and never gains a successor, so
-    // arch_share_next must be NULL while the minute max keeps A's share.
+    // `arch_share_next` must be null while the minute max keeps A's share.
     let mut fx = Fixture::new();
     let minute = |m: u64| H23_NS + m * NS_PER_MIN;
     let big = |inn: f64| vt(inn, 9.0e-8, 9.0e-8, 3.0e-4, 3.0e-4, 23_000.0, false, false);
@@ -620,7 +620,7 @@ fn permutations_preserve_the_variant_invariants_and_are_seed_stable() {
     // The generated side emits none of this.
     let g = build().close(Scope::Generated { seed: 1 }).expect("close");
     assert_eq!(g["permutations"], serde_json::json!([]));
-    // ... and everything else is identical: 5.1 is the ONLY block that
+    // ... and everything else is identical: 5.1 is the only block that
     // differs between the two scopes on the same input.
     for key in ["block1_hist", "block2", "block3", "block4", "segments"] {
         assert_eq!(
@@ -637,7 +637,7 @@ fn permutations_preserve_the_variant_invariants_and_are_seed_stable() {
 fn the_ceil_n_over_2_median_backs_the_control_group_ranges() {
     // The forensic control's per (segment, hour) median takes the
     // ceil(n/2)-th order statistic, matching median_or_none - an even-length
-    // group takes the LOWER middle.
+    // group takes the lower middle.
     for (values, want) in [
         (vec![0i64, 1], 0i64),
         (vec![0, 1, 2], 1),
@@ -650,10 +650,10 @@ fn the_ceil_n_over_2_median_backs_the_control_group_ranges() {
     }
 }
 
-/// An optimization-preserves-output gate, NOT a two-convention gate, though it
+/// An optimization-preserves-output gate, not a two-convention gate, though it
 /// has been graded as one: `close_reduced` drops blocks 3 and 4 to buy Stage A
 /// budget, and the property is that it changes nothing else. If the block-2
-/// definition moves, both sides moving together is CORRECT - that is the whole
+/// definition moves, both sides moving together is correct - that is the whole
 /// claim - so there is no drift for a shared conformance fixture to catch.
 #[test]
 fn close_reduced_agrees_with_close_on_block1_and_block2() {

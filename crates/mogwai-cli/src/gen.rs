@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `mogwai gen` - runs the synthetic generator OFFLINE (no venue, no sockets,
+//! `mogwai gen` - runs the synthetic generator offline (no venue, no sockets,
 //! no adapter) and writes its output as CSV, either raw trades or aggregated
 //! OHLCV bars, so the generated tape can be charted and inspected. Reuses the
 //! venue's own generation plumbing (`InstrumentProfiles`, `fingerprint()`,
 //! `GeneratedSource`) and the shared bar-aggregation core
-//! (`mogwai_data::{BarAcc, fold_trade}`), so the PROCESS is the shipped one.
+//! (`mogwai_data::{BarAcc, fold_trade}`), so the process is the shipped one.
 //! The realization is not: a run draws or configures its own seed, so this CLI
 //! reproduces a served walk only when handed that run's tape seed via `--seed`.
 //!
@@ -78,7 +78,7 @@ pub(crate) struct GenArgs {
     #[arg(long, default_value = "BTCUSDT")]
     symbol: String,
     /// Resolve the instrument from an operator config TOML instead of a
-    /// symbol, through the venue's REAL `Config::load` and profile
+    /// symbol, through the venue's real `Config::load` and profile
     /// construction - the same path a served config takes - so a scratch
     /// profile with candidate scalars is expressible without touching
     /// committed presets. The file must carry `[instrument]` defaults or a
@@ -194,7 +194,7 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
         }
         let mut source = build_source(args, &profile, args.start)?;
         source.enable_vol_trace();
-        // `end` bounds the WINDOW (checked just above), not the walk: the walk
+        // `end` bounds the window (checked just above), not the walk: the walk
         // stops at the first parent at or past `until`, so the last in-window
         // parent's brood is counted whole even when `until == end`.
         return write_trace(&mut source, from, until, sink);
@@ -269,7 +269,7 @@ fn run_into(args: &GenArgs, sink: &mut impl Write) -> anyhow::Result<()> {
 }
 
 /// Drive the walk through `mogwai_lab::measure12a::generated::GeneratedAcc`
-/// (spec Brick G), the UNIFIED block engine phase 2a landed - this CLI
+/// (spec Brick G), the unified block engine phase 2a landed - this CLI
 /// surface used to drive a second, CLI-local twin
 /// (`crate::measure12a::Measure12aAcc`, retired at phase 2c-iii); the walk
 /// itself is unchanged, still the shipped one. The consumer reads events
@@ -314,9 +314,9 @@ pub(crate) fn run_measure12a(
     Ok(value)
 }
 
-/// `VmHWM` (peak resident set) of THIS process, ported from the retired
+/// `VmHWM` (peak resident set) of this process, ported from the retired
 /// `crate::measure12a::self_peak_rss_bytes` - the walk's own cost record,
-/// distinct from `mogwai_lab::sampler::ResourceSampler`'s process-TREE
+/// distinct from `mogwai_lab::sampler::ResourceSampler`'s process-tree
 /// sampling (slice 2c-ii), which this single-shot walk has no need of.
 fn self_peak_rss_bytes() -> u64 {
     std::fs::read_to_string("/proc/self/status")
@@ -337,10 +337,10 @@ fn self_peak_rss_bytes() -> u64 {
 
 /// One JSON line per parent whose event instant falls inside
 /// `[from, until)`: the parent timestamp, its child count, and the
-/// volatility intermediates the source observed on the REAL step path.
+/// volatility intermediates the source observed on the real step path.
 ///
-/// `child_count` IS THE PARENT'S WHOLE BROOD - every trade between that parent
-/// and the NEXT parent, regardless of where those children fall relative to
+/// `child_count` is the parent's whole brood - every trade between that parent
+/// and the next parent, regardless of where those children fall relative to
 /// `until`. That is the contract the record shape admits, and it is why the
 /// walk's only stopping point is the next parent: a count truncated at some
 /// other instant would be a different quantity emitted under the same name.
@@ -379,9 +379,9 @@ fn write_trace(
                 if q.ts_event >= until {
                     // Every later parent sits past the window; the walk can
                     // stop - the tape up to here is already fully realized.
-                    // THE NEXT PARENT IS THE ONLY LEGAL STOPPING POINT: a
+                    // The next parent is the only legal stopping point: a
                     // brood's children carry `child_stride_ns` spacing, so
-                    // stopping on a CHILD's timestamp (this loop used to break
+                    // stopping on a child's timestamp (this loop used to break
                     // on `ts >= start + length`, which `--trace-until` is
                     // allowed to equal) truncates the last parent's
                     // `child_count` and emits the short record anyway.
@@ -405,7 +405,7 @@ fn write_trace(
 }
 
 /// `<n><unit>` -> nanoseconds. `<n>` is one-or-more ASCII digits (`>= 1`);
-/// `<unit>` is EXACTLY one of `s m h d w mo y` (case-sensitive, no surrounding
+/// `<unit>` is exactly one of `s m h d w mo y` (case-sensitive, no surrounding
 /// or internal whitespace: `"1 d"`, `"1D"`, `"1"`, `"d"`, `"0d"` all error).
 /// Multipliers: s=1e9, m=60e9, h=3600e9, d=86_400e9, w=604_800e9, mo=30d, y=365d.
 /// Total; rejects empty/zero/unknown-unit and saturating-checks overflow to an
@@ -519,7 +519,7 @@ fn build_source(
     }
     let regime = resolve_regime(args)?;
 
-    // The calendar is NOT optional dressing: without it a session-bearing
+    // The calendar is not optional dressing: without it a session-bearing
     // instrument prints straight through its own closed weekend and daily
     // maintenance halt, so the dump misrepresents the very tape it exists to
     // show. The served path (`source::generator`) has always applied it; this
@@ -549,7 +549,7 @@ fn resolve_profile_for(args: &GenArgs) -> anyhow::Result<mogwai_venue::source::I
     resolve_profile(&args.symbol)
 }
 
-/// One instrument profile from an operator config file, through the SAME
+/// One instrument profile from an operator config file, through the same
 /// `Config::load` and instrument-profile construction a served run boots
 /// with, so a scratch config exercises exactly the shipped validation and
 /// defaulting. The config must configure an instrument: an absent table
@@ -626,7 +626,7 @@ fn write_bar_row(out: &mut impl Write, open_ts: u64, bar: &BarAcc) -> anyhow::Re
 
 /// Empty-window-fill state threaded across the fold, the end-flush and the
 /// trailing-empties pass. `carry` is `None` until the first real bar is
-/// emitted, which is what makes a LEADING desert render as absent rows rather
+/// emitted, which is what makes a leading desert render as absent rows rather
 /// than empty ones: there is no priced bar yet to carry forward.
 struct FillState {
     prev_close: Option<u64>,
@@ -646,10 +646,10 @@ impl FillState {
     /// last emitted close price forward as a flat zero-volume bar. Advances
     /// `prev_close` as it emits.
     ///
-    /// `target`, when `Some`, is the close of a window that is ABOUT TO BE
+    /// `target`, when `Some`, is the close of a window that is about to be
     /// emitted for real by the caller right after this call returns (a
     /// rotating fold, or the end-flushed still-open accumulator) - so the
-    /// boundary at exactly `target` is EXCLUDED (`nb < target`), leaving that
+    /// boundary at exactly `target` is excluded (`nb < target`), leaving that
     /// window for the caller's own real emission rather than double-counting
     /// it here. `target = None` is the unconditional trailing call, where no
     /// real emission follows: the only ceiling is `end` itself, inclusive, so
@@ -709,8 +709,8 @@ impl FillState {
     }
 }
 
-/// Stream bar rows over the epoch-anchored grid, one row per window FULLY
-/// inside `[start, end)`, INCLUDING zero-trade windows (see the empty-fill
+/// Stream bar rows over the epoch-anchored grid, one row per window fully
+/// inside `[start, end)`, including zero-trade windows (see the empty-fill
 /// rule). header `open_ts,close_ts,open,high,low,close,volume,trade_count`.
 /// Takes an iterator of trades so tests can craft deserts at chosen positions
 /// (the real generator's deserts emerge hours in, seed-dependently, and cannot
@@ -744,9 +744,9 @@ fn write_bars(
         state.fill_empty_to(Some(open.close_ts), end, interval, out)?;
         state.emit_real(open, interval, start, out)?;
     }
-    // If `open.close_ts > end` it straddles `end` and is DROPPED (not emitted).
+    // If `open.close_ts > end` it straddles `end` and is dropped (not emitted).
 
-    // Trailing empties, UNCONDITIONALLY: fills a desert between the last
+    // Trailing empties, unconditionally: fills a desert between the last
     // emitted bar and the span end regardless of whether the open accumulator
     // flushed or dropped.
     state.fill_empty_to(None, end, interval, out)?;
@@ -774,14 +774,14 @@ mod tests {
         }
     }
 
-    /// A trace record's `child_count` is the parent's WHOLE brood - the
+    /// A trace record's `child_count` is the parent's whole brood - the
     /// trades between it and the next parent - and the doc comment on
     /// `write_trace` says so. The walk's own span (`--length`) must therefore
     /// not be able to move it. The window is legal at `trace_until == end`
     /// (the validation admits `until <= end`), which puts the last in-window
     /// parent's children on the far side of the walk's stopping instant.
     ///
-    /// The window close is DERIVED from the tape rather than guessed: a brood
+    /// The window close is derived from the tape rather than guessed: a brood
     /// spans microseconds and the parents are seconds apart, so a `until`
     /// picked on a round second lands between broods with overwhelming
     /// probability and the defect is invisible. 599 round-second closes were
@@ -817,8 +817,8 @@ mod tests {
             lines_of(&buf)
         }
 
-        // Walk the tape independently for the ORACLE: a parent past the origin
-        // that owns a child strictly after it, and its WHOLE brood - every
+        // Walk the tape independently for the oracle: a parent past the origin
+        // that owns a child strictly after it, and its whole brood - every
         // trade up to the next parent. The window then closes one nanosecond
         // past that parent, so the parent is inside `[from, until)` and every
         // child but the first sits at or beyond the close.
@@ -913,8 +913,8 @@ mod tests {
         assert!(parse_duration(&format!("{}d", u64::MAX)).is_err());
     }
 
-    // (a) LEADING gap: `start` a boundary, first trade several windows in.
-    // Asserts NO leading empty rows; the first row is the first fully-in-range
+    // (a) leading gap: `start` a boundary, first trade several windows in.
+    // Asserts no leading empty rows; the first row is the first fully-in-range
     // window.
     #[test]
     fn gen_bars_leading_gap_emits_no_leading_empties() {
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(lines[1], "300,400,100,101,100,101,2,2");
     }
 
-    // (b) INTERIOR desert: trades, gap of several windows, trades. Asserts
+    // (b) interior desert: trades, gap of several windows, trades. Asserts
     // carry-forward empties with volume=0,count=0 and the carried price.
     #[test]
     fn gen_bars_interior_desert_carries_forward_empties() {
@@ -960,8 +960,8 @@ mod tests {
         assert_eq!(lines.len(), 6, "no unexpected trailing rows: {lines:?}");
     }
 
-    // (c) TRAILING desert to `end` with the last window's rotating trade
-    // absent: asserts the END-FLUSH of the complete window plus trailing
+    // (c) trailing desert to `end` with the last window's rotating trade
+    // absent: asserts the end-flush of the complete window plus trailing
     // empties.
     #[test]
     fn gen_bars_trailing_desert_end_flushes_and_fills_to_end() {
@@ -980,8 +980,8 @@ mod tests {
         assert_eq!(lines.len(), 5);
     }
 
-    // (d) STRADDLE case: a late trade whose window close_ts > end. Assert its
-    // window is dropped AND the interior empties before it (all closing <=
+    // (d) straddle case: a late trade whose window close_ts > end. Assert its
+    // window is dropped and the interior empties before it (all closing <=
     // end) still render (the B2 regression).
     #[test]
     fn gen_bars_straddle_drop_still_fills_interior_empties() {
@@ -992,7 +992,7 @@ mod tests {
         ];
         // end=350: the second trade's window is [300,400), close_ts=400 > end,
         // so it straddles and is dropped. But folding it still rotates and
-        // closes the FIRST window [0,100) at ts=380 (>= its close_ts of 100),
+        // closes the first window [0,100) at ts=380 (>= its close_ts of 100),
         // whose close (100) is <= end, so it renders, and the interior empties
         // between [100,300) must render too.
         let mut buf = Vec::new();
@@ -1112,7 +1112,7 @@ mod tests {
     fn a_preset_symbol_resolves_and_carries_its_calendar() {
         // MNQ is not in the built-in venue, so this only works through the
         // preset fallback. The calendar assertion is the load-bearing half: a
-        // CME instrument generated WITHOUT its calendar prints continuously,
+        // CME instrument generated without its calendar prints continuously,
         // which is what this command used to do.
         let profile = resolve_profile("MNQ").expect("MNQ resolves from the embedded preset");
         assert_eq!(profile.def.symbol.as_ref(), "MNQ");
@@ -1337,7 +1337,7 @@ mod tests {
     /// A config carrying a second `[symbols.*]` table used to bail with
     /// "resolved N instruments, expected exactly one"; profiles are plural now,
     /// so the boot shape is resolved by NAME instead of by count. The MNQ case
-    /// additionally pins that an ABSENT top-level `symbol` resolves the shape
+    /// additionally pins that an absent top-level `symbol` resolves the shape
     /// the default `[instrument] preset` names, not `DEFAULT_PRESET`.
     #[test]
     fn a_scratch_config_with_a_second_symbol_table_still_resolves_its_boot_shape() {
@@ -1352,7 +1352,7 @@ mod tests {
     #[test]
     fn a_scratch_config_profile_matches_the_served_profile() {
         // The whole point of --config is that a scratch profile takes the
-        // SAME loading path a served config takes. A config that merely
+        // same loading path a served config takes. A config that merely
         // names the MNQ preset must therefore resolve to exactly the profile
         // the embedded preset resolves to.
         let path = scratch_config(
@@ -1418,7 +1418,7 @@ mod tests {
         // Every slot the fit will solve must demonstrably reach the
         // measurement through the scratch-config path: a candidate value the
         // summary cannot see would make its inverse solve a fiction. Each
-        // case overrides ONE preset knob and asserts the summary changes -
+        // case overrides one preset knob and asserts the summary changes -
         // except size_round_frac, which is structurally inert at MNQ's
         // declared one-contract median (the 4.3 finding), so its pair of
         // configs also raises the median to 40 and differs only in the frac.
@@ -1438,7 +1438,7 @@ mod tests {
                 "\"generator.children_single_frac\" = 0.9",
             ),
             // levels_mean must stay at or below the fitted children_mean
-            // 1.1711, so the moved value sits BELOW the preset's 1.1216.
+            // 1.1711, so the moved value sits below the preset's 1.1216.
             ("levels_mean", "\"generator.levels_mean\" = 1.05"),
             (
                 "latent_size_median",
@@ -1479,7 +1479,7 @@ mod tests {
             );
         }
 
-        // size_round_frac rides the SAME config transport as every other
+        // size_round_frac rides the same config transport as every other
         // slot, because the fit will drive it through gen --config. It is
         // structurally inert at MNQ's declared one-contract median
         // (integral_lot = 1), so both configs also raise the median to 40
@@ -1504,17 +1504,17 @@ mod tests {
 
     /// Brick O of the retired protocol-10 successor spec: the protocol-9
     /// tape oracle. Walks the resolved crypto preset profiles directly -
-    /// quotes AND trades, every field via canonical named-separator lines -
+    /// quotes and trades, every field via canonical named-separator lines -
     /// and hashes each stream with FNV-1a 64 into the committed fixture.
-    /// Write-once semantics: a MISSING fixture is written only at
+    /// Write-once semantics: a missing fixture is written only at
     /// TAPE_PROTOCOL_VERSION 9 and refused by name under any other
     /// protocol, so it can never re-bless later-protocol output; a
     /// present fixture always asserts equality. This is the frozen
     /// oracle the successor's byte-identity tests compare against.
     ///
-    /// IT WAS `#[ignore]`d ON A COST THAT WAS NEVER RE-MEASURED - "walks seven
+    /// It was `#[ignore]`d on a cost that was never re-measured - "walks seven
     /// 6-hour streams" - and both halves of that sentence had gone stale: the
-    /// matrix is THREE rows since the ETHUSDT and SOLUSDT presets were retired,
+    /// matrix is three rows since the ETHUSDT and SOLUSDT presets were retired,
     /// and the whole test measures comfortably inside the per-test watchdog in
     /// every sweep. The gate profile ran it regardless - it sets
     /// `include_ignored` and this test is in no skip list - so the attribute
@@ -1534,7 +1534,7 @@ mod tests {
         // The ETHUSDT and SOLUSDT rows were removed with their presets
         // (owner ruling, 2026-08-09). Their generator paths were identical
         // to BTCUSDT's, but the canonical lines embed the symbol, so their
-        // ORACLE hashes were distinct identity-only rows: the fixture loses
+        // oracle hashes were distinct identity-only rows: the fixture loses
         // those four entries while retaining every distinct-dynamics stream
         // (BTCUSDT at both seeds plus the surge case).
         let matrix: &[(&str, u64, bool)] = &[
@@ -1569,7 +1569,7 @@ mod tests {
                 }
                 events += 1;
                 // Canonical serialization: every field, named separator
-                // layout, Display for decimals - a STABLE contract, unlike
+                // layout, Display for decimals - a stable contract, unlike
                 // Debug text, whose derived layout could drift with a field
                 // rename and silently re-key the oracle.
                 let line = match &event {
@@ -1611,7 +1611,7 @@ mod tests {
                 &std::fs::read_to_string(fixture_path).expect("fixture reads"),
             )
             .expect("fixture parses");
-            // The WHOLE frozen contract is asserted, not merely the entry
+            // The whole frozen contract is asserted, not merely the entry
             // hashes: a fixture whose version, window, hash convention or
             // surge parameters silently changed is a different oracle
             // wearing this one's filename.
@@ -1657,7 +1657,7 @@ mod tests {
         // ranges against an independent collect-then-compute pass over the
         // identical seeded walk. Minutes with at least one in-window trade
         // contribute their high-low in integer ticks; the two largest
-        // OBSERVATIONS (a repeated maximum is its own second maximum) feed
+        // observations (a repeated maximum is its own second maximum) feed
         // the per-seed envelope gates.
         const WINDOW_NS: u64 = 45 * 60 * 1_000_000_000;
         let profile = resolve_profile("MNQ").expect("MNQ profile");
@@ -1934,7 +1934,7 @@ mod tests {
     #[test]
     fn arch_coefficients_match_the_shipped_recursion() {
         // The measure12a-local ARCH/GARCH coefficients are pinned against
-        // the SHIPPED recursion via traces of a real walk: recover all
+        // the shipped recursion via traces of a real walk: recover all
         // three parameters of candidate[i+1] = a0 + a1 * base[i]^2 +
         // b1 * sigma2[i] by least squares over the transitions, then show
         // a perturbed local coefficient fails the residual bound.
@@ -2008,7 +2008,7 @@ mod tests {
             (b1 - mogwai_lab::measure12a::generated::GARCH_12A).abs() < 1e-6,
             "recovered GARCH {b1} drifts from the local constant"
         );
-        // Scale-aware residual bound with the LOCAL constants (a0 from
+        // Scale-aware residual bound with the local constants (a0 from
         // the fit): the shipped recursion satisfies them to numerics.
         let scale = transitions
             .iter()
@@ -2073,7 +2073,7 @@ mod tests {
 
     /// The independent recompute of the protocol-11 session cells from a
     /// collected event stream, as JSON comparable to the summary's
-    /// `session_cells`. `segment_local` selects the CONTRACT as-of rule
+    /// `session_cells`. `segment_local` selects the contract as-of rule
     /// (rule 1: state independent per segment); passing false computes the
     /// defective global-as-of variant, which the halt-crossing test uses to
     /// prove its fixture actually distinguishes the two.
@@ -2164,7 +2164,7 @@ mod tests {
         // Horizon chains per segment: boundaries strictly inside the
         // segment, first boundary having an as-of establishes,
         // hour-crossing windows excluded, the final segment settled to
-        // min(segment end, window end) INCLUSIVELY.
+        // min(segment end, window end) inclusively.
         let quotes: Vec<(u64, f64)> = chunks.iter().map(|c| (c.ts, c.mid)).collect();
         let mut segments: Vec<SessionSegment> = Vec::new();
         for (ts, _) in &quotes {
@@ -2275,7 +2275,7 @@ mod tests {
         // 20:41, leaving the 20:31-20:40 60 s boundaries and the 20:35 and
         // 20:40 300 s boundaries quoteless. A global as-of would establish
         // and price them from the 20:12 mid; the contract skips them. The
-        // global-variant recompute must DIFFER, proving the fixture bites.
+        // global-variant recompute must differ, proving the fixture bites.
         const START_NS: u64 = 1_783_455_000_000_000_000; // 20:10Z Jul 7
         const END_NS: u64 = 1_783_457_400_000_000_000; // 20:50Z
         let minute = 60_000_000_000u64;
@@ -2453,7 +2453,7 @@ mod tests {
         assert_eq!(got["level_count_sum"], serde_json::json!(levels_sum));
         assert_eq!(got["gap_sum_ns"], serde_json::json!(gap_sum));
         assert_eq!(got["eligible_gaps"], serde_json::json!(gaps));
-        // EXACT equality on the float moments: both accumulators traverse
+        // Exact equality on the float moments: both accumulators traverse
         // identical values in identical order, so their sums are bitwise
         // equal - a tolerance here would hide an ordering mismatch.
         assert_eq!(got["mid_return_count"], serde_json::json!(ret_count));
@@ -2553,7 +2553,7 @@ mod tests {
             let mut sumsq = 0f64;
             // Every boundary at or before `end` accumulates: in-window quotes
             // settle the early ones and the end-of-walk flush settles the
-            // rest, INCLUDING the boundary sitting exactly on
+            // rest, including the boundary sitting exactly on
             // measured_until_ns - both horizons here divide the window, so
             // that exact case is exercised for each.
             assert_eq!(WINDOW_NS % h_ns, 0, "window must exercise the end boundary");

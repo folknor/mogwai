@@ -37,7 +37,7 @@ use crate::{
 struct PendingGap {
     /// Frames the ring overwrote, across every lag folded into this episode.
     skipped: u64,
-    /// The last market frame that CROSSED THE SOCKET before the loss. `None`
+    /// The last market frame that crossed the socket before the loss. `None`
     /// when the loss preceded this passenger's first delivered frame, which is
     /// why it is not merely the last frame the venue read.
     after_ts_event: Option<u64>,
@@ -45,22 +45,22 @@ struct PendingGap {
 
 /// The upgrade's query string, exactly as the consumer wrote it.
 ///
-/// `deny_unknown_fields` is a WIRE-COMPATIBILITY decision, taken knowingly: a
-/// consumer that sends a key this carrier does not handle is REFUSED rather than
+/// `deny_unknown_fields` is a wire-compatibility decision, taken knowingly: a
+/// consumer that sends a key this carrier does not handle is refused rather than
 /// silently served a different river, speed or duration than it asked for. The
-/// price is that ANY unrecognized key is a `400`, including
+/// price is that any unrecognized key is a `400`, including
 /// one an unrelated consumer, proxy or tracing layer appends, and including a
 /// future key added before its handling lands. That is accepted:
 /// accepted-and-ignored is the failure mode this carrier exists to prevent, and
 /// the venue's consumers are its own. Relaxing it later is a wire change that owes
 /// its own reasoning, not a tidy-up.
 ///
-/// A repeated `symbol` key is NOT an error - `serde_urlencoded` keeps the last
+/// A repeated `symbol` key is not an error - `serde_urlencoded` keeps the last
 /// occurrence - so the last one wins and is then validated like any other.
 ///
 /// The identity key was `session` until the callsign ruling retired `session`
 /// as a name for anything but the trading day. `deny_unknown_fields` is what
-/// makes that break LOUD for a consumer still sending the old spelling: it is a
+/// makes that break loud for a consumer still sending the old spelling: it is a
 /// `400` naming the key rather than a socket silently admitted with no identity
 /// and the always-evict reading. Pinned by
 /// `the_retired_session_query_key_is_refused`.
@@ -73,14 +73,14 @@ pub(crate) struct SocketQuery {
     symbol: Option<String>,
     /// Absent means the venue's configured `speed`. Finite and non-negative,
     /// quantized to micro-multiples in the sharing key, so `100` and
-    /// `100.0000001` board the same boat. An unserved speed PLACES a second
+    /// `100.0000001` board the same boat. An unserved speed places a second
     /// boat on the same water rather than being refused - speed mutates no
     /// generated value, so it is a second cursor, not a second river. The one
     /// refusal left is per ledger: an account already riding this river at
     /// another speed would be judged on two clocks.
     #[serde(default)]
     speed: Option<f64>,
-    /// Absent means indefinite. SIMULATED milliseconds, measured on the boat's
+    /// Absent means indefinite. Simulated milliseconds, measured on the boat's
     /// clock from this passenger's boarding instant and not from boot. A
     /// duration is a property of the passenger, so passengers with different
     /// durations still share one boat; each announces `RunComplete` and closes
@@ -89,7 +89,7 @@ pub(crate) struct SocketQuery {
     duration_ms: Option<u64>,
     /// The account to trade under. Absent means the venue's default account,
     /// which exists for the ephemeral single-consumer venue where naming one
-    /// would be ceremony - it is NOT a venue-wide account every connection
+    /// would be ceremony - it is not a venue-wide account every connection
     /// shares.
     ///
     /// The id is the consumer's and outlives the connection, so presenting the
@@ -104,7 +104,7 @@ pub(crate) struct SocketQuery {
     /// the query string stays readable and `deny_unknown_fields` still covers
     /// them.
     ///
-    /// This is the fork. A passenger carrying an arm boards a DIFFERENT river
+    /// This is the fork. A passenger carrying an arm boards a different river
     /// than one without it, rather than mutating water someone else may already
     /// be reading, so two accounts can run a clean strategy and a surged one on
     /// one exchange without either seeing the other's weather. It rides the
@@ -112,7 +112,7 @@ pub(crate) struct SocketQuery {
     /// state: on a shared venue that would let one consumer decide what every
     /// other account's next boarding resolves to.
     ///
-    /// `surge_start_ms` is an offset from the RUN ORIGIN, not from this
+    /// `surge_start_ms` is an offset from the run origin, not from this
     /// passenger's boarding instant. That is what lets two passengers share:
     /// "starting when I connect" names a different window for every boarding
     /// instant, so it would fork a river per connection and share nothing. The
@@ -120,7 +120,7 @@ pub(crate) struct SocketQuery {
     /// water whose surge is already over - the river had its weather whether or
     /// not anyone was aboard, which is what exogenous water means.
     ///
-    /// MILLISECONDS, deliberately, where the identity underneath is
+    /// Milliseconds, deliberately, where the identity underneath is
     /// nanoseconds. Two harness paths computing the same intended start through
     /// different units would otherwise differ by sub-millisecond residue and
     /// each strand a river of its own against a cap that never evicts.
@@ -201,7 +201,7 @@ pub(crate) struct Passenger {
     pub(crate) alive: tokio::sync::watch::Receiver<()>,
 }
 
-/// THE RIDE ENDS HERE, and it has to be here rather than at the freeze.
+/// The ride ends here, and it has to be here rather than at the freeze.
 ///
 /// A freeze needs every socket on the account gone, so an account riding two
 /// rivers that loses one passenger never freezes and would hold that ride
@@ -226,12 +226,12 @@ impl Drop for Passenger {
 
 /// Bind one socket to one river, or refuse before the 101.
 ///
-/// A refusal is a STATUS, not a close code: an unserved symbol on `/trades` is
+/// A refusal is a status, not a close code: an unserved symbol on `/trades` is
 /// a `400` naming what is served, and a WebSocket close after a successful
 /// upgrade is the "looks like an outage" ambiguity `CLOSE_VENUE_FAULT` fights.
 /// Returning here spawns no task, allocates no lane and opens no socket.
 ///
-/// The extractor order is CONVENTION matching the other handlers, not a
+/// The extractor order is convention matching the other handlers, not a
 /// constraint: all three are `FromRequestParts`, so any order compiles.
 pub(crate) async fn ws_upgrade(
     ws: WebSocketUpgrade,
@@ -243,11 +243,11 @@ pub(crate) async fn ws_upgrade(
         Err(body) => return (StatusCode::BAD_REQUEST, body).into_response(),
     };
     // Resolved before the instrument, because the instrument is registered on
-    // THIS account's ledger. A malformed id is refused here rather than at
+    // this account's ledger. A malformed id is refused here rather than at
     // first order: nautilus cannot construct an `AccountId` from a bare word, so
     // a venue that accepted one would be refused by every consumer later.
     //
-    // CLAIMED, not merely looked up: claiming an account evicts whoever already
+    // Claimed, not merely looked up: claiming an account evicts whoever already
     // holds it. Sockets presenting the same account and callsign coexist, while
     // a different or absent callsign is a new claim on the account.
     // Bounded and charset-checked before it is stored or compared: it arrives
@@ -263,14 +263,14 @@ pub(crate) async fn ws_upgrade(
             .into_response();
     }
     let callsign = query.callsign.as_deref();
-    // NOTHING IS CLAIMED YET, and the order below is the whole point: every
-    // refusal this handler can make is decided BEFORE `claim_account`, because claiming
+    // Nothing is claimed yet, and the order below is the whole point: every
+    // refusal this handler can make is decided before `claim_account`, because claiming
     // closes the incumbent's sockets and, under `reset_account_on_reconnect`,
     // discards its ledger. Refusing after that turned any of these five 400s
     // into a one-request, unauthenticated way to disconnect a live consumer and
     // wipe its position book while never connecting at all -
     // `GET /ws?account=X&speed=NaN` was the cheapest spelling. Eviction is now
-    // the LAST thing that happens before the 101.
+    // the last thing that happens before the 101.
     let (account_id, claimed) = match &query.account {
         Some(named) => match mogwai_protocol::AccountId::parse(named) {
             Ok(account_id) => (account_id, true),
@@ -285,10 +285,10 @@ pub(crate) async fn ws_upgrade(
         None => (state.run.default_account_id(), false),
     };
     // The bind-time shape refusal: an invalid resolved shape or a
-    // funding-barred one is a CONFIGURATION error, named here and before any
+    // funding-barred one is a configuration error, named here and before any
     // trading, rather than surfacing later as a fill-time funds rejection.
     //
-    // RESOLVED, not yet registered. Resolution is a property of the venue and
+    // Resolved, not yet registered. Resolution is a property of the venue and
     // is the only fallible half, so it answers here where nothing has been
     // taken from anybody; the ledger-side install happens on the account the
     // claim returns, further down.
@@ -296,14 +296,14 @@ pub(crate) async fn ws_upgrade(
         Ok(profile) => profile,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
-    // THIS ACCOUNT'S funding, against the shape it is binding.
+    // This account's funding, against the shape it is binding.
     //
     // The boot-time barred set answers the same question for the venue's
-    // configured `[balances]`, which is now only what an UNNAMED account opens
+    // configured `[balances]`, which is now only what an unnamed account opens
     // with - a consumer that named its own balances is funded in whatever it said,
     // and the venue has no way to know at boot what that will be. So the check
     // moves here for named accounts, where it is still knowable with no order at
-    // all and is still a CONFIGURATION error rather than a trading outcome.
+    // all and is still a configuration error rather than a trading outcome.
     //
     // Presence, never sufficiency: running out is depletion, and a funds
     // rejection on a served shape must keep meaning that and only that.
@@ -340,7 +340,7 @@ pub(crate) async fn ws_upgrade(
     }
     // Resolved here, once, and then carried by the boat, the ticket and the
     // passenger: no serving path re-derives it, so none of them can reach water
-    // this passenger is not on. Refused BEFORE the account is claimed, so a
+    // this passenger is not on. Refused before the account is claimed, so a
     // malformed arm cannot evict an incumbent on its way to a 400.
     let arm = match mogwai_protocol::control::GeneratorArm::normalize(
         query.surge_start_ms.unwrap_or(0).saturating_mul(1_000_000),
@@ -359,12 +359,12 @@ pub(crate) async fn ws_upgrade(
         .await
     {
         Ok(ticket) => ticket,
-        // MISCLASSIFIED, AND KNOWINGLY SO UNTIL THE FAULT VOCABULARY EXISTS.
+        // Misclassified, and knowingly so until the fault vocabulary exists.
         // Placement performs the river's first materialization, so a failure here
         // is usually a generator that could not produce a shape config already
         // validated - a venue fault, not a bad request. It reaches the consumer
         // as a 400 and never reaches the tape fault channel or `/health`, because
-        // placement runs BEFORE `Tape::start` installs the fault sender, and
+        // placement runs before `Tape::start` installs the fault sender, and
         // because `TickFault` has no variant for a materialization that could not
         // proceed. Every river has always failed this way; the riverless boot
         // merely makes it the only path for the default label too. Closing it
@@ -383,15 +383,15 @@ pub(crate) async fn ws_upgrade(
     // two rivers, but two speeds on one river would give that ledger two
     // clocks.
     //
-    // UNCONDITIONAL, including for a frozen account. A return at a new speed
+    // Unconditional, including for a frozen account. A return at a new speed
     // still passes, because a frozen account has no passengers left; routing
     // the frozen
     // case around the check instead would reopen the race the check exists to
-    // close, since an account is CREATED frozen and does not attach until its
+    // close, since an account is created frozen and does not attach until its
     // socket reaches `resume` further down - so two first connections would
     // both read themselves frozen and both board.
     //
-    // TAKEN ON THE EXISTING LEDGER, BEFORE THE CLAIM, and skipped entirely when
+    // Taken on the existing ledger, before the claim, and skipped entirely when
     // the claim is going to reset: a reset ledger has no passengers at all, so
     // asking the outgoing one would refuse exactly the reconnect-at-a-new-speed
     // the reset knob exists to serve. Where the check does apply, the ride is
@@ -401,7 +401,7 @@ pub(crate) async fn ws_upgrade(
     let mut prepared_existing: Option<(Arc<crate::run::Account>, crate::run::Attach)> = None;
     if !resetting {
         // The account `claim_account` is about to return, resolved before the eviction so
-        // this socket can be COUNTED ON to the account before the incumbent is
+        // this socket can be counted on to the account before the incumbent is
         // closed. Without that the incumbent's teardown could win the race to
         // an account with no lane and no attach, freeze it, and make the
         // newcomer's `resume` retire a book it had no business retiring - which
@@ -421,14 +421,14 @@ pub(crate) async fn ws_upgrade(
             )
                 .into_response();
         }
-        // The guard is TAKEN AND HELD, never raised as a bare count: an
+        // The guard is taken and held, never raised as a bare count: an
         // abandoned upgrade or a cancelled future between here and the 101 then
         // lowers it on the way out instead of stranding the account
         // permanently counted-in.
         let attach = state.run.attach(&existing);
         prepared_existing = Some((existing, attach));
     }
-    // EVICTION HAPPENS HERE, with every refusal already decided. `resetting`
+    // Eviction happens here, with every refusal already decided. `resetting`
     // was evaluated once, above, and is handed to `claim_account` rather than
     // re-derived there, so this call cannot decide to reset an account the
     // funding and cadence checks were taken against on the assumption that it
@@ -441,7 +441,7 @@ pub(crate) async fn ws_upgrade(
         // the claim returned, so its ride and its attach carry straight into
         // the passenger.
         Some((existing, attach)) if Arc::ptr_eq(&existing, &account_state) => Some(attach),
-        // The ledger MOVED OUT FROM UNDER THE CHECK. `resetting` is false here,
+        // The ledger moved out from under the check. `resetting` is false here,
         // so `claim_account` did not reopen the account itself: only another upgrade
         // racing this same account inside this window can have replaced the map
         // entry. The attach is given up right here - dropping the guard
@@ -461,7 +461,7 @@ pub(crate) async fn ws_upgrade(
         None => {
             // A ledger this call minted or reset has no passengers, so this cannot
             // refuse for the cadence rule. It can still lose to another upgrade
-            // racing the same account, which is a refusal AFTER the eviction and
+            // racing the same account, which is a refusal after the eviction and
             // the one case the ordering above cannot reach - it needs two
             // upgrades interleaved inside this window, where the pre-claim check
             // needs none.
@@ -478,7 +478,7 @@ pub(crate) async fn ws_upgrade(
                     .into_response();
             }
             // Counted onto the account here instead, since the branch above
-            // never ran. Either way the socket is counted on BEFORE the upgrade
+            // never ran. Either way the socket is counted on before the upgrade
             // completes and off it when its passenger drops, which is what keeps
             // the account attached across the gap before `bind_lanes` and what
             // freezes it if this upgrade is abandoned and never binds anything.
@@ -518,8 +518,8 @@ fn send_admission(lanes: &ExecLanes, msg: VenueMessage) -> Result<(), CloseSpec>
 
 struct QueuedCommand {
     cmd: Command,
-    /// The process-wide command slot, deliberately NOT underscore-prefixed:
-    /// the dispatcher drops it EXPLICITLY after the command has been acted on,
+    /// The process-wide command slot, deliberately not underscore-prefixed:
+    /// the dispatcher drops it explicitly after the command has been acted on,
     /// so an edit that releases it early has to delete a visible `drop`, not
     /// merely rename a binding in a destructure pattern.
     global_slot: OwnedSemaphorePermit,
@@ -528,7 +528,7 @@ struct QueuedCommand {
 /// One history page in flight per connection.
 ///
 /// The global synthesis slots and their waiter queue already bound the venue,
-/// but they bound it ACROSS connections: without a per-connection cap one
+/// but they bound it across connections: without a per-connection cap one
 /// passenger can hold every slot and every waiter, and the command queue's own
 /// bound does not help because a queued history command is cheap to accept and
 /// expensive to serve. One is the right number because pagination is a pull -
@@ -544,7 +544,7 @@ async fn dispatch_command(
     account_state: &Arc<crate::run::Account>,
     history_permits: &Arc<tokio::sync::Semaphore>,
 ) {
-    // INTERCEPTED BEFORE THE ORDER PATH, and spawned rather than awaited. This
+    // Intercepted before the order path, and spawned rather than awaited. This
     // dispatcher is sequential per connection, which is what stops a cancel
     // from overtaking the submit it cancels - and that same sequencing would
     // put a multi-thousand-row generator walk in front of every cancel, modify,
@@ -571,9 +571,9 @@ async fn dispatch_command(
             // Claim first, then scope: a submit that is immediately queried in
             // the same batch would otherwise have its own row dropped.
             //
-            // DO NOT PUT AN `.await` BETWEEN HERE AND `submit_produced`, and the
+            // Do not put an `.await` between here and `submit_produced`, and the
             // reason is not style. `process_order_cmd` released the engine lock
-            // before returning, so the order below is ALREADY VISIBLE to the
+            // before returning, so the order below is already visible to the
             // sweeper while its `OrderAccepted` is still unpublished. Publication
             // order is enqueue order and nothing else: `submit_produced` appends
             // in call order, and the exec pump is one sequential task that sleeps
@@ -581,9 +581,9 @@ async fn dispatch_command(
             // enqueued a fill for this order first would therefore hand the
             // consumer a fill for an order it was never told was accepted.
             //
-            // That does not happen today, and the protection is TIMING rather
-            // than design. The sweeper must gather `pending_scans`, WALK THE
-            // TAPE - the dominant cost in the system - re-lock and apply before
+            // That does not happen today, and the protection is timing rather
+            // than design. The sweeper must gather `pending_scans`, walk the
+            // tape - the dominant cost in the system - re-lock and apply before
             // it can deliver, while this stretch is three cheap synchronous
             // calls that never yield. Inverting them needs this thread preempted
             // for milliseconds inside a window with no yield point in it. Add an
@@ -603,11 +603,11 @@ async fn dispatch_command(
 
 /// Serve one history page off the dispatcher, on a task of its own.
 ///
-/// THE PERMIT DISCIPLINE IS THE CORRECTNESS PROPERTY, and it is the one the
+/// The permit discipline is the correctness property, and it is the one the
 /// HTTP handlers already pay for: a dropped connection drops the awaiting
 /// future, but a running blocking task cannot be cancelled, so a permit held by
 /// the future would be released while the synthesis it covers was still
-/// resident. The global synthesis slot is therefore acquired INSIDE the spawned
+/// resident. The global synthesis slot is therefore acquired inside the spawned
 /// task and moved into the blocking closure, and the per-connection permit
 /// travels with it. Both are given up by dropping, wherever that turns out to
 /// happen - which on every path is after the work ends.
@@ -657,8 +657,8 @@ fn spawn_history_page(
     let rivers = Arc::clone(&state.rivers);
     let slots = Arc::clone(&state.history_slots);
     let waiters = Arc::clone(&state.history_slot_waiters);
-    // THE TIGHTER OF THE TWO PRESENTS. The run clock bounds any caller against
-    // the venue's own present; the boat clock bounds THIS passenger against its
+    // The tighter of the two presents. The run clock bounds any caller against
+    // the venue's own present; the boat clock bounds this passenger against its
     // own. On a paced run at speed 1 they are nearly the same and the second
     // buys nothing visible, which is exactly why it was missing: on an unpaced
     // or slow-boat run the boat trails the run clock, and serving the span
@@ -750,20 +750,20 @@ fn spawn_command_dispatcher(
     boat: Arc<crate::boatyard::Boat>,
     account_state: Arc<crate::run::Account>,
 ) -> tokio::task::JoinHandle<()> {
-    // Per CONNECTION, minted here so it lives exactly as long as the dispatcher
+    // Per connection, minted here so it lives exactly as long as the dispatcher
     // that hands pages out.
     let history_permits = Arc::new(tokio::sync::Semaphore::new(HISTORY_PAGES_IN_FLIGHT));
     tokio::spawn(async move {
         // The permit's scope is the correctness property: the process-wide
-        // slot may return only after the command has been ACTED ON, or the
+        // slot may return only after the command has been acted on, or the
         // bound counts acceptances rather than work in flight. The drop is
-        // therefore EXPLICIT, sequenced after the awaited dispatch, rather
+        // therefore explicit, sequenced after the awaited dispatch, rather
         // than left to a destructure binding whose lifetime an underscore
         // pattern would silently end early.
         //
         // A history command is the one that does not finish inside the
         // dispatch: it is handed to a task of its own, so the global command
-        // slot is released once the request has been ACCEPTED rather than once
+        // slot is released once the request has been accepted rather than once
         // the page has been produced. That is deliberate, and it is why the
         // page has bounds of its own - a per-connection permit and the global
         // synthesis slots - rather than leaning on this one.
@@ -783,12 +783,12 @@ fn spawn_command_dispatcher(
     })
 }
 
-/// Re-stamp the venue's completion on THIS socket's clock.
+/// Re-stamp the venue's completion on this socket's clock.
 ///
 /// The venue deadline is a venue property and is measured on the venue clock -
 /// there is no boat to ask when the last passenger has left. But the frame goes
 /// to a socket whose every other stamp is its boat's, so the venue instant is
-/// the SIGNAL and this is the conversion. `elapsed_ns` is how much tape THIS
+/// the signal and this is the conversion. `elapsed_ns` is how much tape this
 /// passenger's boat covered, which is the only elapsed number meaningful to the
 /// reader; a boat placed after the deadline covered none, hence the clamp.
 fn completion_on_boat_clock(boat_sim: mogwai_protocol::SimClock) -> (u64, u64) {
@@ -840,11 +840,11 @@ pub(crate) fn spawn_exec_pump(
 /// The one task that owns this socket's sink, and therefore the only place that
 /// knows what a consumer actually received.
 ///
-/// IT READS THE BOAT DIRECTLY rather than being fed by a separate task, and that
+/// It reads the boat directly rather than being fed by a separate task, and that
 /// is the whole reason the gap declaration below can be honest. A feed task can
 /// only report what it took off the ring and handed on; whether those frames
 /// were then suppressed by an armed window, lost to a failed write, or overtaken
-/// by a close is knowledge that lives HERE. Splitting the two put the frontier
+/// by a close is knowledge that lives here. Splitting the two put the frontier
 /// in one task and the truth in another, so a declaration composed upstream
 /// could name a boundary the consumer never reached.
 ///
@@ -898,7 +898,7 @@ async fn run_writer(
         };
         match event {
             WriterEvent::Outbound(Outbound::Close(close)) => {
-                // A close the VENUE chose, on a socket it can still write. The
+                // A close the venue chose, on a socket it can still write. The
                 // owed declaration goes out ahead of it: the terminal frame
                 // already reveals that the venue is alive, so stating a hole
                 // first discloses nothing the close does not.
@@ -958,15 +958,15 @@ struct SinkGone;
 
 struct Writer {
     account_state: Arc<crate::run::Account>,
-    /// This socket's BOAT clock, which is the only clock its armed windows are
+    /// This socket's boat clock, which is the only clock its armed windows are
     /// judged on.
     sim: mogwai_protocol::SimClock,
-    /// The last market frame that CROSSED THE SOCKET. Advanced only by a write
+    /// The last market frame that crossed the socket. Advanced only by a write
     /// that returned `Ok`, never by reading a frame, suppressing one, or
     /// queueing one - which is what makes it the consumer's frontier rather than
     /// the venue's.
     delivered_market_ts: Option<u64>,
-    /// The last market frame READ, delivered or not. Separate from the frontier
+    /// The last market frame read, delivered or not. Separate from the frontier
     /// because the backward-time guard is about the tape's own ordering, which a
     /// suppressed frame still participates in.
     last_seen_market_ts: Option<u64>,
@@ -978,7 +978,7 @@ struct Writer {
 impl Writer {
     /// Is venue output being withheld from this account right now?
     ///
-    /// THIS ACCOUNT'S windows, not the venue's: transport havoc corrupts what one
+    /// This account's windows, not the venue's: transport havoc corrupts what one
     /// connection receives, so arming a blackout on one account must not black
     /// out every other account on the exchange.
     fn suppressed(&self, class: FrameClass) -> bool {
@@ -1017,7 +1017,7 @@ impl Writer {
     /// One market frame, and the declaration that must precede it if this
     /// passenger has an unstated hole.
     ///
-    /// THE TWO WRITES ARE ONE STATEMENT. Nothing returns to the select between
+    /// The two writes are one statement. Nothing returns to the select between
     /// them, so no close, completion or execution frame can be interleaved
     /// between a declaration and the frame whose arrival it dates.
     async fn write_market(
@@ -1065,7 +1065,7 @@ impl Writer {
 
     /// Fold loss into the outstanding declaration, or open one.
     ///
-    /// The lower bound is taken from the DELIVERED frontier at the moment the
+    /// The lower bound is taken from the delivered frontier at the moment the
     /// first loss of an episode is recorded, so a hole that opened while an
     /// armed window was withholding frames still names the last instant this
     /// consumer actually saw.
@@ -1157,7 +1157,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
         Arc::clone(&passenger.account_state),
         boat_sim,
     ));
-    // Venue-ORIGINATED execution output (a trigger fill nobody commanded)
+    // Venue-originated execution output (a trigger fill nobody commanded)
     // is delivered through these lanes, so the run has to know about them for
     // as long as this connection lives.
     let lane_id = state.run.bind_lanes(
@@ -1165,8 +1165,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
         passenger.account_state.account_id.as_str(),
         passenger.presented_identity.as_deref(),
     );
-    // ATTACHED from here, which is what un-freezes the account and puts it back
-    // in the sweep. Bound AFTER the lane, so anything the resume retires has a
+    // Attached from here, which is what un-freezes the account and puts it back
+    // in the sweep. Bound after the lane, so anything the resume retires has a
     // lane to be delivered on; a returning socket learns what its absence cost
     // rather than discovering a cancelled order by querying.
     let resumed = state
@@ -1196,17 +1196,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
     let heartbeat = (state.cfg.venue_heartbeat_ms > 0).then(|| {
         let out_tx = out_tx.clone();
         let beat_state = state.clone();
-        // FLOORED IN WALL TIME, for the same reason `MIN_SWEEP_WALL` exists on
+        // Floored in wall time, for the same reason `MIN_SWEEP_WALL` exists on
         // the sweep side and with the same 5 ms. The configured period is
-        // SIMULATED, so `wall_duration` shrinks it linearly with `speed` while
+        // simulated, so `wall_duration` shrinks it linearly with `speed` while
         // the cost of a beat - a serialization, a channel send, a writer wake -
-        // does not, and `wall_duration`'s own floor is one NANOSECOND. At a high
+        // does not, and `wall_duration`'s own floor is one nanosecond. At a high
         // speed the heartbeat task therefore degenerated into a
         // timer-granularity loop pushing uncharged frames into a 256-slot
         // channel the peer has to read. Liveness needs a frame now and then, not
         // a frame per timer tick, so the floor costs the signal nothing.
         //
-        // ITS OWN CONSTANT, not the sweeper's, though the number matches
+        // Its own constant, not the sweeper's, though the number matches
         // today: these floor two different costs against two different
         // budgets, and one name shared between them would make a change to
         // either silently move the other.
@@ -1236,7 +1236,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
     let mut completion = state.run.completion();
     let already_complete = current_completion(&mut completion);
     // Where this passenger's own ride starts, on its boat's clock. Taken beside
-    // the timer it anchors so the two cannot drift apart, and NOT derivable from
+    // the timer it anchors so the two cannot drift apart, and not derivable from
     // the boat: a boat placed for an earlier passenger has been running since
     // before this one existed, so its epoch is somebody else's boarding.
     let boarded_ns = sim_now_ns(boat_sim);
@@ -1244,7 +1244,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
         .duration_ms
         .map(|ms| tokio::time::sleep(boat_sim.wall_duration(sim_duration_from_millis(ms))));
     tokio::pin!(duration);
-    // The venue's own `(sim_now_ns, elapsed_ns)` pair is deliberately DISCARDED
+    // The venue's own `(sim_now_ns, elapsed_ns)` pair is deliberately discarded
     // here and below: only the fact of completion crosses, the numbers are
     // re-derived on this socket's boat clock.
     if already_complete.is_some() {
@@ -1274,7 +1274,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
                 .await,
         );
     } else {
-        // THE VENUE'S OWN CLOSE ENDS THIS LOOP, without waiting on the peer.
+        // The venue's own close ends this loop, without waiting on the peer.
         // Every other exit below needs the consumer to act - its close frame, its
         // EOF, or the run ending - so an evicted socket whose peer ignores the
         // close frame stayed here, and its `Passenger` kept the account riding
@@ -1294,7 +1294,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
                     break;
                 }
                 () = async { if let Some(timer) = duration.as_mut().as_pin_mut() { timer.await } }, if duration.is_some() => {
-                    // THE RUN WINS A TIE, and this re-read is what decides it.
+                    // The run wins a tie, and this re-read is what decides it.
                     // The completion watch and this timer are sibling select
                     // branches, so when both are ready the scheduler picks one -
                     // which was invisible while both announced the same frame
@@ -1310,7 +1310,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut passenger: Passen
                         let now = sim_now_ns(boat_sim);
                         (VenueMessage::PassengerDurationComplete {
                             sim_now_ns: now,
-                            // OBSERVED since this passenger boarded, not the
+                            // Observed since this passenger boarded, not the
                             // deadline restated and not the boat's own span: a
                             // shared boat can predate its passenger, so the
                             // run-completion helper - which measures from the
@@ -1383,14 +1383,14 @@ mod tests {
     use super::{SocketQuery, current_completion};
 
     /// The identity parameter was `/ws?session=` until the callsign ruling, and
-    /// the break is DESIGNED: a consumer carrying the old spelling must be told,
+    /// the break is designed: a consumer carrying the old spelling must be told,
     /// not quietly served. `deny_unknown_fields` is the mechanism and this is
     /// what holds it - the same shape as
     /// `config::a_config_naming_the_retired_heartbeat_key_is_refused` on the
     /// operator side.
     ///
     /// Silently ignoring the old key would be the worst of the readings
-    /// available: the socket would present NO identity, take the always-evict
+    /// available: the socket would present no identity, take the always-evict
     /// behaviour, and disconnect the very peer leg it was configured to coexist
     /// with - with nothing in the log saying why.
     ///
@@ -1417,7 +1417,7 @@ mod tests {
         assert_eq!(accepted.0.callsign.as_deref(), Some("alpha"));
     }
 
-    /// The differential is the point: a receiver subscribed AFTER the terminal
+    /// The differential is the point: a receiver subscribed after the terminal
     /// transition never sees a change, so a socket that only awaits
     /// `changed()` waits forever on a run that is already over. Both halves are
     /// asserted here, because asserting only the second would pass against the

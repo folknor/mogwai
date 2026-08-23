@@ -9,7 +9,7 @@
 //! `preset = "MNQ"` inheritance.
 //!
 //! The Python fanned its walks out as generator subprocesses under a
-//! thread pool and replayed the SOLVE serially from the cache, so evaluation
+//! thread pool and replayed the solve serially from the cache, so evaluation
 //! order, tie-breaks and determinism were untouched by the parallelism - the
 //! cache was the synchronization point. This port drops the pool and walks
 //! in-process; because the cache is still the synchronization point and the
@@ -103,7 +103,7 @@ pub fn pooled(summaries: &[Value]) -> Value {
         ] {
             if let Some(map) = s[src].as_object() {
                 for (k, v) in map {
-                    // The keys are bin LEFT EDGES the generator printed from
+                    // The keys are bin left edges the generator printed from
                     // index * 0.05; round(), not floor(), recovers the index
                     // because 0.05 is not exactly representable.
                     let key = (k.parse::<f64>().unwrap_or(0.0)
@@ -151,7 +151,7 @@ pub fn pooled(summaries: &[Value]) -> Value {
     json!({
         "parents": parents,
         // Python int/int: the pooled nanosecond gap sum passes 2^53 over
-        // eight FINAL seeds, so pre-rounding the numerator to binary64 lands
+        // eight final seeds, so pre-rounding the numerator to binary64 lands
         // one ulp off the committed artifact.
         "mean_event_duration_s": if gaps > 0 {
             crate::kernel::py_int_div(gap_ns, gaps) / 1e9
@@ -207,7 +207,7 @@ fn seed_curves(summary: &Value) -> LabResult<SeedRec> {
     }
     let mut shortfalls: Vec<Value> = Vec::new();
 
-    // EVERY failing seed/session/hour/count is recorded before the family
+    // Every failing seed/session/hour/count is recorded before the family
     // fails - the diagnostic trail is the point, so the scan never stops at
     // the first miss.
     let curve_from =
@@ -351,7 +351,7 @@ fn generated_evidence(per_seed_summaries: &[Value]) -> LabResult<Evidence> {
         let count: i64 = seeds.iter().map(|s| s.walltime_pooled[&h].0).sum();
         // `sum(...)` over floats: the compensated builtin (phase-2b pin).
         let sumsq: f64 = crate::kernel::py_sum(seeds.iter().map(|s| s.walltime_pooled[&h].1));
-        // A zero-return horizon is a deliberate FAILED measurement,
+        // A zero-return horizon is a deliberate failed measurement,
         // represented as null - never NaN.
         walltime_pooled_rms.insert(
             h,
@@ -485,11 +485,11 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
             }
             (g - obs_mid_rms).abs() / obs_mid_rms
         };
-        // The Python PREWARMED exactly `coarse_grid(*VOL_SCALAR_DOMAIN,
+        // The Python prewarmed exactly `coarse_grid(*VOL_SCALAR_DOMAIN,
         // VOL_GRID_POINTS, log_domain=True)` in parallel before solving,
         // then replayed the solve serially from the cache. In-process there
         // is no pool to warm: `solve_scalar` regenerates the identical grid
-        // and walks it serially, so the evaluation ORDER the Python's serial
+        // and walks it serially, so the evaluation order the Python's serial
         // replay had is exactly what happens here.
         solve_scalar(
             &mut vol_eval,
@@ -742,7 +742,7 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
         }
     }
 
-    // The final combined run is attempted REGARDLESS of individual probe
+    // The final combined run is attempted regardless of individual probe
     // misses, so the artifact records interactions.
     let mut combined_results: BTreeMap<&str, Judged> = BTreeMap::new();
     let mut combined_evidence: Option<Evidence> = None;
@@ -804,7 +804,7 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
     };
 
     // The Brick V amendment: the wall-time family splits by role. The pooled
-    // gates land; the hourly contour is RECORDED and never gates protocol 11.
+    // gates land; the hourly contour is recorded and never gates protocol 11.
     let walltime_pooled_ok = stage_checks(
         "session_walltime",
         &["walltime_pooled_60", "walltime_pooled_300"],
@@ -1044,7 +1044,7 @@ pub fn run_fit(cfg: &FitConfig) -> LabResult<Value> {
         })
     };
 
-    // BOTH stage records always exist (frozen schema): a stage whose run
+    // Both stage records always exist (frozen schema): a stage whose run
     // never happened carries an all-null record with pass null.
     let session_gate_records = |metric: &str, family: &str| -> Value {
         let mut records = Vec::new();
@@ -1302,7 +1302,7 @@ mod tests {
         // real fit - every one of these denominators is populated, which the
         // parity gate demonstrates over the delivered corpus - and the
         // artifact's strict writer refuses non-finites anyway. What matters
-        // here is that the empty case NEVER divides by zero.
+        // here is that the empty case never divides by zero.
         assert!(p["mean_event_duration_s"].is_null());
         assert!(p["children_mean"].is_null());
     }

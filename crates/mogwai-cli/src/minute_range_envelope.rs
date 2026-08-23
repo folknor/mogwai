@@ -82,7 +82,7 @@ pub fn run(args: MinuteRangeEnvelopeArgs) -> anyhow::Result<Value> {
     // entirely on the `require_clean_tree` at the top of this function, so a
     // scripted reader would write it unchallenged.
     crate::attestation::refuse_scripted_tree_attestation()?;
-    // AND THE GATE AT THE TOP RAN BEFORE A FULL CORPUS PASS. `clean_tree:
+    // And the gate at the top ran before a full corpus pass. `clean_tree:
     // true` and `harness_tree_commit` claim the tree was this commit and clean
     // when the artifact was produced; a HEAD that moved or a tree that went
     // dirty during the pass makes both false. Re-attest, as `measure`,
@@ -139,7 +139,7 @@ mod tests {
         }
     }
 
-    /// The tree gate runs BEFORE any input is read, and both verdicts are
+    /// The tree gate runs before any input is read, and both verdicts are
     /// injected so the claim is checked in the state the gate is actually run
     /// in. It used to return early on a clean tree - which is every gate run -
     /// after a 2026-08-09 fix for the inverse defect, asserting the
@@ -158,7 +158,7 @@ mod tests {
             err.to_string().contains("the working tree is dirty"),
             "{err}"
         );
-        // The refusal names the tree and NOT the jobs manifest, and the query log
+        // The refusal names the tree and not the jobs manifest, and the query log
         // says why: the run stopped on the status read, so the inputs below
         // were never opened.
         assert!(

@@ -1,7 +1,7 @@
 //! What serde's internally tagged representation costs the adapter's hot
 //! decode path, and what the tag-probe decoder recovers of it.
 //!
-//! Three arms over the SAME representative `Trade` frame:
+//! Three arms over the same representative `Trade` frame:
 //!
 //! - the fully general `VenueMessage` decoder, which buffers the whole object
 //!   into `serde::__private::de::Content` to find the tag and then replays it;
@@ -11,7 +11,7 @@
 //!   stream the payload.
 //!
 //! Allocations are counted by a wrapping global allocator rather than by the
-//! external profiler modes, because the question is allocator CALLS per frame
+//! external profiler modes, because the question is allocator calls per frame
 //! on a path that is nanoseconds long. That also means those modes do not
 //! apply to this target: it must be run plain. The registration and the
 //! measured numbers are recorded in `reference/performance.md`.

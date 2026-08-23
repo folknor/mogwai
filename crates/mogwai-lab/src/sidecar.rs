@@ -4,27 +4,27 @@
 //! The benchmarking output channels: phase markers and counters on the
 //! harness marker FIFO, and end-of-run `key=value` scalars on stderr.
 //!
-//! OBSERVATION ONLY, structurally. Nothing here reads a draw, a tick or an
+//! Observation only, structurally. Nothing here reads a draw, a tick or an
 //! accumulator - it takes names and integers a caller already has, and it has
 //! no return value a caller could branch on. That is deliberate: the module is
 //! reachable from the hot commands, and a measurement channel that can change
 //! what is measured is not a measurement channel.
 //!
-//! DEGRADES TO NOTHING. `MARKER_FIFO_ENV` (`BROKKR_MARKER_FIFO`) is set only by
+//! Degrades to nothing. `MARKER_FIFO_ENV` (`BROKKR_MARKER_FIFO`) is set only by
 //! a benchmark harness that has a FIFO drained on the other end. Absent it,
 //! [`marker`] and [`counter`] are a load and a branch. Present it, the FIFO is opened once,
-//! non-blocking, and a write that would block is DROPPED rather than paced -
+//! non-blocking, and a write that would block is dropped rather than paced -
 //! the run must not slow down because nobody is reading.
 //!
 //! The two channels are not interchangeable and the split is not stylistic:
 //!
-//! - A MARKER is a true phase boundary, and the harness's phase views open a
+//! - A marker is a true phase boundary, and the harness's phase views open a
 //!   segment at every one of them. A name emitted in a loop drowns every such
 //!   view at once, so markers stay at the handful of boundaries a run has -
 //!   `observed`, `walks`, `bootstrap`, `coarse`, `refine`.
-//! - A COUNTER is a work-size reading, `<name>=<i64>`. Non-integers are dropped
+//! - A counter is a work-size reading, `<name>=<i64>`. Non-integers are dropped
 //!   silently at the far end, so [`counter`] takes `i64` and nothing else.
-//! - An STDERR KV pair is an END-OF-RUN scalar scraped into the tracked results
+//! - An stderr kv pair is an end-of-run scalar scraped into the tracked results
 //!   row. It is the durable half: a counter tells the profile timeline what
 //!   happened, a kv pair is what a regression query compares across months.
 //!
@@ -54,7 +54,7 @@ struct Channel {
 
 static CHANNEL: OnceLock<Channel> = OnceLock::new();
 
-/// Resolve the FIFO half of the channel from an ALREADY-READ variable value.
+/// Resolve the FIFO half of the channel from an already-read variable value.
 ///
 /// Pure with respect to the process environment on purpose: the attachment
 /// rule - unset is nothing, empty is nothing, unopenable is nothing - is the
@@ -65,7 +65,7 @@ static CHANNEL: OnceLock<Channel> = OnceLock::new();
 /// still the only caller in a real run).
 fn resolve_fifo(configured: Option<std::ffi::OsString>) -> Option<Mutex<File>> {
     // O_NONBLOCK on the open as well as the writes: a FIFO opened for
-    // writing BLOCKS until a reader attaches, so a blocking open would
+    // writing blocks until a reader attaches, so a blocking open would
     // hang a run whose harness died between setting the variable and
     // draining the pipe. Failure to open is not an error - it is the
     // same no-op as no variable at all.
@@ -81,7 +81,7 @@ fn resolve_fifo(configured: Option<std::ffi::OsString>) -> Option<Mutex<File>> {
         .map(Mutex::new)
 }
 
-/// The ambient reading, taken once at the edge: the ONE place that names
+/// The ambient reading, taken once at the edge: the one place that names
 /// [`MARKER_FIFO_ENV`], kept separate from [`resolve_fifo`] so the hop from
 /// variable to rule is a named function a test can point at rather than an
 /// argument expression nothing can see. Pinned by
@@ -162,7 +162,7 @@ pub fn counter(name: &str, value: i64) {
 
 /// Emit an end-of-run scalar as a stderr `key=value` line.
 ///
-/// UNITS BELONG IN THE KEY (`_ms`, `_us`, `_bytes`, `_s`): the value column is
+/// Units belong in the key (`_ms`, `_us`, `_bytes`, `_s`): the value column is
 /// a bare number in the results row forever after, and a reader months later
 /// has only the name to go on.
 pub fn kv(key: &str, value: impl Display) {
@@ -172,7 +172,7 @@ pub fn kv(key: &str, value: impl Display) {
     let _dropped = writeln!(std::io::stderr().lock(), "{key}={value}");
 }
 
-/// Emit a work-size reading on BOTH channels: a counter on the timeline and a
+/// Emit a work-size reading on both channels: a counter on the timeline and a
 /// kv pair on the results row.
 ///
 /// The common case for a run's final totals, and the reason it is one call is
@@ -210,12 +210,12 @@ mod tests {
     /// The whole point of the default path: with no FIFO attached, every
     /// emitter is a no-op that cannot panic, cannot block and cannot fail.
     ///
-    /// THE ENVIRONMENT-PROOF HALF RUNS FIRST AND UNCONDITIONALLY. The
-    /// PROCESS channel's half cannot: `BROKKR_MARKER_FIFO` is a real variable
+    /// The environment-proof half runs first and unconditionally. The
+    /// process channel's half cannot: `BROKKR_MARKER_FIFO` is a real variable
     /// this workspace's own benchmark harness sets, and `CHANNEL` is a
     /// process-wide `OnceLock`, so under a lane that exported it the process
     /// channel legitimately carries a FIFO. That was an `assert!` for one
-    /// round and it is a SKIP now: the guarantee this test exists for is
+    /// round and it is a skip now: the guarantee this test exists for is
     /// already established against a locally built inert channel, and a red
     /// suite indistinguishable from a regression is too high a price for
     /// re-establishing it a second way. The skip says so on stderr rather
@@ -252,7 +252,7 @@ mod tests {
         report("prints", 34);
     }
 
-    /// The variable NAME, which nothing else in this module's tests touches.
+    /// The variable name, which nothing else in this module's tests touches.
     /// `configured_fifo_path` is the only reader, so re-pointing it - or
     /// re-pointing the constant - would otherwise leave every sidecar test
     /// green while the harness's FIFO went unread forever. The literal is
@@ -270,7 +270,7 @@ mod tests {
 
     /// `stamp_us` is measured from the pinned origin, so a stamp taken after
     /// `init` is a duration into the run rather than an absolute clock.
-    /// Monotonic and small is all the protocol promises, and SMALL is the half
+    /// Monotonic and small is all the protocol promises, and small is the half
     /// with content: monotonicity is free from `Instant`, while an epoch taken
     /// from the wall clock instead would stamp ~1.8e15 microseconds since 1970
     /// and the harness's phase alignment would be nonsense.
@@ -286,7 +286,7 @@ mod tests {
         let second = stamp_us();
         assert!(second >= first);
         // The process-wide origin is pinned at whichever test in this binary
-        // reached `init` first, so the bound here is the SWEEP's, not this
+        // reached `init` first, so the bound here is the sweep's, not this
         // test's: one day of microseconds. It cannot rot - no test binary runs
         // for a day, and it is four orders of magnitude below the 1.8e15 a
         // UNIX-epoch stamp would report, which is the defect it discriminates.

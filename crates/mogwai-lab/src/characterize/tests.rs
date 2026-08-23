@@ -238,9 +238,9 @@ fn corpus(name: &str, rows: &[(&str, &str, &str)]) -> std::path::PathBuf {
     path
 }
 
-/// THE MODAL-TICK TIE. `characterize.py` picks the mode with
+/// The modal-tick tie. `characterize.py` picks the mode with
 /// `max(items(), key=count)` over an insertion-ordered dict, which keeps the
-/// FIRST key on a tie; `max_by_key` keeps the last. This corpus produces tick
+/// first key on a tie; `max_by_key` keeps the last. This corpus produces tick
 /// increments of exactly `1` then `2`, one occurrence each, so the two rules
 /// disagree - and the assertion is direction-sensitive, which a tie fixture has
 /// to be to discriminate at all. The committed eight-pair corpus contains no
@@ -279,7 +279,7 @@ fn a_modal_tick_tie_keeps_the_first_increment_seen() {
     );
 }
 
-/// THE PRICE-DECIMALS TIE, worse than the tick tie in kind rather than degree:
+/// The price-decimals tie, worse than the tick tie in kind rather than degree:
 /// `price_dec_hist` was a `HashMap`, so its tie-break was not merely divergent
 /// from `characterize.py:387` but nondeterministic between runs of the same
 /// input. Python reads the first decimal count seen.
@@ -300,7 +300,7 @@ fn a_price_decimals_tie_keeps_the_first_count_seen() {
     assert_eq!(report["returns"]["price_decimals_mode"], 2);
 }
 
-/// THE SHARED DWELL FIXTURE. `dwell_stats` here measures the corpus and
+/// The shared dwell fixture. `dwell_stats` here measures the corpus and
 /// `empty_hour_stats_over` in `mogwai-data`'s generator tests measures the
 /// synthetic tape, and a realism gate compares one against the other. Nothing
 /// held the two bucket conventions equal: they work in different units, they
@@ -385,7 +385,7 @@ fn dwell_stats_matches_the_shared_conformance_fixture() {
 #[test]
 fn dwell_stats_clamps_the_population_to_the_era_start() {
     let era_hour = DWELL_ERA_START_TS / 3600;
-    // A full day of complete hours BEFORE the era holding nothing, then three
+    // A full day of complete hours before the era holding nothing, then three
     // complete hours from the era on, of which only the first is occupied.
     let seen: std::collections::HashSet<i64> = [era_hour].into_iter().collect();
     let (frac, run) = dwell_stats(

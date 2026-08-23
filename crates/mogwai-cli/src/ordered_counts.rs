@@ -107,7 +107,7 @@ pub fn run_with(config: &OrderedCountsRun) -> anyhow::Result<()> {
     let reference: Value =
         serde_json::from_str(include_str!("../../../analysis/mnq-measure-12a.json"))?;
     let (observed, mut rows) = if config.sequence.exists() {
-        // The prior summary is a RUNTIME artifact under the gitignored
+        // The prior summary is a runtime artifact under the gitignored
         // analysis/out - never include_str! it, which only compiles on a
         // host where the artifact happens to exist.
         let prior: Value = if config.summary.exists() {

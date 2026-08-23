@@ -1,16 +1,16 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! HARNESS SURFACE: one Stage A screen cell, profiled.
+//! Harness surface: one Stage A screen cell, profiled.
 //!
 //! This is the harness the Stage A optimization round stares at. It runs
 //! exactly what `arrival-screen` runs per cell - `project_seed` over the frozen
-//! window, cache BYPASSED - for one probe cell per family at one seed, and
+//! window, cache bypassed - for one probe cell per family at one seed, and
 //! nothing else. Its counterpart in `mogwai-data`, `arrival_walk_bench`, runs
 //! the same draw with no projection attached; the gap between the two is the
 //! measurement cost the round exists to attack.
 //!
-//! WHY THE CACHE IS BYPASSED, stated because reinstating it would be an easy
+//! Why the cache is bypassed, stated because reinstating it would be an easy
 //! and silent mistake: `project_seed` serves a cached product in microseconds,
 //! so a cached harness measures deserialization and reports it as a projection
 //! profile. The screen's own cost probe bypasses the cache for the same reason.
@@ -19,7 +19,7 @@
 //! repository is checked out and needs no market data on disk.
 //!
 //! Its counterpart in `mogwai-data` is `arrival_walk_bench`, and the two are
-//! read by SUBTRACTION on cost per parent: this harness cannot attribute
+//! read by subtraction on cost per parent: this harness cannot attribute
 //! anything finer by annotation, because `project_stream` is one loop over tens
 //! of millions of children per cell and an annotation inside it would price the
 //! profiler rather than the code. See the reading rules in
@@ -50,7 +50,7 @@ const SEED: u64 = 1;
 /// The measured region: one cell, one seed, through the real screen entry
 /// point.
 ///
-/// Annotated at THIS level and not inside `project_stream`: the loop body runs
+/// Annotated at this level and not inside `project_stream`: the loop body runs
 /// tens of millions of times per call, so annotating it would price the
 /// instrumentation. Finer attribution comes from the annotations the lab
 /// carries at its own phase boundaries, which this call reaches through.

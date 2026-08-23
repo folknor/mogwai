@@ -75,7 +75,7 @@ fn cell_ref(cell: &EvaluatedCell) -> Value {
 /// The benchmark channels' view of a screen run: the work it did, and the peak
 /// footprint it did it in.
 ///
-/// EVERY TIMING GETS ITS WORK SIZE BESIDE IT. A screen wall that moves is
+/// Every timing gets its work size beside it. A screen wall that moves is
 /// ambiguous on its own - fewer cells evaluated, a cheaper refinement, a
 /// shorter walk and genuinely faster code all read the same. `cells_evaluated`
 /// and `parents` are the identity-bearing pair under the Stage A free-lane
@@ -83,7 +83,7 @@ fn cell_ref(cell: &EvaluatedCell) -> Value {
 /// `prints` follows the parents. They are reported on the FIFO for the phase
 /// timeline and on stderr for the tracked regression row.
 ///
-/// This is the LAST thing a successful run does, and it is unconditional: a
+/// This is the last thing a successful run does, and it is unconditional: a
 /// run that emitted its counters only under a flag would be a run whose
 /// baseline nobody has.
 fn report_work(peak_rss_bytes: u64) {
@@ -126,7 +126,7 @@ pub fn run(args: ArrivalScreenArgs) -> anyhow::Result<Value> {
     } else {
         Some(require_clean_tree().map_err(|e| anyhow!(e.to_string()))?)
     };
-    // NOT WRAPPED. `ScreenContext::open` also parses the JSON, builds the 12a
+    // Not wrapped. `ScreenContext::open` also parses the JSON, builds the 12a
     // binding, resolves the MNQ preset, computes gate hours and hashes
     // `analysis/fingerprint.json`; a blanket "opening the 12a measurement"
     // here would relabel every one of those as a measurement-path failure.
@@ -541,13 +541,13 @@ mod tests {
         }
     }
 
-    /// The clean-tree attestation runs BEFORE the 12a artifact is opened, so a
+    /// The clean-tree attestation runs before the 12a artifact is opened, so a
     /// dirty tree is reported as a dirty tree rather than as whatever the
     /// inputs happen to say. Pinned by pointing the run at a path that cannot
     /// be read: whichever refusal comes back names which check ran first.
     ///
-    /// BOTH VERDICTS ARE INJECTED. The previous version branched on the
-    /// AMBIENT tree, and its clean branch asserted only that the error did not
+    /// Both verdicts are injected. The previous version branched on the
+    /// ambient tree, and its clean branch asserted only that the error did not
     /// contain the word `clean` - which a file-not-found error satisfies
     /// whether or not the gate ran, so the branch that runs on every gate
     /// machine could not fail. Each direction now names the error it expects
@@ -608,21 +608,21 @@ mod tests {
     /// `--cost-probe` writes no committed artifact, so it may not demand a
     /// clean tree - its whole purpose is to be run before the work that
     /// produces one. The probe's four measured cells are month-scale walks and
-    /// are NOT run here: what this pins is that the probe path reaches its
+    /// are not run here: what this pins is that the probe path reaches its
     /// inputs with the tree in whatever state it is in, and that it names no
     /// output file. The measured run itself is brick A0's own gate, an
     /// orchestrated `arrival-screen --cost-probe` invocation.
     ///
-    /// "CONSULTED THE TREE" IS ASSERTED ON THE READER, not on the error text.
+    /// "Consulted the tree" is asserted on the reader, not on the error text.
     /// This test used to assert the refusal contained neither `clean` nor
     /// `dirty`, which a file-not-found error satisfies unconditionally: a
-    /// probe that DID demand a clean tree would sail past the gate on the
+    /// probe that did demand a clean tree would sail past the gate on the
     /// clean tree every gate run happens on, fail on the missing input, and
     /// leave the test green. The seam makes the claim observable - the tree
-    /// reader is installed and must be asked NOTHING.
+    /// reader is installed and must be asked nothing.
     ///
-    /// SCOPED HONESTLY: the run dies at the measurement read, so what is
-    /// pinned is that nothing BEFORE the first input consulted the tree. A
+    /// Scoped honestly: the run dies at the measurement read, so what is
+    /// pinned is that nothing before the first input consulted the tree. A
     /// consultation added after it would leave this green. That is where the
     /// gate is today - `run` reads the tree in its first ten lines and the
     /// probe returns before the pre-write re-attestation - and taking the
@@ -720,21 +720,21 @@ mod tests {
     }
 
     /// Spec section 6: every evaluated cell appears, admissible or not, with
-    /// its per-condition verdicts, against the COMMITTED artifact - which is
+    /// its per-condition verdicts, against the committed artifact - which is
     /// in the tree, so a missing file is a failure rather than a reason to
     /// skip.
     ///
-    /// IT USED TO SKIP, AND THE SKIP WAS UNCONDITIONAL. `DEFAULT_OUT` is
-    /// relative to the REPOSITORY and a unit test's working directory is its
+    /// It used to skip, and the skip was unconditional. `DEFAULT_OUT` is
+    /// relative to the repository and a unit test's working directory is its
     /// crate, so `path.exists()` asked about
     /// `crates/mogwai-cli/analysis/mnq-arrival-screen.json`, which has never
     /// existed: the early return ran on every invocation and not one assertion
     /// below it ever executed. Same defect the control's B8-absence pin
     /// carried, and the comment here cited that pin as its precedent.
     ///
-    /// AND THE VERSION ASSERTION WAS FALSE ON ITS MERITS, which the dead path
+    /// And the version assertion was false on its merits, which the dead path
     /// was hiding. It held the committed artifact's recorded
-    /// `tape_protocol_version` against the LIVE constant, so every unrelated
+    /// `tape_protocol_version` against the live constant, so every unrelated
     /// bump - and `AGENTS.md` declares bumps free - would have turned this
     /// red. A frozen artifact records the identity it was produced under; that
     /// is the whole point of recording it. What is actually assertable is that
@@ -755,7 +755,7 @@ mod tests {
             artifact["binding"]
         );
         let cells = artifact["cells"].as_array().expect("cells");
-        // A LOOP OVER NOTHING SATISFIES EVERY ASSERTION INSIDE IT. The per-cell
+        // A loop over nothing satisfies every assertion inside it. The per-cell
         // block below is the bulk of this test, and an empty `cells` array
         // would walk it in zero iterations and report green - the same vacuity
         // the early return above used to provide, relocated inward.

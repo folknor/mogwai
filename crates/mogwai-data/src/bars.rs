@@ -3,13 +3,13 @@
 
 //! Shared trade-to-OHLCV time-bar aggregation core. Nautilus-free; lifted out
 //! of `mogwai-adapter` so its second consumer (the `mogwai gen` CLI in
-//! `mogwai-venue`) folds bars through the SAME implementation instead of a
+//! `mogwai-venue`) folds bars through the same implementation instead of a
 //! hand-rolled copy.
 //!
-//! Caller contract, in full: the bar interval is nonzero BY TYPE
+//! Caller contract, in full: the bar interval is nonzero by its type
 //! (`NonZeroU64`), so the division cannot trap; the window-close arithmetic
 //! saturates, so a pathological interval yields a never-closing window rather
-//! than wrapping; and trade timestamps are EXPECTED to be nondecreasing across a
+//! than wrapping; and trade timestamps are expected to be nondecreasing across a
 //! fold sequence for a given accumulator. The last one is an expectation with a
 //! defined failure mode rather than an enforced invariant - see `fold_trade`,
 //! which documents exactly what an out-of-order trade does and why the adapter
@@ -48,7 +48,7 @@ pub fn window_close_ns(ts: u64, interval: NonZeroU64) -> u64 {
     (ts / iv).saturating_add(1).saturating_mul(iv)
 }
 
-/// Fold one trade into the running window `state`. Returns the just-CLOSED
+/// Fold one trade into the running window `state`. Returns the just-closed
 /// window's accumulator when the trade rotates into a new window; `None` when it
 /// extends the current window or opens the first one. This reproduces the
 /// adapter's `update_bar_state` rotate semantics exactly: open on the first
@@ -56,16 +56,16 @@ pub fn window_close_ns(ts: u64, interval: NonZeroU64) -> u64 {
 /// `high.max` / `low.min` / `close =` / `volume +=` / `count += 1`, and rotate
 /// on `ts >= active.close_ts` returning the old window unchanged.
 ///
-/// ORDERING: `ts` is EXPECTED to be nondecreasing across calls for a given
+/// Ordering: `ts` is expected to be nondecreasing across calls for a given
 /// `state`, but an out-of-order trade is a defined, non-fatal outcome rather
 /// than a checked error or a panic. A trade whose `ts` is below the active
 /// window's `close_ts` folds into that (later) window even if it belongs to an
 /// earlier one; a trade at or above `close_ts` rotates. Nothing wedges, no bar
 /// is lost, and the distortion is confined to the window that swallowed it.
 ///
-/// Do NOT "fix" this by buffering or rejecting. One consumer violates the
-/// expectation ON PURPOSE: the adapter's live path runs trades through the
-/// consumer `HavocFilter` BEFORE aggregating, so an armed `reorder_prob` hands
+/// Do not "fix" this by buffering or rejecting. One consumer violates the
+/// expectation on purpose: the adapter's live path runs trades through the
+/// consumer `HavocFilter` before aggregating, so an armed `reorder_prob` hands
 /// this function out-of-order timestamps by design. Bars are fabricated
 /// adapter-side from the trade feed, so a reordered feed producing a reshaped
 /// bar is the honest consequence a real consumer-side aggregator would also
@@ -132,8 +132,8 @@ mod tests {
         assert_eq!(window_close_ns(5, iv(1)), 6);
 
         // interval 10: a ts mid-window (23) closes at the next boundary (30);
-        // a ts exactly on a boundary (30) closes at the FOLLOWING boundary (40)
-        // - `close_ts` is exclusive, so a trade AT a boundary belongs to the
+        // a ts exactly on a boundary (30) closes at the following boundary (40)
+        // - `close_ts` is exclusive, so a trade at a boundary belongs to the
         // window that boundary opens, not the one it closes.
         assert_eq!(window_close_ns(23, iv(10)), 30);
         assert_eq!(window_close_ns(30, iv(10)), 40);
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(active.close_ts, 200);
     }
 
-    /// Pins the DEFINED outcome for an out-of-order trade, which the adapter
+    /// Pins the defined outcome for an out-of-order trade, which the adapter
     /// feeds this function on purpose whenever consumer `reorder_prob` is armed
     /// (trades pass the `HavocFilter` before aggregation). The point is that the
     /// distortion is bounded and legible: the stale trade is absorbed by the
@@ -309,7 +309,7 @@ mod tests {
             None
         );
 
-        // A trade belonging to the PREVIOUS window [0, 100) arrives late. It is
+        // A trade belonging to the previous window [0, 100) arrives late. It is
         // below the active close_ts, so it folds into the open window instead of
         // reopening the earlier one: its price moves the high, and it is counted.
         assert_eq!(
@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(active.count, 2);
 
         // Aggregation continues normally: the next in-order trade still rotates
-        // on the ORIGINAL grid, so one reordered trade cannot desynchronize the
+        // on the original grid, so one reordered trade cannot desynchronize the
         // window boundaries for everything after it.
         let closed = fold_trade(
             &mut state,

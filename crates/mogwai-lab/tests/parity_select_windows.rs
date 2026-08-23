@@ -13,17 +13,17 @@
 //! Everything downstream of the feature sweep is checked in the same run, so
 //! one archive pass covers the whole pipeline.
 //!
-//! WHAT IS COMPARED IS THE STRUCTURE, not printed tables: per-month medians,
+//! What is compared is the structure, not printed tables: per-month medians,
 //! the eligible span, the z-scored vectors in key order, the seeds and the
-//! selection. Floats are compared BIT-EXACTLY, and that is a demand rather than
+//! selection. Floats are compared bit-exactly, and that is a demand rather than
 //! optimism.
 //!
 //! Why bit equality is the right bar here needs stating precisely, because an
-//! earlier version of this note overclaimed. The `sum()` SITES - the variance
+//! earlier version of this note overclaimed. The `sum()` sites - the variance
 //! sums, the z-score mean and variance, the farthest-point distances - go
 //! through `py_sum`, which reproduces CPython's Neumaier compensation, and the
 //! integer divisions go through `py_int_div`. But `ret2` and the hourly buckets
-//! are NOT those: they are naive `+=` accumulations, because the Python
+//! are not those: they are naive `+=` accumulations, because the Python
 //! accumulates them in a loop rather than through `sum()`, and a compensated
 //! sum there would be the mismatch. So the claim is not "everything is
 //! compensated" - it is that each site matches the CPython construct it was
@@ -32,7 +32,7 @@
 //!
 //! One deviation is deliberate and does not appear here: `select_windows::squared`
 //! uses a multiply where the Python uses `** 2`. It changes eleven values in
-//! the CACHE, none of which reaches a surviving monthly median on the committed
+//! the cache, none of which reaches a surviving monthly median on the committed
 //! archives, so this artifact-level gate cannot see it. That is what
 //! `cache_deviations` and `scripts/compare_cme_caches.py` are for.
 
@@ -85,7 +85,7 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
     let reference = blessed();
     let cache = build_cache();
 
-    // THE ARCHIVES THEMSELVES, first and by DIGEST. A session count is not an
+    // The archives themselves, first and by digest. A session count is not an
     // identity: archives can change while the qualifying-session count holds,
     // and changes confined to discarded sessions are exactly the class the
     // monthly artifact cannot see - which is the same blind spot that hid the
@@ -160,7 +160,7 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
         reference["eligible"]["last"].as_str().unwrap()
     );
 
-    // The key ORDER is load-bearing: it is the layout of every vector, so a
+    // The key order is load-bearing: it is the layout of every vector, so a
     // permutation would leave the z-scores individually right and the distances
     // wrong.
     let blessed_keys: Vec<&str> = reference["zscore_keys"]
@@ -197,7 +197,7 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
         .collect();
     assert_eq!(selection.seeds, blessed_seeds, "the seeds differ");
 
-    // Pick ORDER, not just membership. Farthest-point is greedy, so two runs
+    // Pick order, not just membership. Farthest-point is greedy, so two runs
     // agreeing on the set while disagreeing on the order means the distances
     // differ and the agreement is luck.
     let blessed_order: Vec<&str> = reference["selection"]["chosen_in_pick_order"]
@@ -211,7 +211,7 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
         "the selection differs from the blessed reference"
     );
 
-    // `drift` deliberately uses a DIFFERENT median from `monthly` - the upper
+    // `drift` deliberately uses a different median from `monthly` - the upper
     // middle on an even count - so it gets its own comparison rather than being
     // assumed to follow from the month table matching.
     let drift = sw::drift(&months).expect("drift");
@@ -297,18 +297,18 @@ fn parity_select_windows_reproduces_the_blessed_reference() {
     }
 }
 
-/// THE CACHE-LEVEL GATE, one layer below the blessed artifact.
+/// The cache-level gate, one layer below the blessed artifact.
 ///
-/// `select-windows-blessed.json` is derived FROM the daily feature cache, so it
+/// `select-windows-blessed.json` is derived from the daily feature cache, so it
 /// cannot see a difference in a session that no surviving monthly median
 /// depends on - and that is exactly where the squaring deviation lives. This
 /// re-derives the difference set against the Python's own cache and asserts it
-/// is EXACTLY the recorded manifest: no fewer, so a correction cannot silently
+/// is exactly the recorded manifest: no fewer, so a correction cannot silently
 /// disappear, and no more, so a new mismatch cannot hide among the approved
 /// ones.
 ///
 /// Needs the archives, so it keeps the local-data caveat of the gate above -
-/// but NOT the Python, which is the point: its reference side is the committed
+/// but not the Python, which is the point: its reference side is the committed
 /// `select-windows-python-cache.json`, so this survives item 7 intact rather
 /// than becoming unrunnable when the oracle moves.
 #[test]
@@ -320,7 +320,7 @@ fn parity_select_windows_cache_deviations_are_exactly_the_recorded_ones() {
     )
     .expect("the manifest parses");
 
-    // THE COMMITTED PYTHON CACHE, not the regenerable gitignored one.
+    // The committed Python cache, not the regenerable gitignored one.
     //
     // This gate has to outlive the oracle. `analysis/cme_daily_features.json`
     // is produced by `select_windows.py features`, and phase 4b item 7 retires
@@ -329,9 +329,9 @@ fn parity_select_windows_cache_deviations_are_exactly_the_recorded_ones() {
     // than loudly.
     //
     // The obvious repair is to reduce this to a snapshot of the eleven recorded
-    // deviations. That was REFUSED, and the reason is the property being
+    // deviations. That was refused, and the reason is the property being
     // protected: an eleven-row snapshot can confirm the known corrections still
-    // hold, but it cannot notice a TWELFTH deviation appearing, which is the
+    // hold, but it cannot notice a twelfth deviation appearing, which is the
     // entire point of re-deriving the difference set. So the whole 3.7 MB
     // Python cache is committed instead, under a name that says it is an
     // immutable reference rather than a working file.

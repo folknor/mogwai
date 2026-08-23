@@ -5,7 +5,7 @@
 //! `SessionProfile` fit for MNQ from the NQ one-minute archive.
 //!
 //! Ownership model, assumed here as it is there: `SessionCalendar` owns hard
-//! closure, `SessionProfile` owns relative arrival and volatility WHILE
+//! closure, `SessionProfile` owns relative arrival and volatility while
 //! open, `mean_event_duration_s` the unconditional baseline. So the fitted
 //! factors are conditional on being open, exposure is calendar-open minutes,
 //! and closed minutes contribute neither activity nor exposure.
@@ -41,7 +41,7 @@ pub const DESIGNATED_FIT_ERA: &str = "recent";
 pub const EARLY_CLOSE_TOLERANCE_MINUTES: i64 = 60;
 /// How a historical civil timestamp lands on the model's permanent
 /// UTC-05:00 clock. `civil` preserves the civil label (the default, because
-/// the preset declares permanent-CDT CIVIL hours); `instant` preserves the
+/// the preset declares permanent-CDT civil hours); `instant` preserves the
 /// true instant, moving a CST civil time forward 60 minutes.
 pub const MODEL_CLOCK_ALIGNMENT_DEFAULT: Alignment = Alignment::Civil;
 
@@ -191,7 +191,7 @@ fn nth_weekday(y: i64, m: i64, weekday: i64, n: i64) -> i64 {
 /// Is a naive Chicago civil timestamp on CDT? The rule CPython's
 /// `zoneinfo` applies with `fold=0`: daylight time runs from the second
 /// Sunday in March at 03:00 civil - the gap hour 02:00-02:59 resolves to
-/// the offset BEFORE the transition, i.e. standard time - through the first
+/// the offset before the transition, i.e. standard time - through the first
 /// Sunday in November at 02:00 civil, so the ambiguous 01:00-01:59 hour
 /// resolves to daylight time.
 #[must_use]
@@ -267,7 +267,7 @@ pub fn read_archive(path: &std::path::Path, alignment: Alignment) -> LabResult<V
         let volume: f64 = parts[6]
             .parse()
             .map_err(|_| LabError::refusal(format!("bad volume in {line:?}")))?;
-        // The era filter reads the MODEL-LOCAL year, which under `instant`
+        // The era filter reads the model-local year, which under `instant`
         // can differ from the civil year at a new-year boundary.
         let model_year = year_of_day(local_min.div_euclid(1440));
         rows.push(Row {
@@ -333,7 +333,7 @@ pub fn group_sessions(
         };
         let (start, end) = sessions_by_slot[slot];
         // A cycle can straddle midnight and the week boundary, so it is
-        // keyed on the day its CLOSE falls on, not the row's own day.
+        // keyed on the day its close falls on, not the row's own day.
         let close_day = (row.local_min + (end - minute)).div_euclid(1440);
         let state = states
             .entry((close_day, slot))
@@ -394,7 +394,7 @@ fn utc_cell(local_min: i64, calendar: &Calendar) -> (usize, usize) {
 }
 
 /// Numerator from observed rows, denominator from the calendar. Every
-/// eligible session contributes its FULL open-minute grid as exposure.
+/// eligible session contributes its full open-minute grid as exposure.
 #[must_use]
 pub fn build_grid(
     rows: &[Row],
@@ -479,7 +479,7 @@ pub fn fit_grid(grid: &Grid, sweeps: usize, tolerance: f64) -> Fit {
         };
     }
     // `alpha` is constant under the chosen identification and must appear in
-    // BOTH denominators: omit it and the two arrays drift reciprocally while
+    // both denominators: omit it and the two arrays drift reciprocally while
     // their product stays right, and the convergence test never fires.
     let alpha = total_volume / total_exposure;
 
@@ -551,7 +551,7 @@ pub struct VolFit {
 /// RMS of close-to-close minute returns per UTC hour, normalized to an
 /// observation-weighted mean of one.
 ///
-/// A return is formed ONLY between two adjacent present open minutes inside
+/// A return is formed only between two adjacent present open minutes inside
 /// one eligible session - that single rule excludes closure crossings, the
 /// halt, the break and every missing minute at once. The roll trim drops the
 /// single largest squared return per session.
@@ -574,7 +574,7 @@ pub fn build_vol_hour(
     let mut previous: Option<(i64, f64)> = None;
 
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    // `sorted(rows, key=...)` is a STABLE sort on the model-local stamp.
+    // `sorted(rows, key=...)` is a stable sort on the model-local stamp.
     order.sort_by_key(|i| rows[*i].local_min);
 
     let flush = |session_returns: &mut Vec<(usize, f64)>,
@@ -584,7 +584,7 @@ pub fn build_vol_hour(
         if session_returns.is_empty() {
             return;
         }
-        // `max(range(n), key=lambda i: abs(...))` keeps the FIRST maximum.
+        // `max(range(n), key=lambda i: abs(...))` keeps the first maximum.
         let mut largest = 0usize;
         for i in 1..session_returns.len() {
             if session_returns[i].1.abs() > session_returns[largest].1.abs() {
@@ -742,7 +742,7 @@ pub struct EraStability {
 }
 
 /// Does the full-corpus curve represent the designated era? Deliberately the
-/// SAME rule and the same two constants as the separability test, so no new
+/// same rule and the same two constants as the separability test, so no new
 /// threshold enters after results exist.
 #[must_use]
 pub fn era_stability(full: &Fit, designated: &Fit, designated_grid: &Grid) -> EraStability {
@@ -956,7 +956,7 @@ mod tests {
         let mar8 = days_from_civil(2026, 3, 8);
         let nov1 = days_from_civil(2026, 11, 1);
         assert!(!chicago_is_dst(2026, mar8, 60));
-        // The 02:00-02:59 gap resolves to the offset BEFORE the transition.
+        // The 02:00-02:59 gap resolves to the offset before the transition.
         assert!(!chicago_is_dst(2026, mar8, 2 * 60 + 30));
         assert!(chicago_is_dst(2026, mar8, 3 * 60));
         // The 01:00-01:59 ambiguous hour resolves to daylight time.

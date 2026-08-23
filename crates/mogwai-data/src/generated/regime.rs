@@ -28,16 +28,16 @@ impl RegimeState {
             reopen: None,
         };
 
-        // LOCKSTEP with mogwai_protocol::validate_market_regime: these arms
+        // In lockstep with mogwai_protocol::validate_market_regime: these arms
         // destructure the same MarketRegime variants that validator range-checks,
         // one crate away, with no compiler link forcing the two to agree. A new
-        // variant or a renamed field must be mirrored in BOTH - add the arm here
+        // variant or a renamed field must be mirrored in both places - add the arm here
         // and the matching guard there. Notably SessionEdgeSpike's
         // `start_hour < end_hour` invariant is enforced only in the validator and
         // trusted at runtime by EdgeSpike's window comparison below.
         match regime {
             Some(MarketRegime::VolStorm { vol_mult }) => {
-                // A storm scales the REALIZED return only. It no longer lifts
+                // A storm scales the realized return only. It no longer lifts
                 // the GARCH state rail or the feedback rail, so the recursion
                 // is byte-identical armed or not and the storm cannot change
                 // what the process does after it ends.
@@ -78,7 +78,7 @@ impl RegimeState {
                 // tick's gap straddles the instant:
                 // `old_clock < at_ts && at_ts <= new_clock`. The very first
                 // gap opens at the tape anchor (`start_ts`), so an `at_ts` at
-                // or before the anchor can NEVER satisfy the first conjunct -
+                // or before the anchor can never satisfy the first conjunct -
                 // the halt would sit armed forever, silently inert.
                 // `validate_market_regime` rejects `at_ts == 0` for exactly
                 // that failure mode, but any other already-elapsed instant
@@ -125,16 +125,16 @@ impl RegimeState {
     }
 
     pub(super) fn vol_mult(&self, clock_ns: u64) -> f64 {
-        // ADDITIVE within the regime envelope: the neutral value is 1.0 (set in
+        // Additive within the regime envelope: the neutral value is 1.0 (set in
         // `new`), and a SessionEdgeSpike layers its extra_vol_mult on top by
         // addition (out of window edge_extra is 0.0, leaving the baseline). The
-        // RESULT is then composed MULTIPLICATIVELY with the session envelope in
+        // result is then composed multiplicatively with the session envelope in
         // next_latent_mid - see the convention note there. The mix is deliberate
         // and load-bearing on both neutral values being 1.0.
         self.vol_mult + self.edge_extra(clock_ns)
     }
 
-    // There is no realized CLAMP multiplier any more. The realized return now
+    // There is no realized clamp multiplier any more. The realized return now
     // meets `REALIZED_RETURN_CEILING`, an absolute ceiling that no regime
     // scales - see the composition note in `next_latent_mid`. Previously this
     // mirrored `vol_mult`'s additive structure so the ceiling rose exactly

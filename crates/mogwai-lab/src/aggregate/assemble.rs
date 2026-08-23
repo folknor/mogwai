@@ -183,7 +183,7 @@ pub fn measure(
 }
 
 /// The rung-2c conditional-adequacy evidence, per seed. A bin that is not
-/// both REQUIRED and SUPPORTED records its two flags and nothing else - the
+/// both required and supported records its two flags and nothing else - the
 /// envelope fields would be a fabricated measurement.
 fn conditional_adequacy_records(
     obs: &ObsContext,
@@ -219,7 +219,7 @@ fn conditional_adequacy_records(
                     let obj = rec.as_object_mut().expect("a record");
                     obj.insert("observed_p99".into(), jnum(obs_p99));
                     obj.insert("generated_p99".into(), jnum(gen_p99));
-                    // The Python `if obs_p99 and gen_p99` is a TRUTHINESS
+                    // The Python `if obs_p99 and gen_p99` is a truthiness
                     // test: a zero on either side refuses the ratio.
                     let ratio = match (obs_p99, gen_p99) {
                         (Some(o), Some(g)) if o != 0.0 && g != 0.0 => Some(g / o),

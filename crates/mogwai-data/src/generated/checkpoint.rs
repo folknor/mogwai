@@ -124,7 +124,7 @@ impl CheckpointIndex {
     /// the new delta, so the from-origin walk is paid once across all seeks. The
     /// walk is bounded by `max_extend` per call (the runaway backstop); a target
     /// beyond that leaves the lead short, which `try_source_at_or_before`
-    /// REFUSES rather than papering over. Nothing caps the seek downstream of a
+    /// refuses outright rather than papering over. Nothing caps the seek downstream of a
     /// positioned source, so handing one out short is what would hang.
     pub fn extend_toward(&mut self, target: u64) -> usize {
         let mut walked = 0usize;
@@ -177,12 +177,12 @@ impl CheckpointIndex {
 
     /// Halve the snapshot count once it exceeds `MAX_CHECKPOINTS` by dropping
     /// every other checkpoint and doubling the spacing `k`. This is what makes
-    /// the index's memory a HARD ceiling (`MAX_CHECKPOINTS` generator clones)
+    /// the index's memory a hard ceiling (`MAX_CHECKPOINTS` generator clones)
     /// over any session length, rather than a clone per `k` ticks growing
     /// without bound.
     ///
     /// It is correctness-preserving: every retained checkpoint is still the
-    /// EXACT walk state at its `clock_ns`, so resuming from the coarser grid and
+    /// exact walk state at its `clock_ns`, so resuming from the coarser grid and
     /// replaying reproduces the identical tape - dropping an intermediate
     /// snapshot only lengthens the residual drain (`source_at_or_before` now
     /// resumes up to the new, larger `k` ticks before the target), it never
@@ -207,7 +207,7 @@ impl CheckpointIndex {
         if self.checkpoints.len() < before {
             self.k = self.k.saturating_mul(2);
         }
-        // ONE shift, not one per dropped snapshot. `remove(1)` in a loop moves
+        // A single shift, not one per dropped snapshot. `remove(1)` in a loop moves
         // the whole tail down for every element it drops, which is the only
         // unbounded-shift loop in this file; a drain of the same range removes
         // exactly the same snapshots - the oldest after the origin - in a single
@@ -251,8 +251,8 @@ impl CheckpointIndex {
             return None;
         }
         // Strictly-before partition (`<`, not `<=`): a checkpoint's `clock_ns`
-        // is the `ts_event` of the last tick it has ALREADY consumed, so a
-        // checkpoint whose `clock_ns` EQUALS the target has the boundary tick
+        // is the `ts_event` of the last tick it has already consumed, so a
+        // checkpoint whose `clock_ns` equals the target has the boundary tick
         // behind it. Resuming there and seeking to `target` (the trait-default
         // seek returns the first tick with `ts_event >= target`) would skip
         // that boundary tick, while a from-origin seek returns it - the two

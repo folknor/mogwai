@@ -78,11 +78,11 @@ pub struct GeneratedSource {
     tick_f64: f64,
     regime: RegimeState,
     // The upper bound of the last instant span an armed `ReopenGap` was tested
-    // against. It is NOT `clock_ns`: children advance the clock past their
+    // against. It is not `clock_ns`: children advance the clock past their
     // parent, so starting the next test at the clock would leave the whole
     // intra-burst span untested, and an arm inside it could never satisfy the
     // crossing test again. Kept as its own field so the tested spans are
-    // contiguous by CONSTRUCTION rather than by every clock mutation
+    // contiguous by construction rather than by every clock mutation
     // remembering to be included.
     reopen_frontier_ns: u64,
     pub(super) shape: SweepShape,
@@ -92,8 +92,8 @@ pub struct GeneratedSource {
     last_book: Option<PublishedBook>,
     surge: Option<SurgeWindow>,
     // The observation-only volatility trace (the generator successor spec
-    // 3.3): populated per parent event when enabled, consuming NO draws
-    // and changing NOTHING about the walk, which the byte-identity test
+    // 3.3): populated per parent event when enabled, consuming no draws
+    // and changing nothing about the walk, which the byte-identity test
     // pins. `take_vol_trace` hands the last event's record to the offline
     // forensic probe.
     vol_trace_enabled: bool,
@@ -104,7 +104,7 @@ pub struct GeneratedSource {
     pub(super) repeat_draws: u64,
     #[cfg(test)]
     pub(super) rejected_repeat_draws: u64,
-    /// The main-stream STAGE order of the shipped (contract A) event path,
+    /// The main-stream stage order of the shipped (contract A) event path,
     /// recorded as the event executes and cleared at the top of every
     /// `begin_event`. One tag per stage, not one per RNG draw: the stochastic
     /// contract fixes which stage runs before which, and the number of
@@ -114,16 +114,16 @@ pub struct GeneratedSource {
     /// per-draw counter could not be pinned. Recording costs nothing in
     /// release: the field does not exist there.
     ///
-    /// IT IS A SOFT GATE AND MUST BE READ AS ONE. The pushes are hand-placed
-    /// statements ADJACENT TO the work, not instrumentation inside the draws,
-    /// so what they pin is the order of the PUSHES. A change that moves a
+    /// It is a soft gate and must be read as one. The pushes are hand-placed
+    /// statements adjacent to the work, not instrumentation inside the draws,
+    /// so what they pin is the order of the pushes. A change that moves a
     /// draw past its own tag - reordering `next_latent_mid` against
     /// `next_side_and_book` while both tags stay put - leaves this trace
     /// unchanged. What it does catch is a reordering of the stages as
-    /// WRITTEN, which is how the contract-A order is actually expressed here,
+    /// written, which is how the contract-A order is actually expressed here,
     /// and that is the whole of the claim V4 and V5 rest on it.
     ///
-    /// ONLY `begin_event` FEEDS IT. `begin_integrated_event` pushes nothing,
+    /// Only `begin_event` feeds it. `begin_integrated_event` pushes nothing,
     /// so a generator whose scalars carry an `arrival` kernel traces an empty
     /// sequence rather than a wrong one; the reader in `arrival.rs` refuses on
     /// emptiness and says so.
@@ -153,7 +153,7 @@ pub struct ParentSummary {
     pub child_stride_ns: u64,
 }
 
-/// One parent event's volatility intermediates, observed off the REAL
+/// One parent event's volatility intermediates, observed off the real
 /// `GarchVol::step` path - never a reimplementation, and no extra draws.
 /// The forensic instrument of the generator successor spec (3.3): the
 /// 420.75-point minute's diagnosis needs sigma's path, the clamp hits and
@@ -208,7 +208,7 @@ impl SizeGrid {
         }
     }
 
-    /// The grid an instrument's OWN SIZING states, rather than one inferred
+    /// The grid an instrument's own sizing states, rather than one inferred
     /// from its class.
     ///
     /// This read `is_future()` and hardcoded whole contracts, which was right
@@ -218,7 +218,7 @@ impl SizeGrid {
     /// the most common perpetual on the largest venue while claiming its
     /// generator config was invalid.
     ///
-    /// Deriving from `size_increment` and `size_precision` moves NO existing
+    /// Deriving from `size_increment` and `size_precision` moves no existing
     /// tape: a future configured with increment 1 and precision 0 lands on
     /// exactly the integral grid it had, and spot with 1e-8 lands on exactly
     /// `spot()`. The tape version is bumped anyway, because the rule is
@@ -506,7 +506,7 @@ impl GeneratedSource {
             scalars.levels_mean,
         );
         // Built before the struct literal because it borrows `scalars.symbol`,
-        // which the literal moves; `start_ts` is the tape anchor RegimeState
+        // which the literal moves; `start_ts` is the tape anchor that RegimeState
         // needs to fail-close an already-elapsed ReopenGap.
         let regime = RegimeState::new(regime, start_ts, &scalars.symbol);
         let cadence = CadenceWalk::assemble(
@@ -587,7 +587,7 @@ impl GeneratedSource {
     }
 
     /// The simulated instant the generator has reached: the `ts_event` of the
-    /// last emitted tick, i.e. the clock the NEXT `next_tick` advances from. A
+    /// last emitted tick, i.e. the clock the next `next_tick` advances from. A
     /// fresh source sits at its `start_ts`. `CheckpointIndex` uses this to place
     /// snapshots and to binary-search them against a seek target.
     #[must_use]
@@ -652,7 +652,7 @@ impl GeneratedSource {
             //
             // Note the asymmetry with the closed-window path below, which
             // integrates the session envelope hour by hour: here an armed
-            // `LiquidityDrought` stretch stays a ONCE-SAMPLED multiplier on the
+            // `LiquidityDrought` stretch stays a once-sampled multiplier on the
             // whole gap. That is deliberate - thin tape is a venue-wide
             // divergence the operator armed, not a session curve the generator
             // is meant to trace - and it is bounded by the cap above.
@@ -666,7 +666,7 @@ impl GeneratedSource {
         self.low_intensity_gap_ns(duration_s)
     }
 
-    /// Wall-clock gap for a duration draw whose gap OPENS inside a closed
+    /// Wall-clock gap for a duration draw whose gap opens inside a closed
     /// session window (arrival multiplier below `LOW_INTENSITY_ARR_MULT`).
     ///
     /// The open-market path in `next_duration_ns` samples the arrival
@@ -677,19 +677,19 @@ impl GeneratedSource {
     /// cast at u64::MAX, pinning the parent clock there so every later parent
     /// carries the same `ts_event`.
     ///
-    /// CLOCK ADVANCEMENT IS THE REAL INVARIANT, and it is stronger than this
+    /// Clock advancement is the real invariant, and it is stronger than this
     /// comment used to claim. The old wording said "quote/first-child and
-    /// SIBLING ties are intentional"; siblings do not tie and must not - they
+    /// sibling ties are intentional"; siblings do not tie and must not - they
     /// are stamped `parent + emitted * INTRA_EVENT_STEP_NS`, a 1 us stride, and
     /// the arrival kernel floors a parent's own advance at that same stride. So
-    /// the TRADE stream is strictly increasing until the u64 nanosecond epoch is
+    /// the trade stream is strictly increasing until the u64 nanosecond epoch is
     /// exhausted, and a consumer paging history by a timestamp-only cursor
     /// depends on that (see `a_river_never_prints_two_trades_at_one_instant`,
     /// which is what would catch a change here). Only the quote and its first
     /// child share an instant, deliberately and harmlessly: they are served on
     /// separate pages, so the tie can never cut one.
     ///
-    /// Here the draw is instead treated as a BUDGET of un-modulated seconds
+    /// Here the draw is instead treated as a budget of un-modulated seconds
     /// and converted to wall time by integrating the piecewise-constant
     /// session intensity hour by hour: each wall hour consumes
     /// `hour_seconds * rate` of budget, so a closed hour consumes almost
@@ -702,13 +702,13 @@ impl GeneratedSource {
     /// anchor still yields the same stream.
     ///
     /// Residual limitations, stated honestly:
-    /// - only gaps that OPEN below the gate take this path. A gap opening in
+    /// - only gaps that open below the gate take this path. A gap opening in
     ///   an open hour still crosses a later closed window at its open-hour
     ///   rate (a tick can print inside the closed window). That artifact
     ///   predates this path and is left in place deliberately: fixing it would
     ///   change every boundary-crossing gap and break the committed
     ///   fingerprint's byte-identical golden stream.
-    /// - a profile whose EVERY hour is effectively closed can never spend the
+    /// - a profile whose every hour is effectively closed can never spend the
     ///   budget; the walk caps at `MAX_SESSION_GAP_NS` per gap, so the clock
     ///   advances strictly (one tick per ~year) instead of freezing. Reaching
     ///   u64::MAX at all now requires actually simulating the ~580-year u64
@@ -759,7 +759,7 @@ impl GeneratedSource {
         // observation-only trace can carry both without a second draw.
         let innovation_raw = draw_student_t(&mut self.rng, &self.normal, &self.chi_squared);
         let innovation = innovation_raw / STUDENT_T_UNIT_SCALE;
-        // The BASE process is regime-independent by construction. `step` applies
+        // The base process is regime-independent by construction. `step` applies
         // the GARCH-state rail and the feedback rail, neither of which takes a
         // regime multiplier, so an armed storm cannot raise the state ceiling
         // and thereby alter every later recursion step. GARCH feedback sees the
@@ -769,18 +769,18 @@ impl GeneratedSource {
         let step = self.vol.step(innovation);
         let base_return = step.base_return;
         // Vol composition convention (see also RegimeState::vol_mult): the
-        // session envelope and the regime envelope COMPOSE MULTIPLICATIVELY here
+        // session envelope and the regime envelope compose multiplicatively here
         // (session 1.0 = no session bias, regime 1.0 = no regime bias, so the
         // product is the combined RMS scale). Inside the regime envelope a
-        // SessionEdgeSpike instead composes ADDITIVELY onto the storm baseline
+        // SessionEdgeSpike instead composes additively onto the storm baseline
         // (vol_mult + edge_mult). The two conventions are intentional and rely on
-        // both neutral values being 1.0; do NOT restructure either into the other
+        // both neutral values being 1.0; do not restructure either into the other
         // (a future regime that set both vol_mult and an edge spike would want the
         // add re-examined - today the match is exclusive so only one is non-unit).
         let session_vol_mult = self.session.vol_mult(self.clock_ns);
         let regime_vol_mult = self.regime.vol_mult(self.clock_ns);
         let vol_mult = session_vol_mult * regime_vol_mult;
-        // REALIZED ceiling: ABSOLUTE, and deliberately not scaled by anything.
+        // Realized ceiling: absolute, and deliberately not scaled by anything.
         // Every regime - VolStorm, SessionEdgeSpike, drought, reopen - and the
         // session curve reach the mid only through `vol_mult` above, and then
         // meet the same fixed ceiling. Scaling this by the regime is what used
@@ -788,7 +788,7 @@ impl GeneratedSource {
         // whatever the base rail happened to be; sizing it as a policy against
         // the measured envelope is what replaced that.
         //
-        // Bounds ONE event. Cumulative movement is not bounded by it: a
+        // Bounds one event. Cumulative movement is not bounded by it: a
         // sustained storm walks the mid as far as its duration allows.
         let pre_realized = base_return * vol_mult;
         let return_n = pre_realized.clamp(-REALIZED_RETURN_CEILING, REALIZED_RETURN_CEILING);
@@ -868,7 +868,7 @@ impl GeneratedSource {
                 .max(self.size_grid.min_size);
         }
         // The spot arm is the pre-size-grid expression, character for
-        // character: the lot-snap branch is NOT re-rounded to SIZE_DECIMALS,
+        // character: the lot-snap branch is not re-rounded to SIZE_DECIMALS,
         // because it never was, and `spot_draws_are_bit_identical_...` is only
         // provable if this arm is left alone rather than merely made similar.
         let size = if lot_snap {
@@ -968,7 +968,7 @@ impl GeneratedSource {
     /// the middle of a wire parent would make its compact run ambiguous, so the
     /// boundary is enforced rather than silently repaired.
     ///
-    /// FALLIBLE BECAUSE THE ARRIVAL KERNEL CAN REFUSE. `begin_event` latches a
+    /// Fallible because the arrival kernel can refuse. `begin_event` latches a
     /// refusal into `self.fault` and leaves `burst` untouched, so a summary
     /// built unconditionally would describe a parent that was never drawn - the
     /// previous parent's timestamp with zero children - and every caller would
@@ -1046,7 +1046,7 @@ impl GeneratedSource {
     ) {
         let kernel = self.arrival_kernel.expect("integrated branch has kernel");
         // The kernel tests the crossing against its own walk start, which is the
-        // clock AFTER the previous burst's children stepped it past their
+        // clock after the previous burst's children stepped it past their
         // parent. An arm inside that intra-burst span is still owed, so it is
         // presented at the first instant the kernel can act on: the effective
         // instant is the arm's own `at_ts` whenever it is genuinely ahead, and
@@ -1142,9 +1142,9 @@ impl GeneratedSource {
         }
         let dt_ns = ((self.next_duration_ns() as f64 / rate_mult).round() as u64).max(1);
         // Order is load-bearing: next_duration_ns reads the arrival multiplier at
-        // the START of the gap (the clock has not advanced yet), then the clock
+        // the start of the gap (the clock has not advanced yet), then the clock
         // steps, then next_latent_mid reads the volatility multiplier at the
-        // instant the trade PRINTS. A duration belongs to the session window it
+        // instant the trade prints. A duration belongs to the session window it
         // opens in; a trade's volatility belongs to the window it prints in. Do
         // not reorder these three lines to "tidy" them - it silently shifts which
         // session window each tick is attributed to.
@@ -1181,7 +1181,7 @@ impl GeneratedSource {
         self.draw_stages.push("side_book");
         let (aggressor, fresh_book) = self.next_side_and_book(mid);
         // Sweep size is conditional on the arrival state, and the two branches
-        // are constructed to reproduce the DECLARED unconditional shape:
+        // are constructed to reproduce the declared unconditional shape:
         //
         // - the mean, exactly, by the identity ARRIVAL_*_CHILDREN_MULT carry;
         // - the single-child fraction, by giving the active state whatever
@@ -1198,7 +1198,7 @@ impl GeneratedSource {
         // arithmetic on five floats, no allocation; `self.shape` stays the
         // owner of `level_step_prob` and of the truncation counters the realism
         // gate reads, which is why they are folded back in below.
-        // The branch is selected on the BASE configured mean, never the
+        // The branch is selected on the base configured mean, never the
         // surge-effective one, so no runtime path ever crosses between the
         // two arithmetics (the generator successor spec, 3.1). Above the
         // floor - base quiet mean over one child - the legacy identity
@@ -1208,7 +1208,7 @@ impl GeneratedSource {
         // active residual clamps to zero, and any configured near-one mean
         // generates ~1.44 with the single fraction collapsed - the July
         // MNQ fit failure. The floor-aware solve re-derives both active
-        // parameters from the unconditional TARGETS at the current
+        // parameters from the unconditional targets at the current
         // effective mean, preserving them exactly.
         let floor_branch = self.scalars.children_mean * ARRIVAL_QUIET_CHILDREN_MULT <= 1.0;
         let (state_mean, state_single_frac) = if !floor_branch {
@@ -1361,7 +1361,7 @@ impl GeneratedSource {
         self.burst.emitted += 1;
         if self.burst.remaining == 0 {
             // End of the sweep: remember where it finished (the repeat branch
-            // in `begin_event` re-prices from here) and RE-CENTRE the bounce
+            // in `begin_event` re-prices from here) and re-center the bounce
             // drift on the residual between the last printed level and the
             // latent mid. `BounceState::next_drift` still takes its per-event
             // step, but it no longer accumulates across events - see the field

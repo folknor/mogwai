@@ -9,10 +9,10 @@
 //! next run reads. A test that declines to assert because its input is missing
 //! reports the same green as one that checked.
 //!
-//! THIS FILE USED TO CARRY THREE MORE CHECKS, all of them about the build tool's
+//! This file used to carry three more checks, all of them about the build tool's
 //! skip and only filters, and all of them now redundant. A skip entry catching a
-//! live test is an ORPHANED PAIR in the coverage audit, resolved against
-//! libtest's own enumeration; a filter matching no test at all is a DEAD FILTER,
+//! live test is an orphaned pair in the coverage audit, resolved against
+//! libtest's own enumeration; a filter matching no test at all is a dead filter,
 //! reported with the config block that declared it. Both are the tool's job and
 //! it does them without reconstructing test names from source text - which this
 //! file did, with a hand-written parser that had already gone blind once, to
@@ -22,7 +22,7 @@
 //! The third was a self-check policing a lint exemption this file no longer
 //! needs, since nothing here reads the build tool's config any more.
 //!
-//! WHAT THE REMAINING SCANS READ is the source text of `crates/*/src/**` and
+//! What the remaining scans read is the source text of `crates/*/src/**` and
 //! `crates/*/tests/**`, plus examples and benches, stripped of comments in a
 //! literal-aware way so a `//` inside a string cannot eat a closing brace and
 //! shift every later span. An unterminated block comment or string panics naming
@@ -58,12 +58,12 @@ fn source_files(root: &Path) -> Vec<PathBuf> {
 
 /// Every `.rs` file under `crates/*/examples` and `crates/*/benches`.
 ///
-/// KEPT OUT OF [`source_files`] DELIBERATELY. An example target is the
-/// SANCTIONED home for a fixture generator - `no_test_binary_writes_a_committed
+/// Kept out of [`source_files`] deliberately. An example target is the
+/// sanctioned home for a fixture generator - `no_test_binary_writes_a_committed
 /// _fixture` names it as the fix - so folding these into the shared list would
 /// make that gate refuse its own remedy. They carry no unit tests either, so
-/// the name reconstruction has nothing to say about them. What they CAN carry
-/// is a `#[test]` that declines to assert, which is a property of the code and
+/// the name reconstruction has nothing to say about them. What they can still
+/// carry is a `#[test]` that declines to assert, which is a property of the code and
 /// not of the target kind, so the missing-input gate reads them too.
 fn example_and_bench_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -103,11 +103,11 @@ fn strip_comments(path: &Path, text: &str) -> String {
     strip(path, text, true)
 }
 
-/// The same stripper, KEEPING literal contents.
+/// The same stripper, keeping literal contents.
 ///
 /// The name-reconstructing scan wants literals blanked, because every counter it
 /// runs reads punctuation. The fixture-write scan below wants the opposite: the
-/// path it looks for lives INSIDE a string, and blanking it would make that
+/// path it looks for lives inside a string, and blanking it would make that
 /// check pass for free - a scanner that cannot see the thing it forbids. Comments
 /// are stripped either way, so prose discussing a fixture path cannot trip it.
 fn strip_comments_keeping_literals(path: &Path, text: &str) -> String {
@@ -194,7 +194,7 @@ fn strip(path: &Path, text: &str, blank_literals: bool) -> String {
 
 /// Blanks a literal's span, keeping newlines so line numbers hold.
 ///
-/// THE CONTENTS ARE BLANKED, NOT COPIED, because every counter downstream reads
+/// The contents are blanked, never copied, because every counter downstream reads
 /// punctuation: a `{` or a `[` inside a string message would otherwise unbalance
 /// the module-depth walk or an attribute's bracket count. Nothing this file does
 /// needs the text of a literal - the names it reconstructs are all identifiers.
@@ -285,43 +285,43 @@ fn is_char_literal(bytes: &[u8], at: usize) -> bool {
 }
 
 /// Strips the visibility and qualifier keywords that may precede `fn` or `mod`.
-/// THE COMPANION INVARIANT, and the one that is genuinely SILENT: no code the
+/// The companion invariant, and the one that is genuinely silent: no code the
 /// test binaries compile may write a committed fixture.
 ///
-/// WHY THIS IS THE CHECK AND "EVERY IGNORED TEST OWES A SKIP ENTRY" IS NOT. The
-/// gate sets `include_ignored` ON PURPOSE, so an `#[ignore]`d test with no skip
-/// entry RUNS - and for most of them that is the intent, not an omission. The
+/// Why this is the check and not "every ignored test owes a skip entry". The
+/// gate sets `include_ignored` deliberately, so an `#[ignore]`d test with no skip
+/// entry runs anyway - and for most of them that is the intent, not an omission. The
 /// socket-backed adapter binaries are the whole reason the flag is on; the two
 /// `/trades` sizing instruments in `mogwai-venue`'s `http` module are ignored,
 /// unskipped and finish in milliseconds. A check demanding an entry for every
 /// ignored test would refuse both families and would have to grow an exception
 /// list, which is the shape this arc keeps paying for. And where a missing entry
-/// IS a defect - a walk past the 20-second watchdog, a corpus no clone carries -
-/// the gate says so LOUDLY, red, naming the test. That direction needs no
+/// really is a defect - a walk past the 20-second watchdog, a corpus no clone carries -
+/// the gate says so plainly, red, naming the test. That direction needs no
 /// scanner.
 ///
-/// What the gate cannot see is a test that runs, passes, and REWRITES A
-/// COMMITTED PIN on its way through, because the tree it rewrites is the tree
+/// What the gate cannot see is a test that runs, passes, and rewrites a
+/// committed pin on its way through, because the tree it rewrites is the tree
 /// the next run reads. That is not hypothetical: it was
 /// `regenerate_arrival_transcripts_amendment_only`, an `#[ignore]`d test in
 /// `mogwai-data` that wrote `tests/fixtures/arrival-transcript-shot_noise.json`,
 /// the file `arrival_transcripts_replay_bit_exact` pins through `include_str!`.
-/// A kernel change would have failed the pin and rewritten the fixture in the
-/// SAME run; the re-run would have read the new fixture and reported green. It
+/// A kernel change would have failed the pin and rewritten the fixture in that
+/// same run; the re-run would have read the new fixture and reported green. It
 /// ran on every full gate for as long as it existed and cost nothing only
 /// because its output happened not to have moved yet. It is an example target
 /// now - compiled by every lane, run by none.
 ///
-/// THE LINE IS `tests/fixtures/`, and it is drawn by what the directory MEANS
+/// The line is `tests/fixtures/`, and it is drawn by what the directory means
 /// rather than around any one file. A fixture is a committed input: the suite
-/// reads it and a deliberate tool produces it. A GOLDEN (`tests/golden/`) is a
+/// reads it and a deliberate tool produces it. A golden (`tests/golden/`) is a
 /// different contract - `mogwai-venue`'s `fill_distribution_matches_the_golden`
-/// writes one, but only when the file is ABSENT, and it panics after writing so
+/// writes one, but only when the file is absent, and it panics after writing so
 /// the run can never be green on a fresh bless. That shape is safe and stays
 /// legal here. If a golden ever grows an unguarded writer, the rule it needs is
 /// its own, not a widening of this one.
 ///
-/// THE SCANNER IS EXEMPT FROM ITSELF, and structurally so rather than by
+/// The scanner is exempt from itself, and structurally so rather than by
 /// convenience: a scanner has to name every construct it forbids and has to
 /// name the directory it protects, so its own source matches its own rule by
 /// construction, and so does the fixture block that proves it bites. The
@@ -333,7 +333,7 @@ fn no_test_binary_writes_a_committed_fixture() {
     let root = repo_root();
     let mut offenders = Vec::new();
     let files = source_files(&root);
-    // A SCAN THAT READS NOTHING FORBIDS NOTHING, and it reports green while
+    // A scan that reads nothing forbids nothing, and it reports green while
     // doing it. Same floor the name scan carries, for the same reason.
     assert!(
         files.len() > 100,
@@ -341,7 +341,7 @@ fn no_test_binary_writes_a_committed_fixture() {
          it is reading the wrong tree, and a scan that sees nothing accepts every writer there is",
         files.len()
     );
-    // One path, not one file NAME - see the note in the missing-input gate.
+    // One path, not one file name - see the note in the missing-input gate.
     let this_file = root.join(file!());
     for path in files {
         if path == this_file {
@@ -349,7 +349,7 @@ fn no_test_binary_writes_a_committed_fixture() {
         }
         let raw = std::fs::read_to_string(&path).expect("a scanned source file reads");
         // Comments stripped so the paragraph above - which necessarily names the
-        // path - cannot trip a check that is about CODE; literals KEPT, because
+        // path - cannot trip a check that is about code; literals kept, because
         // the path being looked for only ever appears inside one.
         let code = strip_comments_keeping_literals(&path, &raw);
         let shown = path.strip_prefix(&root).unwrap_or(&path).display();
@@ -372,23 +372,23 @@ fn no_test_binary_writes_a_committed_fixture() {
 /// Every construct in `code` that could put bytes on disk with a fixture path
 /// in the same scope, reported as one line each.
 ///
-/// SCOPE IS THE ENCLOSING FUNCTION, not a byte window. The first cut of this
-/// check searched a fixed 1200 bytes BEFORE the construct, which was wrong in
+/// Scope is the enclosing function, never a byte window. The first cut of this
+/// check searched a fixed 1200 bytes before the construct, which was wrong in
 /// both directions at once: a path built after the write (or through a helper
 /// whose definition sits further up) was invisible, and an `include_str!` block
 /// a few hundred bytes above an unrelated `File::create` was a false positive
 /// pointing at the wrong line. A function body is the unit the defect actually
 /// lives in, so that is the unit searched, and there is no tunable left.
 ///
-/// A path declared OUTSIDE every function - the idiomatic
+/// A path declared outside every function - the idiomatic
 /// `const FIXTURE: &str = ...` at module top - puts the file itself in scope,
 /// because such a constant is reachable from every function in it.
 ///
-/// WHAT THIS DOES NOT CATCH, stated rather than implied. The list below is
+/// What this does not catch, stated rather than implied. The list below is
 /// literal constructs; a `write!`/`writeln!` into a handle some helper opened
 /// is not among them, because those two macros are overwhelmingly used to
 /// format into a `String` and a rule flagging them would be an exception list
-/// on day one. The list DOES cover the tokio spellings for free -
+/// on day one. The list does cover the tokio spellings for free -
 /// `tokio::fs::write(` contains `fs::write(`, `tokio::fs::File::create(`
 /// contains `File::create(` - and it covers `Command::new(`, because a test
 /// spawning the shipped binary with a fixture path on its argv is the one
@@ -423,7 +423,7 @@ fn fixture_write_offenders(shown: &str, code: &str) -> Vec<String> {
                     .filter(|&&(from, to)| from <= at && at < to)
                     .any(|&(from, to)| code[from..to].contains(FIXTURES));
             if in_scope {
-                // `lines()` yields one FEWER than the construct's line whenever
+                // `lines()` yields one fewer than the construct's line whenever
                 // the slice ends on the newline before it; counting the
                 // newlines is unconditionally right.
                 let line = code[..at].matches('\n').count() + 1;
@@ -442,11 +442,11 @@ fn fixture_write_offenders(shown: &str, code: &str) -> Vec<String> {
     offenders
 }
 
-/// The byte span of every `fn` body in comment-stripped, literal-KEEPING code.
+/// The byte span of every `fn` body in comment-stripped, literal-keeping code.
 ///
 /// Literals are kept, so the brace walk has to skip them itself or a lone `{`
 /// inside a string unbalances it. Spans nest, and a closure body following an
-/// `fn` POINTER type is recorded as if it were a function - both are harmless
+/// `fn` pointer type is recorded as if it were a function - both are harmless
 /// here, because every enclosing span is consulted and a spurious inner span is
 /// a subset of the real one.
 fn fn_body_spans(code: &str) -> Vec<(usize, usize)> {
@@ -506,11 +506,11 @@ fn fn_body_spans(code: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-/// THE SCANNERS' OWN GATES, on synthetic samples rather than on the tree.
+/// The scanners' own gates, on synthetic samples rather than on the tree.
 ///
 /// Both scans above are exempt from themselves, because a scanner has to name
 /// every construct it forbids and so its own source matches its own rule by
-/// construction. Neither can therefore be proven to BITE by running it over the
+/// construction. Neither can therefore be proven to bite by running it over the
 /// repository. These fixtures are that proof, and each one is a shape that was
 /// wrong at some point rather than an invented case.
 mod parser {
@@ -522,12 +522,12 @@ mod parser {
         fixture_write_offenders("fixture.rs", &strip_comments_keeping_literals(path, text))
     }
 
-    /// THE TWIN'S REASON FOR EXISTING, pinned so nobody collapses it back.
+    /// The twin's reason for existing, pinned so nobody collapses it back.
     ///
     /// `strip_comments` and `strip_comments_keeping_literals` differ by one
     /// bool, and merging them is the obvious simplification. It would also be
     /// silent: the fixture-write scan looks for a path that only ever appears
-    /// INSIDE a string, so a blanking stripper makes that scan pass
+    /// inside a string, so a blanking stripper makes that scan pass
     /// unconditionally forever, and the source-file floor stays green because it
     /// counts files rather than matches. This is the whole guard, in two lines.
     #[test]
@@ -550,7 +550,7 @@ mod parser {
         );
     }
 
-    /// THE SCAN BITES. Until this existed the only evidence was a manual text
+    /// The scan actually bites. Until this existed the only evidence was a manual text
     /// edit recorded in a note, which is evidence that expires.
     #[test]
     fn a_formatted_fixture_path_reaching_a_write_is_flagged() {
@@ -571,7 +571,7 @@ mod parser {
         assert!(found[0].contains("fixture.rs:5"), "{found:?}");
     }
 
-    /// THE DIRECTION THE BYTE-WINDOW FIRST CUT COULD NOT SEE: a path declared
+    /// The direction the byte-window first cut could not see: a path declared
     /// once at module top, which is how anyone would actually write this.
     #[test]
     fn a_module_level_fixture_constant_puts_the_whole_file_in_scope() {
@@ -586,7 +586,7 @@ mod parser {
         assert!(found[0].contains("fixture.rs:3"), "{found:?}");
     }
 
-    /// AND THE FALSE POSITIVE THE WINDOW PRODUCED: a test that READS fixtures
+    /// And the false positive the window produced: a test that reads fixtures
     /// through `include_str!` sits a few hundred bytes above any number of
     /// unrelated scratch writes. Scope is the function, so they do not meet.
     #[test]
@@ -636,7 +636,7 @@ mod parser {
         assert_eq!(fallible.len(), 1, "{fallible:?}");
     }
 
-    /// THE WIDENING, PINNED. `#[test]` is not a substring of `#[tokio::test]`,
+    /// The widening, pinned. `#[test]` is not a substring of `#[tokio::test]`,
     /// so the first cut of this gate could not see a single async test - and
     /// "found zero offenders" from a scan that reads none of the socket suites
     /// is not a finding. This is the whole guard against that regressing.
@@ -658,9 +658,9 @@ mod parser {
         );
     }
 
-    /// THE FALSE POSITIVE THE WIDENING EXPOSED, and the reason the probe is the
+    /// The false positive the widening exposed, and the reason the probe is the
     /// let-else form rather than the `let Ok(` substring. A socket drain binds
-    /// `while let Ok(..)` and RETURNS ON SUCCESS, panicking if the loop runs
+    /// `while let Ok(..)` and returns on success, panicking if the loop runs
     /// out - nothing is skipped, and ten of these in `serving.rs` were the
     /// entire yield of the widening. A gate that convicts them is as useless as
     /// one that sees nothing.
@@ -697,7 +697,7 @@ mod parser {
         );
     }
 
-    /// A PRODUCTION function that probes and returns is not a test, and most
+    /// A production function that probes and returns is not a test, and most
     /// of this workspace's early returns are exactly that. The bound is the
     /// test body, so an ordinary function beside one is untouched - and so is
     /// a test that probes without returning.
@@ -736,22 +736,22 @@ mod parser {
     }
 }
 
-/// THE THIRD SOURCE GATE IN THIS FILE, and the class it holds shut has cost
+/// The third source gate in this file, and the class it holds shut has cost
 /// this workspace three tests that reported green while asserting nothing.
 ///
 /// A cargo test - unit or integration - runs with its working directory set to
-/// the PACKAGE root, never the repository root. A test that reads a
+/// the package root, never the repository root. A test that reads a
 /// repo-relative input therefore reads `crates/<pkg>/analysis/...`, which does
 /// not exist; where the read was guarded by an existence check or a fallible
-/// binding with an early return, the guard fired on EVERY run and the body
+/// binding with an early return, the guard fired on every single run and the body
 /// never executed. `mogwai-cli`'s `the_control_artifact_carries_no_b8_field`
 /// and `the_screen_artifact_carries_every_evaluated_cell_and_its_verdict` were
-/// both this, and the second was ALSO wrong on its merits underneath - the
+/// both this, and the second was also wrong on its merits underneath - the
 /// skip had hidden a false invariant for as long as it had existed. That is
 /// the general shape: a test that can decline to assert does not merely lose
 /// coverage, it preserves whatever is wrong inside it.
 ///
-/// THE RULE IS ON THE SKIP, NOT ON THE PATH, because "repo-relative" is not
+/// The rule is on the skip, never on the path, because "repo-relative" is not
 /// decidable from source and the working directory is not the only way to make
 /// an input absent. A test whose input may legitimately be missing states that
 /// with `#[ignore]`, which the gate profile can then include deliberately;
@@ -770,7 +770,7 @@ fn no_test_declines_to_assert_on_a_missing_input() {
         "this scan found only {} source files under crates/, which is too few for this workspace",
         files.len()
     );
-    // THE EXEMPTION IS THIS FILE, not every file wearing its name. `file!()` is
+    // The exemption is this file, not every file wearing its name. `file!()` is
     // workspace-relative, so joining it against the root names exactly one
     // path; matching on the bare file name would exempt any other
     // `test_hygiene.rs` anywhere under `crates/`, which is an exemption nobody
@@ -790,7 +790,7 @@ fn no_test_declines_to_assert_on_a_missing_input() {
         offenders.is_empty(),
         "these tests return early when an input is absent, so on a run where it is absent they \
          assert nothing and still report green:\n{}\n\nA cargo test's working directory is its \
-         PACKAGE root, so a repo-relative path is absent on every run - join it against the \
+         package root, so a repo-relative path is absent on every run - join it against the \
          workspace root instead. Where the input may genuinely be missing, say so with \
          `#[ignore]`, which is countable; a runtime skip is not.",
         offenders.join("\n")
@@ -800,20 +800,20 @@ fn no_test_declines_to_assert_on_a_missing_input() {
 /// Every `#[test]` body that both probes for an input's absence and returns,
 /// reported as one line each.
 ///
-/// TWO PROBE SPELLINGS, and only these two, because they are the two the tree
+/// Two probe spellings, and only these two, because they are the two the tree
 /// has actually shipped: `path.exists()` as a condition, and a fallible read
-/// bound with `let Ok(..) = .. else`. A `return` ANYWHERE in the same test body
+/// bound with `let Ok(..) = .. else`. A `return` anywhere in the same test body
 /// convicts - a closure's `return` inside such a body is a false positive in
 /// principle, and no instance exists, so the tighter rule would be the more
 /// complicated one for no gain. The bound is the test body: a production
 /// function in the same file that legitimately probes and returns is out of
 /// scope, which is most of the `return`s in this workspace.
 ///
-/// THE `let Ok(` PROBE IS THE LET-ELSE FORM ONLY, and the distinction is what
+/// The `let Ok(` probe is the let-else form only, and the distinction is what
 /// makes this gate usable once it can see `#[tokio::test]`. A bare `let Ok(`
 /// substring also matches `while let Ok(Some(Ok(message))) = ..` and the
 /// let-chain `.. && let Ok(msg) = serde_json::from_str(&text)`, which are the
-/// socket suites' DRAIN loops: there the `return` is the SUCCESS exit and the
+/// socket suites' drain loops: there the `return` is the success exit and the
 /// loop falling through panics, so nothing is being skipped. Ten such loops in
 /// `serving.rs` were the entire yield of widening the attribute match, and
 /// suppressing them by exemption would have left a gate that convicts the
@@ -847,7 +847,7 @@ fn missing_input_skip_offenders(shown: &str, code: &str) -> Vec<String> {
 /// Whether `body` binds a fallible value with a `let Ok(..) = .. else` -
 /// the divergence-free spelling of "the input might not be there".
 ///
-/// A `let` statement runs to its `;`; a LET-ELSE reaches its `else` first.
+/// A `let` statement runs to its `;`; a let-else reaches its `else` first.
 /// `while let` and `if let` are excluded by the keyword before the `let`,
 /// which is also what a let-chain (`cond && let Ok(..) = ..`) reduces to once
 /// the leading `if`/`while` is found - so the check is on the statement
@@ -868,14 +868,14 @@ fn has_fallible_let_else(body: &str) -> bool {
 }
 
 /// The body span of every function carrying a `#[test]` attribute, in
-/// comment-stripped, literal-KEEPING code.
+/// comment-stripped, literal-keeping code.
 ///
 /// A `#[test]` is followed by the attributes it stacks with (`#[ignore]`,
 /// `#[should_panic]`) and then the declaration, so the body wanted is the
-/// FIRST `fn` body beginning after the attribute. Nested spans are subsets of
+/// first `fn` body beginning after the attribute. Nested spans are subsets of
 /// it and start later, so taking the earliest start is right.
 ///
-/// BOTH SPELLINGS, and the omission of the second is why the class gate found
+/// Both spellings, and the omission of the second is why the class gate found
 /// nothing on the run that installed it. `#[test]` is not a substring of
 /// `#[tokio::test]`, so a scan keyed on the former alone is blind to every
 /// async test in the workspace - roughly sixty in `mogwai-cli`'s `serving.rs`

@@ -9,7 +9,7 @@
 //! process-tree walk stays general rather than narrowing to "just read
 //! `/proc/self/status`" - a future caller may still spawn children.
 //!
-//! Any death of the sampling thread VOIDS the cost attestation: [`stop`]
+//! Any death of the sampling thread voids the cost attestation: [`stop`]
 //! refuses rather than reporting a peak measured over a partial window.
 
 use std::path::PathBuf;
@@ -184,13 +184,13 @@ impl ResourceSampler {
     }
 }
 
-/// THE GUARD-SCOPE RULE APPLIED TO A THREAD. `stop` is the only thing that
-/// ever set `stop` and joined, and it sits at the END of `arrival_control`'s
+/// The guard-scope rule applied to a thread. `stop` is the only thing that
+/// ever set `stop` and joined, and it sits at the end of `arrival_control`'s
 /// `run_with` - so every `?` between the `start` and it left the 1 Hz sample
 /// loop running for the life of the process. That was latent while the
 /// early-return paths were only reachable from a real operator run that then
 /// exits; it is not latent any more, because the round-2 clean-direction
-/// assertion drives one of those early returns IN-PROCESS, inside a test
+/// assertion drives one of those early returns in-process, inside a test
 /// binary that goes on to run every other test in the crate.
 ///
 /// Idempotent with `stop`, which takes the handle before this runs.
@@ -225,7 +225,7 @@ mod tests {
 
     /// A sampler dropped without `stop` - which is every `?` between the
     /// `start` and the `stop` in `arrival_control`'s `run_with` - takes its
-    /// thread with it. Asserted on the THREAD rather than on the absence of an
+    /// thread with it. Asserted on the thread rather than on the absence of an
     /// error: the leak is silent by construction, and only the loop's own exit
     /// distinguishes "cleaned up" from "still sampling forever".
     #[test]
@@ -242,7 +242,7 @@ mod tests {
             stop.load(Ordering::Relaxed),
             "the drop must ask the sample loop to finish"
         );
-        // THE JOIN IS NOT ASSERTED, and saying so is better than a predicate
+        // The join is not asserted, and saying so is better than a predicate
         // that cannot fail: a `JoinHandle` consumed inside `drop` leaves this
         // test nothing to observe it through. The flag is the half that is
         // observable, and it is the half that was missing.

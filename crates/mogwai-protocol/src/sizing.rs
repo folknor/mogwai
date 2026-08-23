@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Worst-case SERIALIZED-byte bounds on what one `Command` can make the
+//! Worst-case serialized-byte bounds on what one `Command` can make the
 //! engine produce. It lives in the protocol crate because it is a statement
 //! about the wire format: the venue reserves against it before it lets the
 //! engine mutate, and the engine's own test suite checks the claim.
@@ -11,36 +11,36 @@
 //! bounds: key names and punctuation counted, each numeric at its widest
 //! decimal form, each string at `JSON_ESCAPE_FACTOR` times its cap (a byte
 //! serde must escape as `\uXXXX` costs six output bytes, so an ASCII-only
-//! measurement would be 6x too small). The one string charged at its RAW cap
-//! is the account id, and only because its TYPE forbids an escapable byte -
+//! measurement would be 6x too small). The one string charged at its raw cap
+//! is the account id, and only because its type forbids an escapable byte -
 //! see `account_state_max_bytes`. The fixed addends are scaffolding and
 //! numerics only; they are rounded upward to round figures, because
 //! under-reserving voids the bound outright while over-reserving only costs a
 //! connection some budget.
 //!
-//! THE UPWARD ROUNDING HAS A CEILING ON THE PER-STRUCT BOUNDS, AND IT IS
-//! ENFORCED. Over-reservation is not free - a row constant is multiplied by a
+//! The upward rounding has a ceiling on the per-struct bounds, and it is
+//! enforced. Over-reservation is not free - a row constant is multiplied by a
 //! row count the venue does not control and charged before the engine is
-//! allowed to mutate - so this module's tests bracket each of those from BOTH
-//! sides against the maximal fixture that DEFINES it: `bound >= actual` and
+//! allowed to mutate - so this module's tests bracket each of those from both
+//! sides against the maximal fixture that defines it: `bound >= actual` and
 //! `bound < 2 * actual`, through the `brackets` helper, which carries the
-//! measured slack table. Round generously WITHIN that factor; a derivation
+//! measured slack table. Round generously within that factor; a derivation
 //! that doubles its own struct is a test failure rather than a conservative
 //! choice.
 //!
-//! THE CEILING STOPS AT THE COMPOSITIONS, DELIBERATELY. It covers the five row
+//! The ceiling stops at the compositions, deliberately. It covers the five row
 //! constants, `SNAPSHOT_ENVELOPE_MAX_BYTES`, `ORDER_EVENT_MAX_BYTES` (against
 //! its dominating `OrderRejected` arm) and `account_state_max_bytes`, each of
 //! which has one maximal struct to be measured against. `LINKAGE_MAX_BYTES`,
 //! `BOUNDARY_REFUSAL_BYTES`, `swept_fill_max_bytes` and
 //! `swept_batch_max_bytes` have none: they bound the widest output a command
-//! CLASS can produce, so any sample feeds one command to one book and the
+//! class can produce, so any sample feeds one command to one book and the
 //! ratio is a property of the sample. Measured over the engine's reservation
 //! matrix it runs 2.2x to 249x, which is why
 //! `worst_case_byte_budget_covers_actual_output` in `mogwai-engine` is
 //! one-sided by ruling rather than by omission. `worst_case_output_bytes` is
-//! bracketed on its two QUERY arms only, where the reply really does have one
-//! maximal shape. A NEW COMPOSED BOUND INHERITS THAT REFUSAL; a new
+//! bracketed on its two query arms only, where the reply really does have one
+//! maximal shape. A new composed bound inherits that refusal; a new
 //! per-struct constant owes a `brackets` call.
 
 use crate::{
@@ -67,10 +67,10 @@ const ESC: usize = JSON_ESCAPE_FACTOR;
 /// Any single order-lifecycle frame (`OrderAccepted`, `OrderRejected`,
 /// `OrderCanceled`, `OrderExpired`, `OrderUpdated`, `OrderFilled`, the two
 /// modify/cancel rejections). `OrderExpired` carries `OrderCanceled`'s exact
-/// three fields, so it needs no bound of its own. Widest FIELD-BEARING shape,
+/// three fields, so it needs no bound of its own. Widest field-bearing shape,
 /// which is not the same thing as the widest frame: a reason-bearing rejection
 /// is wider still, and `ORDER_EVENT_MAX_BYTES` below is the max of the two -
-/// measured, it resolves to the REJECTION arm, 4032 against this term's 2400,
+/// measured, it resolves to the rejection arm, 4032 against this term's 2400,
 /// because one `MAX_REASON_LEN` at the escape factor outweighs four ids, a
 /// symbol and a currency. `OrderFilled` is: `type`, `client_order_id`,
 /// `venue_order_id`, `trade_id`, `position_id`, `symbol`, `side`, `last_qty`,
@@ -130,12 +130,12 @@ pub const FILL_ROW_MAX_BYTES: usize =
 /// `request_id` (capped by `validate_request_id` at `MAX_ECHOED_ID_LEN`).
 pub const SNAPSHOT_ENVELOPE_MAX_BYTES: usize = 128 + ESC * MAX_ECHOED_ID_LEN;
 
-/// What ONE executed order's LINKAGE can add to the batch it fills in.
+/// What one executed order's linkage can add to the batch it fills in.
 ///
 /// Every sibling a filling order names produces at most one order-shaped frame:
 /// an `OrderCanceled` under `Oco`, or one `OrderUpdated` (or the cancel a shrink
 /// to zero becomes) under `Ouo`. Never both for one sibling, because a sibling
-/// cancelled is off the book. Releasing an OTO CHILD emits nothing at all - the
+/// cancelled is off the book. Releasing an OTO child emits nothing at all - the
 /// child was accepted when it was submitted - so it costs no bytes here.
 ///
 /// `MAX_LINKED_ORDERS` is what makes this computable in advance, and is the
@@ -150,7 +150,7 @@ pub const BOUNDARY_REFUSAL_BYTES: usize = ORDER_EVENT_MAX_BYTES;
 /// Upper bound on one serialized `AccountState`: the envelope plus every
 /// balance and position row the book currently carries.
 ///
-/// THE ACCOUNT ID IS THE ONE STRING HERE CHARGED AT ITS RAW CAP rather than at
+/// The account id is the one string here charged at its raw cap rather than at
 /// `JSON_ESCAPE_FACTOR` times it, and it is the only string in this module that
 /// may be. `AccountId` is a newtype whose sole constructor is
 /// `AccountId::parse` - `Deserialize` routes through it too - and that alphabet
@@ -162,7 +162,7 @@ pub const BOUNDARY_REFUSAL_BYTES: usize = ORDER_EVENT_MAX_BYTES;
 /// `the_account_id_alphabet_carries_nothing_json_escapes` is what holds the
 /// premise: widen the alphabet and this term owes its factor back.
 ///
-/// Every OTHER string bounded in this module is a bare `String` or `Arc<str>`
+/// Every other string bounded in this module is a bare `String` or `Arc<str>`
 /// whose contents are capped in length and not in alphabet, so it keeps the
 /// factor.
 #[must_use]
@@ -173,20 +173,20 @@ pub fn account_state_max_bytes(shape: &BookShape) -> usize {
         + shape.margins * MARGIN_ROW_MAX_BYTES
 }
 
-/// Upper bound on one trigger sweep's output: per executed order, up to FOUR
+/// Upper bound on one trigger sweep's output: per executed order, up to four
 /// order-shaped frames - `OrderTriggered`, the fill, its possible
 /// `DuplicateNextFill` twin, and the `OrderCanceled` that closes a reduce-only
-/// remainder the position cap clamped - and ONE `AccountState` for the whole
+/// remainder the position cap clamped - and one `AccountState` for the whole
 /// batch (the sweep snapshots once, after every transition it booked).
 ///
-/// The account is sized against a shape widened PER ORDER, not per batch: a
+/// The account is sized against a shape widened per order, not per batch: a
 /// sweep can execute `orders` fills across `orders` distinct pairs, and each
 /// first fill in a new pair introduces up to two currencies and one position the
 /// pre-sweep snapshot never had. Widening by a flat `+2/+1` (the single-command
 /// `SubmitOrder` case) under-reserves any multi-symbol batch, which is exactly
 /// the domination failure the held-byte budget exists to prevent.
 ///
-/// `orders` is the count of orders the sweep actually EMITS for, never the count
+/// `orders` is the count of orders the sweep actually emits for, never the count
 /// of pending scans: a scan below its threshold produces no bytes.
 #[must_use]
 pub fn swept_fill_max_bytes(shape: &BookShape, orders: usize) -> usize {
@@ -229,7 +229,7 @@ pub fn worst_case_output_bytes(cmd: &Command, shape: &BookShape) -> usize {
         // whose fill the position cap clamps adds the trigger on top of exactly
         // that shape, and it cannot also be an IOC because a conditional is
         // GTC-only. The account is
-        // sized against a WIDENED shape: a fill mutates both the base and the
+        // sized against a widened shape: a fill mutates both the base and the
         // quote entry via `entry(..).or_default()`, so a first fill in a new
         // pair introduces up to two currencies and one position the pre-command
         // snapshot never had. Widening by less under-counts by up to two
@@ -247,7 +247,7 @@ pub fn worst_case_output_bytes(cmd: &Command, shape: &BookShape) -> usize {
                     ..*shape
                 })
         }
-        // A GROUP is its members' worst cases summed, against a shape widened
+        // A group is its members' worst cases summed, against a shape widened
         // per member for the same reason `swept_fill_max_bytes` widens per
         // order: each member can be the first fill in a new pair. Summing the
         // single-submit bound rather than deriving a tighter one is deliberate -
@@ -255,16 +255,16 @@ pub fn worst_case_output_bytes(cmd: &Command, shape: &BookShape) -> usize {
         // `MAX_GROUP_ORDERS` is what keeps the sum finite.
         //
         // The linkage allowance is charged per member too, and it is not
-        // double-counting: the group-closing pass applies the rule of EVERY
+        // double-counting: the group-closing pass applies the rule of every
         // member that filled, against siblings admitted after it, so a group of
         // N filling members can emit N linkages in the one batch.
         Command::SubmitOrderGroup { orders } => {
             let members = orders.len();
-            // Each member runs the ordinary submit path and takes its OWN
+            // Each member runs the ordinary submit path and takes its own
             // snapshot, and the group-closing linkage pass takes one more, so
             // the account is charged `members + 1` times against a shape
             // widened for the whole group. Charging one snapshot for the batch
-            // - which is what a SWEEP owes, because a sweep snapshots once -
+            // - which is what a sweep owes, because a sweep snapshots once -
             // would under-reserve a group by a factor of its size.
             members * (5 * ORDER_EVENT_MAX_BYTES + LINKAGE_MAX_BYTES)
                 + (members + 1)
@@ -291,7 +291,7 @@ pub fn worst_case_output_bytes(cmd: &Command, shape: &BookShape) -> usize {
         Command::QueryFills { .. } => {
             SNAPSHOT_ENVELOPE_MAX_BYTES + shape.recorded_fills * FILL_ROW_MAX_BYTES
         }
-        // ZERO, and not because history is small. This function bounds what
+        // Zero, and not because history is small. This function bounds what
         // `Engine::process` produces, and the engine never sees a history
         // request: it is venue-owned, like the transport controls, and reads
         // the river rather than the book. Its bytes are real but they are
@@ -317,7 +317,7 @@ mod tests {
     /// U+0001 fills every string these tests build, because `serde_json`
     /// escapes it to a six-byte escape sequence, which is exactly what
     /// `JSON_ESCAPE_FACTOR` charges for. No validator lets a real id carry it;
-    /// the bound must hold for what the TYPE can carry, and every string
+    /// the bound must hold for what the type can carry, and every string
     /// bounded here except the account id is a plain `String` or `Arc<str>`
     /// capped in length and not in alphabet.
     fn worst(len: usize) -> String {
@@ -356,7 +356,7 @@ mod tests {
         }
     }
 
-    /// Every optional field PRESENT and every enum at its longest spelling -
+    /// Every optional field present and every enum at its longest spelling -
     /// `TrailingStopMarket` (18), `PartiallyFilled` (15), `Gtd` - because a row
     /// bound that holds only for the short spellings is not a bound.
     fn maximal_status_row() -> OrderStatusInfo {
@@ -410,20 +410,20 @@ mod tests {
         }
     }
 
-    /// EVERY PER-STRUCT BOUND IN THIS MODULE IS ASSERTED FROM BOTH SIDES,
-    /// against the maximal fixture that DEFINES it: it must dominate the
+    /// Every per-struct bound in this module is asserted from both sides,
+    /// against the maximal fixture that defines it: it must dominate the
     /// fixture, and it must not exceed twice it. A one-sided `actual <= bound`
     /// is satisfied by a derivation that over-reserves by any factor at all,
     /// and over-reservation is not free - each of these constants is
     /// multiplied by a row count or a member count and charged against a
     /// connection's byte budget before the engine is allowed to mutate.
     ///
-    /// THE COMPOSED BOUNDS ARE OUT OF SCOPE HERE AND THE MODULE HEADER SAYS
-    /// WHY. `LINKAGE_MAX_BYTES`, `BOUNDARY_REFUSAL_BYTES` and the two `swept_*`
+    /// The composed bounds are out of scope here and the module header says
+    /// why. `LINKAGE_MAX_BYTES`, `BOUNDARY_REFUSAL_BYTES` and the two `swept_*`
     /// helpers have no single maximal struct to be measured against, so no
     /// call below passes one to this helper - which is a ruling, not a gap.
     ///
-    /// THE CEILING IS `2 * actual` AND THE FACTOR IS NOT PICKED FROM THE AIR.
+    /// The ceiling is `2 * actual` and the factor is not picked from the air.
     /// It is the ceiling `admission_frames_fit_their_ceiling` already uses on
     /// `ADMISSION_FRAME_MAX_BYTES` in `messages.rs`, and the measured slack of
     /// every bound here sits far inside it:
@@ -441,12 +441,12 @@ mod tests {
     ///
     /// So the loosest is the account-state envelope at 1.27, and a ceiling
     /// tighter than 2 would still pass today - it is deliberately not taken,
-    /// because these addends are ROUNDED UP to round figures by design (the
+    /// because these addends are rounded up to round figures by design (the
     /// module doc says so) and a small struct's rounding can legitimately
     /// approach a factor of two. What 2 forecloses is the order-of-magnitude
     /// over-reservation a one-sided assertion cannot see.
     ///
-    /// THE FIXTURE MUST BE THE DOMINATING ONE. `ORDER_EVENT_MAX_BYTES` is the
+    /// The fixture must be the dominating one. `ORDER_EVENT_MAX_BYTES` is the
     /// max of two derivations, so its ceiling is asserted against
     /// `OrderRejected` alone; the other arm is legitimately far below it and a
     /// ceiling there would be a claim about the wrong struct.
@@ -463,14 +463,14 @@ mod tests {
         );
     }
 
-    /// The row half of the module's claim, RUN rather than argued, on the model
+    /// The row half of the module's claim, run rather than argued, on the model
     /// of `order_event_bound_covers_both_maximal_lifecycle_frames`. Each of
     /// these five constants is multiplied by a row count the venue has no
     /// control over, so a derivation that drifted from its struct
     /// under-reserves by that count - and until this test existed, halving any
     /// of them left both crates green.
     ///
-    /// Each row is measured ALONE, which is what these constants bound; the
+    /// Each row is measured alone, which is what these constants bound; the
     /// array commas and the envelope are the aggregate tests below.
     #[test]
     fn every_row_bound_covers_its_maximal_row() {
@@ -536,7 +536,7 @@ mod tests {
     /// is what catches the array commas the per-row bounds above do not charge
     /// for.
     ///
-    /// BOTH FIXTURES ARE MEASURED AS `VenueMessage::AccountState`, never as a
+    /// Both fixtures are measured as `VenueMessage::AccountState`, never as a
     /// bare `AccountState`. `VenueMessage` is `#[serde(tag = "type")]`, so the
     /// frame the venue reserves for carries about 21 further bytes of tag that
     /// a bare struct does not - and this term's fixed addend is tight enough
@@ -616,19 +616,19 @@ mod tests {
         brackets("fill reply", bound, bytes);
     }
 
-    /// THE PREMISE UNDER `account_state_max_bytes` CHARGING THE ACCOUNT ID AT
-    /// ITS RAW CAP: no character `AccountId::parse` accepts costs more than one
+    /// The premise under `account_state_max_bytes` charging the account id at
+    /// its raw cap: no character `AccountId::parse` accepts costs more than one
     /// byte on the wire.
     ///
-    /// The `0..=0x7f` sweep is EXHAUSTIVE, and it is the whole accepted domain
+    /// The `0..=0x7f` sweep is exhaustive, and it is the whole accepted domain
     /// because `parse` requires `is_ascii_alphanumeric` or one of four ASCII
     /// punctuation marks, so nothing above U+007F can be accepted at all.
     /// Widen that alphabet by one escapable byte and this fires - which is the
     /// signal that the dropped `JSON_ESCAPE_FACTOR` is owed back.
     ///
-    /// THE TWO HALVES ARE NOT THE SAME STRENGTH, and saying so is the point of
+    /// The two halves are not the same strength, and saying so is the point of
     /// this paragraph. The ASCII half is a proof by enumeration. The
-    /// "nothing above U+007F" half is a SAMPLE of six characters, which cannot
+    /// "nothing above U+007F" half is a sample of six characters, which cannot
     /// prove the claim - the proof is the `parse` predicate itself, read. The
     /// sample exists so a widening that made the ASCII sweep stop being the
     /// whole domain fails something rather than nothing.
@@ -668,7 +668,7 @@ mod tests {
         );
     }
 
-    /// Finding 5's corrected derivations, RUN rather than argued. The module
+    /// Finding 5's corrected derivations, run rather than argued. The module
     /// doc's whole claim is that every constant carries a field-by-field
     /// derivation from the struct it bounds, and both halves of
     /// `ORDER_EVENT_MAX_BYTES` had drifted from theirs - `OrderFilled` grew
@@ -680,7 +680,7 @@ mod tests {
     ///
     /// Every string is filled with U+0001, which JSON escapes to six bytes -
     /// the worst case `JSON_ESCAPE_FACTOR` charges for. A validated id can
-    /// never contain it; the bound must hold for what the TYPE can carry.
+    /// never contain it; the bound must hold for what the type can carry.
     #[test]
     fn order_event_bound_covers_both_maximal_lifecycle_frames() {
         use crate::{
@@ -719,12 +719,12 @@ mod tests {
                 "{label} reservation {ORDER_EVENT_MAX_BYTES} must dominate {bytes} wire bytes"
             );
         }
-        // The CEILING is asserted against the dominating arm only. Measured,
+        // The ceiling is asserted against the dominating arm only. Measured,
         // `OrderRejected` is the wider frame - 3545 bytes against
         // `OrderFilled`'s 2205 - because `MAX_REASON_LEN` at the escape factor
         // dwarfs four ids, a symbol and a currency. `ORDER_EVENT_MAX_BYTES` is
         // therefore `ORDER_REJECTION_MAX_BYTES`, and a slack ceiling read off
-        // the fill would be a claim about the struct that does NOT set this
+        // the fill would be a claim about the struct that does not set this
         // constant.
         let rejected_bytes = serde_json::to_vec(&rejected).unwrap().len();
         brackets("OrderRejected event", ORDER_EVENT_MAX_BYTES, rejected_bytes);

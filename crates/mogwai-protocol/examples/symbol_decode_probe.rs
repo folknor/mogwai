@@ -1,4 +1,4 @@
-//! What an INLINE fixed-capacity `Symbol` would buy the adapter's decode path,
+//! What an inline fixed-capacity `Symbol` would buy the adapter's decode path,
 //! measured before proposing the workspace-wide edit rather than after.
 //!
 //! Four arms over the same representative `Trade` frame:
@@ -7,32 +7,32 @@
 //! - the payload as a plain struct with today's `Symbol = Arc<str>`;
 //! - the same payload with a 32-byte inline `Copy` symbol, which is the
 //!   proposal;
-//! - the FIRST THING THE ADAPTER DOES WITH A DECODED TRADE, `convert::trade_id`
+//! - the first thing the adapter does with a decoded trade, `convert::trade_id`
 //!   replicated over the same five fields, because a saving inside the decoder
 //!   is only interesting relative to what the per-tick path spends immediately
 //!   after it.
 //!
-//! WHAT THE TWO PAYLOAD ARMS DO AND DO NOT SHARE, because an undisclosed
+//! What the two payload arms do and do not share, because an undisclosed
 //! asymmetry here would bias the only number this probe exists to produce:
 //!
-//! - THEY OBSERVE THE SAME THING. Both `black_box` the whole decoded tuple,
-//!   SYMBOL VALUE INCLUDED. An earlier cut black-boxed only
+//! - They observe the same thing. Both `black_box` the whole decoded tuple,
+//!   symbol value included. An earlier cut black-boxed only
 //!   `symbol.as_str().len()` on the inline arm - a read of the `len: u8` field,
 //!   leaving nothing observing `bytes`, so LLVM was free to elide the 32-byte
 //!   `copy_from_slice` that is the inline representation's whole cost. That
 //!   biased the delta toward the proposal.
-//! - NEITHER VALIDATES. `InlineSymbol` enforces only the `MAX_SYMBOL_LEN` bound
+//! - Neither validates. `InlineSymbol` enforces only the `MAX_SYMBOL_LEN` bound
 //!   its own array needs, and today's `Arc<str>` enforces nothing, so the arms
-//!   differ ONLY in representation. The proposal's alphabet check is therefore
-//!   NOT measured, which is conservative in the direction of the refusal: the
-//!   measured delta is an UPPER BOUND on what the proposal would save. An
+//!   differ only in representation. The proposal's alphabet check is therefore
+//!   not measured, which is conservative in the direction of the refusal: the
+//!   measured delta is an upper bound on what the proposal would save. An
 //!   earlier cut ran `validate_wire_symbol` on the inline arm alone, which is
 //!   the same asymmetry pointing the other way.
 //!
 //! The `trade_id` arm is a replication and not the function itself - the adapter
 //! crate cannot be depended on from `mogwai-protocol`. It omits
-//! `TradeId::new_checked`, which INTERNS the string, so its allocation count is
-//! a LOWER bound on the real per-trade cost. That too is conservative for the
+//! `TradeId::new_checked`, which interns the string, so its allocation count is
+//! a lower bound on the real per-trade cost. That too is conservative for the
 //! refusal, which is why the omission was left in place rather than modelled.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -80,7 +80,7 @@ impl<'de> Deserialize<'de> for InlineSymbol {
                 f.write_str("a wire symbol")
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<InlineSymbol, E> {
-                // ONLY the bound the fixed array needs, deliberately: see the
+                // Only the bound the fixed array needs, deliberately: see the
                 // module doc on why neither payload arm validates.
                 if s.len() > MAX_SYMBOL_LEN {
                     return Err(E::custom("symbol exceeds MAX_SYMBOL_LEN"));
@@ -122,9 +122,9 @@ fn report(label: &str, elapsed: std::time::Duration, n: usize) {
 }
 
 /// `mogwai_adapter::convert::trade_id`, replicated down to the 56-bit mask. The
-/// adapter crate cannot be depended on from here, and the point is the ORDER OF
-/// MAGNITUDE of what runs right after the decode, not the id itself. See the
-/// module doc for the one thing it does NOT replicate.
+/// adapter crate cannot be depended on from here, and the point is the order of
+/// magnitude of what runs right after the decode, not the id itself. See the
+/// module doc for the one thing it does not replicate.
 fn trade_id(
     symbol: &str,
     ts_event: u64,
@@ -145,10 +145,10 @@ fn main() {
     let tagged = r#"{"type":"Trade","symbol":"MNQ","price":"20123.25","size":"4","aggressor":"Buyer","ts_event":1234567890123456789}"#;
     let plain = r#"{"symbol":"MNQ","price":"20123.25","size":"4","aggressor":"Buyer","ts_event":1234567890123456789}"#;
 
-    // ARM PARITY, the assertion `tag_decode_probe` was fixed to carry after a
+    // Arm parity, the assertion `tag_decode_probe` was fixed to carry after a
     // measurement compared arms with mismatched fields. Two halves here: the
     // tagged frame is the plain one plus exactly the tag, and the two payload
-    // structs decode the SAME symbol out of it, so neither arm is measuring a
+    // structs decode the same symbol out of it, so neither arm is measuring a
     // shorter parse or a different value.
     let object_len = |raw: &str| {
         serde_json::from_str::<serde_json::Value>(raw)
@@ -195,7 +195,7 @@ fn main() {
     let start = Instant::now();
     for _ in 0..n {
         let d = serde_json::from_str::<InlineTrade>(plain).unwrap();
-        // `d.symbol` WHOLE, not a read of its `len` field: see the module doc.
+        // `d.symbol` whole, not a read of its `len` field: see the module doc.
         std::hint::black_box((d.symbol, d.price, d.size, d.aggressor, d.ts_event));
     }
     report("payload, inline 32-byte Symbol", start.elapsed(), n);

@@ -27,7 +27,7 @@ pub use solve::SLACK;
 
 /// A tolerance bound: a scalar, a multiplicative band, or the data-derived
 /// resampled envelope (whose bound is computed at fit time, so the contract
-/// records the WORD rather than a number).
+/// records the word rather than a number).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Bound {
     Scalar(f64),
@@ -35,9 +35,9 @@ pub enum Bound {
     Resampled,
 }
 
-/// Representability tolerances, target-local, boundaries INCLUSIVE in every
+/// Representability tolerances, target-local, boundaries inclusive in every
 /// class under the shared `SLACK` convention. The protocol-10
-/// size/quote/displacement/start-price rows are gone WITH their solves.
+/// size/quote/displacement/start-price rows are gone with their solves.
 #[allow(
     clippy::match_same_arms,
     reason = "one arm per TOLERANCES row, in the Python's own order; merging \
@@ -88,7 +88,7 @@ pub fn within(kind: &str, bound: Bound, generated: f64, observed: f64) -> bool {
         ("absolute", Bound::Scalar(b)) => (generated - observed).abs() <= b + SLACK,
         ("ceiling", Bound::Scalar(b)) => generated <= b + SLACK,
         // Multiplicative band on generated/observed (spec 4.5), boundaries
-        // inclusive under the shared SLACK convention.
+        // inclusive under the shared slack convention.
         ("band", Bound::Band(lo, hi)) => {
             lo * observed - SLACK <= generated && generated <= hi * observed + SLACK
         }
@@ -133,7 +133,7 @@ pub fn targets() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
 }
 
 /// The cadence four, which ride the `base_volatility` family's verdict so a
-/// cadence miss is visible there; cadence separately REFUSES protocol 11.
+/// cadence miss is visible there; cadence separately refuses protocol 11.
 pub const CADENCE_NAMES: [&str; 4] = [
     "mean_event_duration_s",
     "children_mean",

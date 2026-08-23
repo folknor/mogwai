@@ -39,7 +39,7 @@ const DEFAULT_OUT: &str = "analysis/mnq-arrival-control.json";
 const DEFAULT_B5_LOG: &str = "analysis/out/arrival-control-b5-gate.log";
 // ETHUSDT and SOLUSDT left this list with their presets (owner ruling
 // 2026-08-09, amended into the 12b spec): both were BTCUSDT aliases with
-// identical generator paths, and at THIS gate's CSV layer their digests
+// identical generator paths, and at this gate's CSV layer their digests
 // grouped with BTCUSDT's, so B1 exercised three distinct tapes then and
 // exercises the same three now.
 const B1_SYMBOLS: [&str; 3] = ["BTCUSDT", "MES", "MNQ"];
@@ -53,12 +53,12 @@ pub struct ArrivalControlArgs {
     /// Brick B4's committed minute-range bound.
     #[arg(long, value_name = "PATH")]
     pub envelope: Option<PathBuf>,
-    /// The directory holding the per-symbol PRE-LANDING legacy tapes gate B1
+    /// The directory holding the per-symbol pre-landing legacy tapes gate B1
     /// compares against, produced by the shipped binary at the parent commit.
     #[arg(long, value_name = "DIR")]
     pub b1_baseline: Option<PathBuf>,
-    /// Where to write the per-symbol AFTER tapes B1 generates before comparing
-    /// them
+    /// Where to write the per-symbol tapes B1 generates after the run, before
+    /// comparing them
     /// byte for byte against the baseline.
     #[arg(long, value_name = "DIR")]
     pub b1_after: Option<PathBuf>,
@@ -80,7 +80,7 @@ fn gate_json(g: &GateRec) -> Value {
     json!({"passed":g.passed,"evidence":g.evidence,"refusals":g.refusals.iter().map(mogwai_lab::aggregate::RefusalRec::to_json).collect::<Vec<_>>()})
 }
 
-/// B5: the driver READS the standing build gate's output; it never runs it.
+/// B5: the driver reads the standing build gate's output; it never runs it.
 ///
 /// The gate is local development tooling; `mogwai` is the shipped venue
 /// binary. A shipped binary that shells out to the developer's build tool is a
@@ -94,13 +94,13 @@ fn gate_json(g: &GateRec) -> Value {
 ///
 /// What replaces it is the gate's own machine-readable verdict. The operator
 /// runs the gate with its `--json` flag and captures the output; this function
-/// refuses unless that capture exists and its LAST line parses as the gate's
+/// refuses unless that capture exists and its last line parses as the gate's
 /// versioned summary object. B5 passes on `verdict == "complete"`.
 ///
 /// Reading the summary rather than grepping the human output is deliberate.
 /// The prose lines are console formatting and change freely; `--json` is a
 /// declared contract carrying `schema`, and it reports `failed_phase`, so a
-/// red run says WHICH phase failed instead of being inferred from an error
+/// red run says exactly which phase failed instead of being inferred from an error
 /// marker appearing somewhere in the text. A transcript from a run that died
 /// partway has no summary line at all and so cannot read as a pass, which is
 /// what the first draft's `--b5-green-at <commit>` flag could not manage: a
@@ -135,10 +135,10 @@ fn read_b5_log(path: &Path) -> anyhow::Result<(Value, f64)> {
     ))
 }
 
-/// A missing, unreadable or zero-length baseline REFUSES B1 rather than
+/// A missing, unreadable or zero-length baseline refuses B1 rather than
 /// passing it. B1 is a real gate even though this brick touches no generator:
-/// the point of it is that it is RUN, so an absent comparand cannot be allowed
-/// to read as agreement.
+/// the point of it is that it is actually run, so an absent comparand cannot be
+/// allowed to read as agreement.
 fn require_baseline(path: &Path) -> anyhow::Result<()> {
     let meta = std::fs::metadata(path)
         .map_err(|e| anyhow!("B1 refused: missing baseline {}: {e}", path.display()))?;
@@ -164,40 +164,40 @@ const FROZEN_PATHS: [&str; 4] = [
 
 /// B1's supporting check: `git diff --name-only <parent>..HEAD` touches none of
 /// the frozen paths, and `TAPE_PROTOCOL_VERSION` still reads what it read at the
-/// baseline commit. Recorded ALONGSIDE
+/// baseline commit. Recorded alongside
 /// the per-symbol byte comparisons and never substituted for them - it is a much
 /// weaker statement than tape identity, since a generator change outside those
-/// paths would pass it - but it is ANDed into B1's verdict rather than merely
+/// paths would pass it - but it is anded into B1's verdict rather than merely
 /// reported, because a decorative check nobody can fail is not evidence.
 ///
-/// THE ACCEPTED IDENTITY IS DERIVED, NOT WRITTEN DOWN, and that is a repair
-/// rather than a refinement. This check spent its whole life comparing the
-/// constant against a hand-edited literal, re-baselined 14 to 16 to 17 to 18 as
-/// the bumps landed, and then the literal stopped being edited: three further
-/// bumps took the constant to 20 while the check still demanded 18, so B1 could
-/// only ever fail, whatever the per-symbol byte comparisons said. That is the
-/// exact failure [`is_non_shipping`] records having found once already - a
-/// supporting check contradicting the evidence it supports - and a decorative
-/// check nobody can PASS is worse than one nobody can fail. Nothing detected it:
-/// `tape_version_prose.rs` reads markdown, so an executable statement of a live
-/// tape identity is invisible to it.
+/// The accepted identity is derived, never written down as a literal, and that
+/// is a repair rather than a refinement. This check spent its whole life
+/// comparing the constant against a hand-edited literal, re-baselined 14 to 16
+/// to 17 to 18 as the bumps landed, and then the literal stopped being edited:
+/// three further bumps took the constant to 20 while the check still demanded
+/// 18, so B1 could only ever fail, whatever the per-symbol byte comparisons
+/// said. That is the exact failure [`is_non_shipping`] records having found
+/// once already - a supporting check contradicting the evidence it supports -
+/// and a decorative check nobody can pass is worse than one nobody can fail.
+/// Nothing detected it: `tape_version_prose.rs` reads markdown, so an
+/// executable statement of a live tape identity is invisible to it.
 ///
 /// So the baseline version is read out of the baseline commit, the same way and
-/// for the same reason the baseline COMMIT is an argument rather than a
+/// for the same reason the baseline commit is itself an argument rather than a
 /// hardcoded `HEAD~1`. It also states something stronger than the literal did:
 /// the tapes B1 compares came from that commit's binary, so what matters is that
 /// no bump landed between it and HEAD, which a literal cannot express and a
 /// derivation cannot get stale. A baseline commit whose constant cannot be read
-/// REFUSES, on [`require_baseline`]'s doctrine - an unreadable comparand must
+/// refuses, on [`require_baseline`]'s doctrine - an unreadable comparand must
 /// not read as agreement.
 ///
-/// The baseline commit is an ARGUMENT rather than a hardcoded `HEAD~1`. It has
-/// to be: `HEAD~1` is only the pre-landing boundary while the brick's landing
-/// is the tip, and any follow-up commit - a repair, a lint sweep - silently
-/// moves the range off the commit the baseline tapes actually came from. It
-/// defaults to `HEAD~1` for the ordinary case and is stated explicitly in the
-/// artifact, so the range is auditable rather than assumed. An unreachable
-/// commit REFUSES rather than passing vacuously.
+/// The baseline commit is always an argument rather than a hardcoded `HEAD~1`.
+/// It has to be: `HEAD~1` is only the pre-landing boundary while the brick's
+/// landing is the tip, and any follow-up commit - a repair, a lint sweep -
+/// silently moves the range off the commit the baseline tapes actually came
+/// from. It defaults to `HEAD~1` for the ordinary case and is stated explicitly
+/// in the artifact, so the range is auditable rather than assumed. An
+/// unreachable commit refuses rather than passing vacuously.
 fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
     let range = format!("{baseline_commit}..HEAD");
     let out = Command::new("git")
@@ -216,7 +216,7 @@ fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
         .collect();
     // A test, bench or example target inside a frozen crate cannot reach the
     // shipped tape: none of them is linked into the binary that writes one.
-    // Splitting them OUT of the verdict rather than out of the record is
+    // Splitting them out of the verdict rather than out of the record is
     // deliberate - the paths are still reported, so a reader sees exactly what
     // moved and can disagree with this reasoning.
     let (non_shipping, shipping): (Vec<&str>, Vec<&str>) =
@@ -236,7 +236,7 @@ fn b1_supporting_check(baseline_commit: &str) -> anyhow::Result<Value> {
 }
 
 /// The path and the declaration `TAPE_PROTOCOL_VERSION` is written at, as this
-/// check has to read them out of an OLD commit rather than out of the tree.
+/// check has to read them out of an old commit rather than out of the tree.
 /// Reading the file at a revision is the only way to learn what the constant was
 /// then: the compiled-in value is HEAD's by construction, and comparing it
 /// against itself would pass vacuously.
@@ -246,7 +246,7 @@ const TAPE_VERSION_DECL: &str = "pub const TAPE_PROTOCOL_VERSION: u32 = ";
 /// `TAPE_PROTOCOL_VERSION` as it stood at `commit`, read from that revision's
 /// copy of the declaring file.
 ///
-/// Every failure REFUSES rather than defaulting: an unreachable commit, a
+/// Every failure refuses rather than defaulting: an unreachable commit, a
 /// revision predating the file, a declaration this parser cannot find. A silent
 /// fallback here would put the check straight back where it was - passing or
 /// failing for a reason unrelated to the tape.
@@ -343,10 +343,10 @@ fn run_b1(baseline: &Path, after: &Path, baseline_commit: &str) -> anyhow::Resul
     ))
 }
 
-/// Refuses a dirty tree BEFORE reading any input, exactly as
+/// Refuses a dirty tree before reading any input, exactly as
 /// `minute_range_envelope::run` does and for the same reason: an artifact may
 /// only bind a commit that is exactly the code that ran. Re-attests the tree
-/// from git immediately BEFORE the atomic write, so a HEAD move or an edit
+/// from git immediately before the atomic write, so a HEAD move or an edit
 /// during the walking unbinds the artifact rather than being recorded as clean.
 /// Public for the scratch-path regression tests.
 pub fn run(args: ArrivalControlArgs) -> anyhow::Result<Value> {
@@ -360,7 +360,7 @@ pub fn run(args: ArrivalControlArgs) -> anyhow::Result<Value> {
 /// operator has a use for them.
 ///
 /// The mid-run re-attestation pin (spec section 2.9) is the reason all four
-/// fields exist at once: it needs a CLEAN tree to get past step 1, so it cannot
+/// fields exist at once: it needs a clean tree to get past step 1, so it cannot
 /// piggyback on the dirty-tree tests; it has no gate transcript and no
 /// pre-landing baseline tapes; and at the committed 2674800 s window it would
 /// cost six minutes to prove a property that has nothing to do with window
@@ -439,7 +439,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
     // moves both together rather than leaving a hardcoded 21 to contradict it.
     let unexposed: Vec<i64> = (0..24_i64).filter(|h| !hours.contains(h)).collect();
     let observed = hourly_mean_parents(&obs);
-    // THE SCRATCH CLASS, RESOLVED AS ONE. This was `PathBuf::from(
+    // The scratch class, resolved as one. This was `PathBuf::from(
     // "target/arrival-control")` - CWD-relative, so a run started anywhere but
     // the repository root created a directory named `target` wherever the
     // operator happened to be standing. What lands in it is one small
@@ -452,7 +452,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
     // leaf is unique per process, and it is removed on drop - including the
     // early returns between here and the write.
     //
-    // THE BINDING IS THE GUARD. `let scratch = ScratchDir::new(..)?.path()
+    // The binding is itself the guard. `let scratch = ScratchDir::new(..)?.path()
     // .to_path_buf()` compiles and deletes the directory before the first
     // walk - the guard-scope family, in the one line that looks tidiest.
     let scratch_dir = ScratchDir::new(&cache_root(None))?;
@@ -513,7 +513,7 @@ fn run_with(args: ArrivalControlArgs, seams: Seams) -> anyhow::Result<Value> {
         .map(|(k, _)| k.clone())
         .collect();
     let (peak_rss, _) = sampler.stop(&[], None)?;
-    // THE ARTIFACT REFUSES A SCRIPTED ATTESTATION. `binding.harness_tree_commit`
+    // The artifact refuses a scripted attestation. `binding.harness_tree_commit`
     // and `clean_tree: true` below are a provenance claim, and both ends of it -
     // step 1's `require_clean_tree` and this re-attestation - read through a
     // seam that tests can install a double into. The seam is compiled out of a
@@ -553,7 +553,7 @@ mod tests {
             b1_baseline: None,
             b1_after: None,
             b1_baseline_commit: None,
-            // Explicit and absent: the FIRST thing `run_with` does after the
+            // Explicit and absent: the first thing `run_with` does after the
             // tree gate is read this transcript, so it is what a clean tree
             // must be refused by.
             b5_log: Some("target/no-such-b5-for-the-ordering-pin.log".into()),
@@ -561,7 +561,7 @@ mod tests {
         }
     }
 
-    /// The tree gate runs before a byte of any input is read, and BOTH
+    /// The tree gate runs before a byte of any input is read, and both
     /// verdicts are injected so the claim holds in the state the gate is
     /// actually run in. This test used to return early unless the developer's
     /// working tree happened to be dirty, which is precisely the state a gate
@@ -586,11 +586,11 @@ mod tests {
         );
         assert_eq!(dirty.queries(), vec![TreeQuery::Status]);
 
-        // THE CLEAN DIRECTION RUNS WITH B1 DISARMED, and that is a hazard
+        // The clean direction runs with B1 disarmed, and that is a hazard
         // removal rather than a weakening: the pin is that the B5 read is what
         // a bound run reaches first, and B1 is downstream of it either way.
         // Left on production `Seams` this test's outcome would depend on
-        // `target/no-such-b5-for-the-ordering-pin.log` NOT EXISTING - and if
+        // `target/no-such-b5-for-the-ordering-pin.log` never existing - and if
         // it ever did, the run would sail past B5 into `run_b1`, which execs a
         // `mogwai gen` subprocess per symbol from inside a unit test. Low
         // probability, and nothing about the ordering claim needs it.
@@ -614,7 +614,7 @@ mod tests {
     }
 
     /// The derivation B1's supporting check now rests on has to actually find
-    /// the constant. This asserts the PARSE, not an equality against the
+    /// the constant. This asserts the parse itself, not an equality against the
     /// compiled-in value: the moment a bump lands, the edit is uncommitted for a
     /// while, and a test demanding that HEAD's committed constant match the
     /// tree's would fail for the duration of every legitimate bump - the same
@@ -628,7 +628,7 @@ mod tests {
         assert!(version > 0);
     }
 
-    /// An unreachable baseline commit REFUSES. A version check that defaulted
+    /// An unreachable baseline commit refuses. A version check that defaulted
     /// here would be decoration again, passing for a reason unrelated to the
     /// tape - which is how the hardcoded literal this replaced went stale
     /// unnoticed.
@@ -643,7 +643,7 @@ mod tests {
     /// development tooling, absent on a clone, and under this repository's
     /// run-everything-through-it convention a spawned gate deadlocks on the
     /// lock its own parent holds. So an
-    /// ABSENT transcript refuses the run outright rather than passing B5 or
+    /// absent transcript refuses the run outright rather than passing B5 or
     /// quietly running the gate.
     #[test]
     fn arrival_control_refuses_a_missing_b5_transcript() {
@@ -652,16 +652,16 @@ mod tests {
         assert!(err.to_string().contains("B5 refused"));
     }
 
-    /// A transcript recording a RED gate reads successfully and reports a
+    /// A transcript recording a red gate reads successfully and reports a
     /// failing verdict - a red suite is a real gate result and belongs in the
     /// artifact as one. A transcript with no summary line is a different
-    /// thing: it is not evidence at all, so it REFUSES rather than failing.
+    /// thing: it is not evidence at all, so it refuses rather than failing.
     #[test]
     fn a_red_gate_reads_as_failed_and_a_summaryless_one_refuses() {
-        // The WORKSPACE target directory, not a relative `target/`: a unit
+        // The workspace target directory, not a relative `target/`: a unit
         // test's working directory is its crate, so the relative form wrote
         // `crates/mogwai-cli/target/`, which the root `.gitignore` hides and
-        // `cargo clean` never reaches. See `test_paths` - and BIND the guard,
+        // `cargo clean` never reaches. See `test_paths` - and bind the guard,
         // whose drop removes the leaf it made.
         let scratch = crate::test_paths::scratch_dir("arrival-control-b5");
         let dir = scratch.path();
@@ -713,13 +713,13 @@ mod tests {
 
     /// Spec section 2.9: `require_clean_tree` runs before any input is read and
     /// the artifact is written minutes later, so the run re-attests the tree
-    /// immediately before serializing and bails UNBOUND if HEAD moved or the
+    /// immediately before serializing and bails as unbound if HEAD moved or the
     /// tree went dirty in between. The pin dirties the tree in exactly that
     /// window - after the walks, before the gates - and asserts both that the
     /// run refuses and that nothing reached disk.
     ///
     /// `#[ignore]`d because it needs the opposite precondition to its dirty-tree
-    /// siblings: a CLEAN tree, which the development tree usually is not. Run it
+    /// siblings: a clean tree, which the development tree usually is not. Run it
     /// with `test -p mogwai-cli arrival_control_refuses_a_tree_that_changed_during_the_run`
     /// from a committed tree.
     #[test]
@@ -733,9 +733,9 @@ mod tests {
         // it is ignored, so a probe planted there would not dirty the tree and
         // the pin would stop biting.
         //
-        // WHICH MAKES THE CLEANUP LOAD-BEARING, and a straight-line
+        // Which makes the cleanup itself load-bearing, and a straight-line
         // `remove_file` after the call is not it: a panic inside `run_with` or
-        // inside the planting closure unwinds past it and LEAVES the probe in
+        // inside the planting closure unwinds past it and leaves the probe in
         // the tree. This same test is the one documented as refusing a dirty
         // tree by design, so a leaked probe poisons every later run of the
         // suite - the failure would present as an unrelated refusal. The guard
@@ -788,12 +788,12 @@ mod tests {
         );
     }
 
-    /// Inapplicability is ABSENCE, not a recorded pass: the control has no
-    /// cadence grid for B8 to be sensitive to. Pins the COMMITTED artifact,
+    /// Inapplicability is absence, never a recorded pass: the control has no
+    /// cadence grid for B8 to be sensitive to. Pins the committed artifact,
     /// which is in the tree, so a missing file is a failure rather than a
     /// reason to skip.
     ///
-    /// `DEFAULT_OUT` is relative to the REPOSITORY, and a unit test's working
+    /// `DEFAULT_OUT` is relative to the repository root, and a unit test's working
     /// directory is its crate - so this must go through `repo_root`. It did
     /// not, and read `crates/mogwai-cli/analysis/...`, which does not exist:
     /// the read failed on every run and the early return meant not one of the

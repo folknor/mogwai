@@ -24,15 +24,15 @@ pub enum OmsType {
     Hedging,
 }
 
-/// What an instrument IS, which decides how holding it moves the ledger.
+/// What an instrument is, which decides how holding it moves the ledger.
 ///
-/// The split that matters is not asset class but SETTLEMENT SHAPE, and there are
+/// The split that matters is not asset class but settlement shape, and there are
 /// three of them:
 ///
-/// - `Spot` credits the BASE ASSET as a currency balance. That is right for
+/// - `Spot` credits the base asset as a currency balance. That is right for
 ///   crypto spot, where you genuinely hold the base as money and can spend it on
 ///   the next pair.
-/// - `Equity` credits a POSITION and never a balance. A share is not money: you
+/// - `Equity` credits a position and never a balance. A share is not money: you
 ///   cannot pay for anything with AAPL, and modelling it as a currency puts it
 ///   on the same footing as USD, which is what makes short sales, settlement and
 ///   round lots inexpressible.
@@ -47,9 +47,9 @@ pub enum InstrumentClass {
     },
     /// A share. Held as a position, paid for in `currency`.
     ///
-    /// NOT `Spot { base: "AAPL", quote: "USD" }`, which was the only way to say
+    /// Not `Spot { base: "AAPL", quote: "USD" }`, which was the only way to say
     /// this before and is wrong in a way that compounds: it makes the ledger
-    /// hold AAPL as a CURRENCY BALANCE, so the account can "spend" shares, no
+    /// hold AAPL as a currency balance, so the account can "spend" shares, no
     /// short position is expressible as anything but a negative money balance,
     /// and there is nowhere to hang a settlement period or a borrow.
     Equity {
@@ -58,34 +58,34 @@ pub enum InstrumentClass {
         /// present so the notional arithmetic is uniform across classes rather
         /// than special-cased here.
         multiplier: Decimal,
-        /// The ROUND LOT: orders must be a multiple of this many shares.
+        /// The round lot: orders must be a multiple of this many shares.
         ///
         /// Separate from `size_increment`, which stays at one share, and the
-        /// separation is the point: a lot rule governs what may be SUBMITTED,
+        /// separation is the point: a lot rule governs what may be submitted,
         /// while a partial fill legitimately leaves an odd-lot remainder that
         /// the size grid still has to represent. One means odd lots are
         /// accepted, which is what every retail-facing venue does today.
         #[serde(default = "one_share")]
         lot_size: Decimal,
-        /// How many shares this account may be SHORT, or `None` for a venue
+        /// How many shares this account may be short, or `None` for a venue
         /// that models no borrow constraint.
         ///
-        /// A short sale needs a LOCATE at a real venue, and its absence is why
+        /// A short sale needs a locate at a real venue, and its absence is why
         /// a name goes hard-to-borrow. `Some(0)` states exactly that; `None`
         /// states that the venue is not modelling the borrow market, which is
         /// the honest default for a synthetic tape with no lending desk behind
-        /// it. Either way a CASH equity account - one with no margin policy -
+        /// it. Either way a cash equity account - one with no margin policy -
         /// cannot short at all, because shorting is a margin activity.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowable: Option<Decimal>,
-        /// How long sale proceeds take to SETTLE, in simulated nanoseconds.
+        /// How long sale proceeds take to settle, in simulated nanoseconds.
         ///
-        /// Cash from a sale is credited immediately and held UNSETTLED until
+        /// Cash from a sale is credited immediately and held unsettled until
         /// this span has passed, which is what a `T+N` convention buys a
         /// strategy: the money is yours and you cannot spend it yet. It appears
         /// as `locked` on the balance row, because that is exactly what it is.
         ///
-        /// A FIXED SIM SPAN rather than N business days, and the simplification
+        /// A fixed sim span rather than N business days, and the simplification
         /// is stated rather than hidden: a real `T+2` counts sessions, so a
         /// weekend stretches it. Expressing it in nanoseconds keeps it on the
         /// one clock everything else here is on, and a preset that wants the
@@ -99,7 +99,7 @@ pub enum InstrumentClass {
         multiplier: Decimal,
         asset_class: WireAssetClass,
     },
-    /// A perpetual swap: a future with no expiry that pays FUNDING between long
+    /// A perpetual swap: a future with no expiry that pays funding between long
     /// and short at an interval.
     ///
     /// The dominant crypto instrument rather than an exotic one. Modelled as a
@@ -115,12 +115,12 @@ pub enum InstrumentClass {
         /// How often funding is exchanged, in nanoseconds. Eight hours is the
         /// near-universal convention.
         funding_interval_ns: u64,
-        /// Zero-premium INTEREST: the rate a long pays a short when the mark
+        /// Zero-premium interest: the rate a long pays a short when the mark
         /// sits on the index, and the whole rate when no index mark is
         /// available. Negative reverses the direction. A real venue computes
         /// the live rate as this plus the mark-versus-index premium, clamped.
         funding_rate: Decimal,
-        /// Symbol whose last mark is the INDEX this perpetual funds against.
+        /// Symbol whose last mark is the index this perpetual funds against.
         ///
         /// Absent, or present but not yet priced, the premium is zero and the
         /// rate is exactly `funding_rate` - today's constant-rate behaviour,
@@ -135,7 +135,7 @@ pub enum InstrumentClass {
         funding_clamp: Decimal,
     },
     /// A coin-margined (inverse) contract: notional is quoted in `quote_currency`
-    /// but margin and P and L settle in the BASE asset.
+    /// but margin and P and L settle in the base asset.
     ///
     /// Standard on crypto derivatives venues and nearly free on the consumer
     /// side, since a nautilus host already carries an inverse arm. The
@@ -146,7 +146,7 @@ pub enum InstrumentClass {
         underlying: String,
         /// The asset margin and settlement are denominated in.
         settlement_currency: String,
-        /// The currency the CONTRACT is quoted in, which nothing settles in.
+        /// The currency the contract is quoted in, which nothing settles in.
         quote_currency: String,
         multiplier: Decimal,
         asset_class: WireAssetClass,
@@ -170,7 +170,7 @@ impl InstrumentClass {
         }
     }
 
-    /// How many units this account may be SHORT, or `None` where the venue
+    /// How many units this account may be short, or `None` where the venue
     /// models no borrow constraint. Only an equity states one.
     #[must_use]
     pub fn borrowable(&self) -> Option<Decimal> {
@@ -190,7 +190,7 @@ impl InstrumentClass {
         }
     }
 
-    /// Whether holding this is a SHARE rather than a claim on cash - the class
+    /// Whether holding this is a share rather than a claim on cash - the class
     /// whose position is the asset itself and whose cash leg is the full
     /// notional on both sides.
     #[must_use]
@@ -229,7 +229,7 @@ impl InstrumentClass {
         }
     }
 
-    /// The asset a fill credits as a CURRENCY BALANCE, if any.
+    /// The asset a fill credits as a currency balance, if any.
     ///
     /// `Spot` alone. An equity's shares are a position, and every derivative
     /// moves only cash - which is exactly the distinction that makes an equity
@@ -243,7 +243,7 @@ impl InstrumentClass {
         }
     }
 
-    /// Whether exposure is carried as a MARKED POSITION with unrealized P and L,
+    /// Whether exposure is carried as a marked position with unrealized P and L,
     /// rather than as an asset the account holds.
     ///
     /// True for every derivative and for equity. This is the predicate the
@@ -262,7 +262,7 @@ impl InstrumentClass {
 
     /// Whether this is a derivative: marked, and margin-eligible.
     ///
-    /// Equity is marked but is NOT this - a cash equity account posts no
+    /// Equity is marked but is not this - a cash equity account posts no
     /// collateral per contract, and a margin policy attached to one must move no
     /// number, which is the same rule spot already had.
     #[must_use]
@@ -273,7 +273,7 @@ impl InstrumentClass {
         )
     }
 
-    /// Whether P and L is INVERSE in price: value is `multiplier * qty / px`.
+    /// Whether P and L is inverse in price: value is `multiplier * qty / px`.
     #[must_use]
     pub const fn is_inverse(&self) -> bool {
         matches!(self, Self::Inverse { .. })
@@ -303,7 +303,7 @@ impl InstrumentClass {
 /// How a perpetual exchanges funding: the clock, the interest, and the
 /// optional mark-versus-index premium.
 ///
-/// THE RATE IS COMPUTED, not configured. A real venue pays
+/// The rate is computed, not configured. A real venue pays
 /// `clamp(interest + (mark - index) / index, +/- clamp)`. `interest` is
 /// `funding_rate` on the class, the zero-premium term. When no index mark is
 /// available the premium is zero and the rate collapses to that term, which is
@@ -355,11 +355,11 @@ impl InstrumentDef {
             .unwrap_or(Decimal::MAX)
     }
 
-    /// What `qty` at `px` is worth in the SETTLEMENT currency.
+    /// What `qty` at `px` is worth in the settlement currency.
     ///
     /// Linear for every class but `Inverse`, where the contract is quoted in one
     /// currency and settles in another, so value is `multiplier * qty / px` -
-    /// one contract is a fixed amount of QUOTE currency, and what varies with
+    /// one contract is a fixed amount of quote currency, and what varies with
     /// price is how much of the settlement asset that costs. Getting this wrong
     /// does not merely mis-size a position: it inverts the sign of the P and L
     /// response to price.
@@ -404,7 +404,7 @@ impl InstrumentDef {
 
 /// The canonical default instrument set the venue seeds when none is supplied.
 ///
-/// Today this is the single BTCUSDT instrument. The engine seeds from this
+/// Today this is the single `BTCUSDT` instrument. The engine seeds from this
 /// function, and the venue derives its default generator grid from the same
 /// definition, so order validation and generated prices agree on tick size and
 /// precision. The field values are price precision 2, size precision 8, with
@@ -518,7 +518,7 @@ mod tests {
         }
     }
 
-    /// `lot_size` is the ONE equity field with a non-zero serde default, so a
+    /// `lot_size` is the one equity field with a non-zero serde default, so a
     /// config omitting it must decode to one share rather than to zero - which
     /// would make every quantity a whole number of nothing. Its neighbours
     /// `borrowable` and `settlement_ns` default to absent and zero, and those
@@ -583,7 +583,7 @@ mod tests {
         }
     }
 
-    /// An inverse contract is a fixed amount of QUOTE currency, so its value in
+    /// An inverse contract is a fixed amount of quote currency, so its value in
     /// the settlement asset falls as price rises. Getting this backwards does
     /// not mis-size a position, it inverts the sign of its response to price.
     #[test]
@@ -601,7 +601,7 @@ mod tests {
         );
     }
 
-    /// A coin-margined long GAINS settlement asset when price rises, and the
+    /// A coin-margined long gains settlement asset when price rises, and the
     /// gain is not symmetric with an equal fall - which is the whole reason the
     /// arithmetic cannot be shared with the linear form.
     #[test]
@@ -653,7 +653,7 @@ mod tests {
         );
     }
 
-    /// An equity holds SHARES, so nothing about it credits a currency balance -
+    /// An equity holds shares, so nothing about it credits a currency balance -
     /// which is the distinction the class exists for.
     #[test]
     fn an_equity_credits_no_currency_balance() {
@@ -673,12 +673,12 @@ mod tests {
         );
     }
 
-    /// The three equity-only accessors READ THEIR FIELD, and nothing else in
+    /// The three equity-only accessors read their field, and nothing else in
     /// this crate said so: the fixture above states all three at their
     /// defaults, so an implementation returning `Decimal::ONE` / `None` / `0`
     /// and ignoring the class entirely passed every protocol test. The engine's
     /// `Shares` fixture does parameterize them, but that is coverage of the
-    /// BEHAVIOUR in another crate, not of the accessor.
+    /// behaviour in another crate, not of the accessor.
     ///
     /// The non-equity direction is the other half: every other class answers
     /// the same three questions with the documented constants, which is what

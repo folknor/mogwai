@@ -19,7 +19,7 @@ use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use crate::{admission::ExecLanes, boatyard::Boatyard, source};
 
-/// A havoc window, armed at a WALL instant for a SIMULATED span, judged on
+/// A havoc window, armed at a wall instant for a simulated span, judged on
 /// whatever clock the reader owns.
 ///
 /// Stored as `(wall_armed_ns, sim_span_ns)` rather than as an absolute sim
@@ -30,7 +30,7 @@ use crate::{admission::ExecLanes, boatyard::Boatyard, source};
 /// and every reader opens it on its own.
 ///
 /// Behind a `Mutex`, not two atomics. Arming is a cold path - an operator
-/// control - and two independent `AtomicU64`s are a TORN READ: a concurrent
+/// control - and two independent `AtomicU64`s are a torn read: a concurrent
 /// reader can pair the new wall instant with the old span, and a clear can race
 /// a re-arm and erase the new span. The single `AtomicU64` this replaces was
 /// tear-free by construction, so an atomic pair would be a regression
@@ -49,7 +49,7 @@ impl HavocWindow {
         Self(Mutex::new(None))
     }
 
-    /// STORE, not extend: the whole span is replaced under the lock, so
+    /// Stores, never extends: the whole span is replaced under the lock, so
     /// re-arming with a shorter span shortens an in-flight window.
     pub(crate) fn arm(&self, wall_armed_ns: u64, sim_span_ns: u64) {
         *self
@@ -63,13 +63,13 @@ impl HavocWindow {
 
     /// Judged on the reader's own clock.
     ///
-    /// THE LATE-BOARDER RULE: the opening instant is
+    /// The late-boarder rule: the opening instant is
     /// `max(sim.sim_ns(wall_armed_ns), sim.sim_epoch_ns)`. Projecting the
-    /// arming instant through the clock of a boat anchored LATER than the arm
+    /// arming instant through the clock of a boat anchored later than the arm
     /// would put the window in that boat's past, where it never opens - arm a
     /// blackout, connect 50 ms later, and the blackout silently does not
     /// happen. Such a reader instead treats its own epoch as the opening and
-    /// consumes the FULL span.
+    /// consumes the full span unconditionally.
     pub(crate) fn open_at(&self, sim: SimClock, sim_at_ns: u64) -> bool {
         self.0
             .lock()
@@ -88,7 +88,7 @@ impl HavocWindow {
 /// passenger is one socket riding one boat and dies with that socket; the money
 /// and the book stay here.
 ///
-/// The engine is per account, not per process. It was one per PROCESS, which is
+/// The engine is per account, not per process. It was one per process, which is
 /// right while a venue serves one run and wrong the moment an orchestrator
 /// points fifty subagents at one exchange: every subagent's fills moved every
 /// other subagent's net.
@@ -104,47 +104,47 @@ pub(crate) struct Account {
     /// the engine books a fill, and the risk ledger judges the equity that fill
     /// produced.
     pub(crate) risk: Mutex<crate::risk::RiskLedger>,
-    /// WHETHER ANYBODY IS READING THIS ACCOUNT, and since when.
+    /// Whether anybody is reading this account, and since when.
     ///
     /// `None` while a connection is attached. `Some(wall_instant)` once the last
-    /// one went away, which FREEZES the account: it is not swept, not marked,
+    /// one went away, which freezes the account outright: it is not swept, not marked,
     /// not funded and not judged against its policy until a socket returns.
     ///
     /// This is a deliberate departure from a real venue, where being away is no
     /// defence against liquidation. Mogwai exists to exercise a consumer's live
     /// path rather than to simulate an account nobody is trading, and the
     /// consequence to state in any claim is that a run spanning a disconnect has
-    /// a GAP IN ITS RISK HISTORY.
+    /// a gap in its risk history.
     ///
     /// A WALL instant rather than a simulated one, and the reason is that there
     /// is no simulated clock while frozen: the boat that carried one wound down
     /// with the last socket. This is what the TTL is measured against.
     pub(crate) frozen_since: Mutex<Option<std::time::Instant>>,
-    /// Which boats this account is currently riding, and HOW MANY PASSENGERS
+    /// Which boats this account is currently riding, and how many passengers
     /// ride each. One passenger rides one boat; the default account can
     /// have two unnamed sockets on two symbols and therefore two boats. The
     /// sweeper applies a boat's walk only to accounts riding it, so two
     /// cadences on one river cannot double-fill one ledger.
     ///
-    /// COUNTED RATHER THAN A SET, because two unnamed sockets may share one
+    /// Counted rather than a set, because two unnamed sockets may share one
     /// river at one speed and therefore one boat. A set would let the first of
     /// them to close take the ride away from under the second, which stops
     /// the sweeper applying that boat to a ledger somebody is still trading.
     ///
-    /// A ride ends when the PASSENGER drops, not when the account
+    /// A ride ends when the passenger drops, not when the account
     /// freezes: a freeze needs every socket gone, and the two-socket shape
     /// above would otherwise leave a ride held by a passenger that ended.
     /// The key carries no placement nonce, so a stale ride would be
     /// indistinguishable from a live one the moment any account boarded that
     /// river at that speed again.
     seated_on: Mutex<HashMap<crate::boatyard::BoatKey, usize>>,
-    /// HOW MANY SOCKETS ARE ATTACHED TO THIS ACCOUNT AND HAVE NOT YET FINISHED
-    /// TEARING DOWN, counted from the instant the upgrade is decided rather
+    /// How many sockets are attached to this account and have not yet finished
+    /// tearing down, counted from the instant the upgrade is decided rather
     /// than from the instant a lane is bound.
     ///
     /// The lane table alone cannot answer "is anybody reading this account",
     /// and the gap is not theoretical. An eviction retires the incumbent's lane
-    /// EAGERLY, and the newcomer binds its own only once `handle_socket` runs -
+    /// eagerly, and the newcomer binds its own only once `handle_socket` runs -
     /// which is after the 101 and never at all if the consumer abandons the
     /// upgrade. Between those two instants the account has no lane, and a freeze
     /// decided on the lane table alone would either fire on a live account or,
@@ -153,11 +153,11 @@ pub(crate) struct Account {
     ///
     /// Raised by `Run::attach` before the upgrade completes and lowered by
     /// `Passenger`'s `Drop`, which runs on the abandoned-upgrade path too.
-    /// So it counts ATTACHES, and every attach has exactly one departure.
+    /// So it counts attaches, and every attach has exactly one departure.
     attachments: AtomicUsize,
-    /// TRANSPORT havoc, per account rather than per venue.
+    /// Transport havoc, per account rather than per venue.
     ///
-    /// These corrupt what one connection RECEIVES rather than what the
+    /// These corrupt what one connection receives rather than what the
     /// generator produces, so they are scoped to the account and blur each of
     /// its passengers alike: the river is untouched and there is nothing to
     /// scope on the water side. They were run-wide, which meant one subagent arming a blackout
@@ -169,7 +169,7 @@ pub(crate) struct Account {
     /// Same reasoning as the windows above: these change when one connection
     /// hears about its own commands, so a scenario slowing one subagent's acks
     /// must not slow the batch. `delay_ms` holds outbound execution output;
-    /// the act pair delays the venue ACTING and the ack pair delays it SAYING
+    /// the act pair delays the venue acting and the ack pair delays it saying
     /// what it did.
     pub(crate) delay_ms: AtomicU64,
     pub(crate) submit_act_ms: AtomicU64,
@@ -227,7 +227,7 @@ impl Account {
     /// Record one passenger riding `key`, or name the boat this account already
     /// rides on that river at a different speed.
     ///
-    /// THE ONLY WAY TO RECORD A RIDE, and unconditional on the freeze state on
+    /// The only way to record a ride, and unconditional on the freeze state on
     /// purpose. A frozen account has an empty map - its passengers all died with
     /// their sockets -
     /// so a return at a new speed passes the check anyway, and routing a
@@ -300,12 +300,12 @@ impl Account {
     /// Count one socket out. Called from `Passenger`'s `Drop`, so it runs
     /// for an abandoned upgrade as well as for a socket that traded.
     fn depart(&self) {
-        // SATURATING RATHER THAN WRAPPING, which is why this is a loop and not
+        // Saturating, never wrapping, which is why this is a loop and not
         // a `fetch_sub`: an unbalanced departure would wrap the count to
         // `usize::MAX` and leave the account looking permanently attended,
         // which is the exact failure this counter exists to close.
         //
-        // AND IT ASSERTS THE INVARIANT IT PROTECTS, because a saturating loop
+        // It also asserts the invariant it protects, because a saturating loop
         // alone silently absorbs the bug it fears: production keeps the safe
         // floor, and a debug build says which account went unbalanced. It is a
         // `debug_assert` deliberately: the workspace runs its tests in both
@@ -419,13 +419,13 @@ pub(crate) enum VenueArm {
 /// A folded-up run of arms, replayable onto a ledger that did not exist when
 /// they were posted.
 ///
-/// EVERY FIELD IS OPTIONAL AND AN UNSET ONE IS NOT A ZERO. A record is replayed
+/// Every field is optional, and an unset one is not a zero. A record is replayed
 /// onto a ledger that may already carry another record's effects - the venue-wide
 /// record then the account's own - so "this run said nothing about ack delays"
 /// has to be distinguishable from "this run armed a zero ack delay", or the
 /// second replay silently disarms the first.
 ///
-/// The arm variants are STORE-not-merge on the wire, and this mirrors that
+/// The arm variants are store-not-merge on the wire, and this mirrors that
 /// exactly: one `CommandLatency` replaces all six values, one `GoDark` replaces
 /// the whole span.
 #[derive(Default)]
@@ -438,7 +438,7 @@ struct ArmRecord {
     latency: Option<[u64; 6]>,
     /// `(mult, wall armed, sim span)`, as `Engine::arm_fee_surcharge` takes it.
     fee_surcharge: Option<(Decimal, u64, u64)>,
-    /// Engine-armed divergences in arming order, capped and shed from the OLDEST
+    /// Engine-armed divergences in arming order, capped and shed from the oldest
     /// end exactly as `Engine::arm` does, so replaying this onto a fresh ledger
     /// reproduces the queue an existing one holds.
     engine: Vec<mogwai_protocol::control::Divergence>,
@@ -524,7 +524,7 @@ impl ArmRecord {
 
 /// Apply the transport half of one arm to an account that already exists.
 ///
-/// It reads the ARM'S OWN FIELDS and nothing else. An earlier draft read
+/// It reads the arm's own fields and nothing else. An earlier draft read
 /// `CommandLatency` out of the record it had just written, which was correct
 /// only because the caller recorded first - exactly the ordering coupling a
 /// later edit breaks without a test going red.
@@ -557,10 +557,10 @@ fn apply_transport_arm(arm: &VenueArm, account_state: &Account) {
     }
 }
 
-/// AN ARM DOES NOT WAIT FOR A CONNECTION. Whatever the control plane has posted
+/// An arm never waits for a connection. Whatever the control plane has posted
 /// that a ledger minted later still owes.
 ///
-/// THE ARMS BELONG TO THE RUN, NOT TO THE LEDGERS THAT HAPPEN TO EXIST. The
+/// The arms belong to the run, not to the ledgers that happen to exist. The
 /// control plane is an operator surface, and an unqualified arm is a statement about the venue -
 /// `docs/havoc.md` says so twice, once for the transport windows ("naming none
 /// arms every account") and once for the late boarder ("a passenger that boards
@@ -571,8 +571,8 @@ fn apply_transport_arm(arm: &VenueArm, account_state: &Account) {
 /// eviction report's "every ledger holds the same arms and hits the cap
 /// together" was false the moment one ledger was minted after an arm.
 ///
-/// THE TWO HALVES DIFFER IN LIFETIME, AND DELIBERATELY. `all` is the venue's
-/// standing state and is replayed onto EVERY ledger this run ever mints.
+/// The two halves differ in lifetime, deliberately so. `all` is the venue's
+/// standing state and is replayed onto every ledger this run ever mints.
 /// `pending` holds an arm posted against a NAMED account that does not exist
 /// yet, and is consumed by that account's first mint - which is precisely the
 /// promise a named arm makes ("the arm is standing when the consumer dials") and
@@ -582,27 +582,27 @@ fn apply_transport_arm(arm: &VenueArm, account_state: &Account) {
 /// A previous draft minted the ledger here, which locked that consumer out with a
 /// `409` and handed it default balances.
 ///
-/// A LEDGER MINTED NOW MUST BE INDISTINGUISHABLE FROM ONE MINTED AT BOOT that
+/// A ledger minted now must be indistinguishable from one minted at boot that
 /// received every control request since - see `Run::arm` for the exact scope of
 /// that claim. That is the whole reason this record exists, and it is why an
 /// arm is only ever added here and never subtracted: there is no control that
 /// retracts one. The control plane arms and does not disarm, so what a run
 /// carries is the accumulation of what was posted to it.
 ///
-/// AN ARM RECORDED HERE IS THEREFORE ONE-WAY within the run. Pre-boarding havoc
-/// setup is run CONSTRUCTION, not run state a harness manages: a setup that
-/// fails partway leaves records behind, `ArmRecord::record` APPENDS engine arms
+/// An arm recorded here is therefore one-way within the run. Pre-boarding havoc
+/// setup is run construction, not run state a harness manages: a setup that
+/// fails partway leaves records behind, `ArmRecord::record` appends engine arms
 /// rather than replacing them, so a retried setup accumulates one-shots instead
 /// of reproducing itself, and the only rollback is discarding the run. The one
 /// qualification, and it is a capacity rule rather than a control: `pending` is
-/// bounded, so a record here can still be shed by arms posted for OTHER names -
+/// bounded, so a record here can still be shed by arms posted for other names -
 /// see `MAX_PENDING_ACCOUNT_ARMS`. A pending arm is retained, not guaranteed.
 #[derive(Default)]
 struct VenueArms {
     all: ArmRecord,
     /// `(account id, record)` in first-armed order, for accounts that had not
     /// been minted when the arm arrived. A `Vec` rather than a map because it
-    /// is shed from the OLDEST end at `MAX_PENDING_ACCOUNT_ARMS` - an operator
+    /// is shed from the oldest end at `MAX_PENDING_ACCOUNT_ARMS` - an operator
     /// surface that allocates per distinct name needs a bound, and this is the
     /// same shape and direction as the engine's own armed-queue cap.
     pending: Vec<(String, ArmRecord)>,
@@ -636,7 +636,7 @@ impl VenueArms {
     /// and then this, because a pending arm is by construction later in time
     /// than every standing one it can overlap.
     ///
-    /// TAKING RATHER THAN READING is what bounds `pending`, and it is the honest
+    /// Taking rather than reading is what bounds `pending`, and it is the honest
     /// lifetime: the arm was a statement about the account's first ledger, and
     /// once that ledger exists it carries the arm the way any other armed ledger
     /// does.
@@ -655,7 +655,7 @@ impl VenueArms {
 ///
 /// This is the venue-wide `[balances]` seed, which the account-policy design
 /// retires in favour of a consumer-named opening balance and risk policy. Until
-/// that lands it is the OPENING balance applied to each account rather than
+/// that lands it is the opening balance applied to each account rather than
 /// the balance of one shared ledger, which is the same value doing a different
 /// job.
 struct AccountOpeningTerms {
@@ -668,12 +668,12 @@ struct AccountOpeningTerms {
 /// One socket's claim to be reading an account, from before the 101 until the
 /// socket is finished with it.
 ///
-/// A GUARD OBJECT rather than a pair of calls, because the failure it closes is
+/// A guard object rather than a pair of calls, because the failure it closes is
 /// the one where the release never runs: an upgrade abandoned after the 101
 /// never reaches `handle_socket`, and an account left counted-in forever is
 /// never frozen, never TTL-collected and swept while riding no boat.
 ///
-/// MINTED ONLY BY `Run::attach`, which raises the count and constructs this in
+/// Minted only by `Run::attach`, which raises the count and constructs this in
 /// one expression. `Run::depart` is private to this module, so there is no way
 /// to raise the count without owning the guard that lowers it, and no way to
 /// lower it twice.
@@ -725,7 +725,7 @@ pub(crate) struct Run {
     /// the ephemeral single-consumer venue, where making the one consumer name an
     /// id would be ceremony; it is NOT the venue's one account.
     default_account_id: mogwai_protocol::AccountId,
-    /// Whether a returning consumer is handed a CLEAN ledger instead of its own.
+    /// Whether a returning consumer is handed a clean ledger instead of its own.
     /// See the config key of the same name; the readiness record reports it, so
     /// nobody has to infer which way a venue is set.
     reset_account_on_reconnect: bool,
@@ -734,7 +734,7 @@ pub(crate) struct Run {
     account_policies: std::collections::HashMap<String, mogwai_protocol::risk::AccountPolicy>,
     pub(crate) seeds: RunSeeds,
     pub(crate) boatyard: Arc<Boatyard>,
-    /// The VENUE clock, and not the now of any boated river. It is the venue's
+    /// The venue clock, and not the now of any boated river. It is the venue's
     /// one wall-to-sim reference, kept for the three answers no boat can give:
     /// a boatless river's history ceiling, the venue deadline, and the
     /// venue-scoped account ledger. Owned HERE rather than beside the router
@@ -756,9 +756,9 @@ pub(crate) struct Run {
     /// after that passenger's writer has flushed its close, so the process can
     /// tell whether anything is still being served.
     ///
-    /// THE ACCEPT LOOP IS NOT THE ANSWER TO THAT QUESTION, which is the whole
-    /// reason this exists. `axum::serve`'s graceful shutdown tracks HYPER
-    /// CONNECTIONS, and an upgraded connection's hyper future resolves at the
+    /// The accept loop is not the answer to that question, which is the whole
+    /// reason this exists. `axum::serve`'s graceful shutdown tracks hyper
+    /// connections, and an upgraded connection's hyper future resolves at the
     /// 101 rather than when the websocket ends - `serve/mod.rs` drops its
     /// `close_rx` the moment `serve_connection_with_upgrades` returns. So a
     /// venue that waited only on axum was racing its own passengers: the run's
@@ -774,20 +774,20 @@ pub(crate) struct Run {
     /// something other than what it names.
     passengers_tx: watch::Sender<()>,
     /// The venue's terminal-fault channel, kept here as well as inside the
-    /// boatyard so the CONTROL PLANE can reach it.
+    /// boatyard so the control plane can reach it.
     ///
     /// A source that faults sends on its own clone; `FaultTape` sends on this
     /// one. The receiving end is one thread in `serve`, which does not care
     /// which clone a fault arrived on - so an injected fault and a generated one
     /// take the same teardown, which is the whole point of injecting it.
     fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
-    /// Every live connection's outbound lanes, so venue-ORIGINATED output - a
+    /// Every live connection's outbound lanes, so venue-originated output - a
     /// trigger fill nobody commanded - reaches the connection it belongs to.
     ///
-    /// This was a BROADCAST target: the argument was that with a single ledger a
+    /// This was a broadcast target: the argument was that with a single ledger a
     /// fill is a fact about the run rather than about whichever socket submitted
     /// the order. That is true of the ledger and false of the consumer, which is
-    /// told about orders it never placed. Delivery is now ATTRIBUTED through
+    /// told about orders it never placed. Delivery is now attributed through
     /// `order_owners` below; the table stays a list of every live connection
     /// because venue-wide frames (the account snapshot, a venue fault) still go
     /// to all of them.
@@ -796,8 +796,8 @@ pub(crate) struct Run {
     /// to the account that owns it and to nobody else.
     ///
     /// Keyed by `VenueOrderId` because that is what every sweep-produced frame
-    /// and every query row carries; the value is the ACCOUNT ID the order
-    /// belongs to. EVERY live order is claimed: the command dispatcher claims
+    /// and every query row carries; the value is the account id the order
+    /// belongs to. Every live order is claimed: the command dispatcher claims
     /// a consumer's submissions at acceptance, and `claim_produced_orders`
     /// claims venue-originated orders (liquidations) for the account whose
     /// ledger produced them. An order absent from this table is therefore a
@@ -806,13 +806,13 @@ pub(crate) struct Run {
     /// conservative direction to fail in while that bug lives: an account
     /// seeing a stray frame is a smaller wrong than one missing its own fill.
     ///
-    /// BY ACCOUNT, NOT BY CONNECTION, and the difference is not cosmetic. A
+    /// By account, not by connection, and the difference is not cosmetic. A
     /// ledger belongs to an account, so two sockets presenting the same id are
-    /// the SAME TRADER and must each see the whole account's orders; keying on
+    /// the same trader and must each see the whole account's orders; keying on
     /// the connection hid a consumer's own resting order from its own second
     /// socket. Different accounts is what invisibility is about.
     ///
-    /// A claim survives its order's TERMINAL state. Retiring on the ending frame
+    /// A claim survives its order's terminal state. Retiring on the ending frame
     /// would bound the table more tightly and was the first shape of this, but
     /// it makes a closed order unattributed - so `QueryOrders` and `QueryFills`,
     /// which report terminal rows by design, would show every account's history
@@ -850,7 +850,7 @@ impl Run {
         );
         let (complete_tx, _) = watch::channel(None);
         let (passengers_tx, _) = watch::channel(());
-        // No engine is built here. A ledger belongs to an ACCOUNT, and no
+        // No engine is built here. A ledger belongs to an account, and no
         // account exists until a connection first names one, so the run carries
         // only what one is opened from.
         Arc::new(Self {
@@ -885,7 +885,7 @@ impl Run {
     /// An engine built from the account opening terms, for `account_id`,
     /// holding `balances`.
     ///
-    /// THE ONE PLACE THE OPENING TERMS ARE APPLIED. Three callers build an
+    /// The one place the opening terms are applied. Three callers build an
     /// engine - the mint on first sight, the consumer's own `open_account`, and
     /// the throwaway preview `unopened_ledger` - and each carried its own copy
     /// of `Engine::build` plus the two `set_*` calls. Those copies are the
@@ -903,7 +903,7 @@ impl Run {
         account_id: &mogwai_protocol::AccountId,
         balances: std::collections::HashMap<String, Decimal>,
     ) -> Engine {
-        // The ledger starts EMPTY of instruments. One becomes tradable when a
+        // The ledger starts empty of instruments. One becomes tradable when a
         // passenger binds a symbol or names it on an order, through
         // `ensure_instrument` - which is per account for the same reason the
         // engine is.
@@ -964,7 +964,7 @@ impl Run {
                 opening,
                 self.started_ns,
             )),
-            // Born FROZEN, at the instant it was created. An account with no
+            // Born frozen, at the instant it was created. An account with no
             // connection is not being read whether it was just opened or just
             // abandoned, and starting it attached would make a POSTed account
             // nobody ever connects to immortal.
@@ -990,13 +990,13 @@ impl Run {
         minted
     }
 
-    /// The ledger an account nobody has opened WOULD open with, built here and
+    /// The ledger an account nobody has opened would open with, built here and
     /// retained nowhere.
     ///
-    /// THIS IS NOT A THIRD MINT SITE, and the difference is exactly that
+    /// This is not a third mint site, and the difference is exactly that
     /// nothing survives the call: no account is inserted, no pending named
     /// arm is consumed, no passenger boards and no freeze clock starts. The
-    /// CONSTRUCTION is nevertheless shared with both real mint sites, through
+    /// construction is nevertheless shared with both real mint sites, through
     /// `engine_from_account_opening_terms`, because "not a mint" is a claim
     /// about lifecycle and says nothing about whether a preview is built the
     /// same way as the thing it previews. It exists so a READ
@@ -1006,14 +1006,14 @@ impl Run {
     /// an unbounded allocator, bounded only when `account_ttl_ms > 0` and the
     /// default is to keep accounts forever.
     ///
-    /// THE ARMS ARE DELIBERATELY NOT REPLAYED, which is what keeps this honest
+    /// The arms are deliberately not replayed, which is what keeps this honest
     /// rather than a fourth thing to keep in sync. Replaying the venue record
-    /// would CONSUME this account's pending arm, so a read would disarm what an
+    /// would consume this account's pending arm, so a read would disarm what an
     /// operator armed against an account that has not connected. Nothing the
     /// arms touch - a fee surcharge, an armed engine divergence, a transport
     /// window - is rendered in an `AccountState` or a `RiskState`, so the
-    /// answer is identical either way. THAT LAST SENTENCE IS AN ASSUMPTION
-    /// ABOUT THE SNAPSHOT SHAPE, stated here rather than left implicit: it
+    /// answer is identical either way. That last sentence is an assumption
+    /// about the snapshot shape, stated here rather than left implicit: it
     /// holds for every field those two types carry today, and a field added to
     /// either that DOES render an armed effect makes a preview and a real
     /// ledger differ. Nothing detects that; this comment is the notice.
@@ -1038,25 +1038,25 @@ impl Run {
     /// room, if any.
     ///
     /// `account` is the request's optional `account` field. `None` is not "every
-    /// ledger that happens to exist", it is THE VENUE: the arm is recorded on
+    /// ledger that happens to exist", it is the venue itself: the arm is recorded on
     /// the run and replayed onto every ledger minted from here on. `Some(name)`
     /// reaches exactly that account whether or not it has connected - live if it
     /// has, from the pending record if it has not.
     ///
-    /// THE RECORD AND THE LIVE APPLICATION ARE ONE CALL, deliberately. Written
+    /// The record and the live application are one call, deliberately. Written
     /// as two - store it here, walk the accounts there - they drift, and the
     /// drift is invisible: the existing set behaves and the next account to
     /// connect does not. `VenueArms` says why this is owed at all.
     ///
-    /// The record is taken while HOLDING THE ACCOUNT MAP, which is what
+    /// The record is taken while holding the account map, which is what
     /// resolves the race with a concurrent mint. `Run::account` and
     /// `Run::open_account` read the record under the same map lock, so an
     /// account is either already in the list this walks or was opened from a
     /// record that includes this arm - never neither.
     ///
-    /// WHAT "INDISTINGUISHABLE FROM AN EXISTING LEDGER" DOES NOT COVER: the engine
+    /// What "indistinguishable from an existing ledger" does not cover: the engine
     /// half is applied after both locks drop, because the engine sits behind an
-    /// async mutex. Two engine arms posted CONCURRENTLY can therefore land on
+    /// async mutex. Two engine arms posted concurrently can therefore land on
     /// two existing ledgers in opposite orders, and a ledger minted between them
     /// holds the record's order. The control plane is operator-driven and
     /// serialized in every scenario the venue is used from, so this is stated
@@ -1089,7 +1089,7 @@ impl Run {
                         apply_transport_arm(&arm, account_state);
                         vec![Arc::clone(account_state)]
                     }
-                    // NOT MINTED HERE. Recording leaves the consumer's own
+                    // Not minted here. Recording leaves the consumer's own
                     // `POST /account` free to open the ledger on its own terms
                     // and find the arm already on it; minting would answer that
                     // request `409 already open` and hand the account default
@@ -1131,7 +1131,7 @@ impl Run {
         shed
     }
 
-    /// Claim an account for a CONNECTION: evict whoever holds it, then hand
+    /// Claim an account for a connection: evict whoever holds it, then hand
     /// over the ledger or a clean one.
     ///
     /// The whole reconnection story in one call. A second socket presenting an
@@ -1139,7 +1139,7 @@ impl Run {
     /// indistinguishable from an incumbent
     /// returning, so the venue does not try to tell them apart: the incumbent is
     /// closed and the newcomer gets the account. Whether it gets that account's
-    /// HISTORY is the operator's `reset_account_on_reconnect` choice, reported
+    /// History is the operator's `reset_account_on_reconnect` choice, reported
     /// in the readiness record so nobody has to guess which way a venue is set.
     ///
     /// A socket presenting the same callsign as a sitting one carries the same identity
@@ -1148,11 +1148,11 @@ impl Run {
     /// there would discard the ledger the first socket is trading
     /// on, which is the reset knob eating a live book rather than a stale one.
     ///
-    /// `resetting` IS PASSED IN RATHER THAN RE-DERIVED, from
+    /// `resetting` is passed in rather than re-derived, from
     /// `claim_discards_ledger`. `/ws` has to know the answer before it claims -
     /// the funding refusal is a statement about the ledger the connection will
     /// actually get - and computing it a second time here would evaluate the
-    /// same predicate against a LATER state of the venue: `has_matching_identity_on` reads
+    /// same predicate against a later state of the venue: `has_matching_identity_on` reads
     /// the lane table, and another matching lane can drop in the window
     /// between the two reads. The two values would then disagree about whether
     /// the ledger `/ws` funding-checked and cadence-checked is the ledger this
@@ -1164,7 +1164,7 @@ impl Run {
         callsign: Option<&str>,
         resetting: bool,
     ) -> Arc<Account> {
-        // ONLY A CLAIMED ACCOUNT EVICTS. Naming an id is a statement about
+        // Only a claimed account evicts. Naming an id is a statement about
         // identity - "this ledger is mine, hand it over" - and eviction is the
         // answer to it. Naming NONE is not: it means the consumer has no opinion,
         // and the default account is a convenience for exactly that case.
@@ -1194,7 +1194,7 @@ impl Run {
 
     /// Whether claiming this account will discard its ledger.
     ///
-    /// THE ONE HOME OF THE RESET RULE, and asked ONCE per upgrade: `/ws` asks
+    /// The one home of the reset rule, and asked exactly once per upgrade: `/ws` asks
     /// it before it refuses anything - the funding refusal is a statement about
     /// the ledger the connection will actually get, and under the reset knob
     /// that is a fresh one built from the account opening terms rather than
@@ -1214,20 +1214,20 @@ impl Run {
             && !self.has_matching_identity_on(account_id.as_str(), callsign)
     }
 
-    /// The account's ledger IF IT ALREADY EXISTS. Unlike `Run::account`, this
+    /// The account's ledger, if it already exists. Unlike `Run::account`, this
     /// never mints one, which is what lets the funding check ask about an
     /// account nobody has opened without opening it.
     ///
-    /// THIS DOES NOT MAKE A REFUSED UPGRADE ALLOCATION-FREE, and saying so
+    /// This does not make a refused upgrade allocation-free, and saying so
     /// would be the over-claim this comment used to make. `/ws` calls
     /// `Run::account` on the non-resetting path, to record the ride before the
     /// eviction - and the cadence refusal comes after it, so a refused upgrade
-    /// can still leave a fresh ledger behind. That is now the ONLY such site:
+    /// can still leave a fresh ledger behind. That is now the only such site:
     /// `GET /account` used to mint the same way on an unauthenticated read and
     /// resolves through this method instead, previewing an unopened ledger with
-    /// `unopened_ledger` when there is nothing to find. Whether a REFUSAL may
+    /// `unopened_ledger` when there is nothing to find. Whether a refusal may
     /// allocate an account remains open; what this method promises is only that
-    /// IT does not mint.
+    /// it, itself, does not mint.
     pub(crate) fn peek_account(
         &self,
         account_id: &mogwai_protocol::AccountId,
@@ -1239,10 +1239,10 @@ impl Run {
             .map(Arc::clone)
     }
 
-    /// Whether the ledger this connection WILL be served on holds a balance
+    /// Whether the ledger this connection will be served on holds a balance
     /// line in `currency`.
     ///
-    /// PRESENCE, never sufficiency - see `Engine::is_funded_in`. Asked of the
+    /// Presence, never sufficiency - see `Engine::is_funded_in`. Asked of the
     /// prospective ledger rather than of the current one, because a claim that
     /// resets replaces the account's balances with the opening terms' balances,
     /// and an account opened through `/account` with consumer-named balances
@@ -1280,9 +1280,9 @@ impl Run {
     /// thing that does - a frozen account is never liquidated, marked or judged
     /// on its way out, it is simply gone.
     ///
-    /// UNATTENDED IS THE SAME TWO-PART QUESTION `freeze_if_unattended` ASKS,
+    /// "Unattended" is the same two-part question `freeze_if_unattended` asks,
     /// and it is asked here for the same reason: the freeze stamp alone is a
-    /// statement about the past, and a socket that has ATTACHED to a
+    /// statement about the past, and a socket that has attached to a
     /// long-frozen account has not cleared it yet.
     ///
     /// Returns the ids collected, so the caller can say which.
@@ -1293,10 +1293,10 @@ impl Run {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|(_, account_state)| {
-                // AN ATTACH IS THE SECOND HALF OF "NOBODY IS READING THIS", and
+                // An attach is the second half of "nobody is reading this", and
                 // asking only the freeze clock left the two predicates able to
                 // disagree. `freeze_if_unattended` refuses to freeze an account
-                // an attached socket is still on; this asked a STALE freeze
+                // an attached socket is still on; this asked a stale freeze
                 // stamp, which a returning socket does not clear until its
                 // handler reaches `resume` - so a consumer reclaiming a
                 // long-frozen ledger could have it collected out from under it
@@ -1347,14 +1347,14 @@ impl Run {
     /// Resolve a risk policy the way a symbol resolves: total, three steps,
     /// step three never fails.
     ///
-    /// 1. Knobs the consumer stated INLINE win.
-    /// 2. Otherwise a policy the operator REGISTERED under that name, or one
+    /// 1. Knobs the consumer stated inline win.
+    /// 2. Otherwise a policy the operator registered under that name, or one
     ///    this build ships under it. Registered shadows shipped, because the
     ///    whole reason registration exists is that shipped terms go stale.
-    /// 3. Otherwise UNPOLICED, which is the default account's policy and what
+    /// 3. Otherwise unpoliced, which is the default account's policy and what
     ///    every consumer had before policies existed.
     ///
-    /// A name nobody has is an ERROR rather than a silent fall to step three:
+    /// A name nobody has is an error rather than a silent fall to step three:
     /// asking for `apex-50k` and quietly getting no rules at all would be a run
     /// that believes it is enforced and is not.
     pub(crate) fn resolve_policy(
@@ -1382,23 +1382,23 @@ impl Run {
         self.default_account_id.clone()
     }
 
-    /// Open an account with a CONSUMER-NAMED opening balance, before anything
+    /// Open an account with a consumer-named opening balance, before anything
     /// trades on it.
     ///
     /// This is step one of the three-step account resolution, the one where the
     /// consumer states its own terms. Steps two and three - a named policy preset,
     /// and the default account preset - are what a connection gets when it never
-    /// calls this, which is why calling it is OPTIONAL and its absence is not an
+    /// calls this, which is why calling it is optional and its absence is not an
     /// error anywhere.
     ///
-    /// REFUSED IF THE ACCOUNT IS ALREADY OPEN, rather than resetting it. An
+    /// Refused if the account is already open, rather than resetting it. An
     /// account outlives the connection that named it, so re-opening one is
     /// ambiguous between "I am starting a fresh experiment" and "I reconnected
     /// and re-sent my config", and the second reading would silently wipe a
     /// live position book. A consumer that wants a clean ledger names a different
     /// id, which costs it nothing.
     ///
-    /// THIS IS THE SECOND MINT SITE AND IT OWES THE VENUE ARMS TOO. The consumer
+    /// This is the second mint site and it owes the venue arms too. The consumer
     /// states its balances and its policy; it does not get to state whether the
     /// operator's havoc reaches it. Replaying the record here is what makes
     /// `VenueArms`'s claim - a ledger minted now is indistinguishable from one
@@ -1472,9 +1472,9 @@ impl Run {
     /// The account whose book holds `client_order_id` as a resting order, and
     /// the symbol it rests on.
     ///
-    /// `account` IS THE REQUEST'S OWN `account` FIELD, and naming it is how a
+    /// `account` is the request's own `account` field, and naming it is how a
     /// caller resolves the ambiguity rather than losing to it. Client order ids
-    /// are CONSUMER-CHOSEN, so they are unique within one trader's book and not
+    /// are consumer-chosen, so they are unique within one trader's book and not
     /// across a venue serving fifty of them: two subagents that both number
     /// their orders from one collide, and an unqualified search returns
     /// whichever account the map iterated first. That is a scenario control
@@ -1527,7 +1527,7 @@ impl Run {
             .collect()
     }
 
-    /// Make `symbol` tradable on ONE ACCOUNT'S ledger: register the def and
+    /// Make `symbol` tradable on one account's ledger: register the def and
     /// install the margin policy and fee schedule from its profile. Called when
     /// a socket binds a symbol and before an order for it is admitted. An `Err`
     /// means no profile resolves it, and the caller lets the engine produce its
@@ -1537,9 +1537,9 @@ impl Run {
     /// their own registered instruments, margin policy and fee schedule, and
     /// nothing one of them binds is visible in the other's ledger.
     ///
-    /// This is the ONE path from a profile to engine policy - `Run::new` no
+    /// This is the one path from a profile to engine policy - `Run::new` no
     /// longer has a copy - and the installs are guarded on the registration
-    /// having been NEW, so re-binding a symbol a consumer is already trading never
+    /// having been new, so re-binding a symbol a consumer is already trading never
     /// resets its configuration.
     pub(crate) async fn ensure_instrument(
         &self,
@@ -1551,14 +1551,14 @@ impl Run {
         Ok(profile)
     }
 
-    /// The second half of `ensure_instrument`: install an ALREADY-RESOLVED
+    /// The second half of `ensure_instrument`: install an already-resolved
     /// shape on one ledger.
     ///
     /// Split out because the two halves refuse differently and `/ws` needs them
     /// at different moments. Resolution is the only fallible part and is a
-    /// property of the VENUE, so it is decided before a connection claims an
+    /// property of the venue, so it is decided before a connection claims an
     /// account and can therefore refuse without having evicted anybody;
-    /// registration is a property of the LEDGER, cannot fail, and has to happen
+    /// registration is a property of the ledger, cannot fail, and has to happen
     /// on whichever account the claim actually returned, which under the reset
     /// knob is not the one that existed when the shape was resolved.
     pub(crate) async fn register_instrument(
@@ -1616,7 +1616,7 @@ impl Run {
     /// id is what `release_lanes` retires, so a reconnecting consumer cannot
     /// retire the lanes of the connection that replaced it.
     ///
-    /// The id is the LANES' OWN, minted when they were constructed rather than
+    /// The id belongs to the lanes themselves, minted when they were constructed rather than
     /// here. That is what lets `process_order_cmd` - which is handed the lanes
     /// and nothing else naming the connection - record who owns an order it just
     /// saw accepted.
@@ -1636,7 +1636,7 @@ impl Run {
         id
     }
 
-    /// Retire one connection. The ACCOUNT'S order claims survive: an account
+    /// Retire one connection. The account's order claims survive: an account
     /// outlives every connection that ever presented it, so a returning socket
     /// must still find its own orders attributed to it.
     pub(crate) fn release_lanes(&self, id: u64) {
@@ -1649,7 +1649,7 @@ impl Run {
             lanes.retain(|bound| bound.id != id);
             account
         };
-        // A lane this call did not find was retired by an EVICTION, and the
+        // A lane this call did not find was retired by an eviction, and the
         // freeze that owes is the departing socket's rather than this one's -
         // see `freeze_if_unattended` and `Passenger`'s `Drop`. Retiring a
         // lane is therefore an opportunity to freeze, never the only one.
@@ -1668,9 +1668,9 @@ impl Run {
     }
 
     /// Count one socket in, from the instant `/ws` decides to attach it, and
-    /// hand back the GUARD that counts it out again.
+    /// hand back the guard that counts it out again.
     ///
-    /// THE COUNT IS ONLY REACHABLE THROUGH THE GUARD, which is the whole reason
+    /// The count is only reachable through the guard, which is the whole reason
     /// this returns one rather than pairing with a `depart` call. A raise and a
     /// release written as two statements leave a window - a panic, or an
     /// `async fn` cancelled by a dropped connection, between the two - in which
@@ -1680,7 +1680,7 @@ impl Run {
     /// makes that window unrepresentable: there is no way to raise the count
     /// without simultaneously owning the thing that lowers it.
     ///
-    /// Taken under the LANE LOCK, which is what serializes an attach against
+    /// Taken under the lane lock, which is what serializes an attach against
     /// a departing socket's freeze decision: the two questions
     /// `freeze_if_unattended` asks are answered against one state of the venue
     /// rather than two.
@@ -1696,7 +1696,7 @@ impl Run {
 
     /// Freeze `account` if nothing is reading it any more.
     ///
-    /// TWO CONDITIONS, AND BOTH ARE LOAD-BEARING. No lane is bound to the
+    /// Two conditions, and both are load-bearing. No lane is bound to the
     /// account, AND no attached socket is still on its way to binding one. The
     /// lane table alone says "attached" one instant too long for an evicted
     /// socket and one instant too short for an attached one, so a freeze
@@ -1734,26 +1734,26 @@ impl Run {
     /// Attach an account to the river a socket has just bound, and put it in a
     /// state that river can actually serve.
     ///
-    /// THREE THINGS HAPPEN, and each closes a way an account could otherwise
+    /// Three things happen, and each closes a way an account could otherwise
     /// hold something nobody is reading:
     ///
-    /// 1. The account is UNFROZEN, which is what the sweeper reads.
-    /// 2. What a RETURNING account holds off this river is retired - resting
+    /// 1. The account is unfrozen, which is what the sweeper reads.
+    /// 2. What a returning account holds off this river is retired - resting
     ///    orders cancelled, positions closed at their last mark. A returning
     ///    socket may name a different symbol than the frozen account was
     ///    trading, and carrying that position forward would leave the account
     ///    holding something the new connection can neither see nor close.
-    /// 3. Every surviving order's scan frontier is RE-BASED onto this boat's
+    /// 3. Every surviving order's scan frontier is re-based onto this boat's
     ///    clock. A frozen order's frontier is wherever the departed boat got to,
-    ///    which sits in the NEW boat's future - so without this the order is
+    ///    which sits in the new boat's future - so without this the order is
     ///    wedged until the new cursor catches up, which is as long as the
     ///    previous connection ran. The span while nobody was reading was never
     ///    watched and no fill is owed for it, which is the same statement the
     ///    freeze makes.
     ///
-    /// STEPS 2 AND 3 RUN ONLY FOR A RETURNING ACCOUNT, and that is not a
+    /// Steps 2 and 3 run only for a returning account, and that is not a
     /// shortcut. A consumer that opens two sockets on two symbols and names no
-    /// account lands both on the DEFAULT account, which is a supported shape;
+    /// account lands both on the default account, which is a supported shape;
     /// retiring on every bind would make the second socket close the first
     /// socket's book. Neither step has anything to do with a live account
     /// anyway: nothing is stranded and no clock has been left behind.
@@ -1768,7 +1768,7 @@ impl Run {
         let returning = account_state.is_frozen();
         account_state.clear_freeze();
         if !returning {
-            // NOT A FIRST BIND, NECESSARILY. An eviction-reconnect lands here
+            // Not a first bind, necessarily. An eviction-reconnect lands here
             // too: the newcomer is counted onto the account before the incumbent
             // is closed, so the account never goes unattended and `returning` is
             // false even though a cursor may have been torn down underneath it.
@@ -1815,7 +1815,7 @@ impl Run {
     /// stranger quietly share a ledger. So the coexistence is opt-in and the
     /// safe reading is the default.
     ///
-    /// The evicted socket is closed NORMALLY, not faulted: from the venue's side
+    /// The evicted socket is closed normally, not faulted: from the venue's side
     /// a second connection presenting an id is indistinguishable from an
     /// incumbent reconnecting, and handing the ledger over is what makes a
     /// reconnect work. A consumer must not treat it as a reason to redial, or it
@@ -1889,7 +1889,7 @@ impl Run {
     /// Claim every order a just-produced batch accepted for `owner`.
     ///
     /// Only the command dispatcher calls this; the sweep's half is
-    /// [`Run::claim_produced_orders`], which covers the orders the VENUE
+    /// [`Run::claim_produced_orders`], which covers the orders the venue
     /// originates.
     pub(crate) fn track_ownership(&self, events: &[mogwai_protocol::VenueMessage], owner: &str) {
         for event in events {
@@ -1902,13 +1902,13 @@ impl Run {
     /// Claim, for `owner`, every order-scoped frame in a batch that account's
     /// own ledger just produced and that no connection has already claimed.
     ///
-    /// This is what attributes a VENUE-ORIGINATED order - a risk or margin
+    /// This is what attributes a venue-originated order - a risk or margin
     /// liquidation the venue mints under the reserved id prefixes - to the
     /// account whose ledger it acts on. Such an order has no submitting
     /// connection, so before this existed its frames fell to the broadcast
     /// fallback and every account saw them, which is the one hole the
-    /// invisibility property had. The account IS knowable, and it is knowable
-    /// HERE, at production time: every engine pass is per account, so a
+    /// invisibility property had. The account is knowable, and it is knowable
+    /// here, at production time: every engine pass is per account, so a
     /// frame in the pass's batch is about that account's book by
     /// construction. Claiming at production keeps delivery a pure function of
     /// the batch - the ambient account context is used where it is truthful
@@ -1938,7 +1938,7 @@ impl Run {
 
     /// Drop the rows of a query reply that belong to another connection.
     ///
-    /// The engine answers `QueryOrders` and `QueryFills` from ONE book, because
+    /// The engine answers `QueryOrders` and `QueryFills` from one book, because
     /// there is one ledger; scoping happens here, where the connection is known.
     /// A row for an unclaimed order stays, on the same rule the delivery filter
     /// uses - better a stray row than a missing one - and, like that filter's
@@ -2005,14 +2005,14 @@ impl Run {
 
     /// Fault the venue terminally, at the operator's request.
     ///
-    /// Reports whether the fault was DELIVERED. A closed channel means the
+    /// Reports whether the fault was delivered. A closed channel means the
     /// receiving thread in `serve` is already gone, which is what a venue
     /// tearing down for some other reason looks like from here - so a second
     /// `FaultTape` arriving during teardown is a no-op rather than a panic, and
     /// the caller can answer honestly instead of claiming to have killed a venue
     /// that was already dying.
     pub(crate) fn fault_venue(&self) -> bool {
-        // THE DIAGNOSTIC IS EMITTED HERE because an injected fault reaches the
+        // The diagnostic is emitted here because an injected fault reaches the
         // channel directly and never passes the tape worker, which is what logs
         // a source fault. Without this line the two causes would share an exit
         // code and nothing else: a run that died on command would look, in the
@@ -2039,13 +2039,13 @@ impl Run {
 
     /// Resolves once no passenger is live. Immediately, when none is.
     ///
-    /// Awaited on the PLANNED-COMPLETION shutdown only, and that limit is
+    /// Awaited on the planned-completion shutdown only, and that limit is
     /// deliberate rather than an oversight. A planned completion is a promise
     /// the venue made about its declared duration - every open socket is told,
     /// and each passenger ends itself the moment it hears, so waiting here is
     /// bounded by the passengers' own teardown and is the difference between an
-    /// announced run and a reset one. A SIGNAL is not that promise: the
-    /// launcher ended the run, `RunComplete` is deliberately NOT published, and
+    /// announced run and a reset one. A signal is not that promise: the
+    /// launcher ended the run, `RunComplete` is deliberately not published, and
     /// nothing tells a passenger to stop, so waiting would idle out the whole
     /// shutdown grace on any venue with a socket attached and turn a clean stop
     /// into a bailed one. The signal path therefore keeps its abrupt teardown,
@@ -2094,7 +2094,7 @@ impl std::fmt::Display for AccountRefusal {
 
 /// One live connection: its identity, the account it trades under, and its
 /// outbound machinery. The account rides along because delivery is attributed
-/// by ACCOUNT - two sockets on one account are one trader and both hear about
+/// by account - two sockets on one account are one trader and both hear about
 /// its fills - while retirement is per connection.
 #[derive(Clone)]
 pub(crate) struct BoundLane {
@@ -2109,12 +2109,12 @@ pub(crate) struct BoundLane {
     pub(crate) lanes: ExecLanes,
 }
 
-/// Who a swept frame is FOR. Every `VenueMessage` variant is classified here,
+/// Who a swept frame is for. Every `VenueMessage` variant is classified here,
 /// exhaustively and deliberately: [`audience`] carries no catch-all, so a new
 /// variant does not compile until someone decides who it belongs to. That is
 /// the whole point. Delivery used to attribute by two chained lookups whose
 /// shared default was "unrecognized means everyone", and `AccountState` rode
-/// that default silently - the sweep runs one engine pass PER ACCOUNT, so an
+/// that default silently - the sweep runs one engine pass per account, so an
 /// N-account venue handed every socket N snapshots per pass, N-1 of them
 /// somebody else's balances and positions. A consumer had no way to tell: the
 /// snapshot names its account, but a consumer promised one ledger per run has no
@@ -2123,7 +2123,7 @@ pub(crate) struct BoundLane {
 /// The next ledger-owned frame variant would have joined the broadcast set the
 /// same silent way; now it is a compile error instead.
 pub(crate) enum Audience<'a> {
-    /// Genuinely about the VENUE - a completion, a fault, a feed gap, market
+    /// Genuinely about the venue - a completion, a fault, a feed gap, market
     /// data - and belongs to every connection.
     Venue,
     /// Owned by the account the frame itself names. Attribution by the frame's
@@ -2180,7 +2180,7 @@ pub(crate) fn audience(event: &mogwai_protocol::VenueMessage) -> Audience<'_> {
         | M::FillSnapshot(_)
         | M::ProtocolError { .. }
         // One socket's own deadline, and true of no other passenger - so it is
-        // NOT `Venue` even though it sits beside `RunComplete` in the terminal
+        // never `Venue`, even though it sits beside `RunComplete` in the terminal
         // vocabulary. Its producer writes it straight to the socket that owns
         // it and it never enters a swept batch; classifying it venue-wide would
         // make this classifier lie today and broadcast one passenger's
@@ -2219,10 +2219,10 @@ mod havoc_window_tests {
         assert!(!window.open_at(sim(0, 1.0), 1_026));
     }
 
-    /// A ZERO SPAN IS THE ROUTE OFF A WINDOW, and it is the only one: the
+    /// A zero span is the only route off a window: the
     /// control plane has no clear, so `GoDark { ms: 0 }` and `StallData
     /// { ms: 0 }` are what `control.rs` documents as lifting an armed window.
-    /// The property that makes that honest is that a zero span is open for NO
+    /// The property that makes that honest is that a zero span is open for no
     /// clock at all - `open_at` wants `sim_at_ns` both at or after the opening
     /// and strictly before `opening + span`, which no instant satisfies when
     /// the span is zero. A late boarder is covered too: it opens at its own
@@ -2268,7 +2268,7 @@ mod havoc_window_tests {
         let handle = std::thread::spawn(move || {
             for i in 0..10_000 {
                 writer.arm(i, i.saturating_add(1));
-                // The zero-span lift, which is a WRITE like any other arm -
+                // The zero-span lift, which is a write like any other arm -
                 // that is the point here, since the two writes alternate and a
                 // reader must see one whole span or the other.
                 writer.arm(i, 0);
@@ -2331,7 +2331,7 @@ mod tests {
     }
 
     /// Pins [`audience`]'s verdicts on every discriminating case, so a
-    /// transposition fails by name. The COMPLETENESS half is the compiler's:
+    /// transposition fails by name. The completeness half is the compiler's:
     /// `audience` carries no catch-all, so a new `VenueMessage` variant does
     /// not build until it is classified, and this test cannot and does not
     /// try to hold that.
@@ -2424,15 +2424,15 @@ mod tests {
     /// The planned-completion shutdown waits on a live passenger and not merely
     /// on the accept loop.
     ///
-    /// THE DIFFERENTIAL IS THE POINT, and both halves are asserted because the
+    /// The differential is the point, and both halves are asserted because the
     /// second alone passes against the broken shape too. `passengers_drained`
-    /// must NOT resolve while a guard is held - that is the whole defect: the
+    /// must not resolve while a guard is held - that is the whole defect: the
     /// venue's serve future can complete while a passenger is still
     /// mid-announcement, because axum stops tracking an upgraded connection at
     /// the 101 - and it must resolve promptly once the last guard drops, or a
     /// clean completion would idle out the shutdown grace and bail.
     ///
-    /// A WALL TIMEOUT IS THE OBSERVABLE HERE RATHER THAN A BET, because the
+    /// A wall timeout is the observable here rather than a bet, because the
     /// negative half of a "does not resolve" claim has no positive event to
     /// wait for. 200 ms against an operation that is a single atomic wake is
     /// three orders of magnitude of margin, and losing it means the guard was
@@ -2540,7 +2540,7 @@ mod tests {
         account_state.clear_freeze();
         assert!(!account_state.is_frozen());
 
-        // A SECOND connection on the same account: retiring the first must not
+        // A second connection on the same account: retiring the first must not
         // freeze an account somebody is still reading. This is the eviction
         // shape, where the incumbent is retired while the newcomer binds.
         let (second, _second_rx) = crate::admission::ExecLanes::detached();
@@ -2555,8 +2555,8 @@ mod tests {
         assert!(account_state.is_frozen(), "the last one left");
     }
 
-    /// AN EVICTED INCUMBENT STILL OWES THE FREEZE. Eviction retires the
-    /// incumbent's lane EAGERLY, so the incumbent's own teardown finds no lane
+    /// An evicted incumbent still owes the freeze. Eviction retires the
+    /// incumbent's lane eagerly, so the incumbent's own teardown finds no lane
     /// to match its id - and a freeze that keyed off finding one simply
     /// returned. The account was then left attached with zero connections:
     /// never TTL-collected, because `collect_expired_accounts` filters on
@@ -2591,7 +2591,7 @@ mod tests {
     }
 
     /// The other half of the same rule: an account is not frozen out from under
-    /// a socket that has ATTACHED and has not bound its lane yet. That
+    /// a socket that has attached and has not bound its lane yet. That
     /// window is real - it spans the 101 and everything `handle_socket` does
     /// before `bind_lanes` - and freezing inside it would leave a live
     /// connection trading a ledger the sweeper skips.
@@ -2668,7 +2668,7 @@ mod tests {
         );
     }
 
-    /// The one-cadence rule belongs to the account and holds while it is FROZEN,
+    /// The one-cadence rule belongs to the account and holds while it is frozen,
     /// which is the
     /// state every account is created in and stays in until its first socket
     /// reaches `resume`. Two first connections racing two speeds therefore
@@ -2692,7 +2692,7 @@ mod tests {
         );
     }
 
-    /// A ride ends when its PASSENGER does, not at the freeze - an account
+    /// A ride ends when its passenger does, not at the freeze - an account
     /// riding two rivers that loses one socket never freezes. The key carries
     /// no placement nonce, so a stale ride would be indistinguishable from a
     /// live one and would both refuse a legitimate new cadence and hand this
@@ -2716,33 +2716,33 @@ mod tests {
             .expect("a new cadence on a river nobody is riding is not a conflict");
     }
 
-    /// AN EVICTION-RECONNECT CARRIES A SCAN FRONTIER OFF A CURSOR THAT IS GONE.
+    /// An eviction-reconnect carries a scan frontier off a cursor that is gone.
     ///
     /// `resume` re-bases every surviving order's frontier onto the binding
-    /// boat's clock, and it does so only for a RETURNING account - one it found
+    /// boat's clock, and it does so only for a returning account - one it found
     /// frozen. Eviction deliberately defeats that test: `ws_upgrade` counts the
-    /// newcomer onto the account BEFORE closing the incumbent, so the account
+    /// newcomer onto the account before closing the incumbent, so the account
     /// never goes unattended and `resume` sees `returning == false`.
     ///
     /// For the case that ordering was aimed at - a consumer reconnecting on the
     /// same river - nothing is lost, because the newcomer boards the same boat
-    /// and the cursor never rewound. The gap is the CROSS-RIVER claim: the
+    /// and the cursor never rewound. The gap is the cross-river claim: the
     /// newcomer boards a different `BoatKey`, the incumbent's ticket drops, and
     /// the departed river's boat is torn down with its worker. A boat placed
     /// over that river again starts at the yard's origin - `BoatKey` carries no
     /// placement nonce, so it is the same key and `is_seated_on` still passes -
-    /// while the order's frontier sits wherever the FIRST cursor reached. The
+    /// while the order's frontier sits wherever the first cursor reached. The
     /// sweeper then judges that order only on ticks after a bound in the new
     /// cursor's future, so it rests unscanned until the new cursor has covered
     /// the whole of the first session again.
     ///
-    /// CLOSED by asking the state itself rather than repairing the proxy: a
-    /// frontier that LEADS the binding cursor is never legitimate, whatever put
+    /// Closed by asking the state itself rather than repairing the proxy: a
+    /// frontier that leads the binding cursor is never legitimate, whatever put
     /// it there, so `resume` re-bases exactly those on every bind. The
     /// alternative was a placement nonce on `Boat`, which would let the freeze
     /// proxy be repaired but needs a new identity to carry.
     ///
-    /// Pinned here rather than on a socket because the symptom is a STALL whose
+    /// Pinned here rather than on a socket because the symptom is a stall whose
     /// length is the previous session's, and an absence assertion over a `/ws`
     /// drain would be satisfied for free by a truncated one. The frontier is
     /// the thing itself.
@@ -2762,7 +2762,7 @@ mod tests {
         let incumbent = run.bind_lanes(lanes, account.as_str(), Some("alpha"));
         account_state.clear_freeze();
 
-        // A limit far below the tape, so it RESTS rather than filling: the
+        // A limit far below the tape, so it rests rather than filling: the
         // frontier only exists on an order the sweeper still has to judge.
         // Accepted at 5_000 on the incumbent's cursor, which is what puts the
         // frontier there.
@@ -2809,7 +2809,7 @@ mod tests {
             );
         }
 
-        // The newcomer is counted on BEFORE the eviction, which is the ordering
+        // The newcomer is counted on before the eviction, which is the ordering
         // `ws_upgrade` takes and the reason the freeze never fires.
         let newcomer_attach = run.attach(&account_state);
         assert_eq!(
@@ -2853,7 +2853,7 @@ mod tests {
         drop(newcomer_attach);
     }
 
-    /// A CONSUMER IS NOT A SOCKET. The nautilus host that drives this venue holds
+    /// A consumer is not a socket. The nautilus host that drives this venue holds
     /// two sockets on one ledger - data and execution - and both name the same
     /// account, so eviction keyed on the bare id made the host's second dial
     /// disconnect its own first. Sockets presenting one callsign coexist; a
@@ -2899,27 +2899,27 @@ mod tests {
         );
     }
 
-    /// A LEDGER MINTED AFTER AN UNQUALIFIED ARM CARRIES IT. This is the whole of
+    /// A ledger minted after an unqualified arm carries it. This is the whole of
     /// finding 5: the control plane walked the accounts that existed at the
     /// instant of the request, so an operator who armed a `PartialFillNext` and
     /// then started a subagent got a run that believed it was perturbed and was
     /// not - while `docs/havoc.md` and `arm_divergence`'s own comment both said
     /// the arm reaches a passenger that boards later.
     ///
-    /// THREE OBSERVABLES, one per storage class, because the three are applied
+    /// Three observables, one per storage class, because the three are applied
     /// by three different lines and any of them can be dropped alone.
     ///
-    /// THE ENGINE QUEUE IS OBSERVED THROUGH THE CAP, which is the only reader
+    /// The engine queue is observed through the cap, which is the only reader
     /// `mogwai-engine` exposes: fill the venue record to
     /// `MAX_ARMED_DIVERGENCES` with no ledger open at all, mint one, and arm once
-    /// more. A ledger that replayed the record is AT the cap and sheds its
+    /// more. A ledger that replayed the record is at the cap and sheds its
     /// oldest entry, so the arm reports one; a ledger opened empty has room and
     /// reports nothing. That also pins the mirroring the eviction report's
     /// wording rests on - "every ledger holds the same arms and hits the cap
     /// together" - rather than only the fact of a replay.
     ///
     /// The fee surcharge is applied by the line beside the queue replay in
-    /// `ArmRecord::open_engine` and is NOT asserted here: the engine exposes no
+    /// `ArmRecord::open_engine` and is not asserted here: the engine exposes no
     /// reader for it, and inventing one for a test is not worth a public API.
     #[tokio::test]
     async fn a_ledger_minted_after_a_venue_wide_arm_carries_it() {
@@ -2951,7 +2951,7 @@ mod tests {
         );
     }
 
-    /// THE SECOND MINT SITE OWES THE SAME REPLAY. `POST /account` builds its own
+    /// The second mint site owes the same replay. `POST /account` builds its own
     /// ledger from consumer-named balances, and the cold review found it opening
     /// that ledger with every havoc field at zero - so a subagent that starts by
     /// POSTing its account escaped the operator's arms entirely, which is
@@ -2995,8 +2995,8 @@ mod tests {
         );
     }
 
-    /// AN ARM AGAINST AN ACCOUNT THAT HAS NOT CONNECTED MUST NOT COST THAT
-    /// CONSUMER ITS OWN ACCOUNT. The arm is recorded, not minted: the consumer's
+    /// An arm against an account that has not connected must not cost that
+    /// consumer its own account. The arm is recorded, not minted: the consumer's
     /// `POST /account` still succeeds, still gets the balances it asked for, and
     /// finds the arm standing on the ledger it opened.
     ///
@@ -3005,8 +3005,8 @@ mod tests {
     /// default balances and no policy, so the fix for a silent no-op became a
     /// refusal on a legitimate consumer path.
     ///
-    /// HONEST ABOUT WHAT BITES: the second assertion bites on a dropped record.
-    /// The `open_account` call succeeding is a GUARD, not a proven-biting
+    /// Honest about what bites: the second assertion bites on a dropped record.
+    /// The `open_account` call succeeding is a guard, not a proven-biting
     /// assertion - reproducing the regression it forbids means putting a mint
     /// back into `Run::arm`, and there is no perturbation of the shipped code
     /// that produces it.
@@ -3036,7 +3036,7 @@ mod tests {
         );
     }
 
-    /// The same record reaches an account that arrives on a SOCKET instead, and
+    /// The same record reaches an account that arrives on a socket instead, and
     /// it reaches only that account: a named arm is not a venue-wide one.
     #[tokio::test]
     async fn a_named_arm_reaches_the_account_that_connects_later_and_no_other() {
@@ -3062,15 +3062,15 @@ mod tests {
         );
     }
 
-    /// A PENDING ARM IS RETAINED, NOT GUARANTEED, and this is the limit that
+    /// A pending arm is retained, not guaranteed, and this is the limit that
     /// makes the difference matter. There is no control that retracts an arm,
     /// so a pending record is one-way as far as the operator is concerned - but
-    /// `pending` is capacity-bounded and sheds from the OLDEST end, which means
-    /// arms posted for entirely UNRELATED names can drop one. An operator
+    /// `pending` is capacity-bounded and sheds from the oldest end, which means
+    /// arms posted for entirely unrelated names can drop one. An operator
     /// reading only "there is no clear" would conclude the arm is certain to be
     /// standing when its account arrives, and it is not.
     ///
-    /// The account under test is armed FIRST so it is the oldest, and the cap's
+    /// The account under test is armed first so it is the oldest, and the cap's
     /// worth of other names is then posted; the shed takes the front on the
     /// entry that overflows.
     #[tokio::test]
@@ -3100,7 +3100,7 @@ mod tests {
             !shed.dark.open_at(SimClock::identity(), 1_000),
             "the oldest pending arm is shed at the cap, so the account it named opens clean"
         );
-        // The distinguishing half: the cap sheds the OLDEST rather than
+        // The distinguishing half: the cap sheds the oldest rather than
         // refusing the newest, so the arm that caused the overflow is standing.
         let kept = run.account(
             &mogwai_protocol::AccountId::parse(&format!("SHED-{MAX_PENDING_ACCOUNT_ARMS:03}"))
@@ -3183,7 +3183,7 @@ mod tests {
         );
 
         // A zero TTL collects everything already unattended, which is what makes
-        // the rest of this about the ATTACHMENT rather than about a sleep.
+        // the rest of this about the attachment rather than about a sleep.
         let collected = run.collect_expired_accounts(std::time::Duration::ZERO);
         assert_eq!(
             collected,
@@ -3204,8 +3204,8 @@ mod tests {
         );
     }
 
-    /// A SOCKET RECLAIMING A LONG-FROZEN LEDGER MUST NOT HAVE IT COLLECTED OUT
-    /// FROM UNDER IT, which the freeze stamp alone cannot express.
+    /// A socket reclaiming a long-frozen ledger must not have it collected out
+    /// from under it, which the freeze stamp alone cannot express.
     ///
     /// A returning `/ws` upgrade is counted onto its account before the 101 and
     /// only clears the freeze once its handler reaches `resume` - the 101, a
@@ -3213,7 +3213,7 @@ mod tests {
     /// alone therefore discarded the account inside that window, and the consumer
     /// that came back for its book was silently minted a fresh one. Both
     /// assertions are here because the second alone passes against the broken
-    /// shape: what proves the fix is the account surviving WHILE attached.
+    /// shape: what proves the fix is the account surviving while attached.
     #[test]
     fn an_attached_socket_spares_the_account_it_is_reclaiming() {
         let run = run(1_000, 400, None);
@@ -3251,7 +3251,7 @@ mod tests {
     #[test]
     fn the_deadline_is_measured_from_the_post_warmup_epoch() {
         // Decision 8: the deadline counts from `started_ns`, which is set after
-        // warmup generation - NOT from boot. A run whose warmup is larger than
+        // warmup generation - never from boot. A run whose warmup is larger than
         // its duration must still get its whole declared duration.
         let bounded = run(1_000_000, 999_000, Some(30));
         assert_eq!(bounded.deadline_ns, Some(1_000_030));

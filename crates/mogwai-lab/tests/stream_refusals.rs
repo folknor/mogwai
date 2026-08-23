@@ -4,18 +4,18 @@
 //! Phase 4b item 6: the TBBO stream contract refuses malformed rows instead of
 //! panicking on them.
 //!
-//! Two INDEPENDENT defects lived here, and they are tested separately because
+//! Two independent defects lived here, and they are tested separately because
 //! fixing either one alone leaves the other reachable:
 //!
 //! 1. A row with fewer fields than the header promised panicked at
-//!    `parts[idx.ts_event]`, which happens BEFORE any numeric conversion. So
+//!    `parts[idx.ts_event]`, which happens before any numeric conversion. So
 //!    making the conversions fallible does not reach this case at all - the
 //!    width has to be checked first.
 //! 2. A non-integer value in any of the six integer columns panicked inside the
 //!    conversion itself.
 //!
 //! Both were mirrored deliberately from `analysis/mnq_fit.py`'s `parse_stream`,
-//! which dies the same way, and both are fixed here BEFORE the Python retires -
+//! which dies the same way, and both are fixed here before the Python retires -
 //! the order the review signature is conditional on, so the reference this
 //! knowingly diverges from is still runnable while the mismatch lands.
 //!

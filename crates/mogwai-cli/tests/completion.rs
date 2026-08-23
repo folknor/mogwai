@@ -5,7 +5,7 @@
 //! deliberate difference between finishing and being killed.
 //!
 //! `RunComplete` exists so a consumer can tell a finished run from a dead one.
-//! These tests are therefore as much about what is NOT sent under a signal as
+//! These tests are therefore as much about what is never sent under a signal as
 //! about what is sent at the deadline.
 
 mod common;
@@ -36,14 +36,14 @@ async fn connect(venue: &Venue) -> WsSocket {
 }
 
 /// A `--duration`-bounded run, watched to completion on sockets that were
-/// PROVABLY live passengers on it.
+/// provably live passengers on it.
 struct WatchedRun {
     venue: Venue,
     /// One entry per requested url, in that order.
     seen: Vec<Watched>,
     /// Wall time the winning attempt spent opening its sockets.
     ///
-    /// IT IS THE MATERIALIZATION COST, and it is measured rather than assumed
+    /// It is the materialization cost, and it is measured rather than assumed
     /// because no constant can predict it. No river exists until something names
     /// it, so the first boarding of a run generates that river's whole warmup
     /// span inside the upgrade - and that time is spent while the declared
@@ -51,9 +51,9 @@ struct WatchedRun {
     /// duration has to subtract what the run spent making itself servable, and
     /// this is the only honest source for that number.
     boarding_wall: Duration,
-    /// Runs no socket of this test was ever a passenger on. KEPT ALIVE rather than
+    /// Runs no socket of this test was ever a passenger on. Kept alive rather than
     /// dropped as they are discarded, and that is load-bearing rather than
-    /// laziness: `common`'s wall budget re-anchors when the LAST live venue goes
+    /// laziness: `common`'s wall budget re-anchors when the last live venue goes
     /// away, so releasing a loser mid-test would restart this test's budget and
     /// push its ceiling past the hang watchdog - the one failure mode that
     /// mechanism exists to prevent. They exit on their own at their own declared
@@ -64,23 +64,23 @@ struct WatchedRun {
 /// How long [`watch_a_bounded_run`] may spend losing the attach race before it
 /// gives up and says so.
 ///
-/// A CEILING ON RETRIES IS NOT THE SAME AS A CEILING ON THE LAST ONE, and the
+/// A ceiling on retries is not the same as a ceiling on the last one, and the
 /// difference bites the accelerated caller specifically. This budget is checked
-/// BETWEEN attempts, while the surrounding wall budget clamps every bound to
+/// between attempts, while the surrounding wall budget clamps every bound to
 /// anchor plus 13 s; an attempt that re-boots a venue materializing six
 /// simulated hours of warmup can cost seconds, so a naive "still under the
 /// budget, go again" admits an attempt that runs past the clamp - at which point
 /// `common::bounded` refuses with "this test spent its wall budget before this
 /// bound was even taken", naming the clamp rather than the race, which is a
-/// worse message about the same fact. So the check is made against the LAST
-/// ATTEMPT'S MEASURED COST rather than against the instant alone: another
+/// worse message about the same fact. So the check is made against the last
+/// attempt's measured cost rather than against the instant alone: another
 /// attempt is started only if one of the same size still fits.
 const ATTACH_RETRY_BUDGET: Duration = Duration::from_secs(8);
 
-/// The least elapsed sim time a SOCKET may report for a run that declared
+/// The least elapsed sim time a socket may report for a run that declared
 /// `declared_ns`, which is not `declared_ns`.
 ///
-/// A boat's clock is anchored at ITS OWN PLACEMENT while the deadline is judged
+/// A boat's clock is anchored at its own placement while the deadline is judged
 /// on the run clock, and `ws.rs` re-derives every `RunComplete` on the receiving
 /// socket's boat - so an announcement trails the declared duration by the
 /// placement gap times `speed`, always, and by more when the host is crowded.
@@ -96,43 +96,43 @@ fn boat_skew_floor(declared_ns: u64) -> u64 {
 }
 
 /// Launches a `--duration`-bounded venue, opens the named sockets and drains
-/// every one of them to completion - relaunching until each socket was a LIVE
-/// PASSENGER on the run it is reporting about.
+/// every one of them to completion - relaunching until each socket was a live
+/// passenger on the run it is reporting about.
 ///
-/// THE WRONG ANSWER THIS REMOVES. A declared duration is a WALL sleep started at
+/// The wrong answer this removes. A declared duration is a wall sleep started at
 /// readiness (`serve.rs` sleeps `sim.wall_duration(remaining)` and then completes
-/// the run) and the launcher returns AT readiness, so every test of this family
+/// the run) and the launcher returns at readiness, so every test of this family
 /// connects into a span already running down. Under parallel execution the
 /// connect can lose: the venue is already tearing down, the connection is
 /// accepted and dropped without a passenger ever running, and the test then fails
-/// on "the run announces its completion on the wire". That is a WRONG ANSWER
+/// on "the run announces its completion on the wire". That is the wrong answer
 /// about the venue rather than a timeout, which is exactly why it read like a
 /// real regression - measured at `test_threads = 16`, where the test finished
-/// EARLY, at 2.016s against its usual 2.215s, having never seen the frame.
+/// early, at 2.016s against its usual 2.215s, having never seen the frame.
 ///
-/// THE PREMISE IS "THIS SOCKET WAS A PASSENGER", NOT "THIS SOCKET ATTACHED IN
-/// TIME", and the difference is not pedantry - the first version of this helper
-/// used the second and STILL FAILED under the gate. Attaching late is not the
+/// The premise is "this socket was a passenger", never "this socket attached in
+/// time", and the difference is not pedantry - the first version of this helper
+/// used the second and still failed under the gate. Attaching late is not the
 /// defect: `ws.rs` checks `already_complete` when the passenger starts and
 /// announces to a socket that arrived after the run finished, so a late attach
 /// is served. What produces nothing is a connection that never became a passenger
 /// at all, and the only sound evidence either way is the venue having written
-/// SOMETHING on that socket. A run where some socket saw no frame is DISCARDED,
+/// something on that socket. A run where some socket saw no frame is discarded,
 /// so the test can only ever make a statement about a run it was actually
 /// watching.
 ///
-/// A LONGER DURATION IS NOT THE FIX and neither is a shorter connect. Both are
+/// A longer duration is not the fix and neither is a shorter connect. Both are
 /// bets on a margin, and a margin is what a crowded host takes away; this family
 /// was parked rather than retuned for exactly that reason.
 ///
-/// A PASSENGER-SCOPED `?duration_ms=` WOULD NOT DO IT EITHER, and it is worth
+/// A passenger-scoped `?duration_ms=` would not do it either, and it is worth
 /// saying so because it looks like the obvious answer: that deadline starts at
-/// UPGRADE, so the race really is gone - but it closes ONE SOCKET and leaves the
+/// upgrade, so the race really is gone - but it closes one socket and leaves the
 /// run going, which is the property
 /// `a_passenger_duration_closes_one_socket_and_leaves_the_boat_running` in
-/// `serving.rs` exists to pin. No test here is about ONE passenger. One asserts
-/// that the VENUE exits 0 at its declared deadline, which a passenger duration
-/// does not cause, and another that the run-wide announcement reaches EVERY open
+/// `serving.rs` exists to pin. No test here is about one passenger. One asserts
+/// that the venue exits 0 at its declared deadline, which a passenger duration
+/// does not cause, and another that the run-wide announcement reaches every open
 /// socket, which a per-socket deadline cannot express at all. Substituting it
 /// would leave both names attached to different properties.
 async fn watch_a_bounded_run(
@@ -149,12 +149,12 @@ async fn watch_a_bounded_run(
         // instant the test's own wall budget does.
         let give_up = *give_up.get_or_insert_with(|| common::wall_deadline(ATTACH_RETRY_BUDGET));
 
-        // THE WANTED COUNT COMES FROM THE REQUEST, NEVER FROM WHAT WAS
-        // ACHIEVED, and that is the whole guard rather than a style point. An
+        // The wanted count comes from the request, never from what was
+        // achieved, and that is the whole guard rather than a style point. An
         // earlier shape compared the drained count against `sockets.len()`,
         // which on the losing branch this function exists to detect - the very
         // first connect refused, so `sockets` empty - reduced to `0 == 0` with
-        // an `all` over an EMPTY iterator, which is `true`. It returned success
+        // an `all` over an empty iterator, which is `true`. It returned success
         // carrying nothing, and every caller then index-panicked on `seen[0]`:
         // the unattributed failure this helper was written to eliminate,
         // reachable on exactly the race its docstring describes.
@@ -165,7 +165,7 @@ async fn watch_a_bounded_run(
             "a watched run needs at least one socket; with none, every check below is vacuous"
         );
 
-        // TIMED, because the first upgrade of a run is where its river is
+        // Timed, because the first upgrade of a run is where its river is
         // synthesized. See `WatchedRun::boarding_wall`.
         let boarding_started = std::time::Instant::now();
         let mut sockets = Vec::new();
@@ -180,7 +180,7 @@ async fn watch_a_bounded_run(
         let boarding_wall = boarding_started.elapsed();
 
         let seen = if sockets.len() == wanted {
-            // All drained CONCURRENTLY. Draining one while another sits parked
+            // All drained concurrently. Draining one while another sits parked
             // would let the parked one be evicted by the bounded fanout ring and
             // report that as the announcement never arriving.
             futures_util::future::join_all(
@@ -193,9 +193,9 @@ async fn watch_a_bounded_run(
             Vec::new()
         };
 
-        // TWO CONDITIONS, AND THE SECOND WAS MISSING FOR A ROUND. The first is
+        // Two conditions, and the second was missing for a round. The first is
         // the premise: every socket was a live passenger, evidenced by a content
-        // frame. The second is that every drain got to WATCH THE RUN END -
+        // frame. The second is that every drain got to watch the run end -
         // `drain_to_completion`'s deadline is clamped to this test's remaining
         // wall budget, so an attempt begun late enough is cut off mid-run and
         // returns a perfectly plausible-looking reading with no announcement in
@@ -219,7 +219,7 @@ async fn watch_a_bounded_run(
 
         drop(sockets);
         spent.push(venue);
-        // The room a further attempt needs is what the last one COST, not a
+        // The room a further attempt needs is what the last one cost, not a
         // single instant: see [`ATTACH_RETRY_BUDGET`]. Without the cost term
         // this hands the wall clamp an attempt it cannot finish and the clamp's
         // message replaces this one.
@@ -247,21 +247,21 @@ struct Watched {
     announcement: Option<(u64, u64)>,
     /// Whether the venue closed the socket.
     closed: bool,
-    /// HOW MANY CONTENT FRAMES THE VENUE WROTE - `Text` only, which is the
+    /// How many content frames the venue wrote - `Text` only, which is the
     /// venue's entire vocabulary for a passenger. Zero separates "this connection
     /// was never a passenger" from "the venue served this socket and never
     /// announced", which is the whole difference between a loaded host and a
     /// defect. See [`watch_a_bounded_run`].
     ///
-    /// CONTROL FRAMES ARE NOT PASSENGER EVIDENCE and counting them broke the
+    /// Control frames are not passenger evidence and counting them broke the
     /// premise the counter exists to establish: a connection upgraded and then
-    /// CLOSED by a venue already tearing down writes exactly one frame, the
+    /// closed by a venue already tearing down writes exactly one frame, the
     /// close, and a peer Ping does the same, so an all-frames count reported the
     /// losing branch as a live passenger and the caller then panicked asserting
     /// "the venue had already served 1 frames on, so this was a live passenger" -
     /// the exact falsehood the counter rules out.
     content_frames: usize,
-    /// HOW THE DRAIN ENDED, and it is the second half of the passenger premise
+    /// How the drain ended, and it is the second half of the passenger premise
     /// rather than diagnostics. A drain cut off by [`common::deadline`]'s clamp
     /// has not observed the end of the run at all, so an absent announcement in
     /// that reading says nothing about the venue - and the caller reports it as
@@ -269,8 +269,8 @@ struct Watched {
     ending: Ending,
 }
 
-/// How a drain stopped. The distinction that matters is VENUE-ENDED versus
-/// BUDGET-ENDED: the first three are the venue speaking, the fourth is this
+/// How a drain stopped. The distinction that matters is venue-ended versus
+/// budget-ended: the first three are the venue speaking, the fourth is this
 /// test running out of wall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ending {
@@ -280,20 +280,20 @@ enum Ending {
     StreamEnded,
     /// The transport failed.
     Failed,
-    /// The read deadline was reached with the socket still live. NOT EVIDENCE
-    /// ABOUT THE RUN.
+    /// The read deadline was reached with the socket still live. Not evidence
+    /// about the run.
     Deadline,
 }
 
 /// Drains until a `RunComplete` arrives or the socket ends, reporting what was
-/// seen AND how the stream ended.
+/// seen and how the stream ended.
 ///
-/// THE ENDING IS RECORDED BECAUSE THE OLD LOOP ERASED IT. `while let
+/// The ending is recorded because the old loop erased it. `while let
 /// Ok(Some(Ok(m)))` folds a close, a transport error, a clean stream end and a
 /// timeout into one "the loop finished", which is the arc's standing rule - a
 /// drain that does not record how the stream ended is not a drain - in the one
 /// place the rule had not been applied. It cost a real gate failure: the drain
-/// deadline is CLAMPED to the test's remaining wall budget, so on a loaded host
+/// deadline is clamped to the test's remaining wall budget, so on a loaded host
 /// a run whose attach retries had eaten the budget was drained for a fraction of
 /// its declared duration, and `run_complete_reaches_every_open_socket` reported
 /// "the first socket saw the completion announcement, after 15 content frames" -
@@ -314,16 +314,16 @@ async fn drain_to_completion(socket: &mut WsSocket, timeout: Duration) -> Watche
             Ok(Some(Ok(message))) => message,
         };
         match message {
-            // THE SUBSTRING IS A PRE-FILTER, NOT THE ASSERTION, and it is here
+            // The substring is a pre-filter, not the assertion, and it is here
             // for throughput rather than convenience. The one caller still on an
-            // UNPACED `speed = 0.0` venue - the sigterm gate - takes over a
+            // unpaced `speed = 0.0` venue - the sigterm gate - takes over a
             // million frames on one socket in two seconds, measured, and
             // `serde_json::from_str::<VenueMessage>` on every one of them makes
-            // the DRAIN the bottleneck: a frame the test is waiting for is
+            // the drain the bottleneck: a frame the test is waiting for is
             // queued behind the whole backlog and the test spends its wall
             // budget parsing tape it does not care about, then reports the
             // absence. That is the wrong answer this family keeps producing,
-            // arriving by a third route. The bounded-run callers are PACED and
+            // arriving by a third route. The bounded-run callers are paced and
             // carry about a hundred frames, so the filter is free there rather
             // than load-bearing. Candidates are still parsed and still
             // destructured, so nothing is concluded from the substring itself.
@@ -362,12 +362,12 @@ async fn drain_to_completion(socket: &mut WsSocket, timeout: Duration) -> Watche
 /// The declared duration is a contract: the venue serves exactly that much sim
 /// time, says so, and exits 0 on its own without anybody signalling it.
 ///
-/// THE CONTRACT IS ON THE RUN CLOCK AND THIS OBSERVABLE IS ON A BOAT'S, which
+/// The contract is on the run clock and this observable is on a boat's, which
 /// is why the bound below is `boat_skew_floor` rather than the declared
-/// duration itself. The deadline task stops once the RUN clock is past the
+/// duration itself. The deadline task stops once the run clock is past the
 /// deadline (`serve.rs`'s `deadline_wait`, which has its own deterministic
 /// test), while `ws.rs` re-derives every announcement on the receiving socket's
-/// BOAT clock - anchored at that boat's placement, so it trails the run clock
+/// boat clock - anchored at that boat's placement, so it trails the run clock
 /// by the placement gap times `speed`, permanently. Asserting equality here was
 /// asserting a cross-clock identity nothing establishes: measured under a
 /// crowded 32-thread hunt it lost 2 rounds in 40, short by 1.7 ms of a declared
@@ -412,19 +412,19 @@ async fn venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadlin
 
 /// A source refusal is a venue failure, not an ordinary finite replay.  This
 /// is deliberately an end-to-end gate because it pins the fault side channel,
-/// its ERROR diagnostic and the binary's exit status together.  Sampling
+/// its `error` diagnostic and the binary's exit status together.  Sampling
 /// `/health` for a terminal fault is intentionally not gated: the process may
 /// exit before a consumer can observe that transient state.
 #[test]
 #[ignore = "binds a loopback listener"]
 fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
-    // The null side of the field, on a HEALTHY venue, taken first. It is a
+    // The null side of the field, on a healthy venue, taken first. It is a
     // separate launch rather than a phase of the faulted one below because a
     // venue whose source faults may be gone before any consumer can poll it - so
     // "`fault` is null before the fault" is not observable on that process, and
     // asserting it there would be a race dressed as a property.
     //
-    // Its stderr is DISCARDED, deliberately: nothing here reads the healthy
+    // Its stderr is discarded, deliberately: nothing here reads the healthy
     // venue's diagnostics. This launch used to carry a capturing sink and an
     // `Arc<Mutex<Vec<_>>>` that was shadowed a dozen lines below and never read
     // once - a buffer filling for no reader, which reads to a maintainer as
@@ -440,7 +440,7 @@ fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
     assert!(healthy_health.contains("\"fault\":null"));
     drop(healthy);
 
-    // THE FAULT IS INJECTED, not configured. It used to come from
+    // The fault is injected, not configured. It used to come from
     // `tests/configs/arrival-fault.toml`, which set `sigma_y` to 1e308 so the
     // stationary log-OU draw went non-finite and the source refused. Both knobs
     // that allowed that - `sigma_y` and `mean_event_duration_s` - are bounded at
@@ -463,7 +463,7 @@ fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
         ..LaunchSpec::default()
     })
     .expect("the venue to be faulted reaches readiness");
-    // Healthy first, on THIS process. The null above was taken on a different
+    // Healthy first, on this process. The null above was taken on a different
     // launch, so without this the assertions below could not tell a venue that
     // faulted on command from one that was born broken.
     let (_, before) = http_get(&format!("http://{}", faulted.addr()), "/health");
@@ -546,24 +546,24 @@ async fn run_complete_reaches_every_open_socket() {
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn run_complete_is_stamped_on_the_receiving_sockets_clock() {
-    // Same family as the two above, and LATENT rather than caught: it was never
+    // Same family as the two above, and latent rather than caught: it was never
     // on the parked list only because it had not lost the race yet.
     //
-    // WHAT MAKES THE TWO INSTANTS DIFFER IS THE BOATS' WALL ANCHOR, not their
+    // What makes the two instants differ is the boats' wall anchor, not their
     // speed - both are at 1.0 here, and `boatyard.rs` gives every boat the same
     // `sim_epoch_ns` and a `wall_anchor_ns` taken when the boat is built, so two
     // boats built at different instants read different sim-now at one wall
     // instant. The `assert_ne!` below is sensitive to exactly that, which is
     // what a shared-clock regression would erase.
     //
-    // THIS IS THE ONE CALLER PACING PUTS A LIVENESS REQUIREMENT ON, since the
+    // This is the one caller pacing puts a liveness requirement on, since the
     // watcher discards a run where any socket saw no content frame and a river
     // too quiet to print inside the declared window would discard every run and
     // blame host load. Measured rather than argued, six runs at seed 42 and
     // deterministic to the millisecond: MNQ prints 89 content frames, the first
     // 171 ms after attach, longest gap 519 ms; the sparser BTCUSDT boot river
     // prints 16, the first 1.031 s after attach, which is also its longest gap.
-    // Both fit the declared 2 s, and it is the BOOT river that carries the thin
+    // Both fit the declared 2 s, and it is the boot river that carries the thin
     // margin - about a second - not MNQ. The fixture carries the same numbers.
     let mut run = watch_a_bounded_run(&bounded_run_config(), "2s", |venue| {
         vec![
@@ -626,11 +626,11 @@ async fn sigterm_closes_without_announcing_run_complete() {
     .expect("signal the venue");
 
     let watched = drain_to_completion(&mut socket, Duration::from_secs(20)).await;
-    // THE ABSENCE IS ONLY EVIDENCE IF THE DRAIN RAN OUT OF VENUE RATHER THAN
-    // OUT OF BUDGET. A signalled venue ends this socket - the assertion below
+    // The absence is only evidence if the drain ran out of venue rather than
+    // out of budget. A signalled venue ends this socket - the assertion below
     // reads "nothing planned was announced before it died", and a drain cut off
     // by the clamped deadline would satisfy it without the venue having died at
-    // all. Checked FIRST, so an exhausted budget names itself instead of
+    // all. Checked first, so an exhausted budget names itself instead of
     // arriving as a claim about the venue.
     assert_ne!(
         watched.ending,
@@ -650,18 +650,18 @@ async fn sigterm_closes_without_announcing_run_complete() {
 /// still serve that duration from `run_start_ns` rather than end before its
 /// launcher can connect.
 ///
-/// ITS ORIGINAL PREMISE IS GONE, and saying so is the point. This was written
-/// when one river was materialized BEFORE readiness, so "the deadline epoch is
+/// Its original premise is gone, and saying so is the point. This was written
+/// when one river was materialized before readiness, so "the deadline epoch is
 /// boot" and "the deadline epoch is the post-warmup start" named two instants
 /// separated by the whole warmup, and this test told them apart. No river is
 /// warmed before readiness now - none exists until something names it - so those
 /// two instants have collapsed into one and that distinction is no longer
 /// available to assert.
 ///
-/// WHAT REPLACES IT is the property that survived the collapse: a run still
+/// What replaces it is the property that survived the collapse: a run still
 /// serves its declared duration, less only the placement skew and the time it
 /// spent materializing the river its first passenger asked for. That
-/// materialization is now paid out of the declared duration - for EVERY river,
+/// materialization is now paid out of the declared duration - for every river,
 /// the default label included, which is uniformity rather than a regression:
 /// every river but one already behaved this way, because `place_cursor` reaches
 /// inline and only the boot river was reached before the clock existed.
@@ -669,10 +669,10 @@ async fn sigterm_closes_without_announcing_run_complete() {
 /// The bound is computed from this run's own boarding wall rather than from a
 /// constant, because no constant can predict a synthesis cost.
 ///
-/// SO THIS TEST HAS LESS MARGIN THAN IT USED TO, and it had none: the old
-/// span-based sleep served the declared duration PLUS the boot interval, and
-/// the fixed one serves the declared duration exactly - on the RUN clock. The
-/// announcement this reads is stamped on the receiving socket's BOAT clock,
+/// So this test has less margin than it used to, and it had none: the old
+/// span-based sleep served the declared duration plus the boot interval, and
+/// the fixed one serves the declared duration exactly - on the run clock. The
+/// announcement this reads is stamped on the receiving socket's boat clock,
 /// which is anchored at that boat's placement and therefore trails the run
 /// clock by the placement gap times `speed` - 180 us of gap is 18 ms of sim at
 /// speed 100 - so `elapsed_ns >= 30_000_000_000` was a cross-clock identity
@@ -685,7 +685,7 @@ async fn sigterm_closes_without_announcing_run_complete() {
 #[tokio::test]
 #[ignore = "binds a loopback listener"]
 async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
-    // THE TIGHTEST WINDOW IN THE FAMILY, and the one whose `expect` below WAS
+    // The tightest window in the family, and the one whose `expect` below was
     // the premise rather than the property: 30 declared simulated seconds at
     // speed 100 is 0.3 s of wall, so this had the least margin of any of them
     // and was never parked only because it had not yet lost. The premise is
@@ -713,7 +713,7 @@ async fn a_short_accelerated_run_is_not_over_before_it_is_ready() {
         )
     });
 
-    // WHAT THE RUN SPENT MAKING ITSELF SERVABLE, measured on this run rather
+    // What the run spent making itself servable, measured on this run rather
     // than assumed. No river exists until something names it, so this socket's
     // own upgrade generated six simulated hours of warmup - and it did so while
     // the declared duration was already running. At speed 100 every wall

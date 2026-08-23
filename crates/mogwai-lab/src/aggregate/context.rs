@@ -7,7 +7,7 @@
 //! the point estimate (all ones), the 10,000 bootstrap replicates and the
 //! leave-one-week folds all run one code path.
 //!
-//! Despite the name the class is used for BOTH sides: the observed month is
+//! Despite the name the class is used for both sides: the observed month is
 //! one context resampled, and each generated seed is its own context always
 //! evaluated at all-ones. That is deliberate - it is the same statistic on
 //! both sides by construction, not by two implementations agreeing.
@@ -15,14 +15,14 @@
 //! ## The caching design is load-bearing, not an optimization detail
 //!
 //! Each accessor extracts its per-session votes (or a [`QuantileSupport`]
-//! over the shared support) from the JSON records EXACTLY ONCE and memoizes
+//! over the shared support) from the JSON records exactly once and memoizes
 //! them; a replicate then costs a weighted median over 22 numbers or a
 //! binary search. Without it, 10,000 replicates times ~40 metrics times a
 //! re-walk of 22 sessions' block records would dominate everything else in
 //! the phase. The Python's `self._cache` does the same job; this port keeps
 //! the shape so the two stay comparable.
 //!
-//! ## The two STRICT accessors
+//! ## The two strict accessors
 //!
 //! [`ObsContext::perm_value`] and [`ObsContext::b3_robust_strict`] are the
 //! no-K-of-N rulings made executable: a missing or non-finite session vote
@@ -472,8 +472,8 @@ impl ObsContext {
 
     /// One session-hour robust scale per session for one replicate index
     /// (Amendment A): the segment records are combined by count sum,
-    /// `sum_abs` sum and `max_abs` MAX, and the floor applies to the
-    /// COMBINED count.
+    /// `sum_abs` sum and `max_abs` max, and the floor applies to the
+    /// combined count.
     #[must_use]
     pub fn perm_votes(&self, variant: &'static str, hour: i64, h: i64, rep: i64) -> Votes {
         let key = (variant, hour, h, rep);
@@ -517,11 +517,11 @@ impl ObsContext {
         votes
     }
 
-    /// The STRICT counterfactual statistic: the pseudo-month is evaluated
+    /// The strict counterfactual statistic: the pseudo-month is evaluated
     /// under all 16 replicate indices and its value is their median.
     ///
     /// Q1 strictness, the no-K-of-N ruling: a missing or non-finite session
-    /// vote in ANY replicate - regardless of the multiplicity vector, so
+    /// vote in any replicate - regardless of the multiplicity vector, so
     /// including sessions this replicate weights to zero - refuses the whole
     /// statistic, as does a missing per-replicate median.
     #[must_use]
@@ -547,7 +547,7 @@ impl ObsContext {
         median_or_none(&per_rep)
     }
 
-    /// The STRICT robust scale the closure and worsening statistics consume:
+    /// The strict robust scale the closure and worsening statistics consume:
     /// any missing or non-finite session vote refuses outright, regardless
     /// of the bootstrap or fold multiplicities.
     #[must_use]

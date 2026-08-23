@@ -6,18 +6,18 @@
 //! `mnq_fit.py` shelled out to `gen --type summary` once per walk
 //! and cached the result under `analysis/out/mnq-fit-scratch/cache`, keyed by
 //! `sha256(json.dumps({overrides, seed, start_ns, length, warmup, commit},
-//! sort_keys=True))`. This port runs the walk IN-PROCESS through
-//! `crate::summary::summarize` and honours BOTH cache layouts:
+//! sort_keys=True))`. This port runs the walk in-process through
+//! `crate::summary::summarize` and honours both cache layouts:
 //!
 //! - the phase-1 storage policy, keyed by the binary's own provenance token,
 //!   for anything this port writes;
-//! - the PYTHON-ERA layout, read-only, so the parity gate can replay the
+//! - the Python-era layout, read-only, so the parity gate can replay the
 //!   protocol-11 run's 10,192 cached walks instead of spending hours
 //!   re-walking them. Re-deriving the Python's key requires reproducing
 //!   `json.dumps(..., sort_keys=True)` byte-for-byte, floats included, which
 //!   is why `PyJson` below renders through `kernel::py_float_repr`.
 //!
-//! The hashed object's `warmup` member is therefore INHERITED AND FROZEN: it
+//! The hashed object's `warmup` member is therefore inherited and frozen: it
 //! is a field of a historical serialization, and spelling it `burn_in` would
 //! miss all 10,192 entries. The Rust identifiers around it carry the burn-in
 //! vocabulary; the hashed bytes do not.
@@ -33,7 +33,7 @@ use crate::kernel::py_float_repr;
 
 /// One override entry of the scratch config: the Python wrote a TOML
 /// `[instrument.override]` table whose values are strings, numbers or float
-/// arrays, and hashed the SAME values through `json.dumps`.
+/// arrays, and hashed the same values through `json.dumps`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OverrideValue {
     Str(String),
@@ -143,7 +143,7 @@ pub fn scratch_config_text(overrides: &Overrides) -> String {
             }
         }
     }
-    // An EMPTY balances table: the offline walk builds a profile and never
+    // An empty balances table: the offline walk builds a profile and never
     // books a trade, so it has nothing to fund. Without it the boot funding
     // sweep would refuse this MNQ scratch config against the default USDT-only
     // balances, over a currency no order here could ever quote.
@@ -280,7 +280,7 @@ pub fn parse_duration(s: &str) -> LabResult<i64> {
 }
 
 /// One in-process `gen --type summary` walk: resolve the scratch profile
-/// through the venue's own `Config::load` (the SAME path the Python's
+/// through the venue's own `Config::load` (the same path the Python's
 /// `--config` walks took), build the generator at `start - burn-in`, and fold
 /// the tick stream through `summary::summarize`.
 pub fn run_summary_walk(
@@ -330,7 +330,7 @@ pub fn run_summary_walk(
     Ok(serde_json::to_value(&acc)?)
 }
 
-/// One instrument profile from a scratch config, through the SAME
+/// One instrument profile from a scratch config, through the same
 /// `Config::load` and profile construction a served run boots with.
 pub fn profile_from_config(path: &Path) -> LabResult<mogwai_venue::source::InstrumentProfile> {
     let cfg = mogwai_venue::config::Config::load(Some(path.to_path_buf()))
@@ -387,7 +387,7 @@ mod tests {
             OverrideValue::Floats(vec![1.0, 0.5]),
         );
         // Reproduce the exact JSON the hash is taken over, so a future edit
-        // to the renderer breaks HERE rather than silently in the gate.
+        // to the renderer breaks here rather than silently in the gate.
         let mut s = String::from("{");
         s.push_str("\"commit\": \"abc\", \"length\": \"7d\", \"overrides\": ");
         s.push_str("{\"generator.vol_scalar\": 1e-08, \"session.vol_hour\": [1.0, 0.5]}");

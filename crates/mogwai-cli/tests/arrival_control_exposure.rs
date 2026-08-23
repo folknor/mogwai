@@ -8,12 +8,12 @@
 //! is the 12a copy and lives in this crate; `mogwai_lab::arrival_control::control_generated_pass`
 //! is the control's copy and lives in the lab, which cannot depend on the CLI.
 //! Nothing in the type system holds them together, so this test does: it drives
-//! both at the SAME window, burn-in and seed with no curve override, and asserts
+//! both at the same window, burn-in and seed with no curve override, and asserts
 //! the two `GeneratedAcc` records are equal once the wall-clock `cost` block -
 //! the one field that is legitimately allowed to differ between two runs of the
 //! same tape - is removed from each.
 //!
-//! ITS PREMISE IS A SEPARATE, UNIGNORED TEST. The equality pin's inputs - the
+//! Its premise is a separate, unignored test. The equality pin's inputs - the
 //! window, its length and the burn-in - are the half most likely to drift, and
 //! they are the half that is genuinely cross-checked here: the lab side reads
 //! them from the committed 12a artifact, `run_final_walk` from
@@ -61,12 +61,12 @@ fn committed_binding() -> GeneratedBinding {
     GeneratedBinding::from_measure12a(&artifact).expect("binding.generated")
 }
 
-/// THE PREMISE OF THE PIN BELOW, SPLIT OUT SO A CHECK LANE RUNS IT.
+/// The premise of the pin below, split out so a check lane runs it.
 ///
 /// The equality pin is `#[ignore]`d at roughly ten minutes, so until this
-/// existed the only cross-check between the two sides' INPUTS lived inside a
+/// existed the only cross-check between the two sides' inputs lived inside a
 /// gate nobody runs by accident - and the inputs are the drift-prone half.
-/// The lab side takes its window, length and burn-in from the COMMITTED
+/// The lab side takes its window, length and burn-in from the committed
 /// artifact; `run_final_walk` takes them from `mogwai_lab::subcontract`'s
 /// constants. So this is not two copies pinned against each other: it is
 /// committed bytes against code, and changing `FINAL_LENGTH` or
@@ -74,11 +74,11 @@ fn committed_binding() -> GeneratedBinding {
 /// microseconds instead of surfacing ten minutes later as an opaque diff of
 /// two 20 KB accumulator records blaming the exposure contract.
 ///
-/// ALL THREE INPUTS, not just the start, which is all that was checked.
+/// All three inputs, not just the start, which is all that was checked.
 ///
-/// AND THE LENGTH IS COMPARED AGAINST WHAT THE WALK ACTUALLY READS. The first
+/// And the length is compared against what the walk actually reads. The first
 /// cut of this test asserted against `FINAL_END_NS - FINAL_START_NS`, which is
-/// what `measure.rs` writes INTO the artifact - but `run_final_walk` derives
+/// what `measure.rs` writes into the artifact - but `run_final_walk` derives
 /// the window it walks by parsing `FINAL_LENGTH`, a second encoding of the same
 /// quantity. Editing `FINAL_LENGTH` alone therefore moved the measured window
 /// while this test, which named the change in its own docstring, stayed green.
@@ -113,7 +113,7 @@ fn the_committed_binding_carries_the_window_run_final_walk_measures() {
 fn the_lab_walk_matches_the_measure_exposure_contract() {
     let binding = committed_binding();
 
-    // A PER-PROCESS SCRATCH, not `target/arrival-control-exposure`. That was a
+    // A per-process scratch, not `target/arrival-control-exposure`. That was a
     // fixed shared path: `control_generated_pass` writes
     // `arrival-control-<seed>.toml` into it and removes the file again, so two
     // concurrent runs of this gate - it is `#[ignore]`d and invoked by hand,
@@ -123,7 +123,7 @@ fn the_lab_walk_matches_the_measure_exposure_contract() {
     // not ask for. Under `curve: None` the directory is not touched at all
     // today, which is a property of this call site rather than of the callee.
     //
-    // BOUND TO A NAME, not passed as a temporary: the value is a guard that
+    // Bound to a name, not passed as a temporary: the value is a guard that
     // removes the directory when it drops, and a temporary would drop at the end
     // of this statement.
     let scratch = common::scratch("arrival-control-exposure");

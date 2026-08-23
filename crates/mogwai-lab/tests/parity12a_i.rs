@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE GATE of the retired rewrite plan, slice 2c-i: assembling the
-//! section-10 artifact PURELY FROM THE CACHES on disk (no live corpus pass,
+//! The gate of the retired rewrite plan, slice 2c-i: assembling the
+//! section-10 artifact purely from the caches on disk (no live corpus pass,
 //! no walks) reproduces `analysis/mnq-measure-12a.json` typed-canonically
 //! identically except `cost` (a live measurement) and
 //! `binding.harness_tree_commit` (HEAD moves between runs) - and that both
@@ -105,7 +105,7 @@ fn parity12a_i_assembles_the_committed_artifact_from_cache() {
     want_cmp["cost"] = serde_json::Value::Null;
     got_cmp["binding"]["harness_tree_commit"] = serde_json::Value::Null;
     want_cmp["binding"]["harness_tree_commit"] = serde_json::Value::Null;
-    // Each seed's own `cost` (`walk_s`/`rss_bytes`) is ALSO a live wall-time
+    // Each seed's own `cost` (`walk_s`/`rss_bytes`) is also a live wall-time
     // and process-memory measurement, pasted verbatim from whichever walk
     // most recently populated the Brick G cache file for that seed - it is
     // not reproducible from the committed artifact's own snapshot of it any

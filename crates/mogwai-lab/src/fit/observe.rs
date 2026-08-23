@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `observe()` from `analysis/mnq_fit.py` (spec 4.2-4.8): ONE streaming pass
+//! `observe()` from `analysis/mnq_fit.py` (spec 4.2-4.8): one streaming pass
 //! over the usable sessions with three independent chains - cadence over all
 //! sided parents, quote-mid returns over adjacent valid-quote parents inside
 //! one segment, and the shared-shape diagnostics over all sided parents,
@@ -9,7 +9,7 @@
 //! session-refit cells and the two fixed-horizon chains.
 //!
 //! Every accumulation order here is the Python's. Where the Python walks a
-//! `dict` in INSERTION order the port keeps an insertion-ordered structure;
+//! `dict` in insertion order the port keeps an insertion-ordered structure;
 //! where it walks `sorted(...)` the port sorts. Both matter to the last ulp.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -80,7 +80,7 @@ pub fn nearest_rank_of(hist: &BTreeMap<i64, i64>, q: f64) -> LabResult<i64> {
 }
 
 /// Streaming autocorrelation at fixed lags over one long series. Each lag
-/// carries its own PAIR-ONLY moments (left and right members separately), so
+/// carries its own pair-only moments (left and right members separately), so
 /// the value is the Pearson correlation of exactly the accepted pairs.
 pub struct Acf {
     lags: Vec<usize>,
@@ -208,7 +208,7 @@ pub fn dist_stats(values: &[f64]) -> Value {
 }
 
 /// The successor spec 3.3 envelope: `RESAMPLE_REPLICATES` replicates, each
-/// drawing `RESAMPLE_SESSIONS_PER_REPLICATE` sessions WITH replacement,
+/// drawing `RESAMPLE_SESSIONS_PER_REPLICATE` sessions with replacement,
 /// pooling their minute tick ranges, and recording nearest-rank p99, p99.9,
 /// p99.99 and the maximum. The p99 envelope is two-sided: its lower bound is
 /// the complementary lower-tail quantile across replicates and its upper
@@ -394,7 +394,7 @@ pub fn observe(
         .map(|h| (*h, (0, 0.0, 0.0)))
         .collect();
 
-    // The 4.6 horizon chains, SEPARATE from the legacy hz state: the new
+    // The 4.6 horizon chains, separate from the legacy hz state: the new
     // convention settles trailing boundaries through the segment end.
     let mut nhz_key: Option<(String, &'static str)> = None;
     let mut nhz_end = 0i64;
@@ -658,7 +658,7 @@ pub fn observe(
         let session = session.expect("checked above");
         let segment = segment.expect("a usable session always resolves a segment");
 
-        // DELIBERATELY before the side and book branches (4.3).
+        // Deliberately before the side and book branches (4.3).
         sizes.add(row.size);
         pop_prints += 1;
         if row.side == 'N' {
@@ -777,7 +777,7 @@ pub fn observe(
         .min()
         .expect("nonempty");
     let width_total: i64 = width_hist.values().sum();
-    // `sum(...)` over INTEGER terms: CPython's compensated summation applies
+    // `sum(...)` over integer terms: CPython's compensated summation applies
     // to floats only, so an exact integer fold is the faithful port here
     // (contrast the float `sum(...)` sites, which route through
     // `kernel::py_sum`).

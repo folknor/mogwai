@@ -14,7 +14,7 @@
 //!   is recorded,
 //! - a `request_trades` fetch returns a matching `DataResponse::Trades` with the
 //!   two distinct trades in order,
-//! - a failed or off-river history fetch still RESOLVES the nautilus request
+//! - a failed or off-river history fetch still resolves the nautilus request
 //!   rather than hanging it, and
 //! - a subscribe for an instrument this run does not serve is refused locally
 //!   and loudly.
@@ -73,7 +73,7 @@ fn bar_type() -> nautilus_model::data::BarType {
 fn data_client(base_url: String) -> MogwaiDataClient {
     let config = MogwaiDataClientConfig {
         // Stated rather than defaulted so the label these tests assert on is
-        // written down here. It is BOTH a nautilus-side label and the ledger
+        // written down here. It is both a nautilus-side label and the ledger
         // named on `/ws?account=` - the two are deliberately one field, and the
         // upgrade has carried the account since the shared-venue landing.
         account_id: AccountId::from("MOGWAI-001"),
@@ -92,7 +92,7 @@ async fn subscribe_and_request_drive_data_events() {
         .lock()
         .expect("ws trades mutex")
         .push(r#"{"type":"Trade","symbol":"BTCUSDT","price":"100.00","size":"1","aggressor":"Buyer","ts_event":10}"#.to_string());
-    // Seeded on the TAPE rather than as an HTTP body: history is pulled over
+    // Seeded on the tape rather than as an HTTP body: history is pulled over
     // the socket now, so the body the old carrier served would answer nobody.
     *state.trades_tape.lock().expect("trades tape mutex") =
         Some(serde_json::from_str(TRADES_JSON).expect("the trade fixture parses"));
@@ -106,7 +106,7 @@ async fn subscribe_and_request_drive_data_events() {
     client.start().expect("start grabs the sink");
     client.connect().await.expect("connect opens the socket");
 
-    // The subscribe is satisfied LOCALLY: no frame reaches the venue, which
+    // The subscribe is satisfied entirely locally: no frame reaches the venue, which
     // pushes its one run's tape whether or not anybody asked. What the call
     // still does is gate forwarding, so the tape below only reaches the sink
     // because of it.
@@ -219,19 +219,19 @@ async fn a_host_subscribing_quotes_after_connect_receives_the_book_immediately()
     client.start().expect("start grabs the sink");
     client.connect().await.expect("connect opens the socket");
 
-    // THE QUOTE MUST BE ON THE WIRE BEFORE THE SUBSCRIBE, which is the whole
+    // The quote must be on the wire before the subscribe, which is the whole
     // property: a host that subscribes late still gets the book, because the
     // client caches the pre-subscription BBO. This used to be a `sleep(50ms)`
     // that was racing the harness's own 100 ms pre-push delay and therefore
-    // ALWAYS too short - the test passed only because the cache does not care
+    // always too short - the test passed only because the cache does not care
     // when the quote lands, so the ordering it claims to set up was never
     // established. Now the push is released explicitly and waited for: the stub
     // stamps `ws_first_frame_at` strictly before the send, so observing it set
     // establishes the wire half of the ordering.
     //
-    // WHAT IT STILL CANNOT ESTABLISH is the client half - whether the reader had
+    // What it still cannot establish is the client half - whether the reader had
     // filed the quote in the pre-subscription cache before the call below. The
-    // client exposes no observable for that, and a quote delivered LIVE to a
+    // client exposes no observable for that, and a quote delivered live to a
     // subscription that beat it satisfies the same assertion. That gap predates
     // this change and the sleep did not close it either; it is recorded rather
     // than papered over.
@@ -307,7 +307,7 @@ async fn an_unrepresentable_quote_is_dropped_not_panicked() {
             None,
         ))
         .expect("subscribe quotes before connect");
-    // Subscribed BEFORE connect, so there is no ordering to arrange - the gate
+    // Subscribed before connect, so there is no ordering to arrange - the gate
     // is opened here only because the leg has frames to push and would
     // otherwise wait for a release that never comes.
     state.push_gate.open();
@@ -420,12 +420,12 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
     for pair in delivered.windows(2) {
         assert!(pair[0].ts_event < pair[1].ts_event);
     }
-    // Read AFTER the loop rather than inside it, and the ordering argument is
+    // Read after the loop rather than inside it, and the ordering argument is
     // the reason: the stub records on another task, and this is sound only
     // because the response cannot exist until every page has been served, so
     // the sequence is settled by the time the response is in hand.
     //
-    // The SEQUENCE, not a count. A count says the client asked three times; the
+    // The sequence, not a count. A count says the client asked three times; the
     // sequence says it asked once with nothing and twice with the token it had
     // just been handed. Those differ exactly where it matters - a client that
     // re-requested from the start each time would produce three requests too,
@@ -444,7 +444,7 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
     // The token is `stub:<cutoff>:<next_ts>`. The cutoff is whatever the client
     // pinned as its window end - a wall instant it read off the clock, not
     // something this test should hardcode - so what is asserted is that it does
-    // not MOVE between pages, and that the position advances strictly past the
+    // not move between pages, and that the position advances strictly past the
     // last row of the page just delivered.
     let parsed: Vec<(String, u64)> = requests[1..]
         .iter()
@@ -468,37 +468,37 @@ async fn trade_history_pages_without_duplicates_at_the_seam() {
     );
 }
 
-/// A venue whose `/clock` CANNOT BE DECODED is RETRIED and then served anyway:
+/// A venue whose `/clock` cannot be decoded is retried and then served anyway:
 /// the fallback is a fallback, never a refusal.
 ///
-/// THIS BRANCH HAD NO DELIBERATE COVERAGE AND ENORMOUS ACCIDENTAL COVERAGE.
+/// This branch had no deliberate coverage and enormous accidental coverage.
 /// The stub's default `/clock` body used to be the catch-all `[]`, so all 57
 /// connecting tests in these four binaries traversed
 /// `fetch_clock_or_identity`'s retry-then-fall-back path - three attempts, two
-/// 200 ms wall sleeps, INLINE IN `connect()` - and not one of them asserted
+/// 200 ms wall sleeps, inline in `connect()` - and not one of them asserted
 /// anything about it. That was ~400 ms per test and ~24 s of a ~40 s serial
 /// sweep, the crate's largest single cost. The default now serves a real
 /// envelope; this test is what keeps the fallback covered, once, on purpose,
 /// and it is the only place `fail_clock` should be armed.
 ///
-/// WHAT IS ASSERTED IS THE LADDER AND THE OUTCOME, because those are the two
-/// things visible from outside. `clock_hits` pins that the client RETRIED
+/// What is asserted is the ladder and the outcome, because those are the two
+/// things visible from outside. `clock_hits` pins that the client retried
 /// rather than committing to the identity axis on the first failure - the whole
 /// reason the retry exists is that the fallback silently puts every `ts_init`,
 /// havoc sleep, quota interval and backoff on the wrong time axis for the life
 /// of the connection, so giving up immediately on a transient blip is the
-/// defect. The connect then SUCCEEDING is the other half: an unreadable clock
+/// defect. The connect then succeeding is the other half: an unreadable clock
 /// is a fallback, never a refusal, or a venue whose clock route blipped once
 /// would be unattachable.
 ///
-/// THE UNKNOWN FLOOR IS NOT PINNED HERE, AND CANNOT BE PINNED FROM ONE TEST.
+/// The unknown floor is not pinned here, and cannot be pinned from one test.
 /// The fallback sets `data_origin_ns = None`; the success path against a stub
 /// serving `IDENTITY_CLOCK_JSON` sets `Some(0)`; and `ensure_on_river` only
 /// bails when `start < data_origin`, where `start` is a `u64`. Nothing can
-/// precede zero, so `Some(0)` and `None` are OBSERVATIONALLY IDENTICAL and a
+/// precede zero, so `Some(0)` and `None` are observationally identical and a
 /// window assertion on this fixture passes whatever `floor_known` is. So this
-/// test asserts only what it CAN discriminate - the ladder and the non-refusal.
-/// The floor contrast needs a NONZERO known floor to have a false branch at
+/// test asserts only what it can discriminate - the ladder and the non-refusal.
+/// The floor contrast needs a nonzero known floor to have a false branch at
 /// all, and that is `off_river_window_still_answers_the_request`'s job.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
@@ -519,7 +519,7 @@ async fn an_undecodable_clock_is_retried_then_falls_back_without_refusing() {
 
     let mut client = data_client(base_url);
     client.start().expect("start grabs the sink");
-    // The connect completes DESPITE the unreadable clock: the fallback is the
+    // The connect completes despite the unreadable clock: the fallback is the
     // point, and a client that refused here would be unable to attach to any
     // venue whose clock route blipped.
     client
@@ -556,7 +556,7 @@ async fn an_undecodable_clock_is_retried_then_falls_back_without_refusing() {
             break resp.data.clone();
         }
     };
-    // The connection is USABLE after the fallback - it reaches the wire and
+    // The connection is usable after the fallback - it reaches the wire and
     // serves rows. This is the "not a refusal" half restated at the request
     // level, not a claim about the floor.
     assert_eq!(delivered.len(), 1);
@@ -584,7 +584,7 @@ fn tape_trade(ts_event: u64, price_cents: i64) -> mogwai_protocol::TradeTick {
     }
 }
 
-// THREE TESTS OF THE TIMESTAMP CURSOR ARE GONE, and what they pinned no longer
+// Three tests of the timestamp cursor are gone, and what they pinned no longer
 // exists rather than merely moving. They covered a full page cut inside a
 // timestamp group, its quote twin, and the degenerate case of a whole page at
 // one instant - all consequences of the client reconstructing its own position
@@ -601,7 +601,7 @@ fn tape_trade(ts_event: u64, price_cents: i64) -> mogwai_protocol::TradeTick {
 // that is `trade_history_pages_without_duplicates_at_the_seam` above, which now
 // also asserts the client resumed with the token it was handed.
 
-/// The SEEDED SET IS NOT AN ADMISSION LIST. The venue resolves any wire-legal
+/// The seeded set is never an admission list. The venue resolves any wire-legal
 /// symbol and registers it at bind, so a label absent from the connect-time
 /// seed is routinely one this run will serve; the guard that refused it here
 /// refused exactly the passengers piece 13 exists to support. The bound-symbol
@@ -652,11 +652,11 @@ async fn a_subscribe_for_an_instrument_absent_from_the_seeded_set_is_accepted() 
         .expect("the run's own instrument subscribes");
 }
 
-/// THE POST-BIND RESEED, and the frame that depends on it.
+/// The post-bind reseed, and the frame that depends on it.
 ///
 /// A client bound to a label nobody configured cannot have its def in the
-/// connect-time seed: BINDING is what registers the symbol venue-side, so only
-/// a read AFTER the socket is up can carry it. Without that reseed
+/// connect-time seed: binding is what registers the symbol venue-side, so only
+/// a read after the socket is up can carry it. Without that reseed
 /// `handle_market_message` finds no def and drops every frame for the symbol,
 /// silently - which is what this test bites on: delete the reseed and the trade
 /// below never arrives.
@@ -665,7 +665,7 @@ async fn a_subscribe_for_an_instrument_absent_from_the_seeded_set_is_accepted() 
 /// holds its trade until this test opens the push gate, which is after connect
 /// and after the subscribe, and the pump is a task on this same current-thread
 /// runtime that does not run until the test awaits anyway. What the barrier
-/// buys is the case the pump DOES get scheduled mid-connect; it is cheap, and
+/// buys is the case the pump does get scheduled mid-connect; it is cheap, and
 /// the ordering it enforces is the one this test's delivery depends on.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
@@ -722,7 +722,7 @@ async fn a_frame_for_an_unconfigured_symbol_survives_the_post_bind_reseed() {
     }
 }
 
-/// A failed history fetch must still RESOLVE the nautilus request.
+/// A failed history fetch must still resolve the nautilus request.
 ///
 /// The failure arms of `request_trades`/`request_bars` used to log and return
 /// straight out of the spawned task, so no `DataResponse` was ever emitted and
@@ -801,7 +801,7 @@ async fn failed_history_fetch_still_answers_the_request() {
     }
 }
 
-/// An OFF-RIVER window must answer too, for the same reason.
+/// An off-river window must answer too, for the same reason.
 ///
 /// The adapter refuses a `start` below the venue's published `data_origin_ns`
 /// at the request boundary. Returning that refusal to nautilus does not reach
@@ -810,16 +810,16 @@ async fn failed_history_fetch_still_answers_the_request() {
 ///
 /// The clock envelope below is the literal `/clock` text, and it carries
 /// `warmup_ns` rather than the former `backfill_horizon_ns`: the rename is a
-/// WIRE change, so this text and `clock_snapshot_round_trips` in
+/// wire change, so this text and `clock_snapshot_round_trips` in
 /// `mogwai-protocol` move together or one of them fails.
 ///
-/// THE RIVER IS STOCKED AND `/trades` IS COUNTED, and both are load-bearing. An
-/// empty response is what a venue holding NO ROWS returns too, so on the stub's
+/// The river is stocked and `/trades` is counted, and both are load-bearing. An
+/// empty response is what a venue holding no rows returns too, so on the stub's
 /// default empty river `resp.data.is_empty()` passed whether or not the guard
 /// fired - vacuous in exactly the way this crate spent a round sweeping for.
 /// A row at the floor makes the emptiness a consequence, and `trades_hits == 0`
-/// says the refusal happened at the CLIENT boundary rather than at the venue.
-/// This is also the only place a KNOWN floor is discriminated from an unknown
+/// says the refusal happened at the client boundary rather than at the venue.
+/// This is also the only place a known floor is discriminated from an unknown
 /// one: `an_undecodable_clock_is_retried_then_falls_back_without_refusing`
 /// cannot do it, because the only floor its fixture yields is zero and no
 /// `u64` start precedes zero.
@@ -837,7 +837,7 @@ async fn off_river_window_still_answers_the_request() {
         r#"{{"sim":{{"sim_epoch_ns":0,"wall_anchor_ns":0,"speed":1.0}},"venue_now_ns":{},"data_origin_ns":{ORIGIN},"warmup_ns":86400000000000}}"#,
         ORIGIN + 86_400_000_000_000
     ));
-    // Rows the venue WOULD serve if it were asked. See the note above: without
+    // Rows the venue would serve if it were asked. See the note above: without
     // them an empty response proves nothing.
     *state.trades_tape.lock().expect("trades tape mutex") = Some(vec![tape_trade(ORIGIN, 10_000)]);
     let base_url = bound_stub(Arc::clone(&state)).await;
@@ -904,7 +904,7 @@ async fn off_river_window_still_answers_the_request() {
         }
     }
 
-    // Proves the empty responses above came from the off-river GUARD and not
+    // Proves the empty responses above came from the off-river guard and not
     // merely from a stub that happens to serve no trades: a refused window is
     // never fetched at all. Without this the test passes vacuously whenever the
     // clock envelope fails to decode and the floor reads as unknown.
@@ -915,7 +915,7 @@ async fn off_river_window_still_answers_the_request() {
     );
 }
 
-/// The harness's own request reader, pinned against a SEGMENTED head.
+/// The harness's own request reader, pinned against a segmented head.
 ///
 /// `common::read_request` used to take a single `read` into a 4096-byte buffer
 /// and return `None` when `\r\n\r\n` was not in it - dropping the connection
@@ -965,18 +965,18 @@ async fn the_harness_reads_a_request_head_split_across_segments() {
     // test really does present two reads rather than relying on the kernel to
     // split them.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    // NOT `expect`ed, and that is the point. A reader that gave up on the short
+    // Not `expect`ed, and that is the point. A reader that gave up on the short
     // first segment has already dropped its socket, so these writes fail with
     // ECONNRESET - an error naming the write, not the property. The verdict
-    // belongs to what the reader RETURNED, which is asserted below; letting the
+    // belongs to what the reader returned, which is asserted below; letting the
     // write panic would report a bound rather than the check.
     drop(client.write_all(&head.as_bytes()[split..]).await);
     drop(client.write_all(b"hello").await);
     drop(client.flush().await);
 
-    // BOUNDED for the same reason the writes above are not `expect`ed: the
+    // Bounded for the same reason the writes above are not `expect`ed: the
     // failure this test discriminates is "the reader gave up", and a future
-    // regression could express that as a BLOCK rather than a `None`. Without a
+    // regression could express that as a block rather than a `None`. Without a
     // bound of its own the test would hang to the libtest watchdog and report
     // nothing attributable.
     let (read_head, body) = tokio::time::timeout(Duration::from_secs(5), venue)

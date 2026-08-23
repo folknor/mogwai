@@ -3,10 +3,10 @@
 
 // Compiling out the five heavy walks (see the note below) strands the helpers
 // only they reach - `measure`, `measure_session_curves`,
-// `windowed_latent_returns` and the two result structs. They stay COMPILED in
+// `windowed_latent_returns` and the two result structs. They stay compiled in
 // that shape, which is exactly what keeps the instrumented sweep a real build
 // check of this file rather than a hole in it; they are simply unreachable, so
-// the lint is silenced THERE AND ONLY THERE. The default shape still reports
+// the lint is silenced there and only there. The default shape still reports
 // dead code in this file, so a helper whose last real caller is deleted is
 // still caught - which is the decay a blanket allow would otherwise hide.
 #![cfg_attr(feature = "hotpath", allow(dead_code))]
@@ -28,17 +28,17 @@ use super::*;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 
-// THE HEAVY-WALK CFG NOTE. Five tests in this file carry
+// The heavy-walk cfg note. Five tests in this file carry
 // `#[cfg(not(feature = "hotpath"))]` and point back here; this is the one place
 // the reasoning lives.
 //
-// This crate's lib test binary is built and run TWICE by the full gate: once in
+// This crate's lib test binary is built and run twice by the full gate: once in
 // the default shape, and once with `hotpath-alloc` on, so that a feature nothing
 // compiles cannot rot unnoticed. That second sweep exists to prove the
-// annotations, the optional dependency and the harness examples still BUILD - a
+// annotations, the optional dependency and the harness examples still build - a
 // compile-time property, satisfied by compiling.
 //
-// Re-EXECUTING a multi-second statistical walk in it proves nothing further,
+// Re-executing a multi-second statistical walk in it proves nothing further,
 // because `crates/mogwai-data/src` carries no `hotpath` annotation at all: the
 // only `cfg(feature = "hotpath")` in this crate is in
 // `examples/arrival_walk_bench.rs`. The two shapes differ in the dependency
@@ -50,12 +50,12 @@ use std::collections::HashSet;
 // cannot say anything the first run did not. The five walks opt out of the
 // instrumented shape; the other ~170 tests in this binary still run in both,
 // which is what keeps the second sweep a real sweep rather than a build check.
-// Opting OUT is the mechanism rather than a runner-side filter, deliberately:
-// the gate certifies complete coverage, so a filtered-out test is an ORPHANED
+// Opting out is the mechanism rather than a runner-side filter, deliberately:
+// the gate certifies complete coverage, so a filtered-out test is an orphaned
 // pair and an error, while a test that does not exist in a build shape is no
 // pair at all.
 //
-// The line is drawn at ROUGHLY TWO SECONDS, measured one test per process in
+// The line is drawn at roughly two seconds, measured one test per process in
 // dev by `scripts/adapter_test_walls.py`, which is generic over libtest
 // binaries. Below that the doubling is not worth a `cfg` a reader has to come
 // here to understand.
@@ -88,7 +88,7 @@ fn clones_share_immutable_config_and_emitted_symbol_storage() {
 
 /// An integrated source whose origin sits at `origin_ns`, for building arrival
 /// refusals. `next_parent` computes `limit = from_ns + MAX_SESSION_GAP_NS`
-/// SATURATING, so an origin at or near `u64::MAX` leaves the budget walk with
+/// saturating, so an origin at or near `u64::MAX` leaves the budget walk with
 /// no exposure to spend and it refuses `NoOpenExposure` in O(1) - the budget
 /// walk runs at most one iteration and advances no cell, which is what makes
 /// this cheap enough to be the crate's refusal fixture.
@@ -103,7 +103,7 @@ fn refusing_source_at(origin_ns: u64) -> GeneratedSource {
 }
 
 /// The refusal fixture at the very last representable instant: `cursor < limit`
-/// is false on ENTRY, so `next_parent` refuses without executing its loop once.
+/// is false on entry, so `next_parent` refuses without executing its loop once.
 /// Use this wherever the refusal is all that matters. A consumer whose own guard
 /// compares the source clock against a forward target cannot use it - nothing is
 /// after `u64::MAX` - and wants `refusing_source_at` a little below the top
@@ -123,7 +123,7 @@ fn a_refused_parent_is_reported_rather_than_summarized_as_a_phantom() {
         refusal,
         TickFault::Arrival(ArrivalRefusal::NoOpenExposure { .. })
     ));
-    // The fault is LATCHED, not merely returned: a caller that only consults
+    // The fault is latched, not merely returned: a caller that only consults
     // `fault()` must see the same verdict.
     assert!(matches!(
         source.fault(),
@@ -136,16 +136,16 @@ fn a_refused_parent_is_reported_rather_than_summarized_as_a_phantom() {
 #[test]
 fn seek_to_terminates_on_a_refusal_instead_of_spinning_on_a_stale_summary() {
     // The refusal leaves `burst` untouched, so an infallible `advance_parent`
-    // handed back the PREVIOUS parent's timestamp with zero children - a
+    // handed back the previous parent's timestamp with zero children - a
     // `parent_end` of 0, below any forward target - and `seek_to` adopted the
     // faulted clone and looped forever without ever reaching `next_tick`, the
-    // one place the fault is read. A regression therefore HANGS rather than
+    // one place the fault is read. A regression therefore hangs rather than
     // asserting, so the seek runs on its own thread against a deadline.
     //
-    // THE DETACHED THREAD LEAKS ON REGRESSION and that is deliberate: a spinning
+    // The detached thread leaks on regression and that is deliberate: a spinning
     // `seek_to` cannot be cancelled, so the choice is a busy core for the rest
     // of a failing sweep or no test at all. It costs nothing when green - the
-    // refusing fixture makes `seek_to` return on its FIRST iteration, so the
+    // refusing fixture makes `seek_to` return on its first iteration, so the
     // thread is finished before `recv_timeout` is even entered. Do not
     // re-litigate this into a synchronous call; that reintroduces the hang.
     let (tx, rx) = std::sync::mpsc::channel();
@@ -173,14 +173,14 @@ fn seek_to_terminates_on_a_refusal_instead_of_spinning_on_a_stale_summary() {
 fn extend_toward_credits_no_walk_for_a_refused_parent() {
     // The frontier rule, at the site it was written for: `extend_toward` may
     // only credit `walked`/`since_snapshot` and snapshot the lead over a parent
-    // the SAME expression drew successfully. An infallible `advance_parent`
+    // the same expression drew successfully. An infallible `advance_parent`
     // handed it a phantom - the empty burst's `parent_ts_ns` of 0 with zero
     // children - whose `parent_end` of 0 is below any target, so it adopted the
     // faulted clone, credited one tick for a parent that was never drawn, took
     // snapshots of a faulted source, and burned the entire `max_extend` budget
     // before reporting "unreachable" rather than "faulted".
     //
-    // The origin sits just BELOW `u64::MAX` rather than at it: the loop guard is
+    // The origin sits just below `u64::MAX` rather than at it: the loop guard is
     // `self.lead.clock_ns() < target`, which no lead at the top instant can
     // satisfy, so the fixture used by the two tests above would skip the loop
     // entirely and pass for the wrong reason. A few nanoseconds of headroom keep
@@ -270,17 +270,17 @@ fn compact_seek_is_wire_identical_and_preserves_continuation() {
     }
 }
 
-/// A surge moves the CANONICAL tape, so a history read placed inside the surge
+/// A surge moves the canonical tape, so a history read placed inside the surge
 /// window must replay the surged prints rather than the clean ones. That is
 /// what keeps one river one realization: the subscribed feed, `/trades`, the
 /// volatility reading and the trigger scans are all this one walk.
 ///
 /// The read goes through `try_source_at_or_before` deliberately. Comparing two
 /// clones of the lead proves only that the lead is surged, which was never in
-/// doubt; what has to agree is the CHAIN, because that is what a history
+/// doubt; what has to agree is the chain, because that is what a history
 /// request resumes from.
 ///
-/// The surge is installed at CONSTRUCTION and the clean river is a separate
+/// The surge is installed at construction and the clean river is a separate
 /// source. It used to be armed mid-walk on a shared index, with the clean
 /// comparison taken from a frontier clone - which was the mutation the fork
 /// removed. Two rivers is now the honest fixture, because that is what a
@@ -289,7 +289,7 @@ fn compact_seek_is_wire_identical_and_preserves_continuation() {
 fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-    // DERIVED FROM THE TAPE, not guessed: the window has to open somewhere the
+    // Derived from the tape, not guessed: the window has to open somewhere the
     // walk below actually reaches, and far enough in that the two rivers share
     // a real prefix first. A hardcoded instant either sits past the end of the
     // walk - in which case the surge never opens and the test passes against a
@@ -311,7 +311,7 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
     );
     let mut clean = GeneratedSource::new(scalars, 4242, 1_000, &fp, None);
 
-    // Walked in LOCKSTEP from the origin. Advancing one side first would make
+    // Walked in lockstep from the origin. Advancing one side first would make
     // the two disagree from misalignment rather than from the surge, which is a
     // divergence assertion that passes against a no-op window.
     let mut canonical = Vec::with_capacity(10_000);
@@ -319,7 +319,7 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
     for _ in 0..10_000 {
         let tick = index.next_tick().expect("infinite tape");
         let rendered = format!("{tick:?}");
-        // BOTH SIDES UNWRAPPED. Comparing a `TickEvent` against an
+        // Both sides unwrapped. Comparing a `TickEvent` against an
         // `Option<TickEvent>` renders `Trade(..)` against `Some(Trade(..))`,
         // which can never be equal - so the divergence guard would report a
         // mismatch on the first tick whatever the water did, and the
@@ -339,7 +339,7 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
 
     // A history read landing well inside the surge window, resumed off the
     // chain exactly as `build_history_source` does it.
-    // A probe whose `ts_event` is UNIQUE in the sequence. A parent's quote and
+    // A probe whose `ts_event` is unique in the sequence. A parent's quote and
     // its first child legitimately share an instant, so seeking to a shared one
     // lands on whichever of the pair comes first and the comparison below would
     // be about tie order rather than about which tape was replayed.
@@ -365,8 +365,8 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
     }
 }
 
-/// A positioned source resumes AFTER the tick its checkpoint last consumed, so
-/// a reader hunting the last PRINT at or before a target can find an empty
+/// A positioned source resumes after the tick its checkpoint last consumed, so
+/// a reader hunting the last print at or before a target can find an empty
 /// residual even though the print exists - the checkpoint ate it. That is not a
 /// hypothetical: the sweep's futures marks and its settlement prices are read
 /// through exactly this lookup, and a missing settlement mark used to retire the
@@ -375,7 +375,7 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
 fn a_checkpoint_that_consumed_the_last_print_still_answers_for_it() {
     let fp = Fingerprint::from_repo_json();
     let scalars = GeneratorScalars::xbtusd_anchor(&fp);
-    // A trade whose SUCCESSOR prints strictly later than one nanosecond after
+    // A trade whose successor prints strictly later than one nanosecond after
     // it, so a target one nanosecond past it is answered by that trade and by
     // nothing in the residual. The end of a parent's child run is the ordinary
     // case; searching for it rather than hardcoding an instant keeps the
@@ -443,17 +443,17 @@ fn last_trade_through(source: &mut GeneratedSource, target: u64) -> Option<Decim
     last
 }
 
-/// THE FENCE IS GONE AND NOTHING REPLACED IT, because a surge installed before
+/// The fence is gone and nothing replaced it, because a surge installed before
 /// the first draw leaves nothing to fence.
 ///
 /// The old hazard: arming mutated a generator that had already walked, so a
-/// snapshot taken BEFORE the arm would replay the span after it unsurged. The
+/// snapshot taken before the arm would replay the span after it unsurged. The
 /// walk-back had to stop at a pinned control boundary, coarsening had to keep
 /// that boundary, and a reader whose print the boundary had eaten needed a
 /// separate recovery to avoid refusing forever. All three existed to contain
 /// one mutation.
 ///
-/// What has to be true now is stronger and simpler: retreating ACROSS the surge
+/// What has to be true now is stronger and simpler: retreating across the surge
 /// window - all the way to the origin, past however many snapshots - must
 /// replay the same ticks as resuming just before the target. This is the test
 /// that would have failed under the old model without a fence, so it is the
@@ -552,16 +552,16 @@ fn drain_from(source: &mut GeneratedSource, target: u64, count: usize) -> Vec<St
 }
 
 const DRAW: usize = 2_000_000;
-// PARENT EVENTS, not prints. The day-of-week assertions below need at least a
-// full week of simulated tape and want several, so this is denominated in SIM
-// SPAN rather than in ticks: at the committed 0.171 s mean event gap, 15M
+// Parent events, not prints. The day-of-week assertions below need at least a
+// full week of simulated tape and want several, so this is denominated in sim
+// span rather than in ticks: at the committed 0.171 s mean event gap, 15M
 // events is roughly 30 simulated days. `measure_session_curves` drops each
 // event's children rather than emitting them, which is what makes a four-week
 // span affordable - see the note there on what that costs.
 const SESSION_DRAW: usize = 15_000_000;
-// The clean tape's duration ACF is gated by the committed cross-pair BAND
+// The clean tape's duration ACF is gated by the committed cross-pair band
 // (`cadence.targets.duration_acf_lag1` / `_lag5`, measured on microsecond-
-// stamped Binance parent events). This absolute tolerance is used at ONE site
+// stamped Binance parent events). This absolute tolerance is used at one site
 // only - the drought test, which walks a 50,000-gap sample far too small to
 // inherit that band and only needs to see that thinning the tape stretches the
 // gaps without destroying their serial dependence. 0.14 is a principled
@@ -693,7 +693,7 @@ fn session_profile_rejects_non_normalized_curves() {
         })
     );
 
-    // A legitimate closed-session profile sums BELOW 1.0 on intensity (a
+    // A legitimate closed-session profile sums below 1.0 on intensity (a
     // closed hour carries ~0 mass) and must stay legal - the near-zero
     // mechanism and the fully-closed cap machinery both depend on the
     // one-sided bound admitting sub-1 intensity/dow sums.
@@ -915,7 +915,7 @@ fn fine_grid_prices_stay_on_grid() {
 }
 
 // Landing 4: resuming from a checkpoint and replaying the residual yields the
-// EXACT ticks a from-origin run produces - the byte-identical guarantee the
+// exact ticks a from-origin run produces - the byte-identical guarantee the
 // checkpointed seek rests on. Drives the resume path directly (the golden
 // sequence only exercises the from-origin path).
 #[test]
@@ -973,10 +973,10 @@ fn checkpoint_resume_is_byte_identical() {
 // Regression for the exact-ts collision the strictly-before partition in
 // `source_at_or_before` exists for: snapshots land on every K-th tick's
 // exact ts_event, and pollers pass an emitted tick's exact ts_event as the
-// seek target, so a seek target CAN equal a checkpoint's clock_ns. Under
+// seek target, so a seek target can equal a checkpoint's clock_ns. Under
 // the old `<=` partition the index handed back the checkpoint that had
 // already consumed the boundary tick, and the residual seek silently
-// skipped to the NEXT tick - one tick dropped versus the from-origin path.
+// skipped to the next tick - one tick dropped versus the from-origin path.
 #[test]
 fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
     let fp = Fingerprint::from_repo_json();
@@ -997,7 +997,7 @@ fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
 
     // The 3K-th tick (0-based index 3K-1) is exactly where extend_toward
     // pushes its third interior snapshot, so that snapshot's clock_ns
-    // EQUALS this tick's ts_event - the forced collision. The from-origin
+    // equals this tick's ts_event - the forced collision. The from-origin
     // seek semantics (first tick with ts_event >= target) return this
     // boundary tick itself; the checkpointed path must return the
     // identical tick and stay byte-identical afterwards.
@@ -1035,7 +1035,7 @@ fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
 // Coarsening bounds the index's memory (its unbounded per-`k`-ticks growth
 // was the S14/D7 finding) without breaking the byte-identity guarantee.
 // Drive the index past `MAX_CHECKPOINTS` at k=1 (a snapshot every tick) so
-// `coarsen` fires, then assert the snapshot count stayed capped AND that
+// `coarsen` fires, then assert the snapshot count stayed capped and that
 // resumes off the coarsened grid still reproduce the from-origin tape.
 #[test]
 fn checkpoint_index_coarsens_to_bound_memory_and_stays_byte_identical() {
@@ -1194,7 +1194,7 @@ fn vol_storm_lifts_realized_output_without_touching_the_base_process() {
         .map(|value| value.abs())
         .fold(0.0_f64, f64::max);
 
-    // A storm amplifies OUTPUT.
+    // A storm amplifies output.
     assert!(
         lifted_rms > clean_rms * 50.0,
         "clean_rms={clean_rms} lifted_rms={lifted_rms}"
@@ -1207,7 +1207,7 @@ fn vol_storm_lifts_realized_output_without_touching_the_base_process() {
         lifted_max <= REALIZED_RETURN_CEILING * (1.0 + 1e-12),
         "a storm must not exceed the absolute realized ceiling: lifted_max={lifted_max}"
     );
-    // ...and the BASE process is untouched. The storm reaches the mid only
+    // ...and the base process is untouched. The storm reaches the mid only
     // through vol_mult, never through the GARCH state or feedback rails, so
     // after an equal number of updates the recursion state is bit-identical to
     // an unarmed run - which is what makes a divergence an envelope rather than
@@ -1266,37 +1266,37 @@ fn liquidity_drought_imitates_dying_symbol() {
     let gaps = durations(&mut src, 50_000);
     let mean_gap = mean(&gaps);
     let max_gap = gaps.iter().copied().fold(0.0_f64, f64::max);
-    // What this test is about is the RATIO the drought applies to the PARENT
+    // What this test is about is the ratio the drought applies to the parent
     // gap: `thin_factor` multiplies the clean gap, so the realized mean must
     // land near `thin_factor * mean_event_duration_s`.
     //
-    // THE WINDOW IS AN ENSEMBLE, NOT A TASTE. It used to be 0.5x to 2x, on the
+    // The window is an ensemble, not a taste. It used to be 0.5x to 2x, on the
     // stated ground that a 50,000-gap draw is noisy - and it is not: the ratio
     // is a systematic quantity, measured 0.8898 to 0.9739 over the run seeds 0
     // through 7 and 42, an 8.4 percent spread with no seed anywhere near the
     // old edges.
     //
-    // WHY IT SITS BELOW ONE: event-weighted sampling, and one site only. A
+    // Why it sits below one: event-weighted sampling, and one site only. A
     // draft of this comment blamed the envelope dividing the arrival rate as
     // well as multiplying the gap - that second site is `low_intensity_gap_ns`
-    // and it is GATED on `arr_mult < LOW_INTENSITY_ARR_MULT`, which is 0.01,
+    // and it is gated on `arr_mult < LOW_INTENSITY_ARR_MULT`, which is 0.01,
     // while the committed calendar-free `session_profile` bottoms out at
     // `min intensity_hour * 24 * min dow_weight * 7`, about 0.584. It is
     // unreachable here, so the only site in play is the open-market
     // `duration_s = duration_s / arr_mult * arrival_thin`. Its mean is
-    // sampled PER EVENT, and busy hours emit more events, so the sample
+    // sampled per event, and busy hours emit more events, so the sample
     // over-represents large `arr_mult` and the mean of `1 / arr_mult` lands
     // under one.
     //
-    // THE CATCH SET, measured by scaling `thin_factor` while holding
+    // The catch set, measured by scaling `thin_factor` while holding
     // `expected_gap` at the unscaled value - which is exactly a production
     // multiplier off by that factor. Because the low-intensity branch is
     // unreachable, the gap really is proportional to `arrival_thin` draw by
-    // draw; the LINEARITY IS STILL ONLY STATISTICAL, because a scaled gap
+    // draw; the linearity is still only statistical, because a scaled gap
     // advances `clock_ns` and so changes which hours the later gaps sample.
     // That feedback is where the 8.4 percent ensemble spread comes from. At the
     // old window: caught below 0.55x and above 2.25x, so a multiplier off by
-    // 50 percent UPWARD passed (1.5x reads 1.351, inside 2). At this one:
+    // 50 percent upward passed (1.5x reads 1.351, inside 2). At this one:
     // caught below ~0.83x and above ~1.27x, with the nine-seed ensemble still
     // clearing both edges by about 18 percent. A tape change that legitimately
     // moves the envelope re-blesses this number, which is the bump it already
@@ -1343,7 +1343,7 @@ fn session_edge_spike_localizes() {
     assert!(in_rms >= out_rms * 2.0, "in_rms={in_rms} out_rms={out_rms}");
 }
 
-// Companion to vol_storm_lifts_realized_rms for the OTHER vol regime.
+// Companion to vol_storm_lifts_realized_rms for the other vol regime.
 // Pre-fix, SessionEdgeSpike left the realized clamp pinned at 1.0, so a
 // large extra_vol_mult saturated every in-window return against
 // MAX_ABS_RETURN and the realized spike stopped tracking the requested
@@ -1567,7 +1567,7 @@ fn near_zero_hour_share_reopens_at_the_next_open_hour() {
     }
 }
 
-// The degenerate extreme: EVERY hour closed so hard the budget can never
+// The degenerate extreme: every hour closed so hard the budget can never
 // be spent. The hour walk must cap each gap at MAX_SESSION_GAP_NS and keep
 // the clock strictly advancing - one tick per ~year - instead of the
 // pre-fix u64::MAX saturation that pinned the clock forever. 300 capped
@@ -1703,7 +1703,7 @@ fn reopen_gap_inside_calendar_closure_is_consumed_at_the_jump() {
 }
 
 // The other end of the same family. Children step the clock past their parent,
-// so an arm whose instant falls INSIDE a burst was never covered by any tested
+// so an arm whose instant falls inside a burst was never covered by any tested
 // span: the burst's own event tested up to the parent, and the next event
 // started from the last child, already past the arm. The crossing frontier is
 // its own field precisely so those spans are contiguous, and this places an arm
@@ -1926,7 +1926,7 @@ fn tick_traversal_uses_grid_return_over_unconditional_sigma() {
         1e-12,
     );
     // Was 11.90 when `vol_scalar` was 1e-6. The GARCH repair re-solved it to
-    // 1.2e-5, so an MNQ-shaped grid now sits at roughly ONE sigma per tick
+    // 1.2e-5, so an MNQ-shaped grid now sits at roughly one sigma per tick
     // rather than twelve. That is a large change in how the tape meets its
     // grid, and it is the quantity `zero_change_frac` is governed by - which is
     // exactly why traversal is reported by the realism gate rather than left
@@ -1963,10 +1963,10 @@ fn the_integral_floor_lifts_the_realized_mean_above_the_notional_target() {
         .sum::<f64>()
         / f64::from(draws);
     // `realized > target` alone cannot fail: the floor is one contract and the
-    // target here is 0.476 of one, so ANY grid passes it, including a broken
+    // target here is 0.476 of one, so any grid passes it, including a broken
     // one that returns the floor for every draw. What is pinned instead is the
-    // measured RATIO, so a later change to the rounding rule has to re-bless
-    // the number rather than move it silently. MEASURED, because this comment
+    // measured ratio, so a later change to the rounding rule has to re-bless
+    // the number rather than move it silently. Measured, because this comment
     // used to claim a truncating grid "reads 1.00, all mass on the floor",
     // which is not what happens: substituting `RoundingStrategy::ToZero` for
     // the shipped `MidpointAwayFromZero` in `materialize_size` reads 2.2642
@@ -1992,9 +1992,9 @@ fn spot_draws_are_bit_identical_across_the_size_grid_change() {
     // The two constructors agreeing proves only that `new` delegates with
     // `SizeGrid::spot()`, which is a tautology - both run the same code. The
     // claim the landing actually makes is that the spot draws are the ones the
-    // PRE-GRID generator produced, and only a golden can carry it. These are
+    // pre-grid generator produced, and only a golden can carry it. These are
     // the first twelve draws of seed 42 on the committed fingerprint, and they
-    // are the PRE-GRID values: the spot arm of `next_size` is character
+    // are the pre-grid values: the spot arm of `next_size` is character
     // identical to the pre-grid expression, while the direct native-unit
     // latent median is the same calibrated value. Bit identity is provable
     // rather than merely asserted, and this golden keeps it provable across
@@ -2207,7 +2207,7 @@ fn checkpoint_resume_mid_sweep_is_byte_identical() {
     }
 }
 
-// A halt lands BETWEEN events, never inside one: the `ReopenGap` crossing check
+// A halt lands between events, never inside one: the `ReopenGap` crossing check
 // sits in `begin_event`, so a sweep is an atomic exchange action. The failure
 // this pins is a burst whose children straddle the halt, which is a state no
 // venue produces.
@@ -2249,7 +2249,7 @@ fn a_reopen_gap_never_splits_a_sweep() {
     assert_eq!(crossings, 1, "crossings={crossings}");
 }
 
-// The two state-conditional sweep multipliers must reproduce the DECLARED
+// The two state-conditional sweep multipliers must reproduce the declared
 // unconditional child mean exactly, or the mean the fingerprint states and the
 // mean the tape realizes are two different numbers. The active multiplier is
 // therefore not a free constant - it is determined by the quiet share and the
@@ -2270,33 +2270,33 @@ fn arrival_children_mults_preserve_the_declared_mean() {
     );
 }
 
-// THE ONLY DWELL GATE, and it is a MULTI-SEED one. It replaced a pair: this
-// test, which was `#[ignore]`d AND in the runner's `skip` list on the claim
+// The only dwell gate, and it is a multi-seed one. It replaced a pair: this
+// test, which was `#[ignore]`d and in the runner's `skip` list on the claim
 // that it "outlives the 20-second per-test hang watchdog by design", and
 // `run_seeded_tape_dwell_is_bounded`, which walked seed 42 alone at the full
-// `DRAW` and ran on every lane. The claim was FALSE - the eight arms are
+// `DRAW` and ran on every lane. The claim was false - the eight arms are
 // `DRAW / 8` apiece, the same 2M parent events in total as `realism`, measured
 // at 6.54 s - so the repo's only evidence that the dwell band holds across
 // seeds was the one test nothing ever ran, while the one that did run could
 // only ever say "seed 42 passes".
 //
-// SEED 42 IS IN THE LOOP, not dropped with the test that carried it: it is the
+// Seed 42 stays in the loop, not dropped with the test that carried it: it is the
 // default run seed (`RunSeeds::from_run_seed(42)`), i.e. the tape a bare
 // `mogwai serve` actually produces, so a sweep of the first eight integers that
 // excluded it would have traded the shipped realization for eight unshipped
-// ones. THE ARMS ARE SPELLED OUT BELOW AND THERE ARE EIGHT OF THEM:
-// 0, 1, 2, 3, 4, 5, 6 and 42. SEED 7, which the pre-round sweep of the first
-// eight integers covered, IS DELIBERATELY DROPPED - the arm count is what
+// ones. The arms are spelled out below and there are eight of them:
+// 0, 1, 2, 3, 4, 5, 6 and 42. Seed 7, which the pre-round sweep of the first
+// eight integers covered, is deliberately dropped - the arm count is what
 // multiplies `DRAW / 8` back to the two million parent events the wall-clock
 // argument above rests on, so 42 displaces 7 rather than joining it. The list
 // is written out rather than expressed as a range plus a chain because every
 // prose statement of the old form was read as nine arms.
 //
-// WHAT THE SHORTER PER-SEED DRAW COSTS, measured rather than argued, seed by
+// What the shorter per-seed draw costs, measured rather than argued, seed by
 // seed against each bound:
 //   - `mean_gap_s`, the only two-sided band: 0.1743-0.1785 across the eight
 //     `DRAW / 8` arms against a declared 0.17104 and a +/-10% window, versus
-//     0.17426 on the old full-draw seed-42 arm. The short arms sit FURTHER from
+//     0.17426 on the old full-draw seed-42 arm. The short arms sit further from
 //     the declared mean, so the band's bite did not soften.
 //   - `gap_p999_s`: 2.92-3.03 short, 3.18 full, bound 10.65. A defect must
 //     stretch the tail 3.55x rather than 3.35x to be caught - the one place the
@@ -2304,21 +2304,21 @@ fn arrival_children_mults_preserve_the_declared_mean() {
 //     realizations.
 //   - `empty_hour_frac` and `max_empty_hour_run_h` came out at exactly 0 on
 //     every arm at both draws. That is not vacuity: they are one-sided bounds
-//     against SILENCE, and a tape at a 0.17 s mean gap has no empty hour to
+//     against silence, and a tape at a 0.17 s mean gap has no empty hour to
 //     find. Bite-checked at the short draw by injecting a 30,000x
 //     `LiquidityDrought` into this helper - `empty_hour_frac` fails at 0.765
 //     against its 0.0105 bound.
-//     ONE ASSERTION IS GENUINELY WEAKER AT THE SHORT DRAW and it is
+//     One assertion is genuinely weaker at the short draw and it is
 //     `max_empty_hour_run_h`. Its bound is the anchor plus 2 h, i.e. 7 h, and a
 //     `DRAW / 8` arm spans only ~12 h (250k events at 0.174 s), so it can fire
 //     only on a tape that is dead for eight of its eleven complete hour
 //     buckets, where the full draw spans ~4 days and would catch an eight-hour
-//     blackout anywhere in it. It costs the TEST nothing, because
+//     blackout anywhere in it. It costs the test nothing, because
 //     `empty_hour_frac` is asserted first and dominates it at both draws: one
 //     empty hour in eleven is 0.09, already eight times the bound, so every
 //     blackout `max_empty_hour_run_h` would have named is caught one line
-//     earlier by name. WHAT IS LOST IS THE TWO-SIDEDNESS OF THE STATEMENT, not
-//     the coverage: at ~11 complete hour buckets the RESOLUTION of
+//     earlier by name. What is lost is the two-sidedness of the statement, not
+//     the coverage: at ~11 complete hour buckets the resolution of
 //     `empty_hour_frac` is 1/11 = 0.09 against a 0.0105 bound, so the assertion
 //     has degenerated to "no empty hour at all". It was already effectively
 //     that at the full draw - ~96 buckets is a resolution of 0.0104 against
@@ -2330,8 +2330,8 @@ fn arrival_children_mults_preserve_the_declared_mean() {
 //   test -p mogwai-data dwell_is_bounded_across_run_seeds --debug
 // That takes about 6.5 s per sweep and needs no `--timeout` raise - the old
 // hint here asked for `--timeout 280` on a walk that never needed it. The
-// runner runs EVERY sweep of the profile, and for this crate it reports
-// SKIP with a reason for the `instrumented` sweep, which is the `cfg` above
+// runner runs every sweep of the profile, and for this crate it reports
+// skip with a reason for the `instrumented` sweep, which is the `cfg` above
 // doing its job rather than a silent zero-match pass.
 #[test]
 #[cfg(not(feature = "hotpath"))]
@@ -2341,14 +2341,14 @@ fn dwell_is_bounded_across_run_seeds() {
     }
 }
 
-/// No two TRADES on one river share a `ts_event`, and a consumer's CORRECTNESS
-/// RESTS ON IT even though nothing here said so until this test.
+/// No two trades on one river share a `ts_event`, and a consumer's correctness
+/// rests on it even though nothing here said so until this test.
 ///
 /// The history endpoints page by row count and the cursor that walks them is
 /// timestamp-only, so a page cut in the middle of an instant cannot be advanced
 /// past without either losing rows or repeating them. `mogwai-adapter` handles
 /// that honestly - it keeps the complete prefix and re-requests from the
-/// trailing group's own timestamp - but the case where the WHOLE page shares one
+/// trailing group's own timestamp - but the case where the whole page shares one
 /// timestamp has no complete prefix and no safe advance, so it can only stop and
 /// report a short history. A bar-folding consumer cannot distinguish that from a
 /// window that legitimately ended, which is how it reaches a strategy: as a
@@ -2362,16 +2362,16 @@ fn dwell_is_bounded_across_run_seeds() {
 /// (~580 years). Measured over a real walk before this landed: 1.1 M BTCUSDT
 /// trades, zero ties, smallest gap 27 ns.
 ///
-/// So the assertion is deliberately STRICT rather than non-decreasing. A change
+/// So the assertion is deliberately strict rather than non-decreasing. A change
 /// that made ties possible - collapsing the child stride, stamping a burst at
 /// one instant - would be a legitimate-looking generator change that breaks a
 /// consumer nowhere near it, and this is the only thing that would say so. The
 /// quote stream ties with its first child by design and that is fine: trades
-/// and quotes are separate pages with separate cutoffs, so a tie ACROSS them
+/// and quotes are separate pages with separate cutoffs, so a tie across them
 /// can never cut either. Quote against quote is gated separately, by
 /// `a_river_never_prints_two_quotes_at_one_instant`.
 ///
-/// WHAT DEPENDS ON THIS, named so a future generator change can see the cost:
+/// What depends on this, named so a future generator change can see the cost:
 /// socket history paginates by an inclusive per-kind cutoff, and a consumer
 /// splices its buffered live rows onto a completed history by dropping those at
 /// or below that cutoff. Two trades at one instant across a page boundary
@@ -2463,20 +2463,20 @@ fn assert_dwell_is_bounded(measured: &Measured, scalars: &GeneratorScalars, fp: 
     );
 }
 
-// NOTE: the persistent arrival state can carry a long quiet gap across a UTC
+// Note: the persistent arrival state can carry a long quiet gap across a UTC
 // day boundary. Hour shares remain tightly sampled, while the seven-point day
 // curve is therefore checked for shape rather than exact occupancy.
 //
-// THE `#[ignore]` CARRIES A REASON NOW, and the reason is COST. It was the one
+// The `#[ignore]` carries a reason now, and the reason is cost. It was the one
 // bare `#[ignore]` in the workspace, which made it unclassifiable: nothing can
 // tell a cost ignore from an environment one or a parked one, and this file's
 // neighbours are all three.
 //
-// What the attribute buys is exclusion from the FAST lane, which does not set
+// What the attribute buys is exclusion from the fast lane, which does not set
 // `include_ignored`; the full gate does set it, so this is a real gate there
-// and runs on every one. It is deliberately NOT in the runner's `skip` list.
+// and runs on every one. It is deliberately not in the runner's `skip` list.
 //
-// CUTTING `SESSION_DRAW` WAS CONSIDERED AND REFUSED. At the committed 0.171 s
+// Cutting `SESSION_DRAW` was considered and refused. At the committed 0.171 s
 // mean event gap, 15M parent events is about 30 simulated days, and the seven
 // `dow_weight` assertions below need several whole weeks to separate a weekend
 // from a weekday; halving the draw halves the span to two weeks, which does not
@@ -2484,7 +2484,7 @@ fn assert_dwell_is_bounded(measured: &Measured, scalars: &GeneratorScalars, fp: 
 // child away (`src.burst.remaining = 0`), so what is left is the arrival draw
 // itself at about 500 ns per event in dev - there is no fat to take.
 //
-// THE WATCHDOG HEADROOM IS 2.6x, MEASURED, not the ~1.6x a static estimate
+// The watchdog headroom is 2.6x, measured, not the ~1.6x a static estimate
 // suggested: 7.51 s one test per process in dev, and the runner config records
 // the same walk at 7.622 s serial against 7.768 s at eight threads, i.e. this
 // walk barely notices the parallel lane. The 20 s per-test kill is not close.
@@ -2536,7 +2536,7 @@ fn session_modulation_reproduces_curves() {
     );
     let vol_corr = pearson(&measured.vol_hour, &fp.session_profile.vol_hour);
     // SESSION_VOL_CORR_MIN of the protocol-11 spec (Brick T), inclusive.
-    // The measured curve is now a MEDIAN absolute latent return per hour -
+    // The measured curve is now a median absolute latent return per hour -
     // the robust estimator the earlier follow-up here demanded before any
     // vol_hour refit could be attempted. The RMS it replaces had infinite
     // sampling variance under the standardized t(4) innovation (infinite
@@ -2572,7 +2572,7 @@ struct Measured {
     mean_gap_s: f64,
     // The `expect` is conditional because under `hotpath` the whole struct is
     // unreachable (its two callers are the compiled-out heavy walks), so rustc
-    // reports the STRUCT and this field-level expectation goes unfulfilled -
+    // reports the struct and this field-level expectation goes unfulfilled -
     // which is itself an error. It still bites in the default shape, which is
     // the shape that gets to say a field has no reader.
     #[cfg_attr(
@@ -2605,13 +2605,13 @@ struct Measured {
     truncation_frac: f64,
 }
 
-/// `draw` counts PARENT EVENTS, not prints: at the committed
+/// `draw` counts parent events, not prints: at the committed
 /// `children_mean` a 2M-event draw emits roughly 17M raw fills.
 ///
-/// The per-EVENT series (parent timestamps, event prices, the gaps and returns
+/// The per-event series (parent timestamps, event prices, the gaps and returns
 /// derived from them) are retained in full - 2M `f64` is 16 MB apiece and the
-/// dwell block's p999 needs a sortable duration vector. The per-PRINT series
-/// are NOT: 17M timestamps plus 17M `Decimal` sizes would be most of a
+/// dwell block's p999 needs a sortable duration vector. The per-print series
+/// are not: 17M timestamps plus 17M `Decimal` sizes would be most of a
 /// gigabyte, so sizes are folded into running moments and timestamps into the
 /// two structures that actually read them - the occupied-hour set and the
 /// per-second count vector, both O(simulated seconds) rather than O(prints).
@@ -2750,13 +2750,13 @@ fn empty_hour_stats_over(first: u64, last: u64, seen: &HashSet<u64>) -> (f64, f6
     (empty as f64 / total as f64, max_run as f64)
 }
 
-/// THE SHARED DWELL FIXTURE, replacing the hand-built cases that used to sit
+/// The shared dwell fixture, replacing the hand-built cases that used to sit
 /// here. This helper measures the synthetic tape and
 /// `mogwai_lab::characterize::dwell_stats` measures the corpus, and a realism
 /// gate compares one against the other - so if the two hour-bucket conventions
 /// ever drift, the gate silently compares two different quantities and still
 /// passes. A hand-built fixture on one side cannot catch that, because it
-/// pins this implementation against ITSELF.
+/// pins this implementation against itself.
 ///
 /// `analysis/dwell_conformance.json` is run by both sides instead. The two
 /// implementations stay separate deliberately: this one streams nanoseconds
@@ -2929,10 +2929,10 @@ fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurv
             continue;
         }
         // Drop the rest of the sweep instead of emitting it, so a four-week
-        // span costs 15M ticks rather than ~130M. Safe for THIS test and no
+        // span costs 15M ticks rather than ~130M. Safe for this test and no
         // other: no child draw touches the arrival clock, the GARCH state or
         // the session curves, which are the only things measured here. It is
-        // NOT the shipped tape's realization - the skipped children would have
+        // not the shipped tape's realization - the skipped children would have
         // consumed level and size draws, so every later draw lands at a
         // different position in the RNG stream. That makes this a statistically
         // equivalent path, not a byte-identical one, which is all a curve-shape
@@ -2948,7 +2948,7 @@ fn measure_session_curves(src: &mut GeneratedSource, draw: usize) -> SessionCurv
         // measuring the final child would mix level count into this curve.
         let price = src.vol.mid;
         if let Some(prev) = prev_price {
-            // Absolute latent return, for the MEDIAN scale below. Latent
+            // Absolute latent return, for the median scale below. Latent
             // mids are continuous, so no tick-grid zero atom threatens the
             // median here (unlike observed quote mids, where the protocol-11
             // estimator must include the zero mass differently).
@@ -3030,8 +3030,8 @@ fn acf(values: &[f64], lag: usize) -> f64 {
 // commits ae42015 and cac0ff1. Two lessons from them are worth keeping in
 // front of a reader rather than in a log:
 //
-//   - A pilot at 120k events put the SHIPPED arm outside three committed
-//     ranges purely on sample size. ACF estimators need the full DRAW before
+//   - A pilot at 120k events put the shipped arm outside three committed
+//     ranges purely on sample size. ACF estimators need the full draw before
 //     any arm can be compared against a fitted band.
 //   - The first parameter grid put its optimum at two boundaries and so never
 //     bracketed; its ranking turned out to be almost pure amplitude ordering.
@@ -3040,15 +3040,15 @@ fn acf(values: &[f64], lag: usize) -> f64 {
 // ---------------------------------------------------------------------------
 // Rail sizing for the standardized candidate.
 //
-// With standardized t(4) and persistence 0.999 the SECOND moment is
+// With standardized t(4) and persistence 0.999 the second moment is
 // stationary, but the fourth is not: t(4) has infinite kurtosis, so sigma2 has
 // infinite variance and its running maximum grows without bound in the horizon.
 // "Zero hits in two million updates" therefore cannot mean "this rail never
-// binds" - it means the horizon was short. A rail is a POLICY: choose a clean
+// binds" - it means the horizon was short. A rail is a policy: choose a clean
 // calibration horizon, choose how many hits are tolerable within it, and read
 // the rail off the measured tail.
 //
-// Rails are reported as scale-free RATIOS - sigma rail over vol_scalar, return
+// Rails are reported as scale-free ratios - sigma rail over vol_scalar, return
 // rail over return RMS - so the policy survives a later change to vol_scalar,
 // and so the replacement for the `vol_scalar < 0.9 * cap` headroom rule falls
 // out as 1/ratio rather than inheriting 0.9 by inertia.
@@ -3069,7 +3069,7 @@ fn student_t_unit_scale_matches_df() {
     );
 }
 
-/// TEST-ONLY GARCH parameterization. `GarchVol` reads only `a0`, `a1`, `b1`
+/// Test-only GARCH parameterization. `GarchVol` reads only `a0`, `a1`, `b1`
 /// and its running `sigma2`, so writing those four expresses any
 /// `(a1, b1, vol_scalar)` triple. Retained after the parameter sweep was
 /// removed because the rail and envelope harnesses below still need to state
@@ -3138,16 +3138,16 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
 
     // The rails are no longer openable - `step` reads the shipped constants and
     // takes no multiplier, which is the decoupling. That is fine and in fact
-    // stronger: the SHIPPED rails were sized to sit above this process's clean
-    // tail, so THE ASSERTION INSIDE THE LOOP IS THE SIZING CLAIM, checked on
+    // stronger: the shipped rails were sized to sit above this process's clean
+    // tail, so the assertion inside the loop is the sizing claim, checked on
     // every step rather than on a top-k maximum. Callers must not restate it
     // afterwards as `sigma_tail.max() < GARCH_SIGMA_CAP`: `step` writes
-    // `sigma2 = candidate.min(cap)`, so a maximum taken over the CAPPED value
+    // `sigma2 = candidate.min(cap)`, so a maximum taken over the capped value
     // can never exceed the cap and such an assertion is dead by construction.
     // Both callers say so where the temptation is.
     //
     // The sigma tail is therefore collected from `sigma2_candidate`, the value
-    // BEFORE the cap, which is what "uncapped tail" in this function's name
+    // before the cap, which is what "uncapped tail" in this function's name
     // means. The in-loop guard makes the two equal today; collecting the
     // capped one would silently start under-reporting the tail the moment it
     // stopped being equal.
@@ -3186,7 +3186,7 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
     (sigma_tail, return_tail, rms, total)
 }
 
-// THIS IS THE REPOSITORY'S RAIL-SIZING CLAIM AND IT RUNS. It was `#[ignore]`d
+// This is the repository's rail-sizing claim and it runs. It was `#[ignore]`d
 // and in the gate profile's `skip` list under a cost heading asserting that
 // every entry there outlives the 20-second per-test hang watchdog. Measured on
 // 2026-08-18, one test per process in dev, it takes 0.43 s - so the durable
@@ -3195,7 +3195,7 @@ fn measure_uncapped_tail(over: GarchOverride, seeds: u64, horizon: u64) -> (TopK
 // rested on a test nothing had run since it was written. Neither the
 // `#[ignore]` nor the skip entry survives that measurement.
 //
-// It is also pointed at the SHIPPED constants rather than at a written-down
+// It is also pointed at the shipped constants rather than at a written-down
 // "stage-1 winner" triple that happened to equal them. A candidate frozen in a
 // test is a second opinion about the generator: re-solve `GARCH_ARCH`,
 // `GARCH_GARCH` or `VOL_SCALAR` and this would have gone on measuring the old
@@ -3269,21 +3269,21 @@ fn shipped_garch_rails_sit_above_the_clean_tail() {
     println!("headroom is DIAGNOSED, not gated: a universal vol_scalar-over-cap ratio");
     println!("would repeat the scalar_ranges mistake in another dimension.");
 
-    // The pinned invariant, post-repair: BOTH shipped rails sit above the clean
+    // The pinned invariant, post-repair: both shipped rails sit above the clean
     // process's measured excursions, so neither participates in ordinary
-    // operation. Pre-repair this read the other way round - the rails sat BELOW
+    // operation. Pre-repair this read the other way round - the rails sat below
     // the operating range, which is why the recursion spent 12.96 percent of
     // its life saturated and why the repair could not land without re-deriving
     // them.
     //
     // "Above the measured tail" is not "never hit". Standardized t(4) still has
     // infinite kurtosis, so the running maximum grows with the horizon; the
-    // honest claim is NO OBSERVED PARTICIPATION over this 16M sample.
+    // honest claim is that no participation was observed over this 16M sample.
     //
-    // BOTH HALVES OF THAT INVARIANT ARE ENFORCED IN THE LOOP, NOT HERE, and
+    // Both halves of that invariant are enforced in the loop, not here, and
     // the pair of top-k restatements that used to stand at this point is gone
     // because neither could fail. `measure_uncapped_tail` asserts
-    // `!hit_variance_cap() && !hit_feedback_clamp()` on EVERY step, so a rail
+    // `!hit_variance_cap() && !hit_feedback_clamp()` on every step, so a rail
     // sized below the clean tail aborts the run at the first offending update
     // and no later comparison against a maximum is ever reached. The sigma one
     // was dead twice over: `step` writes `sigma2 = candidate.min(cap)`, so a
@@ -3293,7 +3293,7 @@ fn shipped_garch_rails_sit_above_the_clean_tail() {
     // claim is stated once, on the guard, where it bites per-step rather than
     // per-maximum.
     //
-    // What survives here are the claims the guard does NOT make.
+    // What survives here are the claims the guard does not make.
     assert!(
         sigma_tail.max() / candidate.vol_scalar > 1.0,
         "sigma excursions should exceed the unconditional scale"
@@ -3305,26 +3305,26 @@ fn shipped_garch_rails_sit_above_the_clean_tail() {
 //
 // Three concepts are currently overloaded onto two constants:
 //
-//   1. the GARCH-STATE safety rail (caps sigma2, so it changes the recursion);
-//   2. the clean FEEDBACK-return rail (caps what re-enters the recursion);
-//   3. the absolute REALIZED-return ceiling, after session and regime scaling.
+//   1. the GARCH-state safety rail (caps sigma2, so it changes the recursion);
+//   2. the clean feedback-return rail (caps what re-enters the recursion);
+//   3. the absolute realized-return ceiling, after session and regime scaling.
 //
 // Today `clamp_mult` multiplies 1 and 2 as well as 3, so `VolStorm` does not
 // merely amplify output - it raises the GARCH state ceiling and changes every
 // subsequent recursion step. That contradicts the principle `SessionEdgeSpike`
 // already follows, of not contaminating feedback state.
 //
-// Under the decoupled design the storm is an OUTPUT envelope: rails 1 and 2
+// Under the decoupled design the storm is an output envelope: rails 1 and 2
 // stay at their clean values, so the base process is identical armed or not,
 // and `base_return * session_mult * regime_mult` is bounded by a separately
 // named realized ceiling. This measures what that ceiling has to be, because
 // multiplying the clean rail by 100 is not a derivation.
 // ---------------------------------------------------------------------------
 
-// SAME TREATMENT, SAME GROUNDS as the rail sizing above: `#[ignore]`d and
+// The same treatment, on the same grounds, as the rail sizing above: `#[ignore]`d and
 // skipped under a watchdog claim, measured at 0.20 s. It runs, and it reads the
 // shipped constants rather than the design-era candidate and the design-era
-// "proposed" rails - those literals were what the sweep was choosing BETWEEN,
+// "proposed" rails - those literals were what the sweep was choosing between,
 // and leaving them written down here after the choice landed turned the
 // instrument into a record of a decision instead of a check on it.
 #[test]
@@ -3394,13 +3394,13 @@ fn realized_return_envelope_under_regime_scaling() {
     println!();
     println!("Candidate absolute realized ceilings, and the single-event move each permits:");
     for ceiling in [4e-3_f64, 1e-2, 2.5e-2, 5e-2, 1e-1] {
-        // Occupancy is measured at the WORST case: max regime and peak session.
+        // Occupancy is measured at the worst case: max regime and peak session.
         let scale = 100.0 * session_peak;
         let rank_exceeding = (0..return_tail.values.len())
             .take_while(|i| return_tail.values[*i] * scale > ceiling)
             .count();
         // The tail collector retains a bounded number of values, so a count
-        // that reaches its capacity is CENSORED - a lower bound, not a count.
+        // that reaches its capacity is censored - a lower bound, not a count.
         // Reporting it as a count would understate how hard a low ceiling binds.
         let censored = rank_exceeding >= return_tail.keep;
         println!(
@@ -3431,9 +3431,9 @@ fn realized_return_envelope_under_regime_scaling() {
     // even without it. `CLEAN_SIGMA_RAIL` and `CLEAN_FEEDBACK_RAIL` stay named
     // above because the printed table is written in terms of them.
     //
-    // THE CLAIM THIS INSTRUMENT OWNS, and the only one the rail sizing above
-    // does not already carry: `REALIZED_RETURN_CEILING` is a PRODUCT POLICY
-    // that must be INERT in clean operation. `consts.rs` states it as "the
+    // The claim this instrument owns, and the only one the rail sizing above
+    // does not already carry: `REALIZED_RETURN_CEILING` is a product-policy
+    // decision that must be inert in clean operation. `consts.rs` states it as "the
     // unbounded realized maximum at `vol_mult` 1 is 0.82 percent" against a
     // ceiling permitting 5.13 percent. `vol_mult` 1 at the session vol peak is
     // the worst clean case, so the ceiling shaping nothing there is exactly
@@ -3454,7 +3454,7 @@ fn realized_return_envelope_under_regime_scaling() {
 // an earlier analysis reached three mutually inconsistent figures without
 // noticing. This reports each one separately and names it.
 //
-// The output schema here is deliberately the CONTRACT that the real-data
+// The output schema here is deliberately the contract that the real-data
 // experiments must match, so a Roll estimate from a venue archive can be
 // compared against the same quantity rather than against whichever number was
 // convenient.
@@ -3465,7 +3465,7 @@ fn realized_return_envelope_under_regime_scaling() {
 // flip the covariance sign outright.
 // ---------------------------------------------------------------------------
 
-/// Trailing realized-volatility horizon, in parent events, for the OBSERVABLE
+/// Trailing realized-volatility horizon, in parent events, for the observable
 /// stratification axis. Fixed here, before any result was examined, which is
 /// the point: a horizon chosen after seeing the strata is a fitted parameter
 /// wearing a methodology's clothes.
@@ -3478,22 +3478,22 @@ const VOL_STRATUM_QUANTILES: [f64; 3] = [0.25, 0.75, 0.95];
 const VOL_STRATUM_NAMES: [&str; 4] = ["calm", "middle", "stressed", "extreme"];
 
 /// Minimum covariance pairs before a cell reports an estimate. Below this the
-/// cell FAILS CLOSED: an unstable number printed without comment is worse than
+/// cell fails closed: an unstable number printed without comment is worse than
 /// a hole, because it will be read.
 const MIN_COVARIANCE_PAIRS: usize = 500;
 
 /// One Roll estimate plus the covariance behind it, so an unavailable result
-/// still says WHY.
+/// still says why.
 #[derive(Debug, Clone, Copy)]
 struct RollEstimate {
     covariance: f64,
-    /// `None` when the covariance is non-negative. Roll is then UNAVAILABLE,
+    /// `None` when the covariance is non-negative. Roll is then unavailable,
     /// which is a different statement from a spread of zero and must never be
     /// coerced into one.
     ticks: Option<f64>,
 }
 
-/// Three SAMPLING ESTIMATORS of the same underlying quantity, differing only in
+/// Three sampling estimators of the same underlying quantity, differing only in
 /// which prints they sample, plus the same-mid separation and mid-relative
 /// displacement measured at two of those sampling points.
 ///
@@ -3503,7 +3503,7 @@ struct RollEstimate {
 ///
 /// On this synthetic tape the estimators happen to order as
 /// `roll_first_child < same-mid separation < roll_last_child`. That ordering is
-/// RECORDED, not asserted: it is not a general bound. In real data either
+/// recorded, not asserted: it is not a general bound. In real data either
 /// estimator can land on either side of the quoted spread depending on side
 /// persistence, latent movement, burst grouping and within-burst book changes.
 /// Promoting an observed relationship to an invariant is how a schema stops
@@ -3522,12 +3522,12 @@ struct SpreadDecomposition {
     /// Exact configured BBO width, in integer ticks.
     configured_quoted_width_ticks: f64,
     same_mid_separation_ticks: Vec<(f64, u32)>,
-    /// Samples each burst's FIRST print. Excludes the sweep's own level walk.
+    /// Samples each burst's first print. Excludes the sweep's own level walk.
     roll_first_child: RollEstimate,
-    /// Samples each burst's LAST print. Includes the walk, and is what the
+    /// Samples each burst's last print. Includes the walk, and is what the
     /// realism gate's event series uses.
     roll_last_child: RollEstimate,
-    /// Samples every print. Retained precisely BECAUSE it fails: recording an
+    /// Samples every print. Retained precisely because it fails: recording an
     /// unavailable estimator documents why ordinary print-layer Roll cannot be
     /// used here, where dropping it would leave the question open forever.
     roll_all_prints: RollEstimate,
@@ -3553,7 +3553,7 @@ struct SpreadDecomposition {
     tick_traversal_sigma_units: f64,
 }
 
-/// Trailing realized volatility per event, from PARENT-EVENT log returns over
+/// Trailing realized volatility per event, from parent-event log returns over
 /// `TRAILING_VOL_EVENTS`. Trailing only - element `i` uses returns strictly
 /// before `i`, so no observation can see its own future. Leading elements
 /// before the horizon fills are `None` and are excluded rather than
@@ -3587,14 +3587,14 @@ fn stratum_of(vol: f64, boundaries: &[f64]) -> usize {
     boundaries.iter().filter(|b| vol >= **b).count()
 }
 
-/// Volatility per CHANGE for a parent-event series: change `k` runs from parent
-/// price `k` to `k + 1`, and the value known before it is the volatility AT
+/// Volatility per change for a parent-event series: change `k` runs from parent
+/// price `k` to `k + 1`, and the value known before it is the volatility at
 /// price `k`.
 fn parent_change_vols(vols: &[Option<f64>]) -> Vec<Option<f64>> {
     vols[..vols.len().saturating_sub(1)].to_vec()
 }
 
-/// Volatility per CHANGE for the all-print series, expressed in the SHARED
+/// Volatility per change for the all-print series, expressed in the shared
 /// parent-event currency.
 ///
 /// The horizon and the stratum boundaries are both denominated in parent
@@ -3621,17 +3621,17 @@ fn print_change_vols(parent_of_print: &[usize], vols: &[Option<f64>]) -> Vec<Opt
         .collect()
 }
 
-/// Roll over a price series restricted to one stratum. A covariance PAIR spans
+/// Roll over a price series restricted to one stratum. A covariance pair spans
 /// two consecutive changes, hence three prices, and contributes
 /// `dP_t * dP_{t-1}`.
 ///
-/// NO-LOOKAHEAD RULE, and it is load-bearing. The pair belongs to the LATER of
+/// No-lookahead rule, and it is load-bearing. The pair belongs to the later of
 /// its two changes, `dP_t`, so a boundary cannot claim a pair that straddles
 /// it - but the volatility that assigns it must be computed from information
-/// available BEFORE `dP_t`. It may include `dP_{t-1}`, matching what a
+/// available before `dP_t`. It may include `dP_{t-1}`, matching what a
 /// conditional volatility process would know.
 ///
-/// An earlier version indexed `vols` at the pair's third PRICE, whose trailing
+/// An earlier version indexed `vols` at the pair's third price, whose trailing
 /// window includes `dP_t` itself. That stratifies on one of the two terms being
 /// multiplied, and mechanically amplifies exactly the relationship the matrix
 /// exists to measure. Returns the estimate and the pair count behind it.
@@ -3646,8 +3646,8 @@ fn roll_in_stratum(
     let changes: Vec<f64> = prices.windows(2).map(|w| w[1] - w[0]).collect();
     let mut pairs: Vec<(f64, f64)> = Vec::new();
     for i in 0..changes.len().saturating_sub(1) {
-        // `change_vols` carries ONE volatility PER CHANGE, already the value
-        // known before that change. Taking it per PRICE instead forced index
+        // `change_vols` carries one volatility per change, already the value
+        // known before that change. Taking it per price instead forced index
         // arithmetic that differed between conventions and silently mixed a
         // print-denominated horizon with parent-denominated boundaries.
         let Some(vol) = change_vols.get(i + 1).copied().flatten() else {
@@ -3686,13 +3686,13 @@ fn roll_in_stratum(
 /// noticing.
 ///
 /// For price index `i` the window is `returns[i - H .. i]`, and `returns[j]`
-/// ends at price `j + 1`. So the volatility AT price `i` includes the return
-/// ARRIVING at `i` and excludes the return LEAVING it. Distinct magnitudes make
+/// ends at price `j + 1`. So the volatility at price `i` includes the return
+/// arriving at `i` and excludes the return leaving it. Distinct magnitudes make
 /// the two cases separable rather than merely plausible.
 #[test]
 fn trailing_vol_includes_the_arriving_return_and_excludes_the_leaving_one() {
     let horizon = TRAILING_VOL_EVENTS;
-    // Flat except for one large step, placed so that it is the return ARRIVING
+    // Flat except for one large step, placed so that it is the return arriving
     // at the probe index. A flat series has zero volatility, so any non-zero
     // reading can only come from that step.
     let mut prices = vec![100.0_f64; horizon + 3];
@@ -3707,7 +3707,7 @@ fn trailing_vol_includes_the_arriving_return_and_excludes_the_leaving_one() {
         "volatility at price i must INCLUDE the return arriving at i, got {at_probe}"
     );
 
-    // Same step, but now it LEAVES the probe index: everything up to the probe
+    // Same step, but now it leaves the probe index: everything up to the probe
     // is flat, so the probe must read exactly zero.
     let mut prices = vec![100.0_f64; horizon + 3];
     for p in prices.iter_mut().skip(probe + 1) {
@@ -3723,7 +3723,7 @@ fn trailing_vol_includes_the_arriving_return_and_excludes_the_leaving_one() {
 
 /// The Rust half of the shared conformance fixture.
 ///
-/// `analysis/roll_estimator.py` runs the SAME file. The two implementations are
+/// `analysis/roll_estimator.py` runs the same file. The two implementations are
 /// deliberately separate - Rust tests generator truth, Python handles archive
 /// analysis - so without this, the claim that both corpora are measured by the
 /// same estimator would rest on two implementations happening to agree. Here it
@@ -3811,8 +3811,8 @@ fn stratified_roll_matches_the_shared_conformance_fixture() {
     }
 }
 
-/// Roll's estimator over a price series, in TICKS. `2 * sqrt(-cov)` where the
-/// covariance is of consecutive PRICE CHANGES - not of returns, and not a
+/// Roll's estimator over a price series, in ticks. `2 * sqrt(-cov)` where the
+/// covariance is of consecutive price changes - not of returns, and not a
 /// normalized autocorrelation, both of which drop the scale the estimate needs.
 fn roll_estimate(prices: &[f64], tick: f64) -> RollEstimate {
     let changes: Vec<f64> = prices.windows(2).map(|w| w[1] - w[0]).collect();
@@ -3835,21 +3835,21 @@ fn roll_estimate(prices: &[f64], tick: f64) -> RollEstimate {
 /// Mean same-mid print separation and mean mid-relative displacement, in ticks,
 /// at one sampling point.
 ///
-/// NEITHER return is a quoted spread, and the earlier naming of this function
+/// Neither return is a quoted spread, and the earlier naming of this function
 /// and its locals after `quoted` and `effective` spreads was wrong: the
 /// generator constructs no `QuoteTick`, so no bid and no ask exist to be quoted.
 /// The `counterfactual_buy`/`counterfactual_sell` locals below are exactly that:
-/// where a buy and a sell WOULD print against this event's latent mid. Their
+/// where a buy and a sell would print against this event's latent mid. Their
 /// difference is a property of the print series, not a book width.
 ///
-/// The second return is `2 * sign * (price - mid)` against the LATENT mid. It
+/// The second return is `2 * sign * (price - mid)` against the latent mid. It
 /// shares its formula with the effective spread the real-data experiment
 /// computes, but not its referent: the real one is measured against an as-of
 /// joined book top that a venue actually published, and the latent mid is
 /// unobservable. Comparing the two compares a model internal against a market
 /// observable, which is legitimate only while it is stated.
 ///
-/// Negative displacements are NOT clamped. Their real-data counterpart, a
+/// Negative displacements are not clamped. Their real-data counterpart, a
 /// negative effective spread, is evidence of a stale quote, sequencing ambiguity
 /// or price improvement, and clamping would erase exactly the diagnostic that
 /// says the join is wrong.
@@ -3882,12 +3882,12 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let mut src = GeneratedSource::new(scalars.clone(), 42, 0, &fp, None);
     let tick = decimal_to_f64(scalars.modal_tick);
 
-    // BURST GROUPING RULE, and it is part of the estimator contract rather than
-    // an implementation detail. Here it is EXACT: `burst.remaining` is the
+    // The burst grouping rule, and it is part of the estimator contract rather than
+    // an implementation detail. Here it is exact: `burst.remaining` is the
     // generator's own structure, so first and last child are known without
     // inference. Real data has no such field and must approximate the grouping
-    // from equal timestamp plus aggressor side - which makes TIMESTAMP
-    // RESOLUTION part of the contract too, because a millisecond archive merges
+    // from equal timestamp plus aggressor side - which makes timestamp
+    // resolution part of the contract too, because a millisecond archive merges
     // events that a microsecond tape separates. Any comparison against this
     // schema has to state which grouping rule it used.
     let mut first_prices: Vec<f64> = Vec::with_capacity(events);
@@ -3960,7 +3960,7 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
         configured_displacement_ticks,
     );
     // The two populations of section 2.7, measured apart. A repeat parent
-    // reprints the previous price against a FROZEN book, so its displacement
+    // reprints the previous price against a frozen book, so its displacement
     // from that book's midpoint is a different quantity from a fresh parent's
     // displacement from the book just published. Pooling them reports a blend of
     // two mechanisms in the one table meant to be compared against the real-data
@@ -4021,7 +4021,7 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
     let parent_prices = last_prices;
 
     // Counterfactual same-mid separation: how far apart a buy print and a sell
-    // print would land at the SAME latent mid, as a function of grid phase. Not
+    // print would land at the same latent mid, as a function of grid phase. Not
     // an observable market statistic - a mechanism diagnostic - because no two
     // prints share a mid. `ask`/`bid` name the two sides of the counterfactual,
     // not a book: the generator publishes none.
@@ -4074,7 +4074,7 @@ fn decompose_spread(scalars: &GeneratorScalars, events: usize) -> SpreadDecompos
 /// The XBTUSD anchor re-gridded onto MNQ's quarter-point tick and price level.
 ///
 /// Shared by every diagnostic that reports on both grids, so they measure the
-/// SAME second grid by construction rather than by two copies of these five
+/// same second grid by construction rather than by two copies of these five
 /// assignments agreeing. It is not a preset: the arrival, size and session
 /// scalars stay crypto's, because the point is to vary the grid alone.
 fn mnq_shaped_grid(fp: &Fingerprint) -> GeneratorScalars {
@@ -4087,10 +4087,10 @@ fn mnq_shaped_grid(fp: &Fingerprint) -> GeneratorScalars {
     index
 }
 
-// MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
+// Measurement instrument. Its name is in the gate profile's `skip` list in
 // the workspace runner config, and has to be: the gate sets `include_ignored`
 // deliberately - that is how the socket-backed suites get covered - so
-// `#[ignore]` does not keep this out of it. Every instrument of this shape MUST
+// `#[ignore]` does not keep this out of it. Every instrument of this shape must
 // be added to that list as well. Nothing detects the omission; the symptom is
 // the full gate dying on the 20-second per-test hang watchdog, blaming a test
 // that was never meant to run there.
@@ -4205,19 +4205,19 @@ fn synthetic_spread_decomposition_at_protocol_seven() {
         );
     }
 
-    // The invariant this report exists to keep honest: Roll is UNAVAILABLE at
+    // The invariant this report exists to keep honest: Roll is unavailable at
     // the print layer, on every grid. Sweep children walk monotonically in one
-    // direction, so consecutive child price changes are POSITIVELY correlated
+    // direction, so consecutive child price changes are positively correlated
     // and the estimator's sign assumption fails outright. A harness that
     // computed it there would silently return a number from a square root of a
     // negative quantity, or worse, coerce it to zero.
     // The stratified matrix, on the grid where both parent estimators return a
-    // value. Quote age is a single column here and is NAMED rather than set to
+    // value. Quote age is a single column here and is named rather than set to
     // zero: this generator emits no quote at all, so there is no age to report,
     // and calling that "0 ms" would imply an observed transport timestamp that
     // does not exist and invite comparison against real zero-age joins, which
     // are a different thing.
-    // BOTH grids, because print dependence changes materially with
+    // Both grids, because print dependence changes materially with
     // tick_return / return_scale. Judging a real BTCUSDT result only against an
     // MNQ-shaped synthetic tape compares two different regimes and calls the
     // difference a finding.
@@ -4234,7 +4234,7 @@ fn synthetic_spread_decomposition_at_protocol_seven() {
         );
         assert!(d.accepted_repeat_frac > 0.0);
     }
-    // Nothing else is asserted. The ORDERING between the first-child and
+    // Nothing else is asserted. The ordering between the first-child and
     // last-child estimators, and their position relative to the same-mid
     // print separation,
     // are grid-dependent observations rather than invariants: in real data
@@ -4248,8 +4248,8 @@ fn synthetic_spread_decomposition_at_protocol_seven() {
 ///
 /// Without a calendar every minute is exposed, and the schema's sum-to-one
 /// contract makes the week-mean of `intensity_hour * 24 * dow_weight * 7`
-/// exactly 1.0. So the normalizer is not an approximation of that value, it IS
-/// that value, and the modulator returns a literal `1.0` rather than recomputing
+/// exactly 1.0. So the normalizer is not an approximation of that value, it is
+/// that value itself, and the modulator returns a literal `1.0` rather than recomputing
 /// it - a floating-point sum could land a few ulps away and perturb every gap in
 /// every existing operator profile, which is not something a protocol migration
 /// may do silently to configurations it was not aiming at.
@@ -4407,7 +4407,7 @@ fn every_trade_has_a_governing_quote_at_or_before_it() {
 /// share an instant by design, and the two kinds are separate streams with
 /// separate cutoffs, so a tie across them can never cut either.
 ///
-/// Walked over EVERY shipped preset rather than one river, because the property
+/// Walked over every shipped preset rather than one river, because the property
 /// is a claim about what this venue serves and a single-river witness would not
 /// notice a preset whose cadence collapses the quote stride.
 #[test]
@@ -4744,7 +4744,7 @@ fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
     let mut last: Vec<f64> = Vec::new();
     let mut prints: Vec<f64> = Vec::new();
     // Which parent event each print belongs to, so the all-print series can be
-    // stratified in the SHARED parent-event currency rather than in its own.
+    // stratified in the shared parent-event currency rather than in its own.
     let mut parent_of_print: Vec<usize> = Vec::new();
     let mut parent_index = 0_usize;
     while last.len() < 400_000 {
@@ -4765,7 +4765,7 @@ fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
     }
     first.truncate(last.len());
 
-    // Boundaries are computed ONCE, from the last-child series, and reused for
+    // Boundaries are computed once, from the last-child series, and reused for
     // every convention so the conventions stay comparable to one another.
     let vols = trailing_vol(&last);
     let boundaries = vol_boundaries(&vols);
@@ -4792,7 +4792,7 @@ fn stratified_matrix(grid_label: &str, index: &GeneratorScalars) {
         "  {:<18} {:<10} {:>12} {:>10} {:>14}",
         "convention", "stratum", "roll ticks", "pairs", "covariance"
     );
-    // Every convention is cut at the SAME boundaries, in the same parent-event
+    // Every convention is cut at the same boundaries, in the same parent-event
     // currency. The print series borrows the parent volatility rather than
     // computing its own, which is the correction: a print-denominated horizon
     // cut at parent-denominated boundaries is not the same quantity.
@@ -4891,48 +4891,48 @@ fn pearson<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
 //
 // The recursion is a textbook GARCH(1,1), and `GarchVol::new` sets
 // `a0 = vol_scalar^2 * (1 - a1 - b1)` so `vol_scalar^2` is the unconditional
-// variance. That derivation assumes a UNIT-VARIANCE innovation, and the
+// variance. That derivation assumes a unit-variance innovation, and the
 // second-moment condition it needs is `a1 * E[z^2] + b1 < 1`.
 //
-// AS SHIPPED that condition holds. `next_latent_mid` divides the raw
+// As shipped, that condition holds. `next_latent_mid` divides the raw
 // Student-t(df) by `STUDENT_T_UNIT_SCALE` before the innovation reaches the
 // recursion, so `E[z^2] = 1` and the condition is `a1 + b1` = 0.999. The first
-// arm below is that process. Its label used to say "COUNTERFACTUAL" while the
-// raw arm said "AS SHIPPED", exactly inverted, for two repairs after the
+// arm below is that process. Its label used to say `"COUNTERFACTUAL"` while the
+// raw arm said `"AS SHIPPED"`, exactly inverted, for two repairs after the
 // standardization landed - which is the shape this file keeps finding
 // elsewhere: a legible, quotable report describing a world that stopped
 // existing.
 //
-// THE SECOND ARM IS THE SAME SHIPPED PARAMETERS WITH THE STANDARDIZATION
-// SWITCHED OFF, and it is kept because it is why the standardization is
+// The second arm is the same shipped parameters with the standardization
+// switched off, and it is kept because it is why the standardization is
 // load-bearing rather than cosmetic. Unstandardized, the innovation is a raw
 // Student-t(4) of variance `df / (df - 2)` = 2, so the condition reads
 // `a1 * 2 + b1` = 1.019 at today's `a1` and `b1` - no finite stationary
 // variance, bounded only because `sigma2` is capped and the feedback return
 // clamped.
 //
-// IT IS NOT A RECONSTRUCTION OF THE PRE-STANDARDIZATION ERA and must not be
+// It is not a reconstruction of the pre-standardization era and must not be
 // labelled as one. That era ran `a1` 0.12 and `b1` 0.875, giving 1.115, at a
 // `vol_scalar` of 1e-6; `run_garch_harness` builds `GarchVol::new`, which reads
-// the SHIPPED `GARCH_ARCH` and `GARCH_GARCH` and offers no override, so no arm
+// the shipped `GARCH_ARCH` and `GARCH_GARCH` and offers no override, so no arm
 // reachable from here can be that process. An earlier repair drove this arm at
 // the era's 1e-6 and captioned it accordingly, which printed a triple that
 // never shipped in any era under a historical banner - the same defect, one
 // layer down. Reconstructing the era needs an `a1`/`b1` override hook, and
 // nothing here asks a question that would justify adding one.
 //
-// This harness measures what the recursion does, driving the SHIPPED
+// This harness measures what the recursion does, driving the shipped
 // `GarchVol::step` and `draw_student_t` rather than re-deriving them. Prices,
 // bounce, sweeps and the session envelope are bypassed on purpose: reading this
 // off emitted prices does not work, because the almost-sure two-tick bounce is
 // larger than the latent return it would have to reveal.
 //
-// WHAT IT DOES NOT COVER, so nobody reads it as covering it: the harness makes
-// its own standardization decision, so DE-STANDARDIZING PRODUCTION would leave
+// What it does not cover, so nobody reads it as covering it: the harness makes
+// its own standardization decision, so de-standardizing production would leave
 // every assertion here green. That property belongs to
 // `trace_consumes_no_draws_and_leaves_the_tape_byte_identical`, which asserts
 // `innovation_raw / innovation_std == STUDENT_T_UNIT_SCALE` against the shipped
-// walk. What this file owns is the CONSEQUENCE of the choice - stationarity,
+// walk. What this file owns is the consequence of the choice - stationarity,
 // rail occupancy and whether `VOL_SCALAR` means what it says.
 // ---------------------------------------------------------------------------
 
@@ -4946,7 +4946,7 @@ struct GarchReport {
     first_cap_hit: Option<u64>,
     mean_scale: f64,
     /// `E[sigma2]`, the quantity `GarchVol::new` intends to equal
-    /// `vol_scalar^2`. Reported alongside the mean SCALE because the two are
+    /// `vol_scalar^2`. Reported alongside the mean scale because the two are
     /// not interchangeable: sigma2 is heavily right-skewed at this
     /// persistence, so `E[sqrt(sigma2)]` sits well below `sqrt(E[sigma2])` and
     /// comparing the former against `vol_scalar` understates the fit.
@@ -4982,8 +4982,8 @@ impl GarchReport {
 
 /// Drive the shipped recursion for `total` updates after `burn_in`. When
 /// `standardize` is set the innovation is divided by `STUDENT_T_UNIT_SCALE`,
-/// which is what `next_latent_mid` does; clearing it drives the SAME shipped
-/// `a1` and `b1` with an unstandardized innovation. `a1` and `b1` are NOT
+/// which is what `next_latent_mid` does; clearing it drives the same shipped
+/// `a1` and `b1` with an unstandardized innovation. `a1` and `b1` are not
 /// overridable here - `GarchVol::new` reads them from `consts.rs` - so the
 /// cleared arm is today's parameters without the standardization, never a
 /// reconstruction of the pre-standardization era. The divisor is the shipped
@@ -5103,7 +5103,7 @@ fn print_garch_report(label: &str, vol_scalar: f64, report: &GarchReport) {
 /// GARCH repair has to re-bless this deliberately rather than quietly changing
 /// what the generator's volatility means.
 ///
-/// The UNSTANDARDIZED arm carries no gate on the venue. It is here for the
+/// The unstandardized arm carries no gate on the venue. It is here for the
 /// contrast in the printed report and for the one claim that is still live
 /// about it, which is stated on its own assertion below.
 #[test]
@@ -5111,7 +5111,7 @@ fn garch_second_moment_instrumentation() {
     const BURN_IN: u64 = 100_000;
     const UPDATES: u64 = 1_000_000;
 
-    // BOTH ARMS RUN AT `VOL_SCALAR`; see the block comment above for why the
+    // Both arms run at `VOL_SCALAR`; see the block comment above for why the
     // second one cannot be captioned as the pre-standardization era. Its two
     // assertions are scale-free, so the `vol_scalar` it is driven at reaches
     // only the printed report - which is exactly why an inaccurate one here was
@@ -5136,9 +5136,9 @@ fn garch_second_moment_instrumentation() {
          GARCH_ARCH {GARCH_ARCH} * E[z^2] + GARCH_GARCH {GARCH_GARCH} = {}",
         shipped.effective_persistence()
     );
-    // THE RAILS ARE NOT PART OF THE PROCESS AT THESE PARAMETERS, and that is
+    // The rails are not part of the process at these parameters, and that is
     // the claim most easily lost by a re-solve: a non-stationary recursion is
-    // bounded BY its rails rather than by its own dynamics, which is what the
+    // bounded by its rails rather than by its own dynamics, which is what the
     // unstandardized arm below shows at 17.19 percent cap occupancy and 1.46
     // percent feedback clamping, at these same shipped `a1` and `b1`.
     // Occupancy is asserted at zero rather than "small", because at the
@@ -5155,8 +5155,8 @@ fn garch_second_moment_instrumentation() {
         shipped.feedback_clamped,
         shipped.updates
     );
-    // `VOL_SCALAR` MEANS WHAT IT SAYS - AND THE CHECK HAS TO BE WRITTEN AROUND
-    // A 20x AMPLIFICATION, which is the whole reason this is three lines rather
+    // `VOL_SCALAR` means what it says - and the check has to be written around
+    // a twentyfold amplification, which is the whole reason this is three lines rather
     // than one.
     //
     // `GarchVol::new` intends `E[sigma2] = VOL_SCALAR^2`, setting
@@ -5164,13 +5164,13 @@ fn garch_second_moment_instrumentation() {
     // recursion is `a0 / (1 - a1 * E[z^2] - b1)`, so the intent is only
     // realized when `E[z^2]` is exactly 1. At the shipped `a1 + b1` of 0.999
     // the denominator is 0.001 and its derivative in `E[z^2]` is `-a1` = -0.02,
-    // A TWENTYFOLD AMPLIFICATION: `E[z^2]` of 0.99 gives a ratio of 0.913, and
+    // a twentyfold amplification: `E[z^2]` of 0.99 gives a ratio of 0.913, and
     // 1.01 gives 1.118. So a naive `sqrt(E[sigma2]) / VOL_SCALAR` within 10
-    // percent is NOT a 10 percent band on anything - it is a band of under
-    // plus or minus 1 percent on `E[z^2]`, TIGHTER THAN THE UNIT-VARIANCE
-    // ASSERTION ABOVE BY 25x, and it would reject values that assertion
+    // percent is not a 10 percent band on anything - it is a band of under
+    // plus or minus 1 percent on `E[z^2]`, tighter than the unit-variance
+    // assertion above by 25x, and it would reject values that assertion
     // deliberately accepts. It cannot be defended statistically either: `z` is
-    // a standardized t(4), `z^2` has INFINITE VARIANCE at df 4, so the sample
+    // a standardized t(4), `z^2` has infinite variance at df 4, so the sample
     // mean has no CLT error bar, and the persistence-0.999 recursion relaxes
     // over ~1000 steps, leaving of order 1000 effective blocks in a million.
     // A `rand_distr` bump or a burn-in change could flip that red with nothing
@@ -5178,9 +5178,9 @@ fn garch_second_moment_instrumentation() {
     // exactly that, commented as a 10 percent window; the measured 0.957 sat
     // 43 percent of the way to its lower failure edge.
     //
-    // DIVIDING THE AMPLIFICATION OUT MAKES IT WORSE, WHICH WAS WORTH MEASURING
-    // BEFORE WRITING A NUMBER DOWN. Comparing the realized `sqrt(E[sigma2])`
-    // against the stationary sd implied by the MEASURED `E[z^2]` - the
+    // Dividing the amplification out makes it worse, which was worth measuring
+    // before writing a number down. Comparing the realized `sqrt(E[sigma2])`
+    // against the stationary sd implied by the measured `E[z^2]` - the
     // amplification-corrected form, which is the obvious repair - was tried
     // over three harness seeds, 42, 7 and 1:
     //
@@ -5189,18 +5189,18 @@ fn garch_second_moment_instrumentation() {
     //        7   0.9982      0.9904            1.0085
     //        1   1.0008      0.9530            0.9455
     //
-    // The correction WIDENS the spread, 3.7 points to 7.7, because it feeds
+    // The correction widens the spread, 3.7 points to 7.7, because it feeds
     // `E[z^2]`'s own sampling noise through the same 20x amplification into the
     // target it is comparing against. The residual is not the amplification: it
     // is that `E[sigma2]` is a mean over a persistence-0.999 recursion, whose
     // relaxation time is of order 1000 steps, so a million updates carry of
-    // order a THOUSAND effective observations of a heavy-tailed quantity. On
+    // order a thousand effective observations of a heavy-tailed quantity. On
     // that evidence 0.9319 would have sat 68 percent of the way to the 10
     // percent edge - a gate one unlucky seed from red.
     //
-    // SO THE WINDOW IS WIDE - half to double - AND WHAT IT CATCHES WAS
-    // ESTABLISHED BY BITING IT rather than by taste. The ratio is close to an
-    // IDENTITY across the whole stationary interior, because `a0` is DEFINED
+    // So the window is wide - half to double - and what it catches was
+    // established by biting it rather than by taste. The ratio is close to an
+    // identity across the whole stationary interior, because `a0` is defined
     // from `a1` and `b1` to make it one: moving `b1` within that interior
     // barely moves it, so no band of any width gates `a1` and `b1` here, and
     // pretending otherwise was half of what the 10 percent version was doing.
@@ -5217,12 +5217,12 @@ fn garch_second_moment_instrumentation() {
     // And the failure mode the tight version would have added, also measured:
     // driving `b1` to 0.9799, still stationary and still green everywhere else,
     // takes the ratio to 0.685 and the amplification-corrected form to 0.474,
-    // BOTH DOWNWARD, opposite to the direction stationary theory predicts,
+    // both downward, opposite to the direction stationary theory predicts,
     // because near the pole a million updates no longer sample the stationary
     // mean at all. A 10 percent window on either form is a red gate for a
     // parameter move that broke nothing.
     //
-    // Both ratios are PRINTED so a drift within the band is still visible to a
+    // Both ratios are printed so a drift within the band is still visible to a
     // reader, which is the part a tight assertion was pretending to do.
     let stationary_var = VOL_SCALAR.powi(2) * (1.0 - GARCH_ARCH - GARCH_GARCH)
         / (1.0 - GARCH_ARCH * shipped.mean_z2 - GARCH_GARCH);
@@ -5249,7 +5249,7 @@ fn garch_second_moment_instrumentation() {
         "an unstandardized t(4) innovation has variance df/(df-2) = 2, got {}",
         unstandardized.mean_z2
     );
-    // THE ONE LIVE CLAIM THIS ARM CARRIES: at TODAY's a1 and b1 the
+    // The one live claim this arm carries: at today's a1 and b1 the
     // unstandardized condition is still above one, so the standardization is
     // what buys stationarity rather than slack in the parameters. If a future
     // re-solve turns this red it has not regressed - it has made the
@@ -5331,9 +5331,9 @@ fn the_base_mean_boundary_reproduces_the_target_on_both_sides() {
         );
         if single_preserved {
             // The floor side preserves the configured single fraction by
-            // construction. The LEGACY side just above the boundary keeps
+            // construction. The legacy side just above the boundary keeps
             // the old identity byte-for-byte, whose single fraction misses
-            // near the floor - that miss IS the preserved behavior, so it
+            // near the floor - that miss is itself the preserved behavior, so it
             // is deliberately not asserted there.
             assert!(
                 (single - single_cfg).abs() < 0.02,
@@ -5379,8 +5379,8 @@ fn floor_branch_feasibility_is_monotone_under_surge() {
 #[test]
 fn a_surge_crossing_the_floor_boundary_follows_the_branch() {
     // children_mult 6 pushes the quiet effective mean across one
-    // (1.1711 * 6 * 0.2 = 1.405) - the floor-aware branch's INTERNAL
-    // transition. The surge scales the unconditional TARGET, and the
+    // (1.1711 * 6 * 0.2 = 1.405) - the floor-aware branch's internal
+    // transition. The surge scales the unconditional target, and the
     // solve must preserve it: 1.1711 * 6 = 7.027, where the broken legacy
     // identity would not.
     let fp = Fingerprint::from_repo_json();
@@ -5393,7 +5393,7 @@ fn a_surge_crossing_the_floor_boundary_follows_the_branch() {
         (mean - target).abs() / target < 0.10,
         "surged floor-branch children_mean should track {target}, got {mean}"
     );
-    // The surge scales the MEAN target; the single-fraction target is
+    // The surge scales the mean target; the single-fraction target is
     // unconditional and the solve preserves it across the internal
     // quiet_eff transition.
     assert!(
@@ -5422,7 +5422,7 @@ fn size_log_sigma_reaches_the_draw() {
 
 #[test]
 fn the_default_sigma_is_byte_identical() {
-    // An explicit 1.15 and the serde default are the SAME configuration:
+    // An explicit 1.15 and the serde default are the same configuration:
     // the shared shape value became the default, not a refit.
     let fp = Fingerprint::from_repo_json();
     let default_scalars = GeneratorScalars::xbtusd_anchor(&fp);
@@ -5524,7 +5524,7 @@ fn an_infeasible_active_solve_refuses_by_name() {
     let err = scalars
         .validate()
         .expect_err("infeasible solve must refuse");
-    // `field` stays a BARE config-field name a consumer can match on, and the
+    // `field` stays a bare config-field name a consumer can match on, and the
     // discriminating prose lives in `detail`. Both halves are asserted: the
     // refusal is useless to an operator without the detail, and unmatchable if
     // the detail ever leaks back into the field.
@@ -5546,10 +5546,10 @@ fn an_infeasible_active_solve_refuses_by_name() {
 /// long as it did because of that. Every refusal `validate`,
 /// `validate_size_grid` and `try_new` can produce is walked here.
 ///
-/// EACH CASE ASSERTS ITS OWN REFUSAL, BY NAME. An earlier draft guarded the
+/// Each case asserts its own refusal, by name. An earlier draft guarded the
 /// walk with a `refusals.len() >= 12` floor, which is the defect this arc keeps
 /// finding: three mutations could quietly stop refusing, or start refusing on a
-/// DIFFERENT field, and the floor still held. A named expectation per case
+/// different field, and the floor still held. A named expectation per case
 /// fails on both.
 #[test]
 fn every_scalar_refusal_names_a_bare_config_field() {

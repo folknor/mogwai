@@ -88,7 +88,7 @@ pub const CONFORMANCE_BUDGET_S: f64 = 900.0;
 pub const REFINEMENT_DEPTH: u8 = 2;
 pub const REFINEMENT_CELL_CAP: usize = 600;
 pub const STAGE_A_GEN_REFINE_CAP: usize = 40;
-/// AMENDED 2026-08-09 by owner ruling, from the frozen 4.0. Brick A0
+/// Amended 2026-08-09 by owner ruling, from the frozen 4.0. Brick A0
 /// measured a WallMmpp cell at 6.322 s against that bound, so 4.0 was
 /// unmeetable by the computation it was meant to price. 7.0 is the measured
 /// price plus about a tenth for margin.
@@ -97,12 +97,12 @@ pub const STAGE_A_GEN_REFINE_CAP: usize = 40;
 /// forbids: a wall-clock budget changes no verdict. Admissibility is A1 to A4,
 /// none of which consults elapsed time, so no cell that failed passes because
 /// of this and none that passed now fails. The constants section 11 protects
-/// are the BANDS - move one of those and a different candidate survives. The
+/// are the bands themselves - move one of those and a different candidate survives. The
 /// remedy that would have been illegitimate is shortening the measured window
 /// in the exposure contract, which changes every statistic; that was refused.
 pub const STAGE_A_CELL_BUDGET_S: f64 = 7.0;
 pub const STAGE_A_GEN_CELL_BUDGET_S: f64 = 50.0;
-/// AMENDED 2026-08-09 with the above, from the frozen 28_800 (8 h). The total
+/// Amended 2026-08-09 with the above, from the frozen 28_800 (8 h). The total
 /// is cells times per-cell price, so raising the per-cell price without raising
 /// the total would have failed the run at the ceiling instead of at the probe.
 /// At 7.0 the model reads 5,376 s of kernel coarse and 950 s of family-1
@@ -141,7 +141,7 @@ impl Family {
         Self::ShotNoise,
     ];
 
-    /// The SEAM spelling, which is also the artifact's. `Debug` lowercased
+    /// The seam spelling, which is also the artifact's. `Debug` lowercased
     /// would read `eventmarkov` and could not be pasted into a preset's
     /// `[instrument.generator.arrival]` table, so every artifact key and the
     /// verdict string go through this.
@@ -333,7 +333,7 @@ pub struct SeedWalk {
     ///
     /// `serde(default)` because it postdates the cache format: a walk cached
     /// before the field existed reads back as zero rather than refusing. That
-    /// is the right failure for a WORK-SIZE counter, whose consumer is a
+    /// is the right failure for a work-size counter, whose consumer is a
     /// benchmark comparison, and it would be the wrong one for anything the
     /// A1-A4 verdicts read - so nothing reads it.
     #[serde(default)]
@@ -342,7 +342,7 @@ pub struct SeedWalk {
     /// than two parents or refused before it could.
     ///
     /// `Option` rather than a NaN sentinel, and the distinction is not
-    /// cosmetic: NaN serializes to JSON `null` and will NOT deserialize back
+    /// cosmetic: NaN serializes to JSON `null` and will never deserialize back
     /// into an `f64`, so a cached refused walk was unreadable and took the
     /// whole run down with `invalid type: null, expected f64`. A sentinel that
     /// cannot survive its own cache round trip is worse than no sentinel.
@@ -499,7 +499,7 @@ pub fn coarse_lattice(family: Family) -> Vec<LatticeCell> {
 /// centre, taken per axis rather than by indexing the flattened tensor.
 ///
 /// The flattened middle is NOT the domain centre - for `WallMmpp` it is the
-/// occupancy midpoint crossed with the FIRST rate-ratio and tau point, a
+/// occupancy midpoint crossed with the first rate-ratio and tau point alone, a
 /// corner of the grid whose price says nothing about the tensor's interior.
 /// Per axis, this reproduces brick K's `wall_mmpp` transcript point exactly
 /// and lands within one grid step of the other two.
@@ -638,7 +638,7 @@ pub struct ScreenContext {
     #[cfg(test)]
     observed: ObsContext,
     observed_marginal: CountMarginal,
-    /// The observed sides of A1(a), A2 and A3, resolved ONCE. They depend on
+    /// The observed sides of A1(a), A2 and A3, resolved exactly once. They depend on
     /// the committed 12a artifact alone, so recomputing them per cell would
     /// re-walk 22 session records for every one of roughly 1,400 cells and
     /// bill it to `STAGE_A_CELL_BUDGET_S`.
@@ -667,7 +667,7 @@ pub struct ProjectionContext {
 
 impl ScreenContext {
     pub fn open(measure_path: &Path, cache: Option<&Path>) -> LabResult<Self> {
-        // ATTRIBUTED HERE RATHER THAN AROUND THE WHOLE CALL. A caller that
+        // Attributed here, not around the whole call. A caller that
         // wrapped `open` as "opening the 12a measurement" would put that
         // sentence on every failure below it too - a broken MNQ preset, a
         // missing `analysis/fingerprint.json`, an unparseable binding - which
@@ -746,7 +746,7 @@ impl ScreenContext {
         })
     }
 
-    /// Brick A0 measures the PRICE of a cell, so it may neither read nor write
+    /// Brick A0 measures the price of a cell, so it may neither read nor write
     /// the walk cache: a warm cache would report the cost of a JSON read
     /// against `STAGE_A_CELL_BUDGET_S` and pass every family by construction.
     #[must_use]
@@ -755,7 +755,7 @@ impl ScreenContext {
         self
     }
 
-    /// A context over an OBSERVED SIDE GIVEN DIRECTLY, for the condition tests.
+    /// A context over an observed side given directly, for the condition tests.
     ///
     /// It resolves the same MNQ profile, the same gate hour set and the same
     /// three observed projections `open` resolves; only the source of the
@@ -853,10 +853,10 @@ fn cache_key(cell: &Cell, seed: u64) -> String {
 /// The one thing the projection of spec 3.3 needs from a walk: the next
 /// parent, or the refusal that ends the cell.
 ///
-/// A TRAIT RATHER THAN THE CONCRETE `ParentWalk` because the projection is the
+/// A trait, not the concrete `ParentWalk`, because the projection is the
 /// part of Stage A that has to be pinned by test - the straddling-burst,
 /// session-rotation, stalled-walk and mean-gap properties of spec section 7 are
-/// statements about the PROJECTION, not about any arrival family, and driving
+/// statements about the projection itself, not about any arrival family, and driving
 /// them through a real month-scale generator walk would price each of them in
 /// minutes. It is a `pub(crate)` seam with no command-line surface: nothing
 /// outside this module can supply a source, and the shipped driver constructs
@@ -894,14 +894,14 @@ enum ParentWalk {
 impl ParentSource for ParentWalk {
     fn next(&mut self) -> Result<ParentSummary, ScreenRefusal> {
         match self {
-            // BOTH ARMS REPORT A REFUSAL. The generator arm used to be
+            // Both arms report a refusal. The generator arm used to be
             // infallible, so a refused kernel draw reached the projection as a
             // phantom parent - the previous timestamp with zero children - and
             // the only thing that ended the walk was the stall guard, which
             // names the wrong cause. `advance_parent` now returns the fault.
             Self::Generator(source) => source.advance_parent().map_err(|fault| match fault {
                 TickFault::Arrival(refusal) => screen_refusal_from_arrival(refusal),
-                // UNREACHABLE HERE BY CONSTRUCTION rather than by assumption:
+                // Unreachable here by construction, not by assumption:
                 // an injected fault comes from the venue's control plane, and
                 // the screen drives a `GeneratedSource` directly with no venue
                 // and no control plane in the process. Named rather than
@@ -932,7 +932,7 @@ impl ParentSource for ParentWalk {
     }
 }
 
-/// A projection either finishes, refuses the CELL, or hits a defect in the
+/// A projection either finishes, refuses the cell, or hits a defect in the
 /// screen itself. Only the last aborts the run: a refused cell is a recorded
 /// A4 verdict, per spec 3.3 step 4e, not a reason to abandon the grid.
 #[derive(Debug)]
@@ -953,7 +953,7 @@ impl From<serde_json::Error> for ProjectStop {
 
 /// The open-parent tuple `(first_ts, segment_index, session_start_ns)` for a
 /// measured parent. The segment index is `GeneratedAcc`'s own, transcribed
-/// rather than re-derived from the segment's NAME: the accumulator asks whether
+/// rather than re-derived from the segment's name: the accumulator asks whether
 /// this segment opened the session.
 fn open_parent_at(parent_ts_ns: u64, offset: i32) -> Result<(u64, u8, u64), ProjectStop> {
     let seg = session_segment_at(parent_ts_ns, offset)
@@ -995,7 +995,7 @@ struct Projected {
 ///
 /// Kept here rather than derived by the caller because the only place the
 /// numbers exist is inside the projection, and the only place they can be
-/// totalled correctly is where a CACHED seed is served too - a cache hit did
+/// totalled correctly is where a cached seed is served too - a cache hit did
 /// less work this run, but the run still stands for that much work, and a
 /// comparison whose counters swung on cache state would answer nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1154,12 +1154,12 @@ fn envelope_demand_from_walks(
     }
 }
 
-/// A2's level limb, per spec 9.2: total PARENTS over total SCHEDULED EXPOSURE,
+/// A2's level limb, per spec 9.2: total parents over total scheduled exposure,
 /// each side using its own exposure.
 ///
 /// Both halves were wrong before and the pair of errors is worth stating,
 /// because either alone would have been invisible. The numerator summed the
-/// histogram OCCURRENCES - how many minutes carried each parent count - rather
+/// histogram occurrences - how many minutes carried each parent count - rather
 /// than weighting each occurrence by its parent-count key, so it counted
 /// populated minutes and called them parents. The denominator did not exist at
 /// all: the ratio was raw total over raw total. Since the observed month
@@ -1188,7 +1188,7 @@ fn amended_rate_and_zero_gates(
     cell: &Cell,
     walks: &[SeedWalk],
     evaluate_envelopes: bool,
-    // `others_admit` is A1 and A4 together: whether the gates decided OUTSIDE
+    // `others_admit` is A1 and A4 together: whether the gates decided outside
     // this function leave the cell admissible. False means no envelope here can
     // change the cell's fate, per the decision-relevant envelope amendment.
     others_admit: bool,
@@ -1328,7 +1328,7 @@ fn amended_rate_and_zero_gates(
         let mut record = EnvelopeRecord::unevaluated(cell, envelope_grid, k);
         record.evaluated = evaluated;
         record.classification = classification;
-        // The amendment requires a SKIPPED marginal gate to say why, beside
+        // The amendment requires a skipped marginal gate to say why, beside
         // its raw deviations and classification, so the artifact still
         // shows exactly where the cell stood and that nothing was spent.
         record.skip_reason = (needed && !evaluated).then(|| {
@@ -1659,7 +1659,7 @@ impl Iterator for PopulatedChildMinutes {
 /// measured mean gap. Everything family-specific is behind [`ParentSource`], so
 /// this is the whole of what the layer-1 oracle validates.
 ///
-/// A STABLE PROFILE FRAME. One call per seed walk, so the annotation costs
+/// A stable profile frame. One call per seed walk, so the annotation costs
 /// nothing and the name shows up run after run - which is the whole value of a
 /// small fixed annotation set. Nothing inside this function is annotated: the
 /// loop body runs tens of millions of times per call.
@@ -1716,7 +1716,7 @@ fn project_stream(
         if parent.parent_ts_ns >= end {
             break;
         }
-        // The PREVIOUS parent closes here, before this one's children, exactly
+        // The previous parent closes here, before this one's children, exactly
         // as `GeneratedAcc::push_quote` closes it before the quote that opens
         // the next event - so it lands in the session it ran in even when this
         // burst's first child rotates.
@@ -1748,16 +1748,16 @@ fn project_stream(
                 active.push_print(ts);
                 prints += child_count_in_minute;
             }
-            // THE PARENT OPENS ON ITS FIRST CHILD, not after its last.
+            // The parent opens on its first child, always, never after its last.
             // `GeneratedAcc::push_trade` rotates at the top and sets
-            // `open_parent` at the bottom of the SAME call, so a parent is open
+            // `open_parent` at the bottom of that same call, so a parent is open
             // from its first sided print onward; a later child of the same
-            // burst that rotates the session therefore closes THIS parent into
+            // burst that rotates the session therefore closes this exact parent into
             // the session its first child fell in. Opening it after the child
             // loop instead would leave a straddling burst's parent to be
             // written after the rotation, into the new accumulator, which trips
             // `close_open_parent`'s rotation invariant - the very defect spec
-            // 3.3's IMPLEMENTATION DECISION was written to prevent.
+            // 3.3's implementation decision was written to prevent.
             if !opened {
                 opened = true;
                 first.get_or_insert(parent.parent_ts_ns);
@@ -1802,10 +1802,10 @@ fn project_stream(
 /// populated minute at all, which is the only degenerate case section 3.5
 /// defines.
 ///
-/// AN UNDEFINED HOUR DISTANCE IS A DEFECT, NOT A WEIGHT TO REDISTRIBUTE.
+/// An undefined hour distance is always a defect, never a weight to redistribute.
 /// `wasserstein_log1p` returns `None` for exactly one empty side, which here
 /// means an hour with observed mass and no generated mass. That state is
-/// UNREACHABLE on this path: the loss is computed for admissible cells only,
+/// unreachable on this path: the loss is computed for admissible cells only,
 /// and A1 limb (a) already demands a nonzero generated count in every
 /// `(hour, bin)` whose observed share is above zero - so an hour with observed
 /// mass has generated mass, or the cell never got here. The earlier code
@@ -2236,7 +2236,7 @@ fn evaluate_cells_parallel_impl(
 
 /// A1 to A4, the loss and the reported diagnostics over walks that have already
 /// been run. Split from [`evaluate_cell`] because every condition in spec
-/// section 3.4 is a statement about a cell's per-seed PRODUCTS: a test that has
+/// section 3.4 is a statement about a cell's per-seed products: a test that has
 /// to walk a month of tape to ask whether a refused seed keeps a cell out of the
 /// loss is testing the generator, not the condition.
 ///
@@ -2482,7 +2482,7 @@ fn verdict_from_walks_legacy(
         fano_60_readings.push(mean(&fano_60));
         p99_60_readings.push(mean(&p99_60));
         // A1 is gate B2's predicate, called rather than restated: limb (a) is
-        // `count_substitution` over the SAME pooling B2 uses, limb (b) is
+        // `count_substitution` over the same pooling B2 uses, limb (b) is
         // `conditional_adequacy_bins`. A second copy here would be free to
         // drift stronger than the gate Stage A claims to be contained by -
         // the hand-rolled version this replaced judged the zero bin, which
@@ -2610,7 +2610,7 @@ pub fn budget_verdict(elapsed_s: f64, peak_rss_bytes: u64) -> Option<&'static st
 }
 
 /// A crossed ceiling, with the readings that crossed it. These two verdict
-/// strings are exit conditions of the DRIVER (spec 5.1.1) and never artifact
+/// strings are exit conditions of the driver (spec 5.1.1) and never artifact
 /// states: an over-budget run serializes nothing.
 #[derive(Debug, Clone)]
 pub struct BudgetStop {
@@ -2645,12 +2645,12 @@ pub struct BudgetGuard {
     sampler: Option<ResourceSampler>,
     scan_dir: Option<PathBuf>,
     peak_rss: u64,
-    /// TEST SEAM, and the only way the budget arithmetic can be exercised
+    /// A test seam, and the only way the budget arithmetic can be exercised
     /// without an eleven-hour run or an eight-gigabyte allocation: a scripted
     /// sequence of `(elapsed_s, rss_bytes)` boundary readings, consumed one per
     /// [`BudgetGuard::check`].
     ///
-    /// It is deliberately NOT on the command-line surface and not `pub`: it is
+    /// It is deliberately never on the command-line surface and not `pub`: it is
     /// `#[cfg(test)]`-constructed only, so no shipped code path - and no flag,
     /// env var or config key - can reach it. `--cost-probe` is a declared mode
     /// of the subcommand; this is not a mode at all.
@@ -2808,7 +2808,7 @@ pub const PARENT_COUNT_BINS: [(u32, u32); 6] = [
     (4097, u32::MAX),
 ];
 
-/// 12a section 3.3. A required bin is one whose pooled OBSERVED populated
+/// 12a section 3.3. A required bin is one whose pooled observed populated
 /// minute count reaches this floor.
 pub const MIN_MINUTES_CELL: u64 = 30;
 
@@ -2829,7 +2829,7 @@ pub fn bin_name(n: u32) -> &'static str {
     }
 }
 
-/// The per-hour distribution of the EXACT parent count over populated
+/// The per-hour distribution of the exact parent count over populated
 /// minutes, as `(count, occurrences)` pairs sorted ascending by count.
 ///
 /// Exact `n` is retained rather than binned: the six bins coarsen only the
@@ -2895,7 +2895,7 @@ pub fn bin_totals(marginal: &[(u32, u64)]) -> BTreeMap<&'static str, u64> {
 ///
 /// `log1p` is frozen by section 9.3 because parent counts span three orders of
 /// magnitude and an untransformed distance would be dominated by the busiest
-/// hour. This is a RANKING device: it never stands as evidence that the raw
+/// hour. This is a ranking device only: it never stands as evidence that the raw
 /// count distributions agree, which is A1's job.
 ///
 /// Returns zero for two empty populations and `None` if exactly one side is
@@ -3070,7 +3070,7 @@ mod tests {
     fn the_probe_cell_is_the_domain_centre_and_not_a_tensor_corner() {
         // Brick A0 prices one cell per family and its reading is the whole
         // basis of the per-cell budget ruling, so it must be an interior
-        // point. Indexing the FLATTENED coarse grid at its middle yields the
+        // point. Indexing the flattened coarse grid at its middle yields the
         // occupancy midpoint crossed with the first rate-ratio and the first
         // tau - a corner. Per axis it is brick K's transcript point.
         assert_eq!(
@@ -3368,7 +3368,7 @@ mod tests {
     fn the_screen_projection_places_a_straddling_burst_in_two_minutes() {
         // One parent, 400 children at a 1 us stride, starting 300 us before a
         // minute boundary: 300 children land in the first minute and 100 in
-        // the second. Spec 2.5 - the parent counts in the minute of its FIRST
+        // the second. Spec 2.5 - the parent counts in the minute of its first
         // child, so the second minute is populated with N = 0.
         let day = 20_000_u64;
         let boundary = day * DAY_NS + OPEN_NS + 90 * MINUTE_NS;
@@ -3479,12 +3479,12 @@ mod tests {
         // the last in-segment minute before a session boundary is 15:59. This
         // parent's first child sits there and its second lands after the open.
         //
-        // Spec 3.3 step 4: the rotation closes the OPEN PARENT before it closes
+        // Spec 3.3 step 4: the rotation always closes the open parent before it closes
         // the session, so the parent is written into the session its first
         // child fell in. Draft 1's "children then parent" order would rotate
         // first and then file a previous-session parent into the new
         // accumulator, tripping `close_open_parent`'s rotation invariant - a
-        // refusal, so a clean projection here IS the proof of the order.
+        // refusal, so a clean projection here is itself the proof of the order.
         let day = 20_000_u64;
         let open = day * DAY_NS + OPEN_NS;
         let first_child = day * DAY_NS + (15 * 60 + 59) * MINUTE_NS;
@@ -3540,10 +3540,10 @@ mod tests {
     #[test]
     fn a_child_inside_a_closed_halt_is_the_typed_cell_refusal() {
         // The 15:15 to 15:30 local halt maps to no segment. Spec 3.3 step 4b:
-        // such a child is PUSHED into the currently open session, exactly as
+        // such a child is pushed into the currently open session, exactly as
         // `GeneratedAcc::push_trade` pushes it, and `block1` refuses the minute
         // at close time if it must. A projection stricter than the shipped
-        // accumulator cannot pass the layer-1 oracle, so the pin is on WHICH
+        // accumulator cannot pass the layer-1 oracle, so the pin is on which
         // refusal comes back: the accumulator's own close-time one, naming the
         // minute, and never a `projection` A4 refusal at push time.
         let day = 20_000_u64;
@@ -3632,7 +3632,7 @@ mod tests {
             projected.realized_mean_gap_s
         );
 
-        // Fewer than two measured parents leaves the gap UNMEASURED rather
+        // Fewer than two measured parents always leaves the gap unmeasured rather
         // than substituting a number for it. The amended A4 has no mean-gap
         // limb, so it is not a refusal either.
         let mut lonely = Scripted::of(vec![(start, 1), (end + MINUTE_NS, 1)]);
@@ -3643,7 +3643,7 @@ mod tests {
 
     #[test]
     fn a_projection_gap_refuses_rather_than_dropping_a_boundary_minute() {
-        // A MEASURED parent that maps to no open segment - here, one inside the
+        // A measured parent that maps to no open segment - here, one inside the
         // halt - refuses the cell. Spec 3.3 step 4e and section 8: an
         // inconvenient boundary parent is never dropped.
         let day = 20_000_u64;
@@ -3778,7 +3778,7 @@ mod tests {
         );
     }
 
-    /// The committed OBSERVED session records, reduced to the three keys a
+    /// The committed observed session records, reduced to the three keys a
     /// ScreenSession carries. Judging hand-rolled block records would prove
     /// nothing about the shapes a real walk produces.
     fn observed_sessions() -> Vec<Value> {
@@ -3793,7 +3793,7 @@ mod tests {
             .collect()
     }
 
-    /// A `SeedWalk` whose generated side IS the observed side: every ratio is
+    /// A `SeedWalk` whose generated side is exactly the observed side: every ratio is
     /// exactly 1 and every distance exactly 0, so it is admissible by
     /// construction and each test can break one condition on purpose.
     fn perfect_walk(ctx: &ScreenContext, seed: u64, sessions: Vec<Value>) -> SeedWalk {
@@ -3901,9 +3901,9 @@ mod tests {
         assert!(!verdict.admissible);
         assert!(verdict.loss.is_none(), "an inadmissible cell is not ranked");
 
-        // Limb (b): a required FAIL_HOURS_300 bin held at 29 populated minutes
+        // Limb (b): a required `FAIL_HOURS_300` bin held at 29 populated minutes
         // fails, 30 passes. `conditional_adequacy_bins` counts pooled generated
-        // minutes against MIN_MINUTES_CELL, so the pin is on the boundary.
+        // minutes against `MIN_MINUTES_CELL`, so the pin is on the boundary.
         let required = required_bin(&ctx, &observed);
         for (minutes, expected) in [(MIN_MINUTES_CELL - 1, false), (MIN_MINUTES_CELL, true)] {
             let thinned = thin_bin_to(&observed, required.0, required.1, minutes);
@@ -3920,7 +3920,7 @@ mod tests {
     }
 
     /// The first `(hour, exact count)` in a `FAIL_HOURS_300` hour whose bin is
-    /// REQUIRED - pooled observed populated minutes at or above
+    /// required - pooled observed populated minutes at or above
     /// `MIN_MINUTES_CELL` - and whose exact count is the only one in its bin,
     /// so thinning it thins the whole bin.
     fn required_bin(ctx: &ScreenContext, observed: &[Value]) -> (u32, u32) {
@@ -3996,7 +3996,7 @@ mod tests {
     #[test]
     fn the_screen_judges_the_same_hour_set_as_gates_b6_and_b7() {
         // Spec 3.4's most consequential decision: A2 and A3 evaluate the
-        // calendar-EXPOSED hour set, exactly as the landed B6 and B7 do. A
+        // calendar-exposed hour set, exactly as the landed B6 and B7 do. A
         // screen that judged all 24 hours would be strictly stronger than the
         // gate it claims to be contained by, and would reject a cell Stage B
         // would accept - so hour 21, MNQ's daily break, must appear in no row.
@@ -4158,7 +4158,7 @@ mod tests {
             None
         );
 
-        // CASE 1, the injected clock. Three cells' worth of boundary readings,
+        // Case 1, the injected clock. Three cells' worth of boundary readings,
         // the third at the bound: the loop stops there, the fourth cell is
         // never evaluated, and no artifact is written.
         let out = Path::new("target/stage-a-wall-budget-test.json");
@@ -4187,7 +4187,7 @@ mod tests {
         assert!(!out.exists());
         assert!(!out.with_extension("json.tmp").exists());
 
-        // CASE 2, the injected RSS reading. Same shape, the ceiling crossed on
+        // Case 2, the injected RSS reading. Same shape, the ceiling crossed on
         // the second boundary. The peak is retained, so a later smaller
         // reading does not un-cross it.
         let out = Path::new("target/stage-a-rss-budget-test.json");
@@ -4232,8 +4232,8 @@ mod tests {
         // `.measured()`: the oracle drives the real projection every time. A
         // cached `SeedWalk` was produced by whatever the projection was when
         // it was written, so a cache-served run would prove the cache correct
-        // and the code untested - which is the one thing a BLOCKING gate may
-        // not do.
+        // and the code untested - which is the one thing a blocking gate must
+        // never do.
         let cache = root.join("target/stage-a-layer1-cache");
         let context = ScreenContext::open(&path, Some(&cache))
             .expect("screen context")
@@ -4262,14 +4262,14 @@ mod tests {
     }
 
     /// A2's level limb is a rate ratio, not a total ratio, and each side uses
-    /// its OWN scheduled exposure. The defect this pins: the numerator summed
+    /// its own scheduled exposure. The defect this pins: the numerator summed
     /// histogram occurrences instead of weighting them by parent count, and
     /// there was no denominator at all, so with 22 observed and 23 generated
     /// sessions the gate returned exactly 23/22 for every mechanism at every
     /// parameter point - constant, and therefore measuring nothing.
     #[test]
     fn the_a2_level_limb_is_a_rate_and_not_a_session_count() {
-        // Equal RATES over unequal session counts must give exactly 1.0.
+        // Equal rates over unequal session counts must give exactly 1.0.
         let mut observed = ScreenReduced::default();
         let mut generated = ScreenReduced::default();
         for (projection, sessions) in [(&mut observed, 22_u64), (&mut generated, 23_u64)] {
@@ -4327,10 +4327,10 @@ mod tests {
         );
     }
 
-    /// A REFUSED walk is cached like any other product, so it has to survive
+    /// A refused walk is cached like any other product, so it has to survive
     /// the round trip. It did not: `realized_mean_gap_s` was an `f64` carrying
     /// NaN for "not measured", NaN serializes to JSON `null`, and `null` will
-    /// not deserialize back into an `f64` - so the first run to read a cached
+    /// never deserialize back into an `f64` - so the first run to read a cached
     /// refusal died with `invalid type: null, expected f64` before evaluating
     /// a single cell. The field is an `Option` now and this pins it.
     #[test]
@@ -4397,7 +4397,7 @@ mod tests {
 
     /// The 2026-08-11 decision-relevant envelope amendment, at the seam where
     /// it actually bites: a cell whose A3 is past its cap cannot be admitted by
-    /// any A2 allowance, so A2's marginal envelope is NOT evaluated - and the
+    /// any A2 allowance, so A2's marginal envelope is never evaluated - and the
     /// artifact says so rather than going quiet. This is the rule that turned
     /// the census-measured 68 hours of coarse dead-cell work into zero.
     #[test]
@@ -4427,7 +4427,7 @@ mod tests {
         let mut walk = perfect_walk(&ctx, 201, dead_on_a3);
         // ...and rates lifted about 3 percent, which lands A2's shape strictly
         // between its log(1.02) base and its log(1.25) cap. Both conditions are
-        // needed: a cell dead on A3 whose A2 is INSIDE base would never have
+        // needed: a cell dead on A3 whose A2 is inside base would never have
         // asked for an envelope, so it could not show the skip.
         for counts in walk.projection.parent_counts.values_mut() {
             let lifted: std::collections::BTreeMap<u32, u64> = counts

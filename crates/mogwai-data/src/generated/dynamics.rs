@@ -21,7 +21,7 @@ use super::consts::{
 
 /// The child-count mixture of one parent sweep: with probability `q` exactly
 /// one raw fill, otherwise a Geometric on {1, 2, ...} with mean `m`. Neither is
-/// a fitted knob - both are solved in closed form from the two MEASURED
+/// a fitted knob - both are solved in closed form from the two measured
 /// statistics `children_mean` and `children_single_frac`.
 #[derive(Clone)]
 pub struct SweepShape {
@@ -47,7 +47,7 @@ impl SweepShape {
     /// mean is 1.70, so the clamp never binds on the shipped tape.
     ///
     /// Caching the `children_mean - 1.0` denominator across calls was proposed
-    /// in the 2026-08 hunt and MEASURED NO IMPROVEMENT - the caller rescales the
+    /// in the 2026-08 hunt and measured to show no improvement - the caller rescales the
     /// mean per sweep, so the cache would miss on nearly every call. Do not
     /// re-propose it without a measurement naming the decision it changes.
     /// `pub` rather than `pub(super)` because the amendment-only transcript
@@ -77,7 +77,7 @@ impl SweepShape {
     ///
     /// `truncated` counts draws clipped by `CHILD_CAP`, because a clipped draw
     /// is indistinguishable from one that legitimately landed on the cap once it
-    /// has been clipped, and the realism gate asserts a truncation FRACTION.
+    /// has been clipped, and the realism gate asserts a truncation fraction.
     pub(super) fn next_count(&mut self, rng: &mut ChaCha12Rng) -> u32 {
         self.drawn += 1;
         if rng.random::<f64>() < self.q {
@@ -130,7 +130,7 @@ impl SweepBurst {
 
 /// The two-state Markov-modulated Weibull arrival clock that replaced the ACD
 /// block (see the head of `consts.rs` for the evidence that forced the swap).
-/// Each parent gap is an exponential-family draw scaled by the CURRENT state's
+/// Each parent gap is an exponential-family draw scaled by the current state's
 /// mean; the state then switches with the stored probabilities, whose
 /// stationary quiet occupancy is `ARRIVAL_QUIET_FRACTION`.
 #[derive(Clone)]
@@ -139,7 +139,7 @@ pub(super) struct ArrivalClock {
     pub(super) quiet_mean_s: f64,
     pub(super) quiet_to_active: f64,
     pub(super) active_to_quiet: f64,
-    /// The state the NEXT gap will be drawn from.
+    /// The state the next gap will be drawn from.
     pub(super) quiet: bool,
     /// The state the gap just drawn came from. Sweep size is conditioned on
     /// this, not on `quiet`, so the fat sweeps land on the short gaps rather
@@ -187,12 +187,12 @@ impl GarchVol {
     /// a caller might need to observe.
     ///
     /// Factored out of `next_latent_mid` so the instrumentation harness drives
-    /// the SHIPPED recursion instead of a re-derivation of it. A harness that
+    /// the shipped recursion instead of a re-derivation of it. A harness that
     /// re-implements the arithmetic can agree with a comment while disagreeing
     /// with the code, which is the failure mode this whole investigation is
     /// about.
     ///
-    /// `innovation` must already be STANDARDIZED to unit variance - the `a0`
+    /// `innovation` must already be standardized to unit variance - the `a0`
     /// derivation in `new` assumes it. Neither rail here takes a regime
     /// multiplier: a divergence is an output envelope, and letting it lift the
     /// state ceiling would change every subsequent recursion step rather than
@@ -218,7 +218,7 @@ impl GarchVol {
     }
 }
 
-/// One RAW, unstandardized Student-t innovation, drawn in the order the walk
+/// One raw, unstandardized Student-t innovation, drawn in the order the walk
 /// draws it: normal first, chi-squared second. Its variance is
 /// `df / (df - 2)`, not 1 - callers feeding the GARCH recursion must divide by
 /// [`super::consts::STUDENT_T_UNIT_SCALE`] first, which
@@ -239,16 +239,16 @@ pub(super) fn draw_student_t(
 // The former `draw_standardized_innovation` wrapper is inlined at its one
 // call site in `next_latent_mid`: the walk draws raw via `draw_student_t`
 // and divides by `STUDENT_T_UNIT_SCALE` in two named steps, numerically
-// identical, so the observation-only trace can carry BOTH innovations
+// identical, so the observation-only trace can carry both innovations
 // without a second draw. `GarchVol::new`'s `a0` derivation remains correct
 // only against the standardized form.
 
 /// Everything one call to [`GarchVol::step`] computed.
 ///
-/// `garch_scale` is `sqrt(sigma2)`, a SCALE parameter - it is NOT the
+/// `garch_scale` is `sqrt(sigma2)`, a scale parameter - it is not the
 /// conditional standard deviation of the return. The innovation is an
 /// unstandardized Student-t whose variance is `df / (df - 2)`, so the
-/// unclipped conditional SD is `garch_scale * sqrt(df / (df - 2))`. Keeping
+/// unclipped conditional standard deviation is `garch_scale * sqrt(df / (df - 2))`. Keeping
 /// both names present is deliberate: conflating them is what hid the
 /// second-moment problem this struct exists to measure.
 #[derive(Debug, Clone, Copy)]
@@ -259,7 +259,7 @@ pub(super) fn draw_student_t(
               what keeps the harness on the shipped recursion rather than a copy"
 )]
 pub(super) struct GarchStep {
-    /// Recursion output BEFORE the variance cap is applied.
+    /// Recursion output before the variance cap is applied.
     pub(super) sigma2_candidate: f64,
     /// Recursion output after the cap; what the next step recurses on.
     pub(super) sigma2: f64,
@@ -298,8 +298,8 @@ pub(super) struct BounceState {
     pub(super) high_regime: bool,
     /// Same-direction on-grid drift, in ticks, applied on top of the latent mid
     /// in `next_price`. `next_drift` steps it by one tick inside the high
-    /// regime, exactly as before the raw-fill cadence rewrite, but it is NO
-    /// LONGER an unbounded accumulation: `GeneratedSource::next_child` RE-SETS
+    /// regime, exactly as before the raw-fill cadence rewrite, but it is no
+    /// longer an unbounded accumulation: `GeneratedSource::next_child` resets
     /// it at the end of every parent sweep to `DRIFT_RECENTER_FRAC` of the
     /// residual between the sweep's last printed level and the latent mid. The
     /// long-run un-tethering the print-layer generator documented here is

@@ -75,7 +75,7 @@ async fn subscribed_data_client(
     client.start().expect("start grabs sink");
     client.connect().await.expect("connect opens transports");
     subscribe(&mut client);
-    // THE SUBSCRIPTION IS RECORDED, so the tape may flow. Released here rather
+    // The subscription is now recorded, so the tape may flow. Released here rather
     // than waited out by the stub, because the subscription never crosses the
     // wire and nothing on the venue side can see it (`common::PushGate`).
     state.push_gate.open();
@@ -160,14 +160,14 @@ async fn next_trade(rx: &mut UnboundedReceiver<DataEvent>) -> nautilus_model::da
 /// so "the havoc/stub suppressed everything" tests must tolerate it while
 /// still failing on any trade, bar, or quote that leaks through.
 ///
-/// THE WINDOW DOES NOT OPEN UNTIL THE STUB HAS SPOKEN, and that is the
+/// The window does not open until the stub has spoken, and that is the
 /// difference between "the client suppressed the tape" and "the tape was never
 /// sent". A window timed from the caller's own line races the stub's push task;
-/// expiring before the first frame reached the wire is a PASS that observed
+/// expiring before the first frame reached the wire is a pass that observed
 /// nothing, which is this arc's signature defect wearing a negative
 /// assertion's costume. `ws_first_frame_at` is stamped strictly before the
 /// first send, so waiting for it makes the silence afterwards evidence. The
-/// wait is bounded and FAILS rather than falling through, because a stub that
+/// wait is bounded and fails outright rather than falling through, because a stub that
 /// never pushed is the case the window cannot judge.
 async fn assert_only_instrument_prologue(
     state: &StubState,
@@ -212,7 +212,7 @@ async fn assert_only_instrument_prologue(
 async fn wait_for_at_least(count: &AtomicUsize, target: usize, timeout: Duration) -> usize {
     let deadline = Instant::now() + timeout;
     loop {
-        // THE GATE SPEAKS FIRST, on every poll helper in this file: a leg that
+        // The gate speaks first, on every poll helper in this file: a leg that
         // gave up waiting for `push_gate` sent no tape, and a counter that then
         // fails to move - or an absence that then passes - is that omission's
         // symptom rather than a finding about the client. Free unless a stall
@@ -352,7 +352,7 @@ async fn ships_venue_havoc() {
         conn: ConnHavoc::default(),
     };
 
-    // An exec client with no event sink is DEAF - nautilus's emitter drops
+    // An exec client with no event sink is deaf - nautilus's emitter drops
     // every order event with a log line and no error - so `connect()` refuses
     // one outright (AE20). This test cares only about the HTTP control leg,
     // but it still has to be a client that could hear an answer; hold the
@@ -428,11 +428,11 @@ async fn ships_venue_havoc() {
         .await
         .expect("data connect does not ship");
 
-    // DRAINED TO A DEADLINE, not read on the next line. The count is written by
+    // Drained to a deadline, not read on the next line. The count is written by
     // the stub's handler tasks, so an immediate read cannot distinguish "the
     // data client shipped nothing" from "the data client's POST has not landed
     // yet" - a regression shipping divergences asynchronously would pass. The
-    // assertion is that the count STAYS 2 for a window, which is the same
+    // assertion is that the count stays at 2 for a window, which is the same
     // discipline `an_order_list_reaches_the_wire_as_linked_legs` uses.
     let deadline = Instant::now() + Duration::from_millis(400);
     while Instant::now() < deadline {
@@ -460,8 +460,8 @@ async fn havoc_latency_delays_inbound_event() {
         data_nanos: 30_000_000,
         ..HavocLatency::default()
     };
-    // THE BOUND IS THE COMPOSED DELAY, DERIVED RATHER THAN WRITTEN DOWN. It read
-    // 50 ms - the ARMED half alone - which under-stated the contract by the
+    // The bound is the composed delay, derived rather than written down. It read
+    // 50 ms - the armed half alone - which under-stated the contract by the
     // always-on 30 ms baseline and left the bite margin at ~20 ms: zeroing the
     // armed latency, the injection that proves this test alive, still delivered
     // at ~31.7 ms and cleared 50. Stating the sum the client actually owes moves
@@ -478,7 +478,7 @@ async fn havoc_latency_delays_inbound_event() {
         ..InboundHavoc::default()
     });
 
-    // THE CLOCK STARTS AT THE STUB'S SEND, not at `connect()`. Measuring from
+    // The clock starts at the stub's send, not at `connect()`. Measuring from
     // the return of connect/subscribe charges the client for everything the stub
     // does between the upgrade and the push, and the harness does a good deal
     // there - so with `HavocLatency` zeroed the assertion still passed, satisfied
@@ -528,7 +528,7 @@ async fn havoc_drop_prob_one_drops_all() {
 
     // Panics if any of the five dropped trades reaches the sink; only the
     // connect-time instrument prologue may arrive. The helper establishes that
-    // the stub SENT before it starts scoring the silence.
+    // the stub sent before it starts scoring the silence.
     assert_only_instrument_prologue(&state, &mut rx, Duration::from_millis(400)).await;
 }
 
@@ -626,7 +626,7 @@ async fn havoc_reorder_swaps_adjacent() {
     );
 }
 
-/// The `close_after_trades` stub serves its batch ONCE, and the reconnect that
+/// The `close_after_trades` stub serves its batch once, and the reconnect that
 /// its own close provokes gets a live, silent socket rather than the batch
 /// again.
 ///
@@ -637,7 +637,7 @@ async fn havoc_reorder_swaps_adjacent() {
 /// as an unrelated-looking flake in whatever else shares the box. The reorder
 /// test above cannot see it: it stops reading after three trades.
 ///
-/// THE HANDSHAKE COUNT IS NOT DECORATION. Without a re-dial there is nothing to
+/// The handshake count is not decoration. Without a re-dial there is nothing to
 /// replay and the trade assertion below would pass for free, so the reconnect is
 /// established first and the silence asserted after it.
 #[tokio::test(flavor = "current_thread")]
@@ -673,10 +673,10 @@ async fn a_close_after_trades_leg_does_not_replay_its_batch_on_the_reconnect() {
     );
 }
 
-/// A client bound to a run refuses an address serving a DIFFERENT run, and says
+/// A client bound to a run refuses an address serving a different run, and says
 /// so in one named line rather than dying as a generic connect failure.
 ///
-/// The exposure this closes: the venue's port is ephemeral and is freed BEFORE
+/// The exposure this closes: the venue's port is ephemeral and is freed before
 /// the process exits - it stops accepting, then drains for up to the shutdown
 /// grace - so an address can be reused while a consumer watching for child exit
 /// still sees a live child. A client that only knows where to dial cannot tell
@@ -709,41 +709,41 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
     client.start().expect("start grabs the data-event sink");
     // Refused, so the client never reports connected and `connect` spends its
     // whole readiness bound waiting for something that cannot arrive. The
-    // DISTINCT signal is the named `venue identity mismatch` error line the loop
+    // distinct signal is the named `venue identity mismatch` error line the loop
     // logs before returning; at this API the outcome is simply that the client
     // never comes up, which is the correct end state either way.
     //
-    // BOUNDED, BECAUSE `wait_connected`'s FIVE SECONDS ARE ON THIS TEST'S
-    // PASSING PATH, NOT ITS FAILING ONE. Readiness never arrives here, so the
-    // internal deadline WAS the runtime and this one test was 5.0 s of a 15.6 s
+    // Bounded, because `wait_connected`'s five seconds are on this test's
+    // passing path, not its failing one. Readiness never arrives here, so the
+    // internal deadline was the runtime and this one test was 5.0 s of a 15.6 s
     // serial sweep - the same shape `conn_reconnect_respects_max_attempts` was
     // repaired for. Everything the refusal needs is loopback and complete in
     // single-digit milliseconds: one dial, one `/health` probe, one classify.
     //
-    // THE BOUND IS COUPLED TO THE STUB'S `/clock` DEFAULT, AND THAT COUPLING IS
-    // INVISIBLE FROM HERE, so it is written down. `connect()` does the clock
-    // fetch, then seeds instruments, then spawns the pump, and only THEN spawns
+    // The bound is coupled to the stub's `/clock` default, and that coupling is
+    // invisible from here, so it is written down. `connect()` does the clock
+    // fetch, then seeds instruments, then spawns the pump, and only then spawns
     // the reader that issues the `/health` probe the poll below waits on. When
     // the stub's default clock body was the undecodable catch-all, that prefix
     // alone was ~400 ms of retry ladder and this bound had ~100 ms of margin;
-    // the default now serves a decodable envelope, which is the ONLY reason the
-    // headroom is two orders of magnitude. ARMING `fail_clock` IN THIS FIXTURE,
-    // OR LENGTHENING THE LADDER, PUTS THE PREFIX BACK OVER THE BOUND - and this
+    // the default now serves a decodable envelope, which is the only reason the
+    // headroom is two orders of magnitude. Arming `fail_clock` in this fixture,
+    // or lengthening the ladder, puts the prefix back over the bound - and this
     // test would then fail on `health_hits` never reaching one, reporting a
     // refusal defect that is not there. Raise the bound with the ladder, or
     // derive it from `CLOCK_FETCH_MAX_ATTEMPTS`.
     //
-    // CANCELLING `connect()` MID-FLIGHT SKIPS ITS OWN CLEANUP - `abort_tasks`
+    // Cancelling `connect()` mid-flight skips its own cleanup - `abort_tasks`
     // and `retire_connected_flag` never run, so the pump, the reader and the
     // `delivery_ready` sender are dropped rather than retired. That is the
-    // guard-scope shape AGENTS.md flags, and TERMINALITY IS WHAT MAKES IT SAFE
-    // HERE: a venue-identity mismatch is terminal, so the lifecycle loop returns
+    // guard-scope shape AGENTS.md flags, and terminality is what makes it safe
+    // here: a venue-identity mismatch is terminal, so the lifecycle loop returns
     // and nothing restarts to race the assertions below. On any fixture whose
     // failure is retryable this cancellation would leave a live reconnect loop
     // running under the assertions.
     drop(tokio::time::timeout(Duration::from_millis(500), client.connect()).await);
 
-    // The probe was ASKED, polled rather than assumed: with the connect bounded
+    // The probe was asked, polled rather than assumed: with the connect bounded
     // above, "not refused yet" and "never probed" are otherwise the same
     // silence, and an assertion on the flag alone would then be reading a
     // client that had not got round to deciding.
@@ -753,26 +753,26 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
         "the client must have probed /health to judge the run at all; saw {probes}"
     );
 
-    // THIS `is_disconnected()` IS LIVE, and it is the ONLY assertion here that
+    // This `is_disconnected()` is live, and it is the only assertion here that
     // catches the defect - which is the opposite of what it looks like, so it is
     // written down rather than left to be re-derived. The flag is `!connected`,
     // it starts false, and `lifecycle` stores false on every failed dial, so on
-    // a fixture that REFUSES THE UPGRADE it reads "disconnected" from t=0 and
+    // a fixture that refuses the upgrade it reads "disconnected" from t=0 and
     // any assertion on it is vacuous - that is why it was removed twice from
     // `conn_reconnect_respects_max_attempts`, and a test-hunt report proposed
     // removing it here on the same reasoning. It does not transfer. This stub
-    // serves a perfectly good websocket; the refusal happens AFTER the dial
+    // serves a perfectly good websocket; the refusal happens after the dial
     // succeeds, in `verify_run_identity`, and the very next statement on the
     // non-refusing path is `connected.store(true)`. So a client that stops
     // refusing reports connected here, and the flag discriminates.
     //
     // Bite-checked as a text edit: making `IdentityOutcome::Mismatch` return
-    // `Ok(())` fails THIS assertion by its own message. The `handshakes` bound
+    // `Ok(())` fails this assertion by its own message. The `handshakes` bound
     // below does not move - one dial either way - so deleting this would have
     // left the whole refusal unpinned.
     //
-    // HELD AS A WINDOW, NOT SNAPSHOTTED, because the gate above is `health_hits`
-    // and the stub increments that when it SERVES `/health` - before the client
+    // Held as a window, not snapshotted, because the gate above is `health_hits`
+    // and the stub increments that when it serves `/health` - before the client
     // has received the response, classified it and reached the store. A single
     // read the instant the counter moves therefore has a real if narrow window
     // in which a NON-refusing client is still false, which would pass this
@@ -796,28 +796,28 @@ async fn a_venue_serving_another_run_is_refused_terminally() {
     );
 }
 
-/// THE PORT-REUSE QUESTION, ANSWERED - and the answer is narrower than the
+/// The port-reuse question, answered - and the answer is narrower than the
 /// question assumed. An external QA pass showed the adapter dials a dead
 /// venue's address and that a stranger holding the reused port accepts the
 /// connection, but their stranger was a bare TCP listener that accepted and
 /// closed, so nothing past the dial was ever demonstrated.
 ///
-/// The stranger here speaks the wire. With NO `expected_run_seed` the client
-/// dials blind and establishes a LIVE PASSENGER against a venue serving an
+/// The stranger here speaks the wire. With no `expected_run_seed` at all the client
+/// dials blind and establishes a live passenger against a venue serving an
 /// entirely different run, and nothing notices. That is the cost of the blind
 /// default, now measured rather than assumed: not a dial that fails fast, but a
 /// live client consuming a stranger's market data as though it were its own
 /// venue's - which silently corrupts a forward run rather than failing it.
 ///
-/// THE DISCLOSURE HALF IS NOW LIVE, and this test is where it was reserved to
+/// The disclosure half is now live, and this test is where it was reserved to
 /// be asserted. The original framing said the account id could not be "stamped
 /// onto the stranger's state" because the adapter disclosed none - its `/ws`
 /// query carried only an optional `symbol` and the id was a nautilus-side
 /// label. That stopped being true when the adapter started naming its ledger,
 /// which it must, or every worker attached to a shared venue trades one book.
 ///
-/// So the exposure of a blind dial is now what the client REVEALS as well as
-/// what it consumes: dialling a stranger OPENS AN ACCOUNT THERE under this
+/// So the exposure of a blind dial is now what the client reveals as well as
+/// what it consumes: dialling a stranger opens an account there under this
 /// run's id, and trades it. That does not change the remedy - `expected_run_seed`
 /// is what makes a blind dial impossible, and it is set by `for_run`, which is
 /// the constructor a launched or attached venue always has the record for - but
@@ -848,9 +848,9 @@ async fn dialing_blind_establishes_a_full_passenger_with_a_stranger() {
     client.start().expect("start grabs the data-event sink");
     client.connect().await.expect("connect is spawned");
 
-    // THE UPGRADE RECORD IS WRITTEN BY THE STUB'S HANDLER TASK, so it is polled
+    // The upgrade record is written by the stub's handler task, so it is polled
     // for rather than read on the next line: silence from a background recorder
-    // means "nothing recorded YET", and a fixed sleep only guesses how long yet
+    // means "nothing recorded yet", and a fixed sleep only guesses how long yet
     // lasts. On the passing path the poll returns on its first look, because
     // `serve_ws` pushes the request line before it writes the upgrade bytes and
     // `connect` cannot have returned connected before that; the two seconds are
@@ -860,13 +860,13 @@ async fn dialing_blind_establishes_a_full_passenger_with_a_stranger() {
         !requests.is_empty(),
         "the stranger completed at least one upgrade"
     );
-    // A LIVE PASSENGER, not an upgrade that completes and then dies. THIS IS A
-    // WINDOW, NOT A SNAPSHOT, and that is what the deleted `sleep(600ms)` was
-    // buying: `ws_requests` is pushed at the TOP of `serve_ws`, before the
+    // A live passenger, not an upgrade that completes and then dies. This is a
+    // window, not a snapshot, and that is what the deleted `sleep(600ms)` was
+    // buying: `ws_requests` is pushed at the top of `serve_ws`, before the
     // upgrade bytes are even written, and `connect` returns as soon as the
     // client reports connected - so a stranger that completes the handshake and
     // immediately drops the socket satisfies both of the checks above. The
-    // passenger has to be observed SURVIVING, which is the stub's own
+    // passenger has to be observed surviving, which is the stub's own
     // `active_ws` (decremented by the handler's drop guard) plus the client not
     // having fallen back into its reconnect loop.
     let held = Instant::now() + Duration::from_millis(200);
@@ -882,9 +882,9 @@ async fn dialing_blind_establishes_a_full_passenger_with_a_stranger() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    // The disclosure half, pinned as the POSITIVE it now is: the upgrade names
+    // The disclosure half, pinned as the positive claim it now is: the upgrade names
     // this run's ledger, so a blind dial opens that account on a stranger's
-    // venue. Asserted on the CONFIGURED id rather than on the substring
+    // venue. Asserted on the configured id rather than on the substring
     // `account`, so a future query key that merely contains the word cannot
     // stand in for the disclosure this is measuring.
     assert!(
@@ -895,15 +895,15 @@ async fn dialing_blind_establishes_a_full_passenger_with_a_stranger() {
     );
 }
 
-/// An identity check the venue cannot answer is NOT a mismatch. A probe fails
+/// An identity check the venue cannot answer is never a mismatch. A probe fails
 /// for the same transport reasons a socket does, and refusing on that would turn
 /// a blip into a dead client - so a venue that cannot answer is used, not judged.
 ///
-/// THE FIXTURE HAS TO EXCLUDE THE ANSWERABLE CASE, and it did not: the stub
+/// The fixture has to exclude the answerable case, and it did not: the stub
 /// served a perfectly good `/health` naming the run the client expected, which
 /// is the plain matching-identity path. Turning `verify_run_identity` into a
 /// hard refusal on `Unreachable` left this test green, and left the whole
-/// refused-to-refuse BEHAVIOUR with no coverage anywhere - the pure-unit
+/// refused-to-refuse behaviour with no coverage anywhere - the pure-unit
 /// classifier test pins the sorting, not what the connection loop does with it.
 /// So the venue here answers `500`: probed, unresolvable, and used regardless.
 #[tokio::test(flavor = "current_thread")]
@@ -911,7 +911,7 @@ async fn dialing_blind_establishes_a_full_passenger_with_a_stranger() {
 async fn an_unanswerable_identity_probe_does_not_refuse() {
     let state = Arc::new(StubState::default());
     // The run this client expects - set so that a stub which ever starts
-    // answering again would answer FAVOURABLY, and this test would then be
+    // answering again would answer favourably, and this test would then be
     // pinning the wrong branch loudly rather than passing quietly.
     state.run_seed.store(7, Ordering::Relaxed);
     // ...but it does not answer. The probe is made and cannot be resolved.
@@ -932,17 +932,17 @@ async fn an_unanswerable_identity_probe_does_not_refuse() {
     let mut client =
         MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
     client.start().expect("start grabs the data-event sink");
-    // The connect result is DROPPED rather than unwrapped, so a client that
+    // The connect result is dropped rather than unwrapped, so a client that
     // wrongly refuses this venue fails on the property below instead of on a
     // generic "connect timed out" from the helper - the refusal path never
     // reports connected, and its message would name the socket, not the check.
     drop(client.connect().await);
 
-    // The probe was ASKED before anything is concluded from the client not
+    // The probe was asked before anything is concluded from the client not
     // having refused: a client that skipped the check entirely would satisfy
     // the assertion below for free, which is the vacuity this test carried.
     //
-    // POLLED, NOT SLEPT FOR. `health_hits` is written by the stub's handler
+    // Polled, not slept for. `health_hits` is written by the stub's handler
     // task, so an empty count means "not recorded yet" as readily as "never
     // asked"; the two-second wait is the failure deadline, not the success
     // path, and a client that really skips the probe now fails in two seconds
@@ -965,8 +965,8 @@ async fn conn_reconnect_respects_max_attempts() {
     // cap the client must dial exactly three times - one initial plus two
     // retries - and then stop.
     //
-    // "STOPPED" IS ASSERTED AS THE ABSENCE OF A FOURTH DIAL, and deliberately
-    // not as `is_disconnected()`. That flag is `!connected`, it starts FALSE,
+    // "Stopped" is asserted as the absence of a fourth dial, and deliberately
+    // not as `is_disconnected()`. That flag is `!connected`, it starts false,
     // and `lifecycle` stores `false` on every failed dial - so it reads
     // "disconnected" from the first instant of the test, long before the cap is
     // reached, and any assertion built on it passes whatever the client does.
@@ -1001,14 +1001,14 @@ async fn conn_reconnect_respects_max_attempts() {
     client.start().expect("start grabs the data-event sink");
     // The dials all fail, so the loop exhausts the cap and the connect helper's
     // readiness wait never succeeds; bound the await rather than block on it.
-    // THE BOUND IS A FAILURE DEADLINE, NOT A BUDGET THIS TEST SPENDS - it used
+    // The bound is a failure deadline, not a budget this test spends - it used
     // to be two seconds, and since readiness never arrives the test paid every
     // one of them on the passing path. The ladder here is three loopback dials
     // and two 30 ms backoffs, so a client that is going to give up has given up
     // an order of magnitude inside this.
     drop(tokio::time::timeout(Duration::from_secs(1), client.connect()).await);
 
-    // THE LOWER BOUND IS POLLED, NOT INHERITED FROM THE TIMEOUT ABOVE. The
+    // The lower bound is polled, not inherited from the timeout above. The
     // ladder in front of the third dial is a `/clock` fetch with its own retry
     // sleeps, an instrument seed, three loopback dials and two 30 ms backoffs;
     // if that overruns the connect bound then the negative window below opens
@@ -1020,8 +1020,8 @@ async fn conn_reconnect_respects_max_attempts() {
         dials >= 3,
         "a three-attempt cap dials three times: initial plus two retries; saw {dials}"
     );
-    // THE WINDOW IS A NEGATIVE ASSERTION and stays: the property is that no
-    // FOURTH dial ever lands, and the only way to observe an event that must
+    // The window is a negative assertion and stays: the property is that no
+    // fourth dial ever lands, and the only way to observe an event that must
     // not happen is to watch for a while. What changed is the count it holds.
     //
     // The old `(3..=4)` tolerance made the window vacuous against the defect it
@@ -1029,7 +1029,7 @@ async fn conn_reconnect_respects_max_attempts() {
     // arriving at 10 ms passed too, so the wait bought nothing. Three is exact
     // rather than tolerant because the ladder is: `exhausted(0)` is false, the
     // dial fails, `backoff_or_exhausted` bumps to 1 and 2 and returns true at
-    // 3, and every dial is counted by the stub BEFORE it drops the socket the
+    // 3, and every dial is counted by the stub before it drops the socket the
     // client is waiting on. There is no scheduling order in which a fourth is
     // legal, so tolerating one only hid it.
     let window = Instant::now() + Duration::from_millis(300);
@@ -1171,7 +1171,7 @@ async fn divergence_duplicate_fill_forwards_both_wire_events() {
     // A `DuplicateNextFill` divergence emits the same OrderFilled (same
     // trade_id) twice. Per the A.1 contract, the adapter's reconciliation mirror
     // dedups the fill by trade_id (so filled_qty is not double-counted), but the
-    // duplicate wire event is STILL forwarded downstream - that is the intended
+    // duplicate wire event is still forwarded downstream regardless - that is the intended
     // divergence a host's classify layer must see. So two identical Filled
     // events must reach the sink. (The mirror's internal dedup is not observable
     // from the egress sink; it is covered by the client.rs unit tests. This test
@@ -1219,7 +1219,7 @@ async fn divergence_duplicate_fill_forwards_both_wire_events() {
 async fn divergence_dropped_account_update_leaves_fill_without_snapshot() {
     // `DropNextAccountUpdate` swallows the account-state snapshot that would
     // normally follow a fill. The stub models the result: it pushes the fill but
-    // NO AccountState. The adapter must forward the fill and emit no Account
+    // no AccountState at all. The adapter must forward the fill and emit no Account
     // event - the deliberate account drift the divergence exists to inject.
     let state = Arc::new(StubState::default());
     {
@@ -1268,8 +1268,8 @@ async fn divergence_go_dark_within_the_idle_timeout_is_ridden_out() {
     // `GoDark { ms }` blacks the venue out for a window; the stub models it on
     // the data WS leg by emitting no application frame for `dark_ms`.
     //
-    // WHAT THE CLIENT DECIDES ABOUT A BLACKOUT IS THE IDLE CLOCK, and that is
-    // the production surface this pins. A blackout SHORTER than
+    // What the client decides about a blackout is the idle clock, and that is
+    // the production surface this pins. A blackout shorter than
     // `idle_timeout_ms` must be ridden out: the socket stays up, nothing is
     // re-dialled, and the frame held behind the blackout is delivered when it
     // lifts. Its twin below pins the other side of the same decision.
@@ -1305,11 +1305,11 @@ async fn divergence_go_dark_within_the_idle_timeout_is_ridden_out() {
     // prologue does (connect() emits it to the sink directly, not over the
     // suppressed WS leg), so tolerate exactly that.
     //
-    // THE WINDOW ENDS WHEN THE STUB SPEAKS, not at a fixed duration. A fixed
+    // The window ends when the stub speaks, not at a fixed duration. A fixed
     // window starts when `connect()` returns, which races the harness's own
     // pre-push and blackout delays: on a slow debug build a long enough connect
     // pushes the frame inside the window and fails the test for nothing.
-    // `ws_first_frame_at` is stamped strictly BEFORE the send, so observing it
+    // `ws_first_frame_at` is stamped strictly before the send, so observing it
     // set is a sound place to stop looking.
     while state
         .ws_first_frame_at
@@ -1347,23 +1347,23 @@ async fn divergence_go_dark_within_the_idle_timeout_is_ridden_out() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
-    // The other side of the blackout decision: a `GoDark` window LONGER than
+    // The other side of the blackout decision: a `GoDark` window longer than
     // `idle_timeout_ms` is indistinguishable from a dead socket, and the client
     // must say so by dropping the connection and re-dialling. That is the cost
     // of the divergence a host has to know about, and it is the arm that
     // actually exercises `WsAction::Idle` - deleting that arm's `break` changed
     // nothing anywhere in this crate before this test existed.
     //
-    // Ping and Pong deliberately do NOT reset the idle clock (see `ConnHavoc`),
+    // Ping and Pong deliberately never reset the idle clock (see `ConnHavoc`),
     // so no heartbeat is armed here: the silence under test is application
     // silence, and a heartbeat would neither rescue nor hasten it.
     //
-    // THE FIXTURE SEEDS A TRADE, and that is what makes `dark_ms` load-bearing.
+    // The fixture seeds a trade, and that is what makes `dark_ms` load-bearing.
     // With an empty tape the socket is application-silent forever whatever
     // `dark_ms` says, so deleting the blackout would not have moved the verdict
     // and the test would have pinned "a permanently dead venue is re-dialled" -
     // the trivial case the blackout was supposed to exclude. With a trade
-    // seeded, the venue WOULD have spoken as soon as the push gate opened -
+    // seeded, the venue would have spoken as soon as the push gate opened -
     // which is the instant the subscription is recorded, well inside the idle
     // window - and only the blackout keeps it quiet past the idle timeout, so
     // the assertions below separate the two. The straddle used to be stated
@@ -1385,7 +1385,7 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
         Some(conn_havoc(ConnHavoc {
             // Shorter than the blackout, and long enough that the push the gate
             // releases lands inside it: without the blackout the seeded trade
-            // arrives INSIDE the idle window and no socket is ever declared
+            // arrives inside the idle window and no socket is ever declared
             // dead.
             idle_timeout_ms: 250,
             // A flat, short backoff: the property is that a second dial happens
@@ -1404,7 +1404,7 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
         "a blackout past the idle timeout must be declared dead and re-dialled; \
          saw {handshakes} handshakes"
     );
-    // ...and it was re-dialled BECAUSE of the blackout, not after being served.
+    // ...and it was re-dialled because of the blackout, not after being served.
     // A venue that got its frame out before the idle clock expired has not gone
     // dark at all, so nothing but the connect-time prologue may have arrived by
     // the time the second dial happens.
@@ -1417,7 +1417,7 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
     }
 
     // The half a blackout test owes and the deleted one never had: the venue
-    // COMES BACK. Lifting `dark_ms` leaves the client's own reconnect loop to
+    // comes back. Lifting `dark_ms` leaves the client's own reconnect loop to
     // find the next socket serving normally, and the held trade is delivered.
     state.dark_ms.store(0, Ordering::Relaxed);
     let trade = next_trade(&mut rx).await;
@@ -1439,8 +1439,8 @@ async fn divergence_go_dark_past_the_idle_timeout_is_read_as_a_dead_socket() {
 /// behind it was held, delivering the two out of order to a strategy.
 ///
 /// The gate is two-sided on purpose. The exec buckets are set to a delay the
-/// trigger and the fill must BOTH clear, and the data bucket to one an order
-/// of magnitude larger that they must NOT pay: passing only the first half
+/// trigger and the fill must both clear, and the data bucket to one an order
+/// of magnitude larger that they must never pay: passing only the first half
 /// would also pass if every frame were delayed, and passing only the second
 /// would also pass if havoc reached nothing.
 ///
@@ -1475,7 +1475,7 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
                 exec_event_nanos: 400_000_000,
                 fill_nanos: 400_000_000,
                 // An order of magnitude beyond the exec buckets: a trigger or a
-                // fill misfiled as market data would pay THIS instead, and the
+                // fill misfiled as market data would pay this instead, and the
                 // upper bound below would catch it.
                 data_nanos: 4_000_000_000,
             }),
@@ -1514,12 +1514,12 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
     }
     let filled = Instant::now();
 
-    // THE CLOCK STARTS AT THE STUB'S SEND. It used to start before `connect()`,
-    // on the reasoning that setup time only ever ADDS and so leaves the lower
+    // The clock starts at the stub's send. It used to start before `connect()`,
+    // on the reasoning that setup time only ever adds and so leaves the lower
     // bound honest. That reasoning was wrong here, and measurably so: connect
     // does not return until `await_account_registered` sees the seeded snapshot,
     // which arrives through this very pump and therefore pays the armed 400 ms
-    // exec delay INSIDE connect. Setup measured 416.7-418.7 ms over 40 runs -
+    // exec delay inside connect. Setup measured 416.7-418.7 ms over 40 runs -
     // past the 400 ms hold on its own, so the lower bound below passed in every
     // run before a single execution frame was classified. `ws_first_exec_frame_at`
     // is the instant the stub put the OrderAccepted on the wire; the interval
@@ -1544,7 +1544,7 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
     );
     // Anchored at the send, the honest arrival is the 30 ms baseline plus the
     // 400 ms exec hold - measured at ~475 ms end to end before the re-anchor.
-    // The defect is the 4,030 ms DATA bucket, so two seconds sits ~1.5 s above
+    // The defect is the 4,030 ms data bucket, so two seconds sits ~1.5 s above
     // the honest value and ~2 s below the defect, where the old three seconds
     // was measuring from a clock that had already spent 418 ms.
     assert!(

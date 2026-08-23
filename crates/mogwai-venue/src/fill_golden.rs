@@ -11,11 +11,11 @@
 //! symbol, apply) rather than sharing code with it: the async loop, the teardown
 //! race and the per-connection delivery are not what a fill distribution
 //! measures.
-//! It does NOT reimplement the walk or the gate - both are the shipped
+//! It does not reimplement the walk or the gate - both are the shipped
 //! functions, which is the whole point. A golden computed by a hand-rolled tape
 //! loop would certify nothing but itself.
 //!
-//! The instrument is the SHIPPED BTCUSDT PRESET, resolved through the same
+//! The instrument is the shipped BTCUSDT preset, resolved through the same
 //! `config::profile_for_symbol` path a run boots with, rather than the retired
 //! median-derived built-in default. That preset declares no generator or
 //! session table, so its scalars are the fingerprint medians the retired
@@ -29,12 +29,12 @@
 //! this file, and any change that does not move it did not change fill timing.
 //!
 //! Regeneration is an explicit operator act with no env var and no bless switch:
-//! delete the artifact, run this test (it WRITES the file and then FAILS by
+//! delete the artifact, run this test (it writes the file and then fails by
 //! design), inspect the diff, run again. Absence is not a pass - a golden that
 //! was dropped from a checkout or never committed would otherwise be green
 //! forever with the guard silently absent.
 //!
-//! Orders unfilled at the horizon are CENSORED - counted, and excluded from the
+//! Orders unfilled at the horizon are censored - counted, and excluded from the
 //! sample rather than folded in at the horizon value, which would make the
 //! artifact move whenever the horizon moved.
 //!
@@ -44,7 +44,7 @@
 //!
 //! Where the band comes from: nothing hands this harness a `MarketReading`,
 //! because it never goes through the HTTP submit path, so it takes one itself
-//! with `fills::read_market` at each order's OWN acceptance instant, under the
+//! with `fills::read_market` at each order's own acceptance instant, under the
 //! scenario's multiplier and the default 200-tick clamp. That is per-order
 //! rather than one reading per scenario - a deliberate departure from the
 //! spec's anchor-instant reuse, and it costs one extra tape walk per acceptance
@@ -55,7 +55,7 @@
 //!
 //! The two scenarios are the degenerate `0.0` band and the shipped multiplier.
 //! Retired rather than migrated: the old `penetration_ticks = 3` cell covered
-//! ACCUMULATION of penetrations across sweep boundaries, and this model has no
+//! accumulation of penetrations across sweep boundaries, and this model has no
 //! counter to accumulate - one print through the trigger fills.
 //!
 //! # Why the committed artifact was last re-blessed
@@ -67,9 +67,9 @@
 //! tape than it did at 16. Nothing about the band, the predicate, the frontier
 //! or the scenario moved: the fill stream is still run-level and its vectors in
 //! `mogwai-protocol`'s `derived_streams_differ_and_are_stable` are unchanged,
-//! which is the evidence that only the TAPE under the harness moved.
+//! which is the evidence that only the tape under the harness moved.
 //!
-//! The artifact therefore moved in NO predicted direction, and it must not be
+//! The artifact therefore moved in no predicted direction, and it must not be
 //! read as one - it is a fresh draw, not the same draw under a repair. Six
 //! cells go from 5 filled to 4 - the 1, 30 and 100 tick rungs in both
 //! scenarios - which at 5 samples per cell is one order apiece and
@@ -93,15 +93,15 @@
 //! time. `a1`, `b1` and `vol_scalar` were re-solved against the corrected
 //! condition and the rails re-derived from a measured tail.
 //!
-//! The artifact moved in ONE direction, and it is the direction that repair
-//! predicts: cells that previously CENSORED an order - never filled it inside
+//! The artifact moved in one direction, and it is the direction that repair
+//! predicts: cells that previously censored an order - never filled it inside
 //! the horizon - now fill it, so `censored` drops to zero in four cells and the
 //! latency vectors gain a long entry apiece. A stationary tape at the corrected
 //! scale traverses more ticks per unit time, so a resting limit that used to
 //! outlive the horizon now gets reached. Fill timing did not regress; the tape
 //! stopped being artificially sluggish.
 //!
-//! This did NOT re-open the band calibration below, and that is measured rather
+//! This did not re-open the band calibration below, and that is measured rather
 //! than assumed. `fill_band_vol_mult` is selected by `fills::vol_probe` against
 //! the tape's realized volatility, and the repair moved that volatility by
 //! roughly 1.3x in RMS. Re-run against protocol 6 the probe reads `0.001` at
@@ -120,17 +120,17 @@
 //! the implied band ran a median 439 ticks against the 200-tick
 //! `fill_band_max_ticks` clamp: every banded trigger was drawn uniformly across
 //! the whole clamp range, and the tape had stopped deciding fills. `0.005` is
-//! what `fills::vol_probe`'s PROCEED rule selects on the current fingerprint
-//! (median 4 ticks, p90 7). The artifact therefore moved because the SCENARIO
+//! what `fills::vol_probe`'s `Proceed` rule selects on the current fingerprint
+//! (median 4 ticks, p90 7). The artifact therefore moved because the scenario
 //! moved, not because fill timing regressed - the banded cells are now measured
 //! under a band that tracks volatility instead of one pinned to its ceiling.
 //!
-//! READ THE RE-BLESSED ARTIFACT BEFORE TRUSTING ITS BANDED HALF. At `0.005` the
-//! five banded cells came out BYTE-IDENTICAL to the five unbanded ones - same
+//! Read the re-blessed artifact before trusting its banded half. At `0.005` the
+//! five banded cells came out byte-identical to the five unbanded ones - same
 //! fill counts, same latency vectors, same pass counts. That is not a bug in the
 //! harness and it does not violate the `unbanded >= banded` property asserted
 //! below (equality satisfies it), but it does mean the banded half currently
-//! certifies only that the band PIPELINE runs, not that the band BITES.
+//! certifies only that the band pipeline runs, not that the band bites.
 //!
 //! The cause is resolution, not calibration. Latency here is quantized to
 //! `SWEEP_INTERVAL_NS`, one second, and one second of raw-fill tape carries
@@ -153,24 +153,24 @@
 //! shrank so the smaller population still spans a meaningful share of the
 //! shorter horizon.
 //!
-//! It is a RUNTIME trade, and it is safe because the thing being reduced is
-//! SIMULATED TIME, while what the artifact needs is PRINTS. The raw-fill tape
+//! It is a runtime trade, and it is safe because the thing being reduced is
+//! simulated time, while what the artifact needs is prints. The raw-fill tape
 //! carries roughly 8.5x the prints per unit of sim time that the print layer
 //! did, so one sim minute of horizon now contains more tape than the old
 //! twenty-minute horizon did, and one sim hour of warmup fills the estimator's
 //! 300 s window many times over - the reason 24 h was needed was that the
 //! print-layer window was print-starved, which the probe's 0-of-128 cold-window
-//! refusal census says is no longer the case. The cost that did NOT shrink with
+//! refusal census says is no longer the case. The cost that did not shrink with
 //! sim time is the per-order `read_market` walk and the checkpoint restore each
-//! one pays, which is why the ORDER COUNT came down as well.
+//! one pays, which is why the order count came down as well.
 //!
 //! What the coverage still establishes is unchanged in kind: five offset rungs
 //! from 1 to 100 ticks spanning saturation to near-total censoring, both sides
 //! participating at the nearest rung, and the pathwise `unbanded >= banded`
 //! ordering at every rung - all asserted in `assert_shape` before any comparison
-//! or write. What it establishes LESS of is tail resolution: 5 samples per cell
+//! or write. What it establishes less of is tail resolution: 5 samples per cell
 //! resolves a fill fraction to 20 percentage points, so a cell's censoring count
-//! is a coarse reading and the artifact's value is byte-exact REGRESSION
+//! is a coarse reading and the artifact's value is byte-exact regression
 //! detection - any change to the fingerprint, generator, predicate, seeding or
 //! frontier arithmetic still moves it - rather than an estimate of the fill
 //! distribution's shape. `fills::vol_probe` is where distributional questions
@@ -213,7 +213,7 @@ const OFFSETS: [u32; 5] = [1, 3, 10, 30, 100];
 /// the clamp a real venue runs.
 const MAX_TICKS: u32 = 200;
 
-/// The banded scenario's multiplier, READ from the shipped default rather than
+/// The banded scenario's multiplier, read from the shipped default rather than
 /// written out here. Two copies of a calibration constant is how a golden ends
 /// up certifying a band nothing runs: this way moving the default moves the
 /// artifact, the test fails, and the re-bless is forced rather than forgotten.
@@ -302,7 +302,7 @@ fn run_scenario(band_vol_mult: f64, profiles: &crate::source::Rivers) -> Vec<Cel
                     let mut tape = profiles
                         .history_source(&profiles.test_key(SYMBOL), Some(ORIGIN))
                         .ok()?;
-                    // The tape's first PRINT, not its first FRAME. Protocol 7
+                    // The tape's first print, not its first frame. Protocol 7
                     // opens every parent burst with a quote, so reading one tick
                     // and giving up on a non-trade returned None for the
                     // ordinary case - turning this fallback into a panic at the
@@ -467,7 +467,7 @@ fn render() -> String {
 }
 
 /// Properties of correct code, not of a particular tape, asserted against the
-/// FRESHLY computed result before any comparison or write - so broken code can
+/// freshly computed result before any comparison or write - so broken code can
 /// never produce a blessable artifact. The committed file inherits all of them,
 /// since the comparison below proves it equals this result.
 fn assert_shape(rendered: &str) {
@@ -518,13 +518,13 @@ fn assert_shape(rendered: &str) {
         );
     }
     // The one inspection property this artifact can actually assert. It is
-    // implied PATHWISE rather than statistically - `u >= 0` moves a trigger
+    // implied pathwise rather than statistically - `u >= 0` moves a trigger
     // away from the market, so a banded order fills only on a subset of the
     // tapes that fill an unbanded one at the same price - so it holds per order
     // and needs no tolerance.
     //
-    // Censoring rising with `offset_ticks` is NOT asserted, deliberately. It
-    // would only be a valid test of a correct model on PAIRED cohorts - every
+    // Censoring rising with `offset_ticks` is not asserted, deliberately. It
+    // would only be a valid test of a correct model on paired cohorts - every
     // offset submitted at the same acceptance instants under the same identity
     // stem - and this harness rotates offsets through the acceptance schedule
     // instead, so different offsets are accepted at different tape instants
@@ -545,7 +545,7 @@ fn assert_shape(rendered: &str) {
 
 /// Name the first cell that moved and, inside it, the first field or sample
 /// index that moved. A whole-file `assert_eq!` on two multi-kilobyte JSON blobs
-/// is unreadable, and the point of the golden is to say WHAT changed.
+/// is unreadable, and the point of the golden is to say what changed.
 fn describe_mismatch(rendered: &str, expected: &str) -> String {
     let (Ok(new), Ok(old)) = (
         serde_json::from_str::<serde_json::Value>(rendered),

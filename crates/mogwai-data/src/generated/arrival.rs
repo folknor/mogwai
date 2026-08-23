@@ -24,8 +24,8 @@ const CADENCE_STREAM_TAG: u64 = 0x6D6F6777_61693132;
 /// The mean gap `next_parent` is driven with. One definition, called by both
 /// `CadenceWalk::assemble` and `GeneratedSource::begin_integrated_event`: the
 /// point of the shared assembly is that no cadence input is derived twice.
-/// The mean is BARE, deliberately: `ARRIVAL_MEAN_CAL` is an empirically
-/// bisected correction for the SHIPPED sampling scheme's realized-mean
+/// The mean is bare, deliberately: `ARRIVAL_MEAN_CAL` is an empirically
+/// bisected correction for the shipped sampling scheme's realized-mean
 /// inflation, and the integrated frame's exact time change has no such
 /// inflation to correct - applying it here double-counts, a uniform
 /// 1/0.944 = 1.0593 rate excess (the 2026-08-09 calibration amendment,
@@ -201,7 +201,7 @@ const CADENCE_STEP_NS: u64 = 1_000_000_000;
 const EXPECTED_COUNT_FLOOR: f64 = 0.01;
 /// The representable latent-intensity ceiling, uniform across kernel families.
 /// Public because `mogwai-lab`'s envelope simulator judges its replicate months
-/// against the SAME bound the kernel refuses on (spec 9.7's replicate ceiling
+/// against the same bound the kernel refuses on (spec 9.7's replicate ceiling
 /// rule); a second copy of the literal is exactly the twin-value defect this
 /// workspace keeps finding.
 pub const ARRIVAL_X_CEILING: f64 = 1e4;
@@ -240,21 +240,21 @@ pub enum ArrivalConfig {
 
 /// Ceiling on `LogOuCox`'s `sigma_y`, and the reason it exists.
 ///
-/// The latent is `x = exp(y - sigma^2 / 2)`, which is unbounded BELOW - so a
+/// The latent is `x = exp(y - sigma^2 / 2)`, which is unbounded below - so a
 /// thin latent stretches `ArrivalKernel::next_parent`'s budget traversal over
 /// its 366-day limit one cell at a time. The knob was validated as finite and
 /// non-negative only, while every other family in this enum carries a two-sided
 /// range and every other latent has a floor: these were the ones that were
 /// missed, not a liberty granted.
 ///
-/// WHAT MAKES IT DANGEROUS IS THAT IT SUCCEEDS. Unlike the terminal cliff, a
+/// What makes it dangerous is that it succeeds. Unlike the terminal cliff, a
 /// thin latent keeps answering, permanently slower, draw after draw, so an
 /// operator sees a venue that works and is inexplicably slow rather than one
 /// that refuses and says why.
 ///
-/// MEASURED 2026-08-20 by `examples/arrival_sigma_sweep`, 2000 to 4000 draws
+/// Measured 2026-08-20 by `examples/arrival_sigma_sweep`, 2000 to 4000 draws
 /// per point at the `LiquidityDrought` thinning ceiling, on the owner's host.
-/// The median draw is 50 to 70 ns at EVERY setting - the cost is entirely in
+/// The median draw is 50 to 70 ns at every setting - the cost is entirely in
 /// the tail - so the mean and the max are the readings that matter:
 ///
 /// | `sigma_y` | mean | max |
@@ -265,7 +265,7 @@ pub enum ArrivalConfig {
 /// | 8.0 | 24 us | 10.6 ms |
 /// | 9.0 | 336 us | 40.7 ms |
 ///
-/// SIX IS THE KNEE: the mean is flat at healthy-walk cost through 5.5 and
+/// Six is the knee: the mean is flat at healthy-walk cost through 5.5 and
 /// departs by an order of magnitude at 6.0, and the max crosses a millisecond
 /// at 7.0. The ceiling admits the knee and excludes the whole millisecond
 /// region with a full point of margin, which is the line a bound can be
@@ -819,24 +819,24 @@ impl ArrivalKernel {
     ///
     /// `rate_mult` is the RuntimeModifiers multiplier in force over the span
     /// being walked, and it exists for exactly one family. The self-exciting
-    /// kernel's feedback is a RATIO - the parents actually drawn in a cell over
+    /// kernel's feedback is a ratio - the parents actually drawn in a cell over
     /// the parents the baseline expected there - so both halves of that ratio
     /// have to be measured against the same intensity. `next_parent` draws with
     /// `rate_at * x * rate_mult / base_mean_s`, so the expectation it is scored
     /// against carries `rate_mult` too. Every other family's transition is
     /// independent of the realized count and ignores it.
     ///
-    /// WHY THAT IS THE RULE AND NOT A CHOICE: without it an armed `FlowSurge`
+    /// Why that is the rule and not a choice: without it an armed `FlowSurge`
     /// inflates `observed / expected` by the whole multiplier, the kernel reads
     /// the operator's own injection as market excitement, and `a` climbs toward
-    /// `rate_mult` - so the venue serves MORE than the multiplier asked for
+    /// `rate_mult` - so the venue serves more than the multiplier asked for
     /// during the surge and keeps serving a `tau_s`-decayed tail of it after the
     /// surge has cleared, which no divergence declares and nothing bounds below
     /// `ARRIVAL_X_CEILING`. That is the state-versus-envelope split
     /// `generated/consts.rs` states for the GARCH rails: a divergence is an
-    /// OUTPUT envelope and must not raise the process's own state.
+    /// output envelope and must not raise the process's own state.
     ///
-    /// The pairing is exact per CALL rather than per cell: one `next_parent`
+    /// The pairing is exact per call rather than per cell: one `next_parent`
     /// call holds one set of modifiers and walks exactly the cells its own span
     /// crossed, so the only inexactness is a surge that arms or clears strictly
     /// inside a single span - at most the one cell containing the boundary.
@@ -1243,7 +1243,7 @@ mod tests {
 
     /// Mean latent level over a self-exciting walk driven at a fixed
     /// `rate_mult`. Reported rather than asserted inline so the neutral and
-    /// surged arms are computed by ONE expression - a hand-built pair would let
+    /// surged arms are computed by one expression - a hand-built pair would let
     /// the two arms drift into measuring different things and still pass.
     fn self_exciting_mean_latent(rate_mult: f64, draws: usize) -> f64 {
         let kernel = ArrivalKernel::SelfExciting(SelfExcitingParams {
@@ -1278,16 +1278,16 @@ mod tests {
         sum / draws as f64
     }
 
-    /// A `FlowSurge` is an OUTPUT ENVELOPE, and the self-exciting kernel must
+    /// A `FlowSurge` is an output envelope, and the self-exciting kernel must
     /// not read the operator's own multiplier back in as market excitement.
     ///
     /// The stake is not tidiness. `x = (1 - phi) + phi * a`, so a kernel that
-    /// scores its realized counts against an UNSCALED baseline drives `a`
+    /// scores its realized counts against an unscaled baseline drives `a`
     /// toward `rate_mult` itself - the venue then serves the multiplier times
     /// the excitement the multiplier caused, and keeps serving a `tau_s`-decayed
     /// tail of it after the divergence has cleared.
     ///
-    /// AND IT COMPOUNDS, which is why the number below is not eight. Measured
+    /// And it compounds, which is why the number below is not eight. Measured
     /// on the unfixed code by this exact test: an 8x surge left the mean latent
     /// at 123, because the excitement raises `x`, a raised `x` draws more
     /// parents into the next cell, and those inflate the ratio again. The bite
@@ -1300,7 +1300,7 @@ mod tests {
         let surged = self_exciting_mean_latent(8.0, DRAWS);
 
         // Both arms sit at the kernel's stationary latent mean of 1. The
-        // tolerance is on the RATIO rather than on either arm alone: the claim
+        // tolerance is on the ratio rather than on either arm alone: the claim
         // is that the multiplier does not move the latent, and an absolute bound
         // on each arm separately would pass a pair that drifted together.
         assert!(
@@ -1373,11 +1373,11 @@ mod tests {
             let vector: Value =
                 serde_json::from_str(source).expect("valid conformance vector JSON");
             assert_eq!(vector["vector"], format!("V{}", index + 1));
-            // A SCHEMA version, and only that.  It pins the shape these
+            // A schema version, and only that.  It pins the shape these
             // executors read - which fields exist, and which of them are
             // gated rather than derivation record - so a rewrite of the
             // layout cannot land without coming back through this test.
-            // IT DETECTS NO CONTENT EDIT: widening an expected value or
+            // It detects no content edit: widening an expected value or
             // retuning a param leaves `version` at 2 and this assertion
             // green.  Nothing in the tree detects that, which is the same
             // hole AGENTS.md records against the shared-fixture rule; the
@@ -1520,7 +1520,7 @@ mod tests {
         ArrivalEnv::for_profile_with_step(&profile, calendar, 1.0, origin_ns, step_ns)
     }
 
-    /// A kernel whose latent multiplier is exactly 1.0 in BOTH states: with
+    /// A kernel whose latent multiplier is exactly 1.0 in both states: with
     /// `rate_ratio = 1` the level denominator is `q + (1-q) = 1`, so `level`
     /// returns 1.0 either way. The walk still takes exactly one cadence draw
     /// per traversed grid step, which is what keeps V5's contract-B ordering
@@ -1536,7 +1536,7 @@ mod tests {
     struct KernelRun {
         draw: ParentDraw,
         shape: SweepShape,
-        /// The cadence stream as it stood immediately BEFORE `next_parent`
+        /// The cadence stream as it stood immediately before `next_parent`
         /// ran, so a caller can replay the draws the kernel was about to make.
         reference: ChaCha12Rng,
         environment: ArrivalEnv,
@@ -1544,22 +1544,22 @@ mod tests {
     }
 
     /// Runs the real `ArrivalKernel::next_parent` with the intensity scaled so
-    /// that the kernel's OWN drawn budget realizes `unit_budget_s` seconds of
+    /// that the kernel's own drawn budget realizes `unit_budget_s` seconds of
     /// open exposure exactly.
     ///
     /// The scaling is what makes these vectors gates rather than change
     /// detectors: their expected timestamps are derived from the spec's unit
     /// intensity and a stated budget, and the budget the kernel draws is not
     /// choosable, so the alternative would be to read the expected value off a
-    /// run. The clone that reads the budget also LEANS ON contract B's
+    /// run. The clone that reads the budget also leans on contract B's
     /// ordering claim (section 7: the budget is the first cadence draw), which
     /// is why a kernel that drew the child count first would fail V6, V7 and
     /// V8 as well as V5.
     ///
-    /// The latent-draw accounting a caller may replay off `reference` is NOT
+    /// The latent-draw accounting a caller may replay off `reference` is not
     /// general: `advance_state_to` takes one cadence draw per traversed grid
     /// step, so the count is `cell_index(parent)` only when the walk starts in
-    /// cell zero AND resolves inside its first segment. V5 is the only caller
+    /// cell zero and resolves inside its first segment. V5 is the only caller
     /// that replays, and it is driven from `from_ns = 0` on an uninterrupted
     /// grid for exactly that reason.
     fn drive_next_parent(
@@ -1584,7 +1584,7 @@ mod tests {
     }
 
     /// `drive_next_parent` over a caller-chosen kernel. Every kernel passed
-    /// here must have a latent multiplier of EXACTLY 1.0 at the resolved
+    /// here must have a latent multiplier of exactly 1.0 at the resolved
     /// instant, or the intensity scaling no longer realizes `unit_budget_s`
     /// seconds of exposure and the vector's expected timestamp does not hold.
     #[allow(clippy::too_many_arguments)]
@@ -1634,7 +1634,7 @@ mod tests {
 
     /// The stage sequence with consecutive repeats collapsed. A vector writes
     /// its contract-A order out with the per-stage draw counts it declares;
-    /// production records one tag per STAGE, and the multiplicities are not
+    /// production records one tag per stage, and the multiplicities are not
     /// gated (see the V4 fixture's derivation for why they cannot be).
     fn collapsed_stages(order: &Value) -> Vec<String> {
         let mut collapsed: Vec<String> = Vec::new();
@@ -1648,7 +1648,7 @@ mod tests {
         collapsed
     }
 
-    /// The shipped contract-A stage trace of ONE generator event, read off the
+    /// The shipped contract-A stage trace of one generator event, read off the
     /// generator itself rather than restated here.
     fn shipped_contract_a_stages() -> Vec<String> {
         let fp = Fingerprint::from_repo_json();
@@ -1723,7 +1723,7 @@ mod tests {
             "V5 contract-A stage order",
         );
 
-        // Contract B is checked by REPLAYING the cadence stream in the order
+        // Contract B is checked by replaying the cadence stream in the order
         // the fixture states and comparing the child count that replay lands
         // on against the one `next_parent` returned. The reference consumes
         // the stages in the fixture's declared order, so a kernel that moved
@@ -1738,7 +1738,7 @@ mod tests {
         {
             match stage.as_str().expect("a contract B stage") {
                 "budget" => {
-                    // ONE DRAW, CONSUMED AND NOT CHECKED, and that is the
+                    // One draw, consumed and not checked, and that is the
                     // honest state of it: `next_parent` returns no budget and
                     // exposes no observable of one, so there is nothing on the
                     // production side to compare against. Asserting the
@@ -1753,7 +1753,7 @@ mod tests {
                 }
                 "latent_steps" => {
                     // One draw per traversed grid step (section 4.2). The step
-                    // count is the resolved parent's cell ONLY under this
+                    // count is the resolved parent's cell only under this
                     // vector's shape - the walk starts in cell zero and the
                     // traversal resolves inside its first segment, so the two
                     // `advance_state_to` calls step `cell_index(parent)` times
@@ -1800,7 +1800,7 @@ mod tests {
             settlement_minute_of_day: None,
         };
         // The vector must describe a world the venue can hold. Version 1's V6
-        // named a three-SECOND closure on a minute-granular calendar and
+        // named a three-second closure on a minute-granular calendar and
         // nothing said so, because nothing built a calendar from it.
         calendar
             .validate()
@@ -1824,7 +1824,7 @@ mod tests {
             params["latent_x"].as_f64().expect("latent x").to_bits(),
             "V6 the declared unit latent multiplier is what the kernel resolved",
         );
-        // THE WINDOW IS A MAGNITUDE BOUND, not a statement about which way
+        // The window is a magnitude bound, not a statement about which way
         // `ceil` rounds - the pre-ceiling value can sit either side of the
         // ideal, because the intensity scaling is a float division. The bound:
         // `remaining` accumulates relative error of order 1e-16 over three
@@ -1833,7 +1833,7 @@ mod tests {
         // nanosecond or the one above it. Four is that bound with room, and
         // it is nowhere near a tolerance on the claim: a traversal that spent
         // budget across the closure, or failed to skip it, moves this by
-        // 0.25 or by 180 SECONDS.
+        // 0.25 or by 180 seconds.
         let expected_parent = expected["parent_ts_ns"].as_u64().expect("parent");
         assert!(
             (expected_parent..=expected_parent + 4).contains(&run.draw.parent_ts_ns),
@@ -1859,8 +1859,8 @@ mod tests {
     fn execute_v7_degenerate_budget(vector: &Value) {
         let input = &vector["inputs"][0];
         let params = &vector["params"];
-        // g = -ln(U) is the fixture's OWN derivation of the budget, and it is
-        // used here as the driver's target exposure, NOT asserted. The
+        // g = -ln(U) is the fixture's own derivation of the budget, and it is
+        // used here as the driver's target exposure, not asserted. The
         // fixture records `derivation_intermediates.budget` for review; a
         // version-1-style `assert_bits` on it compared this line's arithmetic
         // against a fixture value produced by the same arithmetic, with
@@ -1873,7 +1873,7 @@ mod tests {
             .as_u64()
             .expect("parent");
 
-        // The declared baseline rate is a claim about the ENVIRONMENT the
+        // The declared baseline rate is a claim about the environment the
         // conversion runs in, and `conformance_env` is what has to satisfy it.
         // Reading it here is what stops the field from being decoration.
         let baseline_rate = params["baseline_rate"].as_f64().expect("baseline rate");
@@ -1883,11 +1883,11 @@ mod tests {
             "V7 the declared baseline rate is what the environment supplies",
         );
 
-        // EVERY DRIVEN FAMILY, not one. The conversion under test is shared
+        // Every driven family, not one. The conversion under test is shared
         // code in `next_parent`, but the vector's claim is that all of them
         // reach it with the same resolved instant, and version 2's first cut
         // drove `wall_mmpp` alone while the fixture still listed four. Each
-        // kernel here is parameterized to a latent multiplier of EXACTLY 1.0:
+        // kernel here is parameterized to a latent multiplier of exactly 1.0:
         // `WallMmpp` at `rate_ratio = 1` has denominator `q + (1-q) = 1`;
         // `LogOuCox` at `sigma_y = 0` keeps `y = 0`, so `exp(0 - 0) = 1`;
         // `SelfExciting` at `phi = 0` gives `(1-0) + 0*a = 1` for any `a`.
@@ -2017,19 +2017,19 @@ mod tests {
             // its parent instants by the one-second cadence step, so this is a
             // fixture claim checked against `ArrivalEnv::cell_index`, and it
             // is the third case that carries the weight: a reopen snapped
-            // WITHOUT the calendar lands in a different cell.
+            // without the calendar lands in a different cell.
             assert_eq!(
                 run.environment.cell_index(run.draw.parent_ts_ns),
                 expected["cell"].as_u64().expect("cell"),
                 "V8 resolved cell, {case}",
             );
             // The `(count - 1)` stride identity of section 4.1's second frozen
-            // consequence. BE CLEAR ABOUT WHAT THIS IS: the child count comes
+            // consequence. To be clear about what this is: the child count comes
             // out of the same `ParentDraw`, because the count is an RNG draw
             // and pinning it in the fixture would be writing down what a run
-            // produced. So this is a RE-IMPLEMENTATION check on the identity's
+            // produced. So this is a re-implementation check on the identity's
             // shape, not a fixture gate on the successor instant. What the
-            // fixture does gate is the STRIDE: `intra_event_step_ns` is read
+            // fixture does gate is the stride: `intra_event_step_ns` is read
             // from the vector rather than from the production constant, so a
             // change to `INTRA_EVENT_STEP_NS` alone fails here.
             let stride_ns = params["intra_event_step_ns"].as_u64().expect("stride");
@@ -2139,7 +2139,7 @@ mod tests {
 
     #[test]
     fn arrival_transcripts_replay_bit_exact() {
-        // These files are REGRESSION PINS ONLY. Their records were generated
+        // These files are regression pins only. Their records were generated
         // once at the named non-degenerate points; they prove that the Stage A
         // kernel walk and Stage B generator integration do not drift. The
         // conformance vectors above, not these transcripts, carry correctness
@@ -2270,11 +2270,11 @@ mod tests {
         }
     }
 
-    /// `sigma_y` IS BOUNDED ABOVE, and the bound is the one the constant names
+    /// `sigma_y` is bounded above, and the bound is the one the constant names
     /// rather than a second copy of the number written here.
     ///
-    /// The knob's latent is unbounded BELOW, so a thin one stretches the budget
-    /// traversal a cell at a time and KEEPS SUCCEEDING - which is what makes it
+    /// The knob's latent is unbounded below, so a thin one stretches the budget
+    /// traversal a cell at a time and keeps succeeding - which is what makes it
     /// worth refusing at admission rather than leaving to be noticed. Every
     /// other family in this enum already carried a two-sided range.
     #[test]
@@ -2381,17 +2381,17 @@ mod tests {
         }
     }
 
-    // THE AMENDMENT-ONLY TRANSCRIPT REGENERATOR IS NOT HERE, AND MUST NEVER
-    // COME BACK. It was `regenerate_arrival_transcripts_amendment_only`, an
+    // The amendment-only transcript regenerator is not here, and must never
+    // come back. It was `regenerate_arrival_transcripts_amendment_only`, an
     // `#[ignore]`d test in this module that wrote
     // `tests/fixtures/arrival-transcript-shot_noise.json` - the pin
     // `arrival_transcripts_replay_bit_exact` above reads through `include_str!`.
     // The gate profile sets `include_ignored` deliberately, so `#[ignore]` did
     // not keep it out of the suite: a kernel change would have failed the pin
-    // and rewritten the fixture in the SAME run, and the next run would have
+    // and rewritten the fixture in the same run, and the next run would have
     // read the rewritten fixture and reported green. It lives in
-    // `examples/regenerate_arrival_transcript.rs` now, which every lane COMPILES
-    // and none RUNS, and it refuses to write without a cited amendment.
+    // `examples/regenerate_arrival_transcript.rs` now, which every lane compiles
+    // and none runs, and it refuses to write without a cited amendment.
 
     #[test]
     fn parent_draw_skips_a_full_weekend_closure() {

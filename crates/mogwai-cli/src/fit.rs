@@ -8,7 +8,7 @@
 //! The driver itself lives in `mogwai_lab::fit::driver`; this module is the
 //! CLI surface plus `mode_fit`'s clean-tree binding, which is the same
 //! contract `mogwai measure` carries: `binding.harness_tree_commit` must
-//! name exactly the code that ran, AND the Python's walk cache keys on that
+//! name exactly the code that ran, and the Python's walk cache keys on that
 //! commit, so a dirty tree refuses outright.
 
 use std::path::{Path, PathBuf};
@@ -26,12 +26,12 @@ const DEFAULT_PREFLIGHT: &str = "analysis/out/mnq-fit-preflight.json";
 /// The Python-era scratch directory whose `cache/` subdirectory holds the
 /// protocol-11 run's walk summaries.
 const DEFAULT_PYTHON_CACHE_DIR: &str = "analysis/out/mnq-fit-scratch";
-/// Deliberately NOT the committed `analysis/mnq-fit.json`: a bare `fit` run
+/// Deliberately not the committed `analysis/mnq-fit.json`: a bare `fit` run
 /// must not overwrite the blessed artifact.
 ///
 /// It named `target/mogwai-fit/` until 2026-08-20, which got the "not the
 /// committed artifact" half right and the directory half wrong twice over.
-/// `artifact_path` resolves a bare default against the WORKING DIRECTORY by
+/// `artifact_path` resolves a bare default against the working directory by
 /// design - an artifact is the operator's file and is deliberately never
 /// cached - so a fit run from anywhere but the repository root created a
 /// directory literally called `target` under the operator's feet, reading as a
@@ -65,7 +65,7 @@ pub struct FitArgs {
     /// wrong for replaying someone else's cache - hence the flag.
     #[arg(long, value_name = "SHA")]
     cache_commit: Option<String>,
-    /// Where to write the fit artifact. An ARTIFACT (storage policy): never
+    /// Where to write the fit artifact. An artifact (storage policy): never
     /// cached, never auto-deleted. Defaults to `analysis/out/mnq-fit.json`,
     /// a distinct path in this repository's gitignored output directory, so a
     /// bare invocation can never clobber the committed `analysis/mnq-fit.json`.
@@ -83,7 +83,7 @@ pub fn run(args: &FitArgs) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    // THE SCRATCH CLASS, same resolution as `arrival-control`'s. This was
+    // The scratch class, same resolution as `arrival-control`'s. This was
     // `PathBuf::from("target/mogwai-fit/scratch")` - CWD-relative, so a fit
     // started anywhere but the repository root created a directory named
     // `target` under the operator's feet and left it there. What goes in it is
@@ -91,7 +91,7 @@ pub fn run(args: &FitArgs) -> anyhow::Result<()> {
     // policy's cache root with a leaf unique to this process, and removes it on
     // drop, including on the early returns between here and the write.
     //
-    // BIND THE GUARD. `ScratchDir::new(..)?.path().to_path_buf()` compiles and
+    // Bind the guard. `ScratchDir::new(..)?.path().to_path_buf()` compiles and
     // deletes the directory before the first walk.
     let scratch = ScratchDir::new(&cache_root(None))?;
     let cfg = resolve(args, &harness_commit, &harness_commit, scratch.path());
@@ -102,7 +102,7 @@ pub fn run(args: &FitArgs) -> anyhow::Result<()> {
     // the serialization is in `mogwai-lab`. Refuse a scripted attestation
     // before the bytes reach disk.
     crate::attestation::refuse_scripted_tree_attestation()?;
-    // AND RE-ATTEST, the way `measure` and `arrival-control` do. The gate at
+    // And re-attest, the way `measure` and `arrival-control` do. The gate at
     // the top of this function ran minutes ago; `binding.harness_tree_commit`
     // claims to name exactly the code that ran, so a HEAD that moved or a tree
     // that went dirty in between makes that claim false and the artifact
@@ -190,11 +190,11 @@ mod tests {
         }
     }
 
-    /// The N1 fit-side gate: `fit` is a call site of the SHARED
+    /// The N1 fit-side gate: `fit` is a call site of the shared
     /// `mogwai_lab::delivery::require_clean_tree`, and moving it must not change
     /// what an operator sees.
     ///
-    /// BOTH VERDICTS ARE INJECTED, and that is the whole design. This test
+    /// Both verdicts are injected, and that is the whole design. This test
     /// used to return early on a clean tree - so on the state every gate run
     /// is meant to happen in, it asserted nothing at all - and the reason
     /// given was that calling `run` on a clean tree would launch a real fit.

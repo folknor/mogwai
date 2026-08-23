@@ -37,7 +37,7 @@ pub(crate) struct SessionProfileArgs {
     #[arg(long, value_name = "PATH")]
     archive: Option<PathBuf>,
     /// The preset supplying the session calendar the fit is conditional on.
-    /// The calendar is an INPUT to the estimator rather than a consumer of
+    /// The calendar is an input to the estimator rather than a consumer of
     /// it, so this decides what the fit means.
     #[arg(long, default_value = "MNQ")]
     preset: String,
@@ -58,9 +58,9 @@ pub(crate) struct SessionProfileArgs {
 /// It is a separate type rather than a `ValueEnum` derive on the lab's enum
 /// because `mogwai-lab` carries no clap dependency and must not grow one to
 /// describe an argument. The pair cannot drift: [`AlignmentArg::resolve`] is
-/// total in one direction and [`AlignmentArg::of`] matches EXHAUSTIVELY on
+/// total in one direction and [`AlignmentArg::of`] matches exhaustively on
 /// `Alignment` in the other, so a variant added to the lab fails to compile
-/// here rather than becoming unreachable from the command line. The DEFAULT
+/// here rather than becoming unreachable from the command line. The default
 /// is not a third encoding: `of` is what carries the lab's
 /// `MODEL_CLOCK_ALIGNMENT_DEFAULT` onto the command line.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -73,7 +73,7 @@ pub(crate) enum AlignmentArg {
 }
 
 impl AlignmentArg {
-    /// The spelling of a lab alignment. EXHAUSTIVE BY CONSTRUCTION: a variant
+    /// The spelling of a lab alignment. Exhaustive by construction: a variant
     /// added to `Alignment` fails this match to compile, so the new alignment
     /// cannot ship without a command-line name.
     const fn of(alignment: Alignment) -> Self {
@@ -119,18 +119,18 @@ mod tests {
 
     use super::AlignmentArg;
 
-    /// `AlignmentArg::of` IS THE GATE, not the assertions here.
+    /// `AlignmentArg::of` is the gate, not the assertions here.
     ///
     /// `AlignmentArg` and `Alignment` are two spellings of one quantity, and
-    /// the VARIANTS are the half neither side can derive from the other - a
+    /// the variants are the half neither side can derive from the other - a
     /// clap name is not computable from a Rust identifier - so the identity is
     /// asserted. `of` is exhaustive over `Alignment`, so adding a variant to
-    /// the lab breaks the COMPILE rather than silently leaving the new
+    /// the lab breaks the compile rather than silently leaving the new
     /// alignment with no command-line spelling, which is the failure mode the
     /// hand-rolled `match` on a `String` had, where an unknown name was a
     /// runtime bail and a new alignment was simply unreachable.
     ///
-    /// The DEFAULT is a different case and is NOT asserted here, because it is
+    /// The default is a different case and is not asserted here, because it is
     /// derivable and therefore derived: the argument's `default_value_t` reads
     /// the lab's `MODEL_CLOCK_ALIGNMENT_DEFAULT` through `of`. Until 2026-08-20
     /// that constant had zero readers workspace-wide while the CLI declared

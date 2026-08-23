@@ -6,12 +6,12 @@
 //! One venue serves one run, in the foreground, on a loopback port the kernel
 //! assigns. There is no `--addr` and no shared default, deliberately: a shared
 //! default is what let two concurrent runs collide or silently connect to each
-//! other's venue. So the endpoint is LEARNED rather than assumed - the venue
+//! other's venue. So the endpoint is learned rather than assumed - the venue
 //! writes exactly one line of JSON to stdout, the [`ReadyRecord`], and that is
 //! the only thing it ever writes there. Logs go to stderr, so the two streams
 //! never interleave.
 //!
-//! That last sentence is a DESCRIPTION of the venue, not a rule the launcher
+//! That last sentence is a description of the venue, not a rule the launcher
 //! enforces, and the distinction cost a finding: the reader used to close the
 //! read end of the pipe once it had the record, so any later stdout write from
 //! the venue took `EPIPE`. The launcher now drains stdout to EOF for the whole
@@ -25,7 +25,7 @@
 //!
 //! **The child must be spawned from a thread that outlives the run.** The venue
 //! arms `PR_SET_PDEATHSIG` so a dead launcher cannot leave an orphan holding
-//! positions, and that signal fires on the death of the parent THREAD, not the
+//! positions, and that signal fires on the death of the parent thread, not the
 //! parent process. In an async application, spawning from a pool task is both
 //! the natural thing to write and the wrong thing to write: the task ends, the
 //! thread is recycled, and a perfectly healthy launcher loses its venue mid-run.
@@ -41,7 +41,7 @@
 //! **The ready read is unbounded unless the launcher bounds it.** It blocks for
 //! as long as warmup generation takes, which is proportional to the venue's
 //! `warmup_ns` and its tape cadence. [`LaunchSpec::ready_timeout`] bounds it so a
-//! venue that will NEVER answer fails as a named timeout instead of hanging the
+//! venue that will never answer fails as a named timeout instead of hanging the
 //! caller forever.
 //!
 //! **The schema version is checked before any other field is trusted.** The
@@ -132,12 +132,13 @@ pub struct LaunchSpec {
     pub config: Option<PathBuf>,
     /// `serve --duration <d>`, overriding the config's run duration. Typed, so a
     /// malformed duration is impossible rather than a boot failure the caller
-    /// can only report generically. This is SIM time, which under acceleration
+    /// can only report generically. This is sim time, which under acceleration
     /// is not wall time.
     ///
-    /// `Duration::ZERO` is NOT "end immediately" and is not refused: it renders
-    /// as `--duration 0s`, which the venue reads as an explicit NO DECLARED
-    /// COMPLETION that overrides a finite `run_duration_ns` in the config. A
+    /// `Duration::ZERO` is not "end immediately" and is not refused: it renders
+    /// as `--duration 0s`, which the venue reads as an explicit statement of no
+    /// declared completion that overrides a finite `run_duration_ns` in the
+    /// config. A
     /// launcher computing a duration that lands on zero therefore gets a run
     /// bounded only by its own lifetime. Say so rather than assume it: `None`
     /// leaves the config's duration alone, `Some(ZERO)` overrides it to
@@ -147,15 +148,15 @@ pub struct LaunchSpec {
     pub ready_timeout: Option<Duration>,
     /// What to do with the venue's log stream.
     pub stderr: StderrSink,
-    /// Environment variables SET on the venue process, on top of the inherited
+    /// Environment variables set on the venue process, on top of the inherited
     /// environment. Empty by default, which is plain inheritance.
     ///
     /// This exists because inheritance is not a neutral default for one
     /// variable in particular: `RUST_LOG`. The venue's own filter is
-    /// `mogwai=info` only when `RUST_LOG` is ABSENT, so a caller that reads the
+    /// `mogwai=info` only when `RUST_LOG` is absent, so a caller that reads the
     /// venue's log to decide something has its conclusion silently rewritten by
     /// whatever the surrounding process happened to export. A test scoring an
-    /// ABSENCE of a log line is the dangerous case: under `RUST_LOG=mogwai=error`
+    /// absence of a log line is the dangerous case: under `RUST_LOG=mogwai=error`
     /// the line can never appear, and the absence then means nothing while still
     /// reading as a pass. Pin the variable here rather than inheriting it.
     pub env: Vec<(OsString, OsString)>,
@@ -190,7 +191,7 @@ pub enum LaunchError {
         binary: OsString,
         source: std::io::Error,
     },
-    /// A thread THIS PROCESS needs to own the venue could not be created.
+    /// A thread this process needs to own the venue could not be created.
     ///
     /// Separate from [`LaunchError::Spawn`] because the two have opposite
     /// remedies and the operator cannot act on the wrong one. Both sites that
@@ -199,7 +200,7 @@ pub enum LaunchError {
     /// `pthread_create` rendered as "could not spawn the venue binary
     /// \<owning thread\>: ... point the launcher at it", telling an operator to
     /// reconfigure a path in response to this process hitting its thread or
-    /// memory limit. `what` is the thread's ROLE - a phrase completing "the
+    /// memory limit. `what` is the thread's role - a phrase completing "the
     /// thread that ..." - and never a path.
     Thread {
         what: &'static str,
@@ -242,8 +243,8 @@ impl std::fmt::Display for LaunchError {
             ),
             Self::Thread { what, source } => write!(
                 f,
-                // NOT "nothing was spawned", which is true only of the owning
-                // thread. The readiness reader is created INSIDE `own_venue`,
+                // Not "nothing was spawned", which is true only of the owning
+                // thread. The readiness reader is created inside `own_venue`,
                 // after the venue process is already running, so that phrasing
                 // told the operator no venue had started when one had - the same
                 // class of wrong remedy this variant exists to remove. What is
@@ -338,14 +339,14 @@ pub struct VenueExit {
 /// reaps the child, so cleanup happens on every exit path including a panic
 /// unwinding past it, with no teardown call to forget.
 ///
-/// **Dropping this BLOCKS, and the cost is a signal round trip rather than a
+/// **Dropping this blocks, and the cost is a signal round trip rather than a
 /// poll interval.** The drop signals the owning thread, joins it, and the owner
 /// kills and reaps the child in between - so the calling thread is held for as
 /// long as the kernel takes to deliver `SIGKILL` and produce a zombie, measured
-/// at roughly 300 microseconds against a healthy venue. It is NOT bounded by
+/// at roughly 300 microseconds against a healthy venue. It is not bounded by
 /// [`OWNER_POLL`]: the shutdown channel disconnects when this value's sender
 /// drops, and `recv_timeout` returns on that at once. The poll interval bounds
-/// only how late the owner NOTICES a venue that ended on its own, which is a
+/// only how late the owner notices a venue that ended on its own, which is a
 /// different clock and is not on any teardown path. That distinction is pinned
 /// by `tearing_down_a_healthy_venue_is_a_wakeup_not_a_poll_interval`, because a
 /// loop rewritten to sleep the interval and then `try_recv` would look correct
@@ -353,7 +354,7 @@ pub struct VenueExit {
 ///
 /// Sub-millisecond is short enough to drop on an async worker, which is what the
 /// one nautilus-side consumer does - it takes the venue down explicitly at the
-/// end of a run, inside a `current_thread` runtime. What is NOT bounded is a
+/// end of a run, inside a `current_thread` runtime. What is not bounded is a
 /// venue that refuses `SIGKILL` (uninterruptible sleep in a driver, say); no
 /// launcher can bound that, and a caller for whom it matters should drop this
 /// off the reactor.
@@ -365,10 +366,10 @@ pub struct LaunchedVenue {
     /// What went wrong bringing the venue down, written by the owning thread on
     /// its way out and read by [`LaunchedVenue::shutdown`] after the join.
     teardown: Arc<Mutex<Option<String>>>,
-    /// How many owner-poll windows expired WITHOUT a shutdown request, counted
+    /// How many owner-poll windows expired without a shutdown request, counted
     /// by the owning thread.
     ///
-    /// This exists so a test can tell WHICH ARM of the owner loop did the work
+    /// This exists so a test can tell which arm of the owner loop did the work
     /// instead of inferring it from a fraction of [`OWNER_POLL`]. A test that
     /// means "the reap happened on the shutdown arm" asserts this is zero; one
     /// that means "the owner looked and the venue was still alive" waits for it
@@ -420,7 +421,7 @@ impl LaunchedVenue {
     /// How the venue ended, if it already has. `None` means still serving.
     ///
     /// A venue given a duration ends itself: it announces `RunComplete` and
-    /// exits zero. That is a SUCCESSFUL run rather than a death, and telling the
+    /// exits zero. That is a successful run rather than a death, and telling the
     /// two apart is why this is not just "is it alive".
     #[must_use]
     pub fn exited(&self) -> Option<VenueExit> {
@@ -452,7 +453,7 @@ impl LaunchedVenue {
     /// [`LaunchError::Teardown`] if the venue would not die - signalling or
     /// reaping the child failed at the OS level.
     ///
-    /// THE SECOND ARM IS WHY THIS RETURNS A RESULT AT ALL. It used to report
+    /// The second arm is why this returns a result at all. It used to report
     /// only a panicked owner, so the "shut it down and report a failure to do
     /// so" check every caller writes against it was vacuous: a failed kill and a
     /// wedged child both returned `Ok(())`, and a venue still holding its port
@@ -467,7 +468,7 @@ impl LaunchedVenue {
         if let Some(owner) = self.owner.take() {
             owner.join().map_err(|_| LaunchError::OwnerDied)?;
         }
-        // AFTER the join, which is what makes the read sound: the owning thread
+        // After the join, which is what makes the read sound: the owning thread
         // writes this slot on its way out, so reading it before the join could
         // race the write and report a clean teardown of a venue that would not
         // die. Taken rather than copied, so a second call - `Drop` after an
@@ -501,14 +502,14 @@ pub fn launch(spec: LaunchSpec) -> Result<LaunchedVenue, LaunchError> {
 
 /// [`launch`] with the owning thread's poll interval named.
 ///
-/// The interval is a parameter ONLY so a test can pin which arm of the owner
+/// The interval is a parameter only so a test can pin which arm of the owner
 /// loop did the work: a test of the shutdown arm gives an interval no poll can
 /// expire within, which is a property of the run rather than a hope about the
 /// scheduler. Production has exactly one caller and it passes [`OWNER_POLL`].
 /// Create one of the launcher's own threads, or report the failure as
 /// [`LaunchError::Thread`].
 ///
-/// THE SOLE CONSTRUCTOR OF THAT VARIANT, and that is the point of the function
+/// The sole constructor of that variant, and that is the point of the function
 /// rather than a side effect of extracting three lines. Both call sites used to
 /// build a `Spawn` with the binary field holding a role name, which rendered as
 /// "could not spawn the venue binary \<owning thread\>: ... point the launcher
@@ -585,18 +586,18 @@ fn launch_with_poll(spec: LaunchSpec, owner_poll: Duration) -> Result<LaunchedVe
         })?
     };
 
-    // Waits WITHOUT a deadline of its own, deliberately. The readiness bound is
+    // Waits without a deadline of its own, deliberately. The readiness bound is
     // enforced inside the owner, because the owner holds the `Child` and can
     // therefore end the wait; a deadline here could only stop waiting, and then
     // had to join a thread still blocked in `read_ready` on a child that may
     // never write. That inverted the whole point of the bound - a wedged venue
-    // made `launch` hang forever, AFTER reporting a timeout. The owner always
+    // made `launch` hang forever, after reporting a timeout. The owner always
     // sends exactly one result, so a disconnect here means it panicked.
     let booted = boot_rx.recv().unwrap_or(Err(LaunchError::OwnerDied));
 
     match booted {
         Ok(record) => {
-            // Announce the run HERE rather than leaving it to the caller. A path
+            // Announce the run here rather than leaving it to the caller. A path
             // is reproducible only from `run_seed` with the config and the
             // binary's `version_string`, the seed is drawn at launch and exists
             // nowhere until this record carries it, and a consumer that forgets
@@ -634,27 +635,27 @@ fn launch_with_poll(spec: LaunchSpec, owner_poll: Duration) -> Result<LaunchedVe
 
 /// The argv for `serve`, split out so it is testable without spawning anything.
 ///
-/// PUBLIC so the venue's own argv parser can be held against it. The launcher
+/// Public so the venue's own argv parser can be held against it. The launcher
 /// renders `--duration` through `format_duration`, which emits `ms` and `ns`
 /// units and `0s`; `mogwai-cli` parses it with `humantime`, which takes all
-/// three. That binary's OTHER duration grammar, `gen`'s `parse_duration`,
+/// three. That binary's other duration grammar, `gen`'s `parse_duration`,
 /// takes only `s m h d w mo y`, refuses a zero count, and would read `1500ms`
 /// as an unknown unit. Two grammars in one binary differing on exactly the
 /// units this function emits is a live trap for anyone unifying them "for
 /// consistency", and the only thing that closes it is a test that renders here
-/// and parses THERE. `mogwai-cli`'s `serve_argv_parses_in_the_venues_own_grammar`
+/// and parses there. `mogwai-cli`'s `serve_argv_parses_in_the_venues_own_grammar`
 /// is that test, and it needs this function.
 ///
 /// Not `serve`'s full grammar: this renders only what the launcher passes.
 ///
-/// `--launcher-pid` is always passed, and IT IS A PARAMETER rather than
+/// `--launcher-pid` is always passed, and it is a parameter rather than
 /// `std::process::id()` because this function is public. It lets the venue
 /// prove it still has the parent it was started by, rather than inferring a
 /// death from a change in `getppid()` - an inference blind to a launcher that
 /// was already gone before the venue ran its first instruction, which is
 /// exactly what a launcher that spawns and exits produces. That inference is
 /// only as good as the pid being the pid of whatever will actually own the
-/// child, and a caller that renders argv HERE and spawns ELSEWHERE - into a
+/// child, and a caller that renders argv here and spawns elsewhere - into a
 /// systemd unit, a shell, a supervising helper - would otherwise silently ship
 /// this process's pid and get a venue watching a stranger: it exits at once if
 /// that pid is already gone, or never notices its real owner dying. `launch`
@@ -781,22 +782,22 @@ fn own_venue(
             })
     });
 
-    // The readiness read happens on ITS OWN thread so this one keeps a deadline.
+    // The readiness read happens on its own thread so this one keeps a deadline.
     // `read_ready`'s `read_until` on a child that holds stdout open and never
     // writes cannot be
     // interrupted from outside, so the bound has to belong to whoever can end
     // the wait - and that is this thread, which owns the `Child`. On expiry it
     // kills the venue, which closes stdout and releases the reader.
     //
-    // AND THE SAME THREAD THEN DRAINS STDOUT FOR THE REST OF THE RUN, discarding
+    // And the same thread then drains stdout for the rest of the run, discarding
     // what it reads. That is not tidiness: without it the launcher silently
-    // IMPOSES a rule nobody wrote down. The reader used to end at the send,
+    // imposes a rule nobody wrote down. The reader used to end at the send,
     // dropping the read end of the pipe, so the venue's very next stdout write
     // took `EPIPE` - and since Rust ignores `SIGPIPE`, a stray `println!` in the
     // serve path became a panic in whatever thread wrote it, mid-run, with a
     // cause nobody would trace back to a launcher that had exited its reader
     // three hours earlier. The module doc's "the only thing it ever writes
-    // there" was written as a DESCRIPTION and was silently load-bearing. It is
+    // there" was written as a description and was silently load-bearing. It is
     // now a description again: the venue may write to stdout and be ignored.
     // Pinned by `a_venue_that_writes_to_stdout_after_readiness_is_not_broken`.
     let stdout = child.stdout.take();
@@ -838,12 +839,12 @@ fn own_venue(
                     std::io::Error::other("the readiness reader died without reporting"),
                 )),
             };
-            // THE READER IS NEVER JOINED, on any path, and that is the
+            // The reader is never joined, on any path, and that is the
             // difference between reporting a timeout and hanging inside one. On
             // the success path it is now draining for the whole run, so a join
             // would park the launcher until the venue died. On the timeout path
             // it may be stranded: killing the child closes stdout only while the
-            // CHILD holds the write end, and a `binary` naming a wrapper script
+            // child holds the write end, and a `binary` naming a wrapper script
             // that launches the venue without `exec` leaves the grandchild
             // holding an inherited copy, so the reader's `read_until` never
             // returns and a join
@@ -862,8 +863,8 @@ fn own_venue(
     // into the error, and re-snapshot rather than trusting an earlier copy.
     // The obvious-looking replacement - a bounded join of the drain thread -
     // was proposed and refused with measurement: `NoRecord` is EOF on the
-    // STDOUT pipe, and a venue that closes its own stdout (or hands it to a
-    // grandchild) reaches this branch ALIVE, so both the stderr drain and the
+    // stdout pipe, and a venue that closes its own stdout (or hands it to a
+    // grandchild) reaches this branch alive, so both the stderr drain and the
     // stdout reader (now parked in its post-record `io::copy`) end only when
     // the venue dies. A join here blocks against a live venue; the sleep is
     // the only bounded way to give the ring a chance.
@@ -886,7 +887,7 @@ fn own_venue(
         // Park for the run, waking only often enough to notice the venue ending
         // on its own - which a run with a declared duration does, successfully.
         //
-        // THE REAP IS UNCONDITIONAL ON THE WAY OUT, including the arm where the
+        // The reap is unconditional on the way out, including the arm where the
         // caller asked for shutdown. It used to run only on the poll arm, so a
         // venue that finished its declared run inside the last poll window - the
         // ordinary ending for a bounded run whose caller then tears down - was
@@ -899,7 +900,7 @@ fn own_venue(
             let asked_to_stop = match shutdown_rx.recv_timeout(owner_poll) {
                 Ok(()) | Err(RecvTimeoutError::Disconnected) => true,
                 Err(RecvTimeoutError::Timeout) => {
-                    // Published BEFORE the `try_wait` below, so an observer that
+                    // Published before the `try_wait` below, so an observer that
                     // sees a nonzero count knows the poll arm had already begun
                     // its look. The count is the only evidence a test has of
                     // which arm ran.
@@ -939,7 +940,7 @@ fn own_venue(
             *slot = Some(detail);
         }
     }
-    // The drain thread is NOT joined. It runs a caller-supplied callback once
+    // The drain thread is not joined. It runs a caller-supplied callback once
     // per log line, and joining it here would put arbitrary user code in the
     // path of `LaunchedVenue::drop` - a callback that blocks on a mutex the
     // dropping thread holds, or on a current-thread runtime that is shutting
@@ -953,20 +954,20 @@ fn own_venue(
 /// Read and validate the single readiness line off the child's stdout.
 ///
 /// Takes the handle rather than the `Child`, because this runs on a thread that
-/// must not own the process it is reading from - the thread that DOES own it is
+/// must not own the process it is reading from - the thread that does own it is
 /// the one enforcing the readiness deadline, and it can only do that by killing
 /// the child out from under this read.
 ///
 /// The stderr for a `NoRecord` is attached by the caller, which is the only
 /// party that knows how long the drain has had to deliver it.
 ///
-/// BY REFERENCE, so the caller keeps the handle and can go on draining it for
+/// By reference, so the caller keeps the handle and can go on draining it for
 /// the run. Bytes this function's `BufReader` pulled past the newline are lost,
 /// which is correct for a caller that discards the rest anyway and is bounded at
 /// [`READY_LINE_MAX_BYTES`] by the `take` below.
 fn read_ready(stdout: &mut impl std::io::Read) -> Result<ReadyRecord, LaunchError> {
     let mut bytes = Vec::new();
-    // The `take` wraps the CHILD's stream, not the `BufReader` around it. That
+    // The `take` wraps the child's stream, not the `BufReader` around it. That
     // ordering is the whole bound: wrapping the other way still lets the
     // buffer pull a full chunk past the ceiling from a hostile writer, and
     // leaves the refusal below as the only evidence a cap exists - which a
@@ -1002,7 +1003,7 @@ fn read_ready(stdout: &mut impl std::io::Read) -> Result<ReadyRecord, LaunchErro
 /// version refusal in particular is the branch a consumer most needs to work and
 /// least often exercises.
 fn parse_ready(line: &str) -> Result<ReadyRecord, LaunchError> {
-    // Version FIRST means reading it off the RAW json, before the record is
+    // Version first means reading it off the raw json, before the record is
     // deserialized. Deserializing first and checking after only works while the
     // rest of the schema still happens to fit this build's struct - the moment a
     // newer venue retypes or removes any other field, the mismatch surfaces as
@@ -1048,14 +1049,14 @@ fn parse_ready(line: &str) -> Result<ReadyRecord, LaunchError> {
 mod tests {
     use super::*;
 
-    /// A pid that is deliberately NOT this process's, so a rendering that
+    /// A pid that is deliberately not this process's, so a rendering that
     /// reached for `std::process::id()` instead of the argument would fail.
     const NOT_THIS_PROCESS: u32 = 4_242_424;
 
     /// Not "no flags": the launcher's own pid always goes, because it is what
     /// lets the venue refuse to serve after its owner is already gone.
     ///
-    /// AND THE PID IS THE CALLER'S. `serve_argv` is public, so a consumer that
+    /// And the pid is the caller's. `serve_argv` is public, so a consumer that
     /// renders here and spawns somewhere else - a systemd unit, a supervising
     /// helper - must be able to name the process that will actually own the
     /// venue. Stamping this process's pid unconditionally would hand such a
@@ -1121,17 +1122,17 @@ mod tests {
     /// above it, and exhausting it still fails the caller's real assertion.
     const ETXTBSY_ATTEMPTS: usize = 40;
 
-    /// SERIALIZES EVERY `fork` IN THIS TEST BINARY AGAINST EVERY WRITE OF A
-    /// SCRIPTED FIXTURE, which is what closes the intra-process half of the
-    /// `ETXTBSY` race STRUCTURALLY rather than by retrying it.
+    /// Serializes every `fork` in this test binary against every write of a
+    /// scripted fixture, which is what closes the intra-process half of the
+    /// `ETXTBSY` race structurally rather than by retrying it.
     ///
     /// The race is this. A fixture below writes a shell script and then execs
     /// it. `execve` refuses with `ETXTBSY` while any process holds that inode
     /// open for writing, and while this module's helper holds it open, a
-    /// SIBLING TEST THAT FORKS inherits the descriptor - Rust opens files
-    /// `O_CLOEXEC`, so the child drops it at ITS exec, but not before. A unique
+    /// sibling test that forks inherits the descriptor - Rust opens files
+    /// `O_CLOEXEC`, so the child drops it at its exec, but not before. A unique
     /// path cannot touch that window, because the inherited copy is what the
-    /// kernel counts; pid-qualifying the name closes only the CROSS-PROCESS
+    /// kernel counts; pid-qualifying the name closes only the cross-process
     /// half, where the gate's dev and instrumented sweeps run this crate's
     /// tests at once.
     ///
@@ -1139,9 +1140,9 @@ mod tests {
     /// fixture takes this lock, and every `launch` in this module takes it for
     /// the duration of the call - `launch` returns only after `Command::spawn`
     /// has confirmed the child's exec through its `CLOEXEC` report pipe, so
-    /// holding it across the call covers the whole fork-to-exec span. THE
-    /// ARGUMENT DEPENDS ON `launch.rs` BEING THE ONLY `Command::new` IN THE
-    /// CRATE, which it is; a second spawner anywhere in `mogwai-protocol` owes
+    /// holding it across the call covers the whole fork-to-exec span. The
+    /// argument depends on `launch.rs` being the only `Command::new` in the
+    /// crate, which it is; a second spawner anywhere in `mogwai-protocol` owes
     /// this lock too, or the window reopens.
     ///
     /// The retry below is kept as a backstop rather than as the mechanism. It
@@ -1164,7 +1165,7 @@ mod tests {
     /// stderr callback and cannot be cloned for a second attempt.
     ///
     /// Returns the attempt count, so a failure message can say whether the
-    /// budget was spent, and the LAST attempt's elapsed time, which is the only
+    /// budget was spent, and the last attempt's elapsed time, which is the only
     /// one a wall-clock bound may be read off.
     fn launch_serialized(
         spec: impl FnMut() -> LaunchSpec,
@@ -1173,7 +1174,7 @@ mod tests {
     }
 
     /// [`launch_serialized`] with the owner's poll interval named, for the one
-    /// test that must pin WHICH ARM of the owner loop reaped the venue.
+    /// test that must pin which arm of the owner loop reaped the venue.
     fn launch_serialized_with_poll(
         mut spec: impl FnMut() -> LaunchSpec,
         owner_poll: Duration,
@@ -1312,7 +1313,7 @@ mod tests {
 
     /// `ReadyRecord` does not set `deny_unknown_fields`, so serde happily
     /// ignores the `symbol` key version 5 carried: the raw version check in
-    /// `parse_ready` is the ONLY thing that refuses a stale record. Both halves
+    /// `parse_ready` is the only thing that refuses a stale record. Both halves
     /// are asserted, because the refusal alone would hold just as well if serde
     /// were strict, and then the test would be documenting the wrong mechanism.
     #[test]
@@ -1336,7 +1337,7 @@ mod tests {
     /// A reader that reports how many bytes it was actually asked to hand over.
     /// The refusal message alone cannot distinguish a bounded read from an
     /// unbounded one that truncates afterwards, and the finding is about the
-    /// unbounded READ, so the byte count is the assertion that matters.
+    /// unbounded read, so the byte count is the assertion that matters.
     struct CountingReader<'a> {
         inner: std::io::Cursor<Vec<u8>>,
         delivered: &'a std::cell::Cell<usize>,
@@ -1356,7 +1357,7 @@ mod tests {
             // A hostile venue writing 100 KB with no newline at all.
             ("x".repeat(READY_LINE_MAX_BYTES as usize + 100_000), 4096),
             // The same, in a 3-byte character: the ceiling falls mid-character,
-            // so the retained prefix must stop at the last COMPLETE one.
+            // so the retained prefix must stop at the last complete one.
             ("\u{20ac}".repeat(2_000), 4095),
         ] {
             let source_len = hostile.len();
@@ -1421,7 +1422,7 @@ mod tests {
     }
 
     impl Drop for VenueScript {
-        /// The name is per-process AND per-fixture, so nothing collects these
+        /// The name is per-process and per-fixture, so nothing collects these
         /// between runs; unlink rather than accumulating one script per fixture
         /// per test-binary pid.
         fn drop(&mut self) {
@@ -1429,8 +1430,8 @@ mod tests {
         }
     }
 
-    /// THE PATH IS PID-QUALIFIED, WHICH CLOSES THE CROSS-PROCESS `ETXTBSY` RACE
-    /// ONLY. The full gate runs several sweeps, and the dev and instrumented
+    /// The path is pid-qualified, which closes the cross-process `ETXTBSY` race
+    /// only. The full gate runs several sweeps, and the dev and instrumented
     /// ones both build and run this crate's unit tests, so two processes run
     /// these tests at once; without the pid one would write a script while the
     /// other execed it. Embedding only the fixture's name would have fixed
@@ -1438,7 +1439,7 @@ mod tests {
     /// separates them, and the name is what separates two fixtures inside one
     /// process.
     ///
-    /// The INTRA-PROCESS half is closed by [`SPAWN_SERIALIZATION`], which this
+    /// The intra-process half is closed by [`SPAWN_SERIALIZATION`], which this
     /// takes for the write. See that lock for why a unique path cannot close
     /// it on its own.
     fn write_venue_script(name: &str, body: &str) -> VenueScript {
@@ -1462,12 +1463,12 @@ mod tests {
         write_venue_script("silent", "#!/bin/sh\nexec sleep 60\n")
     }
 
-    /// A venue that BOOTS: it prints one valid `ReadyRecord` line, flushes it by
+    /// A venue that boots: it prints one valid `ReadyRecord` line, flushes it by
     /// virtue of `printf` writing it whole, and then does `then`.
     ///
     /// This is what lets a unit test reach the second half of `own_venue` - the
     /// owner-poll loop, `try_wait`, the `VenueExit` record and the teardown
-    /// path. Every other launch fixture in this module fails BEFORE readiness,
+    /// path. Every other launch fixture in this module fails before readiness,
     /// so nothing here used to get past it.
     ///
     /// The readiness line is this module's own `record_json`, so a schema bump
@@ -1475,9 +1476,9 @@ mod tests {
     /// record to rot. The record's `addr` is never connected to; only `launch`
     /// reads it.
     ///
-    /// THE `pid` FIELD IS THE SCRIPT'S OWN `$$`, not the fixture's 42, and that
-    /// is load-bearing: it is what lets a test WAIT FOR THE CHILD TO ACTUALLY
-    /// END rather than sleep and hope. `$$` survives the `exec` the fixtures use,
+    /// The `pid` field is the script's own `$$`, not the fixture's 42, and that
+    /// is load-bearing: it is what lets a test wait for the child to actually
+    /// end rather than sleep and hope. `$$` survives the `exec` the fixtures use,
     /// so it names the process the launcher is holding in every one of them.
     fn scripted_venue(name: &str, then: &str) -> VenueScript {
         let record = record_json(ReadyRecord::VERSION);
@@ -1494,7 +1495,7 @@ mod tests {
     /// view - it has exited and is either a zombie awaiting its reap or already
     /// gone.
     ///
-    /// This is the OBSERVABLE that replaces "sleep a fraction of `OWNER_POLL`
+    /// This is the observable that replaces "sleep a fraction of `OWNER_POLL`
     /// and assume the child got there". A child the launcher has not reaped
     /// stays a zombie, so the state is stable once reached rather than a window
     /// that can be missed.
@@ -1506,7 +1507,7 @@ mod tests {
                 // Gone entirely: it exited and something reaped it.
                 Err(_) => true,
                 // The comm field can contain anything including spaces and
-                // parens, so the state letter is the first field after the LAST
+                // parens, so the state letter is the first field after the last
                 // close paren.
                 Ok(stat) => stat
                     .rsplit_once(')')
@@ -1567,9 +1568,9 @@ mod tests {
         }
     }
 
-    /// The bound is a WALL-CLOCK bound, not merely an eventual error.
+    /// The bound is a wall-clock bound, not merely an eventual error.
     ///
-    /// This is the case that used to hang FOREVER after reporting its timeout:
+    /// This is the case that used to hang forever after reporting its timeout:
     /// the thread owning the child sat in `read_line` on a line that was never
     /// coming, and `launch` joined it. The assertion that matters is the elapsed
     /// time, not the error variant - the old code produced the right variant and
@@ -1594,13 +1595,13 @@ mod tests {
         );
     }
 
-    /// A venue that closes stdout without speaking is a boot failure EVEN
-    /// THOUGH IT IS STILL RUNNING, and the launcher reports it promptly rather
+    /// A venue that closes stdout without speaking is a boot failure even
+    /// though it is still running, and the launcher reports it promptly rather
     /// than waiting the child out.
     ///
     /// This is the counterexample that keeps the `NoRecord` path's fixed 50 ms
     /// pause from being replaced by "drain stderr to EOF, the child is dead by
-    /// then". `NoRecord` means end-of-file on the STDOUT pipe, which is every
+    /// then". `NoRecord` means end-of-file on the stdout pipe, which is every
     /// write end closed - a venue that closes its own stdout, or hands it to a
     /// grandchild that closes it, reaches this branch while very much alive. An
     /// unbounded drain here would hang `launch` forever immediately after it
@@ -1628,20 +1629,20 @@ mod tests {
         );
     }
 
-    /// A venue that ends itself INSIDE THE POLL WINDOW the caller's shutdown
+    /// A venue that ends itself inside the poll window the caller's shutdown
     /// closes must still have its exit recorded.
     ///
-    /// THIS IS THE UNCONDITIONAL-REAP FIX, AND IT IS THE ONLY TEST OF IT. The
+    /// This is the unconditional-reap fix, and it is the only test of it. The
     /// `try_wait` used to run only on the poll arm, so a bounded run that
-    /// finished during the last window - the ORDINARY ending for a run with a
+    /// finished during the last window - the ordinary ending for a run with a
     /// declared duration whose caller then tears down - was reaped with no
     /// `VenueExit`, reporting `exited() == None`, which reads as a venue killed
     /// while healthy. A clean completion and a death are then the same signal.
     ///
-    /// NEITHER PRECONDITION IS A SLEEP, because both directions of wall-clock
-    /// slip used to be live and one of them made the test PASS WITH THE FIX
-    /// REVERTED. Reverting moves `if asked_to_stop { break; }` ahead of the
-    /// `try_wait` on the SHUTDOWN arm only; the POLL arm reaps either way. So a
+    /// Neither precondition is a sleep, because both directions of wall-clock
+    /// slip used to be live and one of them made the test pass with the fix
+    /// reverted. Reverting moves `if asked_to_stop { break; }` ahead of the
+    /// `try_wait` on the shutdown arm only; the poll arm reaps either way. So a
     /// test that slept a fraction of `OWNER_POLL` and let the poll arm win still
     /// saw the exit recorded, and stopped testing the fix without failing. In
     /// the other direction a child that had not yet exited by the sleep failed
@@ -1649,7 +1650,7 @@ mod tests {
     ///
     /// Both are replaced by observables:
     ///
-    /// - The owner's poll interval is set to an hour, so NO POLL CAN EXPIRE
+    /// - The owner's poll interval is set to an hour, so no poll can expire
     ///   during the test, and `completed_polls()` is asserted zero afterwards.
     ///   That is the property the doc used to merely claim.
     /// - `await_child_end` waits for the kernel to agree the script is over
@@ -1658,7 +1659,7 @@ mod tests {
     ///   window.
     ///
     /// `terminate` rather than `shutdown` because `shutdown` consumes the venue,
-    /// and the record has to be READ after the teardown that would have skipped
+    /// and the record has to be read after the teardown that would have skipped
     /// it.
     #[test]
     fn a_venue_that_ended_during_shutdown_still_records_its_exit() {
@@ -1698,7 +1699,7 @@ mod tests {
         );
     }
 
-    /// A venue ended by a SIGNAL has no exit code, and `code: None` is the only
+    /// A venue ended by a signal has no exit code, and `code: None` is the only
     /// thing that says so. Pinned separately because it is the one shape where
     /// `success: false` carries no number, and a record that defaulted the code
     /// to zero would be indistinguishable from a clean run on `code` alone.
@@ -1718,18 +1719,18 @@ mod tests {
     /// `exited()` is `None` for a venue that was still serving when it was torn
     /// down, and the shutdown of a healthy venue reports no failure.
     ///
-    /// The wait is a POSITIVE PRECONDITION rather than padding: without it the
+    /// The wait is a positive precondition rather than padding: without it the
     /// `None` would hold because the owner had not yet looked, which is a
     /// different claim from "it looked and the venue was alive". It waits on the
     /// owner's own poll counter rather than on a multiple of `OWNER_POLL`, so
-    /// the precondition is OBSERVED - a scheduler that runs the sleep short
+    /// the precondition is observed - a scheduler that runs the sleep short
     /// cannot leave the assertion vacuously true.
     #[test]
     fn a_venue_killed_while_healthy_records_no_exit() {
         let script = scripted_venue("healthy", "exec sleep 60");
         let venue = launch_scripted(&script);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        // TWO, not one: the counter is published at the TOP of the poll arm, so
+        // Two, not one: the counter is published at the top of the poll arm, so
         // a count of one proves only that the arm was entered. A second entry
         // proves the first one ran its `try_wait` to completion and found the
         // venue alive.
@@ -1750,32 +1751,32 @@ mod tests {
             .expect("tearing down a healthy venue is not a failure");
     }
 
-    /// Tearing down a HEALTHY venue costs a wakeup, not an [`OWNER_POLL`].
+    /// Tearing down a healthy venue costs a wakeup, not an [`OWNER_POLL`].
     ///
     /// The finding this pins claimed the opposite - that dropping the handle
     /// blocks the calling thread for up to the poll interval, because the owner
     /// is sitting in `recv_timeout(OWNER_POLL)` - and recommended replacing the
-    /// whole loop with a `SIGCHLD` waiter. MEASUREMENT REFUSED IT: dropping the
-    /// sender DISCONNECTS the channel and `recv_timeout` returns on a disconnect
+    /// whole loop with a `SIGCHLD` waiter. Measurement refused it: dropping the
+    /// sender disconnects the channel and `recv_timeout` returns on a disconnect
     /// immediately, so the observed drop cost is a few hundred microseconds, the
     /// kill and reap. The poll interval bounds only how late the owner notices a
-    /// venue that ended ON ITS OWN, which no teardown waits for.
+    /// venue that ended on its own, which no teardown waits for.
     ///
     /// The property is cheap and invisible, which is why it needs a test: an
     /// owner loop rewritten as `sleep(owner_poll); try_recv()` reads as an
     /// equivalent refactor, passes every other test in this module, and puts the
     /// full interval into every drop on the caller's thread.
     ///
-    /// IT IS NOT A LATENCY BUDGET, AND THE DIFFERENCE IS THE WHOLE DESIGN OF THE
-    /// TEST. A first cut ran at the production [`OWNER_POLL`] of 200 ms and
+    /// It is not a latency budget, and the difference is the whole design of the
+    /// test. A first cut ran at the production [`OWNER_POLL`] of 200 ms and
     /// asserted teardown under a quarter of it - a 50 ms wall-clock assertion in
     /// the parallel dev lane, which is the exact shape this workspace already
     /// deleted once: `tape_lateness_under_acceleration` asserted 50 ms and failed
-    /// a RELEASE run at 311 ms under a load average of 1.46. A budget that tight
+    /// a release run at 311 ms under a load average of 1.46. A budget that tight
     /// is a statement about the host, and no admission test here distinguishes a
     /// host that can judge it.
     ///
-    /// So the SIGNAL is widened instead of the assertion tightened, which is the
+    /// So the signal is widened instead of the assertion tightened, which is the
     /// same move the module's other wall-clock assertions make (10 s against a
     /// 60 s child, 5 s against a 300 s bound - loose upper bounds, not budgets).
     /// The owner is given a ten-second interval, so the two outcomes are
@@ -1783,7 +1784,7 @@ mod tests {
     /// roughly four orders of magnitude above the honest cost and a fifth of what
     /// the defect costs. Nothing here is judging a scheduler.
     ///
-    /// The interval is also what establishes the PRECONDITION without a race.
+    /// The interval is also what establishes the precondition without a race.
     /// `launch` returns only after the owner has sent its boot result, which it
     /// does immediately before entering the loop, so the owner is parked with
     /// essentially the whole ten seconds left to run - the state the finding
@@ -1791,7 +1792,7 @@ mod tests {
     /// flake: an owner not yet parked returns from the disconnect just as fast,
     /// it would only weaken the evidence.
     ///
-    /// `completed_polls` carries the CLOCK-FREE half of the claim - no window
+    /// `completed_polls` carries the clock-free half of the claim - no window
     /// expired at all, so the reap was provably the shutdown arm's work rather
     /// than a poll that happened to look. That is the statement the counter
     /// exists for; separating a wakeup from a slept interval is what still needs
@@ -1818,16 +1819,16 @@ mod tests {
         );
     }
 
-    /// A venue that writes to stdout AFTER readiness is ignored, not killed.
+    /// A venue that writes to stdout after readiness is ignored, not killed.
     ///
     /// The launcher used to drop the read end of the stdout pipe as soon as it
     /// had the record, which turned the module doc's descriptive "that is the
-    /// only thing it ever writes there" into an unwritten HARD REQUIREMENT on
+    /// only thing it ever writes there" into an unwritten hard requirement on
     /// the venue: the next write took `EPIPE`, and with `SIGPIPE` ignored in
     /// Rust that surfaces as a panic or an error mid-run, hours after the
     /// launcher made it possible.
     ///
-    /// The fixture is a `/bin/sh` script, which does NOT ignore `SIGPIPE` - so
+    /// The fixture is a `/bin/sh` script, which does not ignore `SIGPIPE` - so
     /// with the drain removed it dies of the signal and records
     /// `VenueExit { success: false, code: None }`, and with the drain present it
     /// records the clean `Some(0)` it asked for. Both halves are asserted,
@@ -1853,7 +1854,7 @@ mod tests {
         );
     }
 
-    /// A thread the launcher could not create is NOT reported as a bad binary.
+    /// A thread the launcher could not create is not reported as a bad binary.
     ///
     /// Both sites raising this used to build a `Spawn` with the binary field set
     /// to a role name, so `EAGAIN` on `pthread_create` rendered as "could not
@@ -1862,23 +1863,23 @@ mod tests {
     /// this process running out of threads. The remedy has to be in the message,
     /// because the two failures are indistinguishable from the outside.
     ///
-    /// CONSTRUCTED RATHER THAN PROVOKED, and this test therefore pins the
-    /// RENDERING ONLY. Reaching the real branch means driving this process to its
+    /// Constructed rather than provoked, and this test therefore pins the
+    /// rendering only. Reaching the real branch means driving this process to its
     /// thread limit, which fails whatever else the test binary is running at the
     /// time. So be exact about what is and is not held here, because the round
     /// that added it first wrote down a bite-check it could not have run:
     ///
-    /// - PINNED, and it bites: the message names the role, places the limit in
+    /// - Pinned, and it bites: the message names the role, places the limit in
     ///   this process, and does not send the operator after a binary path.
     ///   Reverting the `Display` arm to the old `Spawn` wording fails it.
-    /// - NOT PINNED: that the launcher's two thread-creation sites produce this
+    /// - Not pinned: that the launcher's two thread-creation sites produce this
     ///   variant. Nothing in this test calls `launch`, so restoring the old
     ///   `Spawn { binary: "<owning thread>" }` construction at a call site would
-    ///   leave it green. That coupling is held STRUCTURALLY instead, by
+    ///   leave it green. That coupling is held structurally instead, by
     ///   `spawn_launcher_thread` being the only way this module creates a thread
     ///   and the only constructor of this variant.
-    /// - NOT PINNED EITHER: that the message is true about the venue at both
-    ///   sites. The reader-thread site raises this AFTER the venue is spawned,
+    /// - Not pinned either: that the message is true about the venue at both
+    ///   sites. The reader-thread site raises this after the venue is spawned,
     ///   which is why the text says "no venue is left running" rather than
     ///   "nothing was spawned"; the kill and reap that make it true are the same
     ///   unconditional pair every other failure path in `own_venue` reaches.
@@ -1903,7 +1904,7 @@ mod tests {
         );
     }
 
-    /// A teardown failure recorded by the owning thread REACHES THE CALLER, and
+    /// A teardown failure recorded by the owning thread reaches the caller, and
     /// reaches it once.
     ///
     /// This is why `shutdown` returns a `Result` at all. It used to report only
@@ -1913,16 +1914,16 @@ mod tests {
     /// was announced as an orderly shutdown. A caller that believes that may
     /// launch its replacement into an address the old one still owns.
     ///
-    /// The slot is filled DIRECTLY rather than by provoking a real failed kill.
+    /// The slot is filled directly rather than by provoking a real failed kill.
     /// Provoking one means reaping the child out from under the owner, which
     /// leaves `Child::kill` signalling a pid the kernel may already have
     /// recycled - a test that can kill an unrelated process is not worth the
-    /// coverage. What stays unpinned by this test is the COUPLING: that the
+    /// coverage. What stays unpinned by this test is the coupling: that the
     /// owning thread writes this slot when its kill or its reap fails. The
     /// tests above cover the other direction, that a healthy teardown leaves it
     /// empty, so a `shutdown` that always reported would fail there.
     ///
-    /// It also cannot pin the ORDERING `terminate` calls load-bearing, because
+    /// It also cannot pin the ordering `terminate` calls load-bearing, because
     /// it builds a venue with no owner at all and so never joins one. That is
     /// `the_teardown_detail_is_read_after_the_owner_joins` below.
     #[test]
@@ -1967,20 +1968,20 @@ mod tests {
             .expect("an emptied slot is an orderly teardown");
     }
 
-    /// The teardown slot is read AFTER the owner is joined, which is the whole
+    /// The teardown slot is read after the owner is joined, which is the whole
     /// reason the read sits where it does.
     ///
     /// The real owner writes that slot on its way out, so a read placed before
-    /// the join races the write and reports a CLEAN teardown for a venue that
+    /// the join races the write and reports a clean teardown for a venue that
     /// would not die - the exact failure the `Result` was added to prevent, put
     /// back by an innocuous-looking reordering. The direct-fill test above
     /// cannot see it: it builds a venue with `owner: None`, so there is no join
     /// for the read to be on the wrong side of.
     ///
     /// The stand-in owner is a plain thread rather than a real venue because
-    /// what is under test is `terminate`'s ORDER OF OPERATIONS, not the child.
+    /// what is under test is `terminate`'s order of operations, not the child.
     /// It reproduces the shape that matters: it blocks until the shutdown sender
-    /// drops, then does its work, and only at the END records the failure - just
+    /// drops, then does its work, and only at the end records the failure - just
     /// as `own_venue` kills, waits and then writes.
     #[test]
     fn the_teardown_detail_is_read_after_the_owner_joins() {

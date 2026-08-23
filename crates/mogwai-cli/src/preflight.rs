@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `mogwai preflight`: the fail-closed TBBO corpus contract
-//! (`mogwai_lab::preflight`), THE PARITY GATE of
+//! (`mogwai_lab::preflight`), the parity gate of
 //! the retired rewrite plan, phase 1 - must reproduce
 //! `analysis/out/mnq-fit-preflight.json` value-identically against the
 //! delivered July corpus.
@@ -22,7 +22,7 @@ pub(crate) struct PreflightArgs {
     /// The Databento jobs manifest. Read-only: this never writes it.
     #[arg(long, value_name = "PATH")]
     jobs_manifest: Option<PathBuf>,
-    /// Where to write the preflight artifact. An ARTIFACT (storage policy):
+    /// Where to write the preflight artifact. An artifact (storage policy):
     /// never cached, never auto-deleted.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,

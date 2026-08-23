@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The OBSERVED front-end of the unified block engine: a port of
+//! The observed front-end of the unified block engine: a port of
 //! `analysis/mnq_fit.py`'s `measure12a_observe`. One chronological pass over
-//! the TBBO stream, ONE session retained at a time.
+//! the TBBO stream, one session retained at a time.
 //!
 //! Parent inference here is the frozen observed rule: a parent is a
 //! contiguous run of rows sharing `(ts, side)`; an unsided (`N`) row never
-//! joins a parent AND terminates the open one; a row outside the usable
+//! joins a parent and terminates the open one; a row outside the usable
 //! session set terminates the open parent too. The parent's segment is the
-//! one its FIRST child fell in, and its book/quote come from that same first
+//! one its first child fell in, and its book/quote come from that same first
 //! child's row - the parent is opened from the row that starts it and never
 //! re-reads the book.
 

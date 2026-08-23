@@ -3,7 +3,7 @@
 
 //! `mogwai cache`: the manual-case cover for the storage policy's
 //! stale-provenance pruning (the retired rewrite plan, phase 1). Phase 1
-//! lands no cache PRODUCERS - `stats`/`clean` operate on whatever a later
+//! lands no cache producers - `stats`/`clean` operate on whatever a later
 //! phase has written under the cache root, and are honest about reporting
 //! zero when nothing has.
 
@@ -35,16 +35,16 @@ enum CacheCommand {
     /// Removes provenance directories. Bare `clean` clears everything;
     /// `--stale --keep <TOKEN>` clears every directory except the named one.
     ///
-    /// `--keep` IS REQUIRED WITH `--stale`, AND THAT IS THE FIX FOR A REAL
-    /// DEFECT rather than an ergonomic choice. `--stale` used to synthesize
+    /// `--keep` is required with `--stale`, and that is the fix for a real
+    /// defect rather than an ergonomic choice. `--stale` used to synthesize
     /// "the current token" here, folding `std::env::args()` into it - so the
     /// token it computed was one for the literal string
     /// `".../mogwai cache clean --stale"`, which no producer has ever written
-    /// under. A cache PRODUCER's token binds the command that produced the
+    /// under. A cache producer's token binds the command that produced the
     /// entries (`arrival-screen:kernel-version=...:start=...`) and that
     /// command's own sub-contract hash; nothing about a `cache` invocation
     /// determines it. The mismatch was total, so `clean --stale` deleted
-    /// EVERYTHING, identically to bare `clean`, on the invocation an operator
+    /// everything, identically to bare `clean`, on the invocation an operator
     /// reaches for precisely because it is supposed to be the safe one. A
     /// token this command cannot derive is one the operator must name, and
     /// `cache stats --entries` prints the candidates.
@@ -78,8 +78,8 @@ pub(crate) fn run(args: CacheArgs) -> anyhow::Result<()> {
             stale: true,
             keep: Some(token),
         } => {
-            // AN UNKNOWN TOKEN IS A REFUSAL, because `clean_stale` only ever
-            // COMPARES names: a token matching no directory keeps no directory,
+            // An unknown token is a refusal, because `clean_stale` only ever
+            // compares names: a token matching no directory keeps no directory,
             // so `--keep bbb` fat-fingered for `bbbb` removes the entire cache
             // including the one entry the operator named. That is the very data
             // loss `--keep` was introduced to prevent, reduced from unconditional
@@ -145,7 +145,7 @@ mod tests {
     /// Two provenance directories under a private cache root, so a prune can
     /// be observed rather than argued about.
     ///
-    /// The root is under the WORKSPACE target directory, not a bare relative
+    /// The root is under the workspace target directory, not a bare relative
     /// `target/`. A unit test's working directory is its crate, so a relative
     /// path lands in `crates/mogwai-cli/target/`, which the root `.gitignore`
     /// hides (`target` matches at any depth) and which `cargo clean` never
@@ -155,7 +155,7 @@ mod tests {
     /// sets it for integration tests and benches only - so the workspace root
     /// is resolved from `CARGO_MANIFEST_DIR` instead.
     ///
-    /// THE GUARD IS RETURNED, not the path. Its leaf is unique per process, so
+    /// The guard is returned, not the path. Its leaf is unique per process, so
     /// two concurrent test sweeps, which the full gate profile runs by design,
     /// cannot race each other's seeding, and dropping it removes what the test
     /// wrote.
@@ -176,7 +176,7 @@ mod tests {
         }
     }
 
-    /// THE FINDING, ASSERTED ON THE RESOURCE RATHER THAN ON AN ERROR. The old
+    /// The finding, asserted on the resource rather than on an error. The old
     /// `--stale` synthesized a token from its own argv, matched nothing, and
     /// removed both directories. A test observing only the exit status could
     /// not tell that apart from a correct prune, so this one counts what
@@ -192,7 +192,7 @@ mod tests {
                 keep: None,
             },
         ));
-        // THE RESOURCE BEFORE THE VERDICT, deliberately. Asserted the other way
+        // The resource before the verdict, deliberately. Asserted the other way
         // round, the `expect_err` fires first and the test goes red without
         // ever looking at the disk - so a bite-check reads as proof for an
         // assertion that never ran, which this arc has paid for before.
@@ -221,12 +221,12 @@ mod tests {
         assert!(root.join("entries/bbbb/k").exists(), "bbbb was pruned");
     }
 
-    /// THE TYPO, WHICH IS THE SAME DATA LOSS ONE KEYSTROKE AWAY. `clean_stale`
+    /// The typo, which is the same data loss one keystroke away. `clean_stale`
     /// only compares names, so a `--keep` naming nothing keeps nothing and the
     /// whole cache goes - the exact outcome the required `--keep` was added to
-    /// stop. Asserted on the RESOURCE first, for the same reason its sibling
+    /// stop. Asserted on the resource first, for the same reason its sibling
     /// above is: an `expect_err` fired before any disk check proves the command
-    /// refused, not that it refused BEFORE deleting.
+    /// refused, not that it refused before deleting.
     #[test]
     fn an_unknown_token_refuses_rather_than_pruning_everything() {
         let scratch = seeded_root("cache-stale-typo");

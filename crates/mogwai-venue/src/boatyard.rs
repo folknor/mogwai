@@ -32,14 +32,14 @@ pub(crate) struct BoatKey {
     speed_micros: u64,
 }
 
-/// THE ONE QUANTIZATION. Boarding and looking a cadence up both go through
+/// The one quantization. Boarding and looking a cadence up both go through
 /// here, so a consumer writing `100.0000001` cannot board one boat and then fail
 /// to find it.
 ///
 /// Micro-multiples, so the key is `Hash` and `Eq` and two consumers writing
 /// `100` and `100.0000001` share a boat. Bounded first: a float cast saturates
 /// rather than wrapping, so an absurd speed would otherwise be silently
-/// REPLACED by a different one and then paced at it.
+/// replaced by a different one and then paced at it.
 fn quantize_speed(speed: f64) -> anyhow::Result<u64> {
     if !speed.is_finite() || speed < 0.0 {
         anyhow::bail!("speed must be finite and non-negative");
@@ -69,7 +69,7 @@ impl BoatKey {
         self.speed_micros
     }
 
-    /// The quantized speed, back in the units a consumer asked in. THE ONE
+    /// The quantized speed, back in the units a consumer asked in. The one
     /// dequantization, so a message naming a sitting cadence and a lookup
     /// matching one cannot disagree about what `2` means.
     pub(crate) fn speed(&self) -> f64 {
@@ -99,7 +99,7 @@ pub(crate) struct Boat {
 /// A placement in flight, and the handoff every other joiner waits on. A
 /// `Semaphore` and not a `Notify`: a joiner clones this while holding the
 /// registry mutex and only then awaits, so a wakeup delivered in that window
-/// must be REMEMBERED. `notify_waiters` forgets it and wedges the joiner
+/// must be remembered. `notify_waiters` forgets it and wedges the joiner
 /// forever; a closed semaphore fails every later acquire immediately.
 enum Slot {
     Placing(Arc<Semaphore>),
@@ -304,7 +304,7 @@ impl Boat {
     /// keying per-boat state cannot confuse it with a boat on another river or
     /// at another cadence that happened to be allocated at the same address.
     ///
-    /// NOT AN IDENTITY ACROSS LIFETIMES: the key is the sharing key, so a boat
+    /// Not an identity across lifetimes: the key is the sharing key, so a boat
     /// placed after this one winds down carries the same key if it is the same
     /// river at the same speed. State keyed by it must therefore be released
     /// when its holder lets go, never left to be reclaimed by a match.
@@ -340,7 +340,7 @@ impl Drop for Ticket {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
         };
-        // Joined OFF the registry mutex, and off a runtime worker: the worker
+        // Joined off the registry mutex, and off a runtime worker: the worker
         // may be mid-generator-step or waiting on the river mutex, so the join
         // is bounded by a poll slice plus one tick's work. A ticket can also be
         // dropped outside any runtime (process teardown, a non-async test), so
@@ -381,9 +381,9 @@ mod tests {
         )
     }
 
-    /// RE-ANCHORED by piece 13: `resolve_profile("SECOND")` still succeeds, but
-    /// no longer because "SECOND" is configured - resolution is total now, so
-    /// this only pins that the two labels key two DISTINCT rivers. It is not a
+    /// Re-anchored by piece 13: `resolve_profile("SECOND")` still succeeds, but
+    /// no longer because `"SECOND"` is configured - resolution is total now, so
+    /// this only pins that the two labels key two distinct rivers. It is not a
     /// live guard on configured-only lookup and must not be read as one.
     fn two_symbol_yard() -> (Arc<Boatyard>, RiverKey, RiverKey) {
         let rivers = crate::fills::test_rivers_with_a_second_symbol();
@@ -409,7 +409,7 @@ mod tests {
     /// submit then paying a full window walk behind one global mutex - has no
     /// production expression left, so it was reproduced by injection: one
     /// `MarketReadingCache` read four times with an alternating guard field
-    /// reports FOUR walks where the two per-boat memos report one each.
+    /// reports four walks where the two per-boat memos report one each.
     #[tokio::test]
     async fn two_boats_do_not_evict_each_other_s_market_reading() {
         let (yard, first, second) = two_symbol_yard();
@@ -427,7 +427,7 @@ mod tests {
             })
             .await
             .unwrap();
-        // NOT the yard's origin: a 300 s window walk backwards from
+        // Not the yard's origin: a 300 s window walk backwards from
         // `TAPE_ORIGIN_NS` has no tape behind it, so the reads would memoize a
         // refusal and the counters would pass while proving nothing about the
         // walk they saved. Hence the `is_some` assertion too.
@@ -577,11 +577,11 @@ mod tests {
             "a failed placement left a placeholder behind"
         );
     }
-    /// The placement HANDOFF, which the sequential tests cannot reach: every
+    /// The placement handoff, which the sequential tests cannot reach: every
     /// boarder but one finds a placeholder, and each of them clones the
     /// handoff under the registry mutex and only then awaits it. A handoff
     /// that forgets a wakeup delivered in that window wedges those boarders
-    /// forever, so this test fails as a HANG rather than an assertion.
+    /// forever, so this test fails as a hang rather than an assertion.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_first_boarders_share_one_placement() {
         let (yard, river) = yard();

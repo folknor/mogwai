@@ -1,6 +1,6 @@
 project = "mogwai"
 
-# The default shape: every crate with no feature on. That is the SHIPPED shape
+# The default shape: every crate with no feature on. That is the shipped shape
 # and the one every consumer builds - `mogwai-data` and `mogwai-lab` each carry
 # `hotpath`/`hotpath-alloc`, and both are optional dependencies precisely so
 # that with neither feature named the profiler is absent from the dependency
@@ -28,7 +28,7 @@ packages = ["mogwai-data", "mogwai-lab"]
 features = ["hotpath-alloc"]
 
 # The wall-clock contract, and the only sweep in this workspace that compiles
-# RELEASE. It asserts a latency budget, so the build profile is not an
+# release. It asserts a latency budget, so the build profile is not an
 # implementation detail of how it is run - it is part of what it measures.
 # Running a latency assertion in a dev lane does not produce a weaker result: it
 # produces a meaningless one.
@@ -44,31 +44,31 @@ features = ["hotpath-alloc"]
 # sweep, and the release build shape would then enumerate a coverage universe of
 # its own - every test in the workspace, none of them run here.
 #
-# IT USED TO NAME TWO. `tape_lateness_under_acceleration` was the other, and it
+# It used to name two. `tape_lateness_under_acceleration` was the other, and it
 # is gone from the suite entirely rather than moved between lanes: its 50 ms p99
-# is a statement about the HOST, not about this code - a release run failed it at
+# is a statement about the host, not about this code - a release run failed it at
 # 311 ms under a load average of 1.46 - and no admission test distinguishes a
 # machine that can judge that budget from one that cannot. A gate that must be
 # excluded from every lane that would run it measures nothing, so it became a
-# MEASURABLE TARGET, `tape_lateness` below, where every run records the number
+# measurable target, `tape_lateness` below, where every run records the number
 # against the machine and the commit that produced it.
 #
-# NOTE ON `only`: it is a substring filter, so `read_market_latency` catches
+# A note on `only`: it is a substring filter, so `read_market_latency` catches
 # `read_market_latency_stays_within_submit_budget` and nothing else today. The
 # name is also in the gate's `skip` list, because the two lists state one
-# decision - a wall-clock contract excluded from the debug gate BECAUSE the
+# decision - a wall-clock contract excluded from the debug gate exactly because the
 # release sweep evaluates it - and they have to agree.
 #
-# WHAT ENFORCES THE AGREEMENT, and what does not. A Rust test used to hold the
+# What enforces the agreement, and what does not. A Rust test used to hold the
 # two lists against each other by reconstructing every test name from source;
 # it was deleted on 2026-08-20 when the tool grew the checks it was standing in
 # for. What the tool now guarantees is the half that bites: a test this `only`
-# filter runs which the gate does NOT skip is an ORPHANED PAIR, because the gate
+# filter runs which the gate does not skip is an orphaned pair, because the gate
 # would then be evaluating a wall-clock contract in a debug lane, and a filter
-# matching no test at all is a DEAD FILTER. Both are resolved against libtest's
+# matching no test at all is a dead filter. Both are resolved against libtest's
 # own enumeration.
 #
-# The remaining direction - that the two lists were WRITTEN from one decision -
+# The remaining direction - that the two lists were written from one decision -
 # is a claim about intent and nothing checks it. Comparing them as substrings
 # never could: `skip.contains(filter)` is satisfied by any unrelated long entry,
 # and the sound converse refuses the pair below, where the `only` filter is
@@ -82,7 +82,7 @@ curated = true
 [test]
 gate_profile = "gate"
 
-# `brokkr test` builds DEV. The focused runner is used for bite-checks and
+# `brokkr test` builds dev. The focused runner is used for bite-checks and
 # single-test debugging, where release LTO compile time dominates wall time and
 # the optimization level changes nothing about the property under test - which is
 # why nearly every invocation of it in this repo was already passing `--debug` by
@@ -91,7 +91,7 @@ gate_profile = "gate"
 # It is safe only because the two tests that genuinely need release now say so
 # themselves, in the `timing` sweep above. A sweep's profile beats this key, so
 # the bare documented invocation cannot silently pick dev for them. Anything else
-# that turns out to depend on optimization belongs in that sweep too, NOT in a
+# that turns out to depend on optimization belongs in that sweep too, never in a
 # reader remembering to pass `--release`.
 debug = true
 
@@ -118,7 +118,7 @@ include_ignored = true
 #
 # That blindness has cost real bugs. The `account_id` field the multi-account
 # landing added to `AccountState`, and the websocket URL that landing broke by
-# appending the path after the query string, both shipped RED and stayed red
+# appending the path after the query string, both shipped red and stayed red
 # across three commits, because the only tests that exercised them never ran.
 # Each was found by hand. `include_ignored` here is what makes them a gate
 # rather than a thing someone remembers to run.
@@ -129,9 +129,9 @@ include_ignored = true
 # silence.
 # `include_ignored` pulls in two unrelated families, and only one of them is
 # what this gate is for. The socket-backed tests are `#[ignore]`d for an
-# ENVIRONMENT reason - they bind loopback listeners - and are fast, so the gate
+# environment reason - they bind loopback listeners - and are fast, so the gate
 # runs them. The other family is the `#[ignore]`d instruments, and the honest
-# statement of why they are skipped is NOT one sentence - it used to be
+# statement of why they are skipped is not one sentence - it used to be
 # "every one of them outlives the 20-second per-test hang watchdog by design",
 # and the 2026-08-18 tape round measured that claim and found it false for most
 # of them. It is kept per entry now, beside the entry, with a number:
@@ -150,9 +150,9 @@ include_ignored = true
 #     at all - it is a release-profile wall-clock contract this debug lane
 #     cannot validly evaluate. Its own note says so.
 #   - `arrival_control_refuses_a_tree_that_changed_during_the_run` is an
-#     ENVIRONMENT exclusion: it needs, and deliberately dirties, the tree.
+#     environment exclusion: it needs, and deliberately dirties, the tree.
 #
-# A SKIP ENTRY STATES A COST AND NOTHING CHECKS IT. That is the standing hole
+# A skip entry states a cost and nothing checks it. That is the standing hole
 # this heading used to paper over; the per-entry numbers above are the only
 # defence, and they decay.
 #
@@ -161,7 +161,7 @@ include_ignored = true
 # documented way to use an instrument anyway - e.g.
 # `brokkr test -p mogwai-venue vol_probe`.
 #
-# THE INVARIANT every pattern below must satisfy: it may match ONLY tests that
+# The invariant every pattern below must satisfy: it may only ever match tests that
 # are `#[ignore]`d at the source. That is what makes skipping them free - the
 # audit accepts a non-run pair that is ignored, because `include_ignored` is
 # the only reason it was in scope at all. A pattern matching a non-ignored test
@@ -171,10 +171,10 @@ include_ignored = true
 # a prefix is only safe while every test that shares it stays ignored, which
 # is a property of files this file cannot see.
 #
-# IT IS ENFORCED BY THE TOOL ITSELF, in two places, and no longer by a Rust
+# It is enforced by the tool itself, in two places, and no longer by a Rust
 # test that reconstructed every name in the workspace from source text. A
-# pattern swallowing a live test leaves an ORPHANED PAIR; a pattern matching
-# nothing at all is a DEAD FILTER, named with the block that declared it and
+# pattern swallowing a live test leaves an orphaned pair; a pattern matching
+# nothing at all is a dead filter, named with the block that declared it and
 # judged over the union of the sweeps that block applies to. Both read libtest's
 # own enumeration, so neither can go blind to a declaration form the way the
 # hand-written scanner did - it could not see macro-generated tests for a while,
@@ -183,9 +183,9 @@ include_ignored = true
 description = "Everything, including the socket-backed adapter tests"
 sweeps = ["workspace", "instrumented"]
 include_ignored = true
-# Serial, this gate took 3m01s: 164s of test execution, so the wall was the SUM
+# Serial, this gate took 3m01s: 164s of test execution, so the wall was the sum
 # of 1,608 tests rather than the longest of them. That is not a compute bill -
-# the top 20 tests are 54% of it and most of them are WAITING, on a declared
+# the top 20 tests are 54% of it and most of them are waiting, on a declared
 # `--duration` or a reconnect ladder. At 8 the gate runs in about a minute with
 # per-test times unmoved (the slowest tape walk went 7.622s to 7.768s), which is
 # what says the tests are not starving each other.
@@ -195,25 +195,25 @@ include_ignored = true
 # would let this go higher, is the parallel item in `notes/todo.md`.
 test_threads = 8
 skip = [
-    # THE DECLARED-DEADLINE FAMILY IS GONE FROM THIS LIST, and the note stays
+    # The declared-deadline family is gone from this list, and the note stays
     # because the shape recurs. Two entries sat here - the completion gates
     # `venue_announces_run_complete_and_exits_zero_at_the_declared_sim_deadline`
     # and `run_complete_reaches_every_open_socket` - each giving the venue a
     # fixed `--duration` measured from readiness and then betting that the
     # consumer's connect beat it. Under parallel execution the connect could lose,
     # the run completed and closed before the socket existed, and the test failed
-    # on not having seen the frame: a WRONG ANSWER rather than a timeout, which is
+    # on not having seen the frame: a wrong answer rather than a timeout, which is
     # why it read like a real regression.
     #
     # They were not retuned to a longer duration, because a margin is exactly
-    # what a crowded host takes away. `completion.rs` establishes the PREMISE
-    # instead - `watch_a_bounded_run` drains every socket and DISCARDS the whole
+    # what a crowded host takes away. `completion.rs` establishes the premise
+    # instead - `watch_a_bounded_run` drains every socket and discards the whole
     # run unless each of them saw a frame, relaunching until it has one this test
     # was demonstrably a live passenger on - so a lost race is no longer a
     # statement about the venue. The same treatment went to the two siblings that
     # had the identical shape and had simply not lost yet.
     #
-    # A SECOND CAUSE SURFACED ONCE THE FAILURES WERE TRUTHFUL, and it is the one
+    # A second cause surfaced once the failures were truthful, and it is the one
     # that actually kept this lane red: those venues were `speed = 0.0`, so
     # delivery is unpaced and `RunComplete` is queued behind the entire backlog
     # the run generated flat out - over 1.4 million frames against a consumer
@@ -222,7 +222,7 @@ skip = [
     #
     # A measurement instrument, not a race: `vol_probe` walks millions of ticks.
     "vol_probe",
-    # A RELEASE-profile wall-clock contract, excluded from this DEBUG lane
+    # A release-profile wall-clock contract, excluded from this debug lane
     # because that lane cannot validly evaluate it - not because the property
     # is being dropped. The debug binary measures latency for reasons that are
     # about the build profile rather than the code, so a red result here is not
@@ -236,23 +236,23 @@ skip = [
     # in practice for being unjudgeable on a loaded host, it was a gate no lane
     # evaluated. It is now the `tape_lateness` measurable target instead.
     "read_market_latency_stays_within_submit_budget",
-    # `dwell_is_bounded_across_run_seeds` USED TO SIT HERE and no longer does.
-    # It was excluded under the COST heading above - "walks millions of ticks",
+    # `dwell_is_bounded_across_run_seeds` used to sit here and no longer does.
+    # It was excluded under the cost heading above - "walks millions of ticks",
     # "outlives the 20-second per-test hang watchdog by design" - and that claim
     # was measured false: its eight arms are `DRAW / 8` apiece, the same two
     # million parent events in total as `realism`, and it runs in 6.54 s. The
-    # consequence of the wrong claim was that the repository's ONLY multi-seed
+    # consequence of the wrong claim was that the repository's only multi-seed
     # dwell gate was the one test nothing ever ran, while a single-seed twin at
     # the full draw ran on every lane for the same wall clock. The twin is gone,
     # seed 42 moved into the loop, and the gate runs the eight-arm version.
     #
-    # TWO MORE ENTRIES LEFT ON 2026-08-19, for the same reason and with the
+    # Two more entries left on 2026-08-19, for the same reason and with the
     # same result. `standardized_candidate_rail_sizing` - now
     # `shipped_garch_rails_sit_above_the_clean_tail` - measured 0.43 s and
     # `realized_return_envelope_under_regime_scaling` 0.20 s, one test per
     # process in dev, against a heading claiming both outlive the watchdog.
     # The cost of the wrong claim was the same as the dwell pair's: the
-    # repository's ONLY measurement behind `GARCH_SIGMA_CAP`,
+    # repository's only measurement behind `GARCH_SIGMA_CAP`,
     # `FEEDBACK_RETURN_CEILING` and `REALIZED_RETURN_CEILING` - the 57.2x sigma
     # excursion and the 3.33e-3 clean return that `consts.rs` cites in prose -
     # was a test nothing ran. Both are un-ignored and read the shipped
@@ -270,7 +270,7 @@ skip = [
     # --timeout 279` and `... parity12a_generated_seed_N --timeout 279`.
     "parity12a_",
     # The 12b brick E envelope gates, both `#[ignore]`d at the source for a
-    # COST reason: the closed-form conformance cross-check walks 12 cells by
+    # cost reason: the closed-form conformance cross-check walks 12 cells by
     # 2,000 simulated exposures, measured at about 168 s, and the fidelity gate
     # runs 32 real candidate walks against 32 idealized months per probe cell
     # at two grid steps, 54 s to 142 s per part. Both outlive the 20-second
@@ -278,9 +278,9 @@ skip = [
     # part is inside the runner's 280 s ceiling. Per-part walls are tabulated
     # in `reference/performance.md`.
     #
-    # THE FIDELITY GATE HAS NO ONE-COMMAND FORM, and this comment used to give
+    # The fidelity gate has no one-command form, and this comment used to give
     # one that cannot run. `--timeout` is honored only when the filter matches
-    # exactly ONE test, and `brokkr test` errors out before running when it
+    # exactly one test, and `brokkr test` errors out before running when it
     # matches more; the prefix below matches all ten macro-generated parts, so
     # `brokkr test -p mogwai-lab the_envelope_simulator_is_faithful_to_the_candidate_walks --timeout 279`
     # fails with a config error rather than running anything. Run the parts one
@@ -306,9 +306,9 @@ skip = [
     # the_lab_walk_matches_the_measure_exposure_contract --timeout 279`.
     #
     # The re-attestation pin is fast - roughly a second at its shortened
-    # window - but it is excluded for an ENVIRONMENT reason rather than a cost
+    # window - but it is excluded for an environment reason rather than a cost
     # one: it asserts that a tree which moves mid-run leaves the artifact
-    # unwritten, so it needs a CLEAN tree to get past the run's own first step,
+    # unwritten, so it needs a clean tree to get past the run's own first step,
     # and it deliberately dirties the tree while it is in flight. Neither is
     # acceptable inside a general check lane. Run it by name from a committed
     # tree: `brokkr test -p mogwai-cli
@@ -369,25 +369,25 @@ certifies = "complete"
 # `brokkr check --gate` as a subprocess to prove the suite was green; invoked
 # the documented way it deadlocked instantly and sat for 23 minutes before
 # anyone looked at `brokkr lock`. The code even carried a comment describing
-# the deadlock, written to defend the TESTS against it while leaving the
+# the deadlock, written to defend the tests against it while leaving the
 # production path live.
 #
 # So the rule is the string, not the call: a source file has no business
 # mentioning the build tool at all. Prose about it belongs in markdown, where
 # it cannot become an invocation.
 #
-# NO EXCLUSIONS, as of 2026-08-20, and getting rid of the last one is why the
+# No exclusions remain, as of 2026-08-20, and getting rid of the last one is why the
 # tool grew its dead-filter check. `gate_skip_list.rs` was excluded because it
-# enforced two invariants about the lists ABOVE - that a skip pattern may match
+# enforced two invariants about the lists above - that a skip pattern may match
 # only `#[ignore]`d tests, and that no filter is dead - which it could only do
-# by reading THIS FILE. The exemption was sound on its own terms (it read the
-# config as DATA and spawned nothing, and a self-check kept it that way), but it
+# by reading this very file. The exemption was sound on its own terms (it read the
+# config as data and spawned nothing, and a self-check kept it that way), but it
 # rested on a hand-written parser that reconstructed libtest names from source
 # text and had already gone blind once, to macro-generated tests.
 #
 # Both invariants are the tool's now, resolved against libtest's own
-# enumeration: a skip catching a live test is an ORPHANED PAIR, and a filter
-# matching nothing is a DEAD FILTER naming the block that declared it. The file
+# enumeration: a skip catching a live test is an orphaned pair, and a filter
+# matching nothing is a dead filter naming the block that declared it. The file
 # kept only its two source-hygiene scans, which never mentioned the tool, and is
 # `test_hygiene.rs`. An exemption removed beats an exemption re-checked.
 # The no-shouting family: the AGENTS.md rule that emphasis is carried by the
@@ -440,17 +440,28 @@ except = [
     # The second alternation is this project's vocabulary: the venue name,
     # instrument symbols, the GARCH model, and the root license filenames.
     '\b(?:ASCII|HTTPS|README|LICENSE|SQLITE|POSIX|JSONL|MSRV|NOTICE|RUSTFLAGS|EDITOR|PAGER|VISUAL|LOGNAME|HOSTNAME|RUSTUP)\b',
-    '\b(?:MOGWAI|GARCH|BTCUSDT|ETHUSDT|SOLUSDT|COMMERCIAL-LICENSE)\b',
+    '\b(?:MOGWAI|GARCH|BTCUSDT|ETHUSDT|SOLUSDT|XBTUSD|COMMERCIAL-LICENSE)\b',
+    # Signal, errno and flag names, and OHLCV - comment prose in a systems
+    # codebase names these constantly and they are spellings, not emphasis.
+    '\b(?:SIGKILL|SIGTERM|SIGPIPE|SIGINT|ESRCH|EPIPE|ECONNRESET|EAGAIN|ELOOP|ETXTBSY|O_NONBLOCK|OHLCV|VWAP|TWAP)\b',
     # The root convention files, named bare in prose without backticks, and
     # FOOBAR, the placeholder symbol docs/presets.md's fenced example uses.
     '\b(?:AGENTS|CLAUDE)\.md',
     '\bFOOBAR\b',
 ]
 
-# A sibling rule for Rust comments is owed but not yet landed: with
-# `region = "comment"` and this preset it would fire on roughly 3200
-# pre-existing lines across 191 files (measured 2026-08-23), so the comment
-# de-shouting is its own arc, and the rule lands with it.
+[[textlint]]
+name = "no-shouting-rust"
+preset = "no-shouting"
+pattern = '\b[A-Z]{5,}\b'
+paths = ["crates/**/*.rs"]
+# `region = "comment"` keeps this off string literals and, crucially, off
+# code: a real `const CONFIRMED` or a matched `SomeEnum::CONFIRMED` is not
+# shouting. Its tokenizer is Rust-only, which is why this rule does not also
+# claim the Python under scripts/ and analysis/ - those comments are simply
+# unlinted for now.
+region = "comment"
+message = "write the emphasis into the sentence; don't shout in all caps (shout-ok to allow)"
 
 [[textlint]]
 name = "no-shouting-markdown"
@@ -472,33 +483,33 @@ paths = ["crates/**/*.rs"]
 message = "brokkr is local dev tooling and must never be named from shipped Rust; put the prose in markdown and run the gate outside the binary"
 
 # ---------------------------------------------------------------------------
-# THE BENCHMARK REGISTRY: targets and their feature shapes, plus out-of-git
+# The benchmark registry: targets and their feature shapes, plus out-of-git
 # inputs. Nothing else.
 #
-# WHAT IS NOT HERE, deliberately: workloads. Every mogwai surface takes a
+# What is not here, deliberately: workloads. Every mogwai surface takes a
 # config-shaped invocation - preset, window, seed, cell, probe mode - so the
-# set of things worth measuring is the PRODUCT of surfaces, inputs and flag
+# set of things worth measuring is the product of surfaces, inputs and flag
 # axes, plus every library-level loop that has no command at all. That product
 # cannot be enumerated, and a registry that must be edited before a new
 # question can be asked does not survive a decade of asking them. An earlier
 # cut of this file froze four invocations by name and had already run out of
-# room before the Stage A round started. The argv is composed at the CALL SITE
+# room before the Stage A round started. The argv is composed at the call site
 # and captured verbatim in the row; pairing rows is a query (`--command`,
 # `--dataset`, `--grep`, `--grep-v`), not a name lookup, and the captured argv
 # cannot lie about what was run the way a name can.
 #
-# TWO KINDS OF SURFACE.
+# Two kinds of surface.
 #
-# ARGV-SHAPED, through the shipped bin - `gen`, `tick-composition`,
+# Argv-shaped, through the shipped bin - `gen`, `tick-composition`,
 # `preflight`, `measure`, `fit`, `cache`, `synth`, `arrival-screen`. These need
 # no registration beyond the bin itself: benching through
 # `target/release/mogwai` measures what ships, startup and argument parsing
 # included, which is the honest end-to-end number.
 #
-# HARNESS-SHAPED, through an example target - the loops with no command line:
+# Harness-shaped, through an example target - the loops with no command line:
 # the arrival draw, the screen's projection, and in time the engine's matching
 # loop, the `TickSource` implementations, the serving path and the adapter.
-# These are the MAJORITY of the eventual surface, which is why they get first
+# These are the majority of the eventual surface, which is why they get first
 # class registration rather than an escape hatch. Adding a surface to the
 # measurable set is registering a target, which is the work you were going to
 # do anyway the moment you wanted to optimize it.
@@ -528,7 +539,7 @@ features = ["hotpath"]
 
 # One Stage A screen cell.
 #
-# Deliberately a SEPARATE ms-scale target rather than a mode of the full screen,
+# Deliberately a separate ms-scale target rather than a mode of the full screen,
 # and this is a property of the profiler rather than an architectural layer. The
 # hotpath crate queues one event per instrumented call and drains at roughly
 # 1.3M events/s; the arrival draw produces them far faster than that, so a
@@ -542,13 +553,13 @@ features = ["hotpath"]
 
 # How late a paced tape arrives at a consumer that keeps up, under acceleration.
 #
-# A GATE THAT BECAME A MEASUREMENT. It was `tape_lateness_under_acceleration`,
+# A gate that became a measurement. It was `tape_lateness_under_acceleration`,
 # asserting a 50 ms p99 - a statement about the host rather than about the code,
 # unjudgeable in the debug lane and unreliable in the release one, and therefore
 # excluded from both. The number is worth having on every run; the threshold was
 # never portable. Argv is `[config] [sample_seconds]`.
 #
-# Carries NO registered features: its canonical output is a set of scraped
+# Carries no registered features: its canonical output is a set of scraped
 # counters, and an instrumented build would be measuring the profiler's own
 # per-call cost inside a latency figure.
 [mogwai.targets.tape_lateness]
@@ -568,7 +579,7 @@ example = "stage_a_batch_bench"
 #
 # The unit the envelope budgets are derived from: an evaluation is 500 * (1 + K)
 # months and nothing else, so a per-month price multiplies out to every K tier.
-# Carries NO registered features - its canonical output is a wall and a unit
+# Carries no registered features - its canonical output is a wall and a unit
 # price, and an instrumented build would measure the profiler instead. Argv is
 # `<family> [months]`.
 [mogwai.targets.envelope_evaluation]
@@ -578,8 +589,8 @@ example = "envelope_evaluation_bench"
 # The per-frame cost of the wire decoder, over one representative `Trade`.
 #
 # Registered so the tag-decode table in `reference/performance.md` is
-# re-runnable rather than a number someone once printed. Carries NO features
-# and the profiler MODES do not apply: it wraps the global allocator itself to
+# re-runnable rather than a number someone once printed. Carries no features,
+# and the profiler modes do not apply: it wraps the global allocator itself to
 # count allocator calls per frame, which `--alloc` would displace, and its
 # per-frame cost is nanoseconds, which `--hotpath` would dominate. Argv is an
 # optional iteration count, default 2,000,000.
@@ -587,12 +598,12 @@ example = "envelope_evaluation_bench"
 package = "mogwai-protocol"
 example = "tag_decode_probe"
 
-# NOT REGISTERED: `fill_walk_bench`, also an example target in `mogwai-data`.
+# Not registered: `fill_walk_bench`, also an example target in `mogwai-data`.
 # It is a criterion harness that parses `--bench` itself - that is what lets it
 # live in an example target at all - so it would collide with the mode flag.
 # Run it with `brokkr run --release fill_walk_bench -- --bench`.
 
-# NOT REGISTERED: `symbol_decode_probe`, an example target in `mogwai-protocol`.
+# Not registered: `symbol_decode_probe`, an example target in `mogwai-protocol`.
 # It answered one question - what an inline fixed-capacity `Symbol` would buy the
 # adapter's decode path against what the per-tick path spends right after it -
 # and the answer was a refusal, recorded in `reference/performance.md`. A
@@ -601,16 +612,16 @@ example = "tag_decode_probe"
 # `brokkr run --release symbol_decode_probe -- 2000000`. It wraps the global
 # allocator, so the profiler modes would not apply to it either.
 
-# The delivered corpus, per host. This records WHICH delivery a row was measured
-# against so a cross-month comparison can tell two corpora apart. It does NOT
+# The delivered corpus, per host. This records exactly which delivery a row was measured
+# against so a cross-month comparison can tell two corpora apart. It does not
 # replace the run's own verification: `measure` refuses a corpus whose SHA-256
 # hashes disagree with the jobs manifest and the committed preflight artifact,
-# and that check is about the CONTENTS being the ones the method was fitted to.
-# This digest is about DRIFT - the file under this path not being the file it
+# and that check is about the contents being the ones the method was fitted to.
+# This digest is about drift - the file under this path not being the file it
 # was last time - which is a different question and is why the two hashes are
 # allowed to be different algorithms over different scopes.
 #
-# The digest is over the DIRECTORY - two `.csv.zst` archives beside
+# The digest is over the whole directory - two `.csv.zst` archives beside
 # `manifest.json`, `metadata.json` and `condition.json` - because that is what
 # `measure --corpus` takes.
 #

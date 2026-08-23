@@ -11,21 +11,21 @@
 //!
 //! ## Amendment D, stated once
 //!
-//! A family's simultaneous critical value exists only when EVERY metric in
+//! A family's simultaneous critical value exists only when every metric in
 //! its inventory is computable. When one is not:
 //!
 //! - the refused metric records a `refused: true` row with every value field
 //!   null - it is never dropped from the inventory, because a disappearing
 //!   metric is indistinguishable from a metric that was never required;
-//! - exactly ONE additional `RefusalRec` named `envelope` owns the
+//! - exactly one additional `RefusalRec` named `envelope` owns the
 //!   envelope-only nulls;
-//! - every OTHER metric in that family keeps its point estimate, its
+//! - every other metric in that family keeps its point estimate, its
 //!   bootstrap SE, its band, its point-only predicate and its seed and fold
 //!   evidence, and nulls only `interval_low` / `interval_high` and the two
 //!   envelope-dependent booleans. Evidence that was measured is not thrown
 //!   away because a sibling could not be measured.
 //!
-//! Each refused metric aggregates EVERY cause into exactly one `RefusalRec`
+//! Each refused metric aggregates every cause into exactly one `RefusalRec`
 //! (spec section 10 ownership), reasons joined with `"; "` in the frozen
 //! order: `force_refused`, then the deterministic Q1 qualification lines,
 //! then point-input failure, then bootstrap failure, then SE failure.
@@ -65,14 +65,14 @@ pub const INTERIOR_LABELS: Labels = ("300-1800", "300-1800");
 pub const CLOSURE_CELLS: [(i64, i64); 3] = [(19, 300), (20, 300), (20, 60)];
 
 /// A statistic: one function of a context and a multiplicity vector, shared
-/// VERBATIM between the observed side (resampled) and each generated seed
+/// verbatim between the observed side (resampled) and each generated seed
 /// (all-ones), so the two sides cannot drift.
 pub type StatFn = Rc<dyn Fn(&ObsContext, &[i64]) -> Option<f64>>;
 
 // -- The stat_* closures ----------------------------------------------------
 
-/// `stat_print_excess`: the trade-range p99 over the quote-range p99 IN
-/// TICKS - the quote support is in half-ticks, so it is halved before the
+/// `stat_print_excess`: the trade-range p99 over the quote-range p99 in
+/// ticks - the quote support is in half-ticks, so it is halved before the
 /// division, never after.
 #[must_use]
 pub fn stat_print_excess(hour: i64) -> StatFn {
@@ -177,7 +177,7 @@ pub fn everyone<'a>(obs: &'a ObsContext, seeds: &'a [ObsContext]) -> Vec<(String
     out
 }
 
-/// Q1 for vote-based metrics: EVERY session of EVERY context must qualify;
+/// Q1 for vote-based metrics: every session of every context must qualify;
 /// each failure is one refusal string.
 #[must_use]
 pub fn q1_vote_refusals(
@@ -222,8 +222,8 @@ pub fn q1_floor_refusals(
     out
 }
 
-/// Q1 for count windows: scheduled-EXPOSURE completeness. Every session must
-/// carry exactly the scheduled count its own CALENDAR expects - never a max
+/// Q1 for count windows: scheduled-exposure completeness. Every session must
+/// carry exactly the scheduled count its own calendar expects - never a max
 /// over the candidate's own sessions, which would be self-referential. A
 /// missing serialized cell counts as zero; an expected zero with a scheduled
 /// zero passes.
@@ -260,8 +260,8 @@ pub struct CondBin {
 }
 
 /// `conditional_adequacy_bins` (spec 5.2): per implicated hour a bin is
-/// REQUIRED when its pooled OBSERVED minute count reaches the floor;
-/// required generated support means EVERY seed's count reaches it too. Bin
+/// required when its pooled observed minute count reaches the floor;
+/// required generated support means every seed's count reaches it too. Bin
 /// `"0"` is skipped - `sqrt(N)` is undefined there.
 #[must_use]
 pub fn conditional_adequacy_bins(obs: &ObsContext, seeds: &[ObsContext]) -> Vec<CondBin> {
@@ -474,7 +474,7 @@ pub fn evaluate_family(
                     }
                 })
                 .collect();
-            // A missing or non-finite replicate REFUSES the metric - never a
+            // A missing or non-finite replicate refuses the metric - never a
             // silent omission from the SE population.
             if built.iter().any(|r| !r.is_some_and(f64::is_finite)) {
                 reasons.push("missing or non-finite bootstrap replicate".to_string());
@@ -529,7 +529,7 @@ pub fn evaluate_family(
         }
     }
     if !inventory_complete {
-        // Exactly ONE family-envelope refusal owns the envelope-only nulls
+        // Exactly one family-envelope refusal owns the envelope-only nulls
         // on the otherwise computable metrics (Amendment D).
         refusal_recs.push(RefusalRec::new(
             format!("family:{family}"),
@@ -559,7 +559,7 @@ pub fn evaluate_family(
                 let half = c * se;
                 (Some(point - half), Some(point + half))
             }
-            // Computable metric in an INCOMPLETE family: point, SE, band,
+            // Computable metric in an incomplete family: point, SE, band,
             // point-only predicate, seed and fold evidence all stay; only
             // the envelope fields go null (Amendment D).
             None => (None, None),
@@ -813,7 +813,7 @@ pub fn build_family_metrics(obs: &ObsContext, seeds: &[ObsContext]) -> FamilyInv
         if !cb.required {
             continue;
         }
-        // A required-but-unsupported conditional metric stays PRESENT as a
+        // A required-but-unsupported conditional metric stays present as a
         // refused record (Amendment D), never omitted from the inventory.
         let forced = (!cb.supported)
             .then(|| "required observed bin without required generated support".to_string());
@@ -900,7 +900,7 @@ pub fn build_family_metrics(obs: &ObsContext, seeds: &[ObsContext]) -> FamilyInv
     }
 
     // -- garch (the same three scale metrics the reversion rung consumes;
-    // the two families are evaluated SEPARATELY so one rung's incompleteness
+    // the two families are evaluated separately so one rung's incompleteness
     // cannot silently widen the other's envelope).
     let mut garch = Vec::new();
     for h in [19i64, 20] {

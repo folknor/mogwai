@@ -179,7 +179,7 @@ fn cut(args: CutArgs) -> anyhow::Result<()> {
     // stopwatch. The cut is the expensive surface here - a delivered month is
     // multiple GB decompressed - and the decision it informs is whether cutting
     // a full eleven-month corpus is a coffee break or an overnight job, which
-    // the standing rule says to answer BEFORE running it rather than after.
+    // the standing rule says to answer before running it rather than after.
     let started = std::time::Instant::now();
     let (library, dropped) = segments::cut_with(
         &dir,
@@ -392,8 +392,8 @@ mod tests {
     use super::WindowArg;
 
     /// The `--window` enum and `WINDOWS` are one list written twice, so the
-    /// identity between them is asserted rather than assumed. BOTH DIRECTIONS
-    /// MATTER and they fail differently: a `WindowArg` naming a window the lab
+    /// identity between them is asserted rather than assumed. Both directions
+    /// matter, and they fail differently: a `WindowArg` naming a window the lab
     /// does not have is an argument that parses and then refuses at run time,
     /// while a `WINDOWS` entry with no `WindowArg` is a cuttable window that
     /// `--window` cannot reach and `--help` does not list. The second is what

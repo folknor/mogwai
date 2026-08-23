@@ -5,7 +5,7 @@
 //! from a small non-negative integer and `choice` over a sequence.
 //!
 //! This exists for exactly one estimator - `minute_range_envelope`, which
-//! draws `RESAMPLE_SESSIONS_PER_REPLICATE` session labels WITH replacement
+//! draws `RESAMPLE_SESSIONS_PER_REPLICATE` session labels with replacement
 //! for each of `RESAMPLE_REPLICATES` replicates under `random.Random(1)` -
 //! and its output lands in the committed `analysis/mnq-fit.json` as the
 //! one-sided upper bounds the minute-range gates judge against. Nothing
@@ -14,12 +14,12 @@
 //!
 //! Two CPython details the port has to carry, both surprising:
 //!
-//! - `Random.seed(n)` for an integer does NOT call `init_genrand(n)`. It
+//! - `Random.seed(n)` for an integer does not call `init_genrand(n)`. It
 //!   calls `init_by_array` with the key being `abs(n)` split into 32-bit
 //!   little-endian words, so `Random(1)` is `init_by_array([1])`.
-//! - `choice` is NOT `int(random() * len)`. Since 3.2 it is
+//! - `choice` is not `int(random() * len)`. Since 3.2 it is
 //!   `seq[self._randbelow(len(seq))]`, a rejection sampler over
-//!   `getrandbits(n.bit_length())` - so it consumes a VARIABLE number of
+//!   `getrandbits(n.bit_length())` - so it consumes a variable number of
 //!   32-bit outputs per call.
 
 const N: usize = 624;
@@ -132,8 +132,8 @@ impl PyRandom {
     }
 
     /// `getrandbits(k)`, CPython's word layout: one 32-bit draw per word,
-    /// the FIRST draw carrying the least significant word, and a partial
-    /// final word taken from the HIGH bits of its draw.
+    /// the first draw carrying the least significant word, and a partial
+    /// final word taken from the high bits of its draw.
     pub fn getrandbits(&mut self, k: u32) -> u64 {
         assert!(k > 0 && k <= 64, "only the widths this port needs");
         let mut remaining = k;
@@ -154,7 +154,7 @@ impl PyRandom {
     /// `random.random()`: CPython's 53-bit double from two tempered draws.
     ///
     /// The composition is load-bearing and not interchangeable with any other
-    /// way of building a double from 64 random bits - the FIRST draw supplies
+    /// way of building a double from 64 random bits - the first draw supplies
     /// the high 27 bits and the second the low 26, so a port that swaps them
     /// or takes one 64-bit draw consumes the same stream and produces a
     /// different sequence.
@@ -202,11 +202,11 @@ impl PyRandom {
 mod tests {
     use super::*;
 
-    /// PREFIX TEST for `random()`, pinned bit for bit against
+    /// A prefix test for `random()`, pinned bit for bit against
     /// `random.Random(42)` in CPython 3.14.6. Six draws, because the failure
     /// mode this guards against - swapping which draw supplies the high bits -
     /// still produces plausible uniforms and only shows up as a different
-    /// SEQUENCE.
+    /// sequence.
     #[test]
     fn random_reproduces_the_cpython_stream() {
         let mut rng = PyRandom::new(42);
@@ -223,7 +223,7 @@ mod tests {
         }
     }
 
-    /// PREFIX TEST for `weibullvariate(1.0, 1.0)`, the shape the shipped
+    /// A prefix test for `weibullvariate(1.0, 1.0)`, the shape the shipped
     /// feasibility path uses. Same seed as above, so it also proves the
     /// helper consumes exactly one `random()` per call - a port that drew
     /// twice would still look exponential but would desynchronize the

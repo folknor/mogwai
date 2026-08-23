@@ -3,7 +3,7 @@
 
 //! `run_preflight`/`mode_preflight` (`analysis/mnq_fit.py` spec 4.1): the
 //! fail-closed input-contract pass over the delivered TBBO corpus, and the
-//! artifact it persists. THE PARITY GATE for phase 1 is this module
+//! artifact it persists. The parity gate for phase 1 is this module
 //! reproducing `analysis/out/mnq-fit-preflight.json` value-identically.
 
 use std::collections::BTreeMap;
@@ -358,7 +358,7 @@ fn run_preflight_with_inventory(
 }
 
 /// `require_preflight`: `(preflight artifact JSON, sha256 of the artifact
-/// FILE BYTES)`. Refuses an absent artifact or one whose `file_hashes` do
+/// file bytes)`. Refuses an absent artifact or one whose `file_hashes` do
 /// not match the hashes just computed over the delivered corpus - the
 /// artifact and the bytes on disk must agree before anything downstream
 /// trusts either.

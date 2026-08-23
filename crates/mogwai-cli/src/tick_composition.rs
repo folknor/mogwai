@@ -3,7 +3,7 @@
 
 //! Protocol composition and budget-denomination measurement for the BBO layer.
 //!
-//! Both fixtures come out of ONE traversal. Protocol 6 is a projection of the
+//! Both fixtures come out of one traversal. Protocol 6 is a projection of the
 //! protocol-7 tape - quote placement consumes no randomness, so excluding quote
 //! frames changes neither timestamps nor child counts - which means a second
 //! generator pass would rebuild a bit-identical stream just to count a subset of
@@ -133,7 +133,7 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     let fp = fingerprint();
     // Every preset resolves before any measurement starts. The run is hours
     // long; a preset that cannot resolve must fail in the first second, and it
-    // must be ALL of them that are tried, not the two that happen to be
+    // must be all of them that are tried, not the two that happen to be
     // self-contained documents.
     let profiles = resolve_profiles()?;
     let start_ns = peak_hour_ns();
@@ -147,7 +147,7 @@ pub(crate) fn run(args: &TickCompositionArgs) -> anyhow::Result<()> {
     // in cost, so the fixed shape paid the slowest preset's tail on every
     // worker and pinned concurrency at 32 regardless of the machine.
     let cursor = AtomicUsize::new(0);
-    // Distinct from `cursor`, which counts combinations CLAIMED. Progress has to
+    // Distinct from `cursor`, which counts combinations claimed. Progress has to
     // report finished work: with one worker per core the claimed count runs a
     // whole cohort ahead, and on a long tail it would sit at the total while the
     // run still had its slowest combinations to go.
@@ -299,8 +299,8 @@ fn pairing_id() -> String {
 /// is touched, so a serialization failure or a full disk cannot consume an
 /// hours-long run by truncating the file it was replacing.
 ///
-/// This emits ONE fixture, at the live `TAPE_PROTOCOL_VERSION`. It used to emit
-/// two, because protocol 6 is a count PROJECTION of the protocol-7 stream -
+/// This emits one fixture, at the live `TAPE_PROTOCOL_VERSION`. It used to emit
+/// two, because protocol 6 is a count projection of the protocol-7 stream -
 /// quote placement draws no randomness, so the same traversal carries both. That
 /// trick is specific to 6-and-7 and does not generalize: the protocol-8 session
 /// profile divides the duration draw and scales the return, so its tape has
@@ -309,7 +309,7 @@ fn pairing_id() -> String {
 /// changes how the traversal is counted, so the protocol-8 fixture is the
 /// baseline a protocol-9 report is compared against. The seeds are fixed and
 /// each combination is an independent deterministic walk, so the comparison is
-/// not merely commensurable: every measured field should match EXACTLY, and
+/// not merely commensurable: every measured field should match exactly, and
 /// only the metadata - protocol version, projection and pairing id - differs. A
 /// discrepancy in any counter is a defect in the compact traversal, not noise.
 fn write_report(
@@ -358,7 +358,7 @@ fn serialize(
 /// The measurement anchor: the fingerprint's highest-intensity session hour,
 /// counted from the unix epoch.
 ///
-/// This is a WEEKDAY choice as much as a time-of-day one, and the weekday half
+/// This is a weekday choice as much as a time-of-day one, and the weekday half
 /// is load-bearing for the calendar-bearing presets. The epoch is a Thursday, so
 /// hour 16 lands at 10:00 Chicago on a Thursday - inside CME hours, with the
 /// whole fanout window still inside them. Move the peak hour into a closed
@@ -487,11 +487,11 @@ fn measure(
         // so continuing past one would spin on a stale timestamp forever; the
         // combination is named because that identity is what a wedged run needs.
         //
-        // A PANIC IS THE ONLY LOCAL OPTION because `measure` returns `Reading`,
+        // A panic is the only local option because `measure` returns `Reading`,
         // not a `Result`, and it is the sole reporting site in this change that
         // is not a value - the rest of the refusal plumbing is a `Result` all
-        // the way out. IF `measure` IS EVER MADE FALLIBLE, THIS IS THE SITE TO
-        // REVISIT: the fault is already a value here, so the conversion is
+        // the way out. If `measure` is ever made fallible, this is the site to
+        // revisit: the fault is already a value here, so the conversion is
         // mechanical and nothing else about this loop needs to move.
         let parent = source.advance_parent().unwrap_or_else(|fault| {
             panic!(
@@ -866,7 +866,7 @@ mod tests {
         for preset in mogwai_venue::config::preset_names() {
             for mode in MODES {
                 let source = build_source(&profiles[preset], 17, start_ns, fp);
-                // Applied BEFORE the clone, so both sides carry the same
+                // Applied before the clone, so both sides carry the same
                 // immutable window - which is now the only way a surge can be
                 // present at all, and is what keeps this a surge transition
                 // rather than two differently-watered sources.
@@ -974,7 +974,7 @@ mod tests {
     /// The prediction the protocol 7-to-8 comparison rests on, checkable in
     /// seconds rather than after an hour of measurement.
     ///
-    /// The session profile changes WHEN events happen, never HOW MANY: child
+    /// The session profile changes when events happen, never how many: child
     /// count comes from `next_count`, whose inputs are the arrival-state Markov
     /// chain and the surge window, neither of which reads the profile. So the
     /// RNG draw sequence is identical across the change and `ticks_per_parent`

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Session/segment math, the ONE implementation
+//! Session/segment math, the one implementation
 //! (the retired rewrite plan, phase 1): a port of `analysis/mnq_fit.py`'s
 //! `local_fields`/`assign_session`/`minute_fields`/`segment_origin_ns`/
 //! `segment_end_ns`/`segment_labels`, unified with the integer-only
@@ -11,7 +11,7 @@
 //! wraps it to produce the (trade-date label, segment name) pairs the
 //! preflight stream pass needs.
 //!
-//! THE ONE IMPLEMENTATION IS NOW LITERAL. `gen.rs` was rewired onto
+//! The one implementation is now literal. `gen.rs` was rewired onto
 //! `crate::summary` by the Python-to-Rust move, and `summary`'s own copy of
 //! this branch structure - which a `mogwai-cli` test pinned against this one
 //! over a timestamp sweep, calling itself a bridge until that rewire - is a
@@ -419,9 +419,9 @@ fn local_instant_ns(day: i64, local_min: i64) -> u64 {
     u64::try_from(seconds).expect("session instants are after the epoch") * 1_000_000_000
 }
 
-/// `segment_origin_ns`: the calendar START of a session segment as a UTC
+/// `segment_origin_ns`: the calendar start of a session segment as a UTC
 /// epoch-ns instant - the previous civil day's 17:00 local for `overnight`,
-/// the trade date's 15:30 local for `post_halt`. Derived from the LABEL
+/// the trade date's 15:30 local for `post_halt`. Derived from the label
 /// alone, so the expected-exposure judge never consults a candidate's data.
 #[must_use]
 pub fn segment_origin_ns(session: &str, segment: &str) -> u64 {
@@ -433,7 +433,7 @@ pub fn segment_origin_ns(session: &str, segment: &str) -> u64 {
     }
 }
 
-/// `segment_end_ns`: the calendar END - the trade date's 15:15 local (halt
+/// `segment_end_ns`: the calendar end - the trade date's 15:15 local (halt
 /// start) for `overnight`, its 16:00 local (close) for `post_halt`.
 #[must_use]
 pub fn segment_end_ns(session: &str, segment: &str) -> u64 {
@@ -446,7 +446,7 @@ pub fn segment_end_ns(session: &str, segment: &str) -> u64 {
     local_instant_ns(day, i64::from(local_min))
 }
 
-/// `expected_scheduled_windows`: the CALENDAR-derived scheduled-window count
+/// `expected_scheduled_windows`: the calendar-derived scheduled-window count
 /// for one `(session, hour, window length)`, independent of any candidate's
 /// own data (spec 3.3 scheduled-exposure completeness) - 59 per full hour at
 /// 60 s, 44 at the halt hour.

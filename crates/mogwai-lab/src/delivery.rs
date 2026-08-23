@@ -3,7 +3,7 @@
 
 //! Delivery identity binding (`analysis/mnq_fit.py` spec 4.1): jobs manifest +
 //! delivered manifest + rehash, before a byte of CSV. The lab reads
-//! `analysis/databento-jobs.json` READ-ONLY (per AGENTS.md/the phase-1 brief) -
+//! `analysis/databento-jobs.json` read-only (per AGENTS.md/the phase-1 brief) -
 //! nothing here ever writes it.
 
 #[cfg(any(test, feature = "test-seam"))]
@@ -19,7 +19,7 @@ use crate::error::{LabError, LabResult};
 use crate::subcontract::{DELIVERY_KEY, JOB_ID};
 
 /// Which of the two git reads the tree gate performs. The gate's whole
-/// contract is expressed in the ORDER of these: a run that reads `Head`
+/// contract is expressed in the order of these: a run that reads `Head`
 /// without having read `Status` first would bind a commit it never checked,
 /// and a run that reads neither never consulted the tree at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +31,7 @@ pub enum TreeQuery {
 }
 
 /// One git command's result, in the terms the gate actually reasons about:
-/// did the command succeed, and what did it print. Modelling the RAW output
+/// did the command succeed, and what did it print. Modelling the raw output
 /// rather than a `clean: bool` verdict is deliberate - a double that returned
 /// the verdict would move the gate's own logic into the double and leave the
 /// production decision untested.
@@ -66,19 +66,19 @@ impl TreeOracle for GitTreeOracle {
     }
 }
 
-/// THE SEAM DOES NOT SHIP, and that is the point of the cfg rather than a
-/// tidiness preference. `require_clean_tree` is an INTEGRITY GATE: its return
+/// The seam does not ship, and that is the point of the cfg rather than a
+/// tidiness preference. `require_clean_tree` is an integrity gate: its return
 /// value is written into an artifact's `binding.harness_tree_commit` beside
 /// `"clean_tree": true`, and `fresh_tree_state` is the pre-write
 /// re-attestation of the same claim. An injectable reader exported
-/// unconditionally would let ANY caller of this library install a double that
+/// unconditionally would let any caller of this library install a double that
 /// answers "clean, at deadbeef" and have both ends of that fail-closed
 /// contract fabricate a binding from one install. `mogwai-cli` depends on
 /// `mogwai-lab` normally, so an unconditional export lands in
 /// `target/release/mogwai`.
 ///
 /// So the whole module below is behind `test-seam`, which `mogwai-cli`
-/// enables ONLY in `[dev-dependencies]`. Under resolver 3 a dev-dependency's
+/// enables only in `[dev-dependencies]`. Under resolver 3 a dev-dependency's
 /// features are not unified into a build that compiles no test target, so
 /// `cargo build --release -p mogwai-cli` gets a `read_tree` that is a direct
 /// call to `GitTreeOracle` with no thread-local and no installation point at
@@ -91,7 +91,7 @@ impl TreeOracle for GitTreeOracle {
 /// alone is enough - the cfg can be defeated by a feature flag, and the
 /// runtime check is only as good as the call sites that remember it.
 ///
-/// THE SET IS SIX, NOT TWO, and this comment said two for a while because the
+/// The set is six, not two, and this comment said two for a while because the
 /// refusal was inlined in the two writers the seam's own tests exercised -
 /// leaving `fit`, `measure`, `minute_range_envelope` and
 /// `arrival_envelope_diagnostic` writing tree-attested bindings with the
@@ -104,7 +104,7 @@ mod seam {
     use std::rc::Rc;
 
     thread_local! {
-        /// THREAD-LOCAL, and the scope is exactly right: libtest runs every
+        /// Thread-local, and the scope is exactly right: libtest runs every
         /// test on its own thread, so an installed double cannot leak into a
         /// sibling test running in parallel, and the artifact commands read
         /// the tree on the thread that entered `run` rather than on a worker.
@@ -182,16 +182,16 @@ pub fn tree_readings_are_production() -> bool {
     true
 }
 
-/// A scripted tree state, serving the two git commands' REAL output shape and
-/// RECORDING every query it was asked, in order.
+/// A scripted tree state, serving the two git commands' real output shape and
+/// recording every query it was asked, in order.
 ///
-/// BOTH READINGS ARE THE CALLER'S TO STATE. An earlier cut hardcoded the head
+/// Both readings are the caller's to state. An earlier cut hardcoded the head
 /// reading as a success, which made `unreadable()` model a failing
-/// `git status` ONLY - so `require_clean_tree`'s fourth outcome, the
+/// `git status` only - so `require_clean_tree`'s fourth outcome, the
 /// `rev-parse` failure, was unreachable through the double and untested, and
 /// `fresh_tree_state`'s `head.success` term could be deleted with every test
 /// still green. That is not a hypothetical shape: a repository with no commits
-/// or an unborn HEAD prints nothing from `git status --porcelain` and SUCCEEDS
+/// or an unborn HEAD prints nothing from `git status --porcelain` and succeeds
 /// there while `git rev-parse HEAD` fails.
 #[cfg(any(test, feature = "test-seam"))]
 pub struct ScriptedTree {
@@ -225,7 +225,7 @@ impl ScriptedTree {
         Self::new(failed(), failed())
     }
 
-    /// A tree whose STATUS reads clean but whose HEAD does not resolve: an
+    /// A tree whose status reads clean but whose HEAD does not resolve: an
     /// unborn branch, a repository with no commits, a broken HEAD ref. This is
     /// the only constructor that reaches `require_clean_tree`'s fourth
     /// outcome.
@@ -420,7 +420,7 @@ impl ManifestFiles {
 
 /// `verify_input`: delivery state and job-id checks, agreement between the jobs
 /// manifest's inventory and the delivered manifest's, on-disk presence (a
-/// REGULAR file, not a directory or dangling symlink), then a rehash of every
+/// regular file, not a directory or dangling symlink), then a rehash of every
 /// `.csv.zst` against the jobs manifest. Returns the verified
 /// `{filename: sha256}` map.
 pub fn verify_input(directory: &Path, jobs_manifest: &Path) -> LabResult<BTreeMap<String, String>> {
@@ -561,7 +561,7 @@ mod tests {
     use std::rc::Rc;
 
     /// Replays two readings verbatim, whatever they are - the vehicle for
-    /// holding the scripted double against the REAL endpoint below.
+    /// holding the scripted double against the real endpoint below.
     struct Replay {
         status: TreeReading,
         head: TreeReading,
@@ -580,7 +580,7 @@ mod tests {
         require_clean_tree().map_err(|e| e.to_string())
     }
 
-    /// The three verdicts the gate can reach, and the QUERY SEQUENCE each one
+    /// The three verdicts the gate can reach, and the query sequence each one
     /// costs. The sequence is the ordering claim in its smallest form: a dirty
     /// or unreadable tree is refused on the status read alone, so nothing
     /// downstream of it - not even `rev-parse` - is reached.
@@ -608,7 +608,7 @@ mod tests {
         // no commits is exactly this. The gate must refuse rather than bind
         // the empty string it would otherwise have trimmed out of an empty
         // stdout - which is what makes this branch worth reaching: the failure
-        // it guards is a BINDING TO NOTHING, not an error.
+        // it guards is a binding to nothing, not an error.
         let unborn = Rc::new(ScriptedTree::head_unreadable());
         {
             let _guard = install_tree_oracle(Rc::clone(&unborn));
@@ -640,7 +640,7 @@ mod tests {
         );
     }
 
-    /// `fresh_tree_state` reads BOTH regardless, because its caller needs the
+    /// `fresh_tree_state` reads both regardless, because its caller needs the
     /// HEAD it would have bound in order to say the tree moved.
     #[test]
     fn the_fresh_reading_reports_head_and_cleanliness_together() {
@@ -652,19 +652,19 @@ mod tests {
         assert_eq!(dirty.queries(), vec![TreeQuery::Status, TreeQuery::Head]);
     }
 
-    /// THE DOUBLE IS AUDITED AGAINST THE REAL ENDPOINT, not against what the
-    /// tests want: the actual `git` readings for THIS tree are replayed
+    /// The double is audited against the real endpoint, not against what the
+    /// tests want: the actual `git` readings for this tree are replayed
     /// through the seam and the gate must reach the same verdict it reaches
-    /// against `GitTreeOracle` directly. Passes in EVERY tree state - clean,
+    /// against `GitTreeOracle` directly. Passes in every tree state - clean,
     /// dirty, no repository, unborn HEAD - which is the whole point of the
     /// seam. It is the one test here allowed to consult the ambient tree,
     /// because comparing against it is its job.
     ///
-    /// IT IS THE ONLY TEST IN THIS CRATE THAT SPAWNS A SUBPROCESS, which is a
+    /// This is the only test in this crate that spawns a subprocess, which is a
     /// conscious cost against the fast, sandbox-safe framing of this crate's
-    /// sweep. `git` NOT BEING ON PATH IS NOT A FAILURE - there is nothing to
+    /// sweep. `git` not being on PATH is not a failure - there is nothing to
     /// audit the double against, so the test says so and returns rather than
-    /// reporting a defect in this workspace. Every OTHER outcome of the two
+    /// reporting a defect in this workspace. Every other outcome of the two
     /// commands, including both of them failing inside a directory that is not
     /// a repository, is a state this test compares in.
     #[test]
@@ -690,8 +690,8 @@ mod tests {
         // state this tree is in, the matching constructor reaches the same
         // verdict as the replay of the real bytes.
         //
-        // THE SELECTION IS ON BOTH READINGS' SUCCESS, not on the status bytes
-        // alone. Selecting on the bytes made this test FALSELY RED on a
+        // The selection is on both readings' success, not on the status bytes
+        // alone. Selecting on the bytes made this test falsely red on a
         // repository with no commits: `ambient` and `replayed` both refuse on
         // `rev-parse`, but `clean("")` binds the empty string, and the
         // mismatch would have been reported as the double failing to model the
@@ -714,12 +714,12 @@ mod tests {
             replayed, from_script,
             "the scripted constructor does not model the real reading"
         );
-        // WHERE THIS SECOND ASSERTION BITES, stated because on a clean tree it
+        // Where this second assertion bites, stated because on a clean tree it
         // does not: `clean()`'s status bytes are the empty string, which is
         // bit-identical to what real `git status` printed, so both sides are
         // fed the same input by construction and the comparison is near
         // tautological. It carries real signal in the other three states,
-        // where the constructor INVENTS the reading - `dirty()`'s porcelain
+        // where the constructor invents the reading - `dirty()`'s porcelain
         // line is its own text, and `unreadable()` / `head_unreadable()`
         // synthesize a failure the real command reported some other way. A
         // clean gate machine therefore exercises the weakest of the four, and

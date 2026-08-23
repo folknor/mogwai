@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Unit tests for the phase-2b semantics that the artifact parity gate
-//! cannot reach on its own. The gate proves the WHOLE pipeline reproduces
+//! cannot reach on its own. The gate proves the whole pipeline reproduces
 //! one committed artifact; these pin the individual rules at the corners
 //! that artifact happens not to exercise, so a future edit that breaks a
 //! rule fails here by name rather than as one diverging float.
@@ -103,7 +103,7 @@ fn weighted_median_votes_is_the_ceil_half_order_statistic() {
     let votes = [Some(1.0), Some(2.0), Some(3.0)];
     assert_eq!(weighted_median_votes(&votes, &[1, 1, 1]), Some(2.0));
     // A zero multiplicity removes the session entirely; an even total takes
-    // the ceil(total/2)-th, i.e. the UPPER of the two middles here.
+    // the ceil(total/2)-th, i.e. the upper of the two middles here.
     assert_eq!(weighted_median_votes(&votes, &[1, 0, 1]), Some(1.0));
     assert_eq!(weighted_median_votes(&votes, &[0, 1, 3]), Some(3.0));
     // A None vote contributes nothing rather than refusing.
@@ -232,12 +232,12 @@ fn amendment_d_keeps_computable_evidence_and_nulls_only_the_envelope() {
     assert_eq!(good.seed_same_side_count, Some(8));
     assert_eq!(good.seed_rule_pass, Some(true));
     assert_eq!(good.fold_rule_pass, Some(true));
-    // ...and ONLY the envelope fields go null.
+    // ...and only the envelope fields go null.
     assert_eq!(good.interval_low, None);
     assert_eq!(good.interval_high, None);
     assert_eq!(good.envelope_excludes_edge, None);
 
-    // Exactly two refusals: the forced metric and the ONE envelope record
+    // Exactly two refusals: the forced metric and the one envelope record
     // that owns the envelope-only nulls.
     assert_eq!(env.refusals.len(), 2);
     assert_eq!(env.refusals[0].cell, "forced");
@@ -295,7 +295,7 @@ fn b3_robust_strict_refuses_on_any_missing_vote_whatever_the_multiplicity() {
         weighted_median_votes(&ctx.b3_votes(19, 300, "robust"), &[1, 1]),
         Some(1.0)
     );
-    // ...and the STRICT path refuses, even under a multiplicity vector that
+    // ...and the strict path refuses, even under a multiplicity vector that
     // weights the offending session to zero (the no-K-of-N ruling).
     assert_eq!(ctx.b3_robust_strict(19, 300, &[1, 1]), None);
     assert_eq!(ctx.b3_robust_strict(19, 300, &[1, 0]), None);
@@ -309,9 +309,9 @@ fn tree_median_preserves_leaf_types_and_refuses_shape_drift() {
     let b = json!({"k": 3, "s": "x"});
     let c = json!({"k": 2, "s": "x"});
     let med = tree_median(&[&a, &b, &c]).expect("a median");
-    // An integer population medians to an INTEGER leaf, not a float.
+    // An integer population medians to an integer leaf, not a float.
     assert_eq!(crate::kernel::typed_canon(&med["k"]), "[\"i\", 2]");
-    // An even population takes the LOWER of the two middles.
+    // An even population takes the lower of the two middles.
     let med = tree_median(&[&a, &b]).expect("a median");
     assert_eq!(crate::kernel::typed_canon(&med["k"]), "[\"i\", 1]");
     // Any null centralizes the leaf to null - no median over fewer seeds.
@@ -344,7 +344,7 @@ fn central_blocks_pad_only_the_two_histogram_supports() {
     // block1.hist is stripped, never centralized.
     assert!(central["block1"].get("hist").is_none());
     let cell = &central["block2"]["19"]["60"];
-    // The support is the UNION; an absent value reads as a zero count, and
+    // The support is the union; an absent value reads as a zero count, and
     // the two-seed median takes the lower middle.
     assert_eq!(cell["count_hist"], json!({"0": 0, "1": 2, "2": 0}));
     assert_eq!(cell["run_length_hist"], json!({"1": 0, "2": 0}));
@@ -355,8 +355,8 @@ fn central_blocks_pad_only_the_two_histogram_supports() {
         json!({"0": 4, "1": 2})
     );
 
-    // A cell missing one of the two histogram fields refuses BEFORE any
-    // padding - only the SUPPORT of a present histogram may vary.
+    // A cell missing one of the two histogram fields refuses before any
+    // padding - only the support of a present histogram may vary.
     let broken = json!({
         "block1": {"hist": [], "summary": {}, "by_labels": {}},
         "block2": {"19": {"60": {"scheduled_windows": 59, "count_hist": {"0": 1}}}},

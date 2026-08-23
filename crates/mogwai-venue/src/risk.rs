@@ -3,28 +3,28 @@
 
 //! Enforcing one account's policy against its own equity.
 //!
-//! The venue ENFORCES rather than reports: a strategy that would have been
+//! The venue enforces rather than reports: a strategy that would have been
 //! liquidated must actually be liquidated, or the forward claim is worth
-//! nothing. What is published alongside is for the EVALUATOR - mogwai presents
+//! nothing. What is published alongside is for the evaluator - mogwai presents
 //! no dashboard, so numbers that are not on the wire cannot be judged after the
 //! run.
 //!
-//! EVALUATED AT TICK RESOLUTION, which is the design ruling: peak equity tracks
+//! Evaluated at tick resolution, which is the design ruling: peak equity tracks
 //! every tick, because at a real venue the ratchet is effectively tick-by-tick
 //! and a spike lasting 200 ms still spends budget. This ran on the fill
 //! sweeper's mark cadence until 2026-08-16, so a spike entirely between two
 //! marks was invisible and the account kept room it should have lost.
 //!
-//! It is NOT closed by evaluating per tick. Equity is LINEAR in the price of the
+//! It is not closed by evaluating per tick. Equity is linear in the price of the
 //! one instrument an account can be holding - an account is on at most one
 //! river, and strategies are single-instrument - so its extreme over a span is
-//! attained at a PRICE extreme. The tape thread records the high and the low it
+//! attained at a price extreme. The tape thread records the high and the low it
 //! reached (`crate::extremes`), and the sweeper replays those two readings in
 //! the order the tape reached them before observing the close. Two valuations
 //! per pass answer what thousands would have, the engine lock is still taken
 //! once, and the tape thread's whole contribution is two comparisons per tick.
 //!
-//! THE TIME ORDER IS WHAT KEEPS IT HONEST. A span that spiked and then fell is a
+//! The time order is what keeps it honest. A span that spiked and then fell is a
 //! different run from one that fell and then spiked: in the first the ratchet
 //! raises the floor before the fall tests it. Replaying favourable-first would
 //! invent breaches that never happened, which is the opposite error to the
@@ -103,9 +103,9 @@ impl RiskLedger {
 
     /// Fold one equity reading in, and say what it costs.
     ///
-    /// ORDER MATTERS HERE. The day boundary is crossed FIRST, so a reading in a
+    /// Order matters here. The day boundary is crossed first, so a reading in a
     /// new period is measured against that period's opening equity rather than
-    /// yesterday's. The ratchet is applied SECOND, before the thresholds are
+    /// yesterday's. The ratchet is applied second, before the thresholds are
     /// compared, because a reading that sets a new peak cannot simultaneously
     /// breach the floor that peak just raised.
     pub(crate) fn observe(&mut self, equity: Decimal, now_ns: u64) -> Verdict {
@@ -122,7 +122,7 @@ impl RiskLedger {
             if let Some(trailing) = &self.policy.trailing_drawdown
                 && trailing.basis == TrailingBasis::EndOfDayBalance
             {
-                // The soft basis ratchets ONLY here, on the period's closing
+                // The soft basis ratchets only here, on the period's closing
                 // equity, so an intraday spike given back never counts.
                 self.peak_equity = self.peak_equity.max(equity);
             }
@@ -198,7 +198,7 @@ impl RiskLedger {
             threshold,
         };
         self.locked = true;
-        // A LOCK is remembered as a lock and NOT as a terminal breach, so the
+        // A lock is remembered as a lock and not as a terminal breach, so the
         // next reset can lift it. Only a terminating rule is recorded as the
         // breach that describes the run.
         if action == BreachAction::Terminate {
@@ -242,12 +242,12 @@ impl RiskLedger {
     }
 }
 
-/// Account equity IN ONE CURRENCY, answered by the engine because only it knows
+/// Account equity in one currency, answered by the engine because only it knows
 /// which instrument prices which asset.
 ///
-/// ONE CURRENCY AND NEVER A SUM ACROSS THEM. An earlier version summed every
+/// One currency and never a sum across them. An earlier version summed every
 /// balance total, which silently valued one unit of any asset at one unit of
-/// any other - and that is not an exotic case, it is the DEFAULT one: a spot
+/// any other - and that is not an exotic case, it is the default one: a spot
 /// fill credits the base asset as a currency balance, so buying one BTC at
 /// 60,000 leaves `BTC: 1` beside `USDT: -60,000` and the sum read a 59,999 loss
 /// on a trade that changed nothing.
@@ -292,7 +292,7 @@ mod tests {
     }
 
     /// The case that motivated the whole feature: a day ending 3,000 up having
-    /// SPENT 700 of drawdown budget, because the floor ratcheted on a peak that
+    /// spent 700 of drawdown budget, because the floor ratcheted on a peak that
     /// was touched and not held.
     #[test]
     fn a_peak_that_is_given_back_still_spends_budget() {

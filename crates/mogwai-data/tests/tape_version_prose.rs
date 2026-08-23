@@ -2,27 +2,27 @@
 //!
 //! The artifact binding blocks cannot go stale - `stage_a_batch.rs` refuses a
 //! manifest whose version is not the live constant, and the screen artifact's
-//! test asserts the binding equals it. The PROSE had no such gate, and three
+//! test asserts the binding equals it. The prose had no such gate, and three
 //! separate bumps in 2026-08 each left durable statements naming a superseded
 //! identity; one of them left `reference/architecture.md` claiming version 11
 //! across two prior bumps, so the durable architecture reference was wrong
 //! about tape identity and nobody caught it.
 //!
 //! English cannot be parsed for this, and most mentions of the constant are
-//! deliberately HISTORICAL - a frozen spec recording which identity a past
+//! deliberately historical - a frozen spec recording which identity a past
 //! landing consumed must not be rewritten when the constant moves. So the gate
-//! keys on two CLAIM FORMS that assert a live fact, and any prose that means to
+//! keys on two claim forms that assert a live fact, and any prose that means to
 //! assert one writes it in that form:
 //!
 //! - ``TAPE_PROTOCOL_VERSION` is N`` - N is the live identity right now.
 //! - ``TAPE_PROTOCOL_VERSION` next takes N`` - N is the next unspent identity,
 //!   so it must be the live one plus one.
 //!
-//! Every other phrasing - "stays 11", "= 15 (AMENDED ...)", "13 went to the
+//! Every other phrasing - "stays 11", `= 15 (AMENDED ...)`, "13 went to the
 //! fill-band decimal normalization" - is a record of what was true at a past
 //! landing and is left alone.
 //!
-//! The document SET is discovered by walking the repository, never listed here.
+//! The document set is discovered by walking the repository, never listed here.
 //! The third occurrence of this defect was in `notes/`, read by a different
 //! workstream and invisible to any gate that only checked the durable folders.
 
@@ -43,16 +43,16 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Walk `dir` for markdown, REFUSING rather than skipping wherever it cannot
+/// Walk `dir` for markdown, refusing rather than skipping wherever it cannot
 /// see. An unreadable directory is a failure on purpose: this gate's whole
 /// claim is that it read every markdown file in the repository, and a walk that
 /// quietly steps over a directory it could not open has stopped making that
 /// claim while still reporting green.
 ///
-/// Symlinks are NOT followed. `entry.file_type()` reports the link itself,
+/// Symlinks are not followed. `entry.file_type()` reports the link itself,
 /// where `path.is_dir()` reports its target, so a symlink pointing at an
-/// ancestor used to be descended into. MEASURED RATHER THAN ASSUMED, because
-/// the obvious statement of this hazard is wrong: it does NOT recurse forever.
+/// ancestor used to be descended into. Measured rather than assumed, because
+/// the obvious statement of this hazard is wrong: it does not recurse forever.
 /// Linux caps symlink resolution per pathname at 40, so `is_dir` starts
 /// returning false there and the walk terminates on its own. What it actually
 /// cost was a 40-fold walk - 0.27 s to 1.02 s with one `notes/x -> ..` link on
@@ -98,7 +98,7 @@ fn flatten(text: &str) -> String {
 }
 
 /// Bytes of context carried either side of a match, for the human reading a
-/// failure. It bounds the QUOTE only - never what the gate matches.
+/// failure. It bounds the quote only - never what the gate matches.
 const CONTEXT_BYTES: usize = 40;
 
 /// Largest char boundary at or below `at`. `CONTEXT_BYTES` is a byte count and
@@ -204,14 +204,14 @@ fn durable_prose_names_the_live_tape_version() {
     );
 }
 
-/// The multi-byte character is BUILT rather than written, because this
+/// The multi-byte character is built rather than written, because this
 /// repository forbids one in its own source and prose - which is also why the
 /// case cannot be pinned by planting a file in the tree. A synthetic haystack
 /// is the only place the hazard can be represented at all.
 ///
 /// Placement is exact rather than incidental: the character straddles the
 /// window edge on each side, which is the only arrangement that panics. A
-/// non-ASCII character merely NEAR a claim is harmless, so a test that puts one
+/// non-ASCII character merely near a claim is harmless, so a test that puts one
 /// somewhere in the neighbourhood and passes proves nothing.
 #[test]
 fn a_claim_flanked_by_multi_byte_characters_is_quoted_rather_than_panicking() {
@@ -254,7 +254,7 @@ fn a_claim_flanked_by_multi_byte_characters_is_quoted_rather_than_panicking() {
     );
 }
 
-/// The walk is exercised against a SCRATCH TREE, never against the repository:
+/// The walk is exercised against a scratch tree, never against the repository:
 /// planting a symlink cycle in the tree the suite is being judged against is
 /// the defect `test_hygiene::no_test_binary_writes_a_committed_fixture`
 /// forbids, and the walk takes a path precisely so it can be driven somewhere
@@ -270,7 +270,7 @@ fn a_symlink_cycle_is_not_descended_into() {
     // A leftover from an aborted earlier run, if any. Absent is the normal
     // case, so the error is discarded rather than reported. This prologue,
     // rather than a scope guard, is deliberately the cleanup story: the removal
-    // below runs after the walk, so a PANIC INSIDE `markdown_files` - its
+    // below runs after the walk, so a panic inside `markdown_files` - its
     // `read_dir` arm, reachable here on the ELOOP boundary if the fix ever
     // regresses - leaves the tree behind. It is bounded, it lives under
     // `CARGO_TARGET_TMPDIR` rather than in the repository the suite judges, and
@@ -289,13 +289,13 @@ fn a_symlink_cycle_is_not_descended_into() {
     markdown_files(&scratch, &mut found);
     fs::remove_dir_all(&scratch).expect("remove the scratch tree");
 
-    // TWO files, each ONCE. The count is the assertion rather than mere
+    // Two files, each once. The count is the assertion rather than mere
     // termination, because following the link terminates too - Linux caps
     // symlink resolution at 40 levels - and reports the same two files forty
     // times over. A test asserting only that the walk returned would pass on
     // the defect.
     //
-    // The failure quotes ONE deepest path rather than the whole vector: the
+    // The failure quotes one deepest path rather than the whole vector: the
     // defect produces roughly eighty entries whose names are the cycle repeated
     // forty times, which is twenty kilobytes of panic that says nothing the
     // count and one sample do not.

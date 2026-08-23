@@ -3,19 +3,19 @@
 
 //! The account policy a consumer trades under, and what the venue enforces.
 //!
-//! THIS IS A RISK-POLICY LAYER, NOT A PROP-FIRM FEATURE, and reading it the
+//! This is a risk-policy layer, not a prop-firm feature, and reading it the
 //! other way builds the wrong thing. A live account has the same machinery: an
 //! operator sets "if I lose 200 dollars today, allow no further positions", and
 //! that behaves exactly like a liquidation except that it lifts at the next
 //! session. A funded-account firm is that engine with stricter numbers and less
-//! forgiving breach actions, so there is ONE mechanism here rather than two.
+//! forgiving breach actions, so there is one mechanism here rather than two.
 //!
 //! It matters because a forward test against an account whose rules differ from
 //! the deployed one tests a different account. A strategy that would have been
 //! liquidated must actually be liquidated, or the claim is worth nothing.
 //!
-//! A RULE IS A TRIPLE: what it measures, on what basis, and WHAT IT DOES ON
-//! BREACH. The breach action is the parameter that spans both worlds.
+//! A rule is a triple: what it measures, on what basis, and what it does on
+//! breach. The breach action is the parameter that spans both worlds.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -42,11 +42,11 @@ pub enum BreachAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TrailingBasis {
-    /// Intraday PEAK EQUITY including unrealized. The harsh and common form: a
+    /// Intraday peak equity including unrealized. The harsh and common form: a
     /// spike that is touched and given back has still spent budget.
     #[default]
     PeakEquity,
-    /// End-of-day BALANCE only. Much softer, because an intraday spike that is
+    /// End-of-day balance only. Much softer, because an intraday spike that is
     /// given back never counts toward the ratchet at all.
     EndOfDayBalance,
 }
@@ -59,7 +59,7 @@ pub struct TrailingDrawdown {
     pub amount: Decimal,
     #[serde(default)]
     pub basis: TrailingBasis,
-    /// Where the trail STOPS, if it stops: once the threshold reaches this
+    /// Where the trail stops, if it stops: once the threshold reaches this
     /// equity it is locked there and no longer follows.
     ///
     /// Many firms trail only until the floor reaches the starting balance plus
@@ -78,7 +78,7 @@ fn terminate() -> BreachAction {
 /// A daily loss limit: a non-ratcheting floor measured from the day's opening
 /// equity, reset each session.
 ///
-/// NOT derivable from the trailing drawdown and not the same mechanism. This
+/// Not derivable from the trailing drawdown and not the same mechanism. This
 /// one forgets: crossing a session boundary restores the whole budget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DailyLossLimit {
@@ -88,7 +88,7 @@ pub struct DailyLossLimit {
     pub on_breach: BreachAction,
 }
 
-/// A static overall drawdown: a floor measured from OPENING equity that never
+/// A static overall drawdown: a floor measured from opening equity that never
 /// ratchets and never resets.
 ///
 /// This is the other common funded-account form. A trailing rule follows the
@@ -109,7 +109,7 @@ pub struct OverallDrawdown {
 ///
 /// An account is on at most one river, so one number is enough: it is a
 /// contract count on a future, a share count on an equity, a base-unit size
-/// on a perp. The venue REFUSES an order that would put the book over the
+/// on a perp. The venue refuses an order that would put the book over the
 /// cap - the largest |qty| it can reach given worst-case fill order of the
 /// working book, reduce-only excluded - rather than flattening after the fact.
 /// Under netting that is the worse extreme net; under hedging, the larger
@@ -137,14 +137,14 @@ pub struct AccountPolicy {
     /// Minute of the UTC day at which the daily budget resets, if a daily limit
     /// is set.
     ///
-    /// THE ACCOUNT DEFINES ITS DAY, not the instrument. A firm's reset is its
+    /// The account defines its day, not the instrument. A firm's reset is its
     /// own instant and is a property of the account rather than of whatever is
     /// being traded, so it does not come from the instrument calendar even
     /// though that carries a settlement minute and real open windows.
     ///
-    /// The reset fires whenever SIM TIME crosses it, which needs no rule about
+    /// The reset fires whenever sim time crosses it, which needs no rule about
     /// loops: a one-session loop crosses it once per loop, a multi-day loop as
-    /// often as it contains it. THE EDGE THAT DOES NOT RESOLVE ITSELF is a
+    /// often as it contains it. The edge that does not resolve itself is a
     /// footprint that never contains the instant at all - an Asia-only loop
     /// under a 22:00 UTC reset never crosses it, so the budget never resets and
     /// a daily limit silently becomes a run-lifetime limit.
@@ -153,21 +153,21 @@ pub struct AccountPolicy {
     /// The currency every threshold in this policy is stated in, and the only
     /// currency a policed account may hold.
     ///
-    /// REQUIRED WHENEVER A RULE IS SET, because a threshold has no meaning
+    /// Required whenever a rule is set, because a threshold has no meaning
     /// without one. Equity is computed in this currency alone: the venue sums
     /// the balance and the unrealized on positions settling in it, and has no
     /// exchange rate for anything else.
     ///
-    /// THE CONSEQUENCE IS THAT A POLICED ACCOUNT TRADES ONE SETTLEMENT
-    /// CURRENCY, which today means futures. A SPOT fill credits the base asset
-    /// as a CURRENCY BALANCE and debits the quote - buy one BTC at 60,000 and
+    /// The consequence is that a policed account trades one settlement
+    /// currency, which today means futures. A spot fill credits the base asset
+    /// as a currency balance and debits the quote - buy one BTC at 60,000 and
     /// the ledger holds `BTC: 1` beside `USDT: -60,000` - so a spot account
     /// holds two currencies from its first fill, and the venue would have to
     /// value the base to state its equity. It cannot: `Engine::mark` refreshes
     /// only futures positions, so a spot position's mark is never live, and
     /// inventing a rate would make every threshold mean something nobody
     /// stated. An order that would open a second currency is therefore refused
-    /// at ENTRY, by name, rather than silently mis-valued afterwards.
+    /// at entry, by name, rather than silently mis-valued afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
 }
@@ -214,9 +214,9 @@ impl AccountPolicy {
         if self.reset_minute_utc >= 24 * 60 {
             return Err("reset_minute_utc must be a minute of the day, 0 to 1439".to_owned());
         }
-        // BLANK MEANS TRIMS-TO-EMPTY, matching the divergence validators in
+        // Blank means trims-to-empty, matching the divergence validators in
         // `havoc.rs`, which refuse a `client_order_id` on `trim().is_empty()`.
-        // A currency is a LOOKUP KEY: equity is summed over the balances
+        // A currency is a lookup key: equity is summed over the balances
         // carrying exactly this code, so a whitespace code names no currency
         // any balance can ever match and would freeze equity at zero forever
         // rather than refuse the policy at registration.
@@ -232,21 +232,21 @@ impl AccountPolicy {
 }
 
 /// What the venue is enforcing against this account right now, published so the
-/// run can be JUDGED afterwards.
+/// run can be judged afterwards.
 ///
-/// The audience is the EVALUATOR, not the strategy. A real trader reads its
+/// The audience is the evaluator, not the strategy. A real trader reads its
 /// remaining drawdown off the firm's dashboard; mogwai presents no dashboard,
 /// so if these numbers are not on the wire nobody can tell a run that ended flat
 /// having spent 90 percent of its budget from one that never came close, and
 /// the two are indistinguishable from fills alone.
 ///
-/// EVERY DECIMAL HERE IS STRING-SPELLED ON THE WIRE, and a JSON number is
+/// Every decimal here is string-spelled on the wire, and a JSON number is
 /// refused, for the same reason the execution and market-data frames in
 /// `messages` are: these are money quantities, and a bare number decodes
-/// through `f64`. This type is OUTPUT-ONLY in-tree - the venue builds it and
+/// through `f64`. This type is output-only in-tree - the venue builds it and
 /// publishes it on `GET /account`, nothing decodes it here - but it derives
 /// `Deserialize` for consumers, and a consumer's decoder is exactly where the
-/// tolerance would have bitten unobserved. It is a DELIBERATE inclusion, not
+/// tolerance would have bitten unobserved. It is a deliberate inclusion, not
 /// an oversight: [`RiskPolicy`] beside it stays number-tolerant because a
 /// policy is also TOML config, while a published state is only ever wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,7 +333,7 @@ pub enum BreachedRule {
 
 /// The names this build ships a policy under.
 ///
-/// AUTHORITATIVE, not a parallel listing: [`shipped_policy`] refuses any name
+/// Authoritative, not a parallel listing: [`shipped_policy`] refuses any name
 /// that is not in here before it reaches its match, so the two cannot disagree
 /// about what ships. Nothing can enumerate a `match`'s arms, so the direction
 /// that used to be unpinned - an arm added here but forgotten in the list -
@@ -349,18 +349,18 @@ pub const SHIPPED_POLICIES: &[&str] = &[
 
 /// A policy this build ships, by name.
 ///
-/// ILLUSTRATIVE RATHER THAN AUTHORITATIVE **as to TERMS** - a different axis
+/// Illustrative rather than authoritative as to terms - a different axis
 /// from the one [`SHIPPED_POLICIES`] above calls authoritative, which is the
-/// set of NAMES. The list settles which names exist; this doc disclaims that
+/// set of names. The list settles which names exist; this doc disclaims that
 /// the numbers behind them describe any real programme. Both hold at once.
 ///
 /// Deliberately few, too. These show the
-/// SHAPES a funded-account programme comes in - a hard intraday trail, a softer
+/// shapes a funded-account programme comes in - a hard intraday trail, a softer
 /// end-of-day trail that stops at breakeven, a daily limit that locks rather
 /// than kills - so an operator has something to copy and a test something to
 /// name. They do not track any real firm's current terms and must not be read
 /// as doing so: those change without notice, which is exactly why registration
-/// is a runtime path and why a name an operator registers SHADOWS a shipped one.
+/// is a runtime path and why a name an operator registers shadows a shipped one.
 ///
 /// Built in code rather than parsed from embedded text, so this crate needs no
 /// TOML dependency to state a handful of constants.
@@ -466,7 +466,7 @@ mod tests {
         assert!(AccountPolicy::default().is_unpoliced());
     }
 
-    /// `RiskState` IS ON THE WIRE - `GET /account` publishes it as
+    /// `RiskState` is on the wire - `GET /account` publishes it as
     /// `AccountSnapshot.risk` - so it takes the same string-only decimal rule
     /// the execution and market-data frames do, and this is the row that says
     /// the inclusion was decided rather than forgotten.
@@ -523,7 +523,7 @@ mod tests {
     /// A policy carrying exactly one rule, with the currency named so the
     /// currency check below cannot fire and take the credit for a rule check.
     ///
-    /// THAT SHADOWING IS WHY THIS HELPER EXISTS. Setting any rule makes
+    /// That shadowing is why this helper exists. Setting any rule makes
     /// `is_unpoliced()` false, so a fixture leaving `currency: None` is refused
     /// whatever the rule's own amount says - and a test asserting only
     /// `is_err()` on such a fixture stays green with the amount branch deleted.
@@ -546,7 +546,7 @@ mod tests {
     }
 
     /// Each of the four rules that carries an amount refuses a nonpositive one
-    /// BY NAME, and accepts a positive one. The exact message is asserted
+    /// by name, and accepts a positive one. The exact message is asserted
     /// because it is the only thing separating these four branches from the
     /// currency branch that fires for every policed fixture.
     #[test]
@@ -580,7 +580,7 @@ mod tests {
         }
 
         // The positive case: the same four rules, each on its own, validate.
-        // Without this a validator refusing EVERY amount would pass above.
+        // Without this a validator refusing every amount would pass above.
         let ok = Decimal::from(1);
         policed(|p| p.trailing_drawdown = Some(trailing(ok)))
             .validate()
@@ -624,7 +624,7 @@ mod tests {
         );
 
         // An empty currency is the same defect wearing a value - and so is a
-        // whitespace one, which is not a narrower case but the SAME one: the
+        // whitespace one, which is not a narrower case but the same one: the
         // code is a lookup key against balance currencies, and no balance
         // carries a blank code. `havoc.rs` refuses a blank client_order_id on
         // `trim().is_empty()`; the two validators mean the same thing by blank.
@@ -648,7 +648,7 @@ mod tests {
         .validate()
         .expect("a named currency satisfies the rule");
 
-        // ... and an UNPOLICED account owes no currency at all, which is the
+        // ... and an unpoliced account owes no currency at all, which is the
         // default account and every consumer that predates this policy layer.
         assert!(AccountPolicy::default().currency.is_none());
         AccountPolicy::default()
@@ -673,7 +673,7 @@ mod tests {
     }
 
     /// The sixth branch of `validate`, held to the same standard as the five
-    /// above: the exact message, and the BOUNDARY pinned from both sides.
+    /// above: the exact message, and the boundary pinned from both sides.
     /// 1439 is the last minute of a UTC day and must be accepted; 1440 is the
     /// first that is not and must be refused. Without both, an off-by-one from
     /// `>=` to `>` admits a reset minute that no day contains.

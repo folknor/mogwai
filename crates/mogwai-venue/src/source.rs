@@ -61,17 +61,17 @@ impl InstrumentProfile {
 pub struct InstrumentProfiles {
     cfg: Option<Arc<crate::config::Config>>,
     configured: HashMap<Symbol, Arc<InstrumentProfile>>,
-    /// The symbol of the FIRST profile handed to `from_profiles`, which
+    /// The symbol of the first profile handed to `from_profiles`, which
     /// `build_instrument_profiles` sweeps from the config's boot shape. Kept
     /// because the boot shape is not recoverable from the map: the config's
-    /// top-level `symbol` may be absent, and an absent one does NOT mean
+    /// top-level `symbol` may be absent, and an absent one does not mean
     /// `DEFAULT_PRESET` - `[instrument] preset = "MNQ"` with no top-level symbol
     /// resolves a shape whose symbol is MNQ, and looking up BTCUSDT would then
     /// refuse a config that boots perfectly well.
     boot: Option<Symbol>,
-    /// Shapes resolved for symbols nobody configured, memoized under the EXACT
+    /// Shapes resolved for symbols nobody configured, memoized under the exact
     /// requested label. Uncapped on purpose: a profile is two small structs,
-    /// and the capped resource is the RIVER, charged in `Rivers`.
+    /// and the capped resource is the river, charged in `Rivers`.
     resolved: Mutex<HashMap<Symbol, Arc<InstrumentProfile>>>,
     /// Settlement currencies reachable from this run's closed shape set that
     /// its `[balances]` table does not fund. Computed once at boot; a request
@@ -118,7 +118,7 @@ impl InstrumentProfiles {
             funding_barred: std::collections::HashSet::new(),
         }
     }
-    /// The TOTAL resolver: the same configured shapes, plus the config needed
+    /// The total resolver: the same configured shapes, plus the config needed
     /// to resolve a label nobody configured. `from_profiles` stays non-total on
     /// purpose, so a test rig does not silently acquire consumer-driven
     /// resolution it was never written against.
@@ -142,7 +142,7 @@ impl InstrumentProfiles {
     /// boot already refused a configured shape it cannot fund, so a hit there
     /// is by construction fundable.
     ///
-    /// The memo check, the TOML merge and the insertion all happen under ONE
+    /// The memo check, the TOML merge and the insertion all happen under one
     /// acquisition, so two concurrent callers on the same label cannot each
     /// retain a different `Arc` - `Arc::ptr_eq` is a property the river keying
     /// and the tests both rely on.
@@ -192,7 +192,7 @@ impl InstrumentProfiles {
         symbols.sort_unstable();
         symbols
     }
-    /// The CONFIGURED defs alone. `/instruments` answers from
+    /// The configured defs alone. `/instruments` answers from
     /// `Rivers::instrument_defs`, which unions these with what has actually
     /// materialized.
     pub fn instrument_defs(&self) -> Vec<InstrumentDef> {
@@ -204,12 +204,12 @@ impl InstrumentProfiles {
         defs.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         defs
     }
-    /// The def of the shape this run boots its paced tape on, resolved BY NAME.
+    /// The def of the shape this run boots its paced tape on, resolved by name.
     ///
     /// Not "the sole entry": once profiles are plural there need not be one, and
     /// a sole-entry rule would silently pick the wrong shape for a config with a
     /// top-level `symbol` plus a `[symbols.*]` table. An absent `symbol` falls
-    /// back to the shape the sweep resolved FIRST, which is exactly what the
+    /// back to the shape the sweep resolved first, which is exactly what the
     /// config's own defaulting produced for a `None` symbol.
     pub fn default_symbol_def(&self, symbol: Option<&str>) -> anyhow::Result<InstrumentDef> {
         let named = symbol
@@ -257,9 +257,9 @@ fn generator(
 /// `CHECKPOINT_K` ticks turns that O(distance) walk into a resume plus a
 /// residual replay of fewer than `CHECKPOINT_K` ticks.
 ///
-/// This chain is the mechanism that MATERIALIZES the warmup, which is why it
+/// This chain is the mechanism that materializes the warmup, which is why it
 /// survives the lifecycle rewrite. What that rewrite removed is the per-request
-/// seek BUDGET that used to cap it: there is no `MAX_HISTORY_SEEK_TICKS` any
+/// seek budget that used to cap it: there is no `MAX_HISTORY_SEEK_TICKS` any
 /// more and no request is served short because it ran out of walk. A request
 /// below the floor is refused by name instead, which is the whole point.
 /// The stride is a latency/memory tradeoff, not a reach budget. Reach and
@@ -268,12 +268,12 @@ fn generator(
 /// `MAX_CHECKPOINTS` cap still bounds retained generator clones; exceptionally
 /// long runs coarsen the grid as documented by `CheckpointIndex`.
 pub(crate) const CHECKPOINT_K: usize = 8_192;
-/// How many distinct rivers one run may MATERIALIZE.
+/// How many distinct rivers one run may materialize.
 ///
 /// The expensive resource is the river - a permanent checkpoint chain, and on a
 /// bind a boat and its paced task - not the profile memo, which is two small
 /// structs and stays uncapped. Charged where the river is created, so a history
-/// poll and a socket bind spend the same budget, and there is NO eviction: an
+/// poll and a socket bind spend the same budget, and there is no eviction: an
 /// evicted river would resurrect at a different position, which is a worse lie
 /// than a refusal. Exhaustion by 256 genuinely materialized rivers is an
 /// operational contract, not a hole: this venue serves the owner's own agents,
@@ -281,7 +281,7 @@ pub(crate) const CHECKPOINT_K: usize = 8_192;
 /// spends the budget deliberately.
 pub(crate) const MAX_MATERIALIZED_RIVERS: usize = 256;
 
-/// Runaway backstop on a SINGLE extension while one river lock is held.
+/// Runaway backstop on a single extension while one river lock is held.
 /// This retains the original one-billion-tick safety purpose: a nonsensical
 /// far-future request cannot turn one lock acquisition into the
 /// 667-billion-tick warmup reach bound below.
@@ -304,7 +304,7 @@ const MAX_WARMUP_MATERIALIZATION_TICKS: usize = 1_335_079_000_000;
 /// The bundle digest covers the resolved instrument shape, the tape seed and
 /// the boot regime - all of it operator-owned, fixed at boot, and the same for
 /// every passenger. The arm is not: it is chosen per passenger, so it is held
-/// STRUCTURALLY rather than folded into the digest. That asymmetry is
+/// structurally rather than folded into the digest. That asymmetry is
 /// deliberate. A digest collision here does not merely mislabel a river, it
 /// hands a passenger water belonging to another key, and a value the passenger
 /// controls is a value a passenger could search for collisions in. Keeping the
@@ -479,7 +479,7 @@ fn locked(index: &Mutex<CheckpointIndex>) -> std::sync::MutexGuard<'_, Checkpoin
 }
 
 /// Why a river could not be produced. One layer below `ResolveRefusal`: these
-/// arise only on the paths that actually SPEND the capped resource.
+/// arise only on the paths that actually spend the capped resource.
 #[derive(Debug)]
 pub(crate) enum MaterializeRefusal {
     Resolve(ResolveRefusal),
@@ -565,7 +565,7 @@ impl Rivers {
             rivers: Mutex::new(HashMap::new()),
         })
     }
-    /// The CONFIGURED profiles behind this registry. Test-only since piece 13:
+    /// The configured profiles behind this registry. Test-only since piece 13:
     /// every serving path resolves through `resolve_profile`, and a production
     /// caller reaching past it for the configured map is exactly the
     /// configured-only lookup this landing deleted.
@@ -593,7 +593,7 @@ impl Rivers {
     ///
     /// This is the only place a key is minted, and every key that exists came
     /// from here - which is what `river` relies on instead of re-deriving. The
-    /// memo is keyed by symbol AND arm because one label now names several
+    /// memo is keyed by symbol and arm because one label now names several
     /// rivers; it exists because resolution happens on every history read,
     /// every mark read and every placement, and the bundle digest must not sit
     /// on that path. The first request for a given pair pays the digest and
@@ -690,10 +690,10 @@ impl Rivers {
     }
 
     /// The symbols whose water actually exists right now. A control that means
-    /// "everything" iterates THESE rather than the configured set, so clearing
+    /// "everything" iterates these rather than the configured set, so clearing
     /// never materializes a chain nothing has asked for.
-    /// DEDUPLICATED, because it answers a question about SYMBOLS while iterating
-    /// RIVERS. One label resolves to one river today so the two counts agree,
+    /// Deduplicated, because it answers a question about symbols while iterating
+    /// rivers. One label resolves to one river today so the two counts agree,
     /// and this looks redundant; the moment generator havoc enters river
     /// identity a label names several rivers and an undeduplicated list would
     /// report the same symbol once per fork - to `/instruments`, to the funding
@@ -711,8 +711,8 @@ impl Rivers {
         symbols
     }
 
-    /// What `/instruments` answers: the CONFIGURED shapes unioned with every
-    /// shape this run has MATERIALIZED a river for, sorted by symbol.
+    /// What `/instruments` answers: the configured shapes unioned with every
+    /// shape this run has materialized a river for, sorted by symbol.
     ///
     /// Materialized, not merely resolved. Resolution is total, so a memo-shaped
     /// list would advertise labels nothing had registered; a river is spent by
@@ -733,24 +733,24 @@ impl Rivers {
         defs
     }
 
-    /// A source positioned at `start`, RESUMED from the run's checkpoint chain
+    /// A source positioned at `start`, resumed from the run's checkpoint chain
     /// rather than re-walked from the origin. `None` means the tape origin, which
     /// is checkpoint zero and therefore free.
     ///
-    /// The `MergeSource` around a ONE-element vector is not a leftover from the
+    /// The `MergeSource` around a one-element vector is not a leftover from the
     /// multi-symbol era and must not be "simplified" away. `TickSource::seek_to`
-    /// CONSUMES the tick it returns, so something has to hold that first in-window
+    /// consumes the tick it returns, so something has to hold that first in-window
     /// tick until the stream is read; `MergeSource`'s per-source head buffer is what
     /// does it. Unwrapping this to the bare source silently drops the tick at
     /// exactly `start` - a one-tick-late history window that no type would catch.
     /// Replacing it means writing an equivalent one-tick pushback, which is the same
     /// object with a narrower name.
     ///
-    /// That `start` is INCLUSIVE is relied on rather than incidental: the fill
+    /// That `start` is inclusive is relied on rather than incidental: the fill
     /// sweeper passes `from_ns + 1` precisely to get a window that excludes the
     /// instant it already processed, which only works if the tick at the requested
     /// instant is emitted.
-    /// TAKES A KEY, NEVER A LABEL, like every other water read on this registry.
+    /// Takes a key, never a label, like every other water read on this registry.
     /// See `Rivers::key_for_symbol` for why the two are not interchangeable and
     /// where the remaining label-to-key resolutions live.
     pub(crate) fn history_source(
@@ -773,13 +773,13 @@ impl Rivers {
         )))
     }
 
-    /// Materialize the UNARMED river for `symbol` and answer nothing but
+    /// Materialize the unarmed river for `symbol` and answer nothing but
     /// whether it could be. The pre-check the operator history routes run so a
     /// cap exhaustion or a barred shape is a 400 naming its reason rather than
     /// a 500 raised out of the synthesis task - and so a poll advertises the
     /// shape it just spent a river on, which is the same event.
     ///
-    /// UNARMED, explicitly, and that is the whole of what the fork changed
+    /// Unarmed, explicitly, and that is the whole of what the fork changed
     /// here. This is the operator's view of a label, so it names the river a
     /// passenger carrying no generator arm would board. A passenger that
     /// carries one is on other water and reads it over its own socket.
@@ -789,18 +789,18 @@ impl Rivers {
         Ok(())
     }
 
-    /// THE ONLY WAY A LABEL BECOMES WATER, and it is deliberately awkward to
+    /// The only way a label becomes water, and it is deliberately awkward to
     /// reach.
     ///
-    /// A SYMBOL IS INSTRUMENT IDENTITY AND NOT MARKET-REALIZATION IDENTITY. It
+    /// A symbol is instrument identity and not market-realization identity. It
     /// selects a price increment, a calendar, a settlement currency, a wire
     /// field - and it must not select a river, because the end state has
-    /// generator havoc inside river identity, so one label will name SEVERAL
+    /// generator havoc inside river identity, so one label will name several
     /// rivers: a passenger carrying an arm boards a different river than one
     /// without it. Every water read therefore takes a `RiverKey`, and a
     /// passenger always has one, because it holds a boat.
     ///
-    /// WHAT THIS PROTECTS AGAINST is a fork that lands halfway. If pricing,
+    /// What this protects against is a fork that lands halfway. If pricing,
     /// trigger scans, marks or settlement could still reach water with only a
     /// label, adding the arm to the key would fork the delivered tape while
     /// execution went on reading whichever river the label resolved to - the
@@ -808,8 +808,8 @@ impl Rivers {
     /// saw. There is now no function that will hand out water for a label
     /// except this one.
     ///
-    /// THE CALLERS THAT LEGITIMATELY HAVE NO KEY, each a named boundary rather
-    /// than a convenience. Each of them now names the UNARMED river of that
+    /// The callers that legitimately have no key, each a named boundary rather
+    /// than a convenience. Each of them now names the unarmed river of that
     /// label, which is a choice rather than the only possibility it once was:
     ///
     /// - `/trades` and `/quotes`, which name a symbol and no passenger. They
@@ -846,12 +846,12 @@ impl Rivers {
         }))
     }
 
-    /// Generate and HOLD every instant up to `target_ns` on this river, so that
+    /// Generate and hold every instant up to `target_ns` on this river, so that
     /// each is reachable by a resume plus a bounded residual replay rather than
     /// refused or silently served short. Returns the number of snapshots
     /// retained, which is what the boot log reports for the warmup call.
     ///
-    /// FIRST-TOUCH COST IS REAL. `serve.rs` pays this once at boot for the boot
+    /// First-touch cost is real. `serve.rs` pays this once at boot for the boot
     /// river; every other river is cold until something reads it, and that first
     /// distant history request pays the whole walk from `TAPE_ORIGIN_NS`
     /// synchronously, holding that river's mutex, and allocates up to
@@ -914,8 +914,8 @@ fn reach_river_within(river: &River, target_ns: u64, ceiling: usize) -> anyhow::
 /// checkpoint no later than `ts` and walked forward only the residual, so this
 /// costs the same whether `ts` is one second or one day into the run.
 ///
-/// The WALK-BACK is not an optimization to remove. A positioned source resumes
-/// AFTER the tick its checkpoint last consumed, so the residual covers only
+/// The walk-back is not an optimization to remove. A positioned source resumes
+/// after the tick its checkpoint last consumed, so the residual covers only
 /// `(checkpoint clock, ts]`. When the last print at or before `ts` fell on or
 /// before that clock - `ts` sitting between a parent's final trade and the next
 /// parent is the easy case - the residual contains no trade at all and the
@@ -1000,9 +1000,9 @@ mod river_tests {
     }
 
     /// The widened `RiverKey`. A symbol nobody configured keys a river of its
-    /// OWN - distinct from the default preset's, whose bundle it borrows, and
+    /// own - distinct from the default preset's, whose bundle it borrows, and
     /// distinct from a second unconfigured label sharing that same bundle. That
-    /// falls out of the profile being resolved UNDER THE REQUESTED LABEL, which
+    /// falls out of the profile being resolved under the requested label, which
     /// is why the label is never normalized on the way in.
     #[test]
     fn an_unconfigured_symbol_keys_its_own_river() {
@@ -1027,7 +1027,7 @@ mod river_tests {
     ///
     /// The clean key and an armed key must differ, or a passenger carrying an
     /// arm would board the water someone else is already reading and the whole
-    /// point of putting the arm in identity is lost. Two DIFFERENT arms must
+    /// point of putting the arm in identity is lost. Two different arms must
     /// differ from each other too - otherwise a surged passenger and a
     /// differently-surged one would share, which is the same defect wearing a
     /// disguise.
@@ -1112,7 +1112,7 @@ mod river_tests {
         assert_eq!(rivers.materialized_symbols().len(), 1);
     }
 
-    /// The advertised set is the MATERIALIZED set (adjudication ruling 3): a
+    /// The advertised set is the materialized set (adjudication ruling 3): a
     /// resolve that spent no river must not advertise, and a history poll must.
     #[test]
     fn only_materialized_shapes_are_advertised() {
@@ -1137,7 +1137,7 @@ mod river_tests {
         );
     }
 
-    /// The cap is a BOUND, not merely an error: concurrent racers at the
+    /// The cap is a bound, not merely an error: concurrent racers at the
     /// boundary must not push the river map past it between the check and the
     /// insert.
     #[test]
@@ -1220,7 +1220,7 @@ mod river_tests {
     #[test]
     fn concurrent_first_readers_share_one_river() {
         let rivers = crate::fills::test_rivers();
-        // COLLECT the spawns before joining any of them: chaining `.map(spawn)`
+        // Collect the spawns before joining any of them: chaining `.map(spawn)`
         // straight into `.map(join)` is lazy, so each thread would be joined
         // before the next is spawned and the contention this test exists to
         // exercise would never happen.
@@ -1324,7 +1324,7 @@ mod river_tests {
             .expect("cold history");
     }
 
-    /// A second configured shape is realized as its OWN river, under its OWN
+    /// A second configured shape is realized as its own river, under its own
     /// def and chain, locked independently of the boot river's.
     #[test]
     fn a_second_river_is_realized_under_its_own_def_and_chain() {
@@ -1374,7 +1374,7 @@ mod river_tests {
         assert_eq!(locked(&boot.checkpoints).frontier_ns(), TAPE_ORIGIN_NS);
     }
 
-    /// A blown reach ceiling is an ERROR, never an empty window: swallowing it
+    /// A blown reach ceiling is an error, never an empty window: swallowing it
     /// would leave `/trades` answering `200 []`, indistinguishable from a window
     /// nothing traded in.
     #[test]

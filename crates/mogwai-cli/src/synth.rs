@@ -43,14 +43,14 @@ pub(crate) struct FingerprintArgs {
 
 const DEFAULT_CHAR_DIR: &str = "analysis";
 const DEFAULT_CADENCE: &str = "analysis/cadence.json";
-/// The committed fingerprint, READ as the session profile the arrival clock
+/// The committed fingerprint, read as the session profile the arrival clock
 /// consults. Distinct from `DEFAULT_FINGERPRINT_OUT`, which is where synthesis
-/// WRITES so a bare invocation cannot clobber the committed artifact.
+/// writes, so a bare invocation cannot clobber the committed artifact.
 const DEFAULT_FINGERPRINT_IN: &str = "analysis/fingerprint.json";
 /// `analysis/out/`, this repository's gitignored output directory, for the
 /// reason spelled out on `fit`'s `DEFAULT_OUT`: it was `target/mogwai-synth/`
 /// until 2026-08-20, and `artifact_path` resolves a bare default against the
-/// WORKING DIRECTORY, so a synth run from elsewhere created a directory called
+/// working directory, so a synth run from elsewhere created a directory called
 /// `target` under the operator's feet. The point of the default is only that it
 /// is not `DEFAULT_FINGERPRINT_IN`.
 const DEFAULT_FINGERPRINT_OUT: &str = "analysis/out/fingerprint.json";

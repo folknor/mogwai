@@ -34,18 +34,18 @@ pub fn decimal_from_f64(x: f64) -> Decimal {
     Decimal::from_f64(x).unwrap_or(if x > 0.0 { Decimal::MAX } else { Decimal::MIN })
 }
 
-/// `serde` glue for an OPTIONAL wire `Decimal`: a JSON string or `null`, never
+/// `serde` glue for an optional wire `Decimal`: a JSON string or `null`, never
 /// a JSON number.
 ///
 /// `rust_decimal::serde::str_option` looks like it would do this and does not:
-/// it REFUSES an explicit `null`, and the venue's own frames carry
+/// it refuses an explicit `null`, and the venue's own frames carry
 /// `"price":null` for every priceless order - a stop-market submit, a
 /// still-priceless amend. Annotating the wire fields with it made the adapter's
 /// stop-market and trigger-amend paths undecodable, which the socket suites
 /// caught. The required (non-`Option`) fields keep using
 /// `rust_decimal::serde::str` directly, because no `null` can reach them.
 ///
-/// `visit_some` delegates to that same `str` deserializer, so the ONE rule -
+/// `visit_some` delegates to that same `str` deserializer, so the one rule -
 /// a number is refused, a string is exact - is stated in one place and the
 /// optional case cannot drift away from the required one.
 pub(crate) mod str_option {
@@ -95,7 +95,7 @@ pub(crate) mod str_option {
     }
 }
 
-/// `serde` glue for a MAP of wire decimals keyed by currency: every VALUE is a
+/// `serde` glue for a map of wire decimals keyed by currency: every value is a
 /// JSON string, never a JSON number.
 ///
 /// Exists for one field, `POST /accounts`'s `balances`, which is the third live

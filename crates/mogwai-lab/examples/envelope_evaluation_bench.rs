@@ -1,20 +1,20 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! HARNESS SURFACE: predictive-envelope month simulation, priced.
+//! Harness surface: predictive-envelope month simulation, priced.
 //!
 //! Spec 9.7's envelope is 500 paired replicates of `1 + K` month simulations
-//! over the section 8 exposure, so ONE evaluation is 1,500 months at `K = 2`
+//! over the section 8 exposure, so one evaluation is 1,500 months at `K = 2`
 //! and 4,500 at `K = 8`. That price decides three frozen constants
 //! (`ENVELOPE_CELL_BUDGET_S`, `STAGE_A_ENVELOPE_BUDGET_S`,
 //! `STAGE_B_ENVELOPE_BUDGET_S`) and, through the lazy rule, how much of the
 //! marginal shell a run can afford before it stops on shortfall.
 //!
-//! WHY THIS EXISTS RATHER THAN THE SHIPPED COST PROBE. `arrival-screen
-//! --cost-probe` walks every family at every `K` and FAILS FAST on the first
+//! Why this exists rather than the shipped cost probe. `arrival-screen
+//! --cost-probe` walks every family at every `K` and fails fast on the first
 //! miss, so it prices exactly one cell before it stops - and that cell is
 //! whichever family sorts first, not the one a pricing question is about. It
-//! also cannot answer "what does ONE month cost" at all, which is the number an
+//! also cannot answer "what does one month cost" at all, which is the number an
 //! optimization round moves. This harness takes the family and the month count
 //! on the command line and reports per-month cost, so a K-tier price is
 //! arithmetic on a measured unit rather than an hour of waiting.

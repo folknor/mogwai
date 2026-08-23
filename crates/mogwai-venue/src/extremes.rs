@@ -4,23 +4,23 @@
 //! The high and low one river reached between two sweep passes, recorded by the
 //! tape thread as it prints.
 //!
-//! WHY THIS EXISTS. Peak equity ratchets tick by tick at a real venue, and so
+//! Why this exists. Peak equity ratchets tick by tick at a real venue, and so
 //! does a trailing stop: a spike lasting 200 milliseconds spends drawdown budget
-//! and drags a trail behind it. Both were evaluated on the fill sweeper's MARK
+//! and drags a trail behind it. Both were evaluated on the fill sweeper's mark
 //! instead - one price per pass - so a spike that opened and closed between two
 //! passes never happened as far as the account was concerned, and the account
 //! kept room it should have lost.
 //!
-//! WHY IT IS NOT PER-TICK EVALUATION. The obvious closure - run the policy in
+//! Why it is not per-tick evaluation. The obvious closure - run the policy in
 //! the tape thread - needs the equity inputs published out of the engine and
 //! puts a comparison on the hottest path in the venue. It is also unnecessary,
 //! because of what the quantities actually are:
 //!
-//! - A TRAILING STOP's trigger is a monotone function of the tape: a sell trail
-//!   tracks the running HIGH, a buy trail the running LOW. The maximum over the
-//!   ticks in a span IS the span's high, so ratcheting once against the high is
+//! - A trailing stop's trigger is a monotone function of the tape: a sell trail
+//!   tracks the running high, a buy trail the running low. The maximum over the
+//!   ticks in a span is the span's high, so ratcheting once against the high is
 //!   bit-for-bit what ratcheting per tick would have produced.
-//! - EQUITY is LINEAR in the price of the one instrument an account can be
+//! - Equity is linear in the price of the one instrument an account can be
 //!   holding - an account is on at most one river, and strategies are
 //!   single-instrument - so its extreme over a span is attained at a price
 //!   extreme. Long accounts peak at the high and trough at the low; short
@@ -29,16 +29,16 @@
 //! So two prices per span carry the whole tick-resolution answer, and the tape
 //! thread's only job is to remember them.
 //!
-//! THE INSTANTS ARE CARRIED, and they are what keeps the answer honest rather
+//! The instants are carried, and they are what keeps the answer honest rather
 //! than merely harsh. A span that spiked and then collapsed is a different run
 //! from one that collapsed and then spiked: in the first the ratchet raises the
 //! floor before the fall tests it, in the second it does not. Replaying the two
-//! extremes IN TIME ORDER reproduces the ordering a per-tick evaluation would
+//! extremes in time order reproduces the ordering a per-tick evaluation would
 //! have seen; applying them favourable-first would invent breaches that never
 //! happened, which is the opposite error to the one being fixed.
 //!
-//! THE WRITER NEVER BLOCKS ON A READER. The tape thread keeps its running
-//! extremes in its own stack and publishes only when one MOVES, which after the
+//! The writer never blocks on a reader. The tape thread keeps its running
+//! extremes in its own stack and publishes only when one moves, which after the
 //! first few ticks of a span is rare. The reader opens a fresh span by bumping
 //! an epoch; the writer notices on its next tick with one relaxed load.
 
@@ -85,7 +85,7 @@ impl PriceSpan {
         moved
     }
 
-    /// The two extremes IN THE ORDER THE TAPE REACHED THEM, deduplicated when a
+    /// The two extremes in the order the tape reached them, deduplicated when a
     /// span held one price (or one print).
     ///
     /// This is the sequence a per-tick evaluation would have seen, reduced to
@@ -107,7 +107,7 @@ impl PriceSpan {
 /// The channel between one boat's tape thread and the sweeper reading it.
 #[derive(Debug, Default)]
 pub(crate) struct PriceExtremes {
-    /// Bumped by the READER to open a fresh span. The writer compares it with
+    /// Bumped by the reader to open a fresh span. The writer compares it with
     /// the epoch its running extremes belong to and starts over when they
     /// differ, which is what makes "since the last pass" mean what it says
     /// without the reader ever touching the writer's state.
@@ -155,10 +155,10 @@ impl PriceExtremes {
     /// Take the span since the last call and open a fresh one.
     ///
     /// `None` when the tape printed nothing this span, which is an ordinary
-    /// answer on a quiet river and NOT a reason to fall back to a single mark:
+    /// answer on a quiet river and not a reason to fall back to a single mark:
     /// no print means no tick a per-tick evaluation would have seen either.
     ///
-    /// The epoch is bumped BEFORE the take, so a print racing this call is
+    /// The epoch is bumped before the take, so a print racing this call is
     /// attributed to the new span rather than silently discarded: the writer
     /// stamps what it publishes, and a stale stamp is dropped here.
     pub(crate) fn take(&self) -> Option<PriceSpan> {
@@ -197,8 +197,8 @@ mod tests {
         assert_eq!((span.low_px, span.low_ns), (px(90), 3));
     }
 
-    /// The ordering that keeps this from inventing breaches: a spike BEFORE a
-    /// collapse raises the floor first, a spike AFTER one does not.
+    /// The ordering that keeps this from inventing breaches: a spike before a
+    /// collapse raises the floor first, a spike after one does not.
     #[test]
     fn the_extremes_replay_in_the_order_the_tape_reached_them() {
         let spike_first = PriceSpan {

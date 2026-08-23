@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The CUT half of the session-segment sampler: real session slices carved out
+//! The cut half of the session-segment sampler: real session slices carved out
 //! of a delivered TBBO month into a segment library the composer can loop.
 //!
 //! The direction this serves is `notes/segment-sampler.md` - the tape is a
@@ -12,9 +12,9 @@
 //! `mogwai-data` and never the reverse, so a shared type would point the
 //! dependency the wrong way).
 //!
-//! EVERYTHING IS STORED IN RETURNS SPACE. A segment carries no absolute price
+//! Everything is stored in returns space. A segment carries no absolute price
 //! at all: it is a sequence of log returns against its own predecessor tick,
-//! plus one `open_gap_ret` measured from the last real trade BEFORE the window
+//! plus one `open_gap_ret` measured from the last real trade before the window
 //! to the first trade inside it. Absolute price level is an integration
 //! constant (owner ruling, 2026-08-12), and that is exactly what lets the
 //! composer butt any two segments together without a level discontinuity: the
@@ -23,7 +23,7 @@
 //! at the seam - the owner's defect 2, which the clean generated tape does not
 //! produce at all.
 //!
-//! Returns are stored as NANO-LOG-RETURNS: `round(ln(p / p_prev) * 1e9)` as an
+//! Returns are stored as nano-log-returns: `round(ln(p / p_prev) * 1e9)` as an
 //! `i64`. Integer storage keeps the artifact determinstic per binary and
 //! diffable; 1e-9 of a log return is far below a tick at any level this venue
 //! serves, and the bit-exactness era toward Python-era artifacts is closed, so
@@ -40,7 +40,7 @@ use crate::stream::{Row, data_files, parse_stream};
 
 /// The artifact format version. Bumped when the on-disk shape changes in a way
 /// a previously written library cannot be read under. Distinct from
-/// `TAPE_PROTOCOL_VERSION`, which identifies the GENERATION process: a library
+/// `TAPE_PROTOCOL_VERSION`, which identifies the generation process: a library
 /// is an input to that process, not the process itself.
 pub const SEGMENT_LIBRARY_VERSION: u32 = 1;
 
@@ -84,7 +84,7 @@ pub const LONDON: SessionWindow = SessionWindow {
 /// - the cash open with a half-hour lead-in, run to NY lunch.
 ///
 /// The lead-in is the point, not padding: the direction note asks for an NY
-/// tape that starts before the open so a strategy can PREPARE, and the cash
+/// tape that starts before the open so a strategy can prepare, and the cash
 /// open at 08:30 local sits half an hour into this window rather than at its
 /// edge. That also puts the owner's defect 1 - the generator smearing the
 /// 09:30 New York open across its hour because the session profile is hourly -
@@ -98,7 +98,7 @@ pub const NY_MORNING: SessionWindow = SessionWindow {
 /// NY afternoon: exchange-local 09:30 to 15:00, which is 10:30 to 16:00 New
 /// York - the second half of the cash session, ending at the cash close.
 ///
-/// It ends at the CASH close (15:00 local), not the session close (16:00
+/// It ends at the cash close (15:00 local), not the session close (16:00
 /// local), and so stops an hour and a quarter short of the 15:15 halt. A
 /// window that ran to the session close would carry the halt's fifteen-minute
 /// hole and the settlement flurry, which is a different tape from the one this
@@ -129,7 +129,7 @@ pub fn window_by_name(name: &str) -> LabResult<SessionWindow> {
 
 /// One cut session slice, in returns space.
 ///
-/// The four tick arrays are PARALLEL and equal-length; `trade_count` is their
+/// The four tick arrays are parallel and equal-length; `trade_count` is their
 /// shared length, stored so a reader can refuse a truncated artifact without
 /// trusting any one array.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -140,7 +140,7 @@ pub struct Segment {
     /// only - the composer re-anchors time and never reads it.
     pub window_start_ns: u64,
     pub trade_count: usize,
-    /// The log return from the last real trade BEFORE the window to this
+    /// The log return from the last real trade before the window to this
     /// segment's first trade, in nano-log-returns. `None` when the window
     /// opened the stream and there was no prior trade to measure against.
     pub open_gap_ret: Option<i64>,
@@ -234,7 +234,7 @@ impl SegmentLibrary {
                 )));
             }
             // The anchor rule, checked on this side too. `cut` guarantees it by
-            // construction, but `load` reads a FILE, and the composer's half of
+            // construction, but `load` reads a file, and the composer's half of
             // the contract is that a nonzero first return would put a silent
             // extra jump at every seam. Both sides refuse it, so a library that
             // reaches either one is refused wherever it is opened.
@@ -247,7 +247,7 @@ impl SegmentLibrary {
             }
             // The `units` block's aggressor alphabet, on the writer's side too,
             // and for the same reason the anchor rule is here: `cut` can only
-            // emit what the corpus parser admitted, but `load` reads a FILE. The
+            // emit what the corpus parser admitted, but `load` reads a file. The
             // reader refuses this; a library that reaches only this side would
             // otherwise be accepted here and refused there, which is the split
             // the shared fixture exists to prevent.
@@ -315,7 +315,7 @@ fn nano_log_return(from: i64, to: i64) -> LabResult<i64> {
 }
 
 /// Cuts every `window` slice of `month` out of the TBBO files under
-/// `source_dir`, in ONE streaming pass.
+/// `source_dir`, in one streaming pass.
 ///
 /// One pass matters: a delivered month is multiple GB decompressed, so the
 /// windows are resolved per trade date up front and the stream is classified
@@ -330,7 +330,7 @@ pub struct DroppedSegment {
     pub reason: &'static str,
 }
 
-/// The default thin-session threshold, as a fraction of the month's MEDIAN
+/// The default thin-session threshold, as a fraction of the month's median
 /// segment size.
 ///
 /// A holiday half-session is the case this exists for. CME equity index futures
@@ -350,7 +350,7 @@ pub struct DroppedSegment {
 pub const DEFAULT_MIN_TICKS_FRACTION: f64 = 0.2;
 
 /// Cuts every `window` slice of `month` out of the TBBO files under
-/// `source_dir`, in ONE streaming pass, keeping the default thin-session rule.
+/// `source_dir`, in one streaming pass, keeping the default thin-session rule.
 pub fn cut(
     source_dir: &Path,
     symbol: &str,
@@ -390,7 +390,7 @@ pub fn cut_with(
 
     let mut open: Option<Cutting> = None;
     let mut done: Vec<Segment> = Vec::new();
-    // The last trade seen ANYWHERE in the stream, window or not. This is what
+    // The last trade seen anywhere in the stream, window or not. This is what
     // makes `open_gap_ret` a real reopen gap: it is measured against the last
     // print before the window, which for Asia is the previous day's settlement
     // print, across the daily break.
@@ -478,11 +478,11 @@ pub fn cut_with(
     // An empty segment cannot be composed and would fail `validate` on read;
     // drop it here, at the site that knows a session simply had no prints in
     // the window, rather than failing the whole cut. Weekends and full holidays
-    // leave this way and are NOT reported: a Saturday is not a session that
+    // leave this way and are not reported: a Saturday is not a session that
     // went missing, it is a day the window table never should have offered.
     done.retain(|s| s.trade_count > 0);
 
-    // The thin-session rule, over the median of what survived. Computed AFTER
+    // The thin-session rule, over the median of what survived. Computed after
     // the empty drop so the closed days cannot drag the median down and take
     // real sessions with them.
     let threshold = {
@@ -545,16 +545,16 @@ pub fn cut_with(
 
 /// `[start, end)` UTC-ns bounds of `window` for every trade date in `month`.
 ///
-/// EVERY civil day of the month gets a window, weekends and holidays included.
+/// Every civil day of the month gets a window, weekends and holidays included.
 /// `ScheduleFrame::bounds` is pure civil arithmetic - it resolves 17:00 local
 /// for any date handed to it and knows nothing about whether the venue was
 /// open - so this table is a superset of the real trade dates.
 ///
-/// What removes the non-trading days is the CUT, not the calendar: a Saturday
+/// What removes the non-trading days is the cut, not the calendar: a Saturday
 /// window collects no prints, and `cut` drops every empty segment. The effect
 /// is correct and needs no holiday list, but the mechanism is emptiness rather
 /// than a calendar, and that is worth knowing before this is reused. A window
-/// that is real but THIN would survive on the same rule, so a future caller
+/// that is real but thin would survive on the same rule, so a future caller
 /// wanting "only genuine sessions" needs a minimum-trade threshold here rather
 /// than the assumption that anything non-empty is a session.
 fn window_bounds(
@@ -585,7 +585,7 @@ fn window_bounds(
             )));
         }
         // A window overlapping the daily halt would carry its fifteen-minute
-        // hole INVISIBLY: the cut would still produce a non-empty segment, the
+        // hole invisibly: the cut would still produce a non-empty segment, the
         // composer would loop it happily, and the only symptom would be a dead
         // stretch in the middle of every looped session that no test asks
         // about. Refuse at the table instead, where the window is defined.
@@ -772,7 +772,7 @@ mod tests {
         let frame = ScheduleFrame::stage_m(&authority).expect("frozen authority");
         let bounds = window_bounds("2026-04", ASIA, &frame).expect("april windows");
         // Every civil day of April, weekends included: the window table is a
-        // SUPERSET of the trade dates, and the cut is what drops the days with
+        // superset of the trade dates, and the cut is what drops the days with
         // no prints. Pinned here so the superset stays a deliberate property
         // rather than something a reader has to infer.
         assert_eq!(bounds.len(), 30);
@@ -886,7 +886,7 @@ mod tests {
     #[test]
     fn the_thin_session_fraction_is_range_checked() {
         let dir = Path::new("/nonexistent");
-        // The range check must fire BEFORE any file is opened, otherwise a bad
+        // The range check must fire before any file is opened, otherwise a bad
         // fraction reports a missing corpus and hides the real fault.
         for bad in [1.0, 1.5, -0.1] {
             let err = cut_with(dir, "MNQ", "2026-04", ASIA, &ScheduleFrame::JulyFixed, bad)

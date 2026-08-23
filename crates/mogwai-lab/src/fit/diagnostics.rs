@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `build_diagnostics` from `analysis/mnq_fit.py` (spec 4.8): shared-shape
-//! observed values BESIDE the crypto-fitted reference they are compared
+//! observed values beside the crypto-fitted reference they are compared
 //! against, plus the exposure-normalized count-vs-volume session curves.
 //! Findings, never gates.
 
@@ -25,7 +25,7 @@ pub fn reference_shape() -> Value {
     })
 }
 
-/// Open-minute exposure per exchange-local hour for one FULL session: every
+/// Open-minute exposure per exchange-local hour for one full session: every
 /// open hour carries 60 minutes except local hour 15 (the 15:15-15:30 halt
 /// leaves 45) and hour 16 (the daily break, zero).
 #[must_use]
@@ -55,7 +55,7 @@ fn diffs(obs: &Value, reference: &Value) -> Value {
     }
 }
 
-/// The wave-1 convention: zero-rate OPEN hours stay in - an empty open hour
+/// The wave-1 convention: zero-rate open hours stay in - an empty open hour
 /// widens its own denominator, and a zero trough reads as infinity rather
 /// than being silently dropped.
 fn peak_to_trough(rates: &serde_json::Map<String, Value>) -> f64 {

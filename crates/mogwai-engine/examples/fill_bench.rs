@@ -154,7 +154,7 @@ fn benches(c: &mut Criterion) {
     // region.
     //
     // Every routine hands its engine back as part of the output. `iter_batched`
-    // builds inputs before the timer starts and drops OUTPUTS after it stops,
+    // builds inputs before the timer starts and drops outputs after it stops,
     // but an input consumed by the routine is dropped inside the timed region -
     // and tearing down an engine carrying an instrument table, an id set and a
     // fill history costs more than the submit being measured, with allocator

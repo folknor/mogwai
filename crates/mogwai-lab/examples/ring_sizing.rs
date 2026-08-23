@@ -7,7 +7,7 @@
 #[global_allocator]
 static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
-/// The SHIPPED per-boat depth, read from the config default rather than
+/// The shipped per-boat depth, read from the config default rather than
 /// restated: a measurement that can drift from the knob it verifies measures
 /// nothing.
 fn depth() -> usize {

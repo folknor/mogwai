@@ -27,7 +27,7 @@ pub const fn splitmix64(x: u64) -> u64 {
 }
 
 /// The spec-3.4a multi-field derivation: fold `splitmix64` over the fields in
-/// LISTED order (the order is load-bearing - `tuple_mix(b, [x, y])` and
+/// listed order (the order is load-bearing - `tuple_mix(b, [x, y])` and
 /// `tuple_mix(b, [y, x])` are different streams).
 #[must_use]
 pub fn tuple_mix(base: u64, fields: &[u64]) -> u64 {
@@ -40,7 +40,7 @@ pub fn tuple_mix(base: u64, fields: &[u64]) -> u64 {
 
 /// The frozen spec-5.1 shuffle, in place over `values` in original stream
 /// order: the state advances by `splitmix64` per step and `j = state % (i+1)`.
-/// Note the state advances BEFORE the modulus, matching the Python.
+/// Note the state advances before the modulus, matching the Python.
 pub fn fisher_yates<T>(values: &mut [T], mut state: u64) {
     if values.is_empty() {
         return;
@@ -54,7 +54,7 @@ pub fn fisher_yates<T>(values: &mut [T], mut state: u64) {
     }
 }
 
-/// `nearest_rank_list`: nearest-rank quantile of an ASCENDING list, clamped
+/// `nearest_rank_list`: nearest-rank quantile of an ascending list, clamped
 /// at rank 1. `None` marks the Python `Refusal("empty list has no
 /// quantiles")` - callers that must refuse map it themselves; every current
 /// caller guards emptiness first.
@@ -73,7 +73,7 @@ pub fn nearest_rank_list(sorted_values: &[f64], q: f64) -> Option<f64> {
     Some(sorted_values[rank - 1])
 }
 
-/// `nearest_rank_p`: the same rule with BOTH ends clamped (the Python
+/// `nearest_rank_p`: the same rule with both ends clamped (the Python
 /// `min(max(rank, 1), len)`), returning `None` on an empty list rather than
 /// refusing. The two exist separately in the Python and are kept separate
 /// here so a future mismatch stays visible.
@@ -93,7 +93,7 @@ pub fn nearest_rank_p(sorted_vals: &[f64], q: f64) -> Option<f64> {
 }
 
 /// `weighted_nearest_rank`: exact nearest rank over `(value, weight)` pairs -
-/// sort ascending by value, return the first value whose CUMULATIVE weight
+/// sort ascending by value, return the first value whose cumulative weight
 /// reaches `q * total` (spec 5.2's literal rule, shared by every quantile
 /// over histogram mass). The target is an f64 product and the comparison is
 /// `cum >= target` in f64, exactly as the Python computes it.
@@ -157,10 +157,10 @@ pub fn weighted_nearest_rank_f64(pairs: &[(f64, i64)], q: f64) -> Option<f64> {
 }
 
 /// `median_or_none`: drop the `None`s, sort ascending, then take the
-/// `(n-1)/2`-th order statistic for ODD n and the `n/2 - 1`-th for EVEN n -
+/// `(n-1)/2`-th order statistic for odd n and the `n/2 - 1`-th for even n -
 /// i.e. the ceil(n/2)-th value in both cases, matching
-/// `nearest_rank_list(.., 0.5)`. This is NOT the arithmetic midpoint median:
-/// an even-length population takes the LOWER of the two middles.
+/// `nearest_rank_list(.., 0.5)`. This is not the arithmetic midpoint median:
+/// an even-length population takes the lower of the two middles.
 #[must_use]
 pub fn median_or_none(values: &[Option<f64>]) -> Option<f64> {
     let mut vals: Vec<f64> = values.iter().filter_map(|v| *v).collect();
@@ -173,7 +173,7 @@ pub fn median_or_none(values: &[Option<f64>]) -> Option<f64> {
     Some(vals[idx])
 }
 
-/// CPython's builtin `sum()` over FLOATS, which is not a naive left fold:
+/// CPython's builtin `sum()` over floats, which is not a naive left fold:
 /// since 3.12 it applies the improved Kahan-Babuska (Neumaier) compensated
 /// summation and adds the compensation term at the end.
 ///
@@ -199,7 +199,7 @@ pub fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
     sum + c
 }
 
-/// CPython's `math.fsum`: EXACT summation via Shewchuk partials, rounded once
+/// CPython's `math.fsum`: exact summation via Shewchuk partials, rounded once
 /// at the end.
 ///
 /// Distinct from [`py_sum`], and the distinction is load-bearing rather than
@@ -239,8 +239,8 @@ pub fn py_fsum(values: impl IntoIterator<Item = f64>) -> f64 {
         partials.truncate(i);
         partials.push(x);
     }
-    // The final rounding is NOT a fold over the partials. CPython walks them
-    // from the LARGEST down, stops at the first inexact addition, and then
+    // The final rounding is not a fold over the partials. CPython walks them
+    // from the largest down, stops at the first inexact addition, and then
     // applies an explicit round-half-even correction: when the residual `lo`
     // and the next partial share a sign, the true total is more than halfway
     // to the next representable value, so doubling `lo` and re-adding it
@@ -275,11 +275,11 @@ pub fn py_fsum(values: impl IntoIterator<Item = f64>) -> f64 {
     hi
 }
 
-/// CPython's `int.__truediv__`: the CORRECTLY ROUNDED quotient of two
+/// CPython's `int.__truediv__`: the correctly rounded quotient of two
 /// arbitrary-precision integers.
 ///
 /// This is a parity requirement, not a nicety. `a as f64 / b as f64` rounds
-/// the numerator to binary64 BEFORE dividing, and the fit's pooled
+/// the numerator to binary64 before dividing, and the fit's pooled
 /// `mean_event_duration_s` divides a nanosecond gap sum of order 2e16 - past
 /// 2^53 - by an eligible-gap count. That pre-rounding lands one ulp off the
 /// committed artifact. Python never pre-rounds: its ints are exact and the
@@ -473,7 +473,7 @@ fn canon_node(v: &serde_json::Value, out: &mut String) {
     }
 }
 
-/// `_typed_canon`: TYPE-STRICT canonical serialization for equality gates.
+/// `_typed_canon`: type-strict canonical serialization for equality gates.
 /// Python equality treats `1 == True == 1.0`, so a mutation from `1` to
 /// `true` escapes a plain `!=`; every leaf carries an explicit type tag and
 /// floats compare by `repr`. Byte-identical to the Python
@@ -487,7 +487,7 @@ pub fn typed_canon(value: &serde_json::Value) -> String {
 
 /// The first path (dotted / bracketed, `_typed_canon`-style leaf compare) at
 /// which two JSON trees differ, or `None` when they are canonically equal.
-/// The parity gates need the LOCATION, not just the verdict: a per-session
+/// The parity gates need the location, not just the verdict: a per-session
 /// diff over a 22-session artifact is otherwise a needle in a haystack.
 #[must_use]
 pub fn first_canon_difference(
@@ -567,13 +567,13 @@ fn collect_differences(
 mod tests {
     use super::*;
 
-    /// THE DISCRIMINATOR between [`py_sum`] and [`py_fsum`]. Both helpers must
+    /// The discriminator between [`py_sum`] and [`py_fsum`]. Both helpers must
     /// exist because CPython distinguishes builtin `sum` from `math.fsum`, and
     /// this is an input where that distinction is observable - found by search,
     /// not constructed, since Neumaier compensation is good enough to agree
     /// with exact summation across millions of well-conditioned draws.
     ///
-    /// Note what is NOT a discriminator any more: `sum([0.1] * 10)` returns
+    /// Note what is not a discriminator any more: `sum([0.1] * 10)` returns
     /// exactly 1.0 on CPython 3.12 and later, because builtin `sum` became
     /// compensated. The textbook example stopped separating these two.
     #[test]
@@ -616,7 +616,7 @@ mod tests {
     }
 
     /// The parity case that forced `py_int_div` into existence: the fit's
-    /// pooled `mean_event_duration_s` over eight FINAL seeds. Pre-rounding
+    /// pooled `mean_event_duration_s` over eight final seeds. Pre-rounding
     /// the 2.1e16-nanosecond numerator to binary64 lands one ulp off what
     /// CPython's exact int/int returns.
     #[test]
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn weighted_nearest_rank_is_first_cumulative_reach() {
-        // 5.2's literal rule: the FIRST value whose cumulative weight
+        // 5.2's literal rule: the first value whose cumulative weight
         // reaches q * total, with `>=` (not `>`).
         let pairs = [(0i64, 90i64), (1, 9), (2, 1)];
         assert_eq!(weighted_nearest_rank(&pairs, 0.90), Some(0));
@@ -706,7 +706,7 @@ mod tests {
             median_or_none(&[Some(1.0), Some(2.0), Some(3.0)]),
             Some(2.0)
         );
-        // The None drops out FIRST, so this is an odd population of three.
+        // The None drops out first, so this is an odd population of three.
         assert_eq!(
             median_or_none(&[Some(3.0), None, Some(1.0), Some(2.0)]),
             Some(2.0)
@@ -740,7 +740,7 @@ mod tests {
             typed_canon(&v),
             "[\"d\", [[\"a\", [\"l\", [[\"i\", 1], [\"f\", \"2.5\"]]]], [\"b\", [\"n\"]]]]"
         );
-        // Key ORDER never matters; key SET does.
+        // Key order never matters; key set does.
         let a: serde_json::Value = serde_json::from_str(r#"{"x":1,"y":2}"#).unwrap();
         let b: serde_json::Value = serde_json::from_str(r#"{"y":2,"x":1}"#).unwrap();
         assert_eq!(typed_canon(&a), typed_canon(&b));
@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn json_float_parsing_is_correctly_rounded() {
         // The `float_roundtrip` feature on serde_json (workspace Cargo.toml)
-        // is load-bearing for every parity gate: WITHOUT it serde_json's fast
+        // is load-bearing for every parity gate: without it serde_json's fast
         // float parser lands one ULP off the correctly rounded value for
         // inputs like these, and the gate reports mismatches that exist only
         // in the reader. Each literal below is a real block-2/block-3 value

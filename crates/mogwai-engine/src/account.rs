@@ -28,7 +28,7 @@ pub(crate) enum Hold {
 pub(crate) struct Account {
     pub(crate) balances: HashMap<String, Decimal>,
     pub(crate) positions: HashMap<(Symbol, Option<String>), PositionState>,
-    /// Sale proceeds credited but NOT YET SETTLED, each with the instant it
+    /// Sale proceeds credited but not yet settled, each with the instant it
     /// becomes spendable.
     ///
     /// This is what a `T+N` convention actually is: the money is yours the
@@ -93,10 +93,10 @@ impl Engine {
         &self,
         order: &crate::OpenOrder,
     ) -> Option<(String, Decimal, bool)> {
-        // A HELD order-list child places no hold. It cannot execute until its
+        // A held order-list child places no hold. It cannot execute until its
         // parent fills, and holding funds against it would let a bracket's exit
         // legs starve the entry that has to fill before either can do anything.
-        // The hold appears at RELEASE, through the same `refresh_open_hold`
+        // The hold appears at release, through the same `refresh_open_hold`
         // any other state change goes through.
         if matches!(order.resting, crate::Resting::Held) {
             return None;
@@ -189,7 +189,7 @@ impl Engine {
     }
 
     /// Compare the fast aggregate with a fresh fold through the authoritative
-    /// order book, and PANIC on any difference.
+    /// order book, and panic on any difference.
     ///
     /// This is a debug-only check, called under `cfg!(debug_assertions)` at
     /// every command and sweep boundary, and the choice is deliberate on both
@@ -239,7 +239,7 @@ impl Engine {
         // `> 0`, so a zero price never gets here on the public path. `apply_fill`
         // is private, so the only way in is a future in-crate caller that builds
         // a fill some other way; the warn is kept (rather than an `.expect`
-        // panic) so such a caller books its ledger LOUDLY-wrong instead of
+        // panic) so such a caller books its ledger loudly-wrong instead of
         // silently, matching this crate's saturate-and-warn philosophy.
         if fill.last_px == Decimal::ZERO {
             self.warn_zero_px(&fill.symbol);
@@ -269,7 +269,7 @@ impl Engine {
                     -Decimal::ONE
                 };
                 // Through `InstrumentDef::unrealized`, which is the one place
-                // the INVERSE arithmetic lives: a coin-margined contract's P and
+                // the inverse arithmetic lives: a coin-margined contract's P and
                 // L is `multiplier * qty * (1/entry - 1/exit)`, not
                 // `(exit - entry) * qty * multiplier`. Realized and unrealized
                 // must come from the same expression or a position's value would
@@ -289,7 +289,7 @@ impl Engine {
             }
             return;
         }
-        // EQUITY moves cash only. The shares are the POSITION, which
+        // Equity moves cash only. The shares are the position, which
         // `apply_position` above already recorded, and crediting them as a
         // balance too would both double-count them and make them spendable as
         // money. This is the spot branch's quote leg without its base leg, and
@@ -321,7 +321,7 @@ impl Engine {
                     &mut clipped,
                 ),
             };
-            // THE SETTLEMENT PERIOD. A sale's proceeds are credited above and
+            // The settlement period. A sale's proceeds are credited above and
             // held unspendable until the instrument's period has run - which is
             // the whole of what `T+N` means to a strategy, and is invisible to
             // one that never tries to spend the money before it lands.
@@ -491,7 +491,7 @@ impl Engine {
             .unwrap_or(&Decimal::ZERO);
         let mut clipped = false;
         let mut held = *self.order_holds.get(currency).unwrap_or(&Decimal::ZERO);
-        // Unsettled sale proceeds are HELD, not absent: the account owns them
+        // Unsettled sale proceeds are held, not absent: the account owns them
         // and cannot spend them until their instant.
         for credit in self
             .account
@@ -505,9 +505,9 @@ impl Engine {
             let Some(policy) = self.margin.get(symbol) else {
                 continue;
             };
-            // MARKED, not merely a future. An equity carrying a margin policy is
+            // Marked, not merely a future. An equity carrying a margin policy is
             // a Reg-T margin account and posts maintenance collateral exactly as
-            // a future does; a SPOT symbol carrying one still moves no number,
+            // a future does; a spot symbol carrying one still moves no number,
             // which is what the class check is here for.
             let Some(instrument) = self
                 .instruments
@@ -517,7 +517,7 @@ impl Engine {
                 continue;
             };
             if instrument.class.settlement_currency() == currency {
-                // At the position's MARK, which is what makes a notional-basis
+                // At the position's mark, which is what makes a notional-basis
                 // requirement move with the price the way a leveraged account's
                 // actually does. A per-contract policy ignores the price, so
                 // this is the same number it always was for futures.
@@ -528,14 +528,14 @@ impl Engine {
         sub_clamped(total, held, &mut clipped)
     }
 
-    /// The hold ONE resting order contributes, as a currency kind and
+    /// The hold one resting order contributes, as a currency kind and
     /// an amount. The single authority on the shape of an open order's hold:
     /// `held_balances` folds it into the account totals and `hold_for` adds
     /// the same number back before a funds check, so the two cannot disagree
     /// about branch order. A future posts initial margin in settlement cash on
     /// either side (and needs a margin policy to post anything at all); a spot
     /// buy holds quote notional, a spot sell holds base quantity. The
-    /// instrument CLASS is consulted before the margin map, so a margin policy
+    /// instrument class is consulted before the margin map, so a margin policy
     /// configured against a spot symbol - which venue config rejects at boot,
     /// but the public `set_margin_policy` cannot - moves neither number.
     pub(crate) fn order_hold(
@@ -553,10 +553,10 @@ impl Engine {
         };
         if instrument.class.is_future() {
             return match self.margin.get(&submit.symbol) {
-                // Priced at the CALLER'S `price`, since that is the notional the
+                // Priced at the caller's `price`, since that is the notional the
                 // account is committing to; there is no mark for an order that
                 // has not filled. It is the argument and not `submit.price`
-                // because a price-less `StopMarket` commits at its TRIGGER, and
+                // because a price-less `StopMarket` commits at its trigger, and
                 // every caller already resolves that fallback - reaching back
                 // into `submit` discarded the resolution and held
                 // `initial(qty, 0)`, which under `MarginBasis::Notional` is
@@ -565,10 +565,10 @@ impl Engine {
                 None => Hold::None,
             };
         }
-        // AN EQUITY IS A CASH ACCOUNT OR A MARGIN ACCOUNT, and the margin policy
+        // An equity is a cash account or a margin account, and the margin policy
         // is which. A cash account commits the whole notional on a buy, the way
         // a spot buy does, and places no hold on a sell because it can only
-        // ever sell shares it already holds. A MARGIN account commits the
+        // ever sell shares it already holds. A margin account commits the
         // Reg-T initial requirement on either side - and on a sell, only for the
         // portion the account is not already long, since selling what you hold
         // is not a short.
@@ -619,7 +619,7 @@ impl Engine {
             let Some(instrument) = self.instruments.get(symbol) else {
                 continue;
             };
-            // Only a MARKED class posts maintenance collateral - futures,
+            // Only a marked class posts maintenance collateral - futures,
             // perpetuals, inverses, and an equity whose margin policy makes it a
             // Reg-T margin account. The class is checked here for the same
             // reason `order_hold` checks it: a margin policy attached to
@@ -657,7 +657,7 @@ impl Engine {
     }
 
     /// An inverse position cannot be settled at a non-positive price, so the
-    /// mark is DECLINED and the position is left where it was. See
+    /// mark is declined and the position is left where it was. See
     /// [`Engine::settle`] for why a price like that is a caller defect rather
     /// than a market event.
     pub(crate) fn warn_unpriceable_settlement(&mut self, symbol: &Symbol) {
@@ -765,7 +765,7 @@ fn same_sign(a: Decimal, b: Decimal) -> bool {
 
 // Overflow-tolerant arithmetic for the ledger accumulation paths.
 //
-// `validate_submit` and `on_modify` bound a SINGLE order's notional with
+// `validate_submit` and `on_modify` bound a single order's notional with
 // `checked_mul`, so any one fill's arithmetic is representable - but nothing
 // bounds what many individually-valid orders accumulate to. Balance totals,
 // held funds, the position VWAP numerator and the snapshot's
@@ -779,7 +779,7 @@ fn same_sign(a: Decimal, b: Decimal) -> bool {
 // invisibly, but a loudly-wrong fake venue beats one that panics
 // mid-scenario.
 //
-// The wrongness is STICKY, and the warning must not be read as a transient:
+// The wrongness is sticky, and the warning must not be read as a transient:
 // once a value has clipped, a later opposite-direction fill moves off the
 // clipped base rather than back toward the true one, so the ledger stays wrong
 // for the rest of the run. The saturation is a loud failure mode, not a

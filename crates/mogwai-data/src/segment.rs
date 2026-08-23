@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The COMPOSE half of the session-segment sampler: a [`TickSource`] that
+//! The compose half of the session-segment sampler: a [`TickSource`] that
 //! loops real session slices forever, re-anchored in returns space at every
 //! seam.
 //!
@@ -15,7 +15,7 @@
 //! the fixture rather than both staying green against their own idea of the
 //! format.
 //!
-//! WHY RETURNS SPACE MAKES THE LOOP SEAMLESS. A segment carries no absolute
+//! Why returns space makes the loop seamless. A segment carries no absolute
 //! price. Composing is therefore integration: the river holds a running price,
 //! each stored log return multiplies it, and a segment boundary is just the
 //! point where the returns start coming from a different slice. There is no
@@ -24,7 +24,7 @@
 //! expressible at all. Absolute price level is an integration constant (owner
 //! ruling, 2026-08-12).
 //!
-//! WHAT LANDS AT THE SEAM. Each segment records `open_gap_ret`, the measured
+//! What lands at the seam. Each segment records `open_gap_ret`, the measured
 //! return from the last real print before its window to its own first print -
 //! for an Asia slice, the jump across the daily break. Applying it at the seam
 //! reproduces real reopen gaps in the composed river, which the fitted generator
@@ -115,7 +115,7 @@ impl SegmentLibrary {
     /// The reader-side shape contract.
     ///
     /// This repeats the writer's check rather than trusting it, because the
-    /// artifact is a FILE: it can be hand-edited, truncated by a full disk, or
+    /// artifact is a plain file: it can be hand-edited, truncated by a full disk, or
     /// written by an older build. The composer indexes four arrays with one
     /// cursor, and the failure of an unchecked short array is a panic in the
     /// middle of a serving walk instead of a refusal at the boundary.
@@ -158,7 +158,7 @@ impl SegmentLibrary {
             // Rule 2 of the conformance fixture, and the one that makes a seam
             // level-continuous: the incoming segment's first return must not
             // move the price, because its displacement lives in `open_gap_ret`.
-            // A nonzero `ret[0]` puts a silent extra jump at EVERY seam, on top
+            // A nonzero `ret[0]` puts a silent extra jump at every seam, on top
             // of or instead of the reopen gap, so `reopen_gaps: false` would
             // stop meaning "no gap at the seam" - and the composer's own
             // `a_seam_without_a_reopen_gap_moves_no_price` would keep passing,
@@ -202,11 +202,11 @@ pub struct SegmentCompose {
     pub seed: u64,
     /// Dead time inserted between the last trade of one segment and the window
     /// start of the next. Real calendar time between two Asia sessions is a
-    /// day; an ENDLESS-Asia river deliberately elides it, so this is the visible
+    /// day; an endless Asia river deliberately elides it, so this is the visible
     /// seam and one second is enough to separate two sessions without opening a
     /// hole on the chart.
     ///
-    /// IT BUYS STRICT INCREASE ACROSS SEAMS ONLY, and deliberately so. WITHIN a
+    /// It buys strict increase across seams only, and deliberately so. Within a
     /// segment the timestamps are the corpus's own: `dt_ns[i] == 0` is a normal
     /// row, because a sweep across several price levels prints several trades at
     /// one nanosecond and `mogwai_lab::segments` records the difference
@@ -243,7 +243,7 @@ impl SegmentCompose {
 /// An endless river composed from a segment library.
 ///
 /// Effectively infinite: like [`crate::GeneratedSource`] a caller bounds it by
-/// span rather than by exhaustion. It has exactly ONE terminal condition, the
+/// span rather than by exhaustion. It has exactly one terminal condition, the
 /// nanosecond clock running out of range ([`SegmentSource::clock_exhausted`]),
 /// so a `None` from this source is never ordinary end-of-stream and a consumer
 /// that reports it as one is reporting the wrong thing.
@@ -260,12 +260,12 @@ pub struct SegmentSource {
     segment: usize,
     /// Cursor into that segment's parallel arrays.
     cursor: usize,
-    /// How many segments have been started, so ORDER mode can cycle.
+    /// How many segments have been started, so order mode can cycle.
     played: usize,
     price: f64,
     ts: u64,
     /// Set when the next tick opens a segment, so the seam work (gap return,
-    /// seam dead time) happens exactly once per boundary. FALSE at
+    /// seam dead time) happens exactly once per boundary. False at
     /// construction: the river's origin is not a seam, so the first segment's
     /// `open_gap_ret` - a jump measured against a session that is not in this
     /// river - must not land there and silently displace `start_price`.
@@ -318,9 +318,9 @@ impl SegmentSource {
         // into an ~80 percent crash printed as if it were market data; the
         // composer says so at the boundary instead.
         //
-        // THIS CHECK'S POSITION IS LOAD-BEARING, not stylistic. It precedes
+        // This check's position is load-bearing, not stylistic. It precedes
         // every `integrate` call, and `integrate`'s `clamp(tick_f64,
-        // MID_CEILING)` PANICS when the low bound exceeds the high one - so a
+        // MID_CEILING)` panics when the low bound exceeds the high one - so a
         // library declaring a tick_size above MID_CEILING has to be refused
         // here, before any level is integrated. Reordering the constructor so
         // a tick above the ceiling reaches `integrate` reintroduces that panic.
@@ -362,7 +362,7 @@ impl SegmentSource {
     }
 
     /// Whether the source stopped because the nanosecond clock ran out of
-    /// range. The ONLY reason this source ever returns `None`.
+    /// range. The only reason this source ever returns `None`.
     pub fn clock_exhausted(&self) -> bool {
         self.clock_exhausted
     }
@@ -370,11 +370,11 @@ impl SegmentSource {
     /// Integrates one log return into the running level, holding it inside the
     /// band every emitted price must come from.
     ///
-    /// WHY A BAND AT ALL. The composer integrates `price *= ret.exp()` forever,
+    /// Why a band at all. The composer integrates `price *= ret.exp()` forever,
     /// and an endless river has no re-anchoring event: a run of negative drift
     /// walks the level toward zero and a run of positive drift toward infinity.
     /// Both ends are wrong in a way that is not merely inaccurate. Below half a
-    /// tick, `emit_price` rounds to EXACTLY ZERO and the river carries
+    /// tick, `emit_price` rounds to exactly zero and the river carries
     /// non-positive prices, which this crate's own Kraken parser refuses on the
     /// grounds that they poison downstream ln-return math; above `Decimal`'s
     /// range - about 7.9e28, far below `f64`'s - the level has no decimal image
@@ -382,7 +382,7 @@ impl SegmentSource {
     /// reasoning; the constant is shared so the two bands cannot drift.
     fn integrate(&mut self, log_return: f64) {
         let next = self.price * log_return.exp();
-        // A NaN cannot arise from a finite level times a finite factor, but
+        // A `NaN` cannot arise from a finite level times a finite factor, but
         // `clamp` panics on one, so it is handled rather than argued about.
         let bounded = if next.is_nan() {
             self.tick_f64
@@ -432,12 +432,12 @@ impl SegmentSource {
 
     /// Snaps the running level onto the instrument's grid.
     ///
-    /// The running price stays in f64 and only the EMITTED value is snapped:
+    /// The running price stays in f64 and only the emitted value is snapped:
     /// rounding the running level would accumulate the rounding error into
     /// every subsequent return, which over an endless river is a slow drift
     /// rather than a bounded one.
     fn emit_price(&self) -> Decimal {
-        // ENFORCED, NOT ARGUED. This used to fall back to `self.tick_size` on a
+        // Enforced, not argued. This used to fall back to `self.tick_size` on a
         // `None`, which printed a one-tick trade in the middle of a runaway river
         // with no error and no log - and `None` is reachable well before `inf`,
         // because `Decimal` tops out around 7.9e28. `integrate` holds the level
@@ -503,7 +503,7 @@ impl TickSource for SegmentSource {
         if !self.advance_clock(dt_i) {
             // The level moved and the cursor did not, so the source is left
             // mid-segment and internally inconsistent. Harmless because the
-            // state is TERMINAL: `clock_exhausted` latches, the guard at the
+            // state is terminal: `clock_exhausted` latches, the guard at the
             // top of this function returns `None` from here on, and nothing
             // reads the level again. Anything that ever makes exhaustion
             // recoverable owes an undo of the integration or a reordering.
@@ -612,7 +612,7 @@ mod tests {
     }
 
     /// The property that makes an endless loop possible at all: with reopen
-    /// gaps OFF, a seam introduces no price move, because the incoming
+    /// gaps off, a seam introduces no price move, because the incoming
     /// segment's first return is zero and its level came from the running river.
     #[test]
     fn a_seam_without_a_reopen_gap_moves_no_price() {
@@ -698,7 +698,7 @@ mod tests {
     }
 
     /// Finding 3, the floor half: an endless negative drift walks the level
-    /// below half a tick, and `emit_price` then rounds every print to EXACTLY
+    /// below half a tick, and `emit_price` then rounds every print to exactly
     /// zero - a non-positive price this crate's own Kraken parser refuses.
     #[test]
     fn a_runaway_negative_drift_never_prints_a_non_positive_price() {
@@ -728,9 +728,9 @@ mod tests {
     /// Finding 3, the ceiling half - and the report had the mechanism wrong,
     /// which the bite-check showed. It predicted a silent one-tick print from
     /// `from_f64_retain` returning `None` above `Decimal`'s roughly 7.9e28
-    /// range. MEASURED, an unbounded rising walk never gets there: with a 0.25
+    /// range. Measured directly, an unbounded rising walk never gets there: with a 0.25
     /// tick, `level / tick_size` overflows `Decimal` around 1.98e28, so the
-    /// walk PANICS inside rust_decimal's division several factors of e before
+    /// walk panics inside rust_decimal's division several factors of e before
     /// the `None` fallback could ever fire. The silent print is real code but
     /// unreachable this way; the reachable damage is a panic mid-walk. Without
     /// the ceiling this test dies on that division, with it every print stays
@@ -775,14 +775,14 @@ mod tests {
     /// constant-time stream that still claimed to be endless. `--start` is a
     /// raw u64 an operator types, so this is one command away, not 580 years.
     ///
-    /// THE `start_ns` IS CHOSEN TO LEAVE ROOM FOR FOUR TICKS, and that is the
+    /// The `start_ns` is deliberately chosen to leave room for four ticks, and that is the
     /// whole design of the test. The helper's `dt_ns` is 1 ms per trade, so
     /// `u64::MAX - 4_500_000` emits at MAX-3.5ms, -2.5ms, -1.5ms and -0.5ms and
-    /// then cannot advance. A `start_ns` one tick from the end would emit ONE
+    /// then cannot advance. A `start_ns` one tick from the end would emit a single
     /// timestamp, and the duplicate-timestamp assertion - the one that names
     /// the defect - would be vacuously true over a single-element vector while
     /// the test still went red under the bug for an unrelated reason. The loop
-    /// therefore BREAKS at a cap rather than asserting on the count, so the
+    /// therefore breaks at a cap rather than asserting on the count, so the
     /// frozen-timestamp assertion is reached and fires under `saturating_add`.
     #[test]
     fn a_clock_that_cannot_advance_ends_the_river_instead_of_freezing_it() {
@@ -817,7 +817,7 @@ mod tests {
         );
     }
 
-    /// Finding 4: `ret[0] != 0` is a rule the shared fixture STATES and the
+    /// Finding 4: `ret[0] != 0` is a rule the shared fixture states and the
     /// loader did not check, so a hand-edited library put a silent extra jump
     /// at every seam while `reopen_gaps: false` still claimed to make none.
     #[test]
@@ -861,21 +861,21 @@ mod tests {
         );
     }
 
-    /// THE RULE THE FIXTURE STATES MUST BE A RULE SOMETHING CHECKS. Adding a
+    /// The rule the fixture states must be a rule something checks. Adding a
     /// sixth `rules` entry to the shared artifact without wiring it to a
     /// validator is exactly the "nothing detects a missing fixture" hole one
     /// level down, and nothing but this test would notice it. Each pin names
     /// where its rule is enforced; a new rule fails here until it has one.
     ///
-    /// ITS SCOPE IS THE WHOLE CONTRACT, NOT THE `rules` ARRAY ALONE, because a
+    /// Its scope is the whole contract, not the `rules` array alone, because a
     /// gate whose stated scope differs from its real scope is the defect this
     /// arc keeps finding. `validate` also enforces the aggressor alphabet,
     /// which the fixture states in `units` rather than in `rules` - so that
     /// statement is pinned here too, separately and by name, instead of being
     /// left as a sixth enforcement nobody counted.
     ///
-    /// MATCHING IS BY SEARCH, NOT BY POSITION. Zipping the two arrays would
-    /// report a REORDER of the JSON as "this rule is no longer enforced", which
+    /// Matching is by search, never by position. Zipping the two arrays would
+    /// report a reorder of the JSON as "this rule is no longer enforced", which
     /// sends the next reader to the wrong place; each pin finds its own rule.
     #[test]
     fn every_rule_the_conformance_fixture_states_is_enforced_somewhere() {

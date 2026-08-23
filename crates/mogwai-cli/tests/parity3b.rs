@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Phase 3b's binding parity gate (the retired rewrite plan): `run_fit`,
-//! reading the delivered July corpus and REPLAYING the protocol-11 run's
+//! reading the delivered July corpus and replaying the protocol-11 run's
 //! walk cache at `analysis/out/mnq-fit-scratch` under that run's harness
 //! commit, reproduces the committed `analysis/mnq-fit.json`
 //! typed-canon-identically minus the honestly-live fields.
@@ -11,11 +11,11 @@
 //! corpus and the Python-era cache on local disk, neither of which is in
 //! the repo.
 //!
-//! LIVE-FIELD EXCLUSIONS, enumerated - the same discipline slice 2c-i and
+//! Live-field exclusions, enumerated - the same discipline slice 2c-i and
 //! 2c-ii applied to the 12a artifact:
 //!
 //! - `binding.harness_tree_commit`: the committed artifact binds the commit
-//!   the PYTHON ran from. Any Rust run binds whatever HEAD it ran from, so
+//!   the Python ran from. Any Rust run binds whatever HEAD it ran from, so
 //!   this field can only ever differ; it is not a measurement.
 //! - `binding.subcontract_hash`: CONFIRMED stale-input drift, not a port
 //!   defect. The committed artifact records

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! CLI-level coverage for `mogwai presets`, the LISTING in particular.
+//! CLI-level coverage for `mogwai presets`, the listing in particular.
 //!
 //! The bare listing shipped as a hardcoded `println!("MNQ\nMES\nBTCUSDT")` in
 //! the dispatcher, beside a named lookup that already went through the venue's
@@ -53,7 +53,7 @@ fn every_listed_preset_is_fetchable_by_name() {
         .arg("presets")
         .output()
         .expect("running presets");
-    // The listing's own exit status and non-emptiness are checked FIRST. The
+    // The listing's own exit status and non-emptiness are checked first. The
     // body of this test is a `for` over its lines, so a failing or empty listing
     // made it vacuously green - which is precisely the "the listing went stale"
     // defect class this file exists for, passing by producing nothing to check.
@@ -93,8 +93,8 @@ fn every_listed_preset_is_fetchable_by_name() {
 /// included document rather than of the command: a preset file saved without a
 /// final newline left the shell prompt mid-line, and one saved with a blank
 /// line at the end printed two. Every shipped preset happens to end in one
-/// newline today, WHICH IS EXACTLY WHY THIS NEEDS A TEST RATHER THAN AN
-/// EYEBALL - the defect is invisible until someone edits a preset file, and
+/// newline today, which is exactly why this needs a test rather than an
+/// eyeball check - the defect is invisible until someone edits a preset file, and
 /// then it is invisible in every automated check too.
 ///
 /// Asserting "exactly one" rather than "at least one" is what makes it bite in

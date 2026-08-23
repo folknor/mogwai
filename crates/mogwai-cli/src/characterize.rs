@@ -4,7 +4,7 @@
 //! `mogwai characterize`: the corpus-to-`char_<PAIR>.json` station.
 //!
 //! This closes the gap that blocked the Python retirement. `mogwai_lab`
-//! carried the ported estimand layer as a LIBRARY with no way to run it, and
+//! carried the ported estimand layer as a library with no way to run it, and
 //! the multi-pair driver (`analysis/run_corpus.py`) had already been deleted,
 //! so retiring `analysis/characterize.py` would have left nothing in either
 //! language able to produce `char_<PAIR>.json` - the input

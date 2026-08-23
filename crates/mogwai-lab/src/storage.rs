@@ -4,22 +4,22 @@
 //! The storage policy (the retired rewrite plan, phase 1): three classes,
 //! never mixed.
 //!
-//! - ARTIFACTS: the user's files, written to `--out` or the working
+//! - Artifacts: the user's files, written to `--out` or the working
 //!   directory, never cached, never auto-deleted. This module does not model
 //!   them beyond [`artifact_path`] - a caller just picks a path and writes.
-//! - CACHE: recomputable, keyed by a [`ProvenanceToken`] under
+//! - Cache: recomputable, keyed by a [`ProvenanceToken`] under
 //!   `$XDG_CACHE_HOME/mogwai/` (falling back to `~/.cache/mogwai/`),
 //!   overridable by `MOGWAI_CACHE_DIR` or `--cache-dir`. Stale-provenance
 //!   entries - directories under the cache root that do not name the
-//!   CURRENT token - are unreachable by construction and pruned before a
+//!   current token - are unreachable by construction and pruned before a
 //!   normal write or once before a prepared parallel batch;
 //!   [`CacheStore::clean_stale`] covers the manual case.
-//! - SCRATCH: a run-scoped [`ScratchDir`] under the cache root, deleted on
+//! - Scratch: a run-scoped [`ScratchDir`] under the cache root, deleted on
 //!   `Drop` (clean exit), ignorable on crash - the filesystem will not mind
 //!   an orphaned scratch directory the way the 14,288-file
 //!   `mnq-fit-scratch` mind minded a human.
 //!
-//! Phase 1 lands no cache PRODUCERS (measure12a's walk cache etc. are later
+//! Phase 1 lands no cache producers (measure12a's walk cache etc. are later
 //! phases), so this module's own tests are synthetic - it proves the policy
 //! mechanism, not any particular cache's contents.
 
@@ -75,7 +75,7 @@ impl ProvenanceToken {
         &self.0
     }
 
-    /// A token an OPERATOR named, as printed by `mogwai cache stats
+    /// A token an operator named, as printed by `mogwai cache stats
     /// --entries`. It is not computed from inputs and is not validated
     /// against any: it is a directory name to keep, and the only caller is
     /// `cache clean --stale --keep`. A token this process could compute for
@@ -120,14 +120,14 @@ pub fn artifact_path(explicit_out: Option<&Path>, default_name: &str) -> PathBuf
     }
 }
 
-/// The three environment readings a cache-root decision consults, ALREADY
-/// READ. Taking them as data rather than reading them inside the precedence
+/// The three environment readings a cache-root decision consults, already
+/// read. Taking them as data rather than reading them inside the precedence
 /// rule is what makes that rule testable: every limb below the first needs a
 /// different environment to exercise, and mutating the process environment is
 /// unsound in a multi-threaded test binary, so a rule that reads for itself
 /// can only ever have its `--cache-dir` limb covered.
 ///
-/// NOT `pub`: it exists so the rule can be exercised, and the only exerciser is
+/// Not `pub`: it exists so the rule can be exercised, and the only exerciser is
 /// `mod tests` in this file. A testability helper that leaves the crate is a
 /// seam anyone can reach for in production.
 #[derive(Clone, Copy, Debug, Default)]
@@ -138,7 +138,7 @@ pub(crate) struct CacheEnv<'a> {
 }
 
 /// The owned form of [`CacheEnv`]: the three ambient readings, each bound to
-/// the field it feeds BY NAME.
+/// the field it feeds by name.
 ///
 /// The naming is the point. This was a bare `(Option<String>, Option<String>,
 /// Option<String>)` for one round, with `cache_root` doing the positional
@@ -175,7 +175,7 @@ impl AmbientCacheEnv {
 }
 
 /// The precedence rule, pure: `--cache-dir` first, then `MOGWAI_CACHE_DIR`,
-/// then XDG (`$XDG_CACHE_HOME/mogwai` or `~/.cache/mogwai`). An EMPTY variable
+/// then XDG (`$XDG_CACHE_HOME/mogwai` or `~/.cache/mogwai`). An empty variable
 /// counts as unset at every limb - an exported-but-blank variable is a
 /// configuration accident, not a request to cache at the filesystem root.
 ///
@@ -396,8 +396,8 @@ impl ScratchDir {
     }
 }
 
-/// The scratch root for this CRATE'S LIB UNIT TESTS, and the only shape they
-/// may use: a `ScratchDir` under the workspace `target/`, whose UNIQUE LEAF is
+/// The scratch root for this crate's lib unit tests, and the only shape they
+/// may use: a `ScratchDir` under the workspace `target/`, whose unique leaf is
 /// removed on drop. Everything written by the test goes in that leaf, so the
 /// drop removes all of it; what survives is the empty
 /// `target/lab-unit-scratch/<name>/scratch/` spine, which is a fixed set of
@@ -405,12 +405,12 @@ impl ScratchDir {
 /// obvious reading - "the scratch is removed on drop" - would have a reader
 /// expect `target/lab-unit-scratch` to disappear, and it does not.
 ///
-/// `CARGO_TARGET_TMPDIR` is NOT the answer here, and reaching for it is how
+/// `CARGO_TARGET_TMPDIR` is not the answer here, and reaching for it is how
 /// both hand-rolled scratch shapes in this crate - `cadence.rs`'s probe
 /// fixture and this module's own four-call-site `scratch_test_root` - ended up
 /// writing to the system temp directory, against the project convention that
 /// all data lives in the tree.
-/// Cargo defines it for INTEGRATION test targets only, so in a lib unit test
+/// Cargo defines it for integration test targets only, so in a lib unit test
 /// `env::var` always fails and any `env::temp_dir()` fallback beside it is
 /// the branch that always runs - silently, since the fallback reads as the
 /// exceptional case. `CARGO_MANIFEST_DIR` is defined for every compilation,
@@ -418,7 +418,7 @@ impl ScratchDir {
 ///
 /// The unique leaf carries the pid and a nanosecond stamp (`ScratchDir::new`),
 /// so a second test under the same `name` is unrepresentable rather than
-/// merely unlikely. HOLD THE GUARD for the test's lifetime: it is what
+/// merely unlikely. Hold the guard for the test's lifetime: it is what
 /// removes the directory, including on the panic path, which a trailing
 /// `remove_dir_all` at the end of a test body never does.
 #[cfg(test)]
@@ -453,7 +453,7 @@ mod tests {
 
         // The override wins over every reading, not merely over an empty one.
         assert_eq!(cache_root_from(Some(&cli), full), cli);
-        // Each limb wins once the ones above it are gone, and each ADDS its
+        // Each limb wins once the ones above it are gone, and each adds its
         // own suffix - `MOGWAI_CACHE_DIR` is the root itself, XDG gets
         // `mogwai`, HOME gets `.cache/mogwai`.
         assert_eq!(
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(cache_root(Some(&cli)), cli);
     }
 
-    /// The READ SITE, which the test above cannot see: `cache_root(Some(..))`
+    /// The read site, which the test above cannot see: `cache_root(Some(..))`
     /// returns on its first line, so every assertion up there is satisfied
     /// whatever `AmbientCacheEnv::read` puts in which field.
     ///

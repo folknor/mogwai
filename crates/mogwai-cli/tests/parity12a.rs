@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! THE PARITY GATES of the retired rewrite plan, phase 2a: the unified
+//! The parity gates of the retired rewrite plan, phase 2a: the unified
 //! `mogwai_lab::measure12a` engine must reproduce the two committed 12a
 //! record sets typed-canonical-identically.
 //!
@@ -11,11 +11,11 @@
 //!   every session, every block, all 768 permutation records per session,
 //!   every refusal.
 //! - `parity12a_generated_walk_records_match_the_committed_cache` runs a
-//!   fresh FINAL walk per seed 1-8 and compares against each
+//!   fresh final walk per seed 1-8 and compares against each
 //!   `analysis/out/measure12a-cache/*.json` record with the `cost` field
 //!   excluded (wall time and RSS are not reproducible by construction).
 //!
-//! They live HERE rather than in `mogwai-lab` because the generated side
+//! They live here rather than in `mogwai-lab` because the generated side
 //! needs preset/profile resolution from `mogwai-venue`, and `mogwai-lab`
 //! must not depend on `mogwai-venue` - that would drag the axum stack under
 //! the lab. The engine and its unit tests stay in the lab.
@@ -57,7 +57,7 @@ fn read_json(path: &Path) -> serde_json::Value {
 }
 
 /// Compare two JSON values under the type-strict canonical form, reporting
-/// the FIRST differing path rather than dumping two 20 MB trees.
+/// the first differing path rather than dumping two 20 MB trees.
 fn assert_canon_eq(got: &serde_json::Value, want: &serde_json::Value, what: &str) {
     if typed_canon(got) == typed_canon(want) {
         return;
@@ -122,7 +122,7 @@ fn parity12a_observed_per_session_matches_the_committed_artifact() {
         assert_canon_eq(got, want, &format!("per_session[{date}]"));
     }
     // Belt and braces: the whole array in one canonical comparison, so a
-    // difference in ORDER cannot slip through the pairwise loop.
+    // difference in order cannot slip through the pairwise loop.
     assert_canon_eq(
         &serde_json::Value::Array(records),
         &serde_json::Value::Array(want_sessions.clone()),
@@ -132,7 +132,7 @@ fn parity12a_observed_per_session_matches_the_committed_artifact() {
 
 // -- Gate 2: the generated side ---------------------------------------------
 
-/// One FINAL walk, constructed exactly the way `gen.rs`'s `build_source`
+/// One final walk, constructed exactly the way `gen.rs`'s `build_source`
 /// does: the committed MNQ preset, no overrides, the walk starting at
 /// `FINAL_START_NS - SUMMARY_BURN_IN` with the vol trace enabled, measuring
 /// `[FINAL_START_NS, FINAL_START_NS + FINAL_LENGTH)`.

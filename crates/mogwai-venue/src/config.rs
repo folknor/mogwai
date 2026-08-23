@@ -17,14 +17,14 @@ use rust_decimal::Decimal;
 use crate::admission::AdmissionLimits;
 use crate::source;
 
-/// The shipped fanout ring depth, PER BOAT since piece 9 gave each boat its own
+/// The shipped fanout ring depth, per boat since piece 9 gave each boat its own
 /// `broadcast::Sender`. Protocol 8 measured 1,048,576 as the smallest power of
 /// two holding its worst p99.9 wall-second of frame work; the later 4,194,304
 /// run-wide value was a sizing defect already mispriced at one boat, since a
 /// tokio broadcast ring is eagerly allocated at roughly 40 bytes per slot and
 /// that depth costs on the order of 170 MB - per boat, once boats are plural.
 ///
-/// Public so the `ring_sizing` benchmark measures the depth that SHIPS rather
+/// Public so the `ring_sizing` benchmark measures the depth that ships rather
 /// than a copy of it that can drift.
 pub const DEFAULT_FANOUT_DEPTH: usize = 1_048_576;
 
@@ -46,7 +46,7 @@ pub struct Config {
     pub(crate) run_duration_ns: u64,
     /// The account this run's single ledger is reported under.
     ///
-    /// One venue is one run is one ledger, so this NAMES the account rather than
+    /// One venue is one run is one ledger, so this names the account rather than
     /// selecting one - there is nothing to look up and nothing to refuse. It is
     /// configurable anyway because the consumer asserts it: a host holds an
     /// account of its own naming and compares it against what the venue reports,
@@ -61,13 +61,13 @@ pub struct Config {
     pub(crate) account_id: String,
     /// Whether a returning consumer gets its ledger back, or a clean one.
     ///
-    /// FALSE BY DEFAULT, meaning accounts PERSIST: a socket presenting an id
+    /// False by default, meaning accounts persist: a socket presenting an id
     /// that has traded resumes that ledger, with its positions and order history
     /// intact. That is what makes a reconnect a continuation rather than a new
     /// trader, and it is what the restart scenarios need - kill a worker holding
     /// a position, start it again, find the book where it was left.
     ///
-    /// It is also a behaviour an operator must be TOLD about rather than
+    /// It is also a behaviour an operator must be told about rather than
     /// discover, since a stale account silently inherited is a run measuring
     /// something nobody asked for. The readiness record carries it, so a
     /// launcher sees it without reading a log line.
@@ -77,8 +77,8 @@ pub struct Config {
     /// experiments wants.
     #[serde(default)]
     pub(crate) reset_account_on_reconnect: bool,
-    /// How long an UNATTENDED account survives before the venue collects it, in
-    /// WALL milliseconds. `0` (the default) means never.
+    /// How long an unattended account survives before the venue collects it, in
+    /// wall milliseconds. `0` (the default) means never.
     ///
     /// An account whose last connection went away freezes and is resumable, so
     /// a killed worker can come back to its own book. That also makes it state
@@ -86,12 +86,12 @@ pub struct Config {
     /// shared exchange serving a batch of subagents would accumulate one ledger
     /// per id anybody ever presented, for the life of the process.
     ///
-    /// WALL rather than simulated, because a frozen account has no simulated
+    /// Wall rather than simulated, because a frozen account has no simulated
     /// clock: the boat that carried one wound down with the last socket. The
     /// span an operator means here is "how long do I let a worker be down", which
     /// is a wall question anyway.
     ///
-    /// Set it LONGER than the slowest restart any consumer performs. A collected
+    /// Set it longer than the slowest restart any consumer performs. A collected
     /// account is gone: the next socket presenting that id opens a clean ledger,
     /// which is the correct behaviour and a surprising one to discover mid-run,
     /// so the readiness record carries the setting.
@@ -99,16 +99,16 @@ pub struct Config {
     pub(crate) account_ttl_ms: u64,
     pub(crate) oms_type: mogwai_protocol::OmsType,
     /// How many trailing-volatility horizons wide the fill band is. An order's
-    /// trigger is drawn uniformly from `0 ..= band_ticks` ticks AWAY from its
+    /// trigger is drawn uniformly from `0 ..= band_ticks` ticks away from its
     /// stated price, and `band_ticks` is this multiplier times the tape's
     /// realized volatility scaled to `FILL_HORIZON_NS`.
     ///
-    /// `0.005` is the RAW-FILL-CADENCE calibration, selected by
-    /// `fills::vol_probe`'s PROCEED rule - the smallest multiplier whose median
+    /// `0.005` is the raw-fill-cadence calibration, selected by
+    /// `fills::vol_probe`'s `Proceed` rule - the smallest multiplier whose median
     /// implied band lands in the 3-to-100-tick usable window. On the committed
     /// BTCUSDT profile it reads a median implied band of 4 ticks and a p90 of 8.
     ///
-    /// It replaces `0.5`, which was calibrated against the PRINT-layer tape where
+    /// It replaces `0.5`, which was calibrated against the print-layer tape where
     /// a 300 s window carried ~32 returns. The same window now carries ~15,700,
     /// so the estimator's horizon return rose by two orders of magnitude and
     /// `0.5` implied a median band of 439 ticks with a p90 of 703 - above the
@@ -124,12 +124,12 @@ pub struct Config {
     /// `tests/golden/fill_distribution.json` is blessed against whatever this
     /// default is and has to be re-blessed with it.
     ///
-    /// The probe's OTHER reading is good news and closes an open item: cold-
+    /// The probe's other reading is good news and closes an open item: cold-
     /// window refusals are 0 of 128 sampled instants, against a 29.5% refusal
     /// rate at the print-layer cadence.
     ///
     /// `0.0` is legal and gives the strict-through-at-the-stated-price venue.
-    /// That is the DEGENERATE CASE of this model, not a compatibility mode:
+    /// That is the degenerate case of this model, not a compatibility mode:
     /// there is no switch that restores the counter it replaced.
     pub(crate) fill_band_vol_mult: f64,
     /// Ceiling on the drawn band, in ticks. Truncates a reading rather than the
@@ -138,7 +138,7 @@ pub struct Config {
     /// default `200` sits just above the 100-tick ceiling of usefulness, so it
     /// only ever truncates readings the calibration would already have rejected.
     pub(crate) fill_band_max_ticks: u32,
-    /// How often, in sim milliseconds, the RUN re-checks its resting limits
+    /// How often, in sim milliseconds, the run re-checks its resting limits
     /// against the tape. Zero is refused because the fill band is always on and
     /// every resting trigger needs the sweep to advance.
     pub(crate) fill_sweep_interval_ms: u64,
@@ -165,8 +165,8 @@ pub struct Config {
     /// same number.
     pub(crate) warmup_ns: u64,
     /// Depth of each tape's bounded broadcast ring, in pre-serialized frames.
-    /// A subscriber that falls further behind than this has its CONNECTION
-    /// KILLED as a venue fault (`admission::CLOSE_VENUE_FAULT`), because the
+    /// A subscriber that falls further behind than this has its connection
+    /// killed as a venue fault (`admission::CLOSE_VENUE_FAULT`), because the
     /// venue has lost market data it already promised to deliver in ascending
     /// order and an unarmed hole is not something this venue serves. Stalling
     /// the tape instead is not an option either - every other subscriber on the
@@ -178,12 +178,12 @@ pub struct Config {
     /// the prior 262,144, rounded up to a power of two. That holds 0.114 wall
     /// seconds at the worst measured rate, up from the 0.030 the prior value
     /// held, so the resize lengthens the horizon rather than shortening it.
-    /// UNLIKE every neighbouring count knob, `0` is NOT "unbounded" here:
+    /// Unlike every neighbouring count knob, `0` is not "unbounded" here:
     /// `broadcast::channel(0)` panics, so `validate()` rejects it at load.
     pub(crate) fanout_depth: usize,
     // (see `DEFAULT_FANOUT_DEPTH` for the shipped value and its derivation)
     /// Per-connection byte ceiling on execution output that has been produced
-    /// but not yet written to the socket, i.e. the HELD lane's budget. See
+    /// but not yet written to the socket, i.e. the held lane's budget. See
     /// `admission::EXEC_HELD_BUDGET_BYTES`, which is this field's default and
     /// the shipped value.
     ///
@@ -196,13 +196,13 @@ pub struct Config {
     /// budget is per connection and the process-wide ceiling is this times the
     /// connection count.
     pub(crate) exec_held_budget_bytes: usize,
-    /// Per-connection ceiling on QUEUED priority (admission-truth) frames. See
+    /// Per-connection ceiling on queued priority (admission-truth) frames. See
     /// `admission::ADMISSION_LANE_FRAMES`. Same reasoning as
     /// `exec_held_budget_bytes`: the overload close is only reachable in a test
     /// when this can be made small.
     pub(crate) admission_lane_frames: usize,
     /// Per-connection ceiling on parsed order commands waiting for the one
-    /// sequential dispatcher. One COMMAND, not one payload.
+    /// sequential dispatcher. One command, not one payload.
     pub(crate) pending_command_acts: usize,
     /// Process-wide ceiling on queued or executing commands across every
     /// websocket connection. See `admission::GLOBAL_PENDING_COMMAND_SLOTS`.
@@ -228,19 +228,19 @@ pub struct Config {
     /// deposit made before the run: the ledger only ever books fill deltas, so
     /// an unfunded account goes negative on its first buy - which a nautilus
     /// CASH account (the adapter's default) refuses to apply, silently
-    /// desyncing the consumer from the venue. An ABSENT table keeps the funded
+    /// desyncing the consumer from the venue. An absent table keeps the funded
     /// built-in default (matching the committed mogwai.toml); an explicitly
-    /// EMPTY `[balances]` table runs the account unfunded on purpose.
+    /// empty `[balances]` table runs the account unfunded on purpose.
     pub(crate) balances: HashMap<String, Decimal>,
     /// Named risk policies a consumer can ask for by name instead of restating.
     ///
-    /// THE SAME IDEA AS AN INSTRUMENT PRESET: a named bundle of knobs a user
+    /// The same idea as an instrument preset: a named bundle of knobs a user
     /// could set by hand, carrying no authority and conferring no status. What
-    /// differs is REGISTRATION. Instrument presets are compiled in, which is
+    /// differs is registration. Instrument presets are compiled in, which is
     /// defensible while there are three of them; account policies track funded
     /// account programmes, of which there are hundreds, and their rules change
     /// without notice. Nobody can follow that in a release cycle, so these are
-    /// read from the operator's config at boot and a registered name SHADOWS a
+    /// read from the operator's config at boot and a registered name shadows a
     /// shipped one.
     #[serde(default)]
     pub(crate) account_policies: HashMap<String, mogwai_protocol::risk::AccountPolicy>,
@@ -303,7 +303,7 @@ fn default_balances() -> HashMap<String, Decimal> {
 
 /// Refuses boot on funding gaps the funded-account enforcement would turn into
 /// rejections. A funded venue refuses any order its free balance cannot
-/// cover, so an instrument whose QUOTE currency carries no funding can never
+/// cover, so an instrument whose quote currency carries no funding can never
 /// buy - every order on it rejects with "insufficient balance", and without
 /// this warning the first sign is a rejected order minutes into a run. (Base
 /// funding is only needed by sell-first strategies, so its absence is not
@@ -384,7 +384,7 @@ pub(crate) fn validate_account_id(cfg: &Config) -> anyhow::Result<()> {
 /// The length cap is what makes `sizing::BALANCE_ROW_MAX_BYTES` an upper bound:
 /// a configured currency reaches the wire on every `AccountState` balance row,
 /// and the connection's admission reservation is sized against that constant.
-/// Operator config fails STARTUP rather than a connection, so the venue never
+/// Operator config fails at startup rather than a connection, so the venue never
 /// runs in a state where its own reservations under-count.
 pub(crate) fn validate_balances(cfg: &Config) -> anyhow::Result<()> {
     for (currency, amount) in &cfg.balances {
@@ -412,7 +412,7 @@ pub(crate) fn validate_balances(cfg: &Config) -> anyhow::Result<()> {
 /// malformed-order refusal produces, so every order-entry command - valid or
 /// not - would come back as an admission refusal. Both are misconfigurations an
 /// operator would otherwise discover only as a venue that answers nothing, so
-/// they fail STARTUP instead.
+/// they fail startup instead.
 ///
 /// The floor binds operator config, not the type: the venue's own tests
 /// construct `Config` directly with budgets deliberately below it, which is how
@@ -453,7 +453,7 @@ pub(crate) const SLOW_SWEEP_WARN_MS: u64 = 60_000;
 ///
 /// The upper validation bounds are generous on purpose - an operator
 /// deliberately exploring a pathological band is a legitimate experiment - while
-/// the DEFAULTS are what have to be defensible. A zero sweep interval is refused
+/// the defaults are what have to be defensible. A zero sweep interval is refused
 /// outright rather than warned about: the band is always on, and a venue that
 /// accepts resting limits nothing will ever advance is a black hole.
 pub(crate) fn validate_fill_band(cfg: &Config) -> anyhow::Result<()> {
@@ -501,7 +501,7 @@ impl Config {
     /// Default knobs followed by the matching symbol-specific knobs, each
     /// paired with the config path it came from so a resolution error or an
     /// addition log can name the table the operator wrote. Empty tables are
-    /// omitted and symbol matching is ASCII case-insensitive. This is the ONE
+    /// omitted and symbol matching is ASCII case-insensitive. This is the one
     /// spelling of which overlays a symbol resolves through: the boot guard
     /// and the resolution itself both ask it, so they cannot drift.
     pub(crate) fn overlays_for(&self, symbol: Option<&str>) -> Vec<(String, toml::Table)> {
@@ -572,15 +572,15 @@ fn validate_speed(cfg: &Config) -> anyhow::Result<()> {
 pub const DEFAULT_PRESET: &str = "BTCUSDT";
 /// The shape an arbitrary unconfigured label resolves to under this config.
 ///
-/// NO PROBE LABEL. Resolving the fallback under some sentinel string needs that
-/// string to be wire-ILLEGAL to be collision-proof, and a wire-illegal symbol
+/// No probe label. Resolving the fallback under some sentinel string needs that
+/// string to be wire-illegal to be collision-proof, and a wire-illegal symbol
 /// does not survive `profile_from_configured`, which enforces `MAX_SYMBOL_LEN`
 /// on the resolved def. A wire-legal sentinel would instead be nameable by a
 /// consumer and shadowable by a `[symbols.*]` key, which is the collision the
 /// sentinel existed to prevent.
 ///
 /// `None` is exact and needs neither. `bundle_name` picks a bundle from the
-/// symbol only when the symbol NAMES A PRESET, and `overlays_for` attaches a
+/// symbol only when the symbol names a preset, and `overlays_for` attaches a
 /// `[symbols.*]` table only when one matches - so for a label that is neither,
 /// resolution is `[instrument]` over the operator's preset or `DEFAULT_PRESET`,
 /// which is precisely what `None` resolves. The symbol the shape ends up
@@ -821,8 +821,8 @@ pub fn preset_document(name: &str) -> Option<&'static str> {
 
 /// The preset a symbol and an operator choice select, by the three-step
 /// precedence: the operator's explicit `preset`, then a preset whose name
-/// matches the symbol, then [`DEFAULT_PRESET`]. TOTAL over symbol strings.
-/// This is the ONE spelling of the precedence; `base_bundle` and every message
+/// matches the symbol, then [`DEFAULT_PRESET`]. Total over symbol strings.
+/// This is the one spelling of the precedence; `base_bundle` and every message
 /// naming the chosen bundle read it from here so the two cannot disagree.
 fn bundle_name<'a>(symbol: Option<&'a str>, operator_preset: Option<&'a str>) -> &'a str {
     operator_preset
@@ -936,15 +936,15 @@ fn apply_overlay(
         }
         replace_dotted_for_bundle(merged, &path, value, bundle)?;
     }
-    // A top-level key is the operator's explicit choice. It REPLACES a knob the
-    // bundle sets, and where the bundle sets no such key it ADDS one: the
+    // A top-level key is the operator's explicit choice. It replaces a knob the
+    // bundle sets, and where the bundle sets no such key it adds one: the
     // optional sections (`margin`, `fees`, `calendar`) are absent from most
     // bundles, and no shipped preset sets `fees` at all, so the
     // must-already-exist rule would make them unreachable from every config.
     // The typo guard survives without it - `deny_unknown_fields` on
     // `ConfiguredInstrument` refuses any key that is not a field, and a knob
     // that contradicts the bundle's class (a margin table over spot) is refused
-    // by `validate_instrument_options`. A key spelled with a dot is a PATH,
+    // by `validate_instrument_options`. A key spelled with a dot is a path,
     // as under `[instrument.override]`, and keeps the strict guard.
     for (path, value) in operator {
         if path.contains('.') || merged.contains_key(&path) {
@@ -991,7 +991,7 @@ fn replace_dotted(table: &mut toml::Table, path: &str, value: toml::Value) -> an
 /// The `[instrument]` table: an `InstrumentDef` spelled out inline, plus its
 /// generator and session profiles.
 ///
-/// The def's seven fields are RESTATED here rather than pulled in with
+/// The def's seven fields are restated here rather than pulled in with
 /// `#[serde(flatten)]` because serde cannot combine `flatten` with
 /// `deny_unknown_fields` - under the flattened form every unknown key in the
 /// table was swallowed, so a typo'd `price_precison` silently ran the venue at
@@ -1003,10 +1003,10 @@ fn replace_dotted(table: &mut toml::Table, path: &str, value: toml::Value) -> an
 /// maintenance hazard: `def` builds the struct literal, so a field added
 /// upstream fails to build here until it is mirrored.
 ///
-/// NOTE the guard stops at this table's own keys. `generator` and `session`
+/// Note that the guard stops at this table's own keys. `generator` and `session`
 /// deserialize into `GeneratorScalars` / `SessionProfile`, which are shared with
-/// the committed fingerprint JSON parse and so are deliberately NOT denied here,
-/// meaning a typo inside those sub-tables is still tolerated. Their VALUES are
+/// the committed fingerprint JSON parse and so are deliberately not denied here,
+/// meaning a typo inside those sub-tables is still tolerated. Their values are
 /// validated at load (`build_instrument_profiles` runs `scalars.validate` and
 /// `session.validate`), so the exposure is a silently defaulted field, not a
 /// nonsense one.
@@ -1108,7 +1108,7 @@ fn eight_hours_ns() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct ConfiguredMargin {
     /// Read as a fixed amount of settlement currency per contract, or as a
-    /// FRACTION OF NOTIONAL, according to `basis`. So `initial = 2000` under the
+    /// fraction of notional, according to `basis`. So `initial = 2000` under the
     /// default per-contract basis is CME's dollar performance bond, and
     /// `initial = 0.1` under `notional` is ten-times leverage.
     pub(crate) initial_per_contract: Decimal,
@@ -1231,7 +1231,7 @@ impl ConfiguredInstrument {
     }
 }
 
-/// Resolves and validates EVERY shape this config can reach - the one it boots
+/// Resolves and validates every shape this config can reach - the one it boots
 /// and every `[symbols.*]` table, funding included - then returns only the boot
 /// profile. The non-boot profiles are dropped: the point is the refusal. A
 /// typo or an unfunded settlement currency under a table the run does not boot
@@ -1262,14 +1262,14 @@ pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::Instrum
             .with_context(|| format!("configured symbol {named} cannot be funded"))?;
         resolved.push(profile);
     }
-    // The reachable shape set is CLOSED at boot and wider than the configured
+    // The reachable shape set is closed at boot and wider than the configured
     // one: consumer-driven resolution can select any shipped preset by name, plus
-    // the default bundle under the `[instrument]` overlay. Boot RESOLVES all of
+    // the default bundle under the `[instrument]` overlay. Boot resolves all of
     // them and records the unfundable ones; it does not refuse over them, since
     // that would force a BTCUSDT-only operator to fund USD forever. A request
     // landing on a barred shape is refused at bind instead.
     //
-    // Empty balances mean funds checks are OFF for the whole run (see
+    // Empty balances mean funds checks are off for the whole run (see
     // `refuse_unfunded_settlement`), so nothing can be barred either - barring
     // there would refuse binds for a currency the engine never charges.
     let mut funding_barred = std::collections::HashSet::new();
@@ -1320,7 +1320,7 @@ fn detail_suffix(err: &mogwai_data::ScalarError) -> String {
 
 /// One validated [`source::InstrumentProfile`] from a deserialized
 /// `[instrument]` table. Factored out of `build_instrument_profiles` so the
-/// offline `gen` command can build the SAME profile from an embedded preset
+/// offline `gen` command can build the same profile from an embedded preset
 /// rather than re-deriving the scalar defaulting, the modal-tick agreement
 /// checks and the three validations - which is how `gen` came to be able to
 /// chart only the built-in BTCUSDT venue.
@@ -1366,7 +1366,7 @@ fn profile_from_configured(
         }
     }
     scalars.validate().map_err(|err| {
-        // The bare `field` is the config PATH and must stay in the path
+        // The bare `field` is the config path and must stay in the path
         // position; the optional detail says which of that field's checks
         // refused and is appended after the verb. Rendering the whole `Display`
         // inline produced `generator.children_single_frac (floor-branch active
@@ -1528,7 +1528,7 @@ fn validate_instrument_options(
     Ok(())
 }
 
-/// The checks every DERIVATIVE class shares: a usable underlying, a usable
+/// The checks every derivative class shares: a usable underlying, a usable
 /// settlement currency, a positive multiplier, and whole-contract sizing.
 fn validate_derivative(
     def: &InstrumentDef,
@@ -1557,9 +1557,9 @@ fn validate_derivative(
             def.symbol
         );
     }
-    // EXCHANGE-LISTED derivatives trade whole contracts; a CME future or a
+    // Exchange-listed derivatives trade whole contracts; a CME future or a
     // coin-margined contract denominated in fixed quote units cannot be
-    // fractionally sized. A crypto PERPETUAL can and routinely is - Binance
+    // fractionally sized. A crypto perpetual can and routinely is - Binance
     // sizes BTCUSDT.P in thousandths - so requiring whole contracts of one would
     // refuse the most common perpetual on the largest venue.
     if whole_contracts && (def.size_increment != Decimal::ONE || def.size_precision != 0) {
@@ -1650,7 +1650,7 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
                     def.symbol
                 );
             }
-            // A NEGATIVE borrow is not a smaller one, it is a nonsense: the
+            // A negative borrow is not a smaller one, it is a nonsense: the
             // field states how many shares may be shorted, and zero already
             // says none.
             if borrowable.is_some_and(|shares| shares < Decimal::ZERO) {
@@ -1748,10 +1748,10 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
     // bounds if the configured strings are capped. Startup is the right place
     // to refuse: a connection can then never out-produce its own reservation.
     //
-    // THE SAME VALIDATOR THE WIRE USES, and that is the point rather than an
+    // The same validator the wire uses, and that is the point rather than an
     // implementation detail. A configured symbol is reached by consumers through
     // `/trades`, `/quotes` and order entry, and `validate_submit_order` holds
-    // those to the URL-safe alphabet - so a config checked only for LENGTH could
+    // those to the URL-safe alphabet - so a config checked only for length could
     // name a symbol the venue serves and no consumer can trade or fetch, with both
     // validators green and neither able to see the other's rule. Ruled
     // 2026-08-20: one alphabet, read from one function, on both sides. It
@@ -1863,7 +1863,7 @@ mod tests {
     /// rejected capacity deterministically breaks the accept-before-fill
     /// serving invariant: a socket whose ring lapses can observe a fill for
     /// an order whose accept it never received). A later mechanical
-    /// application of a generated proposal must fail HERE and be argued,
+    /// application of a generated proposal must fail here and be argued,
     /// not slip through as bookkeeping.
     #[test]
     fn the_fanout_default_carries_the_protocol_11_exception() {
@@ -1882,7 +1882,7 @@ mod tests {
     }
 
     /// The venue reported a bare `MOGWAI` for one release, which is a legal
-    /// `mogwai_protocol::AccountId` and an ILLEGAL nautilus one - so every run
+    /// `mogwai_protocol::AccountId` and an illegal nautilus one - so every run
     /// booted cleanly and was refused by its consumer, which could not name an
     /// account that satisfied both sides. The wire type will not catch this
     /// because by its own rules there is nothing wrong; only this check will.
@@ -1975,7 +1975,7 @@ mod tests {
     }
 
     /// The knob governed how long an unpaced tape parked for its slowest
-    /// subscriber, and that behaviour is GONE rather than retuned: a lagging
+    /// subscriber, and that behaviour is gone rather than retuned: a lagging
     /// passenger is now told about its hole instead of waited for, so nothing
     /// remains for the number to mean.
     ///
@@ -2006,7 +2006,7 @@ mod tests {
 
     /// An unfunded quote currency means every buy in that shape rejects for
     /// insufficient balance for the whole run. That is a misconfigured run, so
-    /// it fails BOOT rather than warning - and it is checked for every
+    /// it fails boot rather than warning - and it is checked for every
     /// configured shape, not only the one the boot river carries.
     #[test]
     fn an_unfunded_quote_currency_refuses_boot() {
@@ -2086,7 +2086,7 @@ mod tests {
         // Through the loader's own path, because that is where the legible
         // message lives; a raw `toml::from_str::<Config>` answers "unknown
         // field `base`", which names neither the replacement table nor its
-        // shape, and asserting on THAT would pass no matter what we told the
+        // shape, and asserting on that alone would pass no matter what we told the
         // operator.
         let table: toml::Table = toml::from_str("base = \"BTC\"\nquote = \"USDT\"\n").unwrap();
         let message = resolve_instrument(None, vec![table])
@@ -2294,13 +2294,13 @@ mod tests {
         );
     }
 
-    /// ONE ALPHABET, READ BY BOTH SIDES. A configured symbol is reached by
+    /// One alphabet, read by both sides. A configured symbol is reached by
     /// consumers through `/trades`, `/quotes` and order entry, and the wire holds
-    /// those to the URL-safe alphabet. A config checked only for LENGTH could
+    /// those to the URL-safe alphabet. A config checked only for length could
     /// therefore name a shape the venue serves and no consumer can trade, with
     /// both validators green and neither able to see the other's rule.
     ///
-    /// Asserted against `validate_wire_symbol`'s OWN verdict rather than
+    /// Asserted against `validate_wire_symbol`'s own verdict rather than
     /// against a second copy of the alphabet spelled out here: a hand-built
     /// case list on this side would pin config against itself, which is exactly
     /// the drift the shared validator exists to prevent.
@@ -2458,7 +2458,7 @@ mod tests {
     #[test]
     fn quote_seam_provenance_matches_the_protocol_10_landing() {
         // The placeholder era is over for the futures: MNQ's quote seams
-        // are FITTED from the July TBBO month and MES inherits them loudly
+        // are fitted from the July TBBO month and MES inherits them loudly
         // as the standing stopgap; the crypto preset remains uncalibrated,
         // since no quote evidence covers spot. The fitted corpus strings
         // must name the MNQ evidence, so an MES reader can see the borrow.
@@ -2546,9 +2546,9 @@ mod tests {
     ///
     /// The arms moved on 2026-08-08 when `empirical_ranges.modal_tick.max`
     /// was corrected from 0.25 to 0.1. Before that, MNQ's 0.25 tick sat
-    /// exactly ON the inclusive ceiling, so it cleared the range check and
+    /// exactly on the inclusive ceiling, so it cleared the range check and
     /// the shipped preset carried no acceptance for it - which is what let
-    /// this test use `modal_tick` as its example of an UNACCEPTED diagnostic.
+    /// this test use `modal_tick` as its example of an unaccepted diagnostic.
     /// With the corrected ceiling the tick is genuinely outside the crypto
     /// corpus envelope, the diagnostic fires honestly, and the preset accepts
     /// it in provenance. So the unaccepted arm now needs a different knob.
@@ -2563,7 +2563,7 @@ mod tests {
         // fires, and provenance accepts it. This is the accepted arm.
         assert_preset_diagnostics("MNQ", &profile, &fp, &provenance).unwrap();
 
-        // UNACCEPTED: drop the acceptance the preset ships and the same
+        // Unaccepted: drop the acceptance the preset ships and the same
         // diagnostic must refuse.
         let entry = provenance
             .get_mut("generator.modal_tick")
@@ -2573,8 +2573,8 @@ mod tests {
         let error = assert_preset_diagnostics("TEST", &profile, &fp, &provenance).unwrap_err();
         assert!(error.to_string().contains("unaccepted"), "{error}");
 
-        // STALE: put the acceptance back, then move the tick to a value
-        // INSIDE the corpus range so the diagnostic stops firing. An
+        // Stale: put the acceptance back, then move the tick to a value
+        // inside the corpus range so the diagnostic stops firing. An
         // acceptance for a diagnostic that no longer fires is itself a
         // refusal - provenance may not claim a warning it does not carry.
         let entry = provenance
@@ -2652,7 +2652,7 @@ mod tests {
     fn fitted_mnq_effective_values_are_the_artifact_values() {
         // The protocol-10 landing pin: every fitted MNQ effective value is
         // the literal the fit artifact analysis/mnq-fit.json recorded for
-        // job GLBX-20260805-HAPEWPABKG. A calibration-loop iteration that
+        // job `GLBX-20260805-HAPEWPABKG`. A calibration-loop iteration that
         // moves any candidate value must re-bless this test in the same
         // change, so the preset can never drift from the artifact silently.
         let profile = profile_from_preset("MNQ").unwrap();
@@ -2666,8 +2666,8 @@ mod tests {
         assert_eq!(s.top_sizes.bid, Decimal::from(3));
         assert_eq!(s.top_sizes.ask, Decimal::from(3));
         assert_eq!(s.trade_displacement_ticks.ticks(), 0.5161290322580645);
-        // The three declared knobs carry the frozen solvers' BEST
-        // CANDIDATES as the closest representable approximations (the size
+        // The three declared knobs carry the frozen solvers' best
+        // candidates as the closest representable approximations (the size
         // family missed one gate, p99 10 vs bound 9.6; vol_scalar is the
         // protocol-11 re-solve under the fitted session arrays, passing its
         // pooled RMS gate but not the minute-range envelope), and
@@ -2801,10 +2801,10 @@ mod tests {
     fn mes_inherits_the_mnq_fit_loudly() {
         // MES borrows the MNQ fit as a stated stopgap (fit spec section 6):
         // every generator value except the identity overrides must equal
-        // MNQ's fitted effective values EXACTLY, and the fitted corpus
+        // MNQ's fitted effective values exactly, and the fitted corpus
         // strings must name the MNQ evidence so no MES corpus is implied.
         // The named ES/MES purchase is the route to ending the borrow; the
-        // NQ/MNQ proxy FAIL proves family resemblance is not
+        // NQ/MNQ proxy fail proves family resemblance is not
         // interchangeability, so nothing here claims transfer validity.
         let mnq = profile_from_preset("MNQ").unwrap();
         let mes = profile_from_preset("MES").unwrap();
@@ -2862,7 +2862,7 @@ mod tests {
         assert_eq!(format!("{:?}", mes.calendar), format!("{:?}", mnq.calendar));
 
         // The borrow must be loud in the provenance map too: every borrowed
-        // entry is MNQ's verbatim - a MIXTURE of fitted entries naming the
+        // entry is MNQ's verbatim - a mixture of fitted entries naming the
         // MNQ corpus and declared entries carrying the solver's best
         // candidates - and the identity overrides stay declared.
         let (_, mnq_prov) = effective_preset("MNQ").unwrap();

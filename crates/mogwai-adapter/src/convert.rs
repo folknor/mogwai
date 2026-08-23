@@ -89,7 +89,7 @@ pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_pr
 ///
 /// Nautilus spreads the linkage over four independent optional fields, which
 /// admits combinations that mean nothing - a contingency with nothing linked, a
-/// parent with no list. Those are refused HERE rather than passed on, because a
+/// parent with no list. Those are refused right here rather than passed on, because a
 /// venue-side refusal of a shape the host could have caught reads to a strategy
 /// author as the venue being broken.
 ///
@@ -131,7 +131,7 @@ pub(crate) fn wire_order_link(
     }))
 }
 
-/// The trailing offset a `TrailingStopMarket` carries, if the offset TYPE is one
+/// The trailing offset a `TrailingStopMarket` carries, if the offset's type is one
 /// the venue can act on.
 ///
 /// Nautilus states an offset with a type beside it - a price distance, a number
@@ -456,7 +456,7 @@ pub(crate) fn instrument_any(
         }
         // Both crypto derivatives are `CryptoPerpetual`, which carries the
         // `is_inverse` flag the two differ by. An inverse contract settles in
-        // its BASE asset, which is why the two currency arguments swap.
+        // its base asset, which is why the two currency arguments swap.
         InstrumentClass::Perpetual {
             underlying,
             settlement_currency,
@@ -495,8 +495,8 @@ pub(crate) fn instrument_any(
 
 /// The shared construction for both crypto derivative classes.
 ///
-/// `base` is what the contract is ON and `quote` what it is PRICED in; the
-/// SETTLEMENT currency is what moves, and for an inverse contract that is the
+/// `base` is what the contract is written on and `quote` what it is priced in; the
+/// settlement currency is what actually moves, and for an inverse contract that is the
 /// base rather than the quote. Passing all three explicitly rather than deriving
 /// them keeps the inversion visible at each call site instead of hidden here.
 #[expect(
@@ -591,10 +591,10 @@ mod tests {
         assert_eq!(contract.multiplier.to_string(), "2.5");
         assert_eq!(contract.lot_size.to_string(), "1");
         assert_eq!(contract.size_increment.to_string(), "1");
-        // THE VENUE MODELS NO EXPIRY, so the contract has to be dated past any
+        // The venue models no expiry at all, so the contract has to be dated past any
         // run: a future whose expiration lands inside the run is expired at
         // birth, and nautilus refuses orders on an expired contract. The
-        // assertion here used to be that `to_rfc3339()` is NON-EMPTY, which no
+        // assertion here used to be that `to_rfc3339()` is non-empty, which no
         // value can falsify - a zeroed expiration renders as 1970 and passed.
         // Bounded rather than compared to the `i64::MAX` sentinel literal, so
         // the sentinel can move without a false failure while a collapse to a
@@ -830,7 +830,7 @@ mod tests {
         );
     }
 
-    /// THE ORDER-TYPE SURFACE IS COMPLETE. `wire_order_type` refused
+    /// The order-type surface is complete, always. `wire_order_type` refused
     /// `TrailingStopLimit` until 2026-08-18 and had no other refusal left, so
     /// this asserts the state the completeness ruling asks for rather than one
     /// more converted type: every nautilus order type maps, and the match is
@@ -859,7 +859,7 @@ mod tests {
         }
     }
 
-    /// An expired order reaches nautilus AS EXPIRED. The venue expires `Gtd`
+    /// An expired order reaches nautilus as exactly that: expired. The venue expires `Gtd`
     /// and `Day` orders on their own clocks, and nautilus carries a matching
     /// `OrderStatus::Expired`, so collapsing it onto `Canceled` here would
     /// throw the distinction away at the last seam that could keep it - and

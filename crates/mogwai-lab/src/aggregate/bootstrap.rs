@@ -31,7 +31,7 @@ pub type Mult = Vec<i64>;
 /// truncated to `n_sessions`.
 ///
 /// `start = splitmix64(BASE xor (replicate << 8) xor block) mod n_sessions`.
-/// The shift is a PYTHON shift on an unbounded integer masked back to 64
+/// The shift is a Python shift on an unbounded integer masked back to 64
 /// bits afterwards, so replicate 10,000 does not alias replicate 0 - the
 /// mask is applied to the whole xor, exactly as the Python writes it.
 #[must_use]
@@ -104,7 +104,7 @@ fn valid_month_key(month: u64) -> bool {
 }
 
 /// `fold_multiplicities`: leave-one-ISO-week-out 0/1 vectors over the
-/// session labels IN THEIR GIVEN ORDER. A fold qualifies only when at least
+/// session labels in their given order. A fold qualifies only when at least
 /// `FOLD_MIN_SESSIONS` sessions remain, and a partial week is its own fold.
 #[must_use]
 pub fn fold_multiplicities(sessions: &[String]) -> Vec<Mult> {
@@ -146,7 +146,7 @@ pub fn iso_year_week(label: &str) -> (i64, u32) {
 /// `weighted_median_votes`: the nearest-rank median of the session votes
 /// under a replicate's multiplicities, i.e. the `ceil(total/2)`-th order
 /// statistic of the multiset. A `None` vote (a non-qualifying session)
-/// contributes nothing rather than refusing - the STRICT accessors on
+/// contributes nothing rather than refusing - the strict accessors on
 /// [`super::context::ObsContext`] are what refuse.
 #[must_use]
 pub fn weighted_median_votes(values: &[Option<f64>], mult: &[i64]) -> Option<f64> {
@@ -174,7 +174,7 @@ pub fn weighted_median_votes(values: &[Option<f64>], mult: &[i64]) -> Option<f64
     pairs.last().map(|p| p.0)
 }
 
-/// `QuantileSupport`: per-session cumulative counts over a SHARED sorted
+/// `QuantileSupport`: per-session cumulative counts over a shared sorted
 /// support, so a pooled quantile under a multiplicity vector costs one
 /// binary search over the support rather than a re-pooling of every
 /// session's histogram. This is the structure that makes 10,000 replicates

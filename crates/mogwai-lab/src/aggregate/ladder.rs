@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The frozen 6.2 LADDER, plus the closure and forensic statistics it
+//! The frozen 6.2 ladder, plus the closure and forensic statistics it
 //! consumes. Ported from `analysis/mnq_fit.py`'s `closure_analysis`,
 //! `worsening_23_analysis`, `forensic_subchecks` and `evaluate_ladder`.
 //!
-//! Every rung is evaluated in order and every FIRED rung is recorded; the
+//! Every rung is evaluated in order and every fired rung is recorded; the
 //! selected rung is the first that fired, and a ladder with none fired
 //! returns the `no-family-eligible` verdict. The ladder never short-circuits:
 //! a later rung's evidence is measured and recorded even when an earlier one
@@ -14,22 +14,22 @@
 //! ## Fail-closed, stated three ways
 //!
 //! - **Amendment D (completeness gates).** `fires_outside` and
-//!   `clean_inside` are FALSE whenever the family inventory is incomplete,
+//!   `clean_inside` are false whenever the family inventory is incomplete,
 //!   whatever the individual metric says. The reversion rung's `a_closure`
 //!   and the GARCH rung's `a_closure` additionally test `complete(fam)`
 //!   directly, because they consume required inventory cells rather than one
 //!   named metric.
-//! - **Amendment E (worsening_23).** The diagnostic is evaluated ONLY on a
+//! - **Amendment E (worsening_23).** The diagnostic is evaluated only on a
 //!   fired reversion rung. An unfired rung leaves it null by
-//!   inapplicability, with NO refusal record; a fired rung that cannot
-//!   measure it records null WITH exactly one matching refusal. The object
+//!   inapplicability, with no refusal record; a fired rung that cannot
+//!   measure it records null with exactly one matching refusal. The object
 //!   itself is nullable, not its members - a partially measured
 //!   `worsening_23` is not a thing.
 //! - **Amendment C (localization).** The boundary-localization flag is a
-//!   Boolean only for a FIRED `child_walk` / `reversion` / `garch` rung
-//!   whose inputs all qualify; otherwise it is null WITH a refusal.
+//!   Boolean only for a fired `child_walk` / `reversion` / `garch` rung
+//!   whose inputs all qualify; otherwise it is null with a refusal.
 //!
-//! Each rung MIRRORS its own refusals plus the refusals of the families it
+//! Each rung mirrors its own refusals plus the refusals of the families it
 //! consumed, so a reader of one rung record sees every reason it could not
 //! conclude without cross-referencing the envelope section.
 
@@ -69,11 +69,11 @@ pub struct ClosureAnalysis {
 }
 
 /// `closure_analysis`: per-cell point closures plus the multi-target joint
-/// lower confidence bound - the per-replicate MINIMUM across cells, then the
+/// lower confidence bound - the per-replicate minimum across cells, then the
 /// nearest-rank p5.
 ///
 /// The 5.3 strictness is the whole point: the joint LCB exists only when
-/// EVERY bootstrap replicate produced a value across every cell. One
+/// every bootstrap replicate produced a value across every cell. One
 /// unavailable replicate refuses the bound and the consuming rung fails
 /// closed - there is no partial joint statement.
 #[must_use]
@@ -153,7 +153,7 @@ pub fn closure_analysis(
 /// `worsening_23_analysis`: `|log(G/P)| - |log(G/O)|` at the 300 s robust
 /// scale of hour 23, with the nearest-rank p95 upper confidence bound.
 ///
-/// The WHOLE object refuses (returns `None`) unless the point and EVERY
+/// The whole object refuses (returns `None`) unless the point and every
 /// bootstrap replicate produced a value - section 10 makes the object
 /// nullable, not its members.
 #[must_use]
@@ -211,7 +211,7 @@ impl Worsening23 {
 // -- Forensic subchecks -----------------------------------------------------
 
 /// The trace-based rung inputs (rungs 3b, 3c, 5b) over the per-seed forensic
-/// records. A seed's `control` record is the one MATCHED to that seed's
+/// records. A seed's `control` record is the one matched to that seed's
 /// extreme minute; an unmatched control contributes nothing.
 #[derive(Clone, Debug, Default)]
 pub struct ForensicSubchecks {
@@ -389,7 +389,7 @@ pub fn evaluate_ladder(
     };
     let metric = |family: &str, name: &str| -> &MetricRec { env_of(family).metric(name) };
     let complete = |family: &str| -> bool { env_of(family).inventory_complete };
-    // Envelope-DEPENDENT: false whenever the family inventory is incomplete
+    // Envelope-dependent: false whenever the family inventory is incomplete
     // (Amendment D), whatever the individual metric records.
     let fires_outside = |family: &str, m: &MetricRec| -> bool {
         complete(family)
@@ -410,8 +410,8 @@ pub fn evaluate_ladder(
     let mut rungs: Vec<RungRec> = Vec::new();
     let mut refusals: Vec<RefusalRec> = Vec::new();
 
-    // -- Rung 1: child-walk isolation, paired BY HOUR. The pairing matters:
-    // an excess at one hour and a clean mid at ANOTHER is not isolation.
+    // -- Rung 1: child-walk isolation, paired by hour. The pairing matters:
+    // an excess at one hour and a clean mid at another is not isolation.
     let per_hour: Vec<bool> = FAIL_HOURS_300
         .iter()
         .map(|&h| {
@@ -512,7 +512,7 @@ pub fn evaluate_ladder(
         && sign.all_points_pass
         && sign.joint_lcb.is_some_and(|l| l > GAP_CLOSE_LCB_MIN);
     // Fold stability: each cell's closure sign agrees with that cell's own
-    // POINT closure across every qualifying fold.
+    // point closure across every qualifying fold.
     let point_sign: Vec<bool> = sign
         .cells
         .iter()
@@ -541,7 +541,7 @@ pub fn evaluate_ladder(
         !m.refused && m.point.is_some_and(|p| p > 0.0) && m.interval_low.is_some_and(|l| l > 0.0)
     });
     let fired4 = a_closure && folds_ok && c_cov;
-    // Amendment E: worsening_23 is evaluated ONLY after the rung fires.
+    // Amendment E: worsening_23 is evaluated only after the rung fires.
     let mut w23 = None;
     let mut uniform = None;
     let mut resolution = None;
@@ -593,7 +593,7 @@ pub fn evaluate_ladder(
         refusals: Vec::new(),
     });
 
-    // -- Rung 6: boundary-local state. Only reachable when NO prior rung
+    // -- Rung 6: boundary-local state. Only reachable when no prior rung
     // fired - a boundary-local explanation is the residual hypothesis.
     let no_prior = !rungs.iter().any(|r| r.fired);
     let mut b_ok = false;
@@ -623,7 +623,7 @@ pub fn evaluate_ladder(
     });
 
     // -- Localization (Amendment C). Point estimates only: the flag says
-    // WHERE a fired rung's discrepancy lives, and an interval on a ratio of
+    // where a fired rung's discrepancy lives, and an interval on a ratio of
     // ratios would claim more than the design supports.
     let boundary_log_ratio = |stat_for: &dyn Fn(super::context::Labels) -> StatFn,
                               labels: super::context::Labels|

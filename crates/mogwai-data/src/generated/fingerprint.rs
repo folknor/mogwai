@@ -149,7 +149,7 @@ impl SessionProfile {
     /// relative effects conditional on being open and satisfy no particular sum;
     /// forcing one would distort them, and it would make Saturday's
     /// unidentifiable placeholder - zero exposure, so 0/0, so a declared 1.0 -
-    /// push error into the six days that ARE identifiable.
+    /// push error into the six days that are actually identifiable.
     ///
     /// The bug the sum guard exists to catch also disappears under that
     /// normalization rather than going unguarded: an all-ones profile no longer
@@ -191,12 +191,12 @@ impl SessionProfile {
         // positivity invariants still hold, so the golden stream would never
         // reveal either bug - only a sum check does.
         //
-        // The bound is ONE-SIDED for the two distributions and two-sided for
-        // vol: a sum ABOVE 1.0 is the compression pathology and is rejected,
-        // but a sum BELOW 1.0 is a legitimately thin profile - and at the
+        // The bound is one-sided for the two distributions and two-sided for
+        // vol: a sum above 1.0 is the compression pathology and is rejected,
+        // but a sum below 1.0 is a legitimately thin profile - and at the
         // degenerate extreme the all-but-silent one that `low_intensity_gap_ns`'
         // cap machinery exists to survive - so a low sum stays legal. That is a
-        // NUMERICAL allowance, not a closure idiom: a calendar-free profile
+        // numerical allowance, not a closure idiom: a calendar-free profile
         // whose author means "shut" has no way to say so, which is exactly why
         // closure belongs to `SessionCalendar`. `vol_hour` has no such use, so
         // both an
@@ -204,7 +204,7 @@ impl SessionProfile {
         // symmetric band. The sentinel `index` of `usize::MAX` marks a
         // whole-array (sum) violation rather than a single bad element.
         //
-        // ALL OF THE ABOVE IS CONDITIONAL ON THERE BEING NO CALENDAR. When one
+        // All of the above is conditional on there being no calendar. When one
         // owns closure the modulator divides the composite by its own
         // exposure-weighted mean, so scale carries no meaning to constrain and
         // the "no modulation" pathology this guard was built for cannot occur.
@@ -291,7 +291,7 @@ pub struct GeneratorScalars {
     /// different latent medians collapse onto an observed one-contract median.
     pub latent_size_median: Decimal,
     /// Log-scale sigma of the latent size lognormal. The module-level
-    /// `SIZE_LOG_SIGMA = 1.15` is this field's DEFAULT, not a refit: an
+    /// `SIZE_LOG_SIGMA = 1.15` is this field's default, not a refit: an
     /// instrument that omits it draws exactly the shared crypto shape,
     /// byte for byte, while a fitted instrument states its own tail (the
     /// generator successor spec 3.2 - July MNQ's p99 measured 8 contracts
@@ -326,7 +326,7 @@ impl GeneratorScalars {
             start_price: Decimal::from(START_PRICE_USD),
             // Preserve the calibrated crypto stream while removing the proxy
             // from the public configuration schema. The old field was exactly
-            // MEAN trade notional because it divided by exp(sigma^2 / 2), even
+            // mean trade notional because it divided by exp(sigma^2 / 2), even
             // though its `typical_` name suggested a representative center.
             latent_size_median: decimal_from_f64(
                 fp.cadence.targets.mean_trade_notional.anchor
@@ -403,7 +403,7 @@ impl GeneratorScalars {
         // 10^-price_decimals grid, so the configured modal_tick stops being the
         // real tick (modal_tick 1e-7 with price_decimals 1 collapses every
         // price onto a 0.1 grid). The on-grid invariant still holds against the
-        // COARSER grid, so no test or runtime check catches it - only this does.
+        // coarser grid, so no test or runtime check catches it - only this does.
         // The venue enforces the same relationship on its instrument defs via
         // `on_increment`; this is the generator-layer twin.
         // rust_decimal carries at most 28 fractional digits. Zero is a valid
@@ -412,15 +412,15 @@ impl GeneratorScalars {
         if self.price_decimals > 28 || self.modal_tick.normalize().scale() > self.price_decimals {
             return Err(ScalarError::field("modal_tick"));
         }
-        // TWO-SIDED, and the ceiling is the half that was missing. This knob
+        // Two-sided, and the ceiling is the half that was missing. This knob
         // reaches `ArrivalKernel::next_parent`'s budget traversal through
         // whatever arrival family is attached, and it was validated
         // strictly-positive-finite only - so an operator override could buy an
         // arbitrarily long parent draw and never be told.
         //
-        // MEASURED 2026-08-20 by `examples/arrival_sigma_sweep`, 2000 draws per
-        // point against a fixed healthy `LogOuCox`. UNLIKE `sigma_y` THERE IS NO
-        // KNEE: per-draw cost is LINEAR in the duration, from 78 ns at the
+        // Measured 2026-08-20 by `examples/arrival_sigma_sweep`, 2000 draws per
+        // point against a fixed healthy `LogOuCox`. Unlike `sigma_y` there is no
+        // knee: per-draw cost is linear in the duration, from 78 ns at the
         // fingerprint-median 0.171 through 11.8 us at 100, 123 us at 1e3 and
         // 1.18 ms at 1e4, reaching the terminal `NoOpenExposure` refusal at 1e6.
         // So the ceiling is a statement about acceptable per-draw cost rather
@@ -518,9 +518,9 @@ impl GeneratorScalars {
         // `vol_scalar` is the unconditional sigma, and `GarchVol` initializes
         // `sigma2` to its square. At or above the state rail the process is born
         // clipped and the knob's documented meaning stops holding on the very
-        // first tick, so this much IS a mechanism bound.
+        // first tick, so this much is itself a mechanism bound.
         //
-        // What is NOT enforced here is a HEADROOM ratio. The previous rule
+        // What is not enforced here is a headroom ratio. The previous rule
         // demanded ten percent clearance under the rail, which reads as prudence
         // and behaves as a universal scale gate: it would deny a legitimately
         // higher-volatility instrument for no reason but that one corpus sat
@@ -720,7 +720,7 @@ pub struct TickTraversal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalarError {
-    /// The BARE name of the offending scalar, and nothing else. Consumers
+    /// The bare name of the offending scalar, and nothing else. Consumers
     /// render it as a config path (`mogwai-venue`'s config loader prints
     /// `generator.{field}`) and may match on it, so a sentence here would be
     /// both unmatchable and unrenderable. Where one field has several distinct
@@ -778,13 +778,13 @@ pub enum GeneratedSourceError {
 mod tests {
     use super::*;
 
-    /// `mean_event_duration_s` IS BOUNDED ABOVE. It was validated
+    /// `mean_event_duration_s` is bounded above. It was validated
     /// strictly-positive-finite only, so an operator override could buy an
-    /// arbitrarily long parent draw: the cost is LINEAR in this knob, and past
+    /// arbitrarily long parent draw: the cost is linear in this knob, and past
     /// the ceiling it runs to milliseconds a draw and then to the terminal
     /// refusal.
     ///
-    /// The FITTED VALUE IS ASSERTED TO SURVIVE, and that half is not decoration:
+    /// The fitted value is asserted to survive, and that half is not decoration:
     /// a bound placed below what the committed fingerprint actually carries
     /// would refuse the venue's own default scalars, and every other assertion
     /// here would still pass.

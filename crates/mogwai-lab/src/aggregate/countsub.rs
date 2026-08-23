@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 folknor
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The spec-5.2 COUNT SUBSTITUTION and the 5.3 gap closure: reweight each
+//! The spec-5.2 count substitution and the 5.3 gap closure: reweight each
 //! generated hour's populated minutes so its parent-count-bin frequencies
 //! match the observed shares, preserving the hour's total weight, then read
-//! ONE full-month weighted minute-range p99.9 and `> 968` exceedance rate
+//! one full-month weighted minute-range p99.9 and `> 968` exceedance rate
 //! off the counterfactual.
 //!
 //! Ported from `analysis/mnq_fit.py`'s `observed_bin_shares`,
@@ -19,15 +19,15 @@
 //! |---|---|---|
 //! | `> 0` | `> 0` | `o / g`, rescaled to preserve the hour's total |
 //! | `= 0` | `> 0` | `0` - the generated month over-populates a bin the month never showed |
-//! | `= 0` | `= 0` | `null`, the bin is IGNORED (not zero-weighted) |
-//! | `> 0` | `= 0` | a SUPPORT REFUSAL: the whole hour fails |
+//! | `= 0` | `= 0` | `null`, the bin is ignored (not zero-weighted) |
+//! | `> 0` | `= 0` | a support refusal: the whole hour fails |
 //!
 //! A hour with observed minutes and no generated support at all refuses the
 //! same way (the union rule), and a nonpositive rescaling sum refuses too. A
 //! refused hour is dropped from the pooled counterfactual entirely - never
 //! partially substituted.
 //!
-//! ## Why the accumulation ORDER is pinned
+//! ## Why the accumulation order is pinned
 //!
 //! `total_w`, `exceed_w` and the weighted cumulative counts are float sums
 //! over the pooled histogram and over the weight map. The Python accumulates
@@ -75,7 +75,7 @@ pub fn gap_closure(
 
 /// `obs_shares_under`: the observed populated-minute share of each
 /// parent-count bin within each hour, under a multiplicity vector. Hours
-/// with no populated minutes are ABSENT from the map, which is what makes
+/// with no populated minutes are absent from the map, which is what makes
 /// them an hour-union support refusal on the generated side.
 #[must_use]
 pub fn obs_shares_under(obs: &ObsContext, mult: &[i64]) -> HashMap<i64, HashMap<String, f64>> {
@@ -136,7 +136,7 @@ pub fn observed_bin_shares(pooled: &PooledHist) -> HashMap<i64, HashMap<String, 
         .collect()
 }
 
-/// The `(value, weight)` nearest rank with FLOAT weights, returning the
+/// The `(value, weight)` nearest rank with float weights, returning the
 /// integer support value. The frozen 5.2 rule, over a weighted histogram.
 fn weighted_nearest_rank_fw(pairs: &mut [(i64, f64)], q: f64) -> Option<i64> {
     if pairs.is_empty() {
@@ -158,7 +158,7 @@ fn weighted_nearest_rank_fw(pairs: &mut [(i64, f64)], q: f64) -> Option<i64> {
     pairs.last().map(|p| p.0)
 }
 
-/// `count_substitution`: ONE seed's serialized counterfactual record, over
+/// `count_substitution`: one seed's serialized counterfactual record, over
 /// the all-ones observed shares.
 #[must_use]
 pub fn count_substitution(
@@ -193,7 +193,7 @@ pub fn count_substitution(
         let empty_o = HashMap::new();
         let o_per = obs_shares.get(&h).unwrap_or(&empty_o);
         let mut w_per: HashMap<String, Option<f64>> = HashMap::new();
-        // `raw` keeps the frozen bin ORDER, because the rescaling sum below
+        // `raw` keeps the frozen bin order, because the rescaling sum below
         // is a float accumulation over it.
         let mut raw: Vec<(&'static str, f64)> = Vec::new();
         let mut refused = false;
@@ -222,7 +222,7 @@ pub fn count_substitution(
         }
         if refused || g_total == 0 {
             // A generated-supported hour with a refusing bin, or an observed
-            // hour with NO generated support at all: both refuse the hour
+            // hour with no generated support at all: both refuse the hour
             // (the 5.2 union rule). An hour with neither is simply absent.
             if g_total != 0 || !o_per.is_empty() {
                 refused_hours.push(h);
@@ -368,13 +368,13 @@ pub fn support_refusals_of(record: &Value) -> Vec<RefusalRec> {
 }
 
 /// `CountSubEval`: one seed's generated support, precomputed so that a
-/// counterfactual under a RESAMPLED observed share vector costs one binary
+/// counterfactual under a resampled observed share vector costs one binary
 /// search over the shared trade-range support rather than a re-pooling.
 /// This is what makes rung 2b's 10,000 replicates times 8 seeds tractable.
 #[derive(Debug)]
 pub struct CountSubEval {
     support: Vec<i64>,
-    /// Per `(hour, bin)` group, in FIRST-APPEARANCE order: the cumulative
+    /// Per `(hour, bin)` group, in first-appearance order: the cumulative
     /// count over `support`, the group total and the `> 968` count.
     groups: Vec<(i64, &'static str, Vec<i64>, i64, i64)>,
     /// `(hour, total)` in first-appearance order.
@@ -451,7 +451,7 @@ impl CountSubEval {
     }
 
     /// `(p999, exceed rate, refused hours)` under an observed share vector.
-    /// Hours are the UNION of observed and generated: an observed hour the
+    /// Hours are the union of observed and generated: an observed hour the
     /// generated month never populates is itself a support refusal.
     #[must_use]
     pub fn counterfactual(
@@ -557,7 +557,7 @@ pub struct CountSubClosures {
 
 /// `count_substitution_closures`.
 ///
-/// Two strictnesses are frozen here and both fail closed: a SUPPORT refusal
+/// Two strictnesses are frozen here and both fail closed: a support refusal
 /// nulls that seed's closure (never a closure over partial support), and any
 /// refused seed nulls the aggregate (never a median over fewer seeds). The
 /// LCB likewise exists only when every replicate produced a value.

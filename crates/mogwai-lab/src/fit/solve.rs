@@ -15,9 +15,9 @@
 //!    (endpoint or seed) carries no directional information; letting one
 //!    vote provably drags the bracket off the optimum.
 //! 3. **Flat objectives tie-break to the smaller candidate**, compared in
-//!    the TRANSFORMED domain (log x when `log_domain`).
+//!    the transformed domain (log x when `log_domain`).
 //! 4. **Log-domain termination is relative by construction**: `a` and `b`
-//!    are logs, so their span IS `log(hi/lo)`, compared against
+//!    are logs, so their span is `log(hi/lo)`, compared against
 //!    `log1p(SOLVE_RELATIVE_STEP)`. Dividing a log span by `|log x|` is not
 //!    a relative error in `x`; it over-refines near 1 and under-refines far
 //!    from it.
@@ -84,7 +84,7 @@ pub fn trisect(
     let mut best_score: Option<f64> = None;
     let mut evaluations = 0usize;
 
-    // `record` mirrors Python's closure exactly, INCLUDING the tie-break on
+    // `record` mirrors Python's closure exactly, including the tie-break on
     // the transformed coordinate.
     macro_rules! record {
         ($x:expr, $score:expr) => {{
@@ -104,7 +104,7 @@ pub fn trisect(
     }
 
     // Python builds `seeded` as a dict keyed on the transformed coordinate:
-    // duplicate keys collapse with the LAST value winning, and iteration is
+    // duplicate keys collapse with the last value winning, and iteration is
     // insertion-ordered. A Vec with last-wins replacement reproduces both.
     let mut seeded: Vec<(f64, f64)> = Vec::new();
     for (x, s) in seeds {
@@ -118,7 +118,7 @@ pub fn trisect(
 
     for endpoint in [a, b] {
         match seeded_score(endpoint) {
-            // A known score is RECORDED, never re-evaluated (invariant 1).
+            // A known score is recorded, never re-evaluated (invariant 1).
             Some(s) => {
                 record!(endpoint, s);
             }
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(lg.len(), 32);
         // `exp(log(lo))` is not exactly `lo`; the Python's grid carries the
         // same round trip, and the cache keys hash the round-tripped value,
-        // so the endpoints are compared RELATIVELY here rather than pinned
+        // so the endpoints are compared relatively here rather than pinned
         // to the literal.
         assert!((lg[0] / 1e-8 - 1.0).abs() < 1e-12);
         assert!((lg[31] / 1e-4 - 1.0).abs() < 1e-12);

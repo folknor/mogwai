@@ -153,7 +153,7 @@ fn assert_mass_status(mass: &nautilus_model::reports::ExecutionMassStatus) {
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn mass_status_pairs_an_open_orders_fill_outside_the_lookback() {
     let fixture = fixture().await;
-    // An older fill on the SAME open order, ahead of the fixture's own in the
+    // An older fill on the same open order, ahead of the fixture's own in the
     // venue's ordering. A zero-minute lookback puts both outside the window.
     fixture
         .state
@@ -244,12 +244,12 @@ async fn mass_status_reports_all_three_sets_over_the_single_ws_transport() {
         .expect("mass status generates")
         .expect("mass status is Some, not the trait default");
     assert_mass_status(&mass);
-    // Both sets came off the WIRE rather than out of a client-side cache: a
+    // Both sets came off the wire rather than out of a client-side cache: a
     // mass status assembled from local state would satisfy `assert_mass_status`
     // and leave these at zero.
     assert!(fixture.state.order_queries.load(Ordering::Relaxed) >= 1);
     assert!(fixture.state.fill_queries.load(Ordering::Relaxed) >= 1);
-    // `ws_hits >= 1` USED TO SIT HERE AND COULD NOT FAIL. `fixture()` connects
+    // `ws_hits >= 1` used to sit here and could not fail. `fixture()` connects
     // the exec client and `expect`s it, and a connect that returns has by
     // definition completed a `/ws` upgrade the stub counted - so the value is
     // at least one before this test's first line runs, whatever the mass-status
@@ -444,7 +444,7 @@ async fn query_order_emits_an_order_status_report() {
     }
 }
 
-/// Reconciliation of a CONDITIONAL, over both order-status carriers.
+/// Reconciliation of a conditional order, over both order-status carriers.
 ///
 /// The existing guard above proves venue truth reaches nautilus at all. It
 /// cannot see the hole the conditional surface opened: `OrderStatusReport`'s
@@ -452,7 +452,7 @@ async fn query_order_emits_an_order_status_report() {
 /// `None`, so a report built without setting them describes a stop the venue is
 /// resting as an order with no limit and nothing to wait for. Startup
 /// reconciliation would then adopt a protective leg it cannot match against the
-/// strategy's own, silently. Both an UNTRIGGERED and a TRIGGERED row are pinned
+/// strategy's own, silently. Both an untriggered and a triggered row are pinned
 /// because they differ in exactly the two fields (`order_status`,
 /// `ts_triggered`) the new status ladder introduced.
 #[tokio::test(flavor = "current_thread")]

@@ -22,7 +22,7 @@ use crate::source::InstrumentProfiles;
 /// needs its own budget or a far-from-market order walks forever.
 ///
 /// The original 5,000,000 cap covered ordinary multi-hour gaps of roughly
-/// 700,000 ticks. Protocol 7 raised it to 282,000,000 on the REQUIRED-REACH
+/// 700,000 ticks. Protocol 7 raised it to 282,000,000 on the required-reach
 /// rule; protocol 8 to 1,434,000,000 and protocol 10 to 5,799,000,000 on
 /// the doubling rule against their measured expansions. Protocol 11's
 /// session refit measures an 11/10 p99.9 window ratio of 1.13, and the
@@ -44,27 +44,27 @@ pub(crate) const SWEEP_DRAIN_BUDGET: usize = 13_110_000_000;
 /// old 5,000,000-budget warning point exactly.
 const SWEEP_DRAIN_WARN_TICKS: usize = 2_500_000;
 
-/// One-entry memo of the acceptance-time market reading, keyed on the SWEEP
-/// INTERVAL bucket rather than on the exact command instant.
+/// One-entry memo of the acceptance-time market reading, keyed on the sweep
+/// interval bucket rather than on the exact command instant.
 ///
 /// Why it exists: `read_market` walks `VOL_WINDOW_NS` (300 s) of tape, which at
 /// the raw-fill cadence is ~15,000 prints instead of the ~32 the print-layer
 /// generator produced. Every priced submit paid that walk; a burst of submits
 /// inside one sweep interval paid it once per order.
 ///
-/// It is lever two of the KEEP/REVERT rule on
+/// It is lever two of the keep/revert rule on
 /// `read_market_latency_stays_within_submit_budget`, which named exactly this
 /// ("caching one reading per symbol per sweep interval and serving submits from
 /// it, which is sound because the band is a coarse scale rather than a
 /// per-microsecond quantity"). Lever one, re-scoping the reading, is untaken.
 ///
-/// What it COSTS, stated plainly because it is a behaviour change and not only
+/// What it costs, stated plainly because it is a behaviour change and not only
 /// an optimization: the reading a submit is decided against is the reading at
-/// the START of its sweep-interval bucket, so it is stale by up to
+/// the start of its sweep-interval bucket, so it is stale by up to
 /// `fill_sweep_interval_ms` (100 ms by default, ~5 raw fills). The venue still
 /// never fills a market order on the favourable side of the market it read - the
-/// band is adverse - but that is now a statement about a reading NO OBSERVER CAN
-/// NAME: the reading instant is whenever the submit reached the handler, and
+/// band is adverse - but that is now a statement about a reading no observer can
+/// name: the reading instant is whenever the submit reached the handler, and
 /// nothing on the wire carries it. The end-to-end gates
 /// (`serving::a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`
 /// and `scripts/smoke.py`) consequently assert the bracketed form - a buy fills
@@ -74,7 +74,7 @@ const SWEEP_DRAIN_WARN_TICKS: usize = 2_500_000;
 ///
 /// One boat owns one memo for its river. The bucket is a function of that
 /// boat's clock, and the walk it saves is a walk of that river only. The lock
-/// is held ACROSS the walk deliberately: two passengers landing in the same
+/// is held across the walk deliberately: two passengers landing in the same
 /// bucket then pay for one walk rather than two, which is the whole point.
 /// Callers already run this on `spawn_blocking`.
 pub(crate) struct MarketReadingCache {
@@ -83,7 +83,7 @@ pub(crate) struct MarketReadingCache {
     /// a per-entry tag. Binding it here rather than taking it per read makes
     /// mis-keying unrepresentable instead of merely unreachable.
     ///
-    /// A KEY RATHER THAN A LABEL, and the difference is the whole claim. This
+    /// A key rather than a label, and the difference is the whole claim. This
     /// held a symbol, and a symbol will name several rivers once generator
     /// havoc enters river identity - so the binding would have been to an
     /// instrument rather than to water, and the memo could have answered a
@@ -150,7 +150,7 @@ impl MarketReadingCache {
     /// Walks actually performed. The memo's hit/miss split is invisible in the
     /// returned value - a hit and a miss return the same reading - so this is
     /// the only way a test can gate the memo without timing it. The increment
-    /// happens INSIDE the entry lock, on the same critical section that
+    /// happens inside the entry lock, on the same critical section that
     /// performs the walk, and this reader takes that lock too, so a concurrent
     /// reader cannot observe a count that disagrees with the number of
     /// `read_market` calls made.
@@ -171,7 +171,7 @@ impl MarketReadingCache {
 /// do" must not become silence, which is the failure mode the river registry
 /// exists to delete.
 ///
-/// Exactly ONE refusal is quiet: a FUNDING-BARRED shape is a standing
+/// Exactly one refusal is quiet: a funding-barred shape is a standing
 /// configuration state for the whole run, already refused loudly at every bind,
 /// so warning about it once per sweep pass is noise and nothing else. Every
 /// other refusal - an illegal symbol reaching the sweep, a resolved shape that
@@ -196,15 +196,15 @@ fn history_or_warn(
     }
 }
 
-/// Decide every scan on one symbol in one walk of the CLEAN river.
+/// Decide every scan on one symbol in one walk of the clean river.
 ///
-/// ONE walk per symbol, not per order: every resting limit on a symbol shares
+/// One walk per symbol, not per order: every resting limit on a symbol shares
 /// the same river and the same pass span, so a per-order walk would pay a
 /// checkpoint restore and a process-wide mutex acquisition per order per
 /// interval - fifty resting limits at 100 ms would be five hundred restores a
 /// second contending with `/trades` and market-price stamping. The scans'
 /// `from_ns` may differ (orders rest at different instants); the walk starts at
-/// the EARLIEST and each scan judges only ticks after its own bound.
+/// the earliest and each scan judges only ticks after its own bound.
 ///
 /// The canonical river realization. A run-level `MarketRegime` fixes its tape
 /// identity, while `FlowSurge` mutates the live river so subscribed prints,
@@ -285,11 +285,11 @@ fn scan_triggers_with_budget(
 /// ```
 ///
 /// `horizon_return` carries the time dimension (see `mogwai_data::vol_reading`),
-/// so ONE `mult` stays meaningful across instruments and cadences. `None`
+/// so one `mult` stays meaningful across instruments and cadences. `None`
 /// whenever the reading would be untrue rather than imprecise - a cold
 /// estimator, a truncated walk, a price that will not convert - and the engine's
 /// no-reading path then rests the order untriggerable rather than guessing.
-/// Refusing is the conservative answer: a zero band is the most PERMISSIVE fill
+/// Refusing is the conservative answer: a zero band is the most permissive fill
 /// regime the venue has.
 ///
 /// Synchronous and CPU-bound; callers run it on `spawn_blocking`.
@@ -333,14 +333,14 @@ pub(crate) fn read_market(
 
 /// The last print at or before `ts`, with no volatility reading attached.
 ///
-/// Two callers, both wanting a PRICE rather than a band. A price-less MARKET
+/// Two callers, both wanting a price rather than a band. A price-less market
 /// submit has to be stamped with a price for the protocol's own validator, and
 /// `read_market` legitimately refuses (a cold estimator, a truncated walk) at
 /// instants where a last print does exist. The fill sweeper's futures mark and
 /// settlement prices come through here too, and for a different reason: those
 /// feed unrealized P&L and margin, which is not a coarse scale, so they are read
 /// at the exact instant instead of from `MarketReadingCache`'s per-interval
-/// bucket. It is NOT a second answer to "what is the market" that FILL
+/// bucket. It is not a second answer to "what is the market" that fill
 /// decisions may consult - every one of those goes through `read_market`.
 pub(crate) fn read_last(
     river: &source::RiverKey,
@@ -402,19 +402,19 @@ fn rivers_over(profiles: InstrumentProfiles) -> std::sync::Arc<source::Rivers> {
     )
 }
 
-/// The shipped BTCUSDT shape plus a SECOND spot shape that is FULLY RESOLVABLE -
+/// The shipped BTCUSDT shape plus a second spot shape that is fully resolvable -
 /// a real def, real scalars, a real session profile. Fully resolvable is the
 /// point: a registry test run against a symbol the profile table does not carry
 /// would pass against a `profiles.get` lookup that never keyed a chain at all.
 ///
 /// Both profiles come out of `config::profile_for_symbol`, which resolves an
-/// unnamed symbol onto the default bundle and stamps the REQUESTED label onto
+/// unnamed symbol onto the default bundle and stamps the requested label onto
 /// the def, so the two differ in nothing but that label - identical scalars,
 /// identical session profile. Hand-building the second shape instead, as this
 /// fixture once did, left its `top_sizes` and precision quietly different and
 /// would have made a distinct-prints assertion prove nothing about seeding.
 /// Verified by reverting `generator`'s label to `""` as a text edit: the two
-/// rivers' first 32 prints then come out EQUAL, so
+/// rivers' first 32 prints then come out equal, so
 /// `a_second_river_is_realized_under_its_own_def_and_chain` is observing the
 /// symbol term in seed derivation and nothing else.
 #[cfg(test)]
@@ -640,14 +640,14 @@ mod tests {
 
     #[test]
     fn every_configured_symbol_gets_its_own_chain() {
-        // Both configured shapes answer, and each answers from its OWN chain -
+        // Both configured shapes answer, and each answers from its own chain -
         // the fixture's second symbol is fully resolvable, so a pass here means
         // the registry really keyed a river rather than a lookup vacuously
         // succeeding.
         //
-        // RE-ANCHORED by piece 13: the last assertion no longer pins "an
+        // Re-anchored by piece 13: the last assertion no longer pins "an
         // unconfigured symbol is unservable" - it is servable now. This fixture
-        // is built through `from_profiles`, which carries NO config, so the
+        // is built through `from_profiles`, which carries no config, so the
         // resolver here is deliberately non-total and refuses. What is pinned
         // is that a test rig does not silently acquire consumer-driven
         // resolution; the total path is exercised in `source.rs`.
@@ -722,7 +722,7 @@ mod tests {
     /// One sim day of readings, one per sim minute, on the committed BTCUSDT
     /// profile and the fixed tape origin, starting one sim hour in so the window is
     /// clear of both `VOL_WINDOW_NS` and the generator's own warmup. Quantiles
-    /// are NEAREST-RANK on the sorted vector of non-`None` readings - element
+    /// are nearest-rank on the sorted vector of non-`None` readings - element
     /// `ceil(q * m) - 1`, zero-indexed, no interpolation - stated because
     /// "median" and "p90" have three common definitions that disagree at these
     /// sample counts.
@@ -732,12 +732,12 @@ mod tests {
     /// clamp are the shipped ones. A refusal count above zero is a finding in
     /// its own right and is read before the table is.
     ///
-    /// PROCEED threshold: the chosen multiplier is the smallest whose MEDIAN
+    /// `Proceed` threshold: the chosen multiplier is the smallest whose median
     /// implied band is at least 3 ticks and at most 100. Below 3 the band is
     /// indistinguishable from the degenerate `u = 0` case; above 100 the p90
     /// band approaches the move the tape makes over a whole `VOL_WINDOW_NS`, at
     /// which point a fill is decided by the draw rather than by the tape.
-    // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
+    // Measurement instrument. Its name is in the gate profile's `skip` list in
     // the workspace runner config, and has to be: the gate sets
     // `include_ignored` deliberately - that is how the socket-backed suites get
     // covered - so `#[ignore]` does not keep this out of it. Every instrument of
@@ -754,26 +754,26 @@ mod tests {
     #[ignore = "calibration instrument"]
     fn vol_probe() {
         const WARMUP_NS: u64 = 3_600_000_000_000;
-        // The probe's job is a REFUSAL RATE against a one-percent threshold, so
+        // The probe's job is a refusal rate against a one-percent threshold, so
         // the sample count has to be able to express one percent: 32 instants
         // cannot - its finest resolution is 3%, and a single refusal reads as a
         // failure. 128 instants resolves 0.78% - one refusal still clears the
         // threshold and two do not - at a 10-minute stride, which spans ~21
         // simulated hours. This ignored calibration instrument is run by name
         // with an explicit watchdog above the ordinary 20-second ceiling.
-        // The dominant cost is the tape synthesis the SPAN implies, not the
+        // The dominant cost is the tape synthesis the span implies, not the
         // readings, which is why the stride shrank rather than the count.
         const PROBE_STRIDE_NS: u64 = 600_000_000_000;
         const PROBE_SAMPLES: usize = 128;
-        // Extended DOWNWARD from the print-layer sweep. At the raw-fill cadence
+        // Extended downward from the print-layer sweep. At the raw-fill cadence
         // a 300 s window carries ~15,700 returns instead of ~32, so the same
         // multiplier implies a far larger band: 0.5 yields a median 439 ticks,
         // four times the 100-tick usable ceiling and above the shipped
         // `fill_band_max_ticks` clamp of 200. The instrument has to be able to
-        // reach the multipliers that land in the window, or its PROCEED rule
+        // reach the multipliers that land in the window, or its `Proceed` rule
         // has no candidate to select.
         //
-        // The rule SELECTED 0.005 here (median 4, p90 8) and that is the shipped
+        // The rule selected 0.005 here (median 4, p90 8) and that is the shipped
         // `fill_band_vol_mult` default. The wider multipliers are retained rather
         // than pruned: the table is the provenance for that choice, and a table
         // that only spans the neighbourhood of the answer cannot show why the
@@ -854,10 +854,10 @@ mod tests {
         );
 
         // The refusal census above walks every instant; the band table walks a
-        // STRIDED SUBSET of them, once per multiplier. Each walk pays a
+        // strided subset of them, once per multiplier. Each walk pays a
         // checkpoint restore whose residual is bounded by `CHECKPOINT_K`, so a full cross product
         // costs more than the per-test budget allows. A quantile of a band
-        // scale does not need 128 points; a refusal RATE against a 1% threshold
+        // scale does not need 128 points; a refusal rate against a 1% threshold
         // does, which is why only one of the two was thinned.
         const TABLE_STRIDE: usize = 8;
         for mult in MULTIPLIERS {
@@ -893,12 +893,12 @@ mod tests {
     /// the engine-side fill bench is structurally blind to because it takes a
     /// `MarketReading` as an argument.
     ///
-    /// KEEP/REVERT: median at or below 5 ms, p99 at or below 25 ms. Above that
+    /// Keep/revert: median at or below 5 ms, p99 at or below 25 ms. Above that
     /// the reading is re-scoped before the model ships - first lever a shorter
     /// `VOL_WINDOW_NS`, second caching one reading per symbol per sweep interval
     /// and serving submits from it, which is sound because the band is a coarse
     /// scale rather than a per-microsecond quantity.
-    // MEASUREMENT INSTRUMENT. Its name is in the gate profile's `skip` list in
+    // Measurement instrument. Its name is in the gate profile's `skip` list in
     // the workspace runner config, and has to be: the gate sets
     // `include_ignored` deliberately - that is how the socket-backed suites get
     // covered - so `#[ignore]` does not keep this out of it. Every instrument of
@@ -918,9 +918,9 @@ mod tests {
         let profiles = profiles();
         let base_ts = TEST_ORIGIN + 3_600_000_000_000;
         let cache = MarketReadingCache::for_symbol("BTCUSDT", &profiles);
-        // The MISS path is what a submit pays, and it is the only thing worth
+        // The miss path is what a submit pays, and it is the only thing worth
         // gating: a hit is a mutex acquisition and a struct copy. Every sample
-        // therefore lands in its OWN bucket, so none of them can be served from
+        // therefore lands in its own bucket, so none of them can be served from
         // the entry the previous one left behind - timing repeated reads at one
         // instant would measure the memo and pass no matter what the walk cost.
         let mut samples = Vec::with_capacity(100);
@@ -941,7 +941,7 @@ mod tests {
         let median = samples[49];
         let p99 = samples[98];
         println!("read_market median={median:?} p99={p99:?} cached={warm:?}");
-        // MEASURED STATE, stated rather than assumed: at the raw-fill cadence a
+        // Measured state, stated rather than assumed: at the raw-fill cadence a
         // 300 s window carries ~15,000 prints and a positioning restore replays
         // up to `CHECKPOINT_K` ticks. The stride is deliberately small enough
         // that this residual, rather than an old density-sized checkpoint
@@ -952,7 +952,7 @@ mod tests {
         //
         // So the two paths are gated separately and honestly: the hit path
         // against the original 5 ms budget, the miss path against a regression
-        // ceiling set from the measurement. The miss ceiling is NOT the budget
+        // ceiling set from the measurement. The miss ceiling is not the budget
         // being relaxed - it is the cost the venue currently pays, pinned so it
         // cannot grow further unnoticed while the re-scoping is owed.
         assert!(

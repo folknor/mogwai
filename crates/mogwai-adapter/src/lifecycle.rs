@@ -78,7 +78,7 @@ impl ReconnectPolicy {
         // `max_ms == 0` means "no ceiling": clamp only when a positive max is
         // configured. The old code collapsed the delay to zero whenever either
         // bound was zero, so a nonzero initial paired with a zero max busy-spun
-        // the reconnect loop (D.3). The protocol validator now rejects BOTH
+        // the reconnect loop (D.3). The protocol validator now rejects both
         // mixed-zero combinations - a positive initial with a zero max, and
         // (because the base is `initial * factor^attempt`) a zero initial with
         // a positive max, the same spin from the other side - so the only
@@ -86,7 +86,7 @@ impl ReconnectPolicy {
         // backoff deliberately disabled, nothing to spin against. The `max ==
         // 0` branch below stays as belt-and-suspenders for a caller that
         // bypasses the validator; the mirror case (zero initial, positive max)
-        // deliberately gets NO defensive floor - the mechanism has no
+        // deliberately gets no defensive floor - the mechanism has no
         // principled delay to invent, and silently substituting one would mask
         // the missing validation instead of surfacing it.
         let uncapped = initial_ms * self.factor.powi(attempt as i32);
@@ -116,8 +116,8 @@ impl ReconnectPolicy {
 
 /// Backs off before the next reconnect, unless the attempt cap is already
 /// spent. Computes the backoff for the current `*attempt`, advances the
-/// counter, and returns whether the ADVANCED counter has hit
-/// `reconnect_max_attempts`. When it has, the sleep is SKIPPED and `true` is
+/// counter, and returns whether the counter, once advanced, has hit
+/// `reconnect_max_attempts`. When it has, the sleep is skipped and `true` is
 /// returned: the caller must return instead of looping, because the loop-top
 /// exhausted check would return anyway and sleeping a final backoff first only
 /// delays that exhausted return by one pointless interval (F12). When the cap
@@ -126,8 +126,8 @@ impl ReconnectPolicy {
 /// both reconnect paths, so an exhausted return needs no further store here.
 ///
 /// Both outcomes log: exhaustion permanently stops the socket (the loop
-/// returns and nothing restarts it), which without an ERROR line looks
-/// identical to a quiet venue, and the backoff INFO line is what makes a
+/// returns and nothing restarts it), which without an `error` line looks
+/// identical to a quiet venue, and the backoff `info` line is what makes a
 /// reconnect-in-progress readable in the worker log at all - a venue outage
 /// used to leave zero connection-lifecycle lines while the client silently
 /// re-attached.
@@ -163,15 +163,15 @@ async fn backoff_or_exhausted(
 /// (AE13). Keep call sites consistent with this list, since the meter itself
 /// cannot see who bypasses it:
 ///
-/// METERED (steady-state data plane). Every `fetch_instruments` /
+/// Metered (steady-state data plane). Every `fetch_instruments` /
 /// `fetch_account` / `fetch_trades` request awaits `wait()` before issuing its
 /// request, so the configured
 /// ceiling governs the ongoing request stream a running strategy generates.
 ///
-/// EXEMPT (connect-time bootstrap, deliberately un-metered):
-///   - the clock fetch (`clock::fetch_clock`) - it runs BEFORE this quota
+/// Exempt (connect-time bootstrap, deliberately un-metered):
+///   - the clock fetch (`clock::fetch_clock`) - it runs before this quota
 ///     exists, because the quota's spacing is `sim`-scaled and `sim` is exactly
-///     what the clock fetch returns; `connect()` builds the quota FROM that
+///     what the clock fetch returns; `connect()` builds the quota from that
 ///     result. Metering it is a chicken-and-egg: there is no quota to wait on
 ///     yet.
 ///   - `ship_venue_havoc` - a bounded, one-shot control-plane POST loop that
@@ -197,7 +197,7 @@ impl HttpQuota {
     pub(crate) fn from_conn(conn: &ConnHavoc, sim: SimClock) -> Self {
         Self {
             min_interval: conn.max_requests_per_second.map(|max| {
-                // Round the per-request spacing UP (ceil-divide) so a rate that
+                // Round the per-request spacing up (ceil-divide) so a rate that
                 // does not evenly divide one second (e.g. 3/s -> 333_333_334ns,
                 // not the floored 333_333_333 that ships a hair fast) never
                 // undershoots the spacing and ships marginally above the cap
@@ -248,13 +248,13 @@ pub(crate) struct WsConnectionConfig {
     /// run. `None` dials blind, which is the historical behaviour.
     ///
     /// It lives here rather than in either client's connect path because the
-    /// RECONNECT is the exposure: a re-dial never re-runs that path, so a check
+    /// Reconnect is the exposure: a re-dial never re-runs that path, so a check
     /// placed there would cover only the first connection - the one least likely
     /// to reach a stranger.
     pub(crate) identity: Option<RunIdentityCheck>,
-    /// How long ONE dial may take before it is abandoned and retried.
+    /// How long one dial may take before it is abandoned and retried.
     ///
-    /// IT BOUNDS EVERY DIAL, not just the first, which is what the name has to
+    /// It bounds every single dial, not just the first, which is what the name has to
     /// mean if a host is going to set it. A first boarding on a cold river pays
     /// that river's whole warmup synthesis inside the upgrade - the venue
     /// materializes no river before something asks for one - so this is the
@@ -267,7 +267,7 @@ pub(crate) struct WsConnectionConfig {
 
 /// What an identity probe established. Three outcomes, not two: only one of
 /// them refuses the connection, and the other two are refused-to-refuse for
-/// DIFFERENT reasons that must not be reported as each other.
+/// different reasons that must not be reported as each other.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum IdentityOutcome {
     /// The venue named this client's run.
@@ -276,7 +276,7 @@ pub(crate) enum IdentityOutcome {
     /// not JSON. Indistinguishable from the socket failing the same way.
     Unreachable(String),
     /// Answered, well-formed, and carrying no run identity at all. This is
-    /// VERSION SKEW, not a transport failure: the venue predates run identity.
+    /// version skew, not a transport failure: the venue predates run identity.
     /// It was filed under `Unreachable` once, which made a real skew
     /// undiscoverable by anyone grepping for the category it was filed under.
     Unidentified(String),
@@ -349,7 +349,7 @@ async fn verify_run_identity(
 /// failed, or returned an error status, or returned something that is not JSON.
 pub(crate) const IDENTITY_UNREACHABLE: &str = "unreachable: ";
 
-/// Prefix marking an identity probe that WAS answered, correctly, by a venue
+/// Prefix marking an identity probe that was answered, correctly, by a venue
 /// that reports no run at all. Distinct from [`IDENTITY_UNREACHABLE`] because
 /// nothing failed: this is version skew, and calling it a transport failure
 /// sends whoever reads the log looking for a network problem that is not there.
@@ -367,17 +367,17 @@ pub(crate) type RunIdentityCheck = std::sync::Arc<
 /// Drives one client socket for the life of the client: dial, reattach,
 /// pump, disconnect, redial.
 ///
-/// `on_undelivered` IS NOT OPTIONAL MACHINERY, and the reason is the whole of
+/// `on_undelivered` is never optional machinery, and the reason is the whole of
 /// finding 5. `send_command` pushes onto an unbounded channel a separate writer
-/// task drains, so an `Ok` from it means ACCEPTED FOR WRITING and nothing more.
+/// task drains, so an `Ok` from it means accepted for writing and nothing more.
 /// When the socket drops, the writer is aborted with whatever it had not yet
 /// written, and a submit, cancel, modify or query in that window used to vanish
 /// with no error anywhere: the caller had already been told `Ok`, so nothing
 /// synthesized a terminal event and the order sat `Submitted` forever.
 ///
-/// So every command that was accepted and NOT written is handed back through
+/// So every command that was accepted and never written is handed back through
 /// this callback, exactly once, in the order it was queued. This adapter
-/// deliberately does NOT replay them onto the next generation's socket:
+/// deliberately does not replay them onto the next generation's socket:
 /// re-submitting orders across a reconnect is a policy call a venue adapter has
 /// no business making silently on a host's behalf. Telling the caller is not
 /// optional; deciding for it is.
@@ -419,10 +419,10 @@ pub(crate) async fn run_ws_connection<
         &mut on_undelivered,
     )
     .await;
-    // THE LOOP'S OWN EXIT IS AN UNDELIVERY TOO. Whatever is still sitting in the
+    // The loop's own exit is an undelivery too. Whatever is still sitting in the
     // command receiver when this returns - the run completed, the attempt cap
     // tripped, the identity check refused - is never going to be written by
-    // anybody, because the receiver dies with this frame. Commands sent AFTER
+    // anybody, because the receiver dies with this frame. Commands sent after
     // that point need no report here: the sender sees a closed channel and
     // `dispatch_order` already synthesizes for that case. This drain covers the
     // window between the last write and the receiver's death, which nothing
@@ -480,10 +480,10 @@ async fn run_ws_connection_inner<
     let mut rng = seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
     let mut attempt = 0u32;
     // `RunComplete` is a planned terminal state, not a transport failure. A
-    // graceful close naming a terminal REASON is its socket-level fallback for
+    // graceful close naming a terminal reason is its socket-level fallback for
     // a reader that loses the final text frame while the venue drains.
     //
-    // THE CODE IS NOT THE SIGNAL. This used to read any WS 1000 as completion,
+    // The close code is not the signal - the reason is. This used to read any WS 1000 as completion,
     // which permanently disabled reconnect on every graceful close there is -
     // the venue's own eviction close is 1000, and so is a proxy retiring an
     // idle socket. `mogwai_protocol::close::classify` reads the reason string
@@ -497,7 +497,7 @@ async fn run_ws_connection_inner<
             // Only reachable with `reconnect_max_attempts = 0` (the true-return
             // from `backoff_or_exhausted` already logged and returned for every
             // other exhaustion), but a socket that never dials still deserves
-            // its ERROR line.
+            // its own `error` line.
             tracing::error!(
                 socket = label,
                 attempts = attempt,
@@ -536,13 +536,13 @@ async fn run_ws_connection_inner<
                 continue;
             }
         };
-        // Prove the thing that answered is this client's run, BEFORE it is used
+        // Prove the thing that answered is this client's run, before it is used
         // for anything. An address identifies nothing over time: the port is
         // ephemeral, the venue frees it before it exits, and a client that only
         // knows where to dial cannot tell its own run from whatever answers
         // there next.
         //
-        // A mismatch is TERMINAL and never retried. Reconnecting is for a venue
+        // A mismatch is always terminal and never retried. Reconnecting is for a venue
         // that went away and came back; a different run at the same address did
         // not come back, and dialling it again would only find it again.
         if let Some(check) = identity.as_ref()
@@ -559,12 +559,12 @@ async fn run_ws_connection_inner<
             return;
         }
 
-        // `attempt` counts dials since the last PROVEN connection, so a nonzero
+        // `attempt` counts dials since the last proven connection, so a nonzero
         // value here marks this line as a re-attach after an outage rather than
         // the boot-time connect.
         tracing::info!(socket = label, url = %ws_url, attempt, "venue websocket connected");
 
-        // A successful dial alone does NOT reset the attempt counter: a venue
+        // A successful dial alone does not, on its own, reset the attempt counter: a venue
         // that accepts the handshake and immediately dies would otherwise
         // restart the count on every cycle, so `reconnect_max_attempts` could
         // never trip and each re-dial would re-enter at the cheap initial
@@ -576,9 +576,9 @@ async fn run_ws_connection_inner<
         connected.store(true, Ordering::Relaxed);
         let (mut writer, mut reader) = ws.split();
         let (out_tx, mut out_rx) = unbounded_channel::<(u64, Message)>();
-        // THE RECEIPT BOOK for commands accepted onto `out_tx` and not yet on
+        // The receipt book for commands accepted onto `out_tx` and not yet on
         // the socket. An entry is created before the frame is queued and
-        // retired only by the SAME expression that observed `writer.send` come
+        // retired only by the same expression that observed `writer.send` come
         // back `Ok` - the frontier rule, applied to a write rather than to a
         // watermark. Whatever survives the writer's abort is exactly the set of
         // commands the venue never saw, and it is reported below.
@@ -591,7 +591,7 @@ async fn run_ws_connection_inner<
                 if writer.send(msg).await.is_err() {
                     break;
                 }
-                // NOTHING MAY AWAIT BETWEEN THE `Ok` ABOVE AND THIS RETIRE.
+                // Nothing may await between the `Ok` above and this retire.
                 // The retire is what makes the receipt book mean "the venue
                 // never saw this"; an `await` inserted here would be a point
                 // where the task can be aborted with the frame on the wire and
@@ -599,8 +599,8 @@ async fn run_ws_connection_inner<
                 // as undelivered. A future edit that needs work here must do it
                 // after the retire, not before.
                 lock_unwritten(&writer_unwritten).retain(|(queued, _)| *queued != seq);
-                // ONE SPURIOUS-REJECT WINDOW REMAINS AND IS UNAVOIDABLE: an
-                // abort landing INSIDE `send` after the bytes reached the wire
+                // One spurious-reject window remains and is unavoidable: an
+                // abort landing inside `send` after the bytes reached the wire
                 // but before it returns leaves the receipt in place, so the
                 // command is reported undelivered though the venue saw it. That
                 // is the safe direction - the caller is told less happened than
@@ -808,14 +808,14 @@ async fn run_ws_connection_inner<
         on_disconnect().await;
         connected.store(false, Ordering::Relaxed);
         if let Some(kind) = terminal {
-            // Each of these is terminal, and saying WHICH matters to an
+            // Each of these is terminal, and saying which one matters to an
             // operator reading the log: a completed run is the expected end of
             // a connection, while an eviction means another connection claimed
             // this account under a different callsign - a configuration
             // problem, not a finish line.
             //
-            // ALL THREE ARMS ARE NOW EXACT. The venue announces a finished run
-            // and an elapsed passenger duration as DIFFERENT frames, so the
+            // All three arms are now exact. The venue announces a finished run
+            // and an elapsed passenger duration as different frames, so the
             // inbound-text arm above classifies each correctly and breaks
             // without needing the close that follows; the close agrees with it
             // and remains the fallback for a reader that lost the frame.
@@ -871,27 +871,27 @@ async fn recv_command<Cmd>(rx: &mut Option<UnboundedReceiver<Cmd>>) -> Option<Cm
 
 /// Classifies an inbound reader item: `None` for a live frame the select loop
 /// should process, otherwise the operator-facing cause of the disconnect. The
-/// cause matters because a venue outage-and-recovery used to leave ZERO
+/// cause matters because a venue outage-and-recovery used to leave zero
 /// connection-lifecycle lines in the log - the reconnect machinery worked
-/// silently while an unrelated WARN storm named phantom causes - so the one
+/// silently while an unrelated `warn` storm named phantom causes - so the one
 /// line announcing the disconnect must say what actually happened on the
 /// socket.
 ///
-/// The close CODE is reported, never acted on HERE - the one close this loop
+/// The close code is reported, never acted on in this function - the one close this loop
 /// acts on is classified upstream by `mogwai_protocol::close::classify`, from
-/// the close REASON, and never reaches this function. A venue fault closes the
+/// the close reason, and never reaches this function. A venue fault closes the
 /// socket with WS 1011, and that is deliberately treated here as an ordinary
 /// disconnect: the adapter reconnects, resubscribes, and carries on. Making a
-/// venue fault terminal end to end is the CONSUMER's decision, not the
+/// venue fault terminal end to end is the consumer's decision, not the
 /// adapter's - mogwai's job is to state the fault as clearly as it can and
 /// decline to repair it downstream, the same principle that governs reconnect
 /// account staleness above. An adapter that unilaterally killed the run would be
 /// making a policy call on behalf of whoever embedded it.
 ///
-/// A LAGGED FEED IS NOT ONE OF THESE, and used to be. The venue declares a
+/// A lagged feed is not one of these, though it used to be. The venue declares a
 /// market-view hole with `FeedLagged` and keeps serving, so no disconnect
 /// happens at all and this function never sees it.
-/// Which terminal a venue FRAME announces, if any.
+/// Which terminal a venue frame announces, if any.
 ///
 /// The two terminal announcements are distinct variants precisely so this can
 /// be exact. It used to test for `RunComplete` alone, because that was the only
@@ -930,9 +930,9 @@ fn disconnect_cause(
 }
 
 /// Queues the reattach commands a fresh connection owes the venue, reporting
-/// EVERY one it could not queue - including the ones behind the failure.
+/// every single one it could not queue - including the ones behind the failure.
 ///
-/// TELLING THE CALLER IS NOT OPTIONAL, and that applies to the untried
+/// Telling the caller is never optional, and that applies to the untried
 /// remainder too. This used to `break` after reporting the single command that
 /// hit a dead writer, dropping the rest of the vector on the floor: the caller
 /// heard about one loss and nothing about the ones after it, which is the same
@@ -941,8 +941,8 @@ fn disconnect_cause(
 /// filed for it, so the remainder is reported here or nowhere.
 ///
 /// Stopping at the first failure is still right - the writer is gone and every
-/// later `send_command` would fail identically - so the loop stops TRYING and
-/// keeps REPORTING. `seq` is advanced by reference so the caller's numbering
+/// later `send_command` would fail identically - so the loop stops trying and
+/// keeps reporting. `seq` is advanced by reference so the caller's numbering
 /// continues past whatever was queued here.
 fn send_reattach_commands<Cmd, Serialize, OnUndelivered>(
     commands: Vec<Cmd>,
@@ -969,7 +969,7 @@ fn send_reattach_commands<Cmd, Serialize, OnUndelivered>(
 }
 
 /// Encodes `cmd` and queues it for the writer, recording a receipt in
-/// `unwritten` so a socket that dies before the frame is written can say WHICH
+/// `unwritten` so a socket that dies before the frame is written can say which
 /// commands it swallowed. See `run_ws_connection`'s `on_undelivered`.
 ///
 /// Returns the command back on failure rather than dropping it: an encode
@@ -991,7 +991,7 @@ where
         tracing::error!("dropping a websocket command that would not encode");
         return Some(cmd);
     };
-    // The receipt goes in BEFORE the queue, never after: the writer can retire
+    // The receipt goes in before the queue, never after: the writer can retire
     // a seq the instant the frame is queued, and a receipt filed afterwards
     // would then outlive the write it was meant to cover and be reported as
     // undelivered when the socket dies.
@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     /// `Command` is not `PartialEq`, and its wire form is the identity
-    /// that matters here anyway: these tests assert WHICH command came back.
+    /// that matters here anyway: these tests assert which command came back.
     fn ids_of(msgs: &[Command]) -> Vec<String> {
         msgs.iter()
             .map(|msg| match msg {
@@ -1067,7 +1067,7 @@ mod tests {
             .collect()
     }
 
-    /// THE RECEIPT BOOK, at the level where its two halves are separable.
+    /// The receipt book, at the level where its two halves are separable.
     ///
     /// `send_command` files a receipt before queueing the frame, and only the
     /// expression that saw `writer.send` return `Ok` retires it - so a frame
@@ -1139,9 +1139,9 @@ mod tests {
         );
     }
 
-    /// THE COMMANDS BEHIND THE FAILURE ARE UNDELIVERIES TOO.
+    /// The commands behind the failure are undeliveries too.
     ///
-    /// A dead writer fails the FIRST reattach command, and the rest of the
+    /// A dead writer fails the first reattach command, and the rest of the
     /// vector is never even tried - so no receipt exists for any of them and
     /// the caller hears about them here or never. Reporting only the one that
     /// failed is the shape this test exists to forbid: it is indistinguishable,
@@ -1181,7 +1181,7 @@ mod tests {
         );
     }
 
-    /// THE LOOP'S EXIT IS AN UNDELIVERY. Commands still sitting in the command
+    /// The loop's exit is itself an undelivery. Commands still sitting in the command
     /// receiver when `run_ws_connection` returns die with the receiver, and
     /// nothing else in this crate can see them: `send_command` never ran, so no
     /// receipt exists, and the caller was told `Ok` when it enqueued.
@@ -1212,7 +1212,7 @@ mod tests {
         );
     }
 
-    /// A venue that ANSWERS, correctly, and reports no run is version skew - not
+    /// A venue that answers, correctly, and reports no run is version skew - not
     /// a transport failure, and not a mismatch.
     ///
     /// All three non-mismatch paths behave identically (the connection
@@ -1459,7 +1459,7 @@ mod tests {
     }
 
     /// As `run_lifecycle`, but drives a caller-supplied command receiver and
-    /// returns every command reported UNDELIVERED, in report order.
+    /// returns every command reported undelivered, in report order.
     async fn run_lifecycle_recording(
         port: u16,
         conn: ConnHavoc,
@@ -1517,8 +1517,8 @@ mod tests {
             }
         });
 
-        // THE LADDER ESCALATES ON PURPOSE, and that is what buys this test its
-        // margin. With a FLAT 100 ms backoff the two legal outcomes sit 100 ms
+        // The ladder escalates on purpose, and that is what buys this test its
+        // margin. With a flat 100 ms backoff the two legal outcomes sit 100 ms
         // apart - two sleeps (200 ms) versus the pointless third (300 ms) - so
         // the upper bound had 100 ms to cover three loopback dials, three WS
         // handshakes and three task spawns, measured here at 3-4.5 ms on an idle
@@ -1526,7 +1526,7 @@ mod tests {
         // first two sleeps 100 + 200 = 300 ms and a third 400 ms more, so the
         // window below is 250..500 against a defect that lands at ~700: ~200 ms
         // of headroom on each side for 100 ms of extra wall. The separation is
-        // the SIGNAL, not the assertion - widening the window would only have
+        // the signal here, not the assertion - widening the window would only have
         // moved the goalposts toward the defect.
         let conn = ConnHavoc {
             reconnect_delay_initial_ms: 100,
@@ -1591,16 +1591,16 @@ mod tests {
     /// transport event, not a finish line: the loop must redial.
     ///
     /// This is the defect directly. The old arm read `CloseCode::Normal` alone,
-    /// so ANY 1000 - a proxy retiring an idle socket, a venue restart, and the
+    /// so any 1000 at all - a proxy retiring an idle socket, a venue restart, and the
     /// venue's own eviction close, which is deliberately 1000 - permanently
-    /// disabled reconnect with an INFO line claiming the run had completed.
-    /// The stub sends a REASONED 1000 whose reason this protocol does not
+    /// disabled reconnect with an `info` line claiming the run had completed.
+    /// The stub sends a 1000 carrying a reason this protocol does not
     /// define - a proxy's idle close is the everyday shape - and the attempt
     /// cap is what makes the test terminate: three dials means the loop kept
     /// redialling, one means it treated the close as terminal.
     ///
     /// The reason must be present. `ws.close(None)` sends `Close(None)`, which
-    /// the OLD code did not match either (it required `Close(Some(frame))`), so
+    /// the old code did not match either (it required `Close(Some(frame))`), so
     /// a stub closing with `None` passes against the defect and proves nothing.
     /// A first draft of this test did exactly that and was caught by its own
     /// bite-check.
@@ -1639,7 +1639,7 @@ mod tests {
         assert_eq!(
             dials.load(Ordering::Relaxed),
             3,
-            "an unreasoned 1000 close must redial to the cap; reading the CODE as \
+            "an unreasoned 1000 close must redial to the cap; reading the code alone as \
              completion returns after the first close instead"
         );
         venue.abort();
