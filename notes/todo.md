@@ -82,47 +82,47 @@ undone. Neither is urgent; both modes must eventually be supported.
   near the tape origin cannot carry its own warmup. Better as a named refusal at
   request time than a short warmup nobody notices.
 
-- **Server mode should boot riverless.** Ruled by the owner 2026-08-20; not
-  designed, not landed. A shared exchange has seen no request at boot, so the
-  eagerly warmed boot river is a guess paid for in full warmup synthesis before
-  readiness plus a permanent boat, pacing thread and sweeper slot, while
-  demand-driven materialization already serves every other river.
+- **A first materialization that fails is reported as the caller's mistake.**
+  This is the residue riverless boot named and did not close, and riverless boot
+  made it the only path for every label. Placement performs a river's first
+  materialization, so a generator that cannot produce a shape the config already
+  validated is a venue fault - and it reaches the consumer as a `400` from
+  `ws_upgrade`, never latches, never reaches the tape fault channel and never
+  shows on `/health`. The venue can therefore announce a healthy readiness line
+  and then describe its own failure as a bad request, which is the one reading a
+  consumer cannot recover from: it will retry a request that was never wrong.
 
-  The venue can tell the modes apart at boot: server mode is `mogwai serve`,
-  transient mode is `mogwai_protocol::launch::launch(spec)`, and the launch path
-  always passes `--launcher-pid` where an operator's command line does not. (The
-  cannot-tell-them-apart fact about clients is a different question.) So a
-  transient venue keeps today's eager boot river and a server-mode venue boots
-  riverless. Two consequences to decide with it: readiness stops implying any
-  warm river in server mode, and a `/ws` bind naming no symbol on a riverless
-  venue needs a decided answer, presumably the default preset materialized on
-  demand. `reference/glossary.md`'s boot-river entries describe what is and stay
-  as they are until this lands.
+  Two things are missing. Placement runs before `Tape::start` installs the fault
+  sender, so there is nothing to send on yet; and `TickFault` has no variant for
+  a materialization that could not proceed. Closing it means giving the run a
+  latched materialization fault that follows the terminal path and answers
+  `/health`, and handing every waiter on the same placement that terminal rather
+  than a per-caller refusal.
 
-  For the transient path, where the venue really does know its one symbol up
-  front, a boot symbol supplied at launch would additionally move the funding
-  refusal to boot: today a config funding only USDT boots happily and refuses
-  `MNQ` at first bind, because only configured shapes are funding-checked at boot
-  while presets and the fallback are merely recorded as barred.
-
-- **One ledger, one cadence.** Seats are keyed by (river, speed) and an unserved
-  speed is a second cursor on the same water, so the only surviving refusal is a
-  second socket on an account already riding that river at another speed. Two
-  cadences over one river share the checkpoint chain underneath, so serving this
-  is a per-ledger clock question rather than a second river.
+  For the transient path, a boot symbol supplied at launch would additionally
+  move the funding refusal to boot: today a config funding only USDT boots
+  happily and refuses `MNQ` at first bind, because only configured shapes are
+  funding-checked at boot while presets and the fallback are merely recorded as
+  barred.
 
 ## Venue and protocol
 
-- Should one ledger, one cadence be account-wide rather than per river? Today an
-  account may ride two rivers at two speeds, which is a supported shape and what
-  the default account's two-symbol case depends on. But a ledger's balances,
-  settled cash, daily resets and peak-equity ratchet are all functions of
-  simulated time, so an account reading two rivers at two cadences already
-  drifts - which is the multi-river peak-equity item below, seen from the
-  admission side rather than the valuation side. Tightening it is a
-  consumer-visible refusal and therefore an owner call; the machinery to enforce
-  it is already in place, since the rule is decided in one predicate at
-  reservation.
+- Where should one ledger, one cadence sit? It is per river today: an account may
+  ride two rivers at two speeds, which is a supported shape and what the default
+  account's two-symbol case depends on, but a second speed of one river is
+  refused. Both directions are open and it is one owner call, because the
+  machinery decides it in a single predicate at reservation.
+
+  Tighter, account-wide: a ledger's balances, settled cash, daily resets and
+  peak-equity ratchet are all functions of simulated time, so an account reading
+  two rivers at two cadences already drifts - the multi-river peak-equity item
+  below, seen from the admission side rather than the valuation side. This costs
+  a consumer-visible refusal on a shape that works today.
+
+  Looser, served rather than refused: two cadences over one river share the
+  checkpoint chain underneath, so a second speed is a second cursor rather than a
+  second river. Serving it means giving the engine per-cursor temporal ownership
+  of orders and marks, which is the real prerequisite.
 
 - A passenger whose own duration ends is sent a `RunComplete` frame before the
   `close::DURATION_COMPLETE` close, identically to the whole-run arm
@@ -515,17 +515,14 @@ undone. Neither is urgent; both modes must eventually be supported.
   case that is silent.
 
 - `await_account_registered` and `wait_connected` are busy-wait shims inside
-  `connect()`. Both poll on a 10 ms sleep for up to 5 s, roughly 500 wakeups on a
-  slow boot, and neither is sim-scaled unlike every other sleep in the lifecycle,
-  so under an accelerated clock they are the only wall-time waits in the boot
-  path. Both want a notifier: the connected flag is the adapter's own and could
-  carry a `tokio::sync::Notify` beside it, and the cache poll wants nautilus to
-  signal registration.
-
-  `wait_connected`'s hardcoded 5 s is the sharper half: neither sim-scaled nor
-  configurable, it can fail `connect` against a venue correctly paying a fresh
-  river's warmup inside the first request. The dial path names the cold-river
-  case; the connect wait does not.
+  `connect()`. Both poll on a 10 ms sleep, roughly 500 wakeups on a slow boot,
+  and both are wall time rather than sim-scaled, so under an accelerated clock
+  they are the only wall-time waits in the boot path. Wall is correct for what
+  they wait on - a websocket upgrade and a cache registration are host work - so
+  what is left is the polling. Both want a notifier: the connected flag is the
+  adapter's own and could carry a `tokio::sync::Notify` beside it, and the cache
+  poll wants nautilus to signal registration. `await_account_registered` also
+  still carries its own 5 s bound.
 
 - The adapter cannot name a speed or a duration: `ws_url` emits neither, both
   configs carry no field for them, and the venue reads both. Related, the venue's
@@ -853,10 +850,8 @@ undone. Neither is urgent; both modes must eventually be supported.
 - `mogwai-venue`'s channel capacity `1024` is duplicated inline for the writer
   channel and the exec-delay pump - different traffic classes, so either they
   share a const or they get two named ones.
-- `mogwai-adapter`: `wait_connected` re-hardcodes a 5s/10ms pair matching
-  `ACCOUNT_REGISTRATION_TIMEOUT` and `_POLL` by value without sharing them, and
-  `1_000_000_000` appears inline five or more times across `client.rs` and
-  `lifecycle.rs` where a `NANOS_PER_SEC` const belongs.
+- `mogwai-adapter`: `1_000_000_000` appears inline five or more times across
+  `client.rs` and `lifecycle.rs` where a `NANOS_PER_SEC` const belongs.
 - `mogwai-data`'s `1e9` mid-price runaway ceiling is duplicated at two sites.
 - `arrival_screen`'s `DEFAULT_MAX_JOBS` carries no comment naming the measurement
   behind it, and `arrival_envelope_diagnostic` applies no 16-job cap at all while

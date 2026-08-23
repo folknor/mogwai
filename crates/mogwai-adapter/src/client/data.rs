@@ -578,7 +578,7 @@ impl DataClient for MogwaiDataClient {
         // `connected` flag, so a retry would spawn a second reader racing the
         // first. Abort the task and clear the stale handle and ws_cmd before
         // propagating, leaving the client cleanly disconnected for retry.
-        if let Err(err) = wait_connected(&self.connected, &ws_url).await {
+        if let Err(err) = wait_connected(&self.connected, &ws_url, dial_timeout).await {
             abort_tasks(&self.task_handles);
             self.retire_connected_flag();
             return Err(err);

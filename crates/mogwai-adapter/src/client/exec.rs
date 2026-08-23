@@ -1231,7 +1231,7 @@ impl ExecutionClient for MogwaiExecutionClient {
         // See MogwaiDataClient::connect: a timed-out connect must abort the
         // just-spawned reader and clear the stale handle/ws_cmd so a retry does
         // not orphan the first task racing on the shared `connected` flag.
-        if let Err(err) = wait_connected(&self.connected, &ws_url).await {
+        if let Err(err) = wait_connected(&self.connected, &ws_url, dial_timeout).await {
             abort_tasks(&self.task_handles);
             self.retire_connected_flag();
             self.ws_cmd = None;

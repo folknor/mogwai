@@ -614,18 +614,37 @@ pub(crate) fn now_unix_nanos(sim: SimClock) -> UnixNanos {
     // map then places adapter-side `ts_init` on the same axis as the venue.
     UnixNanos::from(sim.sim_ns(mogwai_protocol::now_unix_nanos()))
 }
+/// Wait for the reader task to report its socket open, under the same deadline
+/// that bounds the dial itself.
+///
+/// The bound is supplied rather than chosen here, and that is the point. It was
+/// five hardcoded seconds, from when the first boarding always found its water
+/// already warm. Nothing is warm at boot any more: every river is synthesized
+/// inside the request that first names it, so an upgrade legitimately takes as
+/// long as a cold river's whole warmup span. A dial that the consumer may bound
+/// at sixty seconds, sitting behind an outer wait that gives up at five, fails
+/// the connect while the venue is still doing exactly what it was asked to do -
+/// and no amount of retrying repairs it, because the retry meets the same wall.
+///
+/// Wall time, never sim-scaled: synthesis and the websocket upgrade are host
+/// work, and an accelerated clock does not make them finish sooner.
 pub(crate) async fn wait_connected(
     connected: &Arc<AtomicBool>,
     ws_url: &str,
+    timeout: Duration,
 ) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         if connected.load(Ordering::Relaxed) {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    anyhow::bail!("connect websocket {ws_url} timed out")
+    anyhow::bail!(
+        "connect websocket {ws_url} timed out after {secs}s; a venue synthesizing a cold river \
+         inside this upgrade can legitimately take longer, and `dial_timeout_secs` raises this",
+        secs = timeout.as_secs()
+    )
 }
 
 #[cfg(test)]
