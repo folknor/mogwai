@@ -67,18 +67,21 @@ pub fn touches_trigger(side: Side, trigger: Decimal, traded: Decimal) -> bool {
 pub enum ScanKind {
     /// `trades_through` against a live limit's drawn band trigger.
     FillThrough,
-    /// `touches_trigger` against an untriggered stop's trigger price.
-    TriggerTouch,
+    /// `touches_trigger` against an untriggered stop's trigger price. The stop
+    /// family, and only that.
+    StopTrigger,
     /// `touches_toward` against an untriggered touched order's trigger price.
+    /// The touched-order family, and only that: market-if-touched and
+    /// limit-if-touched.
     ///
-    /// The complement of `TriggerTouch` in direction and its twin in strictness.
+    /// The complement of `StopTrigger` in direction and its twin in strictness.
     /// A stop protects - buy above the market, sell below - so it fires when
     /// price runs away from where you are. A touched order enters - buy below,
     /// sell above - so it fires when price comes toward its level. Same
     /// machinery, opposite comparison; collapsing them into one predicate with a
     /// flag would put the two most easily confused behaviours in the venue
     /// behind one boolean.
-    TriggerToward,
+    TouchedTrigger,
 }
 
 impl ScanKind {
@@ -86,8 +89,8 @@ impl ScanKind {
     pub fn hit(self, side: Side, px: Decimal, traded: Decimal) -> bool {
         match self {
             Self::FillThrough => trades_through(side, px, traded),
-            Self::TriggerTouch => touches_trigger(side, px, traded),
-            Self::TriggerToward => touches_toward(side, px, traded),
+            Self::StopTrigger => touches_trigger(side, px, traded),
+            Self::TouchedTrigger => touches_toward(side, px, traded),
         }
     }
 }
@@ -782,13 +785,21 @@ impl CommandClass {
     /// The class of an order-entry command, or `None` for anything else -
     /// queries. Queries are deliberately classless: the
     /// reconciliation witness is never made the slowest thing on the venue.
+    ///
+    /// Exhaustive rather than wildcarded, for the same reason
+    /// `EventKind::is_execution` is: the compiler carries the claim. A wildcard
+    /// arm let a new order-entry command compile clean as classless, which is
+    /// silently outside every `CommandLatency` window. Here a new variant must
+    /// opt in or out explicitly.
     #[must_use]
     pub fn of(cmd: &Command) -> Option<Self> {
         match cmd {
             Command::SubmitOrder(_) | Command::SubmitOrderGroup { .. } => Some(Self::Submit),
             Command::ModifyOrder { .. } => Some(Self::Modify),
             Command::CancelOrder { .. } => Some(Self::Cancel),
-            _ => None,
+            Command::QueryOrders { .. }
+            | Command::QueryFills { .. }
+            | Command::QueryHistory { .. } => None,
         }
     }
 }
@@ -1564,21 +1575,20 @@ pub enum VenueMessage {
         elapsed_ns: u64,
         declared_duration_ns: u64,
     },
-    /// The venue refused to do the work, before any engine state was touched:
-    /// its per-connection outbound capacity could not cover the command's
-    /// worst-case output, or the request could not be decoded at all.
-    /// `subject` names what was refused so the refusal is translatable per
-    /// command (a refused cancel is not a rejected order).
+    /// The venue could not admit a command or a frame, and said so instead of
+    /// dropping it: it refused to do the work before any engine state was
+    /// touched, because its per-connection outbound capacity could not cover the
+    /// command's worst-case output, or because the request could not be decoded
+    /// at all. `subject` names what was refused so the refusal is translatable
+    /// per command (a refused cancel is not a rejected order), and `reason` is
+    /// venue-generated and truncated to `MAX_REASON_LEN`, which with the
+    /// identifier caps is what bounds this frame by
+    /// `ADMISSION_FRAME_MAX_BYTES`.
     ///
     /// Admission truth, not engine output: it classifies `EventKind::Admission`,
     /// rides the venue's priority lane, and is deliberately not held by a
     /// `DelayAcks` window - the knob that holds engine output does not reach
     /// something the engine never produced. See `docs/havoc.md`.
-    /// `reason` is venue-generated and truncated to `MAX_REASON_LEN`, which
-    /// with the identifier caps is what bounds this frame by
-    /// `ADMISSION_FRAME_MAX_BYTES`.
-    /// The venue could not admit a command or a frame, and said so instead of
-    /// dropping it.
     ///
     /// Every admission refusal is backpressure, which is what `retryable` says
     /// as data rather than as prose. It matters because of what happens to this
@@ -1681,8 +1691,8 @@ pub enum VenueMessage {
         ts_event: u64,
     },
     /// The venue received a `CancelOrder` it could not honor: the target is
-    /// unknown, already terminal (filled or canceled), or the cancel is
-    /// otherwise illegal.
+    /// unknown, already terminal (filled, canceled, expired or rejected), or
+    /// the cancel is otherwise illegal.
     ///
     /// Distinct from `OrderRejected`, which terminates the order. A rejected
     /// cancel does not kill the order - it is still whatever it was (Accepted,
@@ -2349,11 +2359,11 @@ mod tests {
                     trades_through(side, px, traded)
                 );
                 assert_eq!(
-                    ScanKind::TriggerTouch.hit(side, px, traded),
+                    ScanKind::StopTrigger.hit(side, px, traded),
                     touches_trigger(side, px, traded)
                 );
                 assert_eq!(
-                    ScanKind::TriggerToward.hit(side, px, traded),
+                    ScanKind::TouchedTrigger.hit(side, px, traded),
                     touches_toward(side, px, traded)
                 );
             }
@@ -2448,11 +2458,12 @@ mod tests {
     /// `an_opening_balance_must_be_spelled_as_a_string`).
     ///
     /// Tolerant, deliberately, and the list is exhaustive as of this round:
-    /// `control::Divergence` (`POST /control/divergence`), `risk::RiskPolicy`
-    /// and `risk::AccountPolicy` around it, and `instruments::InstrumentSpec`.
-    /// The last three are also TOML config, where `multiplier = 2` is the
-    /// natural spelling, and all of them carry fractions and thresholds rather
-    /// than a booked quantity.
+    /// `control::Divergence` (`POST /control/divergence`),
+    /// `risk::AccountPolicy` together with the rule structs it nests
+    /// (`TrailingDrawdown`, `DailyLossLimit`, `OverallDrawdown`,
+    /// `MaxPosition`), and `instruments::InstrumentDef`. The last two are also
+    /// TOML config, where `multiplier = 2` is the natural spelling, and all of
+    /// them carry fractions and thresholds rather than a booked quantity.
     ///
     /// Nothing detects a new `Decimal` field that forgets the annotation. The
     /// table below is exhaustive by hand over this module's 35 serde `Decimal`

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `mogwai gen` - runs the synthetic generator offline (no venue, no sockets,
-//! no adapter) and writes its output as CSV, either raw trades or aggregated
-//! OHLCV bars, so the generated tape can be charted and inspected. Reuses the
+//! no adapter) and writes its output as CSV - raw trades or aggregated OHLCV
+//! bars - or as JSON for the measurement modes (summary, trace, measure12a),
+//! so the generated tape can be charted and inspected. Reuses the
 //! venue's own generation plumbing (`InstrumentProfiles`, `fingerprint()`,
 //! `GeneratedSource`) and the shared bar-aggregation core
 //! (`mogwai_data::{BarAcc, fold_trade}`), so the process is the shipped one.
@@ -58,10 +59,12 @@ pub(crate) enum GenType {
     Measure12a,
 }
 
-/// `mogwai gen` arguments. Dumps the offline generator as CSV.
+/// `mogwai gen` arguments. Walks the offline generator and dumps it as CSV
+/// (trades, bars) or as JSON (summary, trace, measure12a).
 #[derive(Args)]
 pub(crate) struct GenArgs {
-    /// What to emit: raw trades, or aggregated OHLCV bars.
+    /// What to emit: trades or bars as CSV, summary, trace or measure12a as
+    /// JSON.
     #[arg(long = "type", value_enum, default_value = "trades")]
     kind: GenType,
     /// Sim-time span to generate: `<n><unit>`, unit one of s m h d w mo y

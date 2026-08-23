@@ -1,9 +1,11 @@
 # Example configuration for one foreground run.
 speed = 1.0
-# The account this run's ledger is reported under. Names it rather than selects
-# it - there is one ledger - but the consumer asserts it, so it has to be the
-# account the host expects. Must be ISSUER-NUMBER: a nautilus AccountId cannot
-# be built from a bare word.
+# The default account: the ledger a connection naming none is served under. A
+# run holds one ledger per account id, and a socket may name its own with
+# /ws?account=, so this picks the default rather than declaring the venue's one
+# account. The consumer asserts it, so it has to be the account the host
+# expects. Must be ISSUER-NUMBER: a nautilus AccountId cannot be built from a
+# bare word.
 account_id = "MOGWAI-001"
 # seed = 42 # Absent means a fresh seed is drawn and reported at launch.
 venue_heartbeat_ms = 0
@@ -46,8 +48,18 @@ global_pending_command_acts = 4096
 # whoever launches the run. Omitted, the generator's baseline applies.
 # [regime]
 
-# Initial funding. The quote currency of the symbol this run serves MUST appear
-# here, or boot is refused: an unfunded quote means every buy rejects for
-# insufficient balance.
+# Initial funding, keyed by currency. A shape can only trade if its settlement
+# currency is funded here - the quote currency for a spot pair, the
+# settlement_currency for a future or a swap. A shape you configured is checked
+# at boot and an unfunded one refuses the run. Every shipped preset is resolved
+# at boot too, and one whose settlement currency is unfunded is recorded as
+# funding-barred: a consumer asking for a symbol that lands on it is refused
+# when it binds, rather than having every buy rejected for insufficient balance
+# minutes in.
+#
+# So these default balances fund USDT only, which covers BTCUSDT and every
+# unmatched symbol resolving through it, but not the USD-settled MNQ and MES
+# bundles. Add USD below for a run whose consumers may ask for the index
+# futures. An empty table is the deliberate unfunded run, with funds checks off.
 [balances]
 USDT = "1000000"

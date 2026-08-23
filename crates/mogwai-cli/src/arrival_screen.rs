@@ -42,7 +42,10 @@ pub struct ArrivalScreenArgs {
     pub demand_census: Option<PathBuf>,
     #[arg(long, value_name = "DIR")]
     pub cache: Option<PathBuf>,
-    /// Concurrent projection workers. Defaults to machine parallelism, capped at 16.
+    /// Concurrent (cell, seed) projection workers. Defaults to the machine's
+    /// reported parallelism capped at 16, because past that the measured
+    /// SMT contention makes the run slower rather than faster. An explicit
+    /// value is the host-specific override and is not capped.
     #[arg(long)]
     pub jobs: Option<usize>,
 }

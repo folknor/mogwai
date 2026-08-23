@@ -2235,7 +2235,12 @@ impl Engine {
                 .iter()
                 .any(|prefix| order.client_order_id.starts_with(prefix))
         {
-            return Err("client_order_id uses reserved liquidation prefix".into());
+            // The list is formatted in rather than spelled out, so the message
+            // cannot name a narrower set than the check enforces.
+            return Err(format!(
+                "client_order_id uses a venue-reserved prefix ({})",
+                crate::RESERVED_ID_PREFIXES.join(", ")
+            ));
         }
 
         // "Duplicate" means an id already accepted (the map is populated only on
@@ -3501,9 +3506,11 @@ fn on_increment(value: Decimal, increment: Decimal) -> bool {
 }
 
 /// Distinguishes a cancel/modify target that was never a real order from one
-/// that was accepted but has since gone terminal (filled - the no-book engine
+/// that was accepted but has since gone terminal: filled - the no-book engine
 /// fills a limit immediately on accept, so it can already be gone by the time
-/// a cancel/modify for it arrives - or already canceled). `seen_client_order_ids`
+/// a cancel/modify for it arrives - canceled, expired, or refused after
+/// acceptance. The reason text names none of them, because it covers all four.
+/// `seen_client_order_ids`
 /// is populated only on accept and never cleared, so key presence is exactly
 /// "this id was once a real order, just not a resting one anymore" - and the
 /// venue id retained alongside it goes out on the reject, upholding the wire
@@ -3516,7 +3523,7 @@ fn terminal_or_unknown_reject(
 ) -> (String, Option<VenueOrderId>) {
     match seen.get(client_order_id) {
         Some(venue_order_id) => (
-            "order already terminal (filled or canceled)".into(),
+            "order already terminal".into(),
             Some(venue_order_id.clone()),
         ),
         None => ("unknown order".into(), None),

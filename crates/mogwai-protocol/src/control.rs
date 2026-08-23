@@ -9,13 +9,65 @@
 
 use crate::{ClientOrderId, Decimal, Deserialize, Serialize};
 
-/// Upper bound on any single divergence's `ms` window, enforced by
-/// `validate_divergence`.
+/// The decimal spelling of the bound as a number. A `const fn` because that is
+/// what lets the bound and the refusal texts below share one written spelling
+/// instead of each carrying its own.
+const fn parse_ms(text: &str) -> u64 {
+    let bytes = text.as_bytes();
+    let mut value = 0u64;
+    let mut at = 0;
+    while at < bytes.len() {
+        assert!(
+            bytes[at].is_ascii_digit(),
+            "the bound's spelling must be decimal digits"
+        );
+        // `u64::from` is a trait method, so it is unavailable in a const fn.
+        value = value * 10 + (bytes[at] - b'0') as u64;
+        at += 1;
+    }
+    value
+}
+
+/// The bound and every refusal that quotes it, from one written spelling.
 ///
-/// One hour is far longer than any test blackout, data-stall, or ack-delay
-/// scenario needs, and `3_600_000 * 1_000_000` ns is well below `u64::MAX`,
-/// so validated temporal windows cannot saturate writer deadlines.
-pub const MAX_DIVERGENCE_MS: u64 = 3_600_000;
+/// The validators return `&'static str` and Rust has no const formatting, so a
+/// message naming the ceiling has to splice a literal in at compile time. Doing
+/// that here, off the same literal the bound itself is parsed from, is what
+/// keeps the hour written once: the alternative is a message that goes on
+/// quoting an old ceiling after the bound moves, with nothing able to notice.
+macro_rules! divergence_bound {
+    ($spelled:literal) => {
+        /// Upper bound on any single divergence's `ms` window, enforced by
+        /// `validate_divergence`.
+        ///
+        /// One hour is far longer than any test blackout, data-stall, or
+        /// ack-delay scenario needs, and an hour expressed in nanoseconds is
+        /// well below `u64::MAX`, so validated temporal windows cannot saturate
+        /// writer deadlines.
+        pub const MAX_DIVERGENCE_MS: u64 = parse_ms($spelled);
+
+        /// Refusal text for an over-range `GeneratorArm::normalize` duration.
+        pub(crate) const REFUSE_GENERATOR_DURATION: &str =
+            concat!("generator duration_ms must be <= ", $spelled);
+        /// Refusal text shared by the three single-window divergences.
+        pub(crate) const REFUSE_WINDOW_MS: &str = concat!(
+            "DelayAcks/GoDark/StallData ms must be <= ",
+            $spelled,
+            " (one hour)"
+        );
+        /// Refusal text for any over-range `CommandLatency` field.
+        pub(crate) const REFUSE_COMMAND_LATENCY: &str = concat!(
+            "CommandLatency fields must each be <= ",
+            $spelled,
+            " (one hour)"
+        );
+        /// Refusal text for an over-range `FeeSurcharge` window.
+        pub(crate) const REFUSE_FEE_WINDOW: &str =
+            concat!("FeeSurcharge window_ms must be <= ", $spelled);
+    };
+}
+
+divergence_bound!("3600000");
 
 /// Fixed-point scale for a generator multiplier: parts per million.
 pub const GENERATOR_MULT_SCALE: u64 = 1_000_000;
@@ -73,7 +125,7 @@ impl GeneratorArm {
             return Err("generator children_mult must be in [1, 100]");
         }
         if duration_ms > MAX_DIVERGENCE_MS {
-            return Err("generator duration_ms must be <= 3600000");
+            return Err(REFUSE_GENERATOR_DURATION);
         }
         let scale = |value: f64| -> u64 {
             #[expect(

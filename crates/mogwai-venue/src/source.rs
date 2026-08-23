@@ -761,7 +761,7 @@ impl Rivers {
         let target = start.unwrap_or(TAPE_ORIGIN_NS);
         let river = self.river(key)?;
         reach_river(&river, target).map_err(MaterializeRefusal::Reach)?;
-        let Some(positioned) = locked(&river.checkpoints).try_source_at_or_before(target) else {
+        let Some(positioned) = locked(&river.checkpoints).try_source_before(target) else {
             return Err(MaterializeRefusal::Reach(anyhow::anyhow!(
                 "river {} cannot reach {target}",
                 key.symbol()
@@ -837,7 +837,7 @@ impl Rivers {
         let river = self.river(key).map_err(anyhow::Error::new)?;
         reach_river(&river, origin_ns)?;
         let mut positioned = locked(&river.checkpoints)
-            .try_source_at_or_before(origin_ns)
+            .try_source_before(origin_ns)
             .ok_or_else(|| anyhow::anyhow!("river {} cannot reach {origin_ns}", key.symbol()))?;
         let first = positioned.seek_to(origin_ns);
         Ok(Box::new(BoatCursor {

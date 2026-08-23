@@ -465,12 +465,7 @@ impl Engine {
         }
     }
 
-    /// The spendable amount of one currency: the booked total minus every
-    /// resting order's hold. This is what the funds checks in
-    /// `validate_submit` and `on_modify` compare an order's requirement
-    /// against, and it matches the `free` the snapshot reports for the same
-    /// currency (both derive from `held_balances` with clamped arithmetic).
-    /// The account's NET quantity in one symbol, across every position key. The
+    /// The account's net quantity in one symbol, across every position key. The
     /// number a short-sale check is against: under hedging two legs of opposite
     /// sign are one net exposure to the borrow desk.
     pub(crate) fn net_position(&self, symbol: &str) -> Decimal {
@@ -483,6 +478,11 @@ impl Engine {
             })
     }
 
+    /// The spendable amount of one currency: the booked total minus every
+    /// resting order's hold. This is what the funds checks in
+    /// `validate_submit` and `on_modify` compare an order's requirement
+    /// against, and it matches the `free` the snapshot reports for the same
+    /// currency (both derive from `held_balances` with clamped arithmetic).
     pub(crate) fn free_balance(&self, currency: &str) -> Decimal {
         let total = *self
             .account

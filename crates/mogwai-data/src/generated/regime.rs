@@ -89,13 +89,18 @@ impl RegimeState {
                 // drawn either way, so an elapsed ReopenGap leaves a stream
                 // byte-identical to no regime at all
                 // (`reopen_gap_at_or_before_anchor_is_consumed_and_matches_clean`
-                // pins this). No tracing dep in this crate, so stderr is the
-                // visible channel - same convention as KrakenCsvSource.
+                // pins this). The notice goes out as a `tracing` warning so a
+                // host running the venue routes it like every other venue
+                // diagnostic - same convention as KrakenCsvSource.
                 if at_ts <= start_ts {
-                    eprintln!(
-                        "GeneratedSource({symbol}): ReopenGap at_ts {at_ts} is at or before \
-                         the tape anchor {start_ts}; the halt has already elapsed and is \
-                         dropped (it would never fire)"
+                    tracing::warn!(
+                        source = "GeneratedSource",
+                        symbol,
+                        at_ts,
+                        anchor_ts = start_ts,
+                        reason = "reopen_gap_already_elapsed",
+                        "ReopenGap at_ts is at or before the tape anchor; the halt has \
+                         already elapsed and is dropped (it would never fire)"
                     );
                 } else {
                     state.reopen = Some(Reopen {

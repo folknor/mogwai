@@ -15,14 +15,24 @@
 //! sweeper's mark cadence until 2026-08-16, so a spike entirely between two
 //! marks was invisible and the account kept room it should have lost.
 //!
-//! It is not closed by evaluating per tick. Equity is linear in the price of the
-//! one instrument an account can be holding - an account is on at most one
-//! river, and strategies are single-instrument - so its extreme over a span is
-//! attained at a price extreme. The tape thread records the high and the low it
-//! reached (`crate::extremes`), and the sweeper replays those two readings in
-//! the order the tape reached them before observing the close. Two valuations
-//! per pass answer what thousands would have, the engine lock is still taken
-//! once, and the tape thread's whole contribution is two comparisons per tick.
+//! It is not closed by evaluating per tick. Equity is linear in each price it
+//! depends on, so an account holding one marked symbol attains its extreme over
+//! a span at that symbol's price extreme. The tape thread records the high and
+//! the low that river reached (`crate::extremes`), and the sweeper replays those
+//! two readings in the order the tape reached them before observing the close.
+//! Two valuations per pass answer what thousands would have, the engine lock is
+//! still taken once, and the tape thread's whole contribution is two comparisons
+//! per tick.
+//!
+//! That is exact for an account on one river. An account rides as many rivers as
+//! its passengers have boarded, and the sweeper judges its policy once per due
+//! boat, so the span in hand covers that boat's river and every other symbol the
+//! account holds is valued at its last mark. Equity is then a sum whose extreme
+//! need not sit at either river's extreme, so the cross-river component is
+//! evaluated at mark cadence and the ratchet below sees a partial reconstruction
+//! of the interval, ordered by whichever boat came due first. It is a stated
+//! bound of the model rather than a defect: what a policy measures per symbol -
+//! a trailing stop, which is monotone in its own river's tape - stays exact.
 //!
 //! The time order is what keeps it honest. A span that spiked and then fell is a
 //! different run from one that fell and then spiked: in the first the ratchet

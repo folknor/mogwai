@@ -338,16 +338,22 @@ passes drags it exactly as a tick-resolution venue would.
 Tick resolution without per-tick evaluation, and this is one mechanism serving
 both the trail and the risk policy. The tape thread records the high and the low
 its river reached since the sweeper last looked, with the instant of each; the
-sweeper takes that span once per pass. Two properties make it exact rather than
-approximate. A trail is a monotone function of the tape, so the maximum over a
-span's ticks is exactly the span's high. Equity is linear in the price of the one
-instrument an account can hold - an account is on at most one river, strategies
-are single-instrument - so its extreme over the span sits at a price extreme.
-The policy therefore observes the two extremes in the order the tape reached
-them and then the close: a spike that opened and closed between passes spends
-drawdown budget, and a collapse that recovered before the pass breaches. Order
-matters and is not a detail - replaying favourable-first would invent breaches
-that never happened. The tape thread's cost is two comparisons and one relaxed
+sweeper takes that span once per pass. A trail is a monotone function of its own
+river's tape, so the maximum over a span's ticks is exactly the span's high, and
+that holds per symbol however many rivers the account rides. Equity is linear in
+each price it depends on, so for an account holding one marked symbol its extreme
+over the span sits at that symbol's price extreme and the two readings carry the
+whole answer. An account riding several rivers is judged once per due boat, with
+that boat's span carrying its river's extremes while every other symbol
+contributes at its last mark, so the cross-river component of equity is evaluated
+at mark cadence rather than at tick resolution. That is a stated bound of the
+model, not a hidden defect, and it is written out again below where the risk
+policy is described.
+
+The policy observes the two extremes in the order the tape reached them and then
+the close: a spike that opened and closed between passes spends drawdown budget,
+and a collapse that recovered before the pass breaches. Order matters and is not
+a detail - replaying favourable-first would invent breaches that never happened. The tape thread's cost is two comparisons and one relaxed
 load per tick, and it publishes only when an extreme actually moves.
 
 Time-in-force covers Gtc, Ioc, Fok, Day and Gtd. A conditional may be Day or Gtd
@@ -466,17 +472,23 @@ surface.
 
 The policy is evaluated at tick resolution, through the span of extremes the
 tape thread records rather than through a per-tick evaluation. See the trailing
-stop above for the mechanism and why it is exact: a spike lasting a fraction of a
-sweep interval spends drawdown budget, and a collapse that recovers before the
-pass still breaches.
+stop above for the mechanism: a spike lasting a fraction of a sweep interval
+spends drawdown budget, and a collapse that recovers before the pass still
+breaches.
 
-What the span does not cover, stated because it is the one place the exactness
-argument stops: an account holding more than one marked symbol. Equity is then a
-sum of linear terms whose extremes need not coincide, and only the swept river's
-symbol carries a span - every other symbol contributes at its last mark, which is
-the mark-cadence behaviour. That costs nothing under the model the venue enforces
-(an account is on at most one river) and is a bound to state rather than a defect
-to hide.
+Where the exactness argument stops, stated rather than hidden: an account holding
+more than one marked symbol. An account rides as many rivers as its passengers
+have boarded, and the sweeper judges its policy once per due boat, so the span in
+hand covers that boat's river alone. Equity is then a sum of linear terms whose
+extremes need not coincide and need not sit at either river's extreme, and only
+the swept river's symbol carries a span - every other symbol contributes at its
+last mark. So a multi-river account's peak-equity ratchet sees a partial
+reconstruction of the interval, ordered by whichever boat came due first, and its
+cross-river component moves at mark cadence. The per-river half is unaffected: a
+trailing stop is monotone in its own river's tape, so it remains exact per
+symbol. Evaluation is therefore exact for an account on one river and bounded by
+mark cadence across rivers, which is a property of the model to know about rather
+than a defect to hide.
 
 Symbol resolution is total over wire-legal labels. Configured profiles are
 held directly and other profiles are memoized without a cap. The permanent,

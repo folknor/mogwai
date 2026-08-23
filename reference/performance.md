@@ -1567,12 +1567,11 @@ today:
   `http::boundary_error`, the one gate the websocket order carrier uses for
   every command.
 - URL-carried symbols: the full wire alphabet, in `http.rs` and `source.rs`.
-- Config instruments: non-empty and `MAX_SYMBOL_LEN` only. `config.rs` calls
-  `validate_wire_symbol` on an instrument's `index_symbol` and not on its own
-  `symbol`, so a configured instrument may carry a symbol order entry would now
-  refuse. Filed as an owner-level item in `notes/todo.md` rather than tightened
-  here: it is operator-supplied rather than consumer-supplied, and it is a
-  `mogwai-venue` decision.
+- Config instruments: the full wire alphabet. `config.rs` runs
+  `validate_wire_symbol` on an instrument's own `symbol` as well as its
+  `index_symbol` (ruled and landed 2026-08-20), so one rule read from one
+  function decides both sides and a config cannot serve a symbol order entry
+  would refuse.
 - The adapter's decode: deliberately unvalidated, with `convert::instrument_id`
   using `NautilusSymbol::new_checked` so a hostile symbol drops one frame rather
   than an unsupervised task. Validating at decode would move that refusal, not

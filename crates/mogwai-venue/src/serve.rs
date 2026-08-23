@@ -478,9 +478,21 @@ async fn serve_async(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
     {
-        anyhow::bail!("tape source fault: {fault:?}");
+        anyhow::bail!("tape source fault: {}", describe_fault(fault));
     }
     Ok(())
+}
+
+/// The terminal fault, rendered for a human reading a log or a launcher
+/// capturing the venue's last words.
+///
+/// The vocabulary is not spelled out here. Both this line and the `/health`
+/// body read one classifier, `crate::http::classify_fault`, so an operator who
+/// polled the endpoint and an operator reading the exit see one set of names,
+/// and a new `TickFault` variant cannot reach one reader and miss the other.
+fn describe_fault(fault: mogwai_data::TickFault) -> String {
+    let class = crate::http::classify_fault(fault);
+    format!("{}, {}", class.kind, class.detail)
 }
 
 /// How long the deadline task sleeps before asking again, or `None` once the

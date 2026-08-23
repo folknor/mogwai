@@ -58,7 +58,7 @@ pub(crate) struct DivergenceRequest {
 /// Naming an account never creates one. Arming a blackout is not a reason to
 /// bring a ledger into existence - a typo would otherwise mint `WYRD-01` and
 /// arm a ledger nothing ever connects to, and would answer the real consumer's own
-/// `POST /account` with a `409`. The arm is recorded against the name instead,
+/// `POST /accounts` with a `409`. The arm is recorded against the name instead,
 /// and the account's first mint consumes it; see `VenueArms`. A stale line here
 /// said the request "resolves to the empty set", which was the finding-5
 /// behaviour and stopped being true when the record landed.
@@ -782,6 +782,14 @@ pub(crate) struct AppState {
 
 #[derive(Serialize)]
 pub(crate) struct Health {
+    /// The one word a fleet poller gates on, derived from `fault` below rather
+    /// than stated: `ok` while no boated river carries a tape fault, `faulted`
+    /// the moment one does. It was the constant `ok` until this, which made a
+    /// status field that could not vary - a poller reading it learned nothing
+    /// it did not already know from the response arriving at all, and a run
+    /// with a stuck tape was scored healthy by anything that did not go on to
+    /// read `fault`. The two fields are one decision, so they are computed
+    /// together and cannot disagree.
     status: &'static str,
     oms_type: mogwai_protocol::OmsType,
     /// Identifies this run, not this process.
@@ -835,6 +843,60 @@ struct HealthFault {
     clock_ns: u64,
 }
 
+/// One tick fault, classified once for every reader of the taxonomy.
+///
+/// There are two readers - the `/health` body and the process exit line the
+/// serve path writes - and they used to spell the vocabulary out separately,
+/// which is the two-constants defect: a new `TickFault` variant could reach one
+/// reader and miss the other with both halves compiling. Everything either one
+/// needs is derived here, so a new variant is a single match arm that neither
+/// reader can be missing.
+pub(crate) struct FaultClass {
+    /// The taxonomy name, shared verbatim by both readers so an operator who
+    /// polled the endpoint and an operator reading the exit see one set of
+    /// names.
+    pub(crate) kind: &'static str,
+    /// The source cursor the fault is dated by.
+    ///
+    /// Zero is the honest clock for an injected fault, not a missing one: it is
+    /// dated by no source's cursor, and reporting the venue's current sim
+    /// instant instead would read as the moment a tape gave out, which is
+    /// exactly the thing that did not happen. The `kind` says where it came
+    /// from, so a consumer never has to infer it from the instant.
+    pub(crate) clock_ns: u64,
+    /// The human half of the exit line, in the fault's own terms. Carries the
+    /// instant again in prose because that line is read on its own, with no
+    /// structured field beside it.
+    pub(crate) detail: String,
+}
+
+/// Classify one tick fault into the vocabulary both readers publish.
+pub(crate) fn classify_fault(fault: mogwai_data::TickFault) -> FaultClass {
+    use mogwai_data::{ArrivalRefusal, TickFault};
+    match fault {
+        TickFault::Arrival(ArrivalRefusal::NoOpenExposure { from_ns }) => FaultClass {
+            kind: "arrival.no_open_exposure",
+            clock_ns: from_ns,
+            detail: format!("no open session at or after clock_ns={from_ns}"),
+        },
+        TickFault::Arrival(ArrivalRefusal::IntensityCeiling { clock_ns, x }) => FaultClass {
+            kind: "arrival.intensity_ceiling",
+            clock_ns,
+            detail: format!("latent x={x} over ceiling at clock_ns={clock_ns}"),
+        },
+        TickFault::Arrival(ArrivalRefusal::NonFiniteState { clock_ns }) => FaultClass {
+            kind: "arrival.non_finite_state",
+            clock_ns,
+            detail: format!("latent state left the reals at clock_ns={clock_ns}"),
+        },
+        TickFault::Injected => FaultClass {
+            kind: "injected",
+            clock_ns: 0,
+            detail: "the FaultTape divergence asked for this exit".to_owned(),
+        },
+    }
+}
+
 /// Which faulted river `/health` reports, given every boated river that has
 /// one. Split out from the handler so the selection is testable without a
 /// boatyard: forcing a real arrival refusal on a chosen river is far more
@@ -847,52 +909,34 @@ fn health_fault(
     let (symbol, fault) = faults
         .into_iter()
         .min_by(|(left, _), (right, _)| left.cmp(right))?;
-    Some(match fault {
-        mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NoOpenExposure {
-            from_ns,
-        }) => HealthFault {
-            symbol,
-            kind: "arrival.no_open_exposure",
-            clock_ns: from_ns,
-        },
-        mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::IntensityCeiling {
-            clock_ns,
-            ..
-        }) => HealthFault {
-            symbol,
-            kind: "arrival.intensity_ceiling",
-            clock_ns,
-        },
-        mogwai_data::TickFault::Arrival(mogwai_data::ArrivalRefusal::NonFiniteState {
-            clock_ns,
-        }) => HealthFault {
-            symbol,
-            kind: "arrival.non_finite_state",
-            clock_ns,
-        },
-        // Zero is the honest clock, not a missing one. An injected fault is not
-        // dated by any source's cursor, and reporting the venue's current sim
-        // instant instead would read as the moment a tape gave out - which is
-        // exactly the thing that did not happen. The `kind` says where it came
-        // from, so a consumer never has to infer it from the instant.
-        mogwai_data::TickFault::Injected => HealthFault {
-            symbol,
-            kind: "injected",
-            clock_ns: 0,
-        },
+    let class = classify_fault(fault);
+    Some(HealthFault {
+        symbol,
+        kind: class.kind,
+        clock_ns: class.clock_ns,
     })
 }
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
+    let fault = health_fault(state.run.boatyard.boats().into_iter().filter_map(|boat| {
+        let fault = boat.tape.fault()?;
+        Some((boat.symbol().to_owned(), fault))
+    }));
     Json(Health {
-        status: "ok",
+        status: health_status(fault.is_some()),
         oms_type: state.run.oms_type,
         run_seed: state.run.seeds.run,
-        fault: health_fault(state.run.boatyard.boats().into_iter().filter_map(|boat| {
-            let fault = boat.tape.fault()?;
-            Some((boat.symbol().to_owned(), fault))
-        })),
+        fault,
     })
+}
+
+/// The `status` word for a run that does or does not carry a reported fault.
+///
+/// Split out so the derivation is testable without a boatyard, and so the two
+/// spellings live in one place: a consumer that matches on the string is
+/// matching on these, and anything else here would be a wire change.
+fn health_status(faulted: bool) -> &'static str {
+    if faulted { "faulted" } else { "ok" }
 }
 
 impl AppState {
@@ -1363,7 +1407,18 @@ fn risk_state(
     ledger.state(equity)
 }
 
+/// The `/account` query string, exactly as the consumer wrote it.
+///
+/// `deny_unknown_fields` for the reason `SocketQuery` and `ClockQuery` carry
+/// it: accepted-and-ignored is the failure mode these carriers exist to
+/// prevent, and it is the worst reading available here. A consumer that
+/// misspells the one key it can send is otherwise handed the default account's
+/// snapshot under the name of the account it asked about, and nothing in the
+/// answer says which ledger it describes. The price is that any unrecognized
+/// key is a `400`, a future key included; relaxing it is a wire change that
+/// owes its own reasoning.
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AccountQuery {
     #[serde(default)]
     account: Option<String>,
@@ -1559,7 +1614,7 @@ pub(crate) async fn clock(
 /// The reading is otherwise returned, never stamped - an order keeps its own
 /// stated price, and what the venue read is the engine's business.
 ///
-/// Synthesis (`build_history_source` -> `source_at_or_before`) locks the run's
+/// Synthesis (`build_history_source` -> `source_before`) locks the run's
 /// checkpoint mutex and walks the residual past the nearest checkpoint.
 /// `/trades` pushes the identical synthesis onto `spawn_blocking` rather than
 /// running it inline on the tokio worker; this does the same, so a burst of price-less market
@@ -1643,7 +1698,21 @@ async fn market_reading(
     (msg, None)
 }
 
+/// The `/operator/trades` and `/operator/quotes` query string, exactly as the
+/// consumer wrote it.
+///
+/// `deny_unknown_fields` for the reason `SocketQuery` and `ClockQuery` carry
+/// it. Every key here bounds the window, so a misspelled one is served as a
+/// wider request than the consumer wrote: `?limti=5` reads as the default
+/// limit, `?strat=` as history from the origin, and the answer looks like a
+/// perfectly good page. The retired `regime` key is the worked example - it was
+/// boot config for the whole run before it was removed, so a consumer still
+/// sending it was being answered on a realization it did not ask for. Refusing
+/// makes that a `400` naming the key. The price is that any unrecognized key is
+/// a `400`, a future key included; relaxing it is a wire change that owes its
+/// own reasoning.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HistoryQuery {
     pub(crate) symbol: String,
     pub(crate) start: Option<u64>,
@@ -1655,8 +1724,14 @@ pub(crate) async fn trades(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
+    // The refusal is returned as a response rather than through `?`, because it
+    // carries a `Retry-After` header and the error arm of this signature is a
+    // status and a body with nowhere to put one.
     let history_slot =
-        acquire_history_slot(&state.history_slots, &state.history_slot_waiters).await?;
+        match acquire_history_slot(&state.history_slots, &state.history_slot_waiters).await {
+            Ok(slot) => slot,
+            Err(refused) => return Ok(refused.into_response()),
+        };
     // No `regime` parameter: the market regime is boot config for the whole run
     // now, so history and the live tape are the same realization by
     // construction rather than by a consumer remembering to ask for the same one.
@@ -1666,10 +1741,14 @@ pub(crate) async fn trades(
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
-    // Resolution is total, so the only history refusals left are shape-class
-    // ones - an illegal label, an invalid or funding-barred shape, an exhausted
-    // river cap - and they are decided HERE so each is a 400 naming its reason
-    // rather than a 500 raised out of the synthesis task below.
+    // Resolution is total, so the caller-caused history refusals left are
+    // shape-class ones - an illegal label, an invalid or funding-barred shape,
+    // an exhausted river cap - and they are decided here so each is a 400
+    // naming its reason rather than a 500 raised out of the synthesis task
+    // below. The refusals no caller can produce, a key mismatch and a failed
+    // reach, are the venue's own failures and answer 500 through
+    // `materialize_refusal_response` - the same status the synthesis task below
+    // answers for a failed reach.
     //
     // The operator view materializes, and that was argued the other way before
     // it was checked. A read that creates has real costs - a typo permanently
@@ -1680,7 +1759,12 @@ pub(crate) async fn trades(
     // contract for a venue serving its owner's own agents, which is stated at
     // `MAX_MATERIALIZED_RIVERS` and does not become a defence here.
     if let Err(error) = rivers.materialize(&symbol) {
-        return Err((StatusCode::BAD_REQUEST, error.to_string()));
+        let named = truncated_symbol(&symbol);
+        let (status, body) = materialize_refusal_response(&error, &named);
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(%error, symbol = %named, "history could not materialize its river");
+        }
+        return Err((status, body));
     }
     // One snapshot of the run clock, taken here and used for both bounds below,
     // so a single request cannot be answered against a moving present. It
@@ -1781,18 +1865,27 @@ pub(crate) async fn quotes(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
+    // Returned as a response rather than through `?`, for the `Retry-After`
+    // header the error arm of this signature cannot carry. See `trades`.
     let history_slot =
-        acquire_history_slot(&state.history_slots, &state.history_slot_waiters).await?;
+        match acquire_history_slot(&state.history_slots, &state.history_slot_waiters).await {
+            Ok(slot) => slot,
+            Err(refused) => return Ok(refused.into_response()),
+        };
     let limit = normalize_limit(query.limit);
     let rivers = Arc::clone(&state.rivers);
     let data_origin = source::TAPE_ORIGIN_NS;
     let HistoryQuery {
         symbol, start, end, ..
     } = query;
-    // Resolution is total, so the only history refusals left are shape-class
-    // ones - an illegal label, an invalid or funding-barred shape, an exhausted
-    // river cap - and they are decided HERE so each is a 400 naming its reason
-    // rather than a 500 raised out of the synthesis task below.
+    // Resolution is total, so the caller-caused history refusals left are
+    // shape-class ones - an illegal label, an invalid or funding-barred shape,
+    // an exhausted river cap - and they are decided here so each is a 400
+    // naming its reason rather than a 500 raised out of the synthesis task
+    // below. The refusals no caller can produce, a key mismatch and a failed
+    // reach, are the venue's own failures and answer 500 through
+    // `materialize_refusal_response` - the same status the synthesis task below
+    // answers for a failed reach.
     //
     // The operator view materializes, and that was argued the other way before
     // it was checked. A read that creates has real costs - a typo permanently
@@ -1803,7 +1896,12 @@ pub(crate) async fn quotes(
     // contract for a venue serving its owner's own agents, which is stated at
     // `MAX_MATERIALIZED_RIVERS` and does not become a defence here.
     if let Err(error) = rivers.materialize(&symbol) {
-        return Err((StatusCode::BAD_REQUEST, error.to_string()));
+        let named = truncated_symbol(&symbol);
+        let (status, body) = materialize_refusal_response(&error, &named);
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(%error, symbol = %named, "history could not materialize its river");
+        }
+        return Err((status, body));
     }
     // One snapshot of the run clock, taken here and used for both bounds below,
     // so a single request cannot be answered against a moving present. It
@@ -1992,37 +2090,122 @@ pub(crate) const MAX_QUEUED_HISTORY_REQUESTS: usize = 128;
 pub(crate) async fn acquire_history_slot(
     gate: &Arc<tokio::sync::Semaphore>,
     queue: &Arc<tokio::sync::Semaphore>,
-) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, String)> {
-    let queued = Arc::clone(queue).try_acquire_owned().map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "history request capacity exhausted".to_owned(),
-        )
-    })?;
+) -> Result<tokio::sync::OwnedSemaphorePermit, HistorySlotRefusal> {
+    let queued = Arc::clone(queue)
+        .try_acquire_owned()
+        .map_err(|_| HistorySlotRefusal::QueueFull)?;
     let slot = tokio::time::timeout(HISTORY_SLOT_WAIT, Arc::clone(gate).acquire_owned())
         .await
-        .map_err(|_| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "history request capacity exhausted".to_owned(),
-            )
-        })?
+        .map_err(|_| HistorySlotRefusal::WaitExpired)?
         // The semaphore is never closed - it lives as long as the process - so
         // the only `acquire_owned` error is closure, and reaching it would mean
-        // the venue is already tearing down.
-        .map_err(|_| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "history request capacity exhausted".to_owned(),
-            )
-        })?;
+        // the venue is already tearing down. A caller cannot tell that apart
+        // from losing the wait, and the remedy is the same either way.
+        .map_err(|_| HistorySlotRefusal::WaitExpired)?;
     drop(queued);
     Ok(slot)
+}
+
+/// Why a history request never got a synthesis slot.
+///
+/// The two conditions had one body between them, which told a consumer nothing
+/// it could act on: a full queue means the venue is overloaded right now, and
+/// an expired wait means this caller queued and lost after the whole deadline.
+/// The remedies differ in how long a client should hold off, so each carries
+/// its own words, and both carry `Retry-After` - the HTTP spelling of the
+/// `retryable` flag the websocket admission refusal already sends, so a
+/// consumer reading either transport learns the same thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistorySlotRefusal {
+    /// The fail-fast half: every queue permit was already taken.
+    QueueFull,
+    /// The bounded half: this caller queued and the deadline expired.
+    WaitExpired,
+}
+
+impl HistorySlotRefusal {
+    /// How long a client is told to hold off, in seconds.
+    ///
+    /// Derived from [`HISTORY_SLOT_WAIT`] rather than written out, because a
+    /// second encoding of one duration is a constant that drifts silently. A
+    /// venue that could not free a slot within the wait is not going to free
+    /// one sooner than that for the next caller either, so both conditions
+    /// quote the same span.
+    pub(crate) fn retry_after_secs(self) -> u64 {
+        HISTORY_SLOT_WAIT.as_secs()
+    }
+
+    /// The refusal in the caller's terms: what happened, then what to do.
+    pub(crate) fn body(self) -> String {
+        let seconds = self.retry_after_secs();
+        match self {
+            Self::QueueFull => format!(
+                "history request queue full: {MAX_QUEUED_HISTORY_REQUESTS} requests are already \
+                 waiting for a synthesis slot, so this one was refused without queueing; the \
+                 venue is overloaded, retry this request after {seconds} seconds"
+            ),
+            Self::WaitExpired => format!(
+                "history request waited {seconds} seconds for a synthesis slot and did not win \
+                 one; the venue is saturated rather than merely busy, retry this request after \
+                 {seconds} seconds"
+            ),
+        }
+    }
+}
+
+impl IntoResponse for HistorySlotRefusal {
+    fn into_response(self) -> Response {
+        let mut response = (StatusCode::SERVICE_UNAVAILABLE, self.body()).into_response();
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from(self.retry_after_secs()),
+        );
+        response
+    }
 }
 
 /// A caller-supplied symbol cut to what any log line or body may echo.
 fn truncated_symbol(symbol: &str) -> String {
     symbol.chars().take(MAX_ECHOED_SYMBOL).collect()
+}
+
+/// Status and body for a history read whose river could not be materialized.
+///
+/// The variants do not share a status, and treating them as though they did was
+/// the defect this closes. `Resolve` and `CapacityExhausted` are grounds a
+/// caller produced and can act on - an illegal or unservable label, a run that
+/// has spent its river cap - so they stay `400` carrying the refusal's own
+/// words. `KeyMismatch` is an invariant between the key this run resolved for a
+/// symbol and the one handed back to it; no request can cause it and no caller
+/// can do anything about it, so it is a `500`. `Reach` is a synthesis failure,
+/// which is exactly what the blocking task below already answers `500` for, so
+/// classifying it as a client error here would have given one failure two
+/// statuses depending on which line it happened on. `materialize` cannot raise
+/// `Reach` today - only the walking paths do - which is precisely why the arm
+/// is written from the variant's grounds rather than from what the current call
+/// sites happen to reach.
+///
+/// The `500` bodies name the truncated symbol and say the venue failed, and
+/// deliberately no more: the detail belongs in the log line the call site
+/// emits, where it is not an echo channel.
+fn materialize_refusal_response(
+    error: &source::MaterializeRefusal,
+    named: &str,
+) -> (StatusCode, String) {
+    match error {
+        source::MaterializeRefusal::Resolve(_)
+        | source::MaterializeRefusal::CapacityExhausted { .. } => {
+            (StatusCode::BAD_REQUEST, error.to_string())
+        }
+        source::MaterializeRefusal::KeyMismatch { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the river for {named} could not be resolved by this venue"),
+        ),
+        source::MaterializeRefusal::Reach(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the river for {named} could not be synthesized"),
+        ),
+    }
 }
 
 /// The 500 body for a history request the venue could not synthesize. Names the
@@ -2079,8 +2262,9 @@ pub(crate) fn resolve_socket_symbol(
     };
     if mogwai_protocol::validate_wire_symbol(requested).is_err() {
         let echoed: String = requested.chars().take(MAX_ECHOED_SYMBOL).collect();
+        let max = mogwai_protocol::MAX_SYMBOL_LEN;
         return Err(format!(
-            "requested symbol {echoed} is not a legal symbol; symbols are 1 to 32 characters of ASCII letters, digits, dot, dash or underscore"
+            "requested symbol {echoed} is not a legal symbol; symbols are 1 to {max} characters of ASCII letters, digits, dot, dash or underscore"
         ));
     }
     Ok(Arc::from(requested))
@@ -2092,13 +2276,17 @@ pub(crate) fn resolve_socket_symbol(
 /// that impossible request distinct from "no trades happened". With today's
 /// zero origin that lower branch is unreachable for a `u64`, but it remains
 /// tied to the constant the handlers read so moving the origin makes it live.
-/// A start beyond `river_now` is likewise impossible without a look-ahead leak.
-/// `river_now` is the named river's ceiling, not the venue's: for a boated
-/// river it is what its boat published, and only a boatless river answers with
-/// venue sim-now. An end beyond the ceiling is instead clamped at each
-/// handler's call site: callers commonly mean "everything through now" and
-/// stamp a clock of their own that leads this one.
-fn history_start_refusal(start: Option<u64>, data_origin: u64, river_now: u64) -> Option<String> {
+/// A start beyond `run_now` is likewise impossible without a look-ahead leak.
+/// `run_now` is one snapshot of the run clock, taken when the request was
+/// admitted, and it consults no boat: see [`AppState::run_now`], whose doc is
+/// the whole of the rule. The ceiling used to be derived from what a boat had
+/// published, falling back to venue sim-now for a boatless river, and that is
+/// abolished - it reported one passenger's delivery frontier to another, so
+/// boarding the same river at a faster cadence moved somebody else's history
+/// ceiling. An end beyond the ceiling is instead clamped at each handler's call
+/// site: callers commonly mean "everything through now" and stamp a clock of
+/// their own that leads this one.
+fn history_start_refusal(start: Option<u64>, data_origin: u64, run_now: u64) -> Option<String> {
     let start = start?;
     if start < data_origin {
         tracing::warn!(start, data_origin, "refusing off-river history window");
@@ -2106,10 +2294,10 @@ fn history_start_refusal(start: Option<u64>, data_origin: u64, river_now: u64) -
             "requested start {start} precedes data_origin_ns {data_origin}; the river cannot serve before its origin"
         ));
     }
-    (start > river_now).then(|| {
-        tracing::warn!(start, river_now, "refusing future history window");
+    (start > run_now).then(|| {
+        tracing::warn!(start, run_now, "refusing future history window");
         format!(
-            "requested start {start} exceeds this river's now {river_now} - what its boat has published, or venue sim-now if it carries none; the river cannot serve past the clock"
+            "requested start {start} exceeds the run present {run_now}, which is venue sim-now sampled when this request was admitted; the river cannot serve past the clock"
         )
     })
 }
@@ -2154,6 +2342,21 @@ mod health_fault_tests {
         assert_eq!(forward.symbol, "BTCUSDT");
         assert_eq!(backward.symbol, forward.symbol);
         assert_eq!(backward.clock_ns, forward.clock_ns);
+    }
+
+    /// The word a fleet poller gates on has to vary, or it carries nothing. It
+    /// was the constant `ok` on both branches, so a run whose tape had given
+    /// out answered exactly like a healthy one to anything that read `status`
+    /// and stopped there.
+    #[test]
+    fn the_status_word_follows_the_reported_fault() {
+        assert_eq!(health_status(false), "ok");
+        assert_eq!(health_status(true), "faulted");
+        assert_ne!(
+            health_status(true),
+            health_status(false),
+            "a status that cannot vary gates nothing"
+        );
     }
 }
 
@@ -2223,11 +2426,53 @@ mod history_slot_tests {
         .map(|slot| slot.expect("slot"))
         .collect::<Vec<_>>();
 
-        let (status, reason) = acquire_history_slot(&gate, &queue)
+        let refused = acquire_history_slot(&gate, &queue)
             .await
             .expect_err("the deadline expires");
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(reason, "history request capacity exhausted");
+        assert_eq!(refused, HistorySlotRefusal::WaitExpired);
+        let response = refused.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .expect("a retry hint")
+                .to_str()
+                .expect("an ascii hint"),
+            HISTORY_SLOT_WAIT.as_secs().to_string(),
+            "the hint is the wait itself, not a second copy of it"
+        );
+        assert!(
+            refused.body().contains("waited"),
+            "the expired wait names its own condition: {}",
+            refused.body()
+        );
+    }
+
+    /// The two refusals do not share a body. One body for both was the defect:
+    /// a full queue and a lost wait are different conditions, and a consumer
+    /// reading the text could not tell which one it hit.
+    #[test]
+    fn the_two_capacity_refusals_say_different_things() {
+        assert_ne!(
+            HistorySlotRefusal::QueueFull.body(),
+            HistorySlotRefusal::WaitExpired.body()
+        );
+        assert!(
+            HistorySlotRefusal::QueueFull.body().contains("queue full"),
+            "the fail-fast refusal names the queue"
+        );
+        for refusal in [
+            HistorySlotRefusal::QueueFull,
+            HistorySlotRefusal::WaitExpired,
+        ] {
+            assert!(
+                refusal
+                    .body()
+                    .contains(&HISTORY_SLOT_WAIT.as_secs().to_string()),
+                "every refusal states the hold-off it also sends as a header"
+            );
+        }
     }
 
     /// The queue has its own bound, and it is the one that still fails fast. An
@@ -2253,8 +2498,9 @@ mod history_slot_tests {
         .await
         .expect("the queue refusal does not wait out the slot deadline");
         assert_eq!(
-            refused.expect_err("refused").0,
-            StatusCode::SERVICE_UNAVAILABLE
+            refused.expect_err("refused"),
+            HistorySlotRefusal::QueueFull,
+            "a full queue is refused as itself, not as a lost wait"
         );
     }
 
@@ -2263,6 +2509,108 @@ mod history_slot_tests {
         let refusal = history_start_refusal(Some(9), 10, 20).expect("off-river refusal");
         assert!(refusal.contains("precedes data_origin_ns 10"));
         assert!(history_start_refusal(Some(10), 10, 20).is_none());
+    }
+
+    /// Parses a query string through `Query`, the carrier the handlers use, so
+    /// a test can neither pass against a string axum would reject nor reject
+    /// one it would take. The rejection is rendered rather than returned so
+    /// this helper names no axum-internal type.
+    fn parse_query<T: serde::de::DeserializeOwned>(path: &str, query: &str) -> Result<T, String> {
+        // A malformed URI panics rather than erroring, so a refusal below can
+        // only ever be the deserializer's verdict and never a parse accident.
+        let uri: axum::http::Uri = match format!("http://venue/{path}?{query}").parse() {
+            Ok(uri) => uri,
+            Err(error) => panic!("a legal uri: {error}"),
+        };
+        axum::extract::Query::<T>::try_from_uri(&uri)
+            .map(|query| query.0)
+            .map_err(|rejection| format!("{rejection:?}"))
+    }
+
+    /// A misspelled key on `/account` is refused rather than answered about a
+    /// different ledger. Without `deny_unknown_fields` the typo below reads as
+    /// no account at all, and the consumer is handed the default account's
+    /// snapshot with nothing in it saying which ledger it describes.
+    #[test]
+    fn a_misspelled_account_query_key_is_refused() {
+        let Err(refusal) = parse_query::<AccountQuery>("account", "acount=WYRD-900") else {
+            panic!("an unknown key must be refused");
+        };
+        assert!(
+            refusal.contains("acount"),
+            "the refusal must name the key the consumer sent: {refusal}"
+        );
+        let accepted = parse_query::<AccountQuery>("account", "account=WYRD-900")
+            .expect("the current key parses");
+        assert_eq!(accepted.account.as_deref(), Some("WYRD-900"));
+    }
+
+    /// The same rule on the history carrier, where every key bounds the window:
+    /// a misspelled `limit` would otherwise be served as the default limit and
+    /// a misspelled `start` as history from the origin, both of them wider
+    /// requests than the consumer wrote and both of them indistinguishable from
+    /// a good page.
+    #[test]
+    fn a_misspelled_history_query_key_is_refused() {
+        let refusal = parse_query::<HistoryQuery>("operator/trades", "symbol=MNQ&limti=5")
+            .expect_err("an unknown key is refused");
+        assert!(
+            refusal.contains("limti"),
+            "the refusal must name the key the consumer sent: {refusal}"
+        );
+        let accepted =
+            parse_query::<HistoryQuery>("operator/trades", "symbol=MNQ&start=7&end=9&limit=5")
+                .expect("the current keys parse");
+        assert_eq!(accepted.symbol, "MNQ");
+        assert_eq!(accepted.start, Some(7));
+        assert_eq!(accepted.end, Some(9));
+        assert_eq!(accepted.limit, Some(5));
+        let bare = parse_query::<HistoryQuery>("operator/trades", "symbol=MNQ")
+            .expect("the optional bounds stay optional");
+        assert_eq!(bare.start, None);
+        assert_eq!(bare.limit, None);
+    }
+
+    /// Each variant answers on the status its grounds deserve. Both history
+    /// call sites mapped every one to a 400, which told a consumer it had
+    /// caused a failure it cannot cause, and which would have given a failed
+    /// reach one status here and another inside the synthesis task.
+    #[test]
+    fn only_the_caller_caused_materialize_refusals_are_client_errors() {
+        let (status, body) = materialize_refusal_response(
+            &source::MaterializeRefusal::CapacityExhausted {
+                cap: 256,
+                count: 256,
+            },
+            "MNQ",
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains("256"),
+            "the cap refusal keeps its words: {body}"
+        );
+
+        let (status, _) = materialize_refusal_response(
+            &source::MaterializeRefusal::KeyMismatch {
+                symbol: "MNQ".to_owned(),
+            },
+            "MNQ",
+        );
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a key mismatch is an invariant no request can violate"
+        );
+
+        let (status, _) = materialize_refusal_response(
+            &source::MaterializeRefusal::Reach(anyhow::anyhow!("the walk stopped")),
+            "MNQ",
+        );
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a failed reach is the same failure the synthesis task answers 500 for"
+        );
     }
 
     fn refusal_profiles(symbols: &[&str]) -> source::InstrumentProfiles {
@@ -2336,6 +2684,34 @@ mod history_slot_tests {
         let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
         let refusal = resolve_socket_symbol(Some("MN Q"), &bound).expect_err("illegal symbol");
         assert!(refusal.contains("is not a legal symbol"), "{refusal}");
+    }
+
+    /// The refusal spells the length bound out for a consumer, so it is
+    /// formatted from the constant the validator reads rather than restated as
+    /// a literal. This holds the sentence against `validate_wire_symbol` at the
+    /// boundary: a symbol of exactly the bound is accepted, one byte more is
+    /// refused, and an illegal byte is refused whatever the length - so moving
+    /// `MAX_SYMBOL_LEN` moves the message and this test with it.
+    #[test]
+    fn the_symbol_refusal_states_the_bound_the_validator_enforces() {
+        let bound: mogwai_protocol::Symbol = Arc::from("MNQ");
+        let max = mogwai_protocol::MAX_SYMBOL_LEN;
+        let at_bound = "X".repeat(max);
+        assert!(
+            resolve_socket_symbol(Some(&at_bound), &bound).is_ok(),
+            "a symbol of exactly the stated bound is legal"
+        );
+        let over = "X".repeat(max + 1);
+        let refusal = resolve_socket_symbol(Some(&over), &bound).expect_err("one byte too long");
+        assert!(
+            refusal.contains(&format!("1 to {max} characters")),
+            "the refusal states the bound it enforces: {refusal}"
+        );
+        let illegal = resolve_socket_symbol(Some("MN Q"), &bound).expect_err("an illegal byte");
+        assert!(
+            illegal.contains("ASCII letters, digits, dot, dash or underscore"),
+            "the refusal states the alphabet it enforces: {illegal}"
+        );
     }
 
     /// The refusal echoes the request, so the echo is capped: an unbounded

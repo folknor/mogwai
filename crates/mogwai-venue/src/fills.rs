@@ -500,7 +500,7 @@ mod tests {
         let ticks = trades(TEST_ORIGIN, 2);
         let (ts, px) = ticks[0];
         let mut touch = scan("touch", Side::Buy, px, ts.saturating_sub(1));
-        touch.kind = mogwai_protocol::ScanKind::TriggerTouch;
+        touch.kind = mogwai_protocol::ScanKind::StopTrigger;
         let through = scan("through", Side::Buy, px, ts.saturating_sub(1));
         let walk = scan_triggers(
             &by_symbol(&profiles(), "BTCUSDT"),

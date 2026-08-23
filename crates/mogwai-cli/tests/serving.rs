@@ -2542,7 +2542,7 @@ async fn the_tape_is_identical_with_and_without_order_flow() {
 /// advances any generator state.
 ///
 /// A resting conditional is the one order shape that puts a second kind of scan
-/// into the sweeper's per-symbol walk (`ScanKind::TriggerTouch` beside the
+/// into the sweeper's per-symbol walk (`ScanKind::StopTrigger` beside the
 /// limits' `FillThrough`), and the walk drains the tape source. If a trigger
 /// scan drained prints the canonical `/trades` page would otherwise have served,
 /// or advanced the generator past them, the two reads of the same fixed window

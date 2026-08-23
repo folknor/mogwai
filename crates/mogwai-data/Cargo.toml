@@ -12,6 +12,12 @@ rand_distr.workspace = true
 rand_chacha.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Emit-only: this crate raises `tracing` events (the Kraken CSV skip paths, the
+# dropped already-elapsed ReopenGap) and never installs a subscriber. The
+# workspace entry carries tracing's default features, matching mogwai-venue;
+# mogwai-adapter's extra `log` feature is its own, needed because its nautilus
+# host runs a `log` backend with no subscriber.
+tracing.workspace = true
 hotpath = { workspace = true, optional = true }
 
 # The two-level feature indirection: a crate feature that forwards to the

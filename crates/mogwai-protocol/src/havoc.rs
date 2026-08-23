@@ -151,9 +151,14 @@ pub fn validate_conn_havoc(conn: &ConnHavoc) -> Result<(), &'static str> {
 /// Market-regime havoc: perturbs the generator before ticks are produced.
 ///
 /// This is distinct from venue divergences and adapter-inbound transport havoc,
-/// which corrupt events after production. It is carried per subscription on
-/// `Subscribe` and per request on `GET /trades`; it never travels the
-/// `/control/divergence` control plane.
+/// which corrupt events after production. It is boot config for the whole run:
+/// the venue reads it from the `regime` key of its config file and folds it into
+/// the run's tape identity, so every passenger on that run sees the same water.
+/// It rides no request. It was once picked per subscription on `Subscribe`, and
+/// with the subscription model gone that carrier went with it - the decoder now
+/// refuses a `Subscribe` frame outright. `GET /trades` takes no `regime`
+/// parameter either, and it never travels the `/control/divergence` control
+/// plane.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MarketRegime {
@@ -278,7 +283,7 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
         | control::Divergence::GoDark { ms }
         | control::Divergence::StallData { ms } => {
             if *ms > control::MAX_DIVERGENCE_MS {
-                return Err("DelayAcks/GoDark/StallData ms must be <= 3600000 (one hour)");
+                return Err(control::REFUSE_WINDOW_MS);
             }
             Ok(())
         }
@@ -305,7 +310,7 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
             .iter()
             .any(|ms| *ms > control::MAX_DIVERGENCE_MS)
             {
-                return Err("CommandLatency fields must each be <= 3600000 (one hour)");
+                return Err(control::REFUSE_COMMAND_LATENCY);
             }
             Ok(())
         }
@@ -314,7 +319,7 @@ pub fn validate_divergence(div: &control::Divergence) -> Result<(), &'static str
                 return Err("FeeSurcharge mult must be in (0, 100]");
             }
             if *window_ms > control::MAX_DIVERGENCE_MS {
-                return Err("FeeSurcharge window_ms must be <= 3600000");
+                return Err(control::REFUSE_FEE_WINDOW);
             }
             Ok(())
         }
@@ -954,6 +959,11 @@ mod tests {
 
     #[test]
     fn validate_divergence_bounds_partial_fill_fraction() {
+        // The refusal texts name the ceiling, and they are held against the
+        // constant here rather than against a copied literal, so moving the
+        // bound moves both halves together.
+        let bound = control::MAX_DIVERGENCE_MS;
+
         // Legitimate fractions in (0, 1].
         validate_divergence(&control::Divergence::PartialFillNext {
             client_order_id: "O-1".into(),
@@ -1008,7 +1018,9 @@ mod tests {
         ] {
             assert_eq!(
                 validate_divergence(&div),
-                Err("DelayAcks/GoDark/StallData ms must be <= 3600000 (one hour)")
+                Err(
+                    format!("DelayAcks/GoDark/StallData ms must be <= {bound} (one hour)").as_str()
+                )
             );
         }
 
@@ -1045,7 +1057,7 @@ mod tests {
                     modify_ack_ms: fields[4],
                     cancel_ack_ms: fields[5],
                 }),
-                Err("CommandLatency fields must each be <= 3600000 (one hour)")
+                Err(format!("CommandLatency fields must each be <= {bound} (one hour)").as_str())
             );
         }
 
@@ -1108,7 +1120,11 @@ mod tests {
         }
         assert_eq!(
             control::GeneratorArm::normalize(0, control::MAX_DIVERGENCE_MS + 1, 2.0, 2.0),
-            Err("generator duration_ms must be <= 3600000")
+            Err(format!(
+                "generator duration_ms must be <= {bound}",
+                bound = control::MAX_DIVERGENCE_MS
+            )
+            .as_str())
         );
     }
 
@@ -1185,7 +1201,11 @@ mod tests {
 
         assert_eq!(
             validate_divergence(&fee(Decimal::ONE, control::MAX_DIVERGENCE_MS + 1)),
-            Err("FeeSurcharge window_ms must be <= 3600000")
+            Err(format!(
+                "FeeSurcharge window_ms must be <= {bound}",
+                bound = control::MAX_DIVERGENCE_MS
+            )
+            .as_str())
         );
     }
 

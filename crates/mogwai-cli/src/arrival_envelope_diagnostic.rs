@@ -30,7 +30,11 @@ pub struct ArrivalEnvelopeDiagnosticArgs {
     pub measure: Option<PathBuf>,
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
-    /// Independent envelope workers. Defaults to machine parallelism.
+    /// Concurrent (cell, seed) envelope workers, one per selected cell.
+    /// Defaults to the machine's reported parallelism, uncapped, and never
+    /// exceeds the number of selected cells. Unlike `arrival-screen`, this
+    /// default carries no cap at 16, so on a host where SMT contention bites
+    /// pass the screen's ceiling explicitly.
     #[arg(long)]
     pub jobs: Option<usize>,
 }

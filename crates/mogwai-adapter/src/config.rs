@@ -20,6 +20,18 @@ use serde::{Deserialize, Serialize};
 /// told about accounts serves exactly the ledger it always did.
 pub const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 
+/// Default nautilus trader identity stamped on the order events this adapter
+/// emits.
+///
+/// It happens to spell the same string as [`DEFAULT_ACCOUNT_ID`], and that
+/// coincidence is not load-bearing: the account id names a ledger the venue
+/// holds and is carried on the websocket upgrade, while the trader id never
+/// leaves this process and only labels the events handed to nautilus. Nothing
+/// compares the two. They are separate constants so that changing either one
+/// is a decision about one job rather than a silent edit to both, and so a
+/// reader cannot mistake the shared spelling for a contract.
+pub const DEFAULT_TRADER_ID: &str = "MOGWAI-001";
+
 /// This process's presented identity, carried on `/ws?callsign=` by every
 /// adapter object built in the process.
 ///
@@ -90,7 +102,7 @@ pub struct MogwaiDataClientConfig {
     /// differs. See `verify_run_identity`.
     #[serde(default)]
     pub expected_run_seed: Option<u64>,
-    /// How long ONE websocket dial may take before it is abandoned and retried.
+    /// How long a single websocket dial may take before it is abandoned and retried.
     ///
     /// Defaults to [`mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS`]. It bounds
     /// every dial rather than only the first, because a reconnect after a boat
@@ -258,6 +270,9 @@ impl ClientConfig for MogwaiDataClientConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MogwaiExecClientConfig {
+    /// The nautilus trader identity stamped on emitted order events. Defaults
+    /// to [`DEFAULT_TRADER_ID`], which is a separate job from `account_id`
+    /// despite the two defaults sharing a spelling.
     pub trader_id: TraderId,
     pub account_id: AccountId,
     /// Base URL of the running mogwai venue.
@@ -286,7 +301,7 @@ pub struct MogwaiExecClientConfig {
     /// same one, for the same reason they carry the same account.
     #[serde(default)]
     pub expected_run_seed: Option<u64>,
-    /// How long ONE websocket dial may take before it is abandoned and retried.
+    /// How long a single websocket dial may take before it is abandoned and retried.
     ///
     /// Defaults to [`mogwai_protocol::DEFAULT_DIAL_TIMEOUT_SECS`]. It bounds
     /// every dial rather than only the first, because a reconnect after a boat
@@ -308,7 +323,7 @@ fn default_oms_type() -> OmsType {
 impl Default for MogwaiExecClientConfig {
     fn default() -> Self {
         Self {
-            trader_id: TraderId::from("MOGWAI-001"),
+            trader_id: TraderId::from(DEFAULT_TRADER_ID),
             account_id: AccountId::from(DEFAULT_ACCOUNT_ID),
             base_url: String::new(),
             symbol: None,

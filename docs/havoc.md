@@ -65,7 +65,7 @@ reaches the host as a `dyn DataClient` with no downcast, and fabricating an
 that log line is the only channel the signal has. A bar-folding strategy is
 therefore not in a position to read it, and a run that needs the distinction
 programmatically wants a consumer on the raw protocol. The real fix is a declared
-feed-gap event upstream; it is filed in `notes/todo.md`.
+feed-gap event upstream, which is owed rather than landed.
 
 Generator havoc is not a control post at all. It rides the websocket upgrade,
 in four query keys, and it selects which river the passenger boards:

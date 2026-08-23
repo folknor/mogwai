@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `MogwaiDataClient`: the `DataClient` half of the adapter. Owns the
-//! subscription table, the poll/WS transport choice, the live bar
-//! aggregator, and the request handlers that page the venue's bounded
-//! `/trades` scan. Plumbing shared with the execution half (the havoc
+//! subscription table, the websocket reader, the live bar aggregator, and
+//! the request handlers that page a window of history off that same socket.
+//! There is one transport and no choice to make: the polling carrier and its
+//! timestamp cursor are retired, and history now travels as `QueryHistory`
+//! frames answered by paged `HistoryPage` replies. Plumbing shared with the
+//! execution half (the havoc
 //! dispatch pipeline, the instrument cache, clock/url glue) lives in
 //! `super::shared`.
 
@@ -742,10 +745,15 @@ impl DataClient for MogwaiDataClient {
         // they must be decremented together. An unmatched unsubscribe_bars (a bar
         // type never subscribed, or a double-unsubscribe interleaved by nautilus
         // command replay) that still decremented the symbol count would steal a
-        // decrement belonging to a different bar type's live subscription and, if
-        // that dropped the symbol total to 0, fire a wire Unsubscribe that darkens
-        // the surviving feed. Saturating arithmetic prevents underflow, not this
-        // cross-type theft - so gate the symbol decrement on a real match.
+        // decrement belonging to a different bar type's live subscription. No
+        // frame goes to the venue either way - subscriptions are satisfied
+        // entirely by this local table - and that is exactly what makes the
+        // theft dangerous: if it drops the symbol's bars count to 0, the WS
+        // reader stops forwarding that symbol's ticks to the bar path while the
+        // venue keeps pushing them, so the surviving bar type goes dark with
+        // nothing on the wire to show for it. Saturating arithmetic prevents
+        // underflow, not this cross-type theft - so gate the symbol decrement
+        // on a real match.
         let (matched, to_flush) = {
             let mut bars = self
                 .bars
@@ -771,7 +779,7 @@ impl DataClient for MogwaiDataClient {
             }
         };
         if matched {
-            // Flush the removed bar type's active window IF it already closed
+            // Flush the removed bar type's active window only if it already closed
             // (close_ts <= sim-now) but was withheld only for lack of a later
             // trade to cross its boundary - the AD19 discard-on-unsubscribe case.
             // A genuinely in-progress window (close_ts still in the future) is
@@ -1563,8 +1571,10 @@ async fn handle_market_message(
         } => {
             // `error`, not `warn`, and the level is a ruling rather than taste.
             // `FeedLagged` is the venue declaring that this client's tape has
-            // a hole: bars aggregate wrong, a `PollCursor` resumes past the
-            // missing span, and nothing downstream can tell the difference
+            // a hole: the live bar aggregator folds across it and closes bars
+            // over trades it never saw, downstream state built from the pushed
+            // stream is short by exactly the skipped rows, and nothing
+            // downstream can tell the difference
             // between a quiet market and a dropped one. The standing
             // preference is an assert, a type or a guard over a verification,
             // and none of the three is available here: nautilus's `DataEvent`
@@ -1580,9 +1590,12 @@ async fn handle_market_message(
             // cross-repo entry in `notes/todo.md`.
             //
             // The boundaries are the actionable part for whoever reads this
-            // log: they delimit the affected span, so a bar folded across it or
-            // a cursor advanced through it can be identified rather than
-            // guessed at. `episode` and `skipped_total` separate a client that
+            // log: they delimit the affected span, so a bar folded across it,
+            // or any downstream state accumulated through it, can be identified
+            // rather than guessed at. A history request over the same span is
+            // the recovery available: it re-synthesizes this passenger's own
+            // river from the generator rather than replaying the pushed stream,
+            // so a span already behind the passenger's present comes back whole. `episode` and `skipped_total` separate a client that
             // fell behind once from one that cannot keep up at all - the second
             // is a sizing problem, not an incident.
             tracing::error!(

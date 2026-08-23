@@ -44,11 +44,15 @@ pub struct Config {
     /// Simulated duration of one venue run. Zero means the launcher owns
     /// shutdown; a non-zero duration is announced as a clean completion.
     pub(crate) run_duration_ns: u64,
-    /// The account this run's single ledger is reported under.
+    /// The default account: the one a socket naming none is served under.
     ///
-    /// One venue is one run is one ledger, so this names the account rather than
-    /// selecting one - there is nothing to look up and nothing to refuse. It is
-    /// configurable anyway because the consumer asserts it: a host holds an
+    /// A run holds one ledger per account id, created the first time that id is
+    /// seen (`POST /accounts`, a `/ws?account=` query, and `account_ttl_ms` all
+    /// exist because of it). This key does not select among them - it names the
+    /// ledger a connection that presented no id gets, so resolution is total and
+    /// there is still nothing to look up and nothing to refuse.
+    ///
+    /// It is configurable because the consumer asserts it: a host holds an
     /// account of its own naming and compares it against what the venue reports,
     /// so a venue that insists on its own label is a venue that host cannot use.
     ///
@@ -303,8 +307,10 @@ fn default_balances() -> HashMap<String, Decimal> {
 
 /// Refuses boot on funding gaps the funded-account enforcement would turn into
 /// rejections. A funded venue refuses any order its free balance cannot
-/// cover, so an instrument whose quote currency carries no funding can never
-/// buy - every order on it rejects with "insufficient balance", and without
+/// cover, so an instrument whose settlement currency carries no funding can
+/// never buy - the quote currency for a spot pair, the `settlement_currency`
+/// for a future or a swap. Every order on it rejects with "insufficient
+/// balance", and without
 /// this warning the first sign is a rejected order minutes into a run. (Base
 /// funding is only needed by sell-first strategies, so its absence is not
 /// warned - a long-only run acquires base through its own buys.) The
@@ -328,7 +334,7 @@ pub(crate) fn refuse_unfunded_settlement(cfg: &Config, def: &InstrumentDef) -> a
     let currency = def.class.settlement_currency();
     if !cfg.balances.contains_key(currency) {
         anyhow::bail!(
-            "instrument {} quote currency {} is unfunded; every buy in this run \
+            "instrument {} settlement currency {} is unfunded; every buy in this run \
              would be rejected for insufficient balance - add {} to [balances]",
             def.symbol,
             currency,
@@ -1003,13 +1009,16 @@ fn replace_dotted(table: &mut toml::Table, path: &str, value: toml::Value) -> an
 /// maintenance hazard: `def` builds the struct literal, so a field added
 /// upstream fails to build here until it is mirrored.
 ///
-/// Note that the guard stops at this table's own keys. `generator` and `session`
-/// deserialize into `GeneratorScalars` / `SessionProfile`, which are shared with
-/// the committed fingerprint JSON parse and so are deliberately not denied here,
-/// meaning a typo inside those sub-tables is still tolerated. Their values are
-/// validated at load (`build_instrument_profiles` runs `scalars.validate` and
-/// `session.validate`), so the exposure is a silently defaulted field, not a
-/// nonsense one.
+/// The `deny` reaches this table's own keys only, because `generator` and
+/// `session` deserialize into `GeneratorScalars` / `SessionProfile`, types
+/// shared with the committed fingerprint JSON parse and so deliberately
+/// permissive. `configured_from_table` covers those two sub-tables instead, by
+/// checking their raw TOML keys against `GENERATOR_KEYS` / `SESSION_KEYS`
+/// before this struct is built - so a typo inside either one is refused by name
+/// rather than defaulting the knob it meant. Every construction of a
+/// `ConfiguredInstrument` from operator or preset text goes through that
+/// function. Values are validated after, at load
+/// (`build_instrument_profiles` runs `scalars.validate` and `session.validate`).
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfiguredInstrument {
@@ -1441,8 +1450,7 @@ fn profile_from_configured(
 /// apply exactly as they do at boot.
 pub fn profile_from_preset(name: &str) -> anyhow::Result<source::InstrumentProfile> {
     let (merged, _provenance) = effective_preset(name)?;
-    let configured: ConfiguredInstrument = merged
-        .try_into()
+    let configured = configured_from_table(merged)
         .with_context(|| format!("preset {name} does not deserialize as an instrument"))?;
     profile_from_configured(&configured, mogwai_data::Fingerprint::repo())
 }
@@ -1475,10 +1483,82 @@ pub fn profile_for_config(
 }
 
 fn profile_from_merged(merged: toml::Table) -> anyhow::Result<source::InstrumentProfile> {
-    let configured: ConfiguredInstrument = merged
-        .try_into()
-        .context("the resolved [instrument] table is not a valid instrument")?;
+    let configured =
+        configured_from_table(merged).context("the resolved [instrument] table is not valid")?;
     profile_from_configured(&configured, mogwai_data::Fingerprint::repo())
+}
+
+/// The keys `mogwai_data::GeneratorScalars` accepts, in its declaration order.
+///
+/// See [`refuse_unknown_subtable_keys`] for why the list exists, and
+/// `the_generator_key_list_is_exhaustive` for what stops it drifting.
+const GENERATOR_KEYS: [&str; 16] = [
+    "symbol",
+    "modal_tick",
+    "price_decimals",
+    "mean_event_duration_s",
+    "children_mean",
+    "children_single_frac",
+    "levels_mean",
+    "size_round_frac",
+    "start_price",
+    "latent_size_median",
+    "size_log_sigma",
+    "vol_scalar",
+    "quoted_width",
+    "top_sizes",
+    "trade_displacement_ticks",
+    "arrival",
+];
+
+/// The keys `mogwai_data::SessionProfile` accepts, in its declaration order.
+const SESSION_KEYS: [&str; 3] = ["intensity_hour", "vol_hour", "dow_weight"];
+
+/// Refuses an unknown key inside the `generator` or `session` sub-tables of a
+/// resolved instrument.
+///
+/// `ConfiguredInstrument` denies unknown fields, but that guard stops at its
+/// own keys. These two sub-tables deserialize into `GeneratorScalars` and
+/// `SessionProfile`, types shared with the committed fingerprint JSON parse and
+/// so deliberately permissive, which left a typo inside the two most
+/// dynamics-sensitive tables an operator writes silently accepted: the
+/// misspelled key was dropped and the knob it meant ran at its default. Both
+/// halves stayed green, because a defaulted scalar is a legal scalar. Checking
+/// the raw TOML keys here closes that without touching the shared types.
+///
+/// One level deep, which is the level an operator writes as a table. The nested
+/// seams (`quoted_width`, `top_sizes`, `trade_displacement_ticks`, `arrival`)
+/// are written as inline tables and are not covered; `calendar`, `margin` and
+/// `fees` need no cover because their own types already deny unknown fields.
+fn refuse_unknown_subtable_keys(instrument: &toml::Table) -> anyhow::Result<()> {
+    for (name, known) in [
+        ("generator", &GENERATOR_KEYS[..]),
+        ("session", &SESSION_KEYS[..]),
+    ] {
+        let Some(sub) = instrument.get(name).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for key in sub.keys() {
+            if !known.contains(&key.as_str()) {
+                anyhow::bail!(
+                    "unknown key {key} in the resolved [instrument.{name}] table; \
+                     it would be dropped and the knob it names left at its default, \
+                     so it is refused instead. Valid keys are: {}",
+                    known.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The one spelling of "this resolved table is an instrument": the sub-table
+/// key guard, then the deserialize whose own `deny_unknown_fields` covers the
+/// top level.
+fn configured_from_table(merged: toml::Table) -> anyhow::Result<ConfiguredInstrument> {
+    refuse_unknown_subtable_keys(&merged)?;
+    let configured: ConfiguredInstrument = merged.try_into()?;
+    Ok(configured)
 }
 
 fn validate_instrument_options(
@@ -2104,12 +2184,97 @@ mod tests {
             let table =
                 toml::Table::from_iter([("preset".into(), toml::Value::String(name.into()))]);
             let resolved = resolve_instrument(None, vec![table]).unwrap();
-            let configured: ConfiguredInstrument = toml::Value::Table(resolved).try_into().unwrap();
+            // Through `configured_from_table`, so the sub-table key guard is
+            // held against every shipped preset here too: a key list that had
+            // lost a field would refuse the preset that sets it.
+            let configured = configured_from_table(resolved).unwrap();
             validate_instrument_def(&configured.def()).unwrap();
             validate_instrument_options(&configured, &configured.def()).unwrap();
             let profile = profile_from_configured(&configured, &fp).unwrap();
             assert_preset_diagnostics(name, &profile, &fp, &provenance).unwrap();
         }
+    }
+
+    /// The anchor for `GENERATOR_KEYS`. The destructure carries no `..`, so a
+    /// field added to `GeneratorScalars` upstream fails to compile here until
+    /// this list learns it, and the length assertion then fails until
+    /// `GENERATOR_KEYS` learns it too. The other direction - a name in the
+    /// constant misspelled, which would let one typo through - is covered by
+    /// `every_shipped_preset_parses_and_validates`, which resolves every key
+    /// the shipped presets actually set through the guard.
+    #[test]
+    fn the_generator_key_list_is_exhaustive() {
+        let sample = mogwai_data::GeneratorScalars::from_fingerprint_medians(
+            "ANCHOR",
+            mogwai_data::Fingerprint::repo(),
+        );
+        let mogwai_data::GeneratorScalars {
+            symbol: _,
+            modal_tick: _,
+            price_decimals: _,
+            mean_event_duration_s: _,
+            children_mean: _,
+            children_single_frac: _,
+            levels_mean: _,
+            size_round_frac: _,
+            start_price: _,
+            latent_size_median: _,
+            size_log_sigma: _,
+            vol_scalar: _,
+            quoted_width: _,
+            top_sizes: _,
+            trade_displacement_ticks: _,
+            arrival: _,
+        } = sample;
+        assert_eq!(GENERATOR_KEYS.len(), 16);
+    }
+
+    /// The anchor for `SESSION_KEYS`, on the same terms.
+    #[test]
+    fn the_session_key_list_is_exhaustive() {
+        let mogwai_data::SessionProfile {
+            intensity_hour: _,
+            vol_hour: _,
+            dow_weight: _,
+        } = default_session_profile();
+        assert_eq!(SESSION_KEYS.len(), 3);
+    }
+
+    /// A typo inside `[instrument.generator]` used to be swallowed: the shared
+    /// `GeneratorScalars` does not deny unknown fields, so the misspelled key
+    /// was dropped and the knob it meant ran at its default with nothing said.
+    #[test]
+    fn a_typo_inside_the_generator_table_refuses_and_names_the_key() {
+        let (mut instrument, _) = effective_preset("MNQ").unwrap();
+        configured_from_table(instrument.clone()).expect("the preset as shipped still loads");
+        instrument
+            .get_mut("generator")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap()
+            .insert("vol_scalr".into(), toml::Value::Float(1.0));
+        let message = configured_from_table(instrument)
+            .expect_err("a misspelled generator knob must not boot")
+            .to_string();
+        assert!(message.contains("vol_scalr"), "{message}");
+        assert!(message.contains("instrument.generator"), "{message}");
+    }
+
+    /// The same hole under `[instrument.session]`, whose three arrays are the
+    /// other dynamics-sensitive table an operator writes by hand.
+    #[test]
+    fn a_typo_inside_the_session_table_refuses_and_names_the_key() {
+        let (mut instrument, _) = effective_preset("MNQ").unwrap();
+        configured_from_table(instrument.clone()).expect("the preset as shipped still loads");
+        instrument
+            .get_mut("session")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap()
+            .insert("dow_weights".into(), toml::Value::Array(Vec::new()));
+        let message = configured_from_table(instrument)
+            .expect_err("a misspelled session knob must not boot")
+            .to_string();
+        assert!(message.contains("dow_weights"), "{message}");
+        assert!(message.contains("instrument.session"), "{message}");
     }
 
     #[test]
@@ -2556,7 +2721,7 @@ mod tests {
     fn shipped_preset_diagnostics_require_exact_provenance_acceptance() {
         let fp = mogwai_data::Fingerprint::from_repo_json();
         let (instrument, mut provenance) = effective_preset("MNQ").unwrap();
-        let configured: ConfiguredInstrument = toml::Value::Table(instrument).try_into().unwrap();
+        let configured = configured_from_table(instrument).unwrap();
         let mut profile = profile_from_configured(&configured, &fp).unwrap();
 
         // As shipped: the tick is outside the corpus range, the diagnostic
@@ -2641,10 +2806,8 @@ mod tests {
     fn an_override_table_entry_wins_and_is_logged_with_both_values() {
         let table: toml::Table =
             toml::from_str("preset = \"MNQ\"\n[override]\n\"class.multiplier\" = \"3\"\n").unwrap();
-        let configured: ConfiguredInstrument =
-            toml::Value::Table(resolve_instrument(None, vec![table]).unwrap())
-                .try_into()
-                .unwrap();
+        let configured =
+            configured_from_table(resolve_instrument(None, vec![table]).unwrap()).unwrap();
         assert_eq!(configured.def().class.multiplier(), Decimal::from(3));
     }
 
@@ -2899,10 +3062,8 @@ mod tests {
     #[test]
     fn the_mnq_preset_reads_two_dollars_per_point_and_fifty_cents_per_tick() {
         let table = toml::Table::from_iter([("preset".into(), toml::Value::String("MNQ".into()))]);
-        let configured: ConfiguredInstrument =
-            toml::Value::Table(resolve_instrument(None, vec![table]).unwrap())
-                .try_into()
-                .unwrap();
+        let configured =
+            configured_from_table(resolve_instrument(None, vec![table]).unwrap()).unwrap();
         let def = configured.def();
         assert_eq!(def.class.multiplier(), Decimal::from(2));
         assert_eq!(def.tick_value(), Decimal::new(50, 2));

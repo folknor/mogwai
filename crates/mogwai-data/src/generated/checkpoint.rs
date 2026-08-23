@@ -65,7 +65,7 @@ pub struct CheckpointIndex {
     /// far-future window), and `GeneratedSource::next_tick` never ends - so an
     /// uncapped `extend_toward` would spin the path-dependent walk indefinitely
     /// while holding the shared index mutex. A target past this bound leaves the
-    /// frontier short; `try_source_at_or_before` reports that refusal instead of
+    /// frontier short; `try_source_before` reports that refusal instead of
     /// handing a caller a source which could then seek forever. Sized to the
     /// same budget as the from-origin cap, so every legitimate target (warmup,
     /// live sim-now, a poll's modest per-step delta) sits far inside it.
@@ -123,7 +123,7 @@ impl CheckpointIndex {
     /// snapshotting every `k` ticks. Monotonic: a later, further target only does
     /// the new delta, so the from-origin walk is paid once across all seeks. The
     /// walk is bounded by `max_extend` per call (the runaway backstop); a target
-    /// beyond that leaves the lead short, which `try_source_at_or_before`
+    /// beyond that leaves the lead short, which `try_source_before`
     /// refuses outright rather than papering over. Nothing caps the seek downstream of a
     /// positioned source, so handing one out short is what would hang.
     pub fn extend_toward(&mut self, target: u64) -> usize {
@@ -184,7 +184,7 @@ impl CheckpointIndex {
     /// It is correctness-preserving: every retained checkpoint is still the
     /// exact walk state at its `clock_ns`, so resuming from the coarser grid and
     /// replaying reproduces the identical tape - dropping an intermediate
-    /// snapshot only lengthens the residual drain (`source_at_or_before` now
+    /// snapshot only lengthens the residual drain (`source_before` now
     /// resumes up to the new, larger `k` ticks before the target), it never
     /// changes which ticks are emitted. The origin (index 0) is always retained
     /// as the pre-first-tick fallback. The residual drain stays bounded by the
@@ -219,11 +219,17 @@ impl CheckpointIndex {
         }
     }
 
-    /// A fresh generator positioned at the latest checkpoint strictly before
-    /// `target` (or the origin when nothing is). The caller drains it forward to
-    /// the exact target (< K ticks) via the normal seek; the returned source is
-    /// an independent clone, so the shared index is untouched by that replay.
-    pub fn try_source_at_or_before(&mut self, target: u64) -> Option<GeneratedSource> {
+    /// A fresh generator positioned at the latest checkpoint whose `clock_ns`
+    /// is strictly less than `target`, or the origin when none is. The boundary
+    /// is strict, never a `<=` partition on `clock_ns` - a checkpoint sitting
+    /// exactly on `target` has already consumed the boundary tick, and resuming
+    /// there loses it. See `try_source_before_target`, which carries the
+    /// argument in full.
+    ///
+    /// The caller drains the result forward to the exact target (< K ticks) via
+    /// the normal seek; the returned source is an independent clone, so the
+    /// shared index is untouched by that replay.
+    pub fn try_source_before(&mut self, target: u64) -> Option<GeneratedSource> {
         self.try_source_before_target(target, 0)
             .map(|(source, _)| source)
     }
@@ -284,10 +290,11 @@ impl CheckpointIndex {
         Some((self.checkpoints[idx].source.clone(), idx == 0))
     }
 
-    /// Position at a reachable target, panicking rather than returning a
-    /// short source that an unbounded downstream seek could walk forever.
-    pub fn source_at_or_before(&mut self, target: u64) -> GeneratedSource {
-        self.try_source_at_or_before(target)
+    /// The same strictly-before positioning as `try_source_before`, on a
+    /// reachable target, panicking rather than returning a short source that an
+    /// unbounded downstream seek could walk forever.
+    pub fn source_before(&mut self, target: u64) -> GeneratedSource {
+        self.try_source_before(target)
             .expect("checkpoint extension cap left target unreachable")
     }
 

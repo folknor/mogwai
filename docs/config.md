@@ -61,6 +61,9 @@ below `5 ms / speed` is served at 5 ms rather than as written.
 
 ## Accounts that outlive their connection
 
+The keys below are the operator's half; `docs/accounts.md` is the consumer's,
+covering how an account is opened, named, frozen, evicted and read.
+
 An account is the consumer's and outlives the socket that named it, so a consumer
 returning with the same id resumes its own ledger. Two keys govern what that
 means, and both are reported on the readiness record so a launcher never has to
@@ -116,12 +119,14 @@ venue. A
 boot storm is dozens of runs taking dozens of sequential pages against four
 slots, so ordinary paging fired the gate constantly and silently.
 
-Two things still answer `503 history request capacity exhausted`, and both mean
-the venue is genuinely saturated rather than merely busy: a wait that outlives
-its 30 seconds, and more than 128 requests in the building at once (synthesizing
-or waiting), which is the fail-fast bound that keeps the queue from becoming a
-way to accept everything and answer nothing. A consumer that sees one should treat
-it as real overload - stagger its boots - and never as an empty window.
+Two things still answer 503, each with its own body naming its condition and
+both meaning the venue is genuinely saturated rather than merely busy: a wait
+that outlives its 30 seconds, and more than 128 requests in the building at
+once (synthesizing or waiting), which is the fail-fast bound that keeps the
+queue from becoming a way to accept everything and answer nothing. Both carry
+a `Retry-After` header derived from the wait bound. A consumer that sees
+either should treat it as real overload - stagger its boots - and never as an
+empty window.
 
 The fill band is `fill_band_vol_mult` and `fill_band_max_ticks`. Every resting
 limit draws a trigger price uniformly from `0 ..= band_ticks` ticks away from
@@ -425,8 +430,8 @@ Commission books in the settlement currency and reaches the consumer on the
 fill.
 
 `[instrument.calendar]` expresses genuine closure, which the hour and day
-weights of `[instrument.session]` cannot: those shape intensity WITHIN an open
-session and must stay strictly positive. It takes `utc_offset_minutes`
+weights of `[instrument.session]` cannot: those shape intensity inside a session
+that is already open, and must stay strictly positive. It takes `utc_offset_minutes`
 (`-720 ..= 840`, fixed - DST is unmodelled), `open_windows` as sorted
 non-overlapping half-open intervals in minutes from local Sunday 00:00 with at
 most one wrapping past it, and an optional `settlement_minute_of_day` naming
@@ -443,10 +448,12 @@ A requested symbol selects a committed preset of the same name, or BTCUSDT when
 unmatched - so `?symbol=MNQ` gets the index-future bundle from a config that
 never mentions MNQ.
 An explicit `preset = "MNQ"` in either overlay takes precedence and serves that
-bundle under the requested symbol. Top-level overlay keys are legal replacements or additions;
-`[instrument.override]` or `[symbols.<SYM>.override]` reaches dotted paths such as
-`"class.multiplier" = "3"`. Overriding a dotted path the bundle does not set
-refuses boot. Each override is logged with both values. Every preset carries a `[provenance]` map with one
+bundle under the requested symbol. A top-level overlay key replaces the knob
+the bundle sets or adds an optional section it leaves out; a dotted path is
+reached only through `[instrument.override]` or `[symbols.<SYM>.override]`,
+which may not add a section and refuses boot on a path the bundle does not set.
+The full rule, with its refusal messages, is stated once under "Overriding a
+knob" in `docs/presets.md`. Each override is logged with both values. Every preset carries a `[provenance]` map with one
 entry per knob it sets - `fitted`, `derived` or `declared` with a rationale -
 and boot refuses a preset that leaves any knob undeclared. `mogwai presets`
 lists them; `mogwai presets MNQ` prints one with its provenance.

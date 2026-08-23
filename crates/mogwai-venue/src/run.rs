@@ -577,7 +577,7 @@ fn apply_transport_arm(arm: &VenueArm, account_state: &Account) {
 /// yet, and is consumed by that account's first mint - which is precisely the
 /// promise a named arm makes ("the arm is standing when the consumer dials") and
 /// nothing more. Recording rather than minting is what keeps the control plane
-/// from deciding an account's terms: the consumer's own `POST /account` still
+/// from deciding an account's terms: the consumer's own `POST /accounts` still
 /// opens the ledger, with its own balances and policy, and finds the arm on it.
 /// A previous draft minted the ledger here, which locked that consumer out with a
 /// `409` and handed it default balances.
@@ -1090,7 +1090,7 @@ impl Run {
                         vec![Arc::clone(account_state)]
                     }
                     // Not minted here. Recording leaves the consumer's own
-                    // `POST /account` free to open the ledger on its own terms
+                    // `POST /accounts` free to open the ledger on its own terms
                     // and find the arm already on it; minting would answer that
                     // request `409 already open` and hand the account default
                     // balances and no policy.
@@ -1794,6 +1794,23 @@ impl Run {
         events
     }
 
+    /// Whether a socket with this identity is already bound to `account_id`. A
+    /// socket that named no callsign is never "already here": silence is not a
+    /// claim to be the incumbent, which is the same reading
+    /// [`Run::evict_account`] takes of it.
+    pub(crate) fn has_matching_identity_on(
+        &self,
+        account_id: &str,
+        callsign: Option<&str>,
+    ) -> bool {
+        let Some(callsign) = callsign else {
+            return false;
+        };
+        self.locked_lanes().iter().any(|bound| {
+            bound.account_id == account_id && bound.callsign.as_deref() == Some(callsign)
+        })
+    }
+
     /// Close every connection already trading `account_id` under a different
     /// callsign than the newcomer's, because a different identity has claimed it.
     ///
@@ -1822,23 +1839,6 @@ impl Run {
     /// would evict whatever evicted it.
     ///
     /// Returns how many were displaced, so the caller can say so.
-    /// Whether a socket with this identity is already bound to `account_id`. A
-    /// socket that named no callsign is never "already here": silence is not a
-    /// claim to be the incumbent, which is the same reading
-    /// [`Run::evict_account`] takes of it.
-    pub(crate) fn has_matching_identity_on(
-        &self,
-        account_id: &str,
-        callsign: Option<&str>,
-    ) -> bool {
-        let Some(callsign) = callsign else {
-            return false;
-        };
-        self.locked_lanes().iter().any(|bound| {
-            bound.account_id == account_id && bound.callsign.as_deref() == Some(callsign)
-        })
-    }
-
     pub(crate) fn evict_account(&self, account_id: &str, callsign: Option<&str>) -> usize {
         let same_callsign = |bound: &BoundLane| {
             callsign.is_some_and(|callsign| bound.callsign.as_deref() == Some(callsign))
@@ -2133,8 +2133,14 @@ pub(crate) enum Audience<'a> {
     /// that a later refactor can silently change.
     Account(&'a mogwai_protocol::AccountId),
     /// Owned by whoever submitted the named order; delivery resolves the owner
-    /// through the run's ownership table. An order the table does not know is
-    /// venue-originated (a liquidation) and goes to everyone.
+    /// through the run's ownership table. A venue-originated order, such as a
+    /// risk or margin liquidation, has no submitter but is claimed for the
+    /// account whose ledger produced it, at production time, by
+    /// [`Run::claim_produced_orders`] - so every order-scoped frame that reaches
+    /// delivery is expected to resolve. An order the table does not know is
+    /// therefore a claim some production site failed to make, not a class of
+    /// order; delivery falls back to everyone, which is the conservative
+    /// direction of the failure rather than the intended path.
     Order(&'a mogwai_protocol::VenueOrderId),
     /// Order-scoped, but the venue never recognized the order, so there is no
     /// id to resolve an owner from: a submit rejection, or a modify/cancel
@@ -2951,7 +2957,7 @@ mod tests {
         );
     }
 
-    /// The second mint site owes the same replay. `POST /account` builds its own
+    /// The second mint site owes the same replay. `POST /accounts` builds its own
     /// ledger from consumer-named balances, and the cold review found it opening
     /// that ledger with every havoc field at zero - so a subagent that starts by
     /// POSTing its account escaped the operator's arms entirely, which is
@@ -2997,7 +3003,7 @@ mod tests {
 
     /// An arm against an account that has not connected must not cost that
     /// consumer its own account. The arm is recorded, not minted: the consumer's
-    /// `POST /account` still succeeds, still gets the balances it asked for, and
+    /// `POST /accounts` still succeeds, still gets the balances it asked for, and
     /// finds the arm standing on the ledger it opened.
     ///
     /// Minting at the control plane instead - which an earlier draft of this

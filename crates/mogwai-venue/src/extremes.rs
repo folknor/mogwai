@@ -16,18 +16,26 @@
 //! puts a comparison on the hottest path in the venue. It is also unnecessary,
 //! because of what the quantities actually are:
 //!
-//! - A trailing stop's trigger is a monotone function of the tape: a sell trail
-//!   tracks the running high, a buy trail the running low. The maximum over the
-//!   ticks in a span is the span's high, so ratcheting once against the high is
-//!   bit-for-bit what ratcheting per tick would have produced.
-//! - Equity is linear in the price of the one instrument an account can be
-//!   holding - an account is on at most one river, and strategies are
-//!   single-instrument - so its extreme over a span is attained at a price
+//! - A trailing stop's trigger is a monotone function of its own river's tape: a
+//!   sell trail tracks the running high, a buy trail the running low. The
+//!   maximum over the ticks in a span is the span's high, so ratcheting once
+//!   against the high is bit-for-bit what ratcheting per tick would have
+//!   produced. This holds per symbol however many rivers the account rides.
+//! - Equity is linear in each price it depends on, so an account holding one
+//!   marked symbol attains its extreme over a span at that symbol's price
 //!   extreme. Long accounts peak at the high and trough at the low; short
 //!   accounts the other way round.
 //!
-//! So two prices per span carry the whole tick-resolution answer, and the tape
-//! thread's only job is to remember them.
+//! So two prices per span carry the whole tick-resolution answer for an account
+//! on one river, and the tape thread's only job is to remember them.
+//!
+//! The bound, since an account rides as many rivers as its passengers have
+//! boarded. The sweeper judges a policy once per due boat, and the span it holds
+//! covers that boat's river alone; every other symbol the account holds is
+//! valued at its last mark. So an account on several rivers has its cross-river
+//! equity evaluated at mark cadence, and its peak-equity ratchet sees a partial
+//! reconstruction of the interval ordered by whichever boat came due first. That
+//! is a stated bound of the model, not a defect this type is failing to cover.
 //!
 //! The instants are carried, and they are what keeps the answer honest rather
 //! than merely harsh. A span that spiked and then collapsed is a different run

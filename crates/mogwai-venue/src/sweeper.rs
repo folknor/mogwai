@@ -827,14 +827,23 @@ fn deliver(
 /// limit, forever for a trailing drawdown - and it is read by the order-entry
 /// gate rather than here.
 ///
-/// Evaluated at tick resolution, which is what `span` buys. Equity is linear in
-/// the price of the one instrument an account can be holding, so its extreme
-/// over the span is attained at a price extreme: replaying the span's two
-/// extremes in the order the tape reached them reproduces what a per-tick walk
-/// would have found, at two valuations rather than thousands. A spike that
-/// opened and closed between two passes now spends drawdown budget, and a
-/// collapse that recovered before the pass now breaches, both of which they did
-/// at the venue being modelled.
+/// Evaluated at tick resolution in `symbol`, which is what `span` buys. Equity
+/// is linear in each price it depends on, so holding every other price fixed,
+/// its extreme over the span is attained at one of `symbol`'s two price
+/// extremes: replaying them in the order the tape reached them reproduces what
+/// a per-tick walk of that river would have found, at two valuations rather
+/// than thousands. A spike that opened and closed between two passes now spends
+/// drawdown budget, and a collapse that recovered before the pass now breaches,
+/// both of which they did at the venue being modelled.
+///
+/// The bound, since an account rides as many rivers as its passengers have
+/// boarded. `span` carries the due boat's river alone; `valuation_at` marks
+/// that one symbol at the extreme and values every other symbol the account
+/// holds at its last read. So the cross-river component of equity is evaluated
+/// at mark cadence, and the ratchet sees a partial reconstruction of the
+/// interval ordered by whichever boat came due first. That is a stated bound of
+/// the model, not a defect here. See `extremes` for the same statement at the
+/// type that records the span.
 ///
 /// The closing equity is observed last regardless, because that is the reading
 /// the published risk state has to agree with.

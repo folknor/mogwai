@@ -56,7 +56,10 @@ pub(crate) struct TickCompositionArgs {
     /// Parent events measured per preset/seed/configuration combination.
     #[arg(long, default_value_t = 2_000_000)]
     parents: usize,
-    /// Concurrent workers. Defaults to the machine's parallelism.
+    /// Traversal workers: how many preset, seed and configuration
+    /// combinations are measured concurrently. Defaults to the machine's
+    /// reported parallelism, uncapped, and never exceeds the number of
+    /// combinations in the run.
     #[arg(long)]
     jobs: Option<usize>,
 }

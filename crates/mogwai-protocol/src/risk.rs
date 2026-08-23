@@ -107,13 +107,20 @@ pub struct OverallDrawdown {
 /// A hard cap on how large a position this account may carry, in the
 /// instrument's own size unit.
 ///
-/// An account is on at most one river, so one number is enough: it is a
-/// contract count on a future, a share count on an equity, a base-unit size
-/// on a perp. The venue refuses an order that would put the book over the
-/// cap - the largest |qty| it can reach given worst-case fill order of the
+/// One scalar, applied independently to every symbol the account trades: it is
+/// a contract count on a future, a share count on an equity, a base-unit size
+/// on a perp. The venue refuses an order that would put that symbol's book over
+/// the cap - the largest |qty| it can reach given worst-case fill order of the
 /// working book, reduce-only excluded - rather than flattening after the fact.
 /// Under netting that is the worse extreme net; under hedging, the larger
 /// side. Sizing past the firm is a consumer error, not a liquidation.
+///
+/// Two things follow from it being one number rather than a table, and both are
+/// deliberate. An account trading several symbols may hold the cap in each at
+/// once, because nothing here bounds the aggregate. And the number is read in
+/// each symbol's own size unit, so ten is ten contracts on one and ten coins on
+/// the next; a cap meant for one instrument is worth checking against every
+/// instrument the account will touch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaxPosition {
     pub quantity: Decimal,
@@ -247,7 +254,7 @@ impl AccountPolicy {
 /// publishes it on `GET /account`, nothing decodes it here - but it derives
 /// `Deserialize` for consumers, and a consumer's decoder is exactly where the
 /// tolerance would have bitten unobserved. It is a deliberate inclusion, not
-/// an oversight: [`RiskPolicy`] beside it stays number-tolerant because a
+/// an oversight: [`AccountPolicy`] beside it stays number-tolerant because a
 /// policy is also TOML config, while a published state is only ever wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskState {

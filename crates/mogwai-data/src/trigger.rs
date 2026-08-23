@@ -117,8 +117,7 @@ pub fn scan_triggers(
     let mut fill_sell_min: Option<Decimal> = None;
     let mut touch_buy_min: Option<Decimal> = None;
     let mut touch_sell_max: Option<Decimal> = None;
-    // `TriggerToward` - the touched-order family, not to be confused with
-    // `TriggerTouch`, which is the stop family despite the name. It opens in the
+    // `TouchedTrigger` - the touched-order family. It opens in the
     // opposite direction to the stop family and the same one as a limit: a
     // touched buy hits at or below its trigger, so its bound is the largest such
     // trigger, and symmetrically for a sell. Kept
@@ -131,18 +130,18 @@ pub fn scan_triggers(
         let slot = match (scan.kind, scan.side) {
             (ScanKind::FillThrough, Side::Buy) => &mut fill_buy_max,
             (ScanKind::FillThrough, Side::Sell) => &mut fill_sell_min,
-            (ScanKind::TriggerTouch, Side::Buy) => &mut touch_buy_min,
-            (ScanKind::TriggerTouch, Side::Sell) => &mut touch_sell_max,
-            (ScanKind::TriggerToward, Side::Buy) => &mut toward_buy_max,
-            (ScanKind::TriggerToward, Side::Sell) => &mut toward_sell_min,
+            (ScanKind::StopTrigger, Side::Buy) => &mut touch_buy_min,
+            (ScanKind::StopTrigger, Side::Sell) => &mut touch_sell_max,
+            (ScanKind::TouchedTrigger, Side::Buy) => &mut toward_buy_max,
+            (ScanKind::TouchedTrigger, Side::Sell) => &mut toward_sell_min,
         };
         // Which extreme this group's predicate opens toward: a group whose
         // predicate admits prices below its bound keeps the largest, one that
         // admits prices above keeps the smallest.
         let keeps_max = matches!(
             (scan.kind, scan.side),
-            (ScanKind::FillThrough | ScanKind::TriggerToward, Side::Buy)
-                | (ScanKind::TriggerTouch, Side::Sell)
+            (ScanKind::FillThrough | ScanKind::TouchedTrigger, Side::Buy)
+                | (ScanKind::StopTrigger, Side::Sell)
         );
         *slot = Some(match *slot {
             Some(bound) if keeps_max => bound.max(scan.px),
@@ -572,7 +571,7 @@ mod tests {
             TriggerScan {
                 side: Side::Buy,
                 px: at,
-                kind: ScanKind::TriggerTouch,
+                kind: ScanKind::StopTrigger,
                 from_ns: 0,
             },
             TriggerScan {

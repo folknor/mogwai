@@ -65,7 +65,7 @@ pub(crate) fn run(args: CacheArgs) -> anyhow::Result<()> {
         CacheCommand::Stats { entries } => {
             let stats = cache_stats(&root)?;
             println!("cache root: {}", root.display());
-            println!("provenance dirs: {}", stats.provenance_dirs);
+            println!("entries: {}", stats.provenance_dirs);
             println!("files: {}", stats.files);
             println!("bytes: {}", stats.bytes);
             if entries {
@@ -90,7 +90,7 @@ pub(crate) fn run(args: CacheArgs) -> anyhow::Result<()> {
             anyhow::ensure!(
                 present.contains(&token),
                 "no cache entry under {} carries the provenance token {token}. Keeping a token \
-                 that matches nothing prunes EVERYTHING, which is what `--keep` exists to \
+                 that matches nothing prunes the entire cache, which is what `--keep` exists to \
                  prevent, so this refuses instead. Present tokens: {}",
                 root.display(),
                 if present.is_empty() {

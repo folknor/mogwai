@@ -132,7 +132,7 @@ fn benches(c: &mut Criterion) {
     // Prime the index so the timed region measures a steady-state restore rather
     // than the one-off from-origin extension, which is what the venue pays after
     // its first pass on a symbol.
-    let _ = index.lock().expect("index").source_at_or_before(target);
+    let _ = index.lock().expect("index").source_before(target);
     c.bench_function("source_positioning", |b| {
         b.iter_batched(
             || (),
@@ -140,7 +140,7 @@ fn benches(c: &mut Criterion) {
             // and its teardown falls outside the timed region, as in the walk
             // benchmarks above.
             |()| {
-                let restored = index.lock().expect("index").source_at_or_before(target);
+                let restored = index.lock().expect("index").source_before(target);
                 let boxed: Box<dyn TickSource> = Box::new(restored);
                 MergeSource::starting_at(vec![boxed], Some(target))
             },

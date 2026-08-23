@@ -375,7 +375,8 @@ group by any other route has no API for it, and none is owed until one is wanted
   whether it drains the engine's armed queue no longer has a subject. The
   2026-08-20 ruling was that it does not and stays that way; the command went
   entirely in `bf25a5e`, generator half and transport half. `Engine::clear_armed`
-  survives as a crate-local flush with no wire route, which is the same
+  survives as a public engine method with no wire route and no caller outside
+  the crate, which is the same
   conclusion the ruling reached by a different road: the control plane arms and
   does not disarm. What the deletion did change, and what the ruling never
   covered, is that `clear_venue_arms` also dropped PENDING per-account records
@@ -482,51 +483,6 @@ group by any other route has no API for it, and none is owed until one is wanted
   with `is_frozen` and `is_seated_on` as derived queries. Not attempted in
   round 1 because it is a rewrite of `run.rs` rather than a fix, and the two
   holes were live.
-
-- RULED 2026-08-20: THE GLOSSARY'S END STATE IS UNIFORM USAGE, ONE PURPOSE PER
-  ENTRY, ACROSS THE ENTIRE CODEBASE. An entry that has to disambiguate is a
-  stopgap documenting a disease rather than curing it, and the standing case
-  is CLIENT, which today carries three senses: the counterparty process (our
-  prose), the adapter objects inside it (nautilus's `MogwaiDataClient` /
-  `MogwaiExecutionClient` vocabulary), and the submitter's id namespace (the
-  wire field `client_order_id`). The cure for everything we own is choosing a
-  distinct word for the process sense - "host" or "consumer" both already
-  have currency - and sweeping our prose and identifiers onto it, so "client"
-  recedes to the senses we cannot rename: nautilus's API vocabulary and
-  frozen wire field names, which stay quarantined behind their APIs and are
-  named as inherited in the glossary. When the sweep lands, the glossary's
-  Client entry collapses from a three-way disambiguation to one sentence, and
-  the same test applies to every future entry: if it needs "in one sense...
-  in another", the vocabulary owes a rename, not a longer entry.
-  THE CLIENT CASE LANDED 2026-08-21 as round 3 of the arc, and the sense count
-  turned out to be eight rather than three, which is why it was executed as a
-  classification and not as a substitution. The record is
-  `notes/glossary-reconciliation.md`.
-  TWO MORE STANDING CASES, agreed 2026-08-20 in the same review.
-  CONNECTION is a synonym cluster: the codebase says connection, socket, lane
-  and leg for one thing or its immediate neighbours - "socket" in most prose
-  and test names, `BoundLane`/`ExecLanes` for the venue-side delivery
-  apparatus a connection owns, "leg" for a connection's role in the adapter's
-  client pair. These are not one concept, so the cure is not collapse but
-  pinning: each word gets its one job and the prose is swept where
-  connection/socket are used interchangeably. The entry also owes a scope
-  sentence: an HTTP poll or a control-plane POST is not a connection in this
-  sense, and nothing says so.
-  SESSION is a three-way collision and the worst of the three cases: (1) the
-  self-asserted socket identity, (2) the TRADING session - calendar,
-  session classes, Asia session - which is domain-standard vocabulary and not
-  ours to rename, and (3) a socket's served TENURE - the socket-owned state
-  object, its shutdown guard, and the completion family's "this socket was a
-  live session".
-  SENSE 1 LANDED 2026-08-21 as round 4 of the arc: it is a `callsign`, and the
-  wire parameter followed as a designed break, so the identity is carried on
-  `/ws?callsign=` and the old key is refused rather than ignored. Sense 2 keeps
-  the word, which is the ruling's own ground - the operator surface spends
-  `session` on the trading day roughly sixty times against the socket sense's
-  six. SENSE 3 LANDED 2026-08-22 with the passenger re-cut: a socket's served
-  tenure is a `Passenger`, and `passenger_guard`, `passengers_tx` and
-  `passengers_drained` carry the tenure machinery. Nothing here is open; the
-  rounds are recorded in `notes/glossary-reconciliation.md`.
 
 - `reject_while_closed` JUDGES MARKETABILITY AGAINST THE STATED PRICE while the
   engine judges it against the BAND-DRAWN trigger, so the two can disagree by
@@ -831,22 +787,6 @@ group by any other route has no API for it, and none is owed until one is wanted
   shape (name the binary, or a wrapper that `exec`s it) and what it costs when a
   caller does not.
 
-- FOUR REFUSAL MESSAGES SPELL THE DIVERGENCE CEILING AS A LITERAL. Filed
-  2026-08-19 by the `bugs-protocol` round-5 fix-and-commit pass, which found it
-  while spot-checking that report's cleared items and did not fix it - the
-  `bugs-*` arc has no remaining document scoped to `mogwai-protocol`, so it has
-  nowhere else to land.
-
-  `havoc::validate_divergence` writes "3600000" into the text of four refusals
-  (the `DelayAcks`/`GoDark`/`StallData` arm, `CommandLatency`, `FlowSurge` and
-  `FeeSurcharge`) while `control::MAX_DIVERGENCE_MS` is the constant the check
-  itself compares against. The constant IS 3_600_000 today, so nothing is wrong
-  and there is no bug to close - the point is that changing the constant leaves
-  four operator-facing messages naming the old ceiling, and NOTHING DETECTS IT:
-  a live fact asserted inside a string literal is invisible to the prose gate
-  and to the compiler alike. Cheap fix whenever anyone next edits those arms -
-  interpolate the constant - and the same shape as the `bugs-tests-lab-cli`
-  item about a refusal text hardcoding its cap.
 
   COUNT THEM AT THE PRODUCTION SITES. The first filing said five, from a raw
   match over the file: the module's tests carry the same four strings as
@@ -2305,7 +2245,7 @@ group by any other route has no API for it, and none is owed until one is wanted
   re-derived on every ratchet. `wire_order_type` now has no refusal arm at all,
   so a type nautilus adds later is a compile error rather than a runtime refusal
   a strategy meets mid-run. The surface is complete in fact, not only in intent.
-  THE TOUCHED FAMILY is a third `ScanKind`, `TriggerToward`, rather than a flag
+  THE TOUCHED FAMILY is a third `ScanKind`, `TouchedTrigger`, rather than a flag
   on the stop predicate: a stop fires when price runs AWAY from what it protects
   and a touched order when price comes TOWARD its level, and putting the two
   most easily confused behaviours in the venue behind one boolean is how they
@@ -3288,9 +3228,13 @@ Inline literals (no named const):
   `venue identity mismatch`. Two non-answers are deliberately not mismatches and
   are reported as distinct categories: no usable answer is a transport failure,
   a well-formed answer carrying no `run_seed` is version skew.
-- `MOGWAI_VENUE_STR = "MOGWAI"` (correctly single-sourced).
+- `MOGWAI_VENUE_STR = "MOGWAI"`. Its doc claims a rename propagates everywhere,
+  and `convert.rs` writes the bare literal `Ustr::from("MOGWAI")` as the
+  exchange on every `FuturesContract` in a file that already imports the
+  constant - a rename does not propagate there and nothing detects it.
 - Default `TraderId` and local Nautilus `AccountId` labels are `MOGWAI-001`.
-  The account label is not sent to the one-ledger venue.
+  The nautilus-side account label is local; the venue account id travels on
+  `/ws?account=`.
 - Timeout consts: `ACCOUNT_REGISTRATION_TIMEOUT 5s`, `ACCOUNT_REGISTRATION_POLL
   10ms`, `MIN_WALL_REQUEST_TIMEOUT_SECS 1` (flagged in its own comment as the
   tightest cap on usable sim speed). `wait_connected` re-hardcodes an
@@ -3353,3 +3297,213 @@ golden-test seed.
   knobs, and the funded `balances` table. It states neither `sim_epoch_ns` nor
   `wall_anchor_ns` - both are derived at boot, and the former is refused as a
   key.
+
+## Residue of the glossary reconciliation arc, filed 2026-08-23 at close-out
+
+The arc ran 2026-08-21/22 (twelve rename rounds, the
+`glossary_vocabulary_prose.rs` conformance gate, a close pass) and was stopped
+by the owner when agents began adding self-evident industry terms to the
+glossary. The arc's records are deleted; git history holds the rounds. Every
+item below was verified live against the tree on 2026-08-23. Two standing
+facts from the stop itself: glossary entries are admitted by the owner alone -
+an agent that meets an undefined load-bearing word escalates, never adds an
+entry - and the vocabularies below that want definitions want them in
+`reference/`, not in the glossary.
+
+### The multi-river peak-equity bound (engineering)
+
+The one-river prose was rewritten to the honest bound on 2026-08-23 (the
+tick-resolution exactness argument in `reference/architecture.md`,
+`extremes.rs`, the venue `risk.rs`, `sweeper.rs`'s `enforce_policy` doc, the
+`MaxPosition` doc and `retire_off_river`'s doc all now state it). What remains
+is the substance the prose now admits: for a multi-river account the
+peak-equity ratchet is fed a partial, arbitrarily ordered reconstruction -
+equity is a sum over rivers, its extreme over a span need not sit at either
+river's extreme, and the sweeper judges per due boat with the other rivers at
+last marks. Closing it means a per-account extremes reconstruction across
+rivers, which is engineering, not prose. The per-symbol position cap is now
+documented on the type; whether an aggregate cap is wanted is unruled.
+
+### The undefined-vocabulary program (the arc's unexecuted phase)
+
+Four scopes converged on lifting the contract vocabularies out of doc comments
+into `reference/` documents (a wire-vocabulary reference and counterparts),
+with the glossary untouched. The vocabularies, by how much depends on them:
+admission/refusal/rejection (including the `BreachAction` collision - two
+project-owned types, one name, disjoint variants, and only one defined); the
+frontier/sweep/watermark vocabulary (the defect family AGENTS.md names first
+has no durable definition; `trigger.rs`'s `reached_ns` comment is the cleanest
+statement in the tree); lane and byte budget (operator config keys
+`admission_lane_frames`, `exec_held_budget_bytes`, `pending_command_acts` rest
+on words no document defines); the fill band (named in the tape-version bump
+rule, defined nowhere); generation (parent/child/sweep/print/level/latent -
+what a tape is made of); reconciliation and the mirror ("venue truth" appears
+in eleven doc blocks as if defined); linkage (release emits no wire frame - a
+consumer watching bracket exit legs waits forever, stated only in doc
+comments); resolution (shape/bundle/overlay - the River entry hangs identity
+on "the resolved bundle" and nothing defines bundle); account lifecycle
+verbs; risk enforcement terms; the arrival kernel (`ArrivalRefusal` is the
+only non-injected route to a terminal tape fault and appears in no document);
+the intake sequence (half of `mogwai --help` is protocol jargon resolving to
+retired notes - "Brick B4", "Stage M", "Amendment 2"); storage (`docs/cli.md`
+cites "the storage policy" three times as a named authority no document
+defines); the adapter's vocabularies (transport generation, receipt book,
+delivery pipeline, "same-ts wedge" in three operator-facing warnings); and
+delivery/audience (the Passenger entry asserts invisibility and names no
+mechanism; `Audience`'s own doc is most of the owed document).
+
+### Code the glossary is owed (roadmap)
+
+- Generator havoc must fork the river. The entry stands by repeated ruling;
+  the tape machinery deliberately mutates a canonical boatless river instead,
+  with the pinned control-boundary snapshot, the coarsen exemption and the
+  walk-back floor built to make non-forking correct - so the gap has known
+  size and known work to undo. The seated-boat refusal standing in for the
+  fork names a remedy no route exposes, and its gate reads boat presence in
+  the non-awaiting form, so it is vacuous against a concurrent board.
+- The adapter cannot name a speed or a duration: `ws_url` emits neither, both
+  configs carry no field for them, and the venue reads both. Related, the
+  venue's second-cadence refusal ("a ledger carries one cadence") reaches the
+  adapter as a failed upgrade retried forever with backoff - a configuration
+  error handled as a transient outage, unlike the identity mismatch, which
+  refuses terminally.
+- The adapter reads the wrong clock: `fetch_clock` hits bare `GET /clock`
+  with neither symbol nor speed, so every timestamp, havoc deadline, quota
+  interval and backoff sits on the venue axis; the `boat_clock` flag on the
+  envelope has no reader in the crate.
+- The many-rivers shape is not expressible through the adapter's public API:
+  one data client binds one river and refuses every other subscription, and
+  nothing presents multi-pair composition as supported.
+- The equity conversion drops the three facts the Instrument class entry says
+  an equity carries: lot size, borrowability, settlement period all pass as
+  `None` in `convert.rs`.
+- `ship_server_havoc` serializes each divergence bare, so transport arms
+  default venue-wide instead of riding the configured account, and generator
+  arms lose their symbol scope.
+- `[regime]` is run-wide, so a per-passenger generator arm has no operator
+  expression; under Boarding the carrier decides nothing, so this is a
+  config-schema gap.
+- `[balances]` and `[account_policies]` are separate tables while the Account
+  policy entry defines a policy as opening balance plus risk rules; there is
+  no way to register a named policy stating its opening equity, which is what
+  a funded-account programme is.
+- `for_run` discards `account_ttl_ms` and `reset_account_on_reconnect`, so
+  the adapter's reconnect loop can back off past a freeze TTL blind.
+
+### Owner rulings still open
+
+- `Balance.locked` carries order holds, maintenance collateral and unsettled
+  credits in one wire number with opposite remedies; two scopes recommend a
+  split, and `Account::unsettled`'s doc in `mogwai-engine` argues the
+  conflation is fine. Unruled.
+- Whether the evidence toolbox stays on the binary's top level (eighteen
+  subcommands for one audience beside three for another), and the repeated
+  leaf names inside it: `preflight` is three different commands and `fit` is
+  two, all operator-typed, all producing plausible evidence output, with no
+  collision warning in `docs/cli.md`.
+- Whether `leg` (one of the two connections a nautilus consumer necessarily
+  holds under one account) gets a glossary entry.
+- The tape-identity vocabulary: river is the sequence, tape the delivery, and
+  the process the version constant identifies has no name; entangled prose
+  ("tape root", "tape identity", `TapeIdentity`) was left by owner ruling.
+  Adjacent and real: `reference/architecture.md`'s version narrative walks 5
+  through 18 and then asserts the current identity - six unnarrated bumps.
+- The `held` collision the hold ruling created: `exec_held_budget_bytes` and
+  the "held lane" use the word for the outbound byte-budget sense that kept
+  `reservation`, at a consumer-visible config key.
+- `mogwai-engine`'s fourth sense of admission (acceptance of an order onto
+  the book, ~60 sites) is unruled and must not be swept as retired.
+- `stage_m_tier2.rs`'s append-only candidate ledger is an unruled sixth sense
+  of ledger; and `mogwai_lab::delivery` still owns the git-cleanliness oracle
+  (`TreeOracle` and kin), a second unrelated job under a module named for the
+  delivery manifest.
+
+### Cross-cutting defects still open after the 2026-08-23 fix waves
+
+Four waves of agents closed most of the close-out's defects the same day:
+wrong-item docs, dangling type citations, the classless-command wildcard,
+query and sub-table typo gates, the constant-vs-message refusals, the stale
+module docs, the retired-carrier adapter prose and its `A.11` tags, the
+materialize status split, the varying `/health` status with one shared fault
+classifier for the health body and the exit message, the two 503 bodies with
+`Retry-After`, the live-fact prose gates (order-type count, class count,
+readiness version), the operator help texts, the boundary-function and
+`ScanKind` renames, `mogwai-data` on tracing, the adapter's `fetch_account`
+naming its account, the venue-side one-print-per-instant premise test, the
+`ARRIVAL_MEAN_CAL` separation gate (bare side), the batch margin setter, the
+adapter test-double knobs, and `docs/accounts.md`. What remains:
+
+- `DivergenceRequest` accepts and ignores unknown fields on the control
+  plane - serde flatten blocks `deny_unknown_fields`, so the fix is
+  structural, a kind/args request shape. Related and unruled: its 202 body
+  is empty, English prose, or prose containing a Rust `{:?}` render, on the
+  one route an automated scenario driver uses most.
+- `MarketToLimit` is an open engine defect documented on the wire type and
+  nowhere actionable: the fill takes the whole quantity at the order's own
+  limit with no reference to the tape, and a divergence-manufactured
+  remainder rests `Inert` - unable to fill, unable to expire, ended only by
+  a consumer cancel - with `Resting::Inert`'s doc describing the mechanism
+  and neither side pointing at the other.
+- `rustdoc::broken_intra_doc_links` is nowhere enabled, so the next dangling
+  doc reference goes undetected; the wrong-item doc-comment class (three
+  instances found, all fixed) is likewise detected by nothing.
+- `enforce_funds` is a whole account mode inferred from an empty balance map
+  at engine construction, invisible from the wire and undocumented anywhere
+  durable.
+- The account-claim path in `ws.rs` (~line 449) leaves an abandoned ride
+  behind, safe by a reachability argument rather than a guard - every other
+  path releases through `Drop` - which is the frontier family in reverse.
+- Two public `SessionSegment` types in one crate (`mogwai-lab`'s `summary`
+  and `session`), sharing field names, so a wrong import compiles; renaming
+  the narrow one keeps the recorded reasoning and removes the trap.
+- `wait_connected`'s hardcoded 5 s (not sim-scaled, not configurable) can
+  fail `connect` against a venue correctly paying a fresh river's warmup
+  inside the first request; the dial path now names the cold-river case, the
+  connect wait does not.
+- The `ARRIVAL_MEAN_CAL` gate covers the bare side only: no cheap observable
+  reaches the corrected side, because the composition is inline in
+  `GeneratedSource::new` and lands in a private field, and the factor cancels
+  in every ratio probe. A `pub(super)` accessor returning the composed active
+  mean would close the second half in one line (for `quiet_share` 0 it must
+  equal the calibration times the bare mean, bit for bit).
+- The late-boarder rule is open-coded twice with nothing shared: the fee
+  surcharge window in `mogwai-engine` and the FlowSurge branch of
+  `arm_divergence` in `mogwai-venue`.
+- The no-shouting textlint is blind to some Rust comments: `http.rs`,
+  `run.rs`, `account.rs` and `config.rs` still carry shouted words the
+  de-shout commit missed. Check the lint's coverage before sweeping by hand.
+- Structural proposals the arc recorded, still unadopted:
+  `reference/architecture.md` is ~1300 lines doing four jobs (its
+  contradictions all sat where one job's old text survived another's
+  landing), and `docs/havoc.md` was patched rather than rewritten.
+- Refuted by the wave that went to fix them, recorded so they are not
+  re-filed: account opening is not quadratic in symbol count (no mint loop
+  installs more than one margin policy; the batch setter now exists for
+  whoever writes one), and the `opening_balances` clone per mint and per
+  `GET /account` preview is structural - the engine mutates its balance map,
+  so an `Arc` field would still be cloned into an owned map at build.
+
+### New residue from the 2026-08-23 fix waves
+
+- The adapter's `fetch_account` now names the configured account, but what a
+  reported-id mismatch should mean under the per-account venue is still only
+  a cosmetic log line (`note_account_label`); whether it should ever be
+  treated as an error is undecided.
+- `HavocSpec.data` (`Option<MarketRegime>`) appears to have no reader on the
+  adapter side now that the `Subscribe` carrier is retired - an operator
+  setting `[havoc.data]` in an adapter havoc spec may be arming a field
+  nothing consumes, the looks-armed-and-is-not shape. Wants a verdict:
+  route it or refuse it.
+- The sub-table typo guard covers `[instrument.generator]` and
+  `[instrument.session]` one level deep; the nested seams inside `generator`
+  (`quoted_width`, `top_sizes`, `trade_displacement_ticks`, `arrival`) are
+  still permissive, and the guard's doc says so.
+- `arrival_envelope_diagnostic` applies no 16-job cap while `arrival_screen`
+  caps its default at 16 for a measured SMT regression; the help now states
+  both honestly, and whether the diagnostic should share the cap is open.
+  `arrival_screen`'s `DEFAULT_MAX_JOBS` also carries no comment naming the
+  measurement (it lives in `reference/performance.md`).
+- `reference/glossary.md`'s Strategy entry says "single-instrument by
+  settled premise", which sits oddly beside the Account entry's many-rivers
+  model; the glossary is owner-only, so this is a question for the owner,
+  not an edit.

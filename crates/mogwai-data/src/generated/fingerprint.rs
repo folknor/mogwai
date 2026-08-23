@@ -368,6 +368,45 @@ impl GeneratorScalars {
         }
     }
 
+    /// Every calibration provenance this struct carries, paired with the field
+    /// name a refusal reports.
+    ///
+    /// The exhaustive destructure - no `..` - is the whole point of the
+    /// helper. The non-empty-corpus rule in `validate` used to walk a
+    /// hand-written list of three fields, so a new seam carrying a
+    /// `CalibrationProvenance` would have been accepted with an empty corpus
+    /// and nothing would have said so. Now a new field fails to compile here
+    /// until it is either named as a provenance or bound to `_` as one that
+    /// carries none.
+    fn provenances(&self) -> [(&'static str, &super::quote::CalibrationProvenance); 3] {
+        let Self {
+            symbol: _,
+            modal_tick: _,
+            price_decimals: _,
+            mean_event_duration_s: _,
+            children_mean: _,
+            children_single_frac: _,
+            levels_mean: _,
+            size_round_frac: _,
+            start_price: _,
+            latent_size_median: _,
+            size_log_sigma: _,
+            vol_scalar: _,
+            quoted_width,
+            top_sizes,
+            trade_displacement_ticks,
+            arrival: _,
+        } = self;
+        [
+            ("quoted_width", quoted_width.provenance()),
+            ("top_sizes", &top_sizes.provenance),
+            (
+                "trade_displacement_ticks",
+                trade_displacement_ticks.provenance(),
+            ),
+        ]
+    }
+
     pub fn validate(&self) -> Result<(), ScalarError> {
         // A `symbol` omitted from config serde-defaults to "". Every trade this
         // source emits would then carry an empty symbol, keying
@@ -379,14 +418,10 @@ impl GeneratorScalars {
         if self.arrival.is_some_and(|arrival| !arrival.is_valid()) {
             return Err(ScalarError::field("arrival"));
         }
-        for (field, provenance) in [
-            ("quoted_width", self.quoted_width.provenance()),
-            ("top_sizes", &self.top_sizes.provenance),
-            (
-                "trade_displacement_ticks",
-                self.trade_displacement_ticks.provenance(),
-            ),
-        ] {
+        // A `Fitted` provenance whose corpus is blank claims a fit and names
+        // nothing, so it is refused. The set of fields checked is fixed by
+        // `provenances`, which the compiler keeps exhaustive.
+        for (field, provenance) in self.provenances() {
             if matches!(
                 provenance,
                 super::quote::CalibrationProvenance::Fitted { corpus } if corpus.trim().is_empty()

@@ -15,10 +15,11 @@ use mogwai_protocol::{AggressorSide, MarketRegime, decimal_to_f64};
 
 use crate::{TickEvent, TickFault, TickSource};
 
+use super::arrival::cadence_base_mean_s;
 use super::checkpoint::MAX_CHECKPOINTS;
 use super::consts::{
-    FEEDBACK_RETURN_CEILING, GARCH_ARCH, GARCH_GARCH, GARCH_SIGMA_CAP, MAX_SESSION_GAP_NS,
-    NS_PER_HOUR, REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
+    ARRIVAL_MEAN_CAL, FEEDBACK_RETURN_CEILING, GARCH_ARCH, GARCH_GARCH, GARCH_SIGMA_CAP,
+    MAX_SESSION_GAP_NS, NS_PER_HOUR, REALIZED_RETURN_CEILING, STUDENT_T_DF, STUDENT_T_UNIT_SCALE,
     TRADE_BOUNCE_HALF_WIDTH_TICKS, VOL_SCALAR,
 };
 use super::numeric::decimal_from_f64;
@@ -275,7 +276,7 @@ fn compact_seek_is_wire_identical_and_preserves_continuation() {
 /// what keeps one river one realization: the subscribed feed, `/trades`, the
 /// volatility reading and the trigger scans are all this one walk.
 ///
-/// The read goes through `try_source_at_or_before` deliberately. Comparing two
+/// The read goes through `try_source_before` deliberately. Comparing two
 /// clones of the lead proves only that the lead is surged, which was never in
 /// doubt; what has to agree is the chain, because that is what a history
 /// request resumes from.
@@ -347,9 +348,7 @@ fn a_surged_river_reads_the_same_tape_canonically_and_through_history() {
         .find(|&i| canonical[i].0 != canonical[i - 1].0 && canonical[i].0 != canonical[i + 1].0)
         .expect("an unshared instant in the surged window");
     let target = canonical[probe].0;
-    let mut resumed = index
-        .try_source_at_or_before(target)
-        .expect("a reached target");
+    let mut resumed = index.try_source_before(target).expect("a reached target");
     assert!(resumed.clock_ns() < target, "resume is strictly before");
     let mut tick = resumed.next_tick().expect("infinite tape");
     while tick.ts_event() < target {
@@ -615,6 +614,76 @@ fn scalars_validate() {
     assert_eq!(
         bad.empirical_diagnostics(&fp, Decimal::ONE)[0].field,
         "mean_event_duration_s"
+    );
+}
+
+// `ARRIVAL_MEAN_CAL` corrects the shipped sampling scheme's realized-mean
+// inflation, and it must reach that scheme and nothing else. The integrated
+// arrival frame draws from an exact time change, which has no such inflation
+// to correct, so a correction that leaked into it would be a uniform
+// 1/ARRIVAL_MEAN_CAL rate excess on every integrated river - the 2026-08-09
+// calibration amendment rests on the frame staying bare. Until this test the
+// separation was held by a doc comment and nothing else.
+//
+// Both expectations are derived from the constant and from the functions
+// themselves, so a second copy of the same mistake cannot satisfy them, and
+// the comparison is on bits because the claim is exact identity rather than
+// closeness: an inherited correction reproduces the same product this test
+// forms, bit for bit.
+//
+// This gates the bare side only. The corrected side is composed inline in
+// `GeneratedSource::new` and lands in a private field, so no observable of it
+// is reachable from here without replaying a whole generation; a source-side
+// accessor for the composed active mean is what would let this test assert
+// the other half.
+#[test]
+fn the_arrival_mean_calibration_stays_off_the_integrated_frame() {
+    let fp = Fingerprint::from_repo_json();
+    let scalars = GeneratorScalars::xbtusd_anchor(&fp);
+    let declared = scalars.mean_event_duration_s;
+    assert!(declared > 0.0, "the anchor declares a positive mean gap");
+    // A calibration of one is unobservable in a product, which would leave
+    // every assertion below true whether or not the frame inherited it.
+    assert!(
+        (ARRIVAL_MEAN_CAL - 1.0).abs() > 1e-6,
+        "the calibration must differ from one for this gate to see anything"
+    );
+    let corrected = ARRIVAL_MEAN_CAL * declared;
+
+    // The one definition both integrated call sites read: the generator's
+    // `begin_integrated_event` and `CadenceWalk::assemble`.
+    let bare = cadence_base_mean_s(&scalars);
+    assert_eq!(
+        bare.to_bits(),
+        declared.to_bits(),
+        "the integrated mean is the declared mean, uncorrected"
+    );
+    assert_ne!(
+        bare.to_bits(),
+        corrected.to_bits(),
+        "the integrated frame inherited the shipped path's calibration"
+    );
+
+    // And the assembly the generator actually constructs, which is what the
+    // kernel is driven with - a bare definition wired to a corrected assembly
+    // would be the same defect one call away.
+    let parts = CadenceWalk::assemble(
+        &scalars,
+        &fp.session_profile,
+        None,
+        1.0,
+        42,
+        SESSION_START_TS,
+    );
+    assert_eq!(
+        parts.base_mean_s.to_bits(),
+        declared.to_bits(),
+        "the assembled cadence mean is the declared mean, uncorrected"
+    );
+    assert_ne!(
+        parts.base_mean_s.to_bits(),
+        corrected.to_bits(),
+        "the assembled cadence mean inherited the shipped path's calibration"
     );
 }
 
@@ -944,7 +1013,7 @@ fn checkpoint_resume_is_byte_identical() {
     // A generous extension cap so the 3000-tick target is reached in one
     // call; the cap's runaway behavior is pinned separately below.
     let mut index = CheckpointIndex::new(origin, 128, 100_000);
-    let mut resumed = index.source_at_or_before(target);
+    let mut resumed = index.source_before(target);
     assert!(
         index.checkpoint_count() > 1,
         "a 3000-tick seek at K=128 must have taken interior checkpoints"
@@ -971,7 +1040,7 @@ fn checkpoint_resume_is_byte_identical() {
 }
 
 // Regression for the exact-ts collision the strictly-before partition in
-// `source_at_or_before` exists for: snapshots land on every K-th tick's
+// `source_before` exists for: snapshots land on every K-th tick's
 // exact ts_event, and pollers pass an emitted tick's exact ts_event as the
 // seek target, so a seek target can equal a checkpoint's clock_ns. Under
 // the old `<=` partition the index handed back the checkpoint that had
@@ -1006,7 +1075,7 @@ fn checkpoint_resume_at_exact_boundary_ts_returns_boundary_tick() {
 
     let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
     let mut index = CheckpointIndex::new(origin, k, 100_000);
-    let mut resumed = index.source_at_or_before(target);
+    let mut resumed = index.source_before(target);
     // Origin plus exactly three interior snapshots: extend_toward stops the
     // moment the lead reaches the target, right after snapshotting it -
     // proof the collision this test is about actually occurred.
@@ -1057,7 +1126,7 @@ fn checkpoint_index_coarsens_to_bound_memory_and_stays_byte_identical() {
 
     let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
     let mut index = CheckpointIndex::new(origin, 1, 10_000_000);
-    let _ = index.source_at_or_before(ref_ticks[n - 1].0);
+    let _ = index.source_before(ref_ticks[n - 1].0);
     // Without coarsening a k=1 walk of `n > MAX_CHECKPOINTS` ticks would hold
     // n+1 snapshots; the cap proves coarsen() ran and holds the ceiling.
     assert!(
@@ -1071,7 +1140,7 @@ fn checkpoint_index_coarsens_to_bound_memory_and_stays_byte_identical() {
     // now-sparse grid and assert byte-identical tails.
     for &probe in &[n / 4, n / 2, (3 * n) / 4, n - 100] {
         let probe_target = ref_ticks[probe].0;
-        let mut resumed = index.source_at_or_before(probe_target);
+        let mut resumed = index.source_before(probe_target);
         assert!(
             resumed.clock_ns() < probe_target,
             "resume starts strictly before the target after coarsening"
@@ -1115,7 +1184,7 @@ fn checkpoint_extension_is_capped() {
     let first_frontier = index.frontier_ns();
     assert_eq!(index.extend_toward(unreachable_target), cap);
     assert!(index.frontier_ns() > first_frontier);
-    assert!(index.try_source_at_or_before(unreachable_target).is_none());
+    assert!(index.try_source_before(unreachable_target).is_none());
     // Three bounded calls were made, so at most `3 * cap / K` interior
     // snapshots were taken beyond the origin.
     assert!(
@@ -1465,7 +1534,7 @@ fn reopen_gap_halts_and_gaps() {
 // A ReopenGap whose at_ts is at or before the tape anchor has already
 // elapsed: the crossing condition (old_clock < at_ts) can never hold, so
 // pre-fix the halt sat armed forever, silently inert. The fix consumes it
-// at construction (fail closed, with a stderr warning) and draws no RNG,
+// at construction (fail closed, with a tracing warning) and draws no RNG,
 // so the resulting stream must be byte-identical to a regime-free run - in
 // particular no halt-sized gap and no mid jump can ever appear.
 #[test]
@@ -1798,7 +1867,7 @@ fn checkpoint_resume_across_a_closure_is_byte_identical() {
     }
     let origin = calendar_source(friday_close - 1);
     let mut index = CheckpointIndex::new(origin, 8, 100_000);
-    let mut resumed = index.source_at_or_before(target);
+    let mut resumed = index.source_before(target);
     let start = expected.iter().position(|tick| tick.0 >= target).unwrap();
     for expected_tick in expected.iter().skip(start).take(100) {
         let tick = next_trade(&mut resumed);
@@ -2191,7 +2260,7 @@ fn checkpoint_resume_mid_sweep_is_byte_identical() {
 
     let origin = GeneratedSource::new(scalars, seed, origin_ts, &fp, None);
     let mut index = CheckpointIndex::new(origin, 7, 100_000);
-    let mut resumed = index.source_at_or_before(target);
+    let mut resumed = index.source_before(target);
     assert!(index.checkpoint_count() > 1);
     let mut tick = next_trade(&mut resumed);
     while tick.ts_event < target {

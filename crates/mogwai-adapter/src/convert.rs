@@ -20,7 +20,7 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-use crate::MOGWAI_VENUE;
+use crate::{MOGWAI_VENUE, MOGWAI_VENUE_STR};
 
 /// Converts a wire `Decimal` price into a nautilus `Price` at `precision`,
 /// returning an error rather than panicking on a hostile wire value.
@@ -234,7 +234,7 @@ pub(crate) fn nautilus_order_status(status: WireOrderStatus) -> OrderStatus {
 /// `Symbol::new` and the `From<&str>`/`From<String>` impls that wrap it
 /// `assert!`-panic on an empty or all-whitespace string, and
 /// `mogwai_protocol::Symbol` is an unvalidated `Arc<str>` straight off the
-/// wire. Every caller here runs inside a spawned reader, poll or report task
+/// wire. Every caller here runs inside a spawned reader, history or report task
 /// with no supervisor, so an empty `symbol` field from a hostile or buggy
 /// venue would take the whole task down rather than dropping one frame.
 pub(crate) fn instrument_id(def: &InstrumentDef) -> anyhow::Result<InstrumentId> {
@@ -247,12 +247,17 @@ pub(crate) fn instrument_id(def: &InstrumentDef) -> anyhow::Result<InstrumentId>
 /// Builds the synthetic nautilus `TradeId` for a wire trade.
 ///
 /// The wire `TradeTick` carries no exchange-assigned trade id or sequence
-/// number, and the adapter's own `PollCursor` explicitly tolerates multiple
-/// trades sharing one `ts_event` (see its doc comment in client.rs), so the
-/// id must be derived from the tick's own fields. Keying on symbol+ts_event
-/// alone collides for any two such trades; folding in price/size/aggressor
-/// closes the collision for the common case PollCursor exists to handle -
-/// genuinely distinct trades landing on the same nanosecond.
+/// number, so the id has to be derived from the tick's own fields. Keying on
+/// symbol+ts_event alone would make that derivation rest on an invariant this
+/// adapter cannot see: one instant holds at most one trade per river, which is
+/// a property of the generator, gated over in `mogwai-data` by
+/// `a_river_never_prints_two_trades_at_one_instant` and relied on by the
+/// venue's history continuation, which resumes strictly after the last row's
+/// instant. Nothing on the wire restates it, this side converts whatever
+/// arrives, and a `TradeId` collision is silent everywhere downstream. Folding
+/// price/size/aggressor into the key means two distinct trades landing on the
+/// same nanosecond stay distinct here whether or not that invariant holds
+/// upstream.
 ///
 /// Nautilus caps a `TradeId` at 36 ASCII chars and the panicking
 /// constructors (`TradeId::new`, the `From<String>` impl) assert past that.
@@ -301,7 +306,7 @@ pub(crate) fn trade_tick(
     // zero and on any positive size small enough to round to raw 0 at the
     // instrument's size_precision. Route through `new_checked` so the caller
     // drops the offending tick with a warning instead of panicking the
-    // spawned reader/poll task that has no supervisor.
+    // spawned reader or history task that has no supervisor.
     NautilusTradeTick::new_checked(
         id,
         price(t.price, def.price_precision)?,
@@ -399,7 +404,10 @@ pub(crate) fn instrument_any(
                 id,
                 symbol,
                 asset_class,
-                Some(ustr::Ustr::from("MOGWAI")),
+                // The exchange field takes the venue name from the same
+                // constant `MOGWAI_VENUE` is built from, so a rename reaches
+                // here too rather than leaving a stale literal behind.
+                Some(ustr::Ustr::from(MOGWAI_VENUE_STR)),
                 ustr::Ustr::from(underlying),
                 UnixNanos::from(0),
                 UnixNanos::from(i64::MAX as u64),
@@ -575,7 +583,9 @@ mod tests {
             class: InstrumentClass::Future {
                 underlying: "NQ".into(),
                 settlement_currency: "USD".into(),
-                multiplier: Decimal::new(25, 1),
+                // MNQ's real contract terms: multiplier 2 against a 0.25 tick,
+                // so a tick is worth 0.50. See `reference/glossary.md`.
+                multiplier: Decimal::new(2, 0),
                 asset_class: WireAssetClass::Index,
             },
             price_precision: 2,
@@ -588,7 +598,7 @@ mod tests {
         else {
             panic!("future definition must produce a futures contract");
         };
-        assert_eq!(contract.multiplier.to_string(), "2.5");
+        assert_eq!(contract.multiplier.to_string(), "2");
         assert_eq!(contract.lot_size.to_string(), "1");
         assert_eq!(contract.size_increment.to_string(), "1");
         // The venue models no expiry at all, so the contract has to be dated past any
@@ -616,10 +626,12 @@ mod tests {
             class: InstrumentClass::Future {
                 underlying: "NQ".into(),
                 settlement_currency: "USD".into(),
-                multiplier: Decimal::new(25, 1),
+                multiplier: Decimal::new(2, 0),
                 asset_class: WireAssetClass::Index,
             },
             price_precision: 2,
+            // The fractional sizing under test; everything else is MNQ's real
+            // terms, as above.
             size_precision: 1,
             price_increment: Decimal::new(25, 2),
             size_increment: Decimal::new(1, 1),
@@ -699,7 +711,7 @@ mod tests {
         // Nautilus caps TradeId at 36 ASCII chars and panics past it. The old
         // readable id (symbol-ts-price-size-aggressor) exceeded the cap for
         // any realistic nanosecond timestamp plus 8-decimal size, panicking
-        // the reader/poll task on essentially every live trade. The hashed id
+        // the reader or history task on essentially every live trade. The hashed id
         // is bounded at 35 chars even for a u64::MAX timestamp.
         let def = def();
         let trade = mogwai_protocol::TradeTick {
@@ -728,9 +740,10 @@ mod tests {
     #[test]
     fn trade_id_disambiguates_same_ts_event_trades() {
         // bug-hunt A.4: keying the id on symbol+ts_event alone collided for
-        // any two trades landing on the same nanosecond - exactly the case
-        // the adapter's own PollCursor is built to tolerate. Folding in
-        // price/size/aggressor must keep two such trades distinct.
+        // any two trades landing on the same nanosecond, a case only the
+        // generator's own one-row-per-instant gate rules out and nothing on
+        // this side of the wire checks. Folding in price/size/aggressor must
+        // keep two such trades distinct.
         let def = def();
         let id = instrument_id(&def).expect("symbol converts");
         let first = mogwai_protocol::TradeTick {
@@ -783,7 +796,7 @@ mod tests {
     fn trade_tick_rejects_zero_size_without_panicking() {
         // A zero size passes `quantity` (see `quantity_accepts_zero`) but the
         // panicking `TradeTick::new` asserts a positive size, which would down
-        // the unsupervised reader/poll task. `trade_tick` must surface it as
+        // the unsupervised reader or history task. `trade_tick` must surface it as
         // an error instead.
         let def = def();
         let trade = mogwai_protocol::TradeTick {

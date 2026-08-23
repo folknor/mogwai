@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `MogwaiExecutionClient`: the `ExecutionClient` half of the adapter. Owns
-//! the order/fill/position mirror (`ExecState`), the HTTP-or-WS order
+//! the order/fill/position mirror (`ExecState`), the websocket order
 //! dispatch, the venue-message-to-nautilus-event translation, and the
 //! report generators startup reconciliation consumes. Plumbing shared with
 //! the data half (the havoc dispatch pipeline, the instrument cache,
@@ -105,15 +105,36 @@ impl From<anyhow::Error> for FetchAccountError {
     }
 }
 
+/// Pull the configured account's ledger from `GET /account`.
+///
+/// The account is always named, for the reason `ws_url` names it on the socket:
+/// the venue resolves accounts totally, so a pull naming none is answered from
+/// the run's default ledger whatever the host's config said, and nothing in the
+/// answer says which ledger it describes. Naming it makes the configured id the
+/// ledger this pull actually reads. The key must be spelled exactly `account`;
+/// the venue's query carrier denies unknown fields, so a misspelling is a 400
+/// rather than a quietly defaulted snapshot.
+///
+/// The id goes into the query string verbatim, with no percent encoding. A
+/// `mogwai_protocol::AccountId` is ASCII alphanumerics plus dot, underscore,
+/// colon and dash, and a nautilus `AccountId` is an `ISSUER-NUMBER` subset of
+/// that. Every one of those characters is legal in a query value per RFC 3986,
+/// colon included, so encoding would only obscure the id in a venue log.
 async fn fetch_account(
     http: &HttpClient,
     quota: &HttpQuota,
     base: &str,
+    account_id: AccountId,
 ) -> Result<mogwai_protocol::AccountState, FetchAccountError> {
     quota.wait().await;
+    let url = format!(
+        "{path}?account={account}",
+        path = join_url(base, "account"),
+        account = account_id.as_ref()
+    );
     let response = http
         .get(
-            join_url(base, "account"),
+            url,
             None,
             None,
             Some(mogwai_protocol::DEFAULT_REQUEST_TIMEOUT_SECS),
@@ -137,14 +158,18 @@ async fn fetch_account(
 
 /// Notes the venue's account label when it differs from the configured one.
 ///
-/// This was once a fatal equality check, and killing it is the point. Under the
-/// retired per-account model a client named a slot and the venue honoured it, so
-/// a snapshot bearing another id meant the venue had routed someone else's
-/// account here and adopting it would have corrupted this one. One venue is now
-/// one run is one ledger: the connection carries the only account there is,
-/// there is nothing to be misrouted from, and the venue's id is a label rather
-/// than a key. An equality check is a per-slot invariant that outlived the
-/// slots.
+/// This was once a fatal equality check, and killing it is the point. Under an
+/// earlier slot model a client named a slot and the venue honoured it, so a
+/// snapshot bearing another id meant the venue had routed someone else's
+/// account here and adopting it would have corrupted this one. The check was
+/// removed when the venue collapsed to a single ledger; the venue has since
+/// become per-account again (one ledger per account id, `GET /account` naming
+/// whose with `?account=`), and [`fetch_account`] names the configured account
+/// on every pull, so the venue answers for exactly the ledger this client is
+/// configured to trade. The label the answer carries is therefore cosmetic:
+/// which ledger was read is settled by the query, not by the id printed in the
+/// snapshot, and the configured id stays authoritative for everything this
+/// adapter emits.
 ///
 /// It also could not be satisfied. The venue reported a bare `MOGWAI` for one
 /// release - legal as a `mogwai_protocol::AccountId`, and unconstructable as a
@@ -212,11 +237,12 @@ pub struct MogwaiExecutionClient {
     /// the venue's snapshot reply lands; `stop()` drains the maps so a waiter
     /// blocked on a dead socket errors out instead of waiting out its timeout.
     pending: Arc<Mutex<PendingQueries>>,
-    /// Handles for the WS reader and every spawned HTTP order dispatch. Shared
-    /// behind an `Arc<Mutex<..>>` so the `&self` `dispatch_order` can record its
-    /// spawned POST task; `stop()` aborts the lot so a slow POST cannot emit exec
-    /// events (its emitter still holds a live sender clone) after the client
-    /// stopped (AE19).
+    /// Handles for this client's spawned tasks: the WS reader, the havoc
+    /// latency pump, and every `query_order` probe. Shared behind an
+    /// `Arc<Mutex<..>>` so the `&self` handlers can record a task alongside the
+    /// `&mut self` connect path; `stop()` aborts the lot so a task that
+    /// outlived the client cannot emit exec events (its emitter still holds a
+    /// live sender clone) after the client stopped (AE19).
     task_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -373,8 +399,8 @@ impl MogwaiExecutionClient {
     /// Mirror the order locally and tell nautilus it is on its way.
     ///
     /// Emitted only once conversion has succeeded and the mirror record exists.
-    /// The dispatch that follows may still fail at transport (WS channel gone,
-    /// or an HTTP POST error), in which case `dispatch_order` synthesizes the
+    /// The dispatch that follows may still fail at transport (the WS command
+    /// channel is gone), in which case `dispatch_order` synthesizes the
     /// matching `OrderRejected` - a valid Submitted -> Rejected transition - so
     /// the order still reaches a terminal state.
     fn announce_submitted(
@@ -481,11 +507,10 @@ impl MogwaiExecutionClient {
             // was stopped), so the command never reached the venue. Nautilus only
             // logs an Err from cancel_order/modify_order (no event), so without
             // this a cancel/modify would sit forever in PendingCancel/PendingUpdate
-            // (and a submit in Submitted) with no reject to restore it - unlike the
-            // HTTP path, which already synthesizes the matching reject on transport
-            // failure. Synthesize it here too and report success: the reject event
-            // is the signal, not the return value (matching the HTTP path, whose
-            // spawn returns Ok and surfaces the failure only as the event) (AE9).
+            // (and a submit in Submitted) with no reject to restore it. Synthesize
+            // the matching reject here and report success: the reject event is the
+            // signal, not the return value, which is the same contract the
+            // reader's undelivered-command path answers under (AE9).
             let ctx = self.exec_context();
             synthesize_transport_reject(cmd, &err, &ctx);
             Ok(())
@@ -612,8 +637,8 @@ impl VenueQuery {
     }
 
     /// Await the correlated reply, bounding the wait by the (havoc-scaled)
-    /// request timeout - the same ceiling the HTTP carrier gets from its
-    /// client - and clean the pending slot up on timeout so a reply that
+    /// request timeout - the same ceiling the remaining HTTP fetches get from
+    /// their client - and clean the pending slot up on timeout so a reply that
     /// straggles in later is logged as unsolicited rather than leaking.
     async fn await_reply<T>(
         &self,
@@ -1064,7 +1089,14 @@ impl ExecutionClient for MogwaiExecutionClient {
         // fill, as before this fix). Any other failure against a venue that does
         // publish the route is fatal - warn-and-continue there would silently
         // recreate the exact first-fill cache-miss this fix exists to eliminate.
-        match fetch_account(&self.http, &self.http_quota, &http_base_url).await {
+        match fetch_account(
+            &self.http,
+            &self.http_quota,
+            &http_base_url,
+            self.config.account_id,
+        )
+        .await
+        {
             Ok(state) => {
                 note_account_label(&state, self.config.account_id);
                 handle_exec_message(VenueMessage::AccountState(state), &self.exec_context());
@@ -1094,8 +1126,10 @@ impl ExecutionClient for MogwaiExecutionClient {
         // and head-of-line-blocked pings/commands (AD4 - see the data client and
         // spawn_latency_pump). The pump owns a clone of the exec context and
         // applies each event to the mirror off-loop. handle_exec_message is
-        // already called concurrently from the HTTP order-dispatch tasks, so
-        // moving the WS drain's calls onto the pump task adds no new sharing.
+        // already called from off this loop - by the transport rejects
+        // `dispatch_order` synthesizes on whatever thread nautilus dispatched
+        // the command from, and by the reader's undelivered-command callback -
+        // so moving the WS drain's calls onto the pump task adds no new sharing.
         let (deliver_tx, deliver_rx) = unbounded_channel::<HavocDelivery>();
         // The delivery barrier. The venue attaches this socket to the live tape
         // at upgrade, so frames can arrive before the post-bind reseed below has
@@ -1521,8 +1555,9 @@ impl ExecutionClient for MogwaiExecutionClient {
     /// `GET /account` is the truthful source and is deliberately not the pushed
     /// frame: it is a point-in-time pull that bypasses the `HavocFilter`, so an
     /// armed `DropNextAccountUpdate` cannot suppress it (see `connect`'s
-    /// initial snapshot). The route is transport-agnostic, so this works
-    /// unchanged under the HTTP order profiles that never open a `/ws` socket.
+    /// initial snapshot). It is also an ordinary HTTP pull that touches neither
+    /// the WS command channel nor the reader, so it answers whatever the exec
+    /// socket is doing - including a reconnect in progress.
     ///
     /// A failed pull propagates rather than falling back to any client-side
     /// belief: an error makes reconciliation fail loudly, whereas a silent
@@ -1535,20 +1570,26 @@ impl ExecutionClient for MogwaiExecutionClient {
         &self,
         cmd: &GeneratePositionStatusReports,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
-        let state =
-            match fetch_account(&self.http, &self.http_quota, &self.config.http_base_url()).await {
-                Ok(state) => state,
-                Err(FetchAccountError::NotFound) => {
-                    tracing::warn!(
-                        "venue predates GET /account; reporting no positions rather than failing \
+        let state = match fetch_account(
+            &self.http,
+            &self.http_quota,
+            &self.config.http_base_url(),
+            self.config.account_id,
+        )
+        .await
+        {
+            Ok(state) => state,
+            Err(FetchAccountError::NotFound) => {
+                tracing::warn!(
+                    "venue predates GET /account; reporting no positions rather than failing \
                      the whole mass status - position reconciliation is blind against this venue"
-                    );
-                    return Ok(Vec::new());
-                }
-                Err(err) => {
-                    return Err(anyhow::Error::new(err).context("position status venue truth"));
-                }
-            };
+                );
+                return Ok(Vec::new());
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context("position status venue truth"));
+            }
+        };
         note_account_label(&state, self.config.account_id);
         // The venue's snapshot instant is the honest `ts_last` for every row:
         // the wire `Position` carries no per-symbol activity timestamp, and
@@ -1790,13 +1831,13 @@ fn exec_command_to_client_message(cmd: &ExecWsCommand) -> Command {
     }
 }
 
-/// Maps a transport-level failure (the HTTP POST for the command never got a
-/// venue reply) onto the `VenueMessage` shape `handle_exec_message` already
-/// knows how to turn into a nautilus event. Only valid for `Submit`/`Modify`:
-/// a failed `Cancel` is not a full order rejection (the order is still live,
-/// or its fate is simply unknown) and is handled by `emit_cancel_rejected`
-/// before the call site ever reaches this function - see the comment at the
-/// `dispatch_order` call site.
+/// Maps a transport-level failure (the command's frame never reached the
+/// venue: the WS command channel was gone, or the writer was aborted before it
+/// sent) onto the `VenueMessage` shape `handle_exec_message` already knows how
+/// to turn into a nautilus event. Only valid for `Submit`/`Modify`: a failed
+/// `Cancel` is not a full order rejection (the order is still live, or its fate
+/// is simply unknown) and is handled by `emit_cancel_rejected` before the call
+/// site ever reaches this function - see `synthesize_transport_reject`.
 fn reject_for(cmd: &ExecWsCommand, err: &anyhow::Error, sim: SimClock) -> VenueMessage {
     let reason = err.to_string();
     let ts_event = now_unix_nanos(sim).as_u64();
@@ -1913,8 +1954,8 @@ fn report_undelivered_command(cmd: &ExecWsCommand, ctx: &ExecContext) {
 }
 
 /// Synthesizes the nautilus reject for a command whose transport failed before
-/// the venue ever saw it - shared by the HTTP POST error path and the WS
-/// send-failure path (AE9). A failed `Cancel` is reported as a `CancelRejected`
+/// the venue ever saw it - shared by `dispatch_order`'s send failure and the
+/// reader's undelivered-command report (AE9). A failed `Cancel` is reported as a `CancelRejected`
 /// (the order is still live, or its fate is simply unknown, not dead), leaving
 /// the mirrored status untouched; a failed `Submit`/`Modify` is reported as the
 /// matching `OrderRejected`/`OrderModifyRejected` so the order reaches a terminal
@@ -1958,7 +1999,7 @@ fn synthesize_transport_reject(cmd: &ExecWsCommand, err: &anyhow::Error, ctx: &E
 /// Reports a rejected `Cancel` as a nautilus `OrderCancelRejected` without
 /// touching the mirrored order's status. Serves both origins:
 ///
-/// - a `Cancel` that failed at transport (the HTTP POST never reached the
+/// - a `Cancel` that failed at transport (its frame never reached the
 ///   venue): `ts_event` is sim-now and `wire_venue_order_id` is `None`, and
 /// - a venue-originated `VenueMessage::OrderCancelRejected` (the engine could
 ///   not honor the cancel): `ts_event` is the venue's stamp and the wire may
@@ -1980,8 +2021,8 @@ fn emit_cancel_rejected(
     ctx: &ExecContext,
 ) {
     let Some(record) = order_record(&ctx.state, client_order_id) else {
-        // Same limitation as OrderRejected/OrderModifyRejected (A.11): the
-        // mirror lacks the order, so we have no real strategy_id/
+        // Same limitation as the OrderRejected and OrderModifyRejected arms:
+        // the mirror lacks the order, so we have no real strategy_id/
         // instrument_id, and a placeholder would be silently dropped by
         // nautilus `Order.apply` strategy-id validation. Make the drop
         // visible rather than silent.
@@ -1989,7 +2030,7 @@ fn emit_cancel_rejected(
             order = %client_order_id,
             reason = %reason,
             "cancel rejected for an order the mirror does not know; \
-             reject not surfaced to nautilus (A.11)"
+             reject not surfaced to nautilus"
         );
         return;
     };
@@ -2274,7 +2315,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 }
                 (record.clone(), stale)
             }) else {
-                // Same A.11 limitation as the reject arms: the mirror lacks the
+                // Same limitation as the reject arms: the mirror lacks the
                 // order (e.g. an event arriving after reset() cleared it), so
                 // there is no real strategy_id/instrument_id to emit with. Make
                 // the drop visible instead of silent.
@@ -2282,7 +2323,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                     order = %client_order_id,
                     venue_order_id = %venue_order_id,
                     "order accepted for an order the mirror does not know; \
-                     event not surfaced to nautilus (A.11)"
+                     event not surfaced to nautilus"
                 );
                 return;
             };
@@ -2321,8 +2362,8 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 // arms, and deliberately so: the engine emits `Rejected` as an
                 // order's sole lifecycle event, so no reordered pair can arrive
                 // to regress a later terminal state. The one reachable overwrite
-                // is the HTTP carrier synthesizing a reject for an order the
-                // venue actually processed, which is the known unrecoverable
+                // is a synthesized transport reject for an order the venue
+                // actually processed, which is the known unrecoverable
                 // desync (the mirror cannot heal it without a venue-truth query
                 // surface) and not something a guard here would fix.
                 record.status = OrderStatus::Rejected;
@@ -2335,15 +2376,14 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 // event's strategy_id against the cached order and silently
                 // drops the event on mismatch, so a placeholder would guarantee
                 // the drop rather than surface the reject. Surfacing it
-                // correctly (e.g. resolving the order from the nautilus cache,
-                // which ExecContext does not hold) is a design change tracked
-                // as bug-hunt A.11; for now make the drop visible instead of
-                // silent.
+                // correctly would mean resolving the order from the nautilus
+                // cache, which ExecContext does not hold - a design change, not
+                // a local fix. For now make the drop visible instead of silent.
                 tracing::warn!(
                     order = %client_order_id,
                     reason = %reason,
                     "order rejected for an order the mirror does not know; \
-                     reject not surfaced to nautilus (A.11)"
+                     reject not surfaced to nautilus"
                 );
                 return;
             };
@@ -2388,13 +2428,13 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 }
                 (record.clone(), stale)
             }) else {
-                // Same A.11 limitation as the reject arms: no real strategy_id/
+                // Same limitation as the reject arms: no real strategy_id/
                 // instrument_id to emit with. Make the drop visible.
                 tracing::warn!(
                     order = %client_order_id,
                     venue_order_id = %venue_order_id,
                     "order canceled for an order the mirror does not know; \
-                     event not surfaced to nautilus (A.11)"
+                     event not surfaced to nautilus"
                 );
                 return;
             };
@@ -2424,7 +2464,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
         // over both: the two are the same shape carrying different facts, and the
         // pressure to fold them is what collapsed expiry into cancellation in
         // the first place. Everything below - the terminal-state guard, the
-        // forward-only `ts_last`, the A.11 unknown-order warning - is the same
+        // forward-only `ts_last`, the unknown-order warning - is the same
         // rule for the same reasons; only the status and the emitted event
         // differ.
         VenueMessage::OrderExpired {
@@ -2451,7 +2491,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                     order = %client_order_id,
                     venue_order_id = %venue_order_id,
                     "order expired for an order the mirror does not know; \
-                     event not surfaced to nautilus (A.11)"
+                     event not surfaced to nautilus"
                 );
                 return;
             };
@@ -2493,13 +2533,13 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 return;
             };
             let Some(known) = order_record(&ctx.state, client_order_id) else {
-                // Same A.11 limitation as the reject arms: no real strategy_id/
+                // Same limitation as the reject arms: no real strategy_id/
                 // instrument_id to emit with. Make the drop visible.
                 tracing::warn!(
                     order = %client_order_id,
                     venue_order_id = %venue_order_id,
                     "order update for an order the mirror does not know; \
-                     event not surfaced to nautilus (A.11)"
+                     event not surfaced to nautilus"
                 );
                 return;
             };
@@ -2623,7 +2663,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                 return;
             };
             let Some(record) = order_record(&ctx.state, client_order_id) else {
-                // Same limitation as OrderRejected (A.11): the mirror lacks the
+                // Same limitation as the OrderRejected arm: the mirror lacks the
                 // order, so we have no real strategy_id/instrument_id, and a
                 // placeholder would be silently dropped by nautilus
                 // `Order.apply` strategy-id validation. The `venue_order_id:
@@ -2636,7 +2676,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
                     venue_order_id = ?venue_order_id,
                     reason = %reason,
                     "modify rejected for an order the mirror does not know; \
-                     reject not surfaced to nautilus (A.11)"
+                     reject not surfaced to nautilus"
                 );
                 return;
             };
@@ -2673,7 +2713,7 @@ fn handle_exec_message(msg: VenueMessage, ctx: &ExecContext) {
         } => {
             // A venue-originated cancel rejection. emit_cancel_rejected leaves
             // the mirror's status untouched (nautilus restores the pre-cancel
-            // status) and handles the unknown-order (A.11) drop, exactly as the
+            // status) and handles the unknown-order drop, exactly as the
             // transport-failure path does - the only differences are the wire
             // timestamp and the possibly-named venue id, both passed through.
             let Some(client_order_id) = wire_client_order_id(&client_order_id) else {
@@ -3039,7 +3079,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
         (record.clone(), is_duplicate)
     }) else {
         // The worst silent drop on this path: money moved at the venue and no
-        // nautilus event can be built (same A.11 limitation as the reject
+        // nautilus event can be built (same limitation as the reject
         // arms - the mirror lacks the order, so there is no real strategy_id/
         // instrument_id to emit with). Make it loud.
         tracing::warn!(
@@ -3047,7 +3087,7 @@ fn handle_order_filled(fill: &mogwai_protocol::OrderFilled, ctx: &ExecContext) {
             trade = %trade_id,
             venue_order_id = %venue_order_id,
             "order fill for an order the mirror does not know; \
-             fill not surfaced to nautilus (A.11)"
+             fill not surfaced to nautilus"
         );
         return;
     };

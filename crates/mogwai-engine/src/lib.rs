@@ -24,8 +24,12 @@ use mogwai_protocol::{
     AccountId, AccountState, ClientOrderId, Command, FillSnapshot, Hit, InstrumentDef, OrderFilled,
     OrderStatusInfo, OrderStatusSnapshot, OrderType, Position, ScanKind, Side, SimClock,
     SubmitOrder, Symbol, TimeInForce, VenueMessage, VenueOrderId, WireOrderStatus,
-    control::Divergence, default_instruments,
+    control::Divergence,
 };
+// Only the test-gated constructors and the tests themselves seed from the
+// default table; production configs name their instruments.
+#[cfg(test)]
+use mogwai_protocol::default_instruments;
 use rust_decimal::Decimal;
 
 mod account;
@@ -355,6 +359,16 @@ pub struct MarketReading {
 }
 
 impl EngineConfig {
+    /// A config carrying the placeholder identity `Engine::UNBOUND_ACCOUNT_ID`,
+    /// for tests that never put a snapshot on the wire.
+    ///
+    /// Test-only on purpose: an engine built from this stamps the literal
+    /// `UNBOUND` on every `AccountState.account_id` it produces, and a snapshot
+    /// is only self-describing if that field is the account the ledger belongs
+    /// to. Production builds an `EngineConfig` by hand, which requires the real
+    /// id. The gate is what keeps the placeholder off the wire, rather than the
+    /// convention that nobody calls this.
+    #[cfg(test)]
     #[must_use]
     pub fn unbound(instruments: Vec<InstrumentDef>) -> Self {
         Self {
@@ -546,9 +560,9 @@ pub struct Engine {
     fee_surcharge: Option<FeeSurchargeWindow>,
     /// The clock of the boat whose pass is currently being processed.
     ///
-    /// The engine is venue-wide but every pass through it belongs to exactly
-    /// one boat, and the fee surcharge is the only state that must be judged on
-    /// that boat's axis. Carrying it as one field set at each pass entry
+    /// The engine is per-account, and an account's sockets may sit on several
+    /// boats, but every pass through it belongs to exactly one of them. The fee
+    /// surcharge is the only state that must be judged on that boat's axis. Carrying it as one field set at each pass entry
     /// (`process_with_market_on_clock`, `apply_scans_on_clock`) rather than as
     /// a parameter threaded through the fill-booking helpers is a deliberate
     /// narrowing: those helpers are reached from a dozen places and none of the
@@ -577,10 +591,42 @@ impl Engine {
     }
 
     pub fn set_margin_policy(&mut self, symbol: Symbol, policy: MarginPolicy) {
-        self.margin.insert(symbol, policy);
-        // Public callers may replace policy after orders already rest. Their
-        // holds still derive from `order_hold`; rebuild the aggregate
-        // rather than teaching this setter a second margin formula.
+        self.set_margin_policies(std::iter::once((symbol, policy)));
+    }
+
+    /// Install several margin policies and rebuild the resting-order hold
+    /// aggregate once.
+    ///
+    /// Public callers may replace policy after orders already rest. Their holds
+    /// still derive from `order_hold`; rebuild the aggregate rather than
+    /// teaching this setter a second margin formula. That reasoning is why the
+    /// single-symbol setter rebuilds, and it is unchanged here - only the
+    /// number of rebuilds is.
+    ///
+    /// One rebuild after all the installs is identical to one rebuild per
+    /// install. `rebuild_order_holds_excluding(None)` discards the cache and
+    /// recomputes it from `compute_order_holds`, which folds the open book and
+    /// reads `self.margin` at that moment; it carries nothing over from the
+    /// previous cache. So the result is a function of the resting orders and
+    /// the policy map as they stand when it runs, and neither is touched
+    /// between the installs. Every intermediate rebuild is therefore a value
+    /// that no caller can observe - nothing between the installs reads
+    /// `order_holds`, and the debug `reconcile_order_holds` invariant compares
+    /// the cache against that same fold, so it is satisfied by the final state
+    /// exactly as it would have been by each intermediate one.
+    ///
+    /// A caller installing one policy per instrument is the reason this exists:
+    /// through the single setter that walk is quadratic in the symbol count,
+    /// since each install refolds every open order. No caller in this workspace
+    /// installs more than one policy at a time today, so this exists for the
+    /// one that does it next rather than to fix a live cost.
+    pub fn set_margin_policies<I>(&mut self, policies: I)
+    where
+        I: IntoIterator<Item = (Symbol, MarginPolicy)>,
+    {
+        for (symbol, policy) in policies {
+            self.margin.insert(symbol, policy);
+        }
         self.rebuild_order_holds_excluding(None);
     }
 
@@ -1308,14 +1354,17 @@ impl Engine {
     /// Retire everything this account holds that is not on `symbol`: cancel the
     /// resting orders, close the positions at their last mark.
     ///
-    /// An account is on at most one river, and this is what makes that true of
-    /// the book rather than only of the connection. A returning socket may name
-    /// a different symbol than the account was trading, and a position carried
-    /// across would be one the new session can neither see nor close: nothing
-    /// prices it, no sweep marks it, and no order can reach it. The same is true
-    /// of a resting order, with the sharper edge that it would sit on a river no
-    /// boat is reading, where nothing would ever sweep it and nothing would say
-    /// so.
+    /// This is the freeze rule's return half, and only that. An account rides
+    /// as many rivers as it has sockets, so boarding a second river while the
+    /// account is live retires nothing; the sole caller (`resume` in
+    /// `mogwai-venue`) runs this on a frozen account's return, when the
+    /// returning passenger is the only one reading the book. That passenger may
+    /// name a different symbol than the account was trading before it froze,
+    /// and a position carried across would be one it can neither see nor close:
+    /// nothing prices it, no sweep marks it, and no order can reach it. The
+    /// same is true of a resting order, with the sharper edge that it would sit
+    /// on a river no boat is reading, where nothing would ever sweep it and
+    /// nothing would say so.
     ///
     /// Closed at the last mark, which is the best price that exists: the river
     /// it traded on has no cursor, so there is no fresher one to be had.
@@ -1706,10 +1755,17 @@ impl Engine {
             recorded_fills: self.fills.len(),
         }
     }
-    // No `Default`: per spec, `new()` is the sole constructor so the instrument
-    // table is always seeded. A derived `Default` would yield an empty table
-    // whose fill accounting silently diverges (every fill warns, books
-    // position-only); a delegating `Default` is dead surface nothing calls.
+    /// The default-instrument, unfunded engine the unit tests build on.
+    ///
+    /// Test-only, and gated rather than merely documented: it carries the
+    /// placeholder account id, so a production caller would stamp `UNBOUND` on
+    /// every snapshot it sent. Production calls `build` with a real
+    /// `EngineConfig`. See `EngineConfig::unbound`.
+    ///
+    /// No `Default`: a derived one would yield an empty instrument table whose
+    /// fill accounting silently diverges (every fill warns, books
+    /// position-only); a delegating one is dead surface nothing calls.
+    #[cfg(test)]
     #[expect(
         clippy::new_without_default,
         reason = "new() seeds the instrument table; a Default impl would diverge or be dead surface"
@@ -1718,7 +1774,8 @@ impl Engine {
         Self::build(EngineConfig::unbound(default_instruments()))
     }
 
-    /// Placeholder identity for `EngineConfig::unbound` and `new()`. Production
+    /// Placeholder identity for `EngineConfig::unbound` and `new()`, both of
+    /// which are `cfg(test)` so this string cannot reach the wire. Production
     /// always builds an `EngineConfig` by hand, which requires the real id:
     /// an engine that guessed its own identity would stamp a wrong
     /// `AccountState.account_id` on the wire, and a snapshot is only
@@ -1894,9 +1951,10 @@ impl Engine {
     /// - `Limit` yields a `FillThrough` scan against the order's drawn band
     ///   trigger. A print strictly through it fills the order at its own stated
     ///   price.
-    /// - `Conditional` yields a `TriggerTouch` scan against the consumer's stated
-    ///   stop price. A print merely reaching it triggers, because a stop holds
-    ///   no queue position and so needs none of the strictness the limit case
+    /// - `Conditional` yields a `StopTrigger` scan, or a `TouchedTrigger` one
+    ///   for the touched family, against the consumer's stated stop price. A
+    ///   print merely reaching it triggers, because a conditional holds no
+    ///   queue position and so needs none of the strictness the limit case
     ///   does.
     /// - `Inert` yields nothing, which is the naming of what an `order_type`
     ///   filter used to express here: an armed `PartialFillNext` can leave a
@@ -1921,9 +1979,9 @@ impl Engine {
                     Resting::Limit { fill_trigger_px } => (ScanKind::FillThrough, fill_trigger_px),
                     Resting::Conditional { stop_px, toward } => (
                         if toward {
-                            ScanKind::TriggerToward
+                            ScanKind::TouchedTrigger
                         } else {
-                            ScanKind::TriggerTouch
+                            ScanKind::StopTrigger
                         },
                         stop_px,
                     ),
@@ -2037,9 +2095,14 @@ impl Engine {
 
     /// Why an id is not currently resting: unknown to this ledger, or seen and
     /// already terminal. One wording, two readers.
+    ///
+    /// Terminal is left unqualified because the gate is `!status.is_open()`,
+    /// which an expiry and a post-acceptance rejection reach as surely as a
+    /// fill or a cancel. Naming a pair of them in the text told a consumer
+    /// cancelling an expired `Gtd` something false about its own order.
     fn not_resting_reason(&self, client_order_id: &str) -> String {
         match self.seen_client_order_ids.get(client_order_id) {
-            Some(_) => "order already terminal (filled or canceled)".into(),
+            Some(_) => "order already terminal".into(),
             None => "unknown order".into(),
         }
     }
@@ -2483,7 +2546,7 @@ mod tests {
             ]
         ));
         let scan = e.pending_scans().remove(0);
-        assert_eq!(scan.kind, ScanKind::TriggerTouch);
+        assert_eq!(scan.kind, ScanKind::StopTrigger);
         let (out, emitted) = e.apply_scans(
             &[ScanResult {
                 client_order_id: scan.client_order_id,
@@ -3509,7 +3572,7 @@ mod tests {
         assert_eq!(e.open[0].scanned_ns, 10, "the trigger window is untouched");
         assert_eq!(e.open[0].submit.price, Some(Decimal::from(98)));
         let scan = e.pending_scans().remove(0);
-        assert_eq!(scan.kind, ScanKind::TriggerTouch);
+        assert_eq!(scan.kind, ScanKind::StopTrigger);
     }
 
     #[test]
@@ -6364,8 +6427,8 @@ mod tests {
         // Both are touch rather than through, so the level itself fires them.
         assert!(touches_trigger(Side::Sell, trigger, trigger));
         assert!(touches_toward(Side::Sell, trigger, trigger));
-        assert!(ScanKind::TriggerToward.hit(Side::Buy, trigger, Decimal::from(99)));
-        assert!(!ScanKind::TriggerToward.hit(Side::Buy, trigger, Decimal::from(101)));
+        assert!(ScanKind::TouchedTrigger.hit(Side::Buy, trigger, Decimal::from(99)));
+        assert!(!ScanKind::TouchedTrigger.hit(Side::Buy, trigger, Decimal::from(101)));
     }
 
     /// The new fields belong to exactly one shape each, and stating one
@@ -8875,10 +8938,7 @@ mod tests {
             },
             2,
         );
-        assert_eq!(
-            cancel_reject_reason(&out),
-            "order already terminal (filled or canceled)"
-        );
+        assert_eq!(cancel_reject_reason(&out), "order already terminal");
 
         let out = e.process(
             Command::CancelOrder {
@@ -8911,7 +8971,7 @@ mod tests {
                 venue_order_id: Some(id),
                 reason,
                 ..
-            } if *id == venue_id && reason == "order already terminal (filled or canceled)"
+            } if *id == venue_id && reason == "order already terminal"
         ));
 
         let out = e.process(
@@ -8947,7 +9007,7 @@ mod tests {
         assert!(matches!(
             &out[0],
             VenueMessage::OrderModifyRejected { reason, .. }
-                if reason == "order already terminal (filled or canceled)"
+                if reason == "order already terminal"
         ));
     }
 
@@ -8975,7 +9035,7 @@ mod tests {
                 venue_order_id: Some(id),
                 reason,
                 ..
-            } if *id == venue_id && reason == "order already terminal (filled or canceled)"
+            } if *id == venue_id && reason == "order already terminal"
         ));
     }
 
@@ -9459,7 +9519,7 @@ mod tests {
         // Misses are refused loudly: already terminal, and never accepted.
         assert_eq!(
             e.cancel_open_order_silently("R1", 10),
-            Err("order already terminal (filled or canceled)".to_string())
+            Err("order already terminal".to_string())
         );
         assert_eq!(
             e.cancel_open_order_silently("GHOST", 11),
@@ -10442,15 +10502,17 @@ mod tests {
     /// Every prefix the venue mints is reserved, not just the first one.
     ///
     /// The restriction is not cosmetic: a consumer that claims one of these ids
-    /// burns it in `seen_client_order_ids`, so the forced close that later mints
-    /// the same id is refused as a duplicate and the venue cannot liquidate the
-    /// account that pre-claimed it. `RISK-`, which `liquidate_all` mints, was
-    /// unreserved until 2026-08-19.
+    /// burns it in `seen_client_order_ids`, so the venue-minted close that later
+    /// mints the same id is refused as a duplicate and the venue cannot force
+    /// the account that pre-claimed it flat. The two prefixes are minted by
+    /// different mechanisms - `LQ-` by liquidation, `RISK-` by the
+    /// `liquidate_all` risk flatten - and both are reserved for the same reason.
+    /// `RISK-` was unreserved until 2026-08-19.
     ///
     /// The loop runs over the constant the minting sites read, so a prefix added
     /// later is covered by this test the moment it exists.
     #[test]
-    fn a_consumer_cannot_claim_the_liquidation_order_namespace() {
+    fn a_consumer_cannot_claim_the_venue_reserved_order_namespace() {
         // The two prefixes are named literally as well as looped over, because a
         // test that only reads the constant shrinks with it: deleting a prefix
         // from the list would delete the case that proves it reserved.
@@ -10465,7 +10527,7 @@ mod tests {
                 Engine::new().process(Command::SubmitOrder(order(&format!("{prefix}MNQ-1"), 1)), 1);
             assert_eq!(
                 reject_reason(&out),
-                "client_order_id uses reserved liquidation prefix",
+                "client_order_id uses a venue-reserved prefix (LQ-, RISK-)",
                 "{prefix}"
             );
         }

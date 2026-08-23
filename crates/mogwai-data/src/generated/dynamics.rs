@@ -310,12 +310,15 @@ pub(super) struct BounceState {
     pub(super) drift_ticks: i64,
     pub(super) drift_dir: i64,
     pub(super) drift_hot: bool,
-    /// Per-instance copy of [`TRADE_BOUNCE_HALF_WIDTH_TICKS`], read fresh by
-    /// `next_price` on every event. It is written once at construction and never
-    /// mutated, so the displacement is identical in every regime and for every
-    /// instrument - but the storage seam for a state-dependent displacement is
-    /// already here, and making it vary is a mutation rather than a
-    /// restructuring. See the constant for why this is not a spread.
+    /// The trade displacement in ticks, filled at construction from the
+    /// resolved `trade_displacement_ticks` seam, for which
+    /// [`TRADE_BOUNCE_HALF_WIDTH_TICKS`] is only the default - so a preset may
+    /// vary it per instrument. Read fresh by `next_price` on every event,
+    /// written once and never mutated, so the displacement is identical in
+    /// every regime for one instrument - but the storage seam for a
+    /// state-dependent displacement is already here, and making it vary is a
+    /// mutation rather than a restructuring. See the constant for why this is
+    /// not a spread.
     pub(super) trade_bounce_ticks: f64,
 }
 

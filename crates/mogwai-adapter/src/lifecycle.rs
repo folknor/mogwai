@@ -163,10 +163,14 @@ async fn backoff_or_exhausted(
 /// (AE13). Keep call sites consistent with this list, since the meter itself
 /// cannot see who bypasses it:
 ///
-/// Metered (steady-state data plane). Every `fetch_instruments` /
-/// `fetch_account` / `fetch_trades` request awaits `wait()` before issuing its
-/// request, so the configured
-/// ceiling governs the ongoing request stream a running strategy generates.
+/// Metered (the recurring HTTP calls either client makes). Every
+/// `fetch_instruments` (`GET /instruments`, including the reseeds
+/// `ensure_instrument` triggers), every `fetch_account` (`GET /account`) and
+/// every per-dial run-identity probe (`GET /health`) awaits `wait()` before
+/// issuing its request, so the configured ceiling governs the ongoing request
+/// stream a running strategy generates. Market data, history and order entry
+/// no longer pass here at all: they are websocket traffic, and this meter never
+/// sees them.
 ///
 /// Exempt (connect-time bootstrap, deliberately un-metered):
 ///   - the clock fetch (`clock::fetch_clock`) - it runs before this quota
@@ -179,14 +183,16 @@ async fn backoff_or_exhausted(
 ///
 /// Both exemptions are connect-time and bounded, so neither contributes to the
 /// sustained rate the ceiling exists to bound. Routing them through the meter
-/// too would be strictly consistent but is a `client.rs` call-site change, not
-/// something this type can enforce.
+/// too would be strictly consistent but is a call-site change in
+/// `client/data.rs` and `client/exec.rs`, not something this type can enforce.
 ///
 /// Known shape, not fixed here: `wait()` holds the mutex across its sleep to
-/// enforce FIFO spacing across concurrent callers, so a burst of N dispatches
-/// queues linearly with no cap and no timeout. An order can sit in the queue
-/// while nautilus sees only `Submitted`. A queue cap/timeout would be a design
-/// change; the spacing-via-held-mutex is intentional.
+/// enforce FIFO spacing across concurrent callers, so a burst of N fetches
+/// queues linearly with no cap and no timeout. What that delays is an
+/// instrument reseed, an account pull or a reconnect's identity probe - a
+/// subscription whose def arrives late, or a redial that waits its turn -
+/// never an order, which does not pass this meter. A queue cap/timeout would be
+/// a design change; the spacing-via-held-mutex is intentional.
 #[derive(Clone, Debug)]
 pub(crate) struct HttpQuota {
     min_interval: Option<Duration>,
@@ -474,8 +480,9 @@ async fn run_ws_connection_inner<
     } = config;
     let policy = ReconnectPolicy::from_conn(&conn, sim);
     // The reconnect-jitter RNG is seeded from the configured havoc seed when one
-    // is set, so jitter is reproducible (D.6). Both client.rs construction sites
-    // pass `seed: inbound_havoc.seed` into `WsConnectionConfig`, so a configured
+    // is set, so jitter is reproducible (D.6). Both construction sites -
+    // `client/data.rs` and `client/exec.rs` - pass
+    // `seed: inbound_havoc.seed` into `WsConnectionConfig`, so a configured
     // seed reaches here; absent a seed we fall back to entropy.
     let mut rng = seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
     let mut attempt = 0u32;

@@ -57,7 +57,9 @@ pub(crate) struct CharacterizeArgs {
     /// Where to write `char_<PAIR>.json`. Defaults to `analysis/`.
     #[arg(long, value_name = "DIR")]
     out_dir: Option<PathBuf>,
-    /// Maximum pairs to stream concurrently.
+    /// Corpus workers: how many pairs are streamed and characterized
+    /// concurrently. Defaults to 6, the cap that keeps peak IO sane, and is
+    /// further clamped down to the number of pairs actually being run.
     #[arg(long, default_value_t = MAX_WORKERS)]
     jobs: usize,
 }

@@ -19,8 +19,8 @@
 //!
 //! `ALLOWED_FILES` and `ALLOWED_PREFIXES` skip a whole file, and they are
 //! correct only where nothing in the file is live repository vocabulary:
-//! frozen preregistrations and specs, the historical arc records, generated or
-//! vendored content, and this gate's own reviewed data table.
+//! frozen preregistrations and specs, generated or vendored content, and this
+//! gate's own reviewed data table.
 //!
 //! Every `ALLOWED_SITES` entry must still match something, or the gate carries
 //! an exemption nobody needs and the next reader cannot tell a live carve-out
@@ -213,14 +213,6 @@ const ALLOWED_FILES: &[AllowedFile] = &[
         reason: "frozen specification whose body is amended, never rewritten",
     },
     AllowedFile {
-        path: "notes/glossary-ledger.md",
-        reason: "historical inventory feeding the reconciliation arc",
-    },
-    AllowedFile {
-        path: "notes/glossary-reconciliation.md",
-        reason: "historical arc record which names every spelling it retired",
-    },
-    AllowedFile {
         path: "analysis/asia_jump_probe.py",
         reason: "owner's untracked work in progress, explicitly outside repository sweeps",
     },
@@ -232,10 +224,6 @@ struct AllowedPrefix {
 }
 
 const ALLOWED_PREFIXES: &[AllowedPrefix] = &[
-    AllowedPrefix {
-        prefix: "notes/glossary-scope-",
-        reason: "historical scope records from the reconciliation arc",
-    },
     AllowedPrefix {
         prefix: "analysis/out/",
         reason: "generated analysis output, not repository content",

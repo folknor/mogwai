@@ -4,10 +4,11 @@
 //! The nautilus client pair for the `MOGWAI` venue: [`MogwaiDataClient`] and
 //! [`MogwaiExecutionClient`]. Split along the natural data/exec/shared seam:
 //!
-//! - `data` - the `DataClient` half (subscriptions, poll/WS transport, live
+//! - `data` - the `DataClient` half (subscriptions, the WS transport, live
 //!   bar aggregation, historical request paging).
 //! - `exec` - the `ExecutionClient` half (the order/fill/position mirror,
-//!   order dispatch, venue-message-to-nautilus-event translation).
+//!   order dispatch over the WS command channel,
+//!   venue-message-to-nautilus-event translation).
 //! - `shared` - plumbing both halves use: the havoc dispatch pipeline, the
 //!   instrument cache, and the clock/url/lock glue.
 

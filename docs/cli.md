@@ -114,10 +114,16 @@ whether a boat exists, what cadence it runs, or how far it has delivered, since
 none of that is knowledge a caller has about its own connection. Your own
 delivery instant arrives stamped on the frames your socket receives.
 
-`GET /account` returns the venue-wide ledger. Its `ts_event` is venue time and
+`GET /account` returns one account's ledger. `?account=` names it and an
+omitted one resolves the run's default account, which is the same resolution a
+socket does, so a consumer that named no account on either surface sees one
+ledger. An id nobody has traded under is answered rather than refused, with the
+opening balances a ledger under that id would carry; asking does not open the
+account. Its `ts_event` is venue time and
 the top-level `clock` field is `"venue"`. Pushed account events are stamped on
 their boat clocks, so consumers order pulls against pushes by protocol
-sequence, never by comparing timestamps across those axes.
+sequence, never by comparing timestamps across those axes. Opening an account
+on your own terms, the freeze and the risk policies are in `docs/accounts.md`.
 
 There is no flag for this and nothing to opt into. The record used to be gated
 behind `--ready-fd <FD>`, which took an unvalidated fd number: a number naming
@@ -132,9 +138,22 @@ mogwai serve --config run.toml
 `--config PATH` is optional and otherwise uses built-in defaults. It never
 consults the working directory. `--duration DURATION` overrides
 `run_duration_ns` for this invocation, and `--duration 0s` means what
-`run_duration_ns = 0` means - NO declared completion, run until the launcher
+`run_duration_ns = 0` means - no declared completion, run until the launcher
 ends it. It briefly meant the opposite here, producing a venue that announced
-readiness and exited before anyone could connect. There is no `--seed` flag: a
+readiness and exited before anyone could connect.
+
+`--duration` is humantime, and it is the only duration on this binary that is.
+It reads `0s`, `1500ms` and `1ns`, which is what lets the shipped launcher
+render any `Duration` it holds. `gen`'s `--length`, `--interval` and
+`--burn-in` take an in-house grammar instead: a positive count and one of
+`s m h d w mo y`. It refuses a zero count, so `--length 0d` is an error rather
+than the endless run `--duration 0s` asks for, and it has `mo` and no `ms`, so
+`--length 1500ms` is refused for an unknown unit rather than read as
+milliseconds. `30m` is the same half hour to both. The two grammars are
+deliberate rather than an oversight, and
+`crates/mogwai-cli/src/main.rs`'s `serve_argv_parses_in_the_venues_own_grammar`
+and `the_in_house_gen_grammar_cannot_read_what_the_launcher_renders` pin the
+split from both sides. There is no `--seed` flag: a
 reproduced path is a written-down act, so the seed is overridden through the
 config file's `seed` key alone; when absent, one is drawn at launch and
 reported back in the readiness record's `run_seed`, the value that with the
@@ -299,6 +318,12 @@ connect.
 river's tape has faulted. It names the river in `symbol`, the refusal in
 `kind`, and the simulated instant in `clock_ns`.
 
+The `status` field follows it, and no longer reads `"ok"` unconditionally: it
+is `"ok"` while no fault is reported and `"faulted"` once one is. Those two
+words are the whole vocabulary, so a poller that only reads `status` sees a
+faulted run rather than the constant a burnt-out venue used to answer with.
+Reading `fault` is still what tells you which river and why.
+
 A run places a boat per river and every boat owns its own tape, so rivers fault
 independently. The field reports the faulted river with the smallest symbol,
 which makes it stable across polls of the same run and still answers the
@@ -345,7 +370,14 @@ so
 `mogwai gen --symbol MNQ --type bars --interval 1m --length 3d` charts the index
 future rather than failing on an unknown symbol. `--config PATH` resolves the
 instrument from an operator TOML instead, through the same load path a served
-config takes; it is mutually exclusive with an explicit `--symbol`. A preset
+config takes; it is mutually exclusive with an explicit `--symbol`. Being the
+served load path rather than an instrument reader has a consequence worth
+knowing before you reach for it: the config is validated whole, so an offline
+chart can be refused over account funding. A `[balances]` table that does not
+carry the resolved instrument's settlement currency fails
+`refuse_unfunded_settlement` and the command exits without generating
+anything, exactly as `serve` would refuse to boot on it. Fund the currency, or
+chart the instrument through `--symbol`, which resolves no config at all. A preset
 carries its session
 calendar into the dump, which is what makes a futures river show its closed
 weekend and its daily maintenance halt as zero-volume runs; before this the
@@ -452,7 +484,8 @@ would carry the halt's fifteen-minute hole invisibly into every loop of the
 composed river. The corpus directory is
 resolved under `--root` from the conventional
 `<symbol>v/<month>.<state>.tbbo` layout, or named outright with `--dir`. The
-library holds NO absolute prices: every segment is a sequence of log returns
+library holds no absolute price anywhere in it: every segment is a sequence of
+log returns
 against its own previous trade, plus one measured `open_gap_ret` recording the
 jump from the last print before the window to the first print inside it. Stderr
 reports the work size - segments cut, ticks in them, and how many carried a
@@ -583,15 +616,21 @@ introduced to prevent, one keystroke away instead of unconditional.
 ### `mogwai arrival-control`
 
 Runs protocol 12b brick N's deterministic hourly re-centring negative control.
-It checks the per-symbol pre-landing legacy tapes (three since the 2026-08-09
-preset retirement) and the standing build gate's
+It checks the per-symbol pre-landing legacy tapes and the standing build gate's
 transcript before walking fit seeds 301 through 304 and test seeds 305 through
 308. The command reads `analysis/mnq-measure-12a.json` and
 `analysis/mnq-minute-range-envelope.json`, and writes the hash-bound result to
 `analysis/mnq-arrival-control.json`. It refuses a dirty tree and requires the
 per-symbol parent-build baselines under
-`analysis/out/arrival-control-b1-baseline/` (three since the 2026-08-09
-preset retirement; the committed brick N artifact recorded five).
+`analysis/out/arrival-control-b1-baseline/`.
+
+Three baselines are required, one per symbol gate B1 walks: `BTCUSDT.csv`,
+`MES.csv` and `MNQ.csv`, named by `B1_SYMBOLS` in
+`crates/mogwai-cli/src/arrival_control.rs`. A missing, unreadable or
+zero-length one refuses B1 rather than passing it. The committed brick N
+artifact recorded five, which is history: it predates the 2026-08-09
+retirement of the ETHUSDT and SOLUSDT presets, and a tree carrying those two
+extra files is not a tree the command reads them from.
 
 Gate B5 is evidence this command reads, never a check it runs. Run
 `brokkr check --gate --json` yourself first and capture its output to

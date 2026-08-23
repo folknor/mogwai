@@ -435,9 +435,16 @@ fn read_next_trade(
                 // stream on one bad byte and dropping every valid trade after
                 // it. `read_line` has already consumed the offending bytes (up
                 // to and including the newline) even though it refused to append
-                // them, so the reader is positioned at the next line. No tracing
-                // dep in this crate, so stderr is the visible channel.
-                eprintln!("KrakenCsvSource({symbol}): non-UTF-8 line, skipping: {err}");
+                // them, so the reader is positioned at the next line. The notice
+                // goes out as a `tracing` warning so a host that installs a
+                // subscriber routes it like every other diagnostic.
+                tracing::warn!(
+                    source = "KrakenCsvSource",
+                    symbol,
+                    error = %err,
+                    reason = "non_utf8_line",
+                    "skipping non-UTF-8 line"
+                );
                 continue;
             }
             Err(err) => {
@@ -445,7 +452,13 @@ fn read_next_trade(
                 // streaming contract returns Option, so we still end with None -
                 // but no longer silently: surface the error so a partial replay
                 // is distinguishable from a complete one.
-                eprintln!("KrakenCsvSource({symbol}): read error, truncating stream: {err}");
+                tracing::warn!(
+                    source = "KrakenCsvSource",
+                    symbol,
+                    error = %err,
+                    reason = "read_error",
+                    "read error, truncating stream"
+                );
                 return None;
             }
             Ok(_) => {}
@@ -458,9 +471,13 @@ fn read_next_trade(
                 // every consumer (MergeSource's k-way merge, replay pacing)
                 // relies on. Skip it and keep reading rather than emit it and
                 // silently let time run backwards downstream.
-                eprintln!(
-                    "KrakenCsvSource({symbol}): out-of-order row (ts {} < last {last}), skipping",
-                    t.ts_event
+                tracing::warn!(
+                    source = "KrakenCsvSource",
+                    symbol,
+                    ts_event = t.ts_event,
+                    last_ts = last,
+                    reason = "out_of_order_row",
+                    "skipping out-of-order row"
                 );
                 continue;
             }

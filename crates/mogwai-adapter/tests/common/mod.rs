@@ -91,7 +91,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mogwai_adapter::{MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient};
+use mogwai_adapter::{
+    DEFAULT_TRADER_ID, MOGWAI_VENUE, MogwaiExecClientConfig, MogwaiExecutionClient,
+};
 use mogwai_protocol::{
     Command, FillSnapshot, OrderFilled, OrderStatusInfo, OrderStatusSnapshot, VenueMessage,
     WireOrderStatus,
@@ -305,6 +307,16 @@ pub struct StubState {
     pub serve_account: AtomicBool,
     /// Body served for `GET /account` when `serve_account` is set.
     pub account_body: Mutex<Option<String>>,
+    /// The request line of every `GET /account` this stub served, in order.
+    ///
+    /// It carries the query string, and therefore the account the puller named,
+    /// for the reason `ws_requests` carries the socket's: the real venue
+    /// resolves accounts totally and answers an unnamed pull from the run's
+    /// default ledger, so a double that only replies is blind to a client
+    /// reading the wrong ledger. Recording the request makes "which account did
+    /// it ask about" an assertable question instead of an inference from the
+    /// body the double chose to hand back.
+    pub account_requests: Mutex<Vec<String>>,
     /// The run this stub reports on `GET /health`. A client configured with a
     /// different `expected_run_seed` must refuse to use the connection.
     pub run_seed: AtomicU64,
@@ -314,6 +326,15 @@ pub struct StubState {
     /// refuse on. Without this the stub can only model a venue that answers, so
     /// the unreachable branch has no end-to-end fixture at all.
     pub fail_health: AtomicBool,
+    /// When set, `GET /health` reports a faulted run whose tape fault names this
+    /// symbol, instead of the healthy body served by default.
+    ///
+    /// The real endpoint's `status` varies - `ok` while no boated river carries
+    /// a tape fault, `faulted` the moment one does, with a `fault` object saying
+    /// which river - and a double that can only ever say `ok` cannot express the
+    /// half of the contract a poller gates on. Defaults to `None`, so every
+    /// existing test still meets the healthy body it met before.
+    pub health_fault_symbol: Mutex<Option<String>>,
     /// Number of `GET /health` requests served. An identity test concluding
     /// "the client did not refuse" must first establish that it asked: a client
     /// that skipped the probe entirely satisfies the same assertion for free.
@@ -561,6 +582,16 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
     if path.starts_with("/ws") {
         serve_ws(stream, head, state).await;
     } else if path.starts_with("/account") {
+        // `path` is the whole request target, query string included, so the
+        // prefix match already accepts `/account?account=...`. Record the
+        // target before answering, including on the 404 arm: a client that
+        // named the wrong account against an older venue named it just the
+        // same.
+        state
+            .account_requests
+            .lock()
+            .expect("account requests mutex")
+            .push(path.to_string());
         if state.serve_account.load(Ordering::Relaxed) {
             let body = state
                 .account_body
@@ -584,12 +615,20 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
         // The run this stub claims to be. A client bound to a different run must
         // refuse it - that is the whole of the venue-identity check.
         let run_seed = state.run_seed.load(Ordering::Relaxed);
-        respond_json(
-            stream,
-            "200 OK",
-            &format!(r#"{{"status":"ok","oms_type":"netting","run_seed":{run_seed}}}"#),
-        )
-        .await;
+        let fault = state
+            .health_fault_symbol
+            .lock()
+            .expect("health fault mutex")
+            .clone();
+        // Status and fault are one decision on the real endpoint and cannot
+        // disagree there, so they are derived together here too.
+        let body = match fault {
+            Some(symbol) => format!(
+                r#"{{"status":"faulted","oms_type":"netting","run_seed":{run_seed},"fault":{{"symbol":"{symbol}","kind":"arrival.intensity_ceiling","clock_ns":0}}}}"#
+            ),
+            None => format!(r#"{{"status":"ok","oms_type":"netting","run_seed":{run_seed}}}"#),
+        };
+        respond_json(stream, "200 OK", &body).await;
     } else if path.starts_with("/clock") {
         state.clock_hits.fetch_add(1, Ordering::Relaxed);
         if state.fail_clock.load(Ordering::Relaxed) {
@@ -1318,7 +1357,7 @@ pub fn trade_json(ts_event: u64, price: &str) -> String {
 /// Seeds a limit BTCUSDT buy order `O-1` into the cache and returns it, so the
 /// exec client's submit path can look it up.
 pub fn cached_order(cache: &Rc<RefCell<Cache>>) -> nautilus_model::orders::OrderAny {
-    let trader_id = TraderId::from("MOGWAI-001");
+    let trader_id = TraderId::from(DEFAULT_TRADER_ID);
     let strategy_id = StrategyId::from("S-001");
     let clock = Rc::new(RefCell::new(TestClock::new()));
     let mut factory = OrderFactory::new(trader_id, strategy_id, None, None, clock, false, false);
@@ -1439,7 +1478,7 @@ pub fn cached_trailing_stop(cache: &Rc<RefCell<Cache>>) -> nautilus_model::order
 
 fn order_factory() -> OrderFactory {
     OrderFactory::new(
-        TraderId::from("MOGWAI-001"),
+        TraderId::from(DEFAULT_TRADER_ID),
         StrategyId::from("S-001"),
         None,
         None,
@@ -1470,7 +1509,7 @@ pub fn submit_command(
     init: nautilus_model::events::OrderInitialized,
 ) -> nautilus_common::messages::execution::SubmitOrder {
     nautilus_common::messages::execution::SubmitOrder::new(
-        TraderId::from("MOGWAI-001"),
+        TraderId::from(DEFAULT_TRADER_ID),
         Some(ClientId::from("MOGWAI-EXEC")),
         StrategyId::from("S-001"),
         instrument_id(),

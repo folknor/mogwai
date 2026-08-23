@@ -132,9 +132,10 @@ pub(crate) fn lock_recover<'a, T>(
     })
 }
 /// Records a spawned task's handle so `stop()`/`disconnect()` can abort it
-/// (AD17/AE19: a `request_*` fetch or an HTTP order dispatch spawned just before
-/// disconnect otherwise keeps issuing HTTP requests, racing the HttpQuota, and
-/// sends into a possibly-dropped sink after the client stopped). Already-finished
+/// (AD17/AE19: a spawned `request_*` handler, instrument reseed or order-status
+/// probe left running across a disconnect otherwise keeps issuing HTTP
+/// requests, racing the HttpQuota, and sends into a possibly-dropped sink after
+/// the client stopped). Already-finished
 /// handles are pruned on every insert so the vec is bounded by the count of
 /// in-flight tasks rather than growing once per short-lived request over the
 /// client's lifetime. Shared behind the `Arc<Mutex<..>>` so the `&self` request
@@ -162,8 +163,9 @@ pub(crate) fn instrument_def(
 /// map is seeded once at connect; a symbol subscribed but absent from that seed
 /// (a venue config change or a later-added instrument) otherwise streams into
 /// nothing with zero diagnostics. The drain (`emit_trade`, the quote arm) has
-/// no HTTP handle to re-seed, so it can only surface the miss - the poll path,
-/// which does have async/HTTP context, self-heals via `ensure_instrument`. The
+/// no HTTP handle to re-seed, so it can only surface the miss - the spawned
+/// request handlers, which do have async and HTTP context, self-heal via
+/// `ensure_instrument`. The
 /// dedup keeps a per-trade warn from flooding the log for a genuinely-missing
 /// symbol. The set belongs to one data client, so another venue client still
 /// reports its own first miss.
