@@ -72,7 +72,15 @@ features = ["hotpath-alloc"]
 # is a claim about intent and nothing checks it. Comparing them as substrings
 # never could: `skip.contains(filter)` is satisfied by any unrelated long entry,
 # and the sound converse refuses the pair below, where the `only` filter is
-# deliberately the shorter of the two.
+# deliberately the shorter of the two. Nor can anything check that every test
+# carrying a wall-clock budget was routed here in the first place: "carries a
+# budget" is a property of what the test measures, not a syntactic one, so no
+# enumeration can find the ones that were missed.
+#
+# Which is the argument for keeping this list short. Where the interval a test
+# waits on is a parameter, inflating it under test is the better fix than
+# routing the test into this lane: it removes the wall-clock dependence instead
+# of relocating it, and it costs no release build.
 [[check]]
 name = "timing"
 profile = "release"

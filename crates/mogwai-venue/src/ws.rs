@@ -78,6 +78,12 @@ pub(crate) struct SocketQuery {
     /// generated value, so it is a second cursor, not a second river. The one
     /// refusal left is per ledger: an account already riding this river at
     /// another speed would be judged on two clocks.
+    ///
+    /// Sharing at all only applies to the unnamed form, a preset plus a
+    /// duration, the request that says "wherever you are is fine". A named
+    /// window always gets its own river even against an identical request
+    /// already running: the first requester is by then some sim-time ahead, and
+    /// asking for a window means being served from its start.
     #[serde(default)]
     speed: Option<f64>,
     /// Absent means indefinite. Simulated milliseconds, measured on the boat's
@@ -253,6 +259,16 @@ pub(crate) async fn ws_upgrade(
     // Bounded and charset-checked before it is stored or compared: it arrives
     // in a URL, is echoed in no frame, and an unbounded one would be per-socket
     // memory a consumer sets for free.
+    //
+    // The account id is the client's, never minted per connection, and that is
+    // load-bearing rather than incidental. From the venue's side a reconnect is
+    // indistinguishable from a stranger claiming the id: a dropped socket the
+    // adapter redialed, an armed `GoDark`, and a client process that died and
+    // restarted against a still-running venue all look the same here. If the id
+    // were born with the socket, the redial case would silently open a fresh
+    // account with a reset balance and peak equity, so a hiccup would wipe a
+    // run's profit and loss. A stable client-supplied id is what makes a
+    // returning socket a continuation.
     if let Some(callsign) = query.callsign.as_deref()
         && let Err(reason) = mogwai_protocol::validate_callsign(callsign)
     {

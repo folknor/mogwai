@@ -114,6 +114,23 @@ impl Engine {
     /// for anything. That is the atomic-admission guarantee, and it is cheap
     /// precisely because `validate_submit` is a pure read.
     ///
+    /// The guarantee is qualified, and the qualification is exactly one thing:
+    /// admission is atomic for everything decidable in advance, and not for a
+    /// balance the group's own fills moved. A member whose funds an earlier
+    /// member's fill consumed is refused on pass two below, with its earlier
+    /// siblings already accepted, and `report_group_member_refusal` is what
+    /// tells that case apart from an admission hole. The member is rejected,
+    /// not cancelled: the cancel reading belongs to a triggered order that
+    /// outruns its account, which is a different path with a different meaning
+    /// for the consumer reconciling it.
+    ///
+    /// Whether a given consumer's exit orders meet the guarantee depends on the
+    /// run's `oms_type`. A reduce-only exit reserves nothing, so it never meets
+    /// it; an exit submitted without the flag takes initial margin per resting
+    /// contract at admission and is not clamped to the position it means to
+    /// close. `mogwai-venue` states the same qualification where it names the
+    /// group, so neither side is the sole record of it.
+    ///
     /// Pass two submits each member through the ordinary path, in the order the
     /// consumer sent them, at one instant against one market reading. So no tape
     /// advances between members and no member meets a market a sibling did not.

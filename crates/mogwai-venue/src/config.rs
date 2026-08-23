@@ -356,13 +356,14 @@ pub(crate) const DEFAULT_ACCOUNT_ID: &str = "MOGWAI-001";
 /// Validates the run's account id.
 ///
 /// Two rules. It must be a legal `mogwai_protocol::AccountId`, which is the wire
-/// constraint. And it must carry an `ISSUER-NUMBER` split, which is NOT a wire
-/// constraint but a nautilus one: `AccountId::new` panics on a value with no
+/// constraint. And it must carry an `ISSUER-NUMBER` split, which is not a wire
+/// constraint at all but a nautilus one: `AccountId::new` panics on a value with no
 /// `-`, so a venue reporting one produces a host that cannot construct the
 /// account it is being told about. mogwai does not import nautilus here and so
 /// checks the shape by hand; the alternative is a run that boots cleanly, serves
 /// happily, and is refused by its consumer a minute later with an error naming
-/// neither this file nor this key.
+/// neither this file nor this key. Do not relax this rule to match the wire
+/// type: the divergence between the two is the finding, not a bug in the check.
 pub(crate) fn validate_account_id(cfg: &Config) -> anyhow::Result<()> {
     let id = cfg.account_id.trim();
     mogwai_protocol::AccountId::parse(id)
@@ -575,6 +576,18 @@ fn validate_speed(cfg: &Config) -> anyhow::Result<()> {
 /// The preset every unmatched symbol is served under. It is spot, makes no
 /// calendar claim about an unfitted symbol, settles in the funded USDT default,
 /// and was fitted from trade-level archives.
+///
+/// This is the shape contract for every unmatched symbol, not merely the tape
+/// you get when you do not pick one. Swapping it for tape reasons silently moves
+/// the currency, price grid and class of every symbol nobody configured, and
+/// therefore what the connect-time funding check demands of the ledger.
+///
+/// It is also currency-coupled to the default account policy: this preset fixes
+/// the settlement currency of every unmatched symbol and the default policy
+/// fixes what an unnamed account is funded in, so if the two disagree the wholly
+/// unnamed request fails its own funding check, which is the one path that must
+/// never fail. Designating either one is therefore a joint decision. The symbol
+/// contributes no currency of its own; it is a label.
 pub const DEFAULT_PRESET: &str = "BTCUSDT";
 /// The shape an arbitrary unconfigured label resolves to under this config.
 ///

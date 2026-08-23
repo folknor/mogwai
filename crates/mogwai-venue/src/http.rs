@@ -119,6 +119,18 @@ pub(crate) fn admission_subject(cmd: &Command) -> AdmissionSubject {
         // A group whose first member carries no link is one
         // `validate_submit_group` refuses anyway, so the empty id here is a
         // subject for a frame that only ever accompanies that refusal.
+        //
+        // "Whole" is exact for everything decidable in advance and is not a
+        // claim about a balance the group's own fills moved. A member whose
+        // funds an earlier member's fill consumed is rejected on the second
+        // pass, with its earlier siblings already accepted. Whether a given
+        // consumer's exits meet the guarantee depends on that run's `oms_type`
+        // and is the consumer's to know: a reduce-only exit reserves nothing
+        // and never meets it, while one submitted without the flag takes
+        // initial margin per resting contract at admission and is not clamped
+        // to a position. The unfunded member is rejected and not cancelled;
+        // the cancel reading belongs to a triggered order that outruns its
+        // account, which is a different path.
         Command::SubmitOrderGroup { orders } => AdmissionSubject::SubmitGroup {
             order_list_id: orders
                 .first()
@@ -1972,8 +1984,8 @@ pub(crate) async fn quotes(
 /// a full `/quotes` page is 4.40 MB of `QuoteTick` vector and 5.90 MB of JSON
 /// resident together while it serializes, so four of them peak near 41 MB.
 /// `/trades` is narrower at 3.20 MB plus 5.05 MB. The number is a bound only
-/// because the permit outlives BOTH halves, which is what `HistoryPage` is
-/// for.
+/// because the permit outlives both halves at once, the vector and the JSON,
+/// which is what `HistoryPage` is for.
 pub(crate) const MAX_CONCURRENT_HISTORY_SLOTS: usize = 4;
 
 /// A serialized history page that owns its history slot.

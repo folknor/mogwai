@@ -357,6 +357,11 @@ async fn serve_async(
         // constraint is a convention held by the callers, so an operator who
         // POSTs late gets live mutation and the venue will not say otherwise.
         //
+        // Enforcing it was considered and declined. Every consumer posts its
+        // arms per account on connect and holds them constant for that
+        // connection, so policing an arm that arrives mid-connection would cost
+        // more than stating the convention does.
+        //
         // Recorded here because the endpoint is where someone looks before
         // arming something, and because several open items elsewhere - the
         // pending-arm shed cap, the unordered application of concurrent arms -

@@ -99,7 +99,14 @@ impl Engine {
     /// against an account is spent by its trigger or it is spent by the run
     /// ending. Exposing a flush on the wire would make the queue's contents
     /// something a consumer can retract mid-run, which is the deferred-state
-    /// surface the venue declines to keep.
+    /// surface the venue declines to keep. A `ClearDivergences` wire message
+    /// existed once and was deleted outright rather than left unrouted.
+    ///
+    /// The known consequence is accepted: an arm posted at an account that then
+    /// never connects has no retraction route at all, and is spent only by the
+    /// run ending. Pre-boarding havoc setup is one-way run construction, so an
+    /// arm that never finds its account is a scenario that was never run rather
+    /// than state anyone needs to take back.
     pub fn clear_armed(&mut self) {
         self.armed.clear();
     }

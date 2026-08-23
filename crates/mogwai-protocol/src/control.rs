@@ -178,6 +178,18 @@ impl GeneratorArm {
     }
 }
 
+/// The havoc a passenger arms against its own view of the venue.
+///
+/// The test for any knob proposed here, and the reason this enum and
+/// `GeneratorHavoc` are separate: does it change the water or the view? Water
+/// changes belong to river identity, so a client wanting different answers gets
+/// a different river. View changes ride the passenger and leave the river
+/// shareable, which is what keeps one generated tape serving many consumers.
+///
+/// Transport havoc was once thought to need an account or connection scope of
+/// its own. Under this rule it needs none: it is passenger-local by
+/// construction, the same family as the fill fanout, and both are closed with
+/// the passenger rather than with a second mechanism.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Divergence {
@@ -201,6 +213,11 @@ pub enum Divergence {
     /// the same frame for real reasons. This one refuses a cancel the venue
     /// could have honoured, so the order stays exactly what it was - the point
     /// is that the book and the consumer's model disagree afterwards.
+    ///
+    /// The arm is therefore deliberately not spent on an unknown or
+    /// already-terminal id. Those cancels are refused anyway, and spending the
+    /// arm on one looks, to a scenario author, exactly like the arm failing to
+    /// fire.
     RejectNextCancel { reason: String },
     /// Delay every outbound execution event by `ms`, bounded by
     /// `MAX_DIVERGENCE_MS`. Arm with `ms: 0` to clear: that is the only route

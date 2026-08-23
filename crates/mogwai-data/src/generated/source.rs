@@ -8,6 +8,20 @@
 //! byte - see `clean_regime_is_byte_identical` in the test module for the
 //! pinned golden sequence that must be re-blessed with any intentional walk
 //! mechanism change.
+//!
+//! One consequence of that determinism is worth stating before it is
+//! rediscovered as a bug: a drought is per-config, not intermittent. Every boot
+//! of a pinned epoch lands on the same stretch of tape, so a config whose epoch
+//! sits in a low-arrival stretch reproduces that stretch on every boot, for as
+//! long as the config is unchanged. A report that a freshly started server
+//! correlates with empty history windows is this, not a startup or warm-up
+//! defect.
+//!
+//! The fitted ACD arrival process is persistent and heavy-tailed, so a short
+//! historical window legitimately holds zero trades. The history routes are
+//! correct to answer an empty list there, and widening the window or seeding
+//! filler to avoid the empty answer would be falsifying the river to flatter a
+//! route.
 
 use std::sync::Arc;
 

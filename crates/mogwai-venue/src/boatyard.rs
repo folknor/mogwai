@@ -2,6 +2,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! On-demand paced boats, shared by passengers asking for the same river and speed.
+//!
+//! Three nouns, and the boat is the one that carries no semantics.
+//!
+//! A river is a tape and is shared. Its identity is everything that mutates the
+//! water: symbol or preset, session or window shape, loop shape, seed, resolved
+//! bundle, market regime, generator havoc, and the tape protocol version. Speed
+//! is not in that list, because it changes delivery cadence and no generated
+//! value.
+//!
+//! A passenger is one connected trader: its own account, ledger, orders and
+//! view, never shared, one per connection.
+//!
+//! A boat is this module's cache. It is a cursor keyed by (river, speed) whose
+//! whole purpose is to generate and pace one river once rather than N times.
+//! Nothing a passenger can observe depends on whether it shares a cursor, so
+//! reasoning about which passengers may share a boat is reasoning about a cache
+//! as though it carried meaning. Duration and the transport havoc family
+//! (`GoDark`, `DelayAcks`, `StallData`, `CommandLatency`) are passenger-local
+//! and therefore never split a river.
+//!
+//! The test for any new knob is one question: does it change the water or the
+//! view? Water goes into river identity, so callers wanting different answers
+//! get different rivers. A view change rides the passenger and leaves the river
+//! shareable.
 
 use mogwai_protocol::SimClock;
 use std::{

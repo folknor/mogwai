@@ -191,6 +191,14 @@ pub(crate) fn spawn_fill_sweeper(sweep: FillSweep) -> tokio::task::JoinHandle<()
                     Arc::clone(boat)
                 })
                 .collect();
+            // The sweep is symbol-keyed by construction, and a survey once
+            // flagged this walk as the likeliest hidden single-symbol
+            // assumption in the venue and found the opposite. Pending scans are
+            // grouped by the symbol of the boat they belong to, the walk runs
+            // once per boat and therefore once per symbol, and the marks and
+            // settlements below look each symbol up in the river store rather
+            // than assuming one. Do not re-derive that suspicion from the shape
+            // of this loop.
             for boat in due_boats {
                 let symbol = boat.symbol().to_owned();
                 let to_ns = sim_now_ns(boat.sim);

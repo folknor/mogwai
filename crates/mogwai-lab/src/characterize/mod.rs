@@ -241,6 +241,22 @@ impl AutoCorr {
         }
     }
 
+    /// Known numerical hazard, deliberately left in place. The variance guard
+    /// below fires only when `sumsq / n - mean * mean` lands at zero or below,
+    /// so a series held constant at a value the mean cannot represent exactly
+    /// leaves a tiny positive residue, the guard misses it, and the returned
+    /// ACF is the ratio of two cancellation errors rather than a measurement.
+    /// Both branches substitute a number where the honest answer is that
+    /// autocorrelation is undefined for a constant series.
+    ///
+    /// It is not fixed because this same routine computes the F1 duration ACFs
+    /// and is bit-exact against `analysis/cadence.json`, the lineage the
+    /// fingerprint's cadence half rests on: changing the estimator invalidates
+    /// that equivalence. A fix owes the analysis of what moves in the cadence
+    /// targets and whether the fingerprint must be refitted, not just the code
+    /// change. A reader who spots this and quietly repairs it breaks the
+    /// lineage; the repair has to be taken as a piece of work with that
+    /// analysis attached.
     #[must_use]
     pub fn acf(&self) -> Vec<f64> {
         if self.n < 2 {

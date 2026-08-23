@@ -5,6 +5,18 @@ receives a versioned readiness record as one JSON line on the child's stdout.
 The process binds one endpoint and owns an open set of resolved instruments,
 generated rivers, and one ledger per account.
 
+Two topologies are supported, and both are required. The default is the per-run
+venue: a consumer given no address spawns its own ephemeral venue, owns it for
+the run, and takes it down with the worker, so N subagents means N venue
+processes, each with one river, one passenger and one ledger. The second is the
+shared exchange, and it exists for amortization: one `mogwai serve`, N
+subagents connecting under their own accounts, one river per distinct tape
+identity rather than N generations of near-identical tape. That is cost
+motivating a second mode, not cost shaping the model, so it does not conflict
+with the standing premise that resource cost shapes no decision here. The
+venue's semantics are identical either way; what differs is how many processes
+carry them.
+
 A river is a generated sequence and is shared; an account owns its ledger,
 risk state and freeze stamp; a passenger is one connected trader riding one
 boat and dying with its socket. The

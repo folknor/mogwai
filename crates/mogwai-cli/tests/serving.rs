@@ -2005,6 +2005,9 @@ async fn a_perpetual_position_pays_funding_across_an_interval() {
     // unpaced, so the tape's `ts_event` runs far ahead of `venue_now_ns`.
     // Anchoring a clock target on a tape stamp therefore satisfies it at once
     // and the test fails on an unmoved balance, which is what was measured.
+    // The sim-clock poll the resting-stop test uses is exactly that vacuous
+    // replacement: it is sound only where the sim clock tracks wall time, and
+    // `reference/clock.md` carries why a `speed = 0.0` config is not that case.
     // Nothing the venue serves
     // counts sweep passes, so there is no condition to wait on: a monotonic
     // per-river count of completed passes on `/clock` or `/health` is what would
@@ -2125,6 +2128,13 @@ async fn an_armed_divergence_reaches_every_connection() {
     // of the observation the property is asserted over: shortening it does not
     // make the test fail sooner, it makes the test pass on less evidence. Two
     // seconds is what the arming above was sized against.
+    //
+    // It is nonetheless a wall-clock assertion: it says data arrives only after
+    // an armed window closes, judged on real time. It flaked once under machine
+    // load at the piece-7 gate and never since. If it recurs, the fix is not a
+    // wider margin - re-express the property on the divergence window's own
+    // clock instead of on wall-time arrival order, because a margin only moves
+    // the load level at which the same wrong answer returns.
     let quiet_until = tokio::time::Instant::now() + Duration::from_secs(2);
     while let Ok(Some(Ok(message))) = tokio::time::timeout_at(quiet_until, data_socket.next()).await
     {

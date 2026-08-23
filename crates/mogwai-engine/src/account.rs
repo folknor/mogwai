@@ -650,6 +650,12 @@ impl Engine {
         }
     }
 
+    /// Warn rather than refuse, ruled 2026-08-20 alongside [`Engine::settle`]'s
+    /// inverse guard. Refusing a non-positive price at the fill was considered
+    /// and rejected: by the time a fill is booked the tape has already produced
+    /// the print, and aborting the serving path over it is the one thing no
+    /// venue does. `Engine::position_unrealized_checked`'s zero answer is the
+    /// backstop for what gets through here, not the policy.
     fn warn_zero_px(&mut self, symbol: &str) {
         if self.warned.zero_px.insert(symbol.into()) {
             tracing::warn!(%symbol, "account fill booked with zero price");

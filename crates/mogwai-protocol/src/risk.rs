@@ -16,6 +16,11 @@
 //!
 //! A rule is a triple: what it measures, on what basis, and what it does on
 //! breach. The breach action is the parameter that spans both worlds.
+//!
+//! The margin ledger's own `breach_action = "liquidate"` is a third instance of
+//! that same triple, reached by a parallel mechanism with its own arithmetic.
+//! Reconciling the two liquidation paths means expressing a margin breach as
+//! one more rule here rather than keeping the second mechanism alongside.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

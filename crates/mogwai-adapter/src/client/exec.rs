@@ -1018,6 +1018,17 @@ impl ExecutionClient for MogwaiExecutionClient {
         // connected and is not - accepts, fills, cancels and rejects all
         // vanish for the life of the connection, silently.
         //
+        // The failure is worse than a dead stream because it is asymmetric:
+        // `submit_order` emits its own `Submitted` off the live emitter field
+        // rather than through a frozen clone, so nautilus keeps seeing every
+        // order go Submitted and nothing after it, forever. That reads as a
+        // wedged venue rather than as a broken client.
+        //
+        // No shipped host hits this: nautilus's own kernel starts clients
+        // before connecting them, on one current-thread runtime. So this is a
+        // host-ordering contract we state and enforce, not a repair of an
+        // ordering we expect.
+        //
         // The sender cannot simply be resolved here for everyone:
         // `try_get_exec_event_sender` reads a thread-local set on the runner's
         // thread, and this async fn may already be polled on another. Try it

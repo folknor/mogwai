@@ -433,6 +433,12 @@ pub fn run_measure_with(
 /// from `run_measure_with` so the
 /// claim is testable at all: it sat mid-way through a multi-minute walk driver
 /// with no reachable seam.
+///
+/// The order refusal should be inert: every producing path is a forward walk
+/// over the calendar, so nothing that reaches here has a reason to be shuffled.
+/// If it ever fires on a calendar that is otherwise fine, the finding is that
+/// `per_session` is no longer emitted in date order - not a reason to loosen
+/// this back to comparing a sorted copy against itself.
 fn session_dates_are_23_sorted_unique(per_session: &[Value]) -> anyhow::Result<()> {
     let dates: Vec<Option<&str>> = per_session
         .iter()

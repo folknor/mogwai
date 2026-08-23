@@ -36,6 +36,14 @@ use crate::{admission::ExecLanes, boatyard::Boatyard, source};
 /// tear-free by construction, so an atomic pair would be a regression
 /// introduced by the fix. No packed encoding either: two independent nanosecond
 /// quantities do not fit one u64 without a range limit nobody can audit later.
+///
+/// Three socket-level forms of these rules were deliberately not built at the
+/// piece-10 landing: a stall window lasting its declared span on a late boat, a
+/// window armed before boarding still opening, and two boats swept at their own
+/// cadence. Each rule is pinned at unit level below; the socket forms are
+/// latency-bounded and would land as flakes rather than as gates. If one is ever
+/// wanted, express it on the divergence window's own clock and never on wall
+/// arrival order.
 pub(crate) struct HavocWindow(Mutex<Option<ArmedSpan>>);
 
 #[derive(Clone, Copy)]
@@ -154,6 +162,14 @@ pub(crate) struct Account {
     /// Raised by `Run::attach` before the upgrade completes and lowered by
     /// `Passenger`'s `Drop`, which runs on the abandoned-upgrade path too.
     /// So it counts attaches, and every attach has exactly one departure.
+    ///
+    /// Only unit tests reach that abandoned-upgrade path, and the attempt to
+    /// reach it over a real socket has already been made: sixteen connections
+    /// writing a well-formed upgrade and then resetting with `SO_LINGER` at
+    /// zero all landed on the handled path instead. On loopback the venue has
+    /// read the request, written the 101 and started the handler before the
+    /// reset arrives, and the race sits inside hyper's upgrade handoff, so
+    /// there is no interval to parameterize. Do not spend another round trying.
     attachments: AtomicUsize,
     /// Transport havoc, per account rather than per venue.
     ///
@@ -573,7 +589,7 @@ fn apply_transport_arm(arm: &VenueArm, account_state: &Account) {
 ///
 /// The two halves differ in lifetime, deliberately so. `all` is the venue's
 /// standing state and is replayed onto every ledger this run ever mints.
-/// `pending` holds an arm posted against a NAMED account that does not exist
+/// `pending` holds an arm posted against a named account that does not exist
 /// yet, and is consumed by that account's first mint - which is precisely the
 /// promise a named arm makes ("the arm is standing when the consumer dials") and
 /// nothing more. Recording rather than minting is what keeps the control plane
@@ -611,6 +627,18 @@ struct VenueArms {
 /// How many not-yet-minted accounts the run will carry arms for. Operator scale
 /// is a handful of subagents; the cap exists so a typo loop on
 /// `POST /control/divergence` cannot grow the run without bound.
+///
+/// The shed here is deliberately silent, while the engine's armed-queue shed is
+/// reported in the ack body, and the asymmetry was adjudicated rather than
+/// overlooked. This cap counts arms outstanding and not arms posted:
+/// `take_pending` consumes a record the moment its account first exists, on both
+/// mint paths (`Run::passenger` and `Run::open_account`), and every consumer
+/// posts its havoc knobs on connect, so records drain almost immediately.
+/// Reaching 64 needs an operator to arm 65 distinct names that never connect,
+/// which is a typo at scale rather than a usage pattern. The engine queue fills
+/// instead from arms against ledgers that already exist, so it can hit its cap in
+/// ordinary use, and a silent eviction there once cost a QA run a full
+/// misdiagnosis.
 const MAX_PENDING_ACCOUNT_ARMS: usize = 64;
 
 impl VenueArms {
@@ -632,8 +660,8 @@ impl VenueArms {
         self.pending.push((account_id.to_owned(), record));
     }
 
-    /// Take `account_id`'s pending arms, if any. The caller replays `all` FIRST
-    /// and then this, because a pending arm is by construction later in time
+    /// Take `account_id`'s pending arms, if any. The caller replays `all` first
+    /// and only then this, because a pending arm is by construction later in time
     /// than every standing one it can overlap.
     ///
     /// Taking rather than reading is what bounds `pending`, and it is the honest
@@ -658,6 +686,14 @@ impl VenueArms {
 /// that lands it is the opening balance applied to each account rather than
 /// the balance of one shared ledger, which is the same value doing a different
 /// job.
+/// Audited 2026-08-23 and found not to be a defect, twice over. Account opening
+/// is not quadratic in symbol count: no mint loop installs more than one margin
+/// policy, and `Engine::set_margin_policies` is the batch setter for whoever
+/// writes one, with `Engine::set_margin_policy` a thin wrapper over it. And the
+/// per-mint clone of `opening_balances` here, and the one in the `GET /account`
+/// preview, is structural rather than waste: the engine mutates its own balance
+/// map, so holding this behind an `Arc` would still clone into an owned map at
+/// build time.
 struct AccountOpeningTerms {
     opening_balances: std::collections::HashMap<String, Decimal>,
     fill_seed: u64,
@@ -717,7 +753,7 @@ pub(crate) struct Run {
     account_opening_terms: AccountOpeningTerms,
     /// Every venue-wide arm the control plane has posted. Read whenever a
     /// ledger is minted, so a late-connecting account carries what the operator
-    /// armed. LOCK ORDER: `accounts` FIRST, then this - both `Run::account` and
+    /// armed. The lock order is `accounts` first and then this, and both `Run::account` and
     /// `arm_venue_wide` take them that way, which is what makes an arm racing a
     /// mint land in exactly one of the two paths rather than in neither.
     venue_arms: Mutex<VenueArms>,
@@ -2026,7 +2062,7 @@ impl Run {
         self.fault_tx.send(mogwai_data::TickFault::Injected).is_ok()
     }
 
-    /// A live-passenger token. Taken by `ws::ws_upgrade` BEFORE the 101 is
+    /// A live-passenger token. Taken by `ws::ws_upgrade` ahead of the 101 being
     /// returned, carried on the `Passenger`, and dropped only after that
     /// passenger's writer has flushed - so the token's lifetime strictly
     /// contains the passenger's, and strictly contains the hyper connection's,

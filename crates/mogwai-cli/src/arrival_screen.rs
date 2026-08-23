@@ -27,6 +27,12 @@ use serde_json::{Map, Value, json};
 
 const DEFAULT_MEASURE: &str = "analysis/mnq-measure-12a.json";
 const DEFAULT_OUT: &str = "analysis/mnq-arrival-screen.json";
+/// The cap on the machine-reported parallelism, not a worker count.
+///
+/// 16 is measured rather than chosen: past it an SMT regression eats the
+/// parallelism and the run gets slower rather than faster. The runs behind the
+/// number are in `reference/performance.md`, under the arrival kernel's cost
+/// cliff. Raising it wants a new run, not a guess about the host.
 const DEFAULT_MAX_JOBS: usize = 16;
 
 #[derive(Args, Debug)]

@@ -192,6 +192,21 @@ impl TickEvent {
 }
 
 /// A source of ticks in replay (time) order.
+///
+/// The tape is exogenous by contract, not by accident: order flow never feeds
+/// back into it. No implementer may consult submitted, resting or filled orders
+/// when producing the next tick. That is what gives passengers
+/// non-interference - one passenger's orders cannot reach another's fills -
+/// and it is the reason there is no queue competition anywhere in the venue:
+/// fifty passengers submitting the same buy at the same instant all get the
+/// same fill, and their aggregate moves the water not at all.
+///
+/// Modelling market impact here is therefore forbidden rather than merely
+/// unimplemented. An impact term would be a channel through which passengers
+/// reach one another through the water, and nothing else in the design would
+/// catch it: every downstream gate reads the tape as given, so the coupling
+/// would be invisible in a green suite. If impact is ever wanted it needs a
+/// separate seam with its own isolation story, not a term added in here.
 pub trait TickSource {
     /// Next tick in replay order, or `None` at end of stream.
     fn next_tick(&mut self) -> Option<TickEvent>;
@@ -365,6 +380,18 @@ pub fn parse_kraken_line(symbol: &str, line: &str) -> Option<TradeTick> {
 
 /// Streaming reader over one Kraken pair CSV. Holds a single line buffer; memory
 /// is constant regardless of file size.
+///
+/// This type and [`TickRuleAggressor`] beside it belong to the offline corpus
+/// lineage, not to the serving path. The Kraken dump is trades only: no quotes,
+/// no L2, and no aggressor side, which is the entire reason a tick rule exists
+/// to infer one. Both are kept for that lineage and its unit tests.
+///
+/// The running venue does not go through here. `GeneratedSource` synthesizes
+/// trades that carry a native `Buyer`/`Seller` aggressor, and since tape
+/// protocol 7 it also publishes an observable top of book, so nothing on the
+/// live path needs to infer a side or invent a quote. What is still open there
+/// is calibration, not the layer: the quoted width, the top-of-book sizes and
+/// the trade displacement are placeholders pending CME TBBO data.
 pub struct KrakenCsvSource {
     symbol: String,
     reader: BufReader<File>,

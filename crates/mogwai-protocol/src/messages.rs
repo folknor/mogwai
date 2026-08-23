@@ -368,6 +368,19 @@ pub enum AggressorSide {
     Seller,
 }
 
+/// The order types this venue serves.
+///
+/// The surface is complete by definition rather than sized against any one
+/// consumer's catalog. An exchange serves stocks, futures, forex and crypto,
+/// and the order types, time-in-force values and account types that go with
+/// each, so this enum is finished when that set is covered and not when the
+/// current caller stops asking.
+///
+/// Completeness is load-bearing rather than tidy. For any shape this venue does
+/// not model there is no forward test anywhere: a bar-close backtest
+/// structurally cannot see resting-order timing, conditional fills, partial
+/// fills or latency. A curated subset does not make those strategy shapes
+/// inconvenient to test, it makes them untestable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderType {
     Market,

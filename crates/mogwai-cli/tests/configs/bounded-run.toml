@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: 2026 folknor
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# THE DECLARED-DURATION GATES' VENUE, and the ONE thing that separates it from
-# fast.toml is the pacing.
+# The declared-duration gates' venue. It is fast.toml with one thing changed,
+# the pacing: `speed = 1.0` rather than 0.0.
 #
 # Those gates give the venue a `--duration` and then wait on a socket for the
-# `RunComplete` the venue writes at its deadline. On an UNPACED venue - which is
+# `RunComplete` the venue writes at its deadline. On an unpaced venue - which is
 # every `speed = 0.0` fixture beside this one - that announcement is queued
-# BEHIND the whole market backlog the run generated flat out, and the consumer has
-# to drain the backlog before it can see the frame. Measured on fast.toml: over
-# 1.4 MILLION frames on one socket in the 2 s of a declared run, against a
-# consumer draining about 111,000 a second, so clearing it takes essentially the
-# test's entire wall budget - and under load it does not clear at all. The test
-# then reports that the run never announced its completion, which is a WRONG
-# ANSWER about the venue produced by a fixture choice.
+# behind the whole market backlog the run generated flat out, and the consumer
+# has to drain the backlog before it can see the frame. Measured on fast.toml:
+# 1,475,111 frames on one socket in the 2 s of a declared run, against a consumer
+# draining about 111,000 a second, so clearing it takes essentially the test's
+# entire wall budget - and under load it does not clear at all. The test then
+# reports that the run never announced its completion, which is a wrong answer
+# about the venue produced by a fixture choice.
 #
 # It is not that the gates were waiting too little. It is that nothing about
 # `RunComplete` is a claim about unpaced delivery, so the firehose is pure cost
@@ -21,7 +21,12 @@
 # carrying 2 s of tape - about a hundred frames - and the announcement lands
 # immediately after them.
 #
-# `speed = 0.0` STAYS EVERYWHERE ELSE. The serving gates assert on WHAT arrives
+# The general shape, worth recognizing before it is diagnosed again: any test
+# waiting for something the venue writes at the tail of a span of unpaced tape
+# is on this same trap, whatever that something is. The frame is not late, it is
+# behind a backlog nobody needed generated.
+#
+# `speed = 0.0` stays everywhere else. The serving gates assert on what arrives
 # rather than on its cadence, and waiting out real inter-trade gaps would make
 # every one of them slower for nothing.
 
@@ -32,7 +37,7 @@ seed = 42
 # Five simulated minutes of history, materialized at boot, as fast.toml.
 warmup_ns = 300000000000
 
-# REAL TIME, which is the whole point of this file. Declared simulated durations
+# Real time, which is the whole point of this file. Declared simulated durations
 # are then wall durations too, so a `--duration 2s` gate costs 2 s.
 speed = 1.0
 
@@ -42,11 +47,11 @@ symbol = "BTCUSDT"
 USDT = "100000"
 USD = "100000"
 
-# A second river, so the gate that asserts each socket receives its OWN boat's
+# A second river, so the gate that asserts each socket receives its own boat's
 # instant has two boats to compare. A single-river config could not express that
 # property at all.
 #
-# WHAT SEPARATES THE TWO BOATS IS THEIR WALL ANCHOR, NOT THEIR SPEED. An earlier
+# What separates the two boats is their wall anchor, not their speed. An earlier
 # version of this comment claimed the second river is "placed at a different
 # speed by the test's own query string", and that was false on its face - this
 # file is `speed = 1.0` and the query asks for `speed=1`, the same number.
@@ -56,8 +61,8 @@ USD = "100000"
 # the difference the gate's `assert_ne!` is sensitive to, and it is what a
 # shared-clock regression would erase.
 #
-# THE PACING PUTS A LIVENESS REQUIREMENT ON BOTH SOCKETS, which unpaced delivery
-# used to hand over for free, so it was MEASURED rather than assumed - the
+# The pacing puts a liveness requirement on both sockets, which unpaced delivery
+# used to hand over for free, so it was measured rather than assumed - the
 # watcher discards a run where any socket saw no content frame, and a river too
 # quiet to print inside the declared window would discard every run and report
 # it as host load. Over six runs at seed 42, deterministic to the millisecond:

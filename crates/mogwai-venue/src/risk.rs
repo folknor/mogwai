@@ -274,6 +274,18 @@ pub(crate) fn equity_in(engine: &mogwai_engine::Engine, currency: &str) -> Optio
 /// The period is a whole day offset by the account's reset minute, so crossing
 /// the minute increments the index whatever the calendar underneath is doing.
 /// That is what lets the daily budget reset without a rule about loops.
+///
+/// A day here is defined by the account policy and not by the instrument, which
+/// is why the minute does not come from `[instrument.calendar]` even though that
+/// carries a settlement minute and real open windows. A prop firm's reset is its
+/// own instant, typically 17:00 or 18:00 in New York, and is a property of the
+/// account rather than of whatever it trades.
+///
+/// The policy names an instant on the tape's civil clock and the reset fires
+/// whenever sim time crosses it, so a one-session loop crosses it once per loop
+/// and a multi-day loop as often as it contains it. A footprint that never
+/// contains the instant never resets, which is a known open hazard rather than
+/// an accident of this function.
 fn day_index(now_ns: u64, reset_minute_utc: u32) -> u64 {
     let offset = u64::from(reset_minute_utc) * NANOS_PER_MINUTE;
     now_ns.saturating_sub(offset) / (24 * 60 * NANOS_PER_MINUTE)

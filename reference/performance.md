@@ -354,6 +354,21 @@ libraries at once. A compact binary encoding is the answer if that arrives, and
 nothing about the format's contract prevents one - the parallel arrays are
 already the storage shape.
 
+### Observed corpus density across session windows, 2026-08-18
+
+The same cut produced the per-window tick counts for MNQ 2026-04, and they are
+recorded here because they were free and a later question about the session
+profile would otherwise have to buy them again. Segments and ticks: asia 22 and
+2,976,377; london 22 and 2,492,576; ny-morning 21 and 8,396,328; ny-afternoon
+21 and 9,572,450.
+
+Per hour the spread is wide. NY afternoon carries 9,572,450 ticks in 5.5 hours
+against Asia's 2,976,377 in 9, roughly a 5x ratio per hour. The fitted
+generator makes no session-profile claim, so a uniform generated volume across
+sessions is the expected behaviour rather than a regression. Measuring the
+generator against this density was waived by the owner on 2026-08-18; nothing
+here is a gate.
+
 ## Per-boat ring sizing, 2026-08-15
 
 Piece 9 reduced the shipped per-boat `fanout_depth` to 1,048,576, the smallest

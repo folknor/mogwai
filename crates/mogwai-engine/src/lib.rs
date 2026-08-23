@@ -798,6 +798,22 @@ impl Engine {
     /// that silently omitted part of the account would look enforced while
     /// enforcing the wrong thing.
     ///
+    /// Why equity is not a sum of balances, which is what this replaced. A spot
+    /// fill credits the base asset as a currency balance and debits the quote
+    /// (see `apply_fill`), so buying 1 BTC at 60,000 leaves `BTC: 1` beside
+    /// `USDT: -60,000`. Adding those totals values one unit of any asset at one
+    /// unit of any other, so the purchase reads as a 59,999 loss and fires a
+    /// trailing drawdown on the account's first buy. That version shipped for
+    /// one commit. Futures never had the problem: a future moves only its
+    /// settlement currency and carries its own unrealized.
+    ///
+    /// Hence the three standing rules. A policy must name the currency it is
+    /// stated in. An order that would leave the account holding something
+    /// nothing prices is refused at entry. An account that reaches an
+    /// unvaluable state some other way is warned about and not enforced
+    /// against, because enforcing on a wrong number is worse than not
+    /// enforcing while looking enforced.
+    ///
     /// A last mark, not a live quote. The value is only as fresh as the last
     /// `mark` this engine saw, which the fill sweeper drives once per pass, so
     /// this inherits exactly the staleness the margin ledger already runs on.
@@ -1508,6 +1524,11 @@ impl Engine {
     /// asking whether any frontier is in the future needs no new identity, and
     /// closes the case whatever produced it.
     ///
+    /// A trailing frontier is left exactly where it is. That span is water the
+    /// account is owed a scan over, and moving it forward would be the
+    /// unconditional re-base wearing a different name - which is the whole
+    /// thing this method exists not to be.
+    ///
     /// Nothing is owed for the span skipped, on the same reasoning as
     /// `rebase_scans`: no pass watched that water on this account's behalf.
     pub fn rebase_future_scans(&mut self, now_ns: u64) -> usize {
@@ -1681,9 +1702,17 @@ impl Engine {
     /// what it says. The rule is about invertibility, not about zero being
     /// distasteful.
     ///
+    /// The same ruling closed the other two prices a non-positive value could
+    /// enter by. Order entry already refused a non-positive `price` and
+    /// `trigger_price` in `validate_submit_order`, so nothing was owed there.
+    /// Refusing at the fill was considered and rejected: by the time a fill is
+    /// booked the tape has already produced the print, and aborting the serving
+    /// path over a price the market printed is the one thing no venue does.
+    ///
     /// `Engine::position_unrealized_checked` still answers zero for an
-    /// unpriceable position. That stays a backstop under a case this guard
-    /// makes unreachable from here, rather than the policy it was before.
+    /// unpriceable position. That stays a backstop under the fill case, and
+    /// under a case this guard makes unreachable from here, rather than the
+    /// policy it was before.
     pub fn settle(&mut self, marks: &[(Symbol, Decimal)], ts: u64) -> MarkOutcome {
         let mut settled = false;
         for (symbol, settle_px) in marks {

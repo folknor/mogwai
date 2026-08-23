@@ -71,6 +71,12 @@ pub(crate) fn wire_side(side: OrderSide) -> anyhow::Result<Side> {
     }
 }
 
+/// Every nautilus order type, mapped to its wire form.
+///
+/// There is no refusal arm here, deliberately. The venue serves every order
+/// type that goes with the instruments it lists, so a variant nautilus adds
+/// later must land as a compile error on this match rather than as a runtime
+/// refusal a strategy meets mid-run.
 pub(crate) fn wire_order_type(order_type: OrderType) -> anyhow::Result<mogwai_protocol::OrderType> {
     match order_type {
         OrderType::Market => Ok(mogwai_protocol::OrderType::Market),
