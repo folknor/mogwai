@@ -56,7 +56,11 @@ const SWEEP_DRAIN_WARN_TICKS: usize = 2_500_000;
 /// `read_market_latency_stays_within_submit_budget`, which named exactly this
 /// ("caching one reading per symbol per sweep interval and serving submits from
 /// it, which is sound because the band is a coarse scale rather than a
-/// per-microsecond quantity"). Lever one, re-scoping the reading, is untaken.
+/// per-microsecond quantity"). Lever one, re-scoping the reading, was never
+/// taken and no longer needs to be: the miss itself is served from the boat's
+/// resident `crate::vol_window::VolWindow` wherever that window can prove
+/// coverage, and pays the tape walk only as the fallback (a cold boat's first
+/// `VOL_WINDOW_NS`, a bucket the pacing has not proven, `speed = 0.0`).
 ///
 /// What it costs, stated plainly because it is a behaviour change and not only
 /// an optimization: the reading a submit is decided against is the reading at
@@ -112,6 +116,12 @@ impl MarketReadingCache {
         }
     }
 
+    /// The reading for `ts`'s sweep-interval bucket, served in preference
+    /// order: the memo, then the boat's resident window when one is passed and
+    /// can prove coverage, then the tape walk. The window and the walk are one
+    /// estimator (`vol_window`'s module doc carries the identity argument), so
+    /// which of the two answered is invisible in the reading - only the cost
+    /// differs, and `walks()` counts the walks so a test can pin the split.
     pub(crate) fn read(
         &self,
         ts: u64,
@@ -119,6 +129,7 @@ impl MarketReadingCache {
         mult: f64,
         max_ticks: u32,
         interval_ms: u64,
+        vol: Option<&crate::vol_window::VolWindow>,
     ) -> Option<MarketReading> {
         let width_ns = interval_ms.saturating_mul(1_000_000).max(1);
         let bucket_ns = ts / width_ns * width_ns;
@@ -134,10 +145,24 @@ impl MarketReadingCache {
         {
             return cached.reading;
         }
-        #[cfg(test)]
-        self.walks
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let reading = read_market(&self.river, bucket_ns, rivers, mult, max_ticks);
+        let resident = vol.and_then(|window| {
+            window.read(
+                bucket_ns.saturating_sub(VOL_WINDOW_NS),
+                bucket_ns,
+                SWEEP_DRAIN_BUDGET,
+            )
+        });
+        let reading = match resident {
+            Some(answer) => {
+                answer.and_then(|vol| band_reading(&self.river, rivers, &vol, mult, max_ticks))
+            }
+            None => {
+                #[cfg(test)]
+                self.walks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                read_market(&self.river, bucket_ns, rivers, mult, max_ticks)
+            }
+        };
         *entry = Some(CachedMarketReading {
             bucket_ns,
             mult_bits,
@@ -308,6 +333,20 @@ pub(crate) fn read_market(
         "market reading could not read its river",
     )?;
     let reading = mogwai_data::vol_reading(source.as_mut(), from_ns, ts, SWEEP_DRAIN_BUDGET)?;
+    band_reading(river, rivers, &reading, mult, max_ticks)
+}
+
+/// One volatility reading converted into the band the engine consumes. The one
+/// implementation of that conversion, whether the reading came from the tape
+/// walk above or from a boat's resident window - splitting it out is what keeps
+/// the two sources indistinguishable past this point.
+fn band_reading(
+    river: &source::RiverKey,
+    rivers: &source::Rivers,
+    reading: &mogwai_data::VolReading,
+    mult: f64,
+    max_ticks: u32,
+) -> Option<MarketReading> {
     // Resolved, not configured-only: this reading is taken for whatever symbol
     // a boat is serving, and after piece 13 that need not be one an operator
     // named. A configured-only lookup would silently drop the reading.
@@ -660,6 +699,50 @@ mod tests {
         assert!(source::build_history_source("NOT-A-SYMBOL", Some(TEST_ORIGIN), &rivers).is_none());
     }
 
+    /// The resident window serves a cache miss with no walk and with the
+    /// identical reading the walk produces - the cross-implementation pin on
+    /// real river water, beside `vol_window`'s unit pin on a hand-built
+    /// stream. The window is fed from a history source positioned exactly the
+    /// way `read_market` positions its own, so the two paths read one tape.
+    #[test]
+    fn a_resident_window_serves_a_miss_walk_free_and_walk_identical() {
+        const INTERVAL_MS: u64 = 100;
+        const BUCKET_NS: u64 = INTERVAL_MS * 1_000_000;
+        let rivers = profiles();
+        let bucket = (TEST_ORIGIN + 3_600_000_000_000) / BUCKET_NS * BUCKET_NS;
+        let from = bucket - VOL_WINDOW_NS;
+        let window = crate::vol_window::VolWindow::starting_at(from);
+        let mut source = tape(from + 1);
+        loop {
+            let tick = source.next_tick().expect("infinite generated tape");
+            let (ts, px) = match tick {
+                TickEvent::Trade(trade) => (trade.ts_event, Some(trade.price)),
+                TickEvent::Quote(quote) => (quote.ts_event, None),
+            };
+            window.fold(ts, px);
+            if ts > bucket {
+                break;
+            }
+        }
+        let resident = MarketReadingCache::for_symbol("BTCUSDT", &rivers);
+        let walked = MarketReadingCache::for_symbol("BTCUSDT", &rivers);
+        let a = resident
+            .read(bucket, &rivers, 0.005, 200, INTERVAL_MS, Some(&window))
+            .expect("the window covers a full bucket window");
+        let b = walked
+            .read(bucket, &rivers, 0.005, 200, INTERVAL_MS, None)
+            .expect("the walk reads the same window");
+        assert_eq!(
+            resident.walks(),
+            0,
+            "the resident window must serve the miss"
+        );
+        assert_eq!(walked.walks(), 1);
+        assert_eq!(a.last_px, b.last_px);
+        assert_eq!(a.ts_ns, b.ts_ns);
+        assert_eq!(a.band_ticks, b.band_ticks);
+    }
+
     #[test]
     fn market_reading_cache_recovers_after_a_poisoned_lock() {
         let rivers = profiles();
@@ -669,7 +752,7 @@ mod tests {
             panic!("poison cache for test");
         });
         assert!(poisoned.is_err());
-        let _ = cache.read(TEST_ORIGIN, &profiles(), 0.005, 200, 100);
+        let _ = cache.read(TEST_ORIGIN, &profiles(), 0.005, 200, 100, None);
     }
 
     #[test]
@@ -888,16 +971,19 @@ mod tests {
         }
     }
 
-    /// The submit path's cost gate. Every limit submit and every price amend now
-    /// pays a checkpoint restore plus up to `SWEEP_DRAIN_BUDGET` ticks, which
-    /// the engine-side fill bench is structurally blind to because it takes a
-    /// `MarketReading` as an argument.
+    /// The submit path's cost gate, over its three tiers: the memo hit, a miss
+    /// served by the boat's resident window (the ordinary production miss),
+    /// and a miss that falls back to the tape walk (a cold boat's first 300
+    /// simulated seconds, a bucket the pacing has not proven, `speed = 0.0`).
+    /// The engine-side fill bench is structurally blind to all of them because
+    /// it takes a `MarketReading` as an argument.
     ///
-    /// Keep/revert: median at or below 5 ms, p99 at or below 25 ms. Above that
-    /// the reading is re-scoped before the model ships - first lever a shorter
-    /// `VOL_WINDOW_NS`, second caching one reading per symbol per sweep interval
-    /// and serving submits from it, which is sound because the band is a coarse
-    /// scale rather than a per-microsecond quantity.
+    /// The hit and the resident miss are gated against the original 5 ms
+    /// submit budget, which the resident window is what finally satisfied. The
+    /// walk keeps the regression ceilings pinned from the 2026-08-14
+    /// measurement (median 25 ms, p99 50 ms): it is no longer what a warm
+    /// submit pays, but it is still what a cold one pays, and a fallback whose
+    /// cost quietly grows is a boot path quietly getting worse.
     // Measurement instrument. Its name is in the gate profile's `skip` list in
     // the workspace runner config, and has to be: the gate sets
     // `include_ignored` deliberately - that is how the socket-backed suites get
@@ -927,37 +1013,75 @@ mod tests {
         for k in 0..100_u64 {
             let ts = base_ts + k * INTERVAL_MS * 1_000_000;
             let started = std::time::Instant::now();
-            let _ = cache.read(ts, &profiles, 0.005, 200, INTERVAL_MS);
+            let _ = cache.read(ts, &profiles, 0.005, 200, INTERVAL_MS, None);
             samples.push(started.elapsed());
         }
         // The hit path, reported next to it so the memo's value is visible
         // rather than assumed. Not gated - it cannot regress past the miss.
         let warm_started = std::time::Instant::now();
         for _ in 0..100 {
-            let _ = cache.read(base_ts, &profiles, 0.005, 200, INTERVAL_MS);
+            let _ = cache.read(base_ts, &profiles, 0.005, 200, INTERVAL_MS, None);
         }
         let warm = warm_started.elapsed() / 100;
         samples.sort_unstable();
         let median = samples[49];
         let p99 = samples[98];
-        println!("read_market median={median:?} p99={p99:?} cached={warm:?}");
+        // The resident tier: the same hundred one-per-bucket misses, on a
+        // fresh cache, served from a window fed the identical water the walks
+        // above regenerated. Fed here the way the boat's tape thread feeds it,
+        // from a source positioned the way `read_market` positions its own.
+        let window_from = base_ts.saturating_sub(VOL_WINDOW_NS);
+        let window = crate::vol_window::VolWindow::starting_at(window_from);
+        let mut feed = tape(window_from + 1);
+        let horizon = base_ts + 100 * INTERVAL_MS * 1_000_000;
+        loop {
+            let (ts, px) = match feed.next_tick().expect("infinite generated tape") {
+                TickEvent::Trade(trade) => (trade.ts_event, Some(trade.price)),
+                TickEvent::Quote(quote) => (quote.ts_event, None),
+            };
+            window.fold(ts, px);
+            if ts > horizon {
+                break;
+            }
+        }
+        let resident_cache = MarketReadingCache::for_symbol("BTCUSDT", &profiles);
+        let mut resident_samples = Vec::with_capacity(100);
+        for k in 0..100_u64 {
+            let ts = base_ts + k * INTERVAL_MS * 1_000_000;
+            let started = std::time::Instant::now();
+            let _ = resident_cache.read(ts, &profiles, 0.005, 200, INTERVAL_MS, Some(&window));
+            resident_samples.push(started.elapsed());
+        }
+        assert_eq!(
+            resident_cache.walks(),
+            0,
+            "a resident tier that walked measured the wrong path"
+        );
+        resident_samples.sort_unstable();
+        let resident_median = resident_samples[49];
+        let resident_p99 = resident_samples[98];
+        println!(
+            "read_market walk_median={median:?} walk_p99={p99:?} resident_median={resident_median:?} resident_p99={resident_p99:?} cached={warm:?}"
+        );
         // Measured state, stated rather than assumed: at the raw-fill cadence a
         // 300 s window carries ~15,000 prints and a positioning restore replays
-        // up to `CHECKPOINT_K` ticks. The stride is deliberately small enough
-        // that this residual, rather than an old density-sized checkpoint
-        // interval, can satisfy the miss-path budget. The memo remains useful
-        // for command bursts and gives the hit path its own stricter gate.
-        // Measured 2026-08-14 on host `bygg`: miss median 9.78 ms, p99 9.99 ms,
-        // hit 0.096 ms. The window walk, not the restore, is what remains.
-        //
-        // So the two paths are gated separately and honestly: the hit path
-        // against the original 5 ms budget, the miss path against a regression
-        // ceiling set from the measurement. The miss ceiling is not the budget
-        // being relaxed - it is the cost the venue currently pays, pinned so it
-        // cannot grow further unnoticed while the re-scoping is owed.
+        // up to `CHECKPOINT_K` ticks. Measured 2026-08-14 on host `bygg`: walk
+        // miss median 9.78 ms, p99 9.99 ms, hit 0.096 ms - the window walk, not
+        // the restore, is what that cost was. The resident window removed the
+        // walk from the ordinary miss, so the 5 ms budget is gated where
+        // production pays, and the walk's ceilings pin the fallback at the cost
+        // it measured rather than the budget it missed.
         assert!(
             warm <= std::time::Duration::from_millis(5),
             "cached={warm:?}"
+        );
+        assert!(
+            resident_median <= std::time::Duration::from_millis(5),
+            "resident_median={resident_median:?}"
+        );
+        assert!(
+            resident_p99 <= std::time::Duration::from_millis(5),
+            "resident_p99={resident_p99:?}"
         );
         assert!(
             median <= std::time::Duration::from_millis(25),

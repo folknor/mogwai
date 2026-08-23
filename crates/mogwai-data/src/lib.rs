@@ -62,7 +62,7 @@ pub use generated::{
 pub use mogwai_protocol::MarketRegime;
 pub use trigger::{
     FILL_HORIZON_NS, MIN_VOL_SAMPLES, TriggerScan, VOL_WINDOW_NS, VolReading, Walk, scan_triggers,
-    vol_reading,
+    vol_reading, vol_reading_from_trades,
 };
 
 /// Identity of the tape generation process, not of any one path. Two runs are

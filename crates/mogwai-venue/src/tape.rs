@@ -38,6 +38,11 @@ pub(crate) struct TapeSpawn {
     /// last looked. See `crate::extremes`: it is what gives peak equity and a
     /// trailing stop tick resolution without evaluating either here.
     pub(crate) extremes: Arc<crate::extremes::PriceExtremes>,
+    /// The resident trailing window the submit path's market reading is served
+    /// from. Folded at pull time, before the pacing sleep, because the pull is
+    /// what proves every earlier instant complete; see `crate::vol_window` for
+    /// why that leaks no lookahead.
+    pub(crate) vol_window: Arc<crate::vol_window::VolWindow>,
 }
 impl Tape {
     pub(crate) fn start(
@@ -74,8 +79,17 @@ impl Tape {
                         tracing::error!(?fault, "tape source faulted");
                         let _fault_receiver_gone = spawn.fault_tx.send(fault);
                     }
+                    spawn.vol_window.close();
                     break;
                 };
+                match &tick {
+                    mogwai_data::TickEvent::Trade(trade) => {
+                        spawn.vol_window.fold(trade.ts_event, Some(trade.price));
+                    }
+                    mogwai_data::TickEvent::Quote(quote) => {
+                        spawn.vol_window.fold(quote.ts_event, None);
+                    }
+                }
                 pace(
                     &worker,
                     &spawn,

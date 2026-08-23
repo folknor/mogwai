@@ -1658,9 +1658,14 @@ async fn market_reading(
         let interval_ms = state.cfg.fill_sweep_interval_ms;
         let boat = Arc::clone(boat);
         let (reading, last_px) = tokio::task::spawn_blocking(move || {
-            let reading = boat
-                .market_readings
-                .read(ts, &rivers, mult, max_ticks, interval_ms);
+            let reading = boat.market_readings.read(
+                ts,
+                &rivers,
+                mult,
+                max_ticks,
+                interval_ms,
+                Some(&boat.vol_window),
+            );
             let last_px = reading
                 .map(|value| value.last_px)
                 .or_else(|| crate::fills::read_last(boat.key().river(), ts, &rivers));

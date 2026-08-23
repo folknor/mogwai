@@ -92,6 +92,10 @@ pub(crate) struct Boat {
     /// written by the tape thread. What gives peak equity and a trailing stop
     /// tick resolution without a per-tick evaluation; see `crate::extremes`.
     pub(crate) extremes: Arc<crate::extremes::PriceExtremes>,
+    /// The resident trailing print window the same thread keeps, so a market
+    /// reading miss folds resident prints instead of regenerating the tape;
+    /// see `crate::vol_window` for the coverage and fallback rules.
+    pub(crate) vol_window: Arc<crate::vol_window::VolWindow>,
     worker: Mutex<Option<JoinHandle<()>>>,
     cancel: Arc<AtomicBool>,
 }
@@ -191,6 +195,7 @@ impl Boatyard {
                 speed: if speed == 0.0 { 1.0 } else { speed },
             };
             let extremes = Arc::new(crate::extremes::PriceExtremes::default());
+            let vol_window = Arc::new(crate::vol_window::VolWindow::starting_at(self.origin_ns));
             let (tape, worker) = Tape::start(
                 cursor,
                 TapeSpawn {
@@ -199,6 +204,7 @@ impl Boatyard {
                     fanout_depth: self.fanout_depth,
                     fault_tx: self.fault_tx.clone(),
                     extremes: Arc::clone(&extremes),
+                    vol_window: Arc::clone(&vol_window),
                 },
             );
             let cancel = tape.cancel_flag();
@@ -209,6 +215,7 @@ impl Boatyard {
                 last_swept_ns: AtomicU64::new(self.origin_ns),
                 market_readings: crate::fills::MarketReadingCache::for_river(req.river.clone()),
                 extremes,
+                vol_window,
                 worker: Mutex::new(Some(worker)),
                 cancel,
             })
@@ -432,10 +439,14 @@ mod tests {
         // refusal and the counters would pass while proving nothing about the
         // walk they saved. Hence the `is_some` assertion too.
         let ts = crate::source::TAPE_ORIGIN_NS + 86_400_000_000_000;
+        // `None` for the resident window on every read in these memo tests:
+        // their subject is the memo's hit/miss split measured through the walk
+        // counter, and the boat's own window would serve a miss walk-free or
+        // not depending on how far its tape thread happens to have pulled.
         for boat in [first.boat(), second.boat(), first.boat(), second.boat()] {
             assert!(
                 boat.market_readings
-                    .read(ts, &yard.rivers, 0.005, 200, 100)
+                    .read(ts, &yard.rivers, 0.005, 200, 100, None)
                     .is_some()
             );
         }
@@ -462,14 +473,14 @@ mod tests {
             ticket
                 .boat()
                 .market_readings
-                .read(base, &yard.rivers, 0.005, 200, INTERVAL_MS)
+                .read(base, &yard.rivers, 0.005, 200, INTERVAL_MS, None)
                 .is_some()
         );
         assert!(
             ticket
                 .boat()
                 .market_readings
-                .read(base + 1, &yard.rivers, 0.005, 200, INTERVAL_MS)
+                .read(base + 1, &yard.rivers, 0.005, 200, INTERVAL_MS, None)
                 .is_some()
         );
         assert_eq!(ticket.boat().market_readings.walks(), 1);
@@ -477,7 +488,14 @@ mod tests {
             ticket
                 .boat()
                 .market_readings
-                .read(base + BUCKET_NS, &yard.rivers, 0.005, 200, INTERVAL_MS,)
+                .read(
+                    base + BUCKET_NS,
+                    &yard.rivers,
+                    0.005,
+                    200,
+                    INTERVAL_MS,
+                    None
+                )
                 .is_some()
         );
         assert_eq!(ticket.boat().market_readings.walks(), 2);

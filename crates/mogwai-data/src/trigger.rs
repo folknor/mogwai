@@ -251,10 +251,7 @@ pub fn vol_reading(
     to_ns: u64,
     budget: usize,
 ) -> Option<VolReading> {
-    let mut prices = Vec::new();
-    let mut first_ts = None;
-    let mut last_ts = None;
-    let mut last_px = None;
+    let mut trades: Vec<(u64, Decimal)> = Vec::new();
     // Same frontier rule as `scan_triggers`, and the stake here is `last_px`.
     // That field is contractually the last print at or before the reading
     // instant, and the submit path decides marketability against exactly it, so
@@ -291,14 +288,7 @@ pub fn vol_reading(
         if let TickEvent::Trade(trade) = event
             && trade.ts_event > from_ns
         {
-            let price = trade.price.to_f64()?;
-            if !price.is_finite() {
-                return None;
-            }
-            first_ts.get_or_insert(trade.ts_event);
-            last_ts = Some(trade.ts_event);
-            last_px = Some(trade.price);
-            prices.push(price);
+            trades.push((trade.ts_event, trade.price));
         }
     }
     if !proved_past && let Some(last) = last_event_ts {
@@ -312,11 +302,42 @@ pub fn vol_reading(
         debug_assert!(drained <= budget);
         return None;
     }
-    let samples = prices.len().saturating_sub(1);
+    vol_reading_from_trades(&trades)
+}
+
+/// The estimator's arithmetic over a window's trades, already collected in tape
+/// order: `(ts_event, price)` for every print in `(from_ns, to_ns]`.
+///
+/// This is the one implementation of the reading's math, shared by the walk
+/// above and by any holder of a resident window (the venue's per-boat rolling
+/// window). Both paths must produce bit-identical readings from the same
+/// trades, which is why the caller hands over `Decimal` prices and the `f64`
+/// conversion happens here, once, the same way for everyone. The refusals
+/// (sample floor, zero span, a price that fails to convert) are part of the
+/// estimator's identity and live here with it.
+///
+/// What this function cannot check, and the caller owes: that the list really
+/// is every print of the window and that the window's upper bound was proved
+/// reached. A caller that hands over a partial list gets a confidently wrong
+/// reading, which is exactly the staleness the walk's `reached_ns` check
+/// refuses.
+#[must_use]
+pub fn vol_reading_from_trades(trades: &[(u64, Decimal)]) -> Option<VolReading> {
+    let samples = trades.len().saturating_sub(1);
     if samples < MIN_VOL_SAMPLES {
         return None;
     }
-    let span_ns = last_ts?.saturating_sub(first_ts?);
+    let mut prices = Vec::with_capacity(trades.len());
+    for (_, px) in trades {
+        let price = px.to_f64()?;
+        if !price.is_finite() {
+            return None;
+        }
+        prices.push(price);
+    }
+    let (first_ts, _) = *trades.first()?;
+    let (last_ts, last_px) = *trades.last()?;
+    let span_ns = last_ts.saturating_sub(first_ts);
     if span_ns == 0 {
         return None;
     }
@@ -334,8 +355,8 @@ pub fn vol_reading(
         return None;
     }
     Some(VolReading {
-        last_px: last_px?,
-        last_ts_ns: last_ts?,
+        last_px,
+        last_ts_ns: last_ts,
         rms_return,
         horizon_return,
         samples,

@@ -24,6 +24,7 @@ mod serve;
 pub mod source;
 mod sweeper;
 mod tape;
+mod vol_window;
 mod ws;
 
 /// The fill-timing distribution certification. Test-only, and here rather than

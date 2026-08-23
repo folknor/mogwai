@@ -1156,22 +1156,27 @@ roughly 1.3x in RMS, the selection is unchanged: `0.001` reads median 0 and p90
 p90 16. `0.005` is still the smallest multiplier satisfying the median rule, so
 neither the band nor the fill golden's banded half needed to move.
 
-Reading the market at a submit is correspondingly more expensive: the walk costs
-about 9.8 ms as of 2026-08-14 (median over 100 distinct buckets, release, host
-`bygg`, measured by the ignored `read_market_latency_stays_within_submit_budget`
-instrument, versus the 12.6 ms recorded before the checkpoint stride was
-repaired). The residual replay is now a small part of that: the 300 s
-volatility window is the walk, which is why cutting checkpoint positioning by
-53x moved this number by only a few milliseconds. So acceptance-time readings
-are memoized on the boat - one memo per boat, bucketed by fill-sweep interval
-on that boat's own clock - and a submit sees a reading that may be up to one
-interval stale. A market order therefore fills at or beyond the market as of
-that reading, not as of the fill instant. The memo lives on the boat rather
-than on the run because the bucket is a function of the boat's clock and the
-walk it saves is a walk of one river: a run-level memo held a single entry, so
-two symbols evicted each other into a guaranteed miss and then serialized on
-the walk behind one mutex. The lock is held across the walk deliberately, so
-two passengers landing in the same bucket pay for one walk rather than two.
+Reading the market at a submit pays one of three tiers. Acceptance-time
+readings are memoized on the boat - one memo per boat, bucketed by fill-sweep
+interval on that boat's own clock - and a submit sees a reading that may be up
+to one interval stale. A market order therefore fills at or beyond the market
+as of that reading, not as of the fill instant. The memo lives on the boat
+rather than on the run because the bucket is a function of the boat's clock
+and the reading it saves is a reading of one river: a run-level memo held a
+single entry, so two symbols evicted each other into a guaranteed miss and
+then serialized behind one mutex. A memo miss is served from the boat's
+resident vol window (`mogwai-venue`'s `vol_window`): the tape thread keeps the
+trailing `VOL_WINDOW_NS` of prints it was already producing, and the miss
+folds them through the same shared arithmetic the tape walk uses
+(`mogwai_data::vol_reading_from_trades`), about 0.2 ms in release. Only where
+the window cannot prove it would match the walk - a cold boat's first 300
+simulated seconds, a bucket the pacing has not proven, `speed = 0.0` - does
+the miss fall back to the full tape walk, about 8 to 10 ms as of 2026-08-23
+(the 300 s volatility window is that walk's cost; the checkpoint stride repair
+had already cut the positioning residual). The two paths are one estimator by
+construction and are pinned bit-identical; `reference/performance.md` carries
+the measurements. The miss lock is held across whichever path serves it, so
+two passengers landing in the same bucket pay for one reading rather than two.
 
 The exact-instant mark and settlement reads that never come from this memo fail
 differently from each other on purpose:
