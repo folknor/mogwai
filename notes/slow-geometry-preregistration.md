@@ -1,9 +1,9 @@
 # The slow-geometry measurement: a preregistration
 
-FROZEN 2026-08-11, signed by codex session
+Frozen 2026-08-11, signed by codex session
 019fefe4-b680-7e70-8a8e-9df36e0beecf after five rounds. The largest
 change those rounds forced is recorded in the opening: this document set
-out to SELECT a slow-component architecture and cannot, because the
+out to select a slow-component architecture and cannot, because the
 permutation it proposed as a null for the boundary contrast was not one
 - mechanically, since it moves scores while the contrast is computed
 from `R_sh`, and inferentially, since destroying session ordering is no
@@ -17,25 +17,25 @@ rewritten to do the smaller thing it can.
 The within-session target geometry is known well enough to build
 against: the incumbent's clustering sits sub-second where the observed
 covariance lives in the minutes-to-hour range, and the successor's
-within-session job is to REDISTRIBUTE it.
+within-session job is to redistribute it.
 
-THE SLOW COMPONENT'S ARCHITECTURE IS NOT KNOWN, and three classes
+The slow component's architecture is not known, and three classes
 remain compatible with everything measured:
 
 ```text
-A-only     a CONTINUOUS SLOW STATE persisting through session
+A-only     a continuous slow state persisting through session
            boundaries
-B-only     a BOUNDARY-ASSOCIATED SESSION FACTOR, possibly
+B-only     a boundary-associated session factor, possibly
            autocorrelated across days
 A+B mixed  both
 ```
 
-THIS DOCUMENT DOES NOT CHOOSE BETWEEN THEM. Its first draft tried to,
+This document does not choose between them. Its first draft tried to,
 and the attempt failed on a defect worth recording: the permutation it
 proposed as a null for the boundary contrast was not a null for it at
 all, and no valid substitute could be frozen from what is known. All
 three classes therefore advance, and what this measurement supplies is
-their PARAMETER GEOMETRY.
+their parameter geometry.
 
 Choosing between architectures on taste would repeat the central mistake
 of protocol 12b - freezing a search space before the target geometry was
@@ -54,7 +54,7 @@ sequence   analysis/out/ordered-counts.jsonl
 output     analysis/out/slow-geometry.json
 ```
 
-THE RESIDUAL MATRIX IS CONSTRUCTED HERE FROM THE SEQUENCE, not consumed
+The residual matrix is constructed here from the sequence, not consumed
 from another note, so no implementation-specific matrix can be silently
 inherited:
 
@@ -69,37 +69,37 @@ R_sh         L_sh - (1 / S_h) * sum over s of L_sh
 ```
 
 A session-hour with `parents_sh = 0`, `exposure_sh = 0` or a missing
-cell is EXCLUDED with its reason recorded, and every statistic reports
+cell is excluded with its reason recorded, and every statistic reports
 the cells it used. Sessions are ordered by calendar date ascending; the
 actual dates are retained because elapsed separation depends on them.
 
-## Statistic 1: does the COMMON MODE itself persist?
+## Statistic 1: does the common mode itself persist?
 
 Established already: a stable common mode exists, and the residual field
-has one-day dependence. NOT established: that the common mode's own
+has one-day dependence. Not established: that the common mode's own
 score is what persists. That needs a lag statistic on the scores.
 
-CROSS-FITTED, so no session contributes to the direction it is scored
+**Cross-fitted**, so no session contributes to the direction it is scored
 on. For each held-out session `s`:
 
 ```text
-1  over the OTHER 21 sessions, per hour h, compute the training mean
-   mu_h^(-s) and standard deviation sigma_h^(-s) of R, POPULATION
+1  over the other 21 sessions, per hour h, compute the training mean
+   mu_h^(-s) and standard deviation sigma_h^(-s) of R, population
    denominator, matching 12a
 2  z_sh = ( R_sh - mu_h^(-s) ) / sigma_h^(-s)
 3  V^(-s) = leading eigenvector of the Pearson correlation matrix of R
-   over those 21 sessions, normalized to UNIT EUCLIDEAN LENGTH
+   over those 21 sessions, normalized to unit euclidean length
 4  sign-align V^(-s) so the sum of its loadings is positive; on an
-   exact tie, align so the loading of the LOWEST-NUMBERED hour is
+   exact tie, align so the loading of the lowest-numbered hour is
    positive
 5  f_s = dot( z_s , V^(-s) )
 ```
 
-REFUSALS: a training hour with zero variance, a failed eigensolve, or a
-session with any excluded cell refuses THAT SESSION's score, recorded
+**Refusals**: a training hour with zero variance, a failed eigensolve, or a
+session with any excluded cell refuses that session's score, recorded
 with the reason; the statistic continues over the sessions that scored.
 
-SCORES ARE CENTERED before any autocovariance - `f_s * f_s'` is not an
+Scores are centered before any autocovariance - `f_s * f_s'` is not an
 autocovariance otherwise:
 
 ```text
@@ -109,83 +109,83 @@ S(g)   = ( 1 / |G(g)| ) * sum over pairs at gap g of
 ```
 
 Gap bins `{1, 2, 3, 4 or more}` calendar days, `|G(g)|` reported beside
-every value, MINIMUM SUPPORT 8 pairs, below which the bin is null with
+every value, minimum support 8 pairs, below which the bin is null with
 its count. With 22 sessions there are only 21 adjacent pairs, so
 refusals are expected and are a result.
 
-## Statistic 2: covariance by ELAPSED SEPARATION, boundaries marked
+## Statistic 2: covariance by elapsed separation, boundaries marked
 
 The discriminating geometry. A continuous slow state decays in elapsed
 time and does not care about a session boundary; a boundary-associated
-factor produces a within-session shift and a DISCONTINUITY at it.
+factor produces a within-session shift and a discontinuity at it.
 
 ```text
-cell timestamp  the SCHEDULED-EXPOSURE-WEIGHTED MIDPOINT of the
+cell timestamp  the scheduled-exposure-weighted midpoint of the
                 session-hour's windows - not the nominal hour start,
                 because hour 20 is partial and a nominal timestamp
                 would misplace it
-pairs           UNORDERED, each unordered pair counted once, endpoints
+pairs           unordered, each unordered pair counted once, endpoints
                 ordered by (session_date, hour) for reproducibility
 separation      absolute difference of the two timestamps, in hours
-class           WITHIN if both cells share a session, else CROSS
+class           within if both cells share a session, else cross
 statistic       C(bin, class) = mean over that bin and class of
                 R_sh * R_s'h'  (R is already per-hour centered)
 ```
 
-BIN EDGES, half-open and exhaustive, in hours:
+Bin edges, half-open and exhaustive, in hours:
 
 ```text
 [1,2) [2,3) [3,6) [6,12) [12,24) [24,48) [48,72) [72,96) [96,inf)
 ```
 
-MINIMUM SUPPORT 8 pairs per `(bin, class)`, else null with the count.
+Minimum support 8 pairs per `(bin, class)`, else null with the count.
 
-HOUR 20 PAIR STATISTICS ARE THEIR OWN STRATUM and never enter the
-ordinary pool. Every bin and class is reported twice: the ORDINARY
-stratum over pairs with NO hour-20 endpoint, and the hour-20 stratum
-over pairs with AT LEAST ONE hour-20 endpoint - which is stated that way
-because a cross-session pair can have BOTH endpoints at hour 20, and
+Hour 20 pair statistics are their own stratum and never enter the
+ordinary pool. Every bin and class is reported twice: the ordinary
+stratum over pairs with no hour-20 endpoint, and the hour-20 stratum
+over pairs with at least one hour-20 endpoint - which is stated that way
+because a cross-session pair can have both endpoints at hour 20, and
 "pairs involving one" would leave that case undefined.
 
-THE "NEVER POOLED" CLAIM IS NARROWED TO WHAT IS TRUE. Statistic 1
-NECESSARILY combines hour 20 with the other hour coordinates, because a
+The "never pooled" claim is narrowed to what is true. Statistic 1
+necessarily combines hour 20 with the other hour coordinates, because a
 factor projection is a dot product over all 23 of them. The accurate
-statement is that hour 20 remains an EXPLICIT FACTOR COORDINATE, whose
-loading is reported alongside the rest, and that its PAIR statistics are
+statement is that hour 20 remains an explicit factor coordinate, whose
+loading is reported alongside the rest, and that its pair statistics are
 never pooled with ordinary pairs. An earlier draft claimed the stronger
 thing and was wrong.
 
 ## Statistic 3: what survives removing the common mode?
 
-Subtraction happens in STANDARDIZED coordinates, because the loading
+Subtraction happens in standardized coordinates, because the loading
 lives there and `R_sh - f_s * V_h` would be dimensionally wrong:
 
 ```text
 z_star_sh = z_sh - f_s * V_h^(-s)
 ```
 
-ONLY THE ELAPSED-SEPARATION COVARIANCE IS RECOMPUTED:
+Only the elapsed-separation covariance is recomputed:
 
 ```text
 C_star(bin, class) = mean over that bin and class of
                      z_star_sh * z_star_s'h'
 ```
 
-STATISTIC 1 IS NOT REPEATED after residualization, and an earlier draft
-that said it was carried a type error: `S(g)` is defined on SCALAR
-session scores while `z_star` is an hour VECTOR, so "`S(g)` with
+Statistic 1 is not repeated after residualization, and an earlier draft
+that said it was carried a type error: `S(g)` is defined on scalar
+session scores while `z_star` is an hour vector, so "`S(g)` with
 `z_star` in place of the original inputs" is undefined. Producing a
 residualized scalar score would require fitting a second cross-fitted
 factor, which this document explicitly excludes.
 
-UNITS DIFFER AND ARE NOT COMPARABLE: `C` is in log-rate units,
+Units differ and are not comparable: `C` is in log-rate units,
 `C_star` in standardized units. They are never subtracted from or
 divided by one another, and the artifact labels each.
 
 ## Permutation and multiplicity
 
 ```text
-what moves      the cross-fitted SCORES are permuted among the FIXED
+what moves      the cross-fitted scores are permuted among the fixed
                 session dates; the calendar-gap and elapsed-separation
                 pair sets stay fixed
 replicates      2,000
@@ -196,13 +196,13 @@ shuffle         Fisher-Yates with the 12a 5.1 state advancement:
                       swap(values[i], values[j])
 seeding         tuple_mix(SLOW_GEOMETRY_PERM_SEED, [replicate_index])
                 SLOW_GEOMETRY_PERM_SEED = 5177340928461523719
-sharing         ONE permutation per replicate, SHARED across every bin,
+sharing         one permutation per replicate, shared across every bin,
                 so the bins remain jointly comparable
 ```
 
-WHAT THIS PERMUTATION IS A NULL FOR, and it is ONLY this: `S(g)`, the
-persistence of the cross-fitted common-mode SCORE across calendar gaps.
-Multiplicity across the gap bins is handled by a MAX STATISTIC - the
+What this permutation is a null for, and it is only this: `S(g)`, the
+persistence of the cross-fitted common-mode score across calendar gaps.
+Multiplicity across the gap bins is handled by a max statistic - the
 maximum absolute `S(g)` across supported bins against the distribution
 of that same maximum under the shared permutation:
 
@@ -211,16 +211,16 @@ p = (1 + count of null max >= observed max) / (1 + 2000)
 ```
 
 equality counting toward the null. Per-bin values are reported for
-description and carry NO independent inferential claim.
+description and carry no independent inferential claim.
 
-IT IS NOT A NULL FOR `C`, `C_star` OR `D`, and an earlier draft of this
+It is not a null for `C`, `C_star` or `D`, and an earlier draft of this
 document wrongly used it as one. Two reasons, either sufficient. First,
-mechanically: the permutation moves scalar SCORES among dates, while
+mechanically: the permutation moves scalar scores among dates, while
 `C` and `D` are computed from `R_sh` directly, so permuting scores
-leaves them UNCHANGED - it is not a weak null, it is not a null at all.
+leaves them unchanged - it is not a weak null, it is not a null at all.
 Second, and deeper: permuting session order tests temporal ordering or
-cross-session independence. It does NOT test equality of WITHIN and
-CROSS covariance CONDITIONAL ON ELAPSED SEPARATION, because a smooth
+cross-session independence. It does not test equality of within and
+cross covariance conditional on elapsed separation, because a smooth
 continuous process can carry nonzero covariance on both sides of a
 boundary and destroying its ordering is no null for "no boundary
 discontinuity."
@@ -232,12 +232,12 @@ that is a separate preregistration if it is ever wanted.
 
 ## The boundary contrast, and what it turned out it cannot do
 
-The boundary contrast, at every separation bin where BOTH classes have
-support, computed SEPARATELY for the two pair strata:
+The boundary contrast, at every separation bin where both classes have
+support, computed separately for the two pair strata:
 
 ```text
-D_ordinary(bin) = C_ordinary(bin, WITHIN) - C_ordinary(bin, CROSS)
-D_hour20(bin)   = C_hour20(bin, WITHIN)   - C_hour20(bin, CROSS)
+D_ordinary(bin) = C_ordinary(bin, within) - C_ordinary(bin, cross)
+D_hour20(bin)   = C_hour20(bin, within)   - C_hour20(bin, cross)
 ```
 
 They are never maximized jointly and never combined; each is reported on
@@ -245,21 +245,21 @@ its own, because hour 20's support geometry differs from every other
 hour's and a joint statistic would let one stratum's scarcity move the
 other's reading.
 
-THIS MEASUREMENT SELECTS NO ARCHITECTURE. `D` has no valid null - see
+This measurement selects no architecture. `D` has no valid null - see
 the permutation section - and none is improvised to preserve a selection
 this evidence cannot make. `C`, `C_star` and `D` are therefore
-DESCRIPTIVE, and the mechanical consequence is:
+descriptive, and the mechanical consequence is:
 
 ```text
-ALL THREE ADVANCE AS SEPARATE SUCCESSOR CLASSES:
+all three advance as separate successor classes:
   A-only      continuous slow state
   B-only      boundary-associated session factor
   A+B mixed   both
 ```
 
 Even a valid boundary test would not have selected `B-only`: a detected
-discontinuity supports the PRESENCE of a boundary-associated component
-and says nothing about the ABSENCE of a continuous one, so without an
+discontinuity supports the presence of a boundary-associated component
+and says nothing about the absence of a continuous one, so without an
 equivalence test it cannot separate `B-only` from `mixed`. The branches
 a valid test would have supported are recorded so a later reader sees
 what was and was not on offer:
@@ -269,15 +269,15 @@ discontinuity detected      reject A-only; advance B-only and mixed
 none detected               advance all three
 ```
 
-WHAT THIS MEASUREMENT IS FOR, restated to match what it can do: it sets
-the PARAMETER GEOMETRY of the three classes - the timescales, the
+What this measurement is for, restated to match what it can do: it sets
+the parameter geometry of the three classes - the timescales, the
 magnitudes, the hour-20 stratum's behavior - rather than eliminating any
 of them. That is a smaller claim than the document's first draft made
 and it is the one the evidence supports.
 
-THE REMAINING STATISTICS AND THEIR ROLE, stated so none of them
+The remaining statistics and their role, stated so none of them
 acquires one by implication: `S(g)` and its permutation p-value, and
-`C_star`, are PARAMETERIZATION EVIDENCE ONLY. Significant score
+`C_star`, are parameterization evidence only. Significant score
 persistence does not change which classes advance; it informs how the
 slow component of any of them is parameterized. Low support is likewise
 a result and changes no branch.
@@ -295,7 +295,7 @@ D_ordinary and D_hour20    descriptive point estimates plus pair counts
 f_s and V^(-s)             point estimates only
 ```
 
-NO BOOTSTRAP APPEARS IN THIS MEASUREMENT. Every statistic here is
+No bootstrap appears in this measurement. Every statistic here is
 defined by actual elapsed separation or by a permutable score set, and
 the 12a circular block resample manufactures adjacency the calendar does
 not contain - the reason already frozen in the ordered-count document.
@@ -304,9 +304,9 @@ not contain - the reason already frozen in the ordered-count document.
 
 All pair counts; the factor normalization and sign-alignment outcome per
 held-out session; every per-session score; every held-out loading; the
-residualized field's statistics; null counts and p-values SCOPED TO
+residualized field's statistics; null counts and p-values scoped to
 `S(g)`, which is the only statistic carrying inference; every refusal
-with its reason; THE CLASSES ADVANCED, which are fixed at `A-only`,
+with its reason; the classes advanced, which are fixed at `A-only`,
 `B-only` and `A+B mixed` and are not a result; the sequence content
 hash; this document's identity; the implementing commit; and the
 outcome.
@@ -320,15 +320,15 @@ insufficient_support  a frozen statistic could not be computed and no
                       refusal rule covers the case
 ```
 
-## What this does NOT do
+## What this does not do
 
 It does not choose a parameterization, fit anything, or rank a
-candidate - AND it does not choose an architecture class either. All
+candidate - and it does not choose an architecture class either. All
 three advance regardless of what it finds. What it produces is their
-PARAMETER GEOMETRY: the timescales, the magnitudes, and the hour-20
+parameter geometry: the timescales, the magnitudes, and the hour-20
 stratum's behavior, measured rather than assumed.
 
-## RESULT, 2026-08-11
+## Result, 2026-08-11
 
 Ran artifact-only at commit `69aa132`, outcome `completed`, sequence
 hash matched, 506 cells included and none excluded, 22 cross-fitted
@@ -352,17 +352,17 @@ Descriptive contrasts, carrying no inference by construction:
 bins; `D_hour20` is -0.0383, -0.0093, -0.0013, -0.0163 and +0.0050
 across five.
 
-THE CORRECT READING, which is narrower than the p-value invites and is
+The correct reading, which is narrower than the p-value invites and is
 stated here because the first attempt to describe it overreached:
 
 > Cross-fitted common-mode scores reject exchangeability over the fixed
 > July dates under the preregistered shared-max permutation,
 > `p = 0.0215`. The maximum is the negative two-day covariance estimate
-> from 12 pairs. The result establishes CALENDAR-ORGANIZED SCORE
-> STRUCTURE, but does not identify persistence, oscillation, mean
+> from 12 pairs. The result establishes calendar-organized score
+> structure, but does not identify persistence, oscillation, mean
 > reversion, or a weekday effect.
 
-The permutation is VALID; what was too broad was the label on it. It
+The permutation is valid; what was too broad was the label on it. It
 tests exactly one null - that the scores are exchangeable among the
 fixed July session dates - preserving the dates, the gap graph, the pair
 counts and the unequal bin sizes while destroying every association
@@ -372,41 +372,41 @@ regime pattern, oscillation, or another calendar-linked effect.
 
 Three candidate worries, resolved:
 
-- OSCILLATION IS NOT ESTABLISHED. The negative two-day estimate is
+- **Oscillation is not established.** The negative two-day estimate is
   descriptive evidence only; twelve pairs cannot license an oscillatory
   successor component, and that bin carried no independent inferential
   claim under the frozen max test.
-- LOW SUPPORT DOES NOT INVALIDATE THE P-VALUE. The permutation
+- **Low support does not invalidate the p-value.** The permutation
   reproduces the same pair counts in every replicate, so the two-day
   bin's greater sampling variability is represented in the null maximum
   distribution. Power concentrates in sparse bins and the effect
   estimate is unstable, but the exchangeability p-value is not
   anti-conservative for that reason.
-- CALENDAR CONFOUNDING IS THE REAL LIMIT, though not by the route first
+- **Calendar confounding is the real limit**, though not by the route first
   guessed: the retained dates are all weekdays and Friday-to-Monday
-  pairs fall mainly in the THREE-day bin, so the two-day result is not a
+  pairs fall mainly in the three-day bin, so the two-day result is not a
   weekend contrast. The gap bins nonetheless carry different weekday
   compositions, and the permutation shuffles scores away from the
   calendar positions a persistence test would want preserved.
 
-CONSEQUENCES FOR THE SUCCESSOR, binding: all three classes continue to
-advance; NO two-day oscillation is encoded and NO iid or session
+Consequences for the successor, binding: all three classes continue to
+advance; no two-day oscillation is encoded and no iid or session
 component is excluded on this result; the score-gap curve is reported as
-a DIAGNOSTIC for every class; and the final multi-horizon tape gates
+a diagnostic for every class; and the final multi-horizon tape gates
 judge the joint arm rather than this July lag pattern becoming a
 mechanism requirement.
 
 A calendar-adjusted persistence test - weekday-preserving randomization,
 or a frozen calendar-effect model followed by a residual dependence test
 - would need its own preregistration and more design data, and at 22
-sessions would be weak. IT MAY NOT BE PAID FOR WITH JUNE: June cannot
+sessions would be weak. It may not be paid for with June: June cannot
 both resolve this geometry and remain the untouched acceptance holdout.
 Resolving it would need separate design data or a separately authorized
 split.
 
 ## The June corpus, stated at its true weight
 
-The successor's final acceptance needs an OBSERVED holdout not used to
+The successor's final acceptance needs an observed holdout not used to
 choose its architecture, horizons, tolerances or parameter grid.
 Generated seed holdout is not a substitute: it re-draws from the same
 fitted model rather than supplying independent market evidence. July
@@ -414,7 +414,7 @@ fitted model rather than supplying independent market evidence. July
 protocol 11's session refit, 12a's measurement, 12b's screen, the count
 curve, the ordered counts and this measurement.
 
-THE ACCURATE STATEMENT, correcting an earlier draft of this document
+The accurate statement, correcting an earlier draft of this document
 that claimed the purchase report's named condition "has been reached":
 
 > The work has identified an untouched June corpus as a prospective
@@ -422,7 +422,7 @@ that claimed the purchase report's named condition "has been reached":
 > consider a purchase decision contract; it is not itself that contract
 > and does not satisfy or bypass the existing purchase prohibition.
 
-A purchase contract would still have to freeze, BEFORE acquisition, the
+A purchase contract would still have to freeze, before acquisition, the
 successor acceptance criteria, the allowed uses of June, the possible
 outcomes and what each outcome authorizes. July's result must not itself
 unlock the purchase - which is exactly what `DATA-PURCHASE-REPORT.md`

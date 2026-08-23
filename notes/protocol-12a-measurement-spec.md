@@ -1,6 +1,6 @@
 # Protocol 12a: the tail and aggregation measurement landing
 
-REVISION 12 - the revision-10 freeze (Brick F signed by the
+Revision 12 - the revision-10 freeze (Brick F signed by the
 reviewing codex session 019fd565-1f36-7ab2-83e1-77af1b32b326 on
 2026-08-06) plus the four narrow amendments A-D negotiated at the
 Brick O implementation review, plus the two narrow amendments E-F
@@ -17,7 +17,7 @@ residual violations on 2026-08-06. Brick G followed the same
 protocol on 2026-08-06: session 019fd792-89b8-7783-bac1-2f0beb778373
 signed the design with three rulings (complete sessions only; local
 ARCH/GARCH constants pinned by coefficient recovery over traces;
-Brick G owns cost12a, the cache runner and the eight FINAL walks)
+Brick G owns cost12a, the cache runner and the eight final walks)
 and eight corrections; session 019fd7b3-4da1-73a3-a026-6c6d84e04dd1
 found four residual violations in the implementation (cross-language
 log-mid arithmetic, trade-driven initiation closure, a stale
@@ -54,7 +54,7 @@ the body below):
   combined floor refuses).
 - B: `Block4Map` gains the literal `"all"` pooled-hours key;
   `diagnostics.warmup_exclusions` stays integer-hour keyed.
-- C: `boundary_localized` on a FIRED child-walk/reversion/garch rung
+- C: `boundary_localized` on a fired child-walk/reversion/garch rung
   is Boolean only when every localization input qualifies; otherwise
   null WITH a matching `RefusalRec` (never a fabricated false).
   Localization is metadata; its refusal does not revoke eligibility.
@@ -91,7 +91,7 @@ the body below):
   as such. A post-omission count falling below `MIN_RESIDUAL_CELL`
   produces a separate, ordinary family-metric refusal that owns that
   metric's null.
-- Q1 ruling: required family cells qualify only when EVERY usable
+- Q1 ruling: required family cells qualify only when every usable
   observed session (and, per seed, every complete generated session)
   meets the applicable floor - one failing session refuses the
   metric and makes its family inventory incomplete; unrelated
@@ -104,7 +104,7 @@ the body below):
 Written against `reference/technical-implementation-spec.md`. Spawned
 from the protocol-12 obligations recorded in
 `notes/protocol-11-session-repair-spec.md` (section 1 as amended at
-Brick V, and the RESULT records): the minute-range envelope failures
+Brick V, and the result records): the minute-range envelope failures
 and the hour-dependent 60 s / 300 s wall-time contour failures that
 protocol 11 inherited to its successor.
 
@@ -120,14 +120,14 @@ range grows roughly with sqrt(parent count), so range divided by count
 falls mechanically as counts rise, and the 256 top-minute records are
 censored maxima without an all-minute denominator. A single t-GARCH
 feedback process (one exceptional innovation raising sigma, persistence
-0.979 carrying the episode) can generate both strata. Mechanism COUNT
+0.979 carrying the episode) can generate both strata. Mechanism count
 is therefore an output of this measurement landing, not an input.
 
 ---
 
 ## 1. The goal
 
-Land the measurement instruments and evidence that SELECT the
+Land the measurement instruments and evidence that select the
 protocol-12 mechanism family (or prove no family eligible), without
 changing the tape generation path. Five evidence blocks, two
 permutation counterfactuals, one count-substitution counterfactual, a
@@ -135,7 +135,7 @@ preregistered Boolean eligibility ladder, and a committed verdict
 artifact. `TAPE_PROTOCOL_VERSION` stays 11: nothing in this landing
 may touch the generator state machine, and Brick G's gate pins that.
 
-Protocol 12b - the mechanism implementation - is EXCLUDED and may not
+Protocol 12b - the mechanism implementation - is excluded and may not
 be drafted until this landing's verdicts exist. That is not deferral:
 12b's content is unknowable before these measurements, which is the
 same argument that split protocol 11 from 12.
@@ -147,7 +147,7 @@ The landing closes with one of:
 - `family-eligible: <ordered list>` - at least one ladder rung fires.
   Every fired rung is recorded independently (families are NOT
   mutually exclusive; co-firing is interaction evidence). 12b is
-  drafted for the FIRST eligible family in ladder order; a
+  drafted for the first eligible family in ladder order; a
   two-mechanism 12b becomes drawable only if that family repairs its
   discriminating diagnostics in 12b and leaves a separately
   identified residual.
@@ -156,16 +156,16 @@ The landing closes with one of:
 
 ### 1.2 Inherited obligations restated (binding on 12b)
 
-- The hourly 60 s and 300 s wall-time bands `[0.8, 1.25]` are HARD
+- The hourly 60 s and 300 s wall-time bands `[0.8, 1.25]` are hard
   gates for the 12b landing (Brick V amendment), measured with the
   protocol-11 estimator: the one-maximum-trimmed mean absolute
   fixed-horizon return (`robust_scale` below). Replacing them
-  requires a defended preregistered estimator BEFORE 12b
+  requires a defended preregistered estimator before 12b
   implementation, never after a miss.
 - `vol_scalar` carries declared-best-candidate status; the envelope
   failure is 12b's primary target.
 - 12b adds a two-sided body gate: the p99 minute-range statistic gets
-  a LOWER acceptance bound from the lower tail of the same resampled
+  a lower acceptance bound from the lower tail of the same resampled
   envelope machinery, so an over-damped model cannot pass by making
   every minute too small.
 - The standing instrument-resolution decision (section 8) binds 12b.
@@ -175,7 +175,7 @@ The landing closes with one of:
 ### 2.1 The evidence this spec starts from
 
 From the landed protocol-11 artifact `analysis/mnq-fit.json`
-(harness commit ac6b016, corpus job GLBX-20260805-HAPEWPABKG,
+(harness commit ac6b016, corpus job `GLBX-20260805-HAPEWPABKG`,
 22 usable sessions, 8 generated seeds):
 
 - Minute-range envelope: generated p99.9 per seed 433-607 ticks vs
@@ -208,8 +208,8 @@ Frozen hour sets used by the ladder: `FAIL_HOURS_300 = {19, 20, 23}`,
   frozen `MNQ_DOW_WEIGHT`, splitmix64 seeding, nearest-rank
   quantiles, and the selftest harness.
 
-Everything Block 5 needs is DERIVABLE from these: pre-draw sigma is
-the PREVIOUS parent's realized sigma; latent-mid range from
+Everything Block 5 needs is derivable from these: pre-draw sigma is
+the previous parent's realized sigma; latent-mid range from
 `mid_before`/`mid_after`; trade range from ordinary printed prices;
 signed runs from realized-return signs; the ARCH contribution from
 `base_return` and the frozen ARCH coefficient; clamp counts from the
@@ -229,13 +229,13 @@ construction.
 
 ### 2.4 Walk-cache verdict
 
-The protocol-11 summary caches CANNOT feed any complete 12a block:
+The protocol-11 summary caches cannot feed any complete 12a block:
 Block 1 lacks the joint minute distribution, quote ranges and segment
 buckets; Block 2 lacks sub-hour counts; Block 3 lacks the 1/5/15 s
 horizons, component covariances and segment detail; Block 4 lacks
 ordered parent returns; even the cached 60 s / 300 s records lack the
 new segmentation. They are NOT reused. Brick G performs exactly one
-fresh full FINAL walk per seed 1-8 into a distinct `measure12a` cache
+fresh full final walk per seed 1-8 into a distinct `measure12a` cache
 keyed by the full command, harness commit and
 measurement-subcontract hash.
 
@@ -277,10 +277,10 @@ since_segment_open:   [0, 300) | [300, 1800) | [1800, inf)
 until_segment_close:  (1800, inf) | (300, 1800] | (0, 300]
 ```
 
-Attribution, frozen: minute labels are evaluated at MINUTE START -
+Attribution, frozen: minute labels are evaluated at minute start -
 `since_segment_open = minute_start - segment_origin` and
 `until_segment_close = segment_end - minute_start`. Fixed-horizon
-returns receive segment labels at their ENDPOINT boundary. Block 2
+returns receive segment labels at their endpoint boundary. Block 2
 count windows are half-open, segment-origin-aligned windows
 `[origin + jW, origin + (j+1)W)` strictly contained in the open
 segment, attributed by endpoint hour; windows crossing a UTC-hour
@@ -291,12 +291,12 @@ boundary; active runs reset at either boundary.
 
 The protocol-11 floors cover parent cells and the 60/300 s chains.
 The new populations get explicit floors; a cell below floor is a
-recorded refusal for REQUIRED statistics (the ladder inventories,
+recorded refusal for required statistics (the ladder inventories,
 section 6.4 - a refused required cell fails its rung closed) and an
 empty diagnostic bin (recorded, not failed) for descriptive ones.
 
 Q1 ruling (all-session qualification, frozen): a required family
-cell qualifies only when EVERY usable observed session meets its
+cell qualifies only when every usable observed session meets its
 floor, and, per generated seed, every complete generated session
 meets it. Block 1 pools histograms only after that check; Blocks 3
 and 4 therefore always carry all session votes. One failing session
@@ -361,13 +361,13 @@ top-32 minute, with trade range at or below that seed/segment-hour
 median. Select the candidate minimizing
 `abs(log1p(N_control) - log1p(N_extreme))`; break ties by rank
 `tuple_mix(CONTROL_TIE_BASE_SEED, [generated seed, extreme minute
-start ns, candidate minute start ns])` with the LOWER rank winning,
+start ns, candidate minute start ns])` with the lower rank winning,
 then by earlier minute. Refuse (recorded) if no candidate exists.
 
 ### 3.5 Cross-session and cross-seed aggregation (the contract every
 statistic obeys)
 
-Per-session records are SUFFICIENT records - nothing coarser than
+Per-session records are sufficient records - nothing coarser than
 what reconstructs every downstream statistic exactly:
 
 - Block 1: an exact sparse joint histogram keyed by
@@ -400,12 +400,12 @@ Aggregation:
   horizon floor, and derive ONE session-hour robust scale; monthly
   aggregation takes the median across qualifying sessions per
   replicate index, then the median across the 16 replicate indices.
-- Generated: EVERY scalar generated statistic is computed per seed
+- Generated: every scalar generated statistic is computed per seed
   (pooling that seed's month for Blocks 1-2, session-median for
-  Blocks 3-4) and centralized by MEDIAN ACROSS THE EIGHT SEEDS. A
+  Blocks 3-4) and centralized by the median across the eight seeds. A
   cross-seed pooled histogram may be committed as a diagnostic but is
   never a ladder input.
-- The bootstrap (6.1) resamples the observed PER-SESSION RECORDS and
+- The bootstrap (6.1) resamples the observed per-session records and
   reruns exactly these aggregation rules; shuffles are never rerun
   inside the bootstrap.
 - Empty/non-finite: refused cells carry `null` values plus a refusal
@@ -418,7 +418,7 @@ Blocks 1-4 are computed identically on the observed TBBO parent
 stream and each generated seed's parent stream, under the protocol-11
 segment-local as-of and endpoint-hour conventions. Nothing shuffles,
 standardizes or windows across a halt, reopen, session open or close.
-Block 5 is GENERATED-ONLY: the observed corpus has no latent
+Block 5 is generated-only: the observed corpus has no latent
 innovation or sigma state; its observed comparators are the Block 1,
 3 and 4 statistics.
 
@@ -444,7 +444,7 @@ Per hour and window length in `COUNT_WINDOWS_S = {1, 5, 60}`:
 zero-count fraction; mean; Fano factor (variance/mean); count
 p90/p99/p99.9; lag-1 count autocorrelation (from the sufficient
 moments); active-run-length p90. Zero-count fraction and lag-1 count
-autocorrelation are DIAGNOSTICS only (they are zero-capable and
+autocorrelation are diagnostics only (they are zero-capable and
 sign-capable; section 6.4 excludes them from the envelope inventory).
 
 ### Block 3: aggregation signature
@@ -509,11 +509,11 @@ streaming pass (Brick G):
   denominator = traced parents in the minute.
 - `initiation`: true iff the largest-innovation parent's timestamp is
   at or before the instant the minute's running quote-mid range first
-  strictly exceeds half its final value; FALSE (never a refusal) when
+  strictly exceeds half its final value; false (never a refusal) when
   the final quote-mid range is zero - a child-only extreme must stay
   visible.
 - `sigma_start = sqrt(previous_parent.sigma2_realized)` (the parent
-  BEFORE the minute's first parent, so an initiating first-parent
+  before the minute's first parent, so an initiating first-parent
   shock is not hidden; refused only when the minute's first parent is
   the first parent of the measured walk),
   `sigma_peak = max sqrt(sigma2_realized)` within the minute,
@@ -530,7 +530,7 @@ streaming pass (Brick G):
 - `clamp_hits`: count of any of the three clamp/cap flags.
 - `arch_share_next = GARCH_ARCH * base_return_i^2 /
   sigma2_candidate_{i+1}` for the largest-innovation parent, where
-  `i+1` is the next parent IN THE MEASURED WALK (it may lie in the
+  `i+1` is the next parent in the measured walk (it may lie in the
   following minute); null only when no successor parent exists in the
   walk; plus the minute maximum of that share over parents with
   successors.
@@ -616,19 +616,19 @@ cumulative weight is at least `q * total_weight`. Exceedance rate =
 `sum(weight where range > 968) / total_weight`.
 
 The rung-2 closure target `T_obs` is the observed pooled minute-range
-p99.9 POINT ESTIMATE (causal gap closure); closure to the 399-tick
+p99.9 point estimate (causal gap closure); closure to the 399-tick
 resampled acceptance bound is recorded separately as a delivery
 diagnostic, never a ladder input.
 
 Conditional adequacy guard (rung 2c), fully frozen: the implicated
 hours are exactly `FAIL_HOURS_300`; the statistic is
 `trade_range_ticks / sqrt(N)` p99; the zero bin is excluded (sqrt(N)
-undefined). Qualification, frozen without contradiction: a REQUIRED
-bin is one whose pooled OBSERVED count is at least
-`MIN_MINUTES_CELL`; required generated support means EVERY generated
+undefined). Qualification, frozen without contradiction: a required
+bin is one whose pooled observed count is at least
+`MIN_MINUTES_CELL`; required generated support means every generated
 seed's count in that bin is also at least `MIN_MINUTES_CELL`; a
 required observed bin lacking required generated support fails rung
-2c CLOSED (recorded - it is never silently nonqualifying). For every
+2c closed (recorded - it is never silently nonqualifying). For every
 implicated hour and required bin the generated/observed ratio must
 be `inside_with_envelope` of `[0.8, 1.25]`, and these conditional
 metrics JOIN the arrival family's envelope inventory (in addition to
@@ -653,7 +653,7 @@ Confidence rules, frozen:
 
 ```text
 single-target LCB:     nearest-rank p5 of the 10,000 bootstrap closures
-multi-target joint LCB: per bootstrap replicate take the MINIMUM
+multi-target joint LCB: per bootstrap replicate take the minimum
                         closure across the required cells, then
                         nearest-rank p5 across those 10,000 minima
 worsening_23 UCB:      nearest-rank p95 of the 10,000 bootstrap
@@ -682,7 +682,7 @@ worsening_23 UCB:      nearest-rank p95 of the 10,000 bootstrap
   start = splitmix64(x) mod 22
   ```
 
-  Centering: `theta_hat` is the ORIGINAL 22-session
+  Centering: `theta_hat` is the original 22-session
   estimate; `SE` is the sample standard deviation of the 10,000
   `theta_b` with `ddof = 1`; the studentized value is
   `(theta_b - theta_hat) / SE`.
@@ -709,7 +709,7 @@ worsening_23 UCB:      nearest-rank p95 of the 10,000 bootstrap
                          interval excludes the nearest band edge
                          (raw_diff: interval excludes zero in the
                          claimed direction)
-  inside_with_envelope:  point inside the band AND the ENTIRE
+  inside_with_envelope:  point inside the band AND the entire
                          simultaneous interval contained in the band
   ```
 
@@ -720,12 +720,12 @@ worsening_23 UCB:      nearest-rank p95 of the 10,000 bootstrap
   records per session and variant are precomputed once; each
   pseudo-month is evaluated under all 16 replicate indices and its
   counterfactual statistic is their median.
-- Seed rule, split by predicate kind: for an OUTSIDE metric, at
+- Seed rule, split by predicate kind: for an outside metric, at
   least 7 of 8 seeds lie on the same outside side of the band; for
-  an INSIDE metric, at least 7 of 8 seeds individually lie inside
-  the band with NO same-direction requirement (a clean metric's
-  seeds may straddle 1.0); for a RAW-DIRECTION metric, at least 7 of
-  8 seed point differences have the claimed STRICT sign - zero
+  an inside metric, at least 7 of 8 seeds individually lie inside
+  the band with no same-direction requirement (a clean metric's
+  seeds may straddle 1.0); for a raw-direction metric, at least 7 of
+  8 seed point differences have the claimed strict sign - zero
   supports neither sign - and `seed_same_side_count` records this
   same-sign count for both outside and raw-direction predicates.
 - Predicate/kind constraints: `outside` and `inside` require
@@ -743,8 +743,8 @@ worsening_23 UCB:      nearest-rank p95 of the 10,000 bootstrap
 ### 6.2 Ladder order and rungs
 
 Order = smallest causal and behavioral blast radius that can explain
-the failed outputs, NOT ease of implementation. Rungs are evaluated
-top to bottom; EVERY fired rung is recorded; 12b takes the first.
+the failed outputs, not ease of implementation. Rungs are evaluated
+top to bottom; every fired rung is recorded; 12b takes the first.
 Boundary is a localization dimension, not a standalone mechanism,
 except as rung 6's residual.
 
@@ -768,7 +768,7 @@ except as rung 6's residual.
    conjunction holds for at most 2 of 8 matched controls.
 4. **Signed reversion.** The family fires iff (a) the sign shuffle's
    closure of the `robust_scale` wall-time log-ratio gap is at least
-   0.50 at EVERY hour in `HOT_HOURS` at 300 s and at hour 20 at
+   0.50 at every hour in `HOT_HOURS` at 300 s and at hour 20 at
    60 s, with the multi-target joint LCB above 0.25, AND (b) the
    closure sign agrees across every qualifying leave-one-week fold,
    AND (c) covariance direction: at BOTH `HOT_HOURS`,
@@ -804,14 +804,14 @@ except as rung 6's residual.
    model), AND (b) `sigma_escalation >= 2.0` for the max-range
    extreme in at least 7 of 8 seeds while the matched controls'
    median `sigma_escalation < 1.25`. Subcheck keys:
-   `{a_closure, b_escalation}`. (Rev-2's rung 5c is DROPPED: an
+   `{a_closure, b_escalation}`. (Rev-2's rung 5c is dropped: an
    exceptional innovation causing sigma escalation is the ordinary
    t-GARCH composition; innovation and GARCH may both fire, and
    ladder order selects innovation first.)
 6. **Boundary-local state.** Fires iff no rung above fired, AND at
    least one of the four boundary metrics (6.4) is
    `outside_with_envelope` of `[0.8, 1.25]`, AND the same metric
-   over that boundary case's MATCHED comparator cell is
+   over that boundary case's matched comparator cell is
    `inside_with_envelope`:
 
    ```text
@@ -822,7 +822,7 @@ except as rung 6's residual.
    ```
 
 Localization flag: `boundary_localized` is `bool | null`. It is
-computed ONLY for a FIRED child-walk, reversion or GARCH rung (whose
+computed only for a fired child-walk, reversion or GARCH rung (whose
 Block 1/3 inputs exist label-resolved): true iff the rung's
 discrepancy magnitude in the boundary cells is at least twice its
 interior magnitude. The child-walk discrepancy is the label-filtered
@@ -848,7 +848,7 @@ falsifier - co-firing is recorded as interaction evidence.
 ### 6.4 Family metric inventories (the exact envelope sets)
 
 All `log_ratio` kind unless marked `raw_diff`. These inventories are
-the REQUIRED statistics of 3.3; a refused required cell fails its
+the required statistics of 3.3; a refused required cell fails its
 rung closed and is recorded.
 
 - Child-walk (9): the three print-excess ratios
@@ -866,8 +866,8 @@ rung closed and is recorded.
   fraction and lag-1 count autocorrelation are diagnostics only -
   zero-capable and sign-capable.)
 - Innovation tail (4): nonzero `abs(z)` p99.9/p99 per hour in
-  `FAIL_HOURS_300` plus pooled all-hours; rung 3a fires when AT
-  LEAST ONE of the four is `outside_with_envelope`.
+  `FAIL_HOURS_300` plus pooled all-hours; rung 3a fires when at
+  least one of the four is `outside_with_envelope`.
 - Reversion (5): `robust_scale_300` at `HOT_HOURS`,
   `robust_scale_60` at hour 20, `C_norm(60,300)` at `HOT_HOURS`
   (`raw_diff`).
@@ -938,7 +938,7 @@ INITIATION_INNOVATION_MIN = 8
 ```
 
 If implementation proves a frozen constant or statistic unmeasurable,
-that brick FAILS and stops. A reviewed amendment restarts Brick F
+that brick fails and stops. A reviewed amendment restarts Brick F
 before implementation resumes. No artifact may be produced under a
 partially amended contract.
 
@@ -954,12 +954,12 @@ Confirmed by both reviewers, standing:
 - A structural mechanism that cannot preserve the legacy branch
   exactly is ineligible absent separately scoped crypto evidence.
 - The eventual MNQ generator change bumps `TAPE_PROTOCOL_VERSION` to
-  15. (AMENDED 2026-08-14: the reservation has slid twice more since the
+  15. (Amended 2026-08-14: the reservation has slid twice more since the
   text below was written, and the number is the only thing that moved.
   13 went to the fill-band decimal normalization and 14 to the
   calendar-aware `ReopenGap` crossing repair, both landed by the bug-hunt
   arc under the unconditional bump rule. The mechanism landing therefore
-  consumes 15. Originally AMENDED 2026-08-09 from 12, reviewed and co-signed by codex
+  consumes 15. Originally amended 2026-08-09 from 12, reviewed and co-signed by codex
   session 019fe781-e6dd-7172-b700-22df68b83271 under this document's own
   stopping rule, formally restarting Brick F for the amendment: the
   12b arrival-frame calibration repair changes outputs for
@@ -1014,15 +1014,15 @@ existing `VolTrace`, consumes each generated parent and its children
 once, computes Blocks 1-4 streaming, retains one compact forensic
 accumulator per populated minute plus the predecessor state
 `sigma_start` needs and one deferred successor record for
-`arch_share_next` (which requires LOOKAHEAD to the next parent, so
+`arch_share_next` (which requires lookahead to the next parent, so
 the record completes when that parent arrives), applies the frozen
 extreme/control selection after the walk, and emits Blocks 1-5 and
 the count-substitution inputs as JSON. It neither adds nor changes
 any field, branch, callback, buffer or draw in `GeneratedSource`
-(crate `mogwai-data` untouched). One fresh FINAL walk per seed 1-8
+(crate `mogwai-data` untouched). One fresh final walk per seed 1-8
 into the `measure12a` cache (2.4).
 
-Cost probe, run FIRST via a dedicated harness mode:
+Cost probe, run first via a dedicated harness mode:
 
 ```text
 python3 analysis/mnq_fit.py cost12a
@@ -1093,9 +1093,9 @@ Serialization rules: all maps keyed by integers (hours, seeds, N,
 ticks) serialize the key as its decimal string; arrays of sessions
 sort ascending by date, seeds ascending 1-8, hours ascending 0-23,
 horizons and window lengths ascending. Refusal ownership model,
-frozen: every null CAUSED BY REFUSAL has exactly one matching record
+frozen: every null caused by refusal has exactly one matching record
 in top-level `diagnostics.refused_cells`; the per-session and
-forensic `refusals` arrays are scoped MIRRORS of the corresponding
+forensic `refusals` arrays are scoped mirrors of the corresponding
 top-level records (no scope of its own for observed monthly,
 generated blocks or generated central). Nulls caused by defined
 emptiness (the parenthesized rules on the shapes below) are NOT
@@ -1212,13 +1212,13 @@ PermRecord   = {segment_index, hour, variant, replicate,
                 return_count_60, sum_abs_60, max_abs_60,
                 return_count_300, sum_abs_300, max_abs_300}
                (Amendment A: sufficient statistics, robust scales
-                derived downstream. return_count counts EMITTED
+                derived downstream. return_count counts emitted
                 returns, zeros included; all-zero windows give zero
                 sums; no emitted windows give all-zero fields. The
                 session-hour statistic pools the session's segments:
                 count = sum, sum_abs = sum, max_abs = max, robust =
                 (sum_abs - max_abs)/(count - 1), refused when the
-                COMBINED count is below the horizon floor. Cells
+                combined count is below the horizon floor. Cells
                 with zero adjacent returns still emit records.)
 
 ForensicRec  = {seed, kind: extreme_range | extreme_sqrt | control,
@@ -1275,16 +1275,16 @@ RungRec      = {name, subchecks: {key: bool}, fired,
                 localization input qualifies and the ratio is
                 defined; null with exactly one matching localization
                 RefusalRec when such a fired rung cannot measure
-                localization; null WITHOUT a localization refusal
+                localization; null without a localization refusal
                 for every unfired rung and for arrival, innovation
                 and boundary (Amendment C). uniform_eligible and
                 required_resolution are both null unless the
                 reversion rung fired; a fired reversion rung with a
-                MEASURED worsening_23 records either uniform_eligible
+                measured worsening_23 records either uniform_eligible
                 = true with required_resolution = "uniform" or
                 uniform_eligible = false with required_resolution =
                 "hour-resolved"; a fired reversion rung with a
-                REFUSED worsening_23 records both null with exactly
+                refused worsening_23 records both null with exactly
                 one matching worsening_23 RefusalRec, per Amendment
                 E - never a fabricated hour-resolved)
 ```
@@ -1350,7 +1350,7 @@ mnq-measure-12a.json
               subcheck consuming an incomplete family is false;
               forensic subchecks keep their measured booleans; the
               rung cannot fire and mirrors the refusal records.
-              Every required conditional metric remains PRESENT in
+              Every required conditional metric remains present in
               metrics: unsupported generated support produces a
               refused MetricRec, never omission from the inventory.
               Whenever inventory_complete = false, exactly one
@@ -1370,17 +1370,17 @@ mnq-measure-12a.json
                 worsening_23: {point, se, ucb} | null}
 ```
 
-## 11. RESULT (Brick M, 2026-08-06)
+## 11. Result (Brick M, 2026-08-06)
 
 The measurement ran from the clean committed tree 1e9506c and the
 artifact `analysis/mnq-measure-12a.json` landed under both validation
-gates. VERDICT: `no-family-eligible` - no rung fired. Cost: observed
+gates. Verdict: `no-family-eligible` - no rung fired. Cost: observed
 333.6 s, generated replays 324.3 s, bootstrap and assembly 10.5 s,
 total 668.4 s; peak tree RSS 734 MiB; scratch 83 MB - every budget
-held. Five of six family inventories are COMPLETE; the verdict is
+held. Five of six family inventories are complete; the verdict is
 measured, not a refusal cascade, with one deliberate exception:
 
-- ARRIVAL failed CLOSED, and it carries the loudest evidence. The
+- Arrival failed closed, and it carries the loudest evidence. The
   generated arrival process is massively under-dispersed against the
   observed tape: Fano-factor log ratios at the fail hours are -1.22 to
   -3.07 (generated 3.4x to 21x less dispersed) and count-p99 log
@@ -1389,23 +1389,23 @@ measured, not a refusal cascade, with one deliberate exception:
   support the generated months never populate at floor (Amendment D
   fails the rung closed), and the count substitution refuses 22 of 24
   hours on observed-support-without-generated-support, so the closure
-  is unmeasurable. The generated parent-count COMPOSITION is too far
+  is unmeasurable. The generated parent-count composition is too far
   from the observed one for the counterfactual to have support at all.
-- INNOVATION subcheck a FIRED: the pooled nonzero abs-z p99.9/p99
+- Innovation subcheck a fired: the pooled nonzero abs-z p99.9/p99
   ratio is outside the band with envelope, seeds and folds (generated
   tail 31 percent heavy). But initiation held in only 4 of 8 seeds
   (7 required) and the escalation contrast with controls was not
   clean, so b and c failed on measured forensic evidence.
-- REVERSION and GARCH: the 300 s wall-time discrepancy is present in
+- Reversion and GARCH: the 300 s wall-time discrepancy is present in
   point estimates (generated hot 27 to 36 percent at hours 19 and 20)
   but the 95 percent simultaneous envelopes (critical values 2.65 to
   3.09) do not exclude the band edge over 22 sessions, and neither
   shuffle closure cleared the 0.50 floor everywhere; the hour-19
   covariance direction came out opposite-signed.
-- CHILD_WALK and BOUNDARY: clean in point; nothing to fire.
+- Child-walk and boundary: clean in point; nothing to fire.
 
-The verdict went to the owner (spec 1.1) and the owner RULED,
-2026-08-06: protocol 12b targets the ARRIVAL COMPOSITION, framed as
+The verdict went to the owner (spec 1.1) and the owner ruled,
+2026-08-06: protocol 12b targets the arrival composition, framed as
 repair-until-measurable. Because no rung fired, this is a recorded
 owner override of the ladder's silence, not a ladder output, grounded
 in two facts: the point evidence (generated Fano 3.4x to 21x low at
@@ -1413,17 +1413,17 @@ every fail hour, 7 of 8 seeds, every fold) and the failure mode itself
 (the counterfactual refused 22 of 24 hours for missing generated
 support - the rung could not measure arrival at all, which is
 composition evidence in its own right). The 12b success criterion is
-therefore NOT assumed eligibility: 12b repairs the generated
+therefore not assumed eligibility: 12b repairs the generated
 parent-count composition until the frozen 12a arrival counterfactual
-HAS support, then the unamended 12a ladder re-runs and eligibility is
+has support, then the unamended 12a ladder re-runs and eligibility is
 measured. Constraints binding that spec: the section-8
 instrument-resolution decision (the arrival chain is shared shape, so
 MNQ receives an instrument-resolved override with the legacy branch
 byte-preserved, no re-bless), the Brick V wall-time hard gates of
-section 1.2, and `TAPE_PROTOCOL_VERSION` 15 (AMENDED 2026-08-14 from
+section 1.2, and `TAPE_PROTOCOL_VERSION` 15 (amended 2026-08-14 from
 13, per the section 8 amendment: 13 went to the fill-band decimal
 normalization and 14 to the calendar-aware `ReopenGap` crossing repair,
-so the mechanism landing consumes 15. Originally AMENDED 2026-08-09 from
+so the mechanism landing consumes 15. Originally amended 2026-08-09 from
 12, same coordinated amendment as section 8: identity 12 is consumed
 by the arrival-frame calibration repair). Drafting waits on codex
 review capacity (exhausted for the week of 2026-08-06); the freeze

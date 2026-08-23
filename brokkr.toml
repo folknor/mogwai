@@ -440,7 +440,7 @@ except = [
     # The second alternation is this project's vocabulary: the venue name,
     # instrument symbols, the GARCH model, and the root license filenames.
     '\b(?:ASCII|HTTPS|README|LICENSE|SQLITE|POSIX|JSONL|MSRV|NOTICE|RUSTFLAGS|EDITOR|PAGER|VISUAL|LOGNAME|HOSTNAME|RUSTUP)\b',
-    '\b(?:MOGWAI|GARCH|BTCUSDT|ETHUSDT|SOLUSDT|XBTUSD|COMMERCIAL-LICENSE)\b',
+    '\b(?:MOGWAI|GARCH|BTCUSDT|BTCUSD|ETHUSDT|ETHUSD|SOLUSDT|XBTUSD|YYYYMM|COMMERCIAL-LICENSE)\b',
     # Signal, errno and flag names, and OHLCV - comment prose in a systems
     # codebase names these constantly and they are spellings, not emphasis.
     '\b(?:SIGKILL|SIGTERM|SIGPIPE|SIGINT|ESRCH|EPIPE|ECONNRESET|EAGAIN|ELOOP|ETXTBSY|O_NONBLOCK|OHLCV|VWAP|TWAP)\b',
@@ -468,9 +468,9 @@ name = "no-shouting-markdown"
 preset = "no-shouting"
 pattern = '\b[A-Z]{5,}\b'
 paths = ["**/*.md"]
-# notes/ is transient with no truth guarantee - de-shouting retired specs is
-# churn, so only durable prose is linted. research/ is vendored upstream.
-exclude = ["notes/**", "research/**"]
+# research/ is vendored upstream and stays unlinted; notes/ is linted like
+# everything else since the 2026-08-23 de-shout of the transient prose.
+exclude = ["research/**"]
 # textlint has no markdown fence awareness, so exempt indented code blocks by
 # shape; a fenced block that trips the rule takes a shout-ok marker instead.
 except = ['^ {4,}\S', '^\t']

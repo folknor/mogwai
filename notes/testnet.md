@@ -13,19 +13,19 @@ gets an account that is correct.
 
 Four things must be true:
 
-1. COVERAGE. Those four product types work. Adding an instrument is declaring
+1. **Coverage.** Those four product types work. Adding an instrument is declaring
    what it is - its class, contract terms, session and economics - not writing
    engine code. If a new instrument requires the engine to learn something, the
    model is wrong.
-2. ACCOUNT CORRECTNESS. Balances, margin, position and P&L at the end of a run
+2. **Account correctness.** Balances, margin, position and P&L at the end of a run
    are what a real venue would have produced. This is where the weight sits:
    nautilus is not the authority for any of it, and nothing compares the two.
-3. THE PRODUCT'S ECONOMICS REACH THE STRATEGY. Funding, settlement, expiry,
+3. **The product's economics reach the strategy.** Funding, settlement, expiry,
    liquidation, corporate actions are what make a perp a perp and a dated
    future a dated future. Where nautilus has no live-path carrier for one, the
    carrier is added upstream rather than laundered into an unattributed balance
    delta. A forward test that quietly loses funding lies about the strategy.
-4. IT SCALES TO N CONCURRENT STRATEGIES, each with its own account,
+4. **It scales to N concurrent strategies**, each with its own account,
    accelerated, seeded, reproducible.
 
 What it buys: no exchange accounts, ever. No KYC, no API keys, no discovering
@@ -39,8 +39,8 @@ nautilus, it came from one of them and can be re-derived from the named types.
 
 ### Fact 1: account type is per-venue, and it forces a venue split
 
-`AccountType` is `Cash | Margin | Betting | Wallet`. It is chosen by ADAPTER
-CONFIG, not by the instrument - there is no instrument-to-account-type function
+`AccountType` is `Cash | Margin | Betting | Wallet`. It is chosen by adapter
+config, not by the instrument - there is no instrument-to-account-type function
 anywhere in the tree, and every live adapter hardcodes its own. The account
 object is materialized by `AccountAny::from_events`, switching on the
 `account_type` the venue itself reported in its `AccountState`.
@@ -54,7 +54,7 @@ of nautilus's mismatch checks across that set - and choosing it applies
 leveraged margin to spot and permits naked equity shorts. That is not
 "acceptable with caveats", it is wrong accounting.
 
-THE VENUE SPLITS BY ACCOUNT TYPE. Distinct venue identities, distinct client
+The venue splits by account type. Distinct venue identities, distinct client
 pairs, one account type each, all speaking the same wire protocol:
 
 | venue identity | account type | products |
@@ -77,27 +77,27 @@ One boolean is the entire boundary of trust. `calculate_account_state` is
 hardcoded `false` whenever an account is materialized from a venue-reported
 `AccountState` - which is the live path, always; the backtest sets it true. The
 portfolio's order and position handlers early-return on it, so `AccountsManager`
-- the whole balance, margin and PnL-to-balance arithmetic layer - NEVER RUNS ON
-LIVE.
+- the whole balance, margin and PnL-to-balance arithmetic layer - never runs on
+live.
 
 The split is absolute:
 
-- VENUE IS AUTHORITY: balances total/free/locked, initial and maintenance
+- **Venue is authority**: balances total/free/locked, initial and maintenance
   margin, commission. Nautilus blind-inserts what the venue reports and keeps no
   shadow ledger. The only validation is that `locked + free == total` within
   each reported triple - internal consistency, never consistency with the fills
   nautilus actually saw.
-- NAUTILUS IS AUTHORITY: position quantity, average open price, realized and
+- **Nautilus is authority**: position quantity, average open price, realized and
   unrealized PnL, notional. All computed from fills plus the instrument
   definition.
 
-They meet in exactly two places and NEITHER RAISES ON DISAGREEMENT:
+They meet in exactly two places and neither raises on disagreement:
 `Portfolio::equity`, and the risk engine's pre-trade margin check.
 
 The commission gap recorded in `notes/todo.md` - nautilus computes commission
 client-side only in its simulated engine, so a venue reporting none is
-indistinguishable from one charging none - is therefore NOT one instance of a
-class. It IS the general rule. Commission is merely the case where the
+indistinguishable from one charging none - is therefore not one instance of a
+class. It is the general rule. Commission is merely the case where the
 client-side formula visibly exists and is wired only into the backtest.
 
 Nothing in nautilus will catch mogwai being wrong about money. Anywhere.
@@ -111,46 +111,46 @@ venue-initiated account movement must be laundered into one of those.
 
 Per event type:
 
-- LIQUIDATION works, and is the pattern to copy. The execution engine
+- **Liquidation** works, and is the pattern to copy. The execution engine
   materializes an external order from a fill report carrying no matching local
   order - synthesizing initialized and accepted, then applying the fill. Its doc
   comment names Hyperliquid liquidations as the case. Real adapters flatten
   liquidation, ADL and settlement into this shape. There is no distinct
   liquidation type; provenance survives only as free-form metadata on
   `OrderFilled.info`, where the existing convention is a `liquidation=true` key.
-- FUNDING is built and unreachable. `FundingSettlement` and
+- **Funding** is built and unreachable. `FundingSettlement` and
   `PositionAdjustmentType::Funding` exist with full semantics including
-  rollback, and are wired EXCLUSIVELY into the backtest `SimulatedExchange`. No
+  rollback, and are wired exclusively into the backtest `SimulatedExchange`. No
   live client can construct or deliver either; `ExecutionEvent` has no variant
-  for them. `FundingRateUpdate` is fully live but carries a RATE, not a payment
+  for them. `FundingRateUpdate` is fully live but carries a rate, not a payment
   - no account, no amount. So every shipped perp adapter drops it: BitMEX
   explicitly skips funding executions, Bybit excludes them from
   `is_exchange_generated`, Binance parses a `FundingFee` reason and maps it to
   nothing. Funding reaches the portfolio only as an unattributed balance delta
   inside the next `AccountState`. It cannot use the liquidation trick because it
   moves cash without moving quantity, and the fill shape cannot express that.
-- EXPIRY and HALTS are live-deliverable but INERT. `InstrumentClose` with
+- **Expiry and halts** are live-deliverable but inert. `InstrumentClose` with
   `InstrumentCloseType::ContractExpired` and `InstrumentStatus` with
   `MarketStatusAction::Halt` both have real live subscriptions, and
   `InstrumentStatus` even has its own top-level `DataEvent` variant. But the
-  only code that ACTS on them - cancelling orders, closing positions, setting
+  only code that acts on them - cancelling orders, closing positions, setting
   market status - lives in `OrderMatchingEngine`, instantiated only by the
   backtest exchange and the sandbox adapter. On live they inform the strategy
   and change nothing.
-- VARIATION MARGIN SETTLEMENT, DIVIDENDS and SPLITS have no carrier at all,
+- **Variation margin settlement, dividends and splits** have no carrier at all,
   live or backtest. Zero corporate-action types anywhere in model, execution,
   live or backtest. A split currently arrives from Bybit as an ordinary fill
   with no semantic marker.
 
-The pattern across all of it: THE LIVE PATH CAN INFORM BUT CANNOT ACT.
+The pattern across all of it: the live path can inform but cannot act.
 
 ## The topology
 
-THE USER OWNS THE VENUE PROCESS. This is the correction that reorganizes
+The user owns the venue process. This is the correction that reorganizes
 everything else, and it inverts what the code assumes today.
 
 Today the venue's life is bound to its launcher, down to `PR_SET_PDEATHSIG`
-firing on the death of the launching THREAD. The client owns the venue. That is
+firing on the death of the launching thread. The client owns the venue. That is
 correct and cheap for a single fire-and-forget accelerated run, and it is
 backwards for an exchange.
 
@@ -169,11 +169,11 @@ the topology to build:
 ### The consequence: the venue must become multi-account
 
 Each agent runs its own nautilus node with its own execution client and its own
-`AccountId`. Today mogwai has ONE account per venue config
+`AccountId`. Today mogwai has one account per venue config
 (`DEFAULT_ACCOUNT_ID = "MOGWAI-001"`, validated for the `ISSUER-NUMBER` shape at
 load). A long-lived venue serving many agents cannot work that way.
 
-ACCOUNT IDENTITY MOVES TO THE CONNECTION. Established at connect, per client,
+Account identity moves to the connection. Established at connect, per client,
 the way a real exchange does it with API keys - not baked into the venue's
 config file. What follows:
 
@@ -196,25 +196,25 @@ accelerated: a limit order resting three sim-days is minutes of wall clock. The
 run is a single continuous session by design - no restart, no resume, reproduce
 by re-running the seed. A resting book is state the engine holds and the
 sweeper already walks it. The lifecycle question was only ever about who owns
-the PROCESS, and the answer is the user.
+the process, and the answer is the user.
 
 ## The instrument declaration
 
-The unit that declares an instrument needs a name; it is NOT what this
+The unit that declares an instrument needs a name; it is not what this
 repository currently calls a preset, and that word is deliberately not used
 here.
 
-An instrument declaration is the complete statement of what an instrument IS.
+An instrument declaration is the complete statement of what an instrument is.
 It governs three things and nothing else:
 
-1. THE NAUTILUS INSTRUMENT DEFINITION the venue publishes, because nautilus
+1. **The nautilus instrument definition** the venue publishes, because nautilus
    computes all position arithmetic from it and will happily compute it wrong.
-2. THE VENUE IDENTITY it belongs to, which follows from its account type per
+2. **The venue identity** it belongs to, which follows from its account type per
    Fact 1.
-3. THE ECONOMICS the venue must emit - which of the four event generators are
+3. **The economics** the venue must emit - which of the four event generators are
    armed, and on what schedule.
 
-The rule: THE ENGINE OWNS THE MECHANISMS, THE DECLARATION ARMS THEM. If adding
+The rule: the engine owns the mechanisms, the declaration arms them. If adding
 an instrument requires an engine change, the model has been violated.
 
 ### What the declaration must carry, per Fact 1's taxonomy
@@ -231,7 +231,7 @@ relevant ones and what each demands:
 
 Two choices worth recording:
 
-- PREFER `PerpetualContract` over `CryptoPerpetual`. The latter is the
+- Prefer `PerpetualContract` over `CryptoPerpetual`. The latter is the
   crypto-only elder; the former is the newer generic that works on any asset
   class and does not corner us when a non-crypto perp shows up.
 - `multiplier` and `lot_size` are non-optional positive `Quantity` on every
@@ -240,7 +240,7 @@ Two choices worth recording:
 
 ### Traps that must be guarded rather than exposed as knobs
 
-- `is_quanto` IS NEVER DECLARED. It is inferred from whether settlement
+- `is_quanto` is never declared. It is inferred from whether settlement
   currency differs from both base and quote. Setting settlement currency
   casually flips a linear perp into quanto valuation, silently, and the
   valuation currency changes with it. Settlement currency needs a guard, not a
@@ -249,14 +249,14 @@ Two choices worth recording:
   construction. Precision and increment cannot be declared independently - they
   are generated as a pair, and the venue's tick grid must agree exactly or
   construction errors.
-- `Equity` has NO size precision or size increment constructor arguments; the
+- `Equity` has no size precision or size increment constructor arguments; the
   trait hardcodes precision 0 and increment 1. Fractional-share equities are not
   expressible as `Equity` at HEAD. If fractional equities matter, that is an
   upstream change.
 - `activation_ns` and `expiration_ns` are mandatory and non-optional on dated
-  types. A synthetic MNQ must invent a contract LIFECYCLE, not just a symbol -
+  types. A synthetic MNQ must invent a contract lifecycle, not just a symbol -
   which means the declaration owns a roll schedule, not one expiry.
-- Nautilus's cash-account guard is INCOMPLETE. The backtest exchange refuses a
+- Nautilus's cash-account guard is incomplete. The backtest exchange refuses a
   cash account trading futures or perps, but the check is a hardcoded match
   listing only `CryptoPerpetual`, `CryptoFuture` and `PerpetualContract`.
   `FuturesContract` is absent. A cash account holds MNQ with no complaint. Do
@@ -268,30 +268,30 @@ Two choices worth recording:
 These follow from Fact 2. Nothing checks any of them, so each is a rule the
 venue enforces on itself or a defect nobody sees.
 
-1. REPORT CASH-ONLY BALANCES, NEVER MARK-TO-MARKET EQUITY. `Portfolio::equity`
-   is the venue's reported total balance PLUS nautilus's own computed unrealized
+1. **Report cash-only balances, never mark-to-market equity.** `Portfolio::equity`
+   is the venue's reported total balance plus nautilus's own computed unrealized
    PnL. Perp venues typically report equity already marked to market; nothing
    detects the double count. Get this wrong and every forward test's equity
    curve is off by 2x uPnL, with a perfectly plausible-looking chart and no
    error anywhere. This is the single highest-consequence rule in the document.
-2. BUILD BALANCE TRIPLES WITH `from_total_and_locked`. `AccountBalance::new`
-   PANICS when `locked + free != total`. Rounding in a synthetic balance
+2. **Build balance triples with** `from_total_and_locked`. `AccountBalance::new`
+   panics when `locked + free != total`. Rounding in a synthetic balance
    computation is a crash, not a warning.
-3. SET `is_reported: true` on every `AccountState`. Otherwise cash accounts keep
+3. **Set** `is_reported: true` on every `AccountState`. Otherwise cash accounts keep
    a stale local lock table.
-4. CROSS MARGIN USES `instrument_id: None` on `MarginBalance` entries;
+4. **Cross margin uses** `instrument_id: None` on `MarginBalance` entries;
    per-instrument margin uses `Some`. The routing is by that field.
-5. MARGIN IS TWO AUTHORITIES THAT NEVER MEET. The venue's reported margins
+5. **Margin is two authorities that never meet.** The venue's reported margins
    populate the account; the risk engine independently computes its own
    requirement from `margin_init` and leverage and checks it against the
-   VENUE's free balance. If the declared `margin_init`/`margin_maint` do not
+   venue's free balance. If the declared `margin_init`/`margin_maint` do not
    match the regime mogwai actually enforces, orders are denied or admitted
    wrongly and nothing logs it. The declaration and the ledger must be generated
    from one source.
-6. THE MARGIN MODEL DEFAULT IS LEVERAGED (divides by leverage). A futures or
+6. **The margin model default is leveraged** (divides by leverage). A futures or
    equity venue expecting fixed-percentage margin needs `StandardMarginModel`,
    and getting this wrong is silent.
-7. COMMISSION IS VENUE-ABSOLUTE. `fill.commission` is copied verbatim and never
+7. **Commission is venue-absolute.** `fill.commission` is copied verbatim and never
    checked against the instrument's maker/taker fees. The fee schedule is
    already an instrument knob; this is the rule that makes it load-bearing
    rather than decorative.
@@ -303,11 +303,11 @@ venue enforces on itself or a defect nobody sees.
 
 `Position::apply_fill` suppresses duplicate fills keyed on `trade_id` plus
 `causation_id`. If mogwai's duplicate-fill divergence repeats the `trade_id`,
-nautilus DROPS the duplicate with a warning and it never reaches the accounting
+nautilus drops the duplicate with a warning and it never reaches the accounting
 path at all - the arm arms, the wire carries it, and nothing downstream is
 exercised.
 
-NOT VERIFIED against what the divergence seam actually emits. If it is true, the
+Not verified against what the divergence seam actually emits. If it is true, the
 arm has been certifying less than it appears to, and the fix is a distinct
 `trade_id` per delivery. Worth confirming independently of this plan.
 
@@ -316,19 +316,19 @@ arm has been certifying less than it appears to, and the fix is a distinct
 Landing these in nautilus is what separates "mogwai models the product" from
 "mogwai fakes it the way every other adapter fakes it". Ordered by leverage.
 
-1. LIFT `FundingSettlement` ONTO THE LIVE PATH. The types exist, the semantics
+1. **Lift** `FundingSettlement` **onto the live path.** The types exist, the semantics
    exist including rollback, and they are wired only into the backtest. Every
    shipped perp adapter currently launders funding through an unattributed
    balance delta. This is the highest-value change in the list: it is additive,
    it has an obvious shape (an `ExecutionEvent` variant plus a live emitter
    method), and mogwai emitting it correctly is what makes the gap visible.
-2. MAKE EXPIRY ACT ON THE LIVE PATH. `InstrumentClose` with `ContractExpired`
+2. **Make expiry act on the live path.** `InstrumentClose` with `ContractExpired`
    already arrives; the machinery that cancels orders and closes positions is
    matching-engine-only. Dated futures are not honestly forward-testable until
    this exists.
-3. COMPLETE THE CASH-ACCOUNT GUARD to include `FuturesContract` and the option
+3. **Complete the cash-account guard** to include `FuturesContract` and the option
    types. Small, obviously correct, and directly on the MNQ path.
-4. CORPORATE ACTIONS. Genuinely new: no dividend or split type exists anywhere.
+4. **Corporate actions.** Genuinely new: no dividend or split type exists anywhere.
    Splits are the hard half because they rewrite an open position's quantity and
    average price retroactively. Only needed when equities become real.
 
@@ -355,30 +355,30 @@ follow and neither is settled here:
 
 Each step is complete and useful on its own.
 
-0. DECIDE the nautilus version posture, since it gates everything downstream.
-1. MULTI-ACCOUNT VENUE. Account identity at connect, per-account ledgers and
+0. **Decide** the nautilus version posture, since it gates everything downstream.
+1. **Multi-account venue.** Account identity at connect, per-account ledgers and
    resting orders, shared book. Precondition for the workload; nothing else in
    the plan is reachable at scale without it.
-2. VENUE SPLIT BY ACCOUNT TYPE. Distinct venue identities and client pairs.
+2. **Venue split by account type.** Distinct venue identities and client pairs.
    Forced by Fact 1.
-3. THE INSTRUMENT DECLARATION. Whatever it ends up being called: the four
+3. **The instrument declaration.** Whatever it ends up being called: the four
    nautilus types above, the guarded fields, generated so declaration and ledger
    share one source.
-4. SPOT AND PERPETUALS. Spot is the degenerate case that emits nothing.
+4. **Spot and perpetuals.** Spot is the degenerate case that emits nothing.
    Perpetuals need funding - through `AccountState` first, through the upstream
    event once it lands - plus liquidation, which already works via
    venue-initiated fills.
-5. DATED FUTURES. Contract lifecycle and roll schedule, variation margin,
+5. **Dated futures.** Contract lifecycle and roll schedule, variation margin,
    expiry settlement. Needs upstream item 2 to be honest.
-6. EQUITIES. Sessions with real auctions and halts, then corporate actions,
+6. **Equities.** Sessions with real auctions and halts, then corporate actions,
    which need upstream item 4.
 
 ## What this plan does not cover
 
-- THE TAPE. Out of scope by owner ruling. The mechanism generalizes across
+- **The tape.** Out of scope by owner ruling. The mechanism generalizes across
   product types; whether any given instrument's generated tape is realistic is a
   separate question with a separate answer.
-- WHO STARTS THE VENUES and how N of them are supervised. The user owns the
+- **Who starts the venues** and how N of them are supervised. The user owns the
   process; how that is operated is not mogwai's design problem.
-- THROUGHPUT. Whether N venues fit on the machine remains excluded per the
+- **Throughput.** Whether N venues fit on the machine remains excluded per the
   standing instruction that resource cost shapes no decision here.

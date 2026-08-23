@@ -14,7 +14,7 @@ operational surface, for as long as the project exists. Stage A is the problem
 directly in front of us; it is not what the infrastructure is for.
 
 The end state is on the order of 200 venue instances on one host. That is a
-MULTIPLIER on every instance-level cost, not a workload of its own - a
+multiplier on every instance-level cost, not a workload of its own - a
 megabyte of steady-state RSS is 200 MB, a percent of the draw loop is two
 cores. Measuring one instance well is measuring the end state. It is why the
 grinding is justified, and why the measuring apparatus has to outlive the
@@ -30,7 +30,7 @@ designed here.
 
 ## What mogwai owes
 
-ADDRESSING. What is the name of a thing you can bench, such that every
+Addressing. What is the name of a thing you can bench, such that every
 operational surface has one.
 
 The `[mogwai.workloads.*]` registry answered this for four hand-written
@@ -41,7 +41,7 @@ that must be edited before a new question can be asked will not survive a
 decade of asking them.
 
 pbfhogg is the precedent: roughly 25 commands across several flag axes and ten
-datasets, and its `brokkr.toml` registers ZERO workloads. It registers inputs.
+datasets, and its `brokkr.toml` registers zero workloads. It registers inputs.
 Invocations are composed at the call site and captured verbatim, and pairing
 rows is a query rather than a name lookup.
 
@@ -49,19 +49,19 @@ rows is a query rather than a name lookup.
 
 Two kinds, and the split is what the two-layer design was groping at.
 
-ARGV-SHAPED, through the shipped bin: `gen` and its `--type` variants,
+Argv-shaped, through the shipped bin: `gen` and its `--type` variants,
 `tick-composition`, `preflight`, `measure`, `fit`, `cache`, `synth`,
 `arrival-screen`. A process, an argv, a wall. Benching these through
 `target/release/mogwai` measures what ships, startup and argument parsing
 included, which is the honest end-to-end number.
 
-HARNESS-SHAPED, through an example target: the engine's matching loop and
+Harness-shaped, through an example target: the engine's matching loop and
 divergence seam, the `TickSource` implementations, the arrival draw, the
 screen's projection, and eventually the serving path and the adapter. These
 have no command line, so there is nothing for an argv registry to hold. The
 harness is the addressable thing.
 
-The second kind is the MAJORITY of the eventual surface. Registering only the
+The second kind is the majority of the eventual surface. Registering only the
 first kind is what forced everything else into "layer 2", which was never an
 architecture - it was an escape hatch with a name.
 
@@ -95,7 +95,7 @@ xxh128 = "280ade40376bd49f50c579bb127f3fbd"
 - Harness surfaces resolve by name against `[mogwai.targets.*]`. Adding a
   surface to the measurable set is registering a target, which is the work you
   were going to do anyway the moment you wanted to optimize it.
-- Harnesses TAKE AN ARGV, like the bin. Every surface here is config-shaped -
+- Harnesses take an argv, like the bin. Every surface here is config-shaped -
   preset, window, seed, cell - so an argument-free harness becomes a new
   registry entry per shape, which is the enumeration trap again at one remove.
 - Datasets record out-of-git inputs per host: which delivery, and whether the
@@ -108,14 +108,14 @@ The exposure this accepts: a harness with an argv can be invoked in a shape
 nobody meant, and no registry entry prevents it. pbfhogg carries the same
 exposure across every command it has. What answers it is not a config
 constraint but the captured argv - an invocation that is not comparable is
-VISIBLE in the row rather than prevented, and reading rules are what turn that
+visible in the row rather than prevented, and reading rules are what turn that
 into a verdict.
 
 ## What is removed, and why
 
 From `[mogwai.workloads.*]`:
 
-- `timing` / `timing_reason`. Redefined what the `elapsed` column MEANS, per
+- `timing` / `timing_reason`. Redefined what the `elapsed` column meant, per
   workload, so one row's elapsed was an external wall and another's was the sum
   of three internal phases with setup excluded, and nothing in the row said
   which. The stated goal - the measured phases and nothing else - is what
@@ -141,7 +141,7 @@ From `[mogwai.workloads.*]`:
   because the registry named a bin with no feature shape attached. A target
   plus its features is the fix.
 
-`screen_projection_bench` existing as a separate ms-scale target is CORRECT and
+`screen_projection_bench` existing as a separate ms-scale target is correct and
 survives. The arrival draw is precisely the annotation shape that drowns a
 profiler - dellingr ships a second ms-scale file per workload for exactly this
 reason, and pbfhogg keeps its instrumentation sparse to avoid it. That is a
@@ -151,17 +151,17 @@ harness.
 
 ## Deferred, deliberately
 
-- THE SERVING PATH. Designed for, not measured yet. It is harness-shaped and
+- The serving path. Designed for, not measured yet. It is harness-shaped and
   fits the scheme when it arrives; excluding it on principle, as the retired
   registry did, would have written off the class the entire end state lives in.
-- MOGWAI'S READING RULES. pbfhogg's are load-bearing and almost entirely
+- Mogwai's reading rules. pbfhogg's are load-bearing and almost entirely
   inapplicable here: it is I/O bound, so its error model is drive state, trim
   debt and page cache. The screen and the walk are CPU and RNG bound, so the
   variables are host quiet, frequency and thermal state, core count and
   allocator behaviour. The `tape_lateness_under_acceleration` failure at 311 ms
   p99 under a load average of 1.46, currently an open item in `todo.md`, is the
   first data point in that record rather than an annoyance.
-- THE DOCUMENT SPLIT. pbfhogg carries current state and history separately,
+- The document split. pbfhogg carries current state and history separately,
   every number pinned to a UUID, with refuted experiments written down at the
   same weight as wins. Over a decade of grinding the most expensive thing is
   re-running a refuted experiment. Worth copying; not needed to unblock Stage A.

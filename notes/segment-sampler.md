@@ -1,12 +1,12 @@
 # The session-segment sampler: the standing direction
 
 Written 2026-08-12, the owner's ruling from the day the charts were
-finally looked at. `notes/`-class, but this one carries the DIRECTION
+finally looked at. `notes/`-class, but this one carries the direction
 until it lands; read it before touching tape work.
 
 ## The product statement, in the owner's terms
 
-The tape is a COMPOSABLE SESSION-SEGMENT SAMPLER, not a month
+The tape is a composable session-segment sampler, not a month
 imitator. The owner wants, as configs of one machine:
 
 - an endless Asia-session tape
@@ -19,19 +19,19 @@ imitator. The owner wants, as configs of one machine:
 
 ## The machine
 
-- SEGMENT LIBRARY: session slices (Asia, London, NY-morning,
+- **Segment library**: session slices (Asia, London, NY-morning,
   NY-afternoon, full day) cut from the 11 delivered real months
   AND/OR from the generator, behind one segment interface (the
   existing `TickSource` seam).
-- COMPOSER: sequence, loop, or sample segments per seed, re-anchored
-  in RETURNS SPACE at every seam - absolute price level is an
+- **Composer**: sequence, loop, or sample segments per seed, re-anchored
+  in returns space at every seam - absolute price level is an
   integration constant (owner ruling), which is what makes endless
   looping seamless.
-- FEATURE INJECTORS as config knobs: reopen gaps, open ignition,
+- **Feature injectors** as config knobs: reopen gaps, open ignition,
   day-factor chaining, calendar, macro spikes - each on/off.
 - Divergence injection (havoc) unchanged on top.
 
-THE ONE OPEN DESIGN DECISION: real-resampled segments vs
+The one open design decision: real-resampled segments vs
 generated-with-features. Real segments carry the within-session
 texture that five fitted mechanism families failed to imitate;
 bounded variety (roughly 230 real sessions, reordered and
@@ -39,13 +39,13 @@ re-anchored). Generated segments are unlimited but carry every
 catalogued defect. Both fit behind the same interface; they are not
 exclusive.
 
-SLICE 1: endless-Asia from resampled real segments - the smallest
-thing exercising cut, re-anchor, loop, serve - ending as a CHART for
+Slice 1: endless-Asia from resampled real segments - the smallest
+thing exercising cut, re-anchor, loop, serve - ending as a chart for
 the owner's eye. Days, not weeks. No preregistration liturgy.
 
 ### Slice 1, what landed
 
-Cut, re-anchor, loop and chart are in. SERVING IS NOT: the server's
+Cut, re-anchor, loop and chart are in. Serving is not: the server's
 source path is typed on `GeneratedSource` in places rather than on
 `Box<dyn TickSource>`, so putting a composed tape behind `/ws` is its
 own change and has not been made. Everything below is offline.
@@ -70,12 +70,12 @@ level, which is the owner's 300-point reopen gap. Chart at
 `analysis/out/asia-endless.html`, 11,889 one-minute bars from a
 3,000,000-tick compose at seed 42.
 
-KNOWN, and deliberate: the window table admits every civil day, not
+Known, and deliberate: the window table admits every civil day, not
 only trade dates - `ScheduleFrame::bounds` is pure civil arithmetic
 and knows nothing about whether the venue was open. What removes
 Saturdays is that they collect no prints and empty segments are
 dropped at the cut. Correct today, but the mechanism is emptiness
-rather than a calendar, so a REAL but thin session would survive the
+rather than a calendar, so a real but thin session would survive the
 same rule. A caller wanting only genuine sessions needs a
 minimum-trade threshold, not this assumption.
 
@@ -83,14 +83,14 @@ All four session windows of the product statement are cuttable:
 `asia`, `london`, `ny-morning` (09:00 New York to lunch, with the
 lead-in the statement asks for) and `ny-afternoon` (10:30 to the cash
 close). The fifth config - a 4-year full-calendar tape, all sessions -
-is not built and is a different shape: it wants segments SEQUENCED on a
+is not built and is a different shape: it wants segments sequenced on a
 real calendar rather than looped, which is the composer's other mode.
 
 A window overlapping the 15:15 halt is refused at the window table. It
 would otherwise carry the halt's hole invisibly into every loop, and
 nothing downstream could detect it.
 
-THIN SESSIONS ARE DROPPED, and this was a real find rather than a
+Thin sessions are dropped, and this was a real find rather than a
 precaution. The 2026-04-03 ny-morning slice is Good Friday: 4,408 ticks
 against a 400,000-tick typical day, non-empty and so invisible to the
 empty-segment rule, and sampled uniformly it would inject a
@@ -100,7 +100,7 @@ and every drop is named on stderr. This is exactly the failure the
 earlier "a real but thin session would survive the same rule" caveat
 predicted, found by cutting a second window rather than by reasoning.
 
-STILL OPEN from the list below: the seam is one second of dead time by
+Still open from the list below: the seam is one second of dead time by
 default rather than real calendar time, since an endless-Asia tape
 elides the fifteen non-Asia hours by construction. Feature injectors
 other than the reopen gap (open ignition, day-factor chaining,
@@ -115,12 +115,12 @@ viewer:
 
 1. The cash open does not ignite - the generator smears the 09:30 ET
    open across its hour because the session profile is hourly.
-2. REOPEN GAPS dominate, not settlement flurries: Asia frequently
+2. Reopen gaps dominate, not settlement flurries: Asia frequently
    opens with literal 300-point gaps across the daily close (owner's
    example: real 2026-04-10 20:59 UTC bar vs the following 22:00
    session-open bar). The clean generated tape has NO reopen gaps at
    all.
-3. Generated VOLUME looks uniform across all sessions - suspicious
+3. Generated volume looks uniform across all sessions - suspicious
    and unverified; check the generated per-hour volume profile
    against the observed one before assuming the session profile
    actually modulates what the chart shows.
@@ -130,7 +130,7 @@ viewer:
    and the viewer shows its own frame - always state times in UTC
    and say what they are in the viewer's frame.
 
-## Slice 1 gate verdict, 2026-08-18: FAILED, and the control was contaminated
+## Slice 1 gate verdict, 2026-08-18: failed, and the control was contaminated
 
 The owner viewed the two Asia charts and rejected both as unusable: they
 carry 300-point moves inside the session body, over spans of one to
@@ -138,41 +138,41 @@ twenty minutes. Such moves are real at the first minutes after an open,
 where price can literally jump rather than trade through the range, and
 they do not happen in Asia session body at all.
 
-BOTH ARMS FAILED, which is the load-bearing part. `asia-endless-nogaps`
+Both arms failed, which is the load-bearing part. `asia-endless-nogaps`
 is the gaps-OFF control and was supposed to be a continuous tape with no
 discontinuities, so the failure is not the reopen-gap injection that
 slice 1 built. Measured with `analysis/asia_jump_probe.py` over the two
 bar CSVs, segments being 540 bars of 60 s - nine hours, 22 of them,
 so seams fall at multiples of 540:
 
-- THE CONTROL IS NOT A CONTROL. Gaps-OFF still jumps AT SEAMS: bar 1080
+- The control is not a control. Gaps-OFF still jumps at seams: bar 1080
   by 87 points, 3510 by 74, 4590 by 71. `--no-reopen-gaps` suppresses
   the measured gap injection but not the level discontinuity between
   spliced segments, so both arms carry seam jumps and the ON arm merely
   adds the measured gap on top. The A/B therefore never isolated the
   feature it was built to judge, and no conclusion about reopen gaps can
   be drawn from this pair.
-- THE OWNER'S DEFECT IS MID-SEGMENT AND UPSTREAM OF COMPOSITION. Bars
+- The owner's defect is mid-segment and upstream of composition. Bars
   1112 and 1113 move 176 and 131 points in two consecutive minutes - 307
-  points in two minutes, 32 bars after a seam - and are IDENTICAL in both
+  points in two minutes, 32 bars after a seam - and are identical in both
   tapes. Identical across the two arms means it is carried in from the
   segment data, not produced by composition or by gap injection. So the
   cut is admitting something that is not Asia session body: a segment
   whose span crosses an open, or a corpus artifact the cut does not
   screen.
-- A LEAD ON GRANULARITY. Two mid-segment offenders, bars 3510 and 4590,
-  sit at exactly 6.5 and 8.5 segments - the MIDPOINT of a 540-bar
+- A lead on granularity. Two mid-segment offenders, bars 3510 and 4590,
+  sit at exactly 6.5 and 8.5 segments - the midpoint of a 540-bar
   segment. A 270-bar internal boundary appearing as a discontinuity
-  points at a splice granularity INSIDE the segment, not only at its
+  points at a splice granularity inside the segment, not only at its
   edges. Unconfirmed; it is two instances.
 
 Scale, gaps-OFF: median one-minute move 1.75 points, p95 8.00, p99
 14.50, max 175.75. Twenty-minute p99 93.00, max 330.00. So the
-300-pointers are RARE rather than pervasive - which does not soften the
+300-pointers are rare rather than pervasive - which does not soften the
 verdict, because the objection is that they cannot happen at all, and a
 rare impossibility still dominates the eye on a chart.
 
-THE DEFECT IS ASIA-SPECIFIC. The probe run against the other three
+The defect is Asia-specific. The probe run against the other three
 windows (all gaps-ON) finds nothing of the kind - largest single-bar move
 59.50 in London, 61.00 in NY morning, 51.50 in NY afternoon, against
 Asia's 175.75 with gaps OFF and 294.75 with them ON. Twenty-minute maxima
@@ -180,16 +180,16 @@ are 104.25, 161.00 and 150.00 against Asia's 330.00 and 331.00.
 
 Two things follow that were not obvious from the Asia pair alone:
 
-- ASIA'S ORDINARY TEXTURE IS THE CALMEST OF THE FOUR, which is correct for
+- Asia's ordinary texture is the calmest of the four, which is correct for
   the window. Median one-minute move is 1.75 points in Asia against 2.25
   London, 3.75 NY afternoon and 5.00 NY morning, and the p95 ordering
-  matches. So the pathology is ISOLATED EVENTS sitting on top of a
+  matches. So the pathology is isolated events sitting on top of a
   plausible texture, not a texture that is uniformly too hot - which is
   what makes a screen the likely repair rather than a rebuild.
-- NO SEAM JUMPS OUTSIDE ASIA, with gap injection ON. London's largest
+- No seam jumps outside Asia, with gap injection on. London's largest
   single-bar move is 59.50 and it is not at a seam. That is consistent
   with the mechanism rather than against it: the reopen gap is the gap
-  across the DAILY close, which is the Asia open, so London and NY reopen
+  across the daily close, which is the Asia open, so London and NY reopen
   after a break with little to gap across. Worth confirming rather than
   assuming, since the alternative reading is that injection only fires
   for one window.
@@ -198,19 +198,19 @@ NY morning's two largest early moves are at bars 30 and 36, near the
 start of a segment - the open igniting, which is the one place a jump of
 that size is legitimate.
 
-THE TEXTURE IS GOOD, owner's eye, 2026-08-18, on a quiet stretch of the
+The texture is good, owner's eye, 2026-08-18, on a quiet stretch of the
 gaps-OFF Asia tape around bars 5000-6000: movement, consolidations,
-ranges and breaks all read as real. THIS IS THE LOAD-BEARING ACCEPTANCE
-OF THE WHOLE APPROACH. Carrying within-session texture from real data is
+ranges and breaks all read as real. This is the load-bearing acceptance
+of the whole approach. Carrying within-session texture from real data is
 the entire argument for resampled segments over generated ones, and it is
 the one claim no statistic here can settle, which is why it is an
 eyeball gate. It passed. What failed is a small number of isolated
-events sitting on top of that texture, so the repair is a SCREEN plus a
-SEAM FIX, not a rebuild - and the corroborating statistic is that Asia's
+events sitting on top of that texture, so the repair is a screen plus a
+seam fix, not a rebuild - and the corroborating statistic is that Asia's
 ordinary texture is the calmest of the four windows, exactly as the
 window should be.
 
-WHAT THIS BINDS. The gate stands: nothing further is built on the
+What this binds. The gate stands: nothing further is built on the
 composed tape. Two repairs are owed before a re-render is worth the
 owner's eye - the seam level discontinuity that contaminates the control,
 which is ours and self-contained, and whatever the cut is admitting at
@@ -223,7 +223,7 @@ The arrival-successor contract reached its terminal Tier 2 outcome
 (`no_one_month_slow_confirmation_design`, recorded in
 `notes/stage-m-preregistration.md` and the Tier 2 artifact). Its
 named owner exits were pending when this direction arrived and are
-LIKELY MOOTED by it: the segment sampler gets within-session realism
+likely mooted by it: the segment sampler gets within-session realism
 from real data rather than confirming an imitated slow component.
 The Stage M evidence (count curves, DST phase, calendar structure,
 the diagnosis) remains the reference for the generated-segment path
@@ -236,5 +236,5 @@ eye plus strategy usefulness.
 Recorded in CLAUDE.md the same day: Codex scoped to correctness
 review, never direction; every measurement demand names the decision
 it changes; a rendered chart judged by the owner is a standing gate;
-the system budget is MINUTES of owner attention at real forks. The
+the system budget is minutes of owner attention at real forks. The
 week that preceded this note is the case study for why.
