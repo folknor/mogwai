@@ -386,7 +386,8 @@ the compact path are continuation-tested from identical initial states.
 `man` renders the bundled reference docs. Bare, it lists the topics; with one -
 `mogwai man cli` - it renders that document to the terminal, colour dropped when
 stdout is not a TTY or `NO_COLOR` is set. The topics are `cli`, `config`,
-`architecture`, `havoc`, `clock`, `presets` and `oms-types`. The docs travel
+`architecture`, `havoc`, `clock`, `presets`, `oms-types`, `order-lists` and
+`adapter-lifecycle`. The docs travel
 inside the binary, so an installed `mogwai` documents itself with no source tree
 present. The durable documents only: transient working notes are not bundled.
 

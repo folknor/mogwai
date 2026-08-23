@@ -214,8 +214,10 @@ opening balance every account is funded with when its consumer names none - not
 the balance of one shared ledger. A consumer that wants its own size opens an
 account with `POST /accounts`, naming an id and its balances; a connection that
 never does is served under the default account on these values.
-`oms_type` is `netting` (the default) or `hedging`; the venue serves both and
-refuses a consumer over neither, and `/health` reports the run's choice.
+`oms_type` is `netting` (the default) or `hedging`; the venue supports both
+styles, one per run - every account inherits the run's choice, per
+`docs/oms-types.md` - it refuses a consumer over neither, and `/health` reports
+the run's choice.
 
 `account_id` names the default account - the one a connection naming none is
 served under - and defaults to `MOGWAI-001`. Every socket may name its own with

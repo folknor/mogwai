@@ -33,7 +33,8 @@ publishes.
 `speed = 0.0` is unpaced
 delivery, not a stopped clock: the sim axis still advances at wall rate so the
 deadline task, the fill sweeper and the trailing-volatility window keep
-working: `/clock` reports speed `1.0` for a firehose run. A non-zero speed
+working, which is why `/clock` reports speed `1.0` for a firehose run - that is
+the rate the axis genuinely advances at. A non-zero speed
 paces delivery to `sim.wall_ns(ts)`.
 
 The consequence, stated because it has already been reasoned about backwards

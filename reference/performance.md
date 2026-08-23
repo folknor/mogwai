@@ -1213,11 +1213,12 @@ the same parent count into the cash session raises all of them.
 Protocol 8 cannot be projected from protocol 7. The profile divides the duration
 draw and scales the return, so timestamps and prices both move and the two
 fixtures come from separate traversals. `mogwai tick-composition-ratios compare --mode
-independent` therefore gates before computing any ratio: `ticks_per_parent` must
-be bit-identical for all five presets, because the profile changes when events
-happen and never how many, and every measured field must be identical for
-BTCUSDT, ETHUSDT and SOLUSDT, whose calendar-free normalizer is the literal 1.0
-and whose tape is byte-identical across the change. Both gates passed.
+independent` therefore gated before computing any ratio: `ticks_per_parent` had
+to be bit-identical for all five presets then shipped (this run predates the
+2026-08-09 retirement of ETHUSDT and SOLUSDT), because the profile changes when
+events happen and never how many, and every measured field had to be identical
+for BTCUSDT, ETHUSDT and SOLUSDT, whose calendar-free normalizer is the literal
+1.0 and whose tape is byte-identical across the change. Both gates passed.
 
 The maximum independent p99.9 protocol-8/protocol-7 ratios were:
 
@@ -1277,10 +1278,10 @@ Protocol 10 landed the July 2026 MNQ TBBO fit: the two futures presets took
 fitted generator scalars (mean event duration 0.0609 s against the
 crypto-derived 0.171 s, near-single-child parents, the fitted quote seams), so
 their cadence and fanout both move while the three crypto presets are untouched
-by construction. The `independent_9_10` mode gates accordingly before any
-ratio: every measured field must be byte-identical for BTCUSDT, ETHUSDT and
-SOLUSDT, `parents` must match for all five, and every measurement entering a
-ratio must be finite and positive on both sides. `ticks_per_parent` is not
+by construction. The `independent_9_10` mode gated accordingly before any
+ratio: every measured field had to be byte-identical for BTCUSDT, ETHUSDT and
+SOLUSDT, `parents` had to match for all five presets then shipped, and every
+measurement entering a ratio had to be finite and positive on both sides. `ticks_per_parent` is not
 frozen for the futures - the fit changes what a parent looks like, which the
 7-to-8 session reshape could not. All gates passed; the protocol-9 side is the
 Brick B0 fixture whose 8/9 byte-identity was separately verified.
@@ -1373,9 +1374,12 @@ clock. That mechanism is still unresolved.
 `the_fanout_default_carries_the_protocol_11_exception`, in
 `mogwai-venue/src/config.rs`, pins the default so a later mechanical
 application of the generated proposal must be argued, not slipped
-through; it now pins 1,048,576, the per-boat depth the 2026-08-15
-section above records, rather than the 4,194,304 that stood when this
-exception was taken.
+through; as of 2026-08-15 it pins 1,048,576, the per-boat depth the
+2026-08-15 section above records, rather than the 4,194,304 that stood
+when this exception was taken. The test is the live authority on the
+default; the figures here are the record of when it moved, so a future
+resize re-blesses the test and extends this record rather than editing
+either number in place.
 
 `MAX_EXTEND_TICKS` and `SWEEP_DRAIN_WARN_TICKS` stay unchanged for the
 recorded standing reasons: a per-lock runaway backstop and an

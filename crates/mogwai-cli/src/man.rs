@@ -25,7 +25,7 @@ use std::io::{IsTerminal, Write};
 use clap::ValueEnum;
 
 /// The bundled topics: everything in `docs/`, which is by definition how the
-/// venue is USED, plus the two `reference/` documents an operator rather than a
+/// venue is used, plus the two `reference/` documents an operator rather than a
 /// contributor needs. Deliberately not bundled: `technical-implementation-spec`
 /// and `performance`, which serve someone changing this repo, and `glossary`,
 /// which is a working aid for the same audience. Each variant must have an arm
@@ -47,6 +47,10 @@ pub(crate) enum ManTopic {
     Presets,
     /// Netting versus hedging, and what each does on the wire (docs/oms-types.md).
     OmsTypes,
+    /// Contingent order lists and how the venue executes them (docs/order-lists.md).
+    OrderLists,
+    /// The order a nautilus host must drive the shipped clients in (docs/adapter-lifecycle.md).
+    AdapterLifecycle,
 }
 
 /// The kebab-case topic name as typed on the command line.
@@ -59,6 +63,8 @@ fn name(topic: ManTopic) -> &'static str {
         ManTopic::Clock => "clock",
         ManTopic::Presets => "presets",
         ManTopic::OmsTypes => "oms-types",
+        ManTopic::OrderLists => "order-lists",
+        ManTopic::AdapterLifecycle => "adapter-lifecycle",
     }
 }
 
@@ -72,6 +78,8 @@ fn summary(topic: ManTopic) -> &'static str {
         ManTopic::Clock => "the simulated clock for accelerated forward testing",
         ManTopic::Presets => "choosing a built-in instrument preset, and its provenance",
         ManTopic::OmsTypes => "netting versus hedging, and what each does on the wire",
+        ManTopic::OrderLists => "order lists: OCO, OTO and OUO linkage on this venue",
+        ManTopic::AdapterLifecycle => "the order a nautilus host must call the shipped clients in",
     }
 }
 
@@ -90,6 +98,8 @@ fn content(topic: ManTopic) -> &'static str {
         ManTopic::Clock => include_str!("../../../reference/clock.md"),
         ManTopic::Presets => include_str!("../../../docs/presets.md"),
         ManTopic::OmsTypes => include_str!("../../../docs/oms-types.md"),
+        ManTopic::OrderLists => include_str!("../../../docs/order-lists.md"),
+        ManTopic::AdapterLifecycle => include_str!("../../../docs/adapter-lifecycle.md"),
     }
 }
 
