@@ -906,6 +906,11 @@ pub(crate) fn classify_fault(fault: mogwai_data::TickFault) -> FaultClass {
             clock_ns: 0,
             detail: "the FaultTape divergence asked for this exit".to_owned(),
         },
+        TickFault::Materialize => FaultClass {
+            kind: "materialize",
+            clock_ns: 0,
+            detail: "a river the config validated could not be materialized".to_owned(),
+        },
     }
 }
 
@@ -930,10 +935,26 @@ fn health_fault(
 }
 
 pub(crate) async fn health(State(state): State<AppState>) -> Json<Health> {
-    let fault = health_fault(state.run.boatyard.boats().into_iter().filter_map(|boat| {
-        let fault = boat.tape.fault()?;
-        Some((boat.symbol().to_owned(), fault))
-    }));
+    // The latched materialization fault is preferred over any boated river's,
+    // and it has to be: it happened before there was a boat to carry it, so
+    // reading only boats would report a venue that cannot produce the water it
+    // promised as healthy. That is the sequence this exists to stop - a
+    // readiness line, then a refused upgrade, then `/health` saying the venue is
+    // fine.
+    let fault = state
+        .run
+        .materialize_fault()
+        .map(|symbol| HealthFault {
+            symbol,
+            kind: classify_fault(mogwai_data::TickFault::Materialize).kind,
+            clock_ns: 0,
+        })
+        .or_else(|| {
+            health_fault(state.run.boatyard.boats().into_iter().filter_map(|boat| {
+                let fault = boat.tape.fault()?;
+                Some((boat.symbol().to_owned(), fault))
+            }))
+        });
     Json(Health {
         status: health_status(fault.is_some()),
         oms_type: state.run.oms_type,

@@ -521,6 +521,32 @@ impl std::fmt::Display for MaterializeRefusal {
         }
     }
 }
+impl MaterializeRefusal {
+    /// Whether this is the venue failing to keep a promise it already made,
+    /// rather than an answer to what the caller asked for.
+    ///
+    /// The split decides two consumer-visible things: the status a refused
+    /// upgrade carries, and whether the run latches a terminal fault. Getting it
+    /// wrong in either direction is worse than the defect it closes. A river cap
+    /// is reachable, intentional and documented, so latching it would turn
+    /// ordinary capacity admission into a kill switch; a synthesis failure
+    /// reported as a bad request sends a consumer to fix a request that was
+    /// never wrong, and leaves `/health` saying the venue is fine.
+    pub(crate) fn is_venue_fault(&self) -> bool {
+        match self {
+            // `Reach` is the shape that was validated and whose generator still
+            // could not walk the river to the placement origin. `KeyMismatch` is
+            // an internal routing mistake: the run resolved a different key for
+            // this symbol than the one it was handed, which no caller can
+            // produce. Different causes, same consequence for the consumer -
+            // there is nothing it can change - so both are ours.
+            Self::Reach(_) | Self::KeyMismatch { .. } => true,
+            // Deliberate resource admission, and a resolution the request or the
+            // config owns. Both are answers, not failures.
+            Self::CapacityExhausted { .. } | Self::Resolve(_) => false,
+        }
+    }
+}
 impl std::error::Error for MaterializeRefusal {}
 impl From<ResolveRefusal> for MaterializeRefusal {
     fn from(value: ResolveRefusal) -> Self {
@@ -840,16 +866,27 @@ impl Rivers {
         Ok(self.resolve_key(&profile, None))
     }
 
+    /// The refusal stays typed rather than flattening into an `anyhow::Error`,
+    /// and that is load-bearing rather than tidiness. The caller has to tell a
+    /// river cap - reachable, intentional, and a bad request - from a validated
+    /// shape whose generator could not produce it, which is a venue fault. Both
+    /// arrived here as one opaque error, so every placement failure was reported
+    /// to the consumer as its own mistake.
     pub(crate) fn place_cursor(
         &self,
         key: &RiverKey,
         origin_ns: u64,
-    ) -> anyhow::Result<Box<dyn TickSource + Send>> {
-        let river = self.river(key).map_err(anyhow::Error::new)?;
-        reach_river(&river, origin_ns)?;
+    ) -> Result<Box<dyn TickSource + Send>, MaterializeRefusal> {
+        let river = self.river(key)?;
+        reach_river(&river, origin_ns).map_err(MaterializeRefusal::Reach)?;
         let mut positioned = locked(&river.checkpoints)
             .try_source_before(origin_ns)
-            .ok_or_else(|| anyhow::anyhow!("river {} cannot reach {origin_ns}", key.symbol()))?;
+            .ok_or_else(|| {
+                MaterializeRefusal::Reach(anyhow::anyhow!(
+                    "river {} cannot reach {origin_ns}",
+                    key.symbol()
+                ))
+            })?;
         let first = positioned.seek_to(origin_ns);
         Ok(Box::new(BoatCursor {
             first,
@@ -1109,6 +1146,35 @@ mod river_tests {
                 Err(MaterializeRefusal::KeyMismatch { .. })
             ),
             "a key nothing issued is refused rather than silently resolved"
+        );
+    }
+
+    /// Which refusals are the venue's own, which is what decides whether a
+    /// refused placement latches the run terminal and what status the consumer
+    /// is handed.
+    ///
+    /// Both directions are asserted, because both are dangerous. A river cap
+    /// that latched would make ordinary capacity admission a kill switch for
+    /// every account on a shared exchange; a synthesis failure that did not
+    /// latch leaves the venue announcing itself healthy while refusing every
+    /// upgrade and telling each consumer its request was bad.
+    #[test]
+    fn only_the_venue_owned_refusals_are_venue_faults() {
+        assert!(
+            MaterializeRefusal::Reach(anyhow::anyhow!("could not walk the river")).is_venue_fault(),
+            "a validated shape whose generator could not produce it is the venue's own failure"
+        );
+        assert!(
+            MaterializeRefusal::KeyMismatch {
+                symbol: "BTCUSDT".to_owned(),
+            }
+            .is_venue_fault(),
+            "an internal routing mismatch is not something a caller can produce or change"
+        );
+        assert!(
+            !MaterializeRefusal::CapacityExhausted { cap: 4, count: 4 }.is_venue_fault(),
+            "the river cap is deliberate resource admission, so latching it would make ordinary \
+             capacity a venue kill switch"
         );
     }
 

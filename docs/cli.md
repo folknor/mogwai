@@ -105,6 +105,17 @@ a legal symbol, a shape whose settlement currency this run does not fund, a
 shape the resolved configuration makes invalid, and an exhausted river cap.
 Each is a 400 naming its reason.
 
+A `/ws` upgrade that cannot be served splits by whose fault it is, and the
+status is the machine-readable half of that answer. A 400 means changing the
+request could make it work: a malformed symbol, an unfunded settlement currency,
+an invalid shape, an exhausted river cap. A 503 means the venue could not
+produce water its own configuration had already validated. Nothing about the
+request will fix that, so a consumer meeting one must stop rather than retry:
+the run has latched a terminal fault, `GET /health` reports it with
+`kind: "materialize"`, and recovery means a new run. Every upgrade that had
+joined the same placement receives that same answer rather than each re-running
+the failure.
+
 `GET /clock` takes no parameters and always answers on the run's clock:
 `venue_now_ns` is the affine map read at the wall, and `data_origin_ns` and
 `warmup_ns` are venue facts identical for every river. It took `symbol` and

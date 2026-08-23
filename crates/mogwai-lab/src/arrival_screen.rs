@@ -917,6 +917,20 @@ impl ParentSource for ParentWalk {
                     canonical_params: None,
                     seed: None,
                 },
+                // Unreachable for the same reason, and named for the same
+                // reason. A materialization fault is raised by the venue while
+                // walking a river to a placement origin; the screen has no
+                // venue, no boatyard and no placement.
+                TickFault::Materialize => ScreenRefusal {
+                    variant: "materialize".to_string(),
+                    clock_ns: 0,
+                    detail: "a venue materialization fault reached the offline screen, which \
+                             places no boats"
+                        .to_string(),
+                    family: None,
+                    canonical_params: None,
+                    seed: None,
+                },
             }),
             Self::Kernel(walk) => {
                 let stride = walk.child_stride_ns();

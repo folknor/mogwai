@@ -172,6 +172,21 @@ pub enum TickFault {
     /// no latent state to report, and inventing one would put a number in the
     /// diagnostic that describes nothing.
     Injected,
+    /// A river could not be materialized to the instant a placement needed.
+    ///
+    /// Not produced by a source, which is the point: it happens before there is
+    /// a source to produce it, while the venue is walking a river to the
+    /// placement origin. It is a fault rather than a refusal because the shape
+    /// was already validated - the venue promised a servable river and its
+    /// generator could not produce one - and the alternative was reporting it to
+    /// the consumer as a bad request, which sends a consumer to fix a request
+    /// that was never wrong.
+    ///
+    /// Carries no detail for the same reason `Injected` does not: there is no
+    /// clock instant to report, because the failure is that no instant could be
+    /// reached. The symbol and the underlying error are reported where the fault
+    /// is latched, which is the only place that knows them.
+    Materialize,
 }
 
 /// One replayable market-data event.

@@ -132,10 +132,44 @@ pub(crate) struct Boat {
 enum Slot {
     Placing(Arc<Semaphore>),
     Placed(PlacedBoat),
+    /// A placement that failed, kept so every joiner on the same key observes
+    /// the one result of the one operation they joined.
+    ///
+    /// Without it a failure was not a result at all: the slot was removed, the
+    /// waiter's `acquire` error was discarded, the loop saw no slot and
+    /// installed a fresh `Placing` of its own. So N joiners on one key ran the
+    /// same deterministic failure N times, serially, each paying the whole walk
+    /// before failing exactly as the first one had. They joined one placement
+    /// and each got their own.
+    ///
+    /// Retained for the life of the run rather than retried, because every
+    /// failure this can hold is deterministic in the key: the river cap is a
+    /// property of the run, and a generator that could not walk this river to
+    /// this origin will not walk it next time either.
+    Failed(Arc<PlacementFailure>),
 }
 struct PlacedBoat {
     boat: Arc<Boat>,
     passengers: u32,
+}
+
+/// Why a placement failed, and whose fault it was.
+///
+/// Shared rather than cloned because the underlying error is not `Clone` and
+/// because every waiter is meant to see the same failure, not a copy of it.
+#[derive(Debug)]
+pub(crate) struct PlacementFailure {
+    pub(crate) message: String,
+    /// Whether the venue failed to keep a promise, as opposed to answering the
+    /// request. Decides the status the consumer sees and whether the run
+    /// latches a terminal fault; see `MaterializeRefusal::is_venue_fault`.
+    pub(crate) venue_fault: bool,
+}
+
+impl std::fmt::Display for PlacementFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 pub(crate) struct Boatyard {
@@ -152,7 +186,7 @@ pub(crate) struct BoardRequest {
 }
 #[derive(Debug)]
 pub(crate) enum BoardRefusal {
-    Placement(anyhow::Error),
+    Placement(Arc<PlacementFailure>),
 }
 
 pub(crate) struct Ticket {
@@ -179,7 +213,14 @@ impl Boatyard {
         self: &Arc<Self>,
         req: &BoardRequest,
     ) -> Result<Ticket, BoardRefusal> {
-        let key = BoatKey::new(req.river.clone(), req.speed).map_err(BoardRefusal::Placement)?;
+        let key = BoatKey::new(req.river.clone(), req.speed).map_err(|err| {
+            // A speed this quantization refuses is a bad request, not a venue
+            // that failed at anything.
+            BoardRefusal::Placement(Arc::new(PlacementFailure {
+                message: format!("{err:#}"),
+                venue_fault: false,
+            }))
+        })?;
         let speed = key.speed();
         loop {
             let wait = {
@@ -191,6 +232,13 @@ impl Boatyard {
                             yard: Arc::clone(self),
                             boat: Arc::clone(&placed.boat),
                         });
+                    }
+                    // The one result of the one placement this caller joined.
+                    // Returned rather than retried: every failure held here is
+                    // deterministic in the key, so a retry pays the whole walk
+                    // again to fail identically.
+                    Some(Slot::Failed(failure)) => {
+                        return Err(BoardRefusal::Placement(Arc::clone(failure)));
                     }
                     Some(Slot::Placing(placing)) => Some(Arc::clone(placing)),
                     None => {
@@ -210,8 +258,23 @@ impl Boatyard {
         let origin_ns = self.origin_ns;
         let cursor = tokio::task::spawn_blocking(move || rivers.place_cursor(&river, origin_ns))
             .await
-            .map_err(|err| BoardRefusal::Placement(anyhow::anyhow!(err)))
-            .and_then(|result| result.map_err(BoardRefusal::Placement));
+            .map_err(|err| {
+                // The blocking task panicked or was cancelled. Nothing the
+                // caller asked for produces that, so it is ours.
+                Arc::new(PlacementFailure {
+                    message: format!("placement task did not complete: {err}"),
+                    venue_fault: true,
+                })
+            })
+            .and_then(|result| {
+                result.map_err(|refusal| {
+                    Arc::new(PlacementFailure {
+                        venue_fault: refusal.is_venue_fault(),
+                        message: refusal.to_string(),
+                    })
+                })
+            })
+            .map_err(BoardRefusal::Placement);
         let boat = cursor.map(|cursor| {
             let sim = SimClock {
                 sim_epoch_ns: self.origin_ns,
@@ -267,7 +330,12 @@ impl Boatyard {
                     boat,
                 })
             }
-            Err(err) => Err(err),
+            Err(BoardRefusal::Placement(failure)) => {
+                // Recorded rather than left absent, so a joiner that wakes finds
+                // this failure instead of an empty slot to re-place into.
+                boats.insert(key, Slot::Failed(Arc::clone(&failure)));
+                Err(BoardRefusal::Placement(failure))
+            }
         }
     }
     fn locked(&self) -> std::sync::MutexGuard<'_, HashMap<BoatKey, Slot>> {
@@ -598,10 +666,20 @@ mod tests {
         );
     }
 
+    /// A failed placement is a result, and every later boarder on that key gets
+    /// that one result rather than running the failure again.
+    ///
+    /// The old shape removed the slot entirely, which left nothing for the next
+    /// boarder to find: it installed a fresh placeholder and re-ran the same
+    /// deterministic failure, paying the whole walk to fail exactly as the first
+    /// one had. What the removal was protecting against - a stale `Placing`
+    /// placeholder wedging joiners forever - is still closed, because the slot a
+    /// boarder finds here is a finished result and never an in-flight one.
     #[tokio::test]
-    async fn a_failed_placement_leaves_no_placeholder_for_the_next_joiner() {
+    async fn a_failed_placement_is_shared_rather_than_re_run() {
         let (yard, river) = yard();
         let unplaceable = river.with_unresolvable_bundle();
+        let mut failures = Vec::new();
         for _ in 0..2 {
             match yard
                 .board(&BoardRequest {
@@ -610,13 +688,13 @@ mod tests {
                 })
                 .await
             {
-                Err(BoardRefusal::Placement(_)) => {}
+                Err(BoardRefusal::Placement(failure)) => failures.push(failure),
                 _ => panic!("an unresolvable river must refuse placement"),
             }
         }
         assert!(
-            yard.locked().is_empty(),
-            "a failed placement left a placeholder behind"
+            Arc::ptr_eq(&failures[0], &failures[1]),
+            "the second boarder ran its own placement instead of joining the first one's result"
         );
     }
     /// The placement handoff, which the sequential tests cannot reach: every

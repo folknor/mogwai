@@ -419,22 +419,36 @@ pub(crate) async fn ws_upgrade(
         .await
     {
         Ok(ticket) => ticket,
-        // Misclassified, and knowingly so until the fault vocabulary exists.
-        // Placement performs the river's first materialization, so a failure here
-        // is usually a generator that could not produce a shape config already
-        // validated - a venue fault, not a bad request. It reaches the consumer
-        // as a 400 and never reaches the tape fault channel or `/health`, because
-        // placement runs before `Tape::start` installs the fault sender, and
-        // because `TickFault` has no variant for a materialization that could not
-        // proceed. Every river has always failed this way; the riverless boot
-        // merely makes it the only path for the default label too. Closing it
-        // means giving the run a latched materialization fault that follows the
-        // terminal path and answers `/health`, and handing every waiter on the
-        // same placement that terminal rather than this refusal.
-        Err(BoardRefusal::Placement(err)) => {
+        // Placement performs the river's first materialization, so what failed
+        // decides whose fault it is, and the two answers are not
+        // interchangeable. A river cap is a reachable, intentional refusal of
+        // what was asked for, and stays a 400. A validated shape whose generator
+        // could not produce it is the venue failing a promise it already made -
+        // there is nothing the caller can change, so reporting it as a bad
+        // request sends a consumer to fix a request that was never wrong, and
+        // leaves it retrying forever against a venue that will never serve it.
+        //
+        // The venue-fault arm latches, which takes the run down the terminal
+        // path and puts the fault on `/health`. Without that the venue announced
+        // a healthy readiness line, refused every upgrade, and went on reporting
+        // itself sound.
+        Err(BoardRefusal::Placement(failure)) => {
+            if failure.venue_fault {
+                state
+                    .run
+                    .latch_materialize_fault(symbol.as_ref(), &failure.message);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "the venue could not materialize {symbol}, which its own config \
+                         validated: {failure}. This run is faulted; see GET /health"
+                    ),
+                )
+                    .into_response();
+            }
             return (
                 StatusCode::BAD_REQUEST,
-                format!("could not place boat for {symbol}: {err}"),
+                format!("could not place boat for {symbol}: {failure}"),
             )
                 .into_response();
         }

@@ -82,28 +82,12 @@ undone. Neither is urgent; both modes must eventually be supported.
   near the tape origin cannot carry its own warmup. Better as a named refusal at
   request time than a short warmup nobody notices.
 
-- **A first materialization that fails is reported as the caller's mistake.**
-  This is the residue riverless boot named and did not close, and riverless boot
-  made it the only path for every label. Placement performs a river's first
-  materialization, so a generator that cannot produce a shape the config already
-  validated is a venue fault - and it reaches the consumer as a `400` from
-  `ws_upgrade`, never latches, never reaches the tape fault channel and never
-  shows on `/health`. The venue can therefore announce a healthy readiness line
-  and then describe its own failure as a bad request, which is the one reading a
-  consumer cannot recover from: it will retry a request that was never wrong.
-
-  Two things are missing. Placement runs before `Tape::start` installs the fault
-  sender, so there is nothing to send on yet; and `TickFault` has no variant for
-  a materialization that could not proceed. Closing it means giving the run a
-  latched materialization fault that follows the terminal path and answers
-  `/health`, and handing every waiter on the same placement that terminal rather
-  than a per-caller refusal.
-
-  For the transient path, a boot symbol supplied at launch would additionally
-  move the funding refusal to boot: today a config funding only USDT boots
-  happily and refuses `MNQ` at first bind, because only configured shapes are
-  funding-checked at boot while presets and the fallback are merely recorded as
-  barred.
+- A boot symbol supplied at launch would move the transient path's funding
+  refusal to boot. Today a config funding only USDT boots happily and refuses
+  `MNQ` at first bind, because only configured shapes are funding-checked at
+  boot while presets and the fallback are merely recorded as barred. The
+  transient launcher knows its one symbol up front, so it is the one caller that
+  could be told at boot rather than at first use.
 
 ## Venue and protocol
 

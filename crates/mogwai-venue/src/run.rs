@@ -641,6 +641,17 @@ pub(crate) struct Run {
     /// which clone a fault arrived on - so an injected fault and a generated one
     /// take the same teardown, which is the whole point of injecting it.
     fault_tx: std::sync::mpsc::Sender<mogwai_data::TickFault>,
+    /// The first venue-owned materialization failure this run suffered, if any.
+    ///
+    /// Latched rather than reported per caller, and separate from the tape fault
+    /// channel because it happens before there is a tape: placement walks a
+    /// river to its origin before `Tape::start` installs a fault sender, so the
+    /// channel that carries every other terminal condition does not exist yet.
+    ///
+    /// Only a venue fault latches. A river cap is reachable, intentional and
+    /// documented as a bad request, so latching it would make ordinary capacity
+    /// admission a kill switch for the whole venue.
+    materialize_fault: Mutex<Option<String>>,
     /// Who is reading which account, and the lanes their output reaches.
     ///
     /// One structure rather than the four this replaced, so the answers cannot
@@ -735,6 +746,7 @@ impl Run {
             complete_tx,
             passengers_tx,
             fault_tx,
+            materialize_fault: Mutex::new(None),
             registry: crate::registry::ConnectionRegistry::new(),
             order_owners: Mutex::new(std::collections::HashMap::new()),
         })
@@ -1787,6 +1799,51 @@ impl Run {
     /// mutex would let one connection's cost block every other's teardown.
     pub(crate) fn bound_lanes(&self) -> Vec<crate::registry::BoundLane> {
         self.registry.bound_lanes()
+    }
+
+    /// Record a venue-owned materialization failure, first one wins.
+    ///
+    /// First rather than latest because it is the one that describes what went
+    /// wrong: every later placement on a venue whose generator has already
+    /// failed is a consequence rather than a cause.
+    ///
+    /// Also sends on the fault channel, so a venue that can no longer produce
+    /// water it promised takes the same terminal path as a tape that faulted
+    /// mid-run. A run that kept serving its other rivers would be a venue
+    /// selectively trustworthy about which of its own promises it kept, which is
+    /// worse for a forward test than ending.
+    pub(crate) fn latch_materialize_fault(&self, symbol: &str, detail: &str) {
+        let mut latched = self
+            .materialize_fault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if latched.is_some() {
+            return;
+        }
+        *latched = Some(format!("{symbol}: {detail}"));
+        tracing::error!(
+            symbol,
+            detail,
+            "a river the config validated could not be materialized; the venue is faulted",
+        );
+        drop(latched);
+        // A closed channel is a venue already tearing down for some other
+        // reason, which is not a second failure to report.
+        if self
+            .fault_tx
+            .send(mogwai_data::TickFault::Materialize)
+            .is_err()
+        {
+            tracing::debug!("the venue was already tearing down when a river failed to appear");
+        }
+    }
+
+    /// The latched materialization fault, for `/health`.
+    pub(crate) fn materialize_fault(&self) -> Option<String> {
+        self.materialize_fault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Earliest sim instant the tape can serve.
