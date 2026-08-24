@@ -47,7 +47,14 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Readiness-record schema this launcher understands. Step 3 refuses anything
 # else rather than reading fields that may have moved.
-READY_VERSION = 6
+#
+# This is a hand-kept copy of `ReadyRecord::VERSION`, and it went stale for two
+# bumps without anything noticing, which killed every mode of this script at
+# boot. Nothing here can derive the constant, so what keeps it honest is that
+# the `control-shapes` mode below boots a real venue and is registered as a
+# gate check: a stale pin now fails the gate on the next run rather than the
+# next time a human happens to invoke this script.
+READY_VERSION = 8
 
 # Each mode's default venue config, relative to scripts/. `None` means the
 # venue's own built-in defaults.
@@ -62,6 +69,95 @@ MODE_CONFIGS = {
     "stop": "smoke-stop.toml",
     "futures": "../crates/mogwai-cli/tests/configs/mnq.toml",
     "fees": "../crates/mogwai-cli/tests/configs/fees.toml",
+    "control-shapes": None,
+}
+
+
+# --------------------------------------------------------------------------
+# The control plane's request shape.
+# --------------------------------------------------------------------------
+
+# Every divergence kind the venue arms. The venue publishes no list of these,
+# so this is a hand-kept copy and cannot prove itself complete - a kind added
+# in Rust and not added here is simply untested. What it does buy is that no
+# script can post a kind the venue does not have, and that the `control-shapes`
+# mode below proves every kind named here is one a real venue accepts.
+DIVERGENCE_KINDS = frozenset(
+    {
+        "PartialFillNext",
+        "RejectNextSubmit",
+        "RejectNextCancel",
+        "DelayAcks",
+        "CommandLatency",
+        "DuplicateNextFill",
+        "DropNextAccountUpdate",
+        "GoDark",
+        "StallData",
+        "FeeSurcharge",
+        "CancelOpenOrderSilently",
+        "FaultTape",
+    }
+)
+
+
+def divergence_body(
+    kind: str, account: str | None = None, symbol: str | None = None, **args: object
+) -> dict:
+    """The wire shape `POST /control/divergence` takes.
+
+    Every script that arms a divergence builds its body here, and that is the
+    point rather than tidiness. The route used to take the divergence tag
+    flattened into the request object, so a body was `{"type": ..., <fields>}`;
+    it now takes `kind` beside an `args` object and refuses unknown top-level
+    fields outright. Two scripts were left posting the old shape and took an
+    HTTP refusal before arming anything, because each hand-rolled its own dict
+    at the call site and nothing tied those dicts to the venue. One constructor
+    means the next such change breaks in one place.
+    """
+    assert kind in DIVERGENCE_KINDS, f"unknown divergence kind {kind}"
+    body: dict = {"kind": kind, "args": dict(args)}
+    if account is not None:
+        body["account"] = account
+    if symbol is not None:
+        body["symbol"] = symbol
+    return body
+
+
+# One representative, in-range body per divergence kind, keyed by kind. The
+# `control-shapes` mode posts every one of these at a live venue, which is what
+# makes it a gate rather than a spell-check: a body the venue would refuse
+# takes a real refusal from the real deserializer.
+#
+# `FaultTape` is deliberately absent. Arming it takes the venue down by design,
+# so a run that armed it could not go on to arm anything else, and it is the
+# one kind whose shape is empty anyway.
+CONTROL_SHAPE_ARMS: dict[str, dict] = {
+    "PartialFillNext": divergence_body(
+        "PartialFillNext", client_order_id="SHAPE-1", fraction="0.5"
+    ),
+    "RejectNextSubmit": divergence_body("RejectNextSubmit", reason="shape check"),
+    "RejectNextCancel": divergence_body("RejectNextCancel", reason="shape check"),
+    "DelayAcks": divergence_body("DelayAcks", ms=0),
+    "CommandLatency": divergence_body(
+        "CommandLatency",
+        submit_act_ms=0,
+        modify_act_ms=0,
+        cancel_act_ms=0,
+        submit_ack_ms=0,
+        modify_ack_ms=0,
+        cancel_ack_ms=0,
+    ),
+    "DuplicateNextFill": divergence_body("DuplicateNextFill"),
+    "DropNextAccountUpdate": divergence_body("DropNextAccountUpdate"),
+    "GoDark": divergence_body("GoDark", ms=0),
+    "StallData": divergence_body("StallData", ms=0),
+    "FeeSurcharge": divergence_body("FeeSurcharge", mult="1.5", window_ms=1000),
+    # Names no resting order, so the venue answers `404 unknown order`. That is
+    # the assertion: a shape refusal is decided at the deserializer and never
+    # reaches the order lookup, so reaching a 404 proves the shape parsed.
+    "CancelOpenOrderSilently": divergence_body(
+        "CancelOpenOrderSilently", client_order_id="NO-SUCH-ORDER"
+    ),
 }
 
 
@@ -109,7 +205,20 @@ def venue_binary() -> str:
     The build is not optional and is not skipped when a binary already exists: a
     smoke run against a stale binary asserts things about code that is not in
     the tree, which is worse than no smoke run at all.
+
+    `MOGWAI_VENUE_BINARY` names a binary the caller has just built itself, and
+    is the one way past that build. It exists for the brokkr `script_check`
+    entry that runs the `control-shapes` mode: a check running inside brokkr
+    cannot shell back out to `brokkr run` to get its binary, so the gate builds
+    first and hands the path in. The invariant is unchanged rather than waived -
+    the binary is still freshly built from the tree under test, just by the
+    caller rather than here.
     """
+    override = os.environ.get("MOGWAI_VENUE_BINARY")
+    if override:
+        path = override if os.path.isabs(override) else os.path.join(REPO, override)
+        assert os.path.exists(path), f"MOGWAI_VENUE_BINARY names no binary at {path}"
+        return path
     candidates = [
         os.path.join(REPO, "target", profile, "mogwai") for profile in ("release", "debug")
     ]
@@ -617,15 +726,15 @@ def mode_admission(venue: Venue) -> str:
 def mode_command_latency(venue: Venue) -> str:
     armed = venue.post(
         "/control/divergence",
-        {
-            "type": "CommandLatency",
-            "submit_act_ms": 400,
-            "modify_act_ms": 0,
-            "cancel_act_ms": 0,
-            "submit_ack_ms": 0,
-            "modify_ack_ms": 0,
-            "cancel_ack_ms": 0,
-        },
+        divergence_body(
+            "CommandLatency",
+            submit_act_ms=400,
+            modify_act_ms=0,
+            cancel_act_ms=0,
+            submit_ack_ms=0,
+            modify_ack_ms=0,
+            cancel_ack_ms=0,
+        ),
     )
     assert armed == 202, f"arming refused with {armed}"
 
@@ -1018,6 +1127,43 @@ def mode_duration(venue: Venue, duration: str) -> str:
     return f"declared {duration} run announced completion and exited 0"
 
 
+def mode_control_shapes(venue: Venue) -> str:
+    """Post every divergence kind at a live venue and refuse any shape refusal.
+
+    This exists because of how the last control-plane change was found. The
+    route's request shape changed, every Rust caller moved with it, the whole
+    suite went green, and two scripts were left posting a body the venue now
+    refuses outright - a hole one layer up that no test could see, because no
+    test drove a script. A grep for the old spelling would not have been a gate
+    either: the question is not whether a string appears, it is whether the
+    venue accepts what the scripts send. So this sends it.
+
+    A refusal at the deserializer is a `400` or a `422` and is decided before
+    any venue state is consulted, so anything else - a `202`, or the `404` an
+    unknown order earns - proves the shape itself was understood. That is the
+    line this asserts on, which keeps the check about shape and leaves each
+    kind's semantics to the modes and tests that own them.
+    """
+    for kind, body in sorted(CONTROL_SHAPE_ARMS.items()):
+        status = venue.post("/control/divergence", body)
+        assert status not in (400, 415, 422), (
+            f"the venue refused the {kind} request shape with {status}; "
+            f"scripts/smoke.py posts {json.dumps(body)}"
+        )
+    # `FaultTape` is armed last and alone, because it is the one kind that ends
+    # the run it is armed against. Its shape carries no arguments, so an empty
+    # `args` is the whole of what there is to check - and the venue answering
+    # `202` rather than a deserializer refusal is that check.
+    status = venue.post("/control/divergence", divergence_body("FaultTape"))
+    assert status == 202, f"the venue refused the FaultTape request shape with {status}"
+    covered = set(CONTROL_SHAPE_ARMS) | {"FaultTape"}
+    assert covered == set(DIVERGENCE_KINDS), (
+        "every divergence kind this script knows must be posted here; "
+        f"uncovered: {sorted(set(DIVERGENCE_KINDS) - covered)}"
+    )
+    return f"the venue accepted the request shape of all {len(covered)} divergence kinds"
+
+
 MODES = {
     "default": mode_default,
     "heartbeat": mode_heartbeat,
@@ -1029,6 +1175,7 @@ MODES = {
     "stop": mode_stop,
     "futures": mode_futures,
     "fees": mode_fees,
+    "control-shapes": mode_control_shapes,
 }
 
 

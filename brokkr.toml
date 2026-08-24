@@ -109,6 +109,39 @@ match = "contains"
 stream = "both"
 stage = "pre-test"
 
+# The control plane's request shape, checked by posting it at a real venue.
+#
+# This exists because of a hole the suite structurally could not see. The
+# `/control/divergence` request shape changed, every Rust caller moved with it,
+# the whole workspace went green - and two scripts were left posting the shape
+# the venue now refuses, so the end-to-end smoke and the arm-eviction probe both
+# took an HTTP refusal before arming anything. Underneath that, this script's
+# readiness-version pin had been stale for two schema bumps, which killed every
+# mode of it at boot. Both were invisible for the same reason: nothing ran the
+# scripts. A test suite gates the code the tests import, and these scripts are
+# the layer above it.
+#
+# So the check runs one, against a venue it boots. It is deliberately not a grep
+# for the old spelling: the question is not whether some string appears in a
+# file, it is whether the venue accepts what the scripts actually send, and the
+# only thing that answers that is sending it. The mode posts a body for every
+# divergence kind and fails on a deserializer refusal, which also drags the
+# readiness pin and the launcher contract through a real boot on every gate run.
+#
+# `post-test` because it needs a built binary, and it builds one rather than
+# trusting whatever is in `target/`: a check against a stale binary asserts
+# things about code that is not in the tree. The build is here rather than in
+# the script because the script reaches for `brokkr run`, and a check running
+# inside brokkr cannot shell back out to it - so the gate builds and passes the
+# path in through `MOGWAI_VENUE_BINARY`.
+[[script_check]]
+name = "control-plane-shapes"
+command = "cargo build --release --bin mogwai && MOGWAI_VENUE_BINARY=target/release/mogwai python3 scripts/smoke.py control-shapes"
+expect = "PASS [control-shapes]"
+match = "contains"
+stream = "both"
+stage = "post-test"
+
 [test]
 gate_profile = "gate"
 # Without a default profile, a bare `brokkr check` runs every [[check]] entry -

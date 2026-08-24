@@ -262,7 +262,7 @@ async fn an_order_for_another_symbol_is_refused_on_a_bound_socket() {
     assert_eq!(
         post_divergence(
             &venue.http_base(),
-            r#"{"type":"CommandLatency","submit_act_ms":60000}"#,
+            r#"{"kind":"CommandLatency","args":{"submit_act_ms":60000}}"#,
         ),
         202,
         "the act latency is armed"
@@ -1401,7 +1401,7 @@ async fn a_blackout_armed_on_one_account_leaves_another_seeing() {
         "/control/divergence",
         // The ceiling, in simulated ms. This config is accelerated, so a
         // wall-comfortable window has to be a large sim one.
-        r#"{"type":"GoDark","ms":3600000,"account":"WYRD-500"}"#,
+        r#"{"kind":"GoDark","args":{"ms":3600000},"account":"WYRD-500"}"#,
     );
     assert_eq!(status, 202, "the targeted blackout arms: {body}");
 
@@ -2103,7 +2103,10 @@ async fn an_armed_divergence_reaches_every_connection() {
 
     // Arm a blackout over the control plane. It is armed against the run, not
     // against an account, so it must gate this socket's market data.
-    let armed = post_divergence(&venue.http_base(), r#"{"type":"StallData","ms":180000}"#);
+    let armed = post_divergence(
+        &venue.http_base(),
+        r#"{"kind":"StallData","args":{"ms":180000}}"#,
+    );
     assert_eq!(armed, 202, "the divergence is accepted");
     // No ceiling, and no clock read. This used to read `/clock?symbol=` for the
     // boat's own published instant and assert that nothing arriving was stamped
@@ -3113,7 +3116,7 @@ async fn websocket_commands_cannot_overtake_each_other() {
     assert_eq!(
         post_divergence(
             &venue.http_base(),
-            r#"{"type":"CommandLatency","submit_act_ms":200,"cancel_act_ms":0}"#,
+            r#"{"kind":"CommandLatency","args":{"submit_act_ms":200,"cancel_act_ms":0}}"#,
         ),
         202
     );
@@ -3332,6 +3335,39 @@ fn post_divergence_body(base: &str, body: &str) -> (u16, String) {
         .map(|(_, body)| body.to_owned())
         .unwrap_or_default();
     (status, body)
+}
+
+/// The control request has one structural home for scope, kind and arguments.
+/// Unknown keys at either level are refused, and every accepted response has a
+/// stable JSON shape rather than switching among empty text, prose and debug
+/// output depending on which arm ran.
+#[test]
+#[ignore = "binds a loopback listener"]
+fn divergence_requests_refuse_unknown_fields_and_acknowledge_in_json() {
+    let venue = spawn(&["--config", &fast_config()]);
+
+    let (status, body) = post_divergence_body(
+        &venue.http_base(),
+        r#"{"kind":"GoDark","args":{"ms":0,"typo":1}}"#,
+    );
+    assert_eq!(status, 400, "an unknown argument is refused: {body}");
+    let refusal: serde_json::Value = serde_json::from_str(&body).expect("JSON refusal");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("args.typo")),
+        "the refusal points at the ignored field: {body}"
+    );
+
+    let (status, body) =
+        post_divergence_body(&venue.http_base(), r#"{"kind":"GoDark","args":{"ms":0}}"#);
+    assert_eq!(status, 202, "the valid arm is accepted: {body}");
+    let accepted: serde_json::Value = serde_json::from_str(&body).expect("JSON acceptance");
+    assert_eq!(accepted["status"], "accepted", "stable ack shape: {body}");
+    assert!(
+        accepted.get("detail").is_none(),
+        "no prose-only success: {body}"
+    );
 }
 
 /// Generator havoc no longer needs an empty boatyard, and that is the whole
@@ -3710,7 +3746,7 @@ async fn a_silent_cancel_naming_an_account_reaches_only_that_accounts_book() {
 
     let (status, body) = post_divergence_body(
         &venue.http_base(),
-        r#"{"account":"WYRD-911","type":"CancelOpenOrderSilently","client_order_id":"COLLIDE-1"}"#,
+        r#"{"account":"WYRD-911","kind":"CancelOpenOrderSilently","args":{"client_order_id":"COLLIDE-1"}}"#,
     );
     assert_eq!(
         status, 404,
@@ -3722,7 +3758,7 @@ async fn a_silent_cancel_naming_an_account_reaches_only_that_accounts_book() {
     // states by accepting the properly-targeted cancel of it.
     let (status, body) = post_divergence_body(
         &venue.http_base(),
-        r#"{"account":"WYRD-910","type":"CancelOpenOrderSilently","client_order_id":"COLLIDE-1"}"#,
+        r#"{"account":"WYRD-910","kind":"CancelOpenOrderSilently","args":{"client_order_id":"COLLIDE-1"}}"#,
     );
     assert_eq!(
         status, 202,
@@ -3783,7 +3819,7 @@ async fn a_missed_silent_cancel_diagnoses_without_cancelling_the_default_account
 
     let (status, body) = post_divergence_body(
         &venue.http_base(),
-        r#"{"account":"WYRD-912","type":"CancelOpenOrderSilently","client_order_id":"COLLIDE-2"}"#,
+        r#"{"account":"WYRD-912","kind":"CancelOpenOrderSilently","args":{"client_order_id":"COLLIDE-2"}}"#,
     );
     assert_eq!(
         status, 404,
@@ -3792,7 +3828,7 @@ async fn a_missed_silent_cancel_diagnoses_without_cancelling_the_default_account
 
     let (status, body) = post_divergence_body(
         &venue.http_base(),
-        r#"{"type":"CancelOpenOrderSilently","client_order_id":"COLLIDE-2"}"#,
+        r#"{"kind":"CancelOpenOrderSilently","args":{"client_order_id":"COLLIDE-2"}}"#,
     );
     assert_eq!(
         status, 202,
@@ -3898,7 +3934,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
 
     let (status, body) = post_divergence_body(
         &venue.http_base(),
-        r#"{"type":"CancelOpenOrderSilently","symbol":"MNQ","client_order_id":"SILENT-1"}"#,
+        r#"{"kind":"CancelOpenOrderSilently","symbol":"MNQ","args":{"client_order_id":"SILENT-1"}}"#,
     );
     assert_eq!(status, 400, "a mismatched symbol is refused: {body}");
     assert!(
@@ -3914,7 +3950,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
     let (status, body) = post_divergence_body(
         &venue.http_base(),
         &format!(
-            r#"{{"type":"CancelOpenOrderSilently","symbol":"{}","client_order_id":"SILENT-1"}}"#,
+            r#"{{"kind":"CancelOpenOrderSilently","symbol":"{}","args":{{"client_order_id":"SILENT-1"}}}}"#,
             venue.symbol
         ),
     );
@@ -3924,7 +3960,7 @@ async fn a_silent_cancel_naming_the_wrong_symbol_is_refused() {
     // than a flattened "unknown order".
     let (status, body) = post_divergence_body(
         &venue.http_base(),
-        r#"{"type":"CancelOpenOrderSilently","client_order_id":"SILENT-1"}"#,
+        r#"{"kind":"CancelOpenOrderSilently","args":{"client_order_id":"SILENT-1"}}"#,
     );
     assert_eq!(status, 404, "an already-cancelled order is refused: {body}");
     assert!(

@@ -127,6 +127,18 @@ or when it hears about its own commands, rather than what the generator
 produces - so on a shared exchange, blacking out or slowing one subagent leaves
 the rest of the batch untouched.
 
+Every control post has one request shape: `kind` names the divergence, `args`
+contains only that kind's fields, and the optional `account` and `symbol` scope
+sit beside them. For example:
+
+    {"kind":"GoDark","args":{"ms":60000},"account":"WYRD-500"}
+
+Unknown top-level fields and unknown fields inside `args` are refused. Every
+successful post answers `202` with a JSON object whose `status` is `accepted`;
+`detail` and `evicted` appear only when there is collateral information to
+report. A scenario driver never has to distinguish an empty body, prose and a
+debug rendering.
+
 The control plane arms and never disarms. There is no clear: the route off an
 armed window is to re-arm it with a zero span, which is closed on every reader's
 clock, and it is scoped exactly like any other arm - naming an account lifts

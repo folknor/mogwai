@@ -198,7 +198,19 @@ async fn ship_venue_havoc(
 ) -> anyhow::Result<()> {
     let url = join_url(http_base, "control/divergence");
     for divergence in &spec.venue {
-        let body = serde_json::to_vec(divergence).context("encode divergence")?;
+        let serde_json::Value::Object(mut encoded) =
+            serde_json::to_value(divergence).context("encode divergence")?
+        else {
+            unreachable!("Divergence always serializes as an object")
+        };
+        let kind = encoded
+            .remove("type")
+            .expect("Divergence serialization carries its tag");
+        let body = serde_json::to_vec(&serde_json::json!({
+            "kind": kind,
+            "args": encoded,
+        }))
+        .context("encode divergence request")?;
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         let response = http

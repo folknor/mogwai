@@ -30,19 +30,6 @@ entry cannot start until another lands, it says so under Blocked by.
 
 ## B. Engine correctness
 
-### B3. `MarketToLimit` fills the whole quantity at its own limit, off the tape
-
-An open engine defect documented on the wire type and nowhere actionable: the
-fill takes the whole quantity at the order's own limit with no reference to the
-tape, and a divergence-manufactured remainder rests `Inert` - unable to fill,
-unable to expire, ended only by a consumer cancel. `Resting::Inert`'s doc
-describes the mechanism and neither side points at the other.
-
-### B4. A linkage release emits no wire frame
-
-A consumer watching bracket exit legs waits forever. Stated only in doc comments;
-it is either a protocol gap to close or a refusal to state on the wire.
-
 ### B7. Account valuation residue
 
 None of it blocking:
@@ -56,14 +43,17 @@ None of it blocking:
   each needs a holding valued in a currency it is not denominated in, so this
   machinery is the part of that which now exists.
 
-### B8. A zero-price fill is booked, not refused
+### B9. The order path refolds all holds whenever a margin-equity sell is involved
 
-`warn_zero_px` warns and books, so a position can carry `mark_px == 0` if the
-tape produces one. `position_unrealized_checked`'s zero answer is the backstop
-for exactly that case. Refusing at the fill was considered and rejected in the
-2026-08-20 ruling, because by then the tape has already produced the print and
-aborting the serving path over it is the one thing no venue does. Open only as a
-known-covered case - listed so it is not re-filed as new.
+Filed 2026-08-24 from round 1. `rest_open`, `take_open` and `refresh_open_hold`
+each trigger a full `rebuild_order_holds_excluding(None)` refold when a
+margin-equity sell is in play, so those accounts went from O(1) to O(open
+orders) on the order path. Correct, and the price of moving the cover
+allocation into the aggregate, but it is a hot path.
+
+Whatever is done here must not break what round 1 established: the incremental
+`order_holds` cache and a fresh fold must stay in exact agreement, because
+`reconcile_order_holds` panics on any drift.
 
 ---
 
@@ -96,13 +86,6 @@ ledgers in opposite orders. Unreachable in practice - the control plane is an
 operator surface, serialized in every scenario the venue is driven from - and
 closing it costs a second lock on a path that has never contended.
 
-### C4. `DivergenceRequest` accepts and ignores unknown fields
-
-Serde flatten blocks `deny_unknown_fields`, so the fix is structural: a kind/args
-request shape. Related and unruled: its 202 body is empty, English prose, or
-prose containing a Rust `{:?}` render, on the one route an automated scenario
-driver uses most.
-
 ### C5. `enforce_funds` is an invisible whole-account mode
 
 Inferred from an empty balance map at engine construction, invisible from the
@@ -126,6 +109,14 @@ production sites, since the module's tests carry the same strings as expected
 values. Both refusals return `&'static str`, so fixing means changing the return
 type or reaching for a `const` formatter, which is why neither was fixed in
 passing.
+
+### C15. The `max_position` cap is applied to one symbol of a pending list
+
+Filed 2026-08-24 from round 1. `projected_qty`'s caller in `http.rs` takes the
+symbol from `pending.first()` and applies the cap to that symbol alone.
+Pre-existing and harmless while order lists are single-symbol, but nothing in
+the code or the docs states that they are, so the guard is one multi-symbol
+list away from checking the wrong book.
 
 ### C8. The launcher kills one process, not a process group
 
@@ -569,6 +560,27 @@ The verdict and both readings are recorded at the emission site in
 ---
 
 ## G. Tests and tooling
+
+### G16. The scripts hand-copy Rust constants, and only exercise proves them
+
+Filed 2026-08-24 from round 2, as the residue of the hole that round found.
+`scripts/smoke.py` had been pinning `READY_VERSION = 6` against a
+`ReadyRecord::VERSION` of 8 for two schema bumps, which killed every mode of the
+script at boot, and nothing noticed because nothing ran it. The same shape of
+copy is still there in two places: that pin, and `DIVERGENCE_KINDS`, the list of
+divergence tags the control-plane helper will build a body for.
+
+The new `control-shapes` gate closes the half that matters most - it boots a
+venue on every gate run, so a stale pin or a body the venue would refuse now
+fails immediately. What it cannot do is prove either list complete. A divergence
+kind added in Rust and not added to `DIVERGENCE_KINDS` is simply untested, and
+the gate stays green while it is. Closing that means the venue publishing its
+own kind list on a route the script can read, which is a wire addition and wants
+a ruling before it is built rather than being done in passing.
+
+The general lesson is worth more than either constant: a green workspace suite
+says nothing about the layer above the code the tests import. Two rounds running
+have now put a hole there.
 
 ### G1. Triage every test for parallel safety, and kill every fixed duration and wait
 
@@ -1054,9 +1066,11 @@ crates.io release. Nothing here can be fixed from this tree.
 
 Theirs, not ours. One item is genuinely ours and is called out first.
 
-- **Owed by us: tell them, in one message. Nobody has.** The whole account
-  surface moved under them and several entries below are stale in their favour.
-  This is a message to write, not code to change.
+- **Owed by us: tell them, in one message. Nobody has.** Three breaking changes
+  now, not two: the whole account surface moved under them, `OrderExpired`
+  replaced `OrderCanceled` for expiries, and the divergence control plane
+  changed request shape. Several entries below are stale in their favour. This
+  is a message to write, not code to change.
   - The break: they set no `account_type`, inherit `MOGWAI-001`, POST no account,
     and have no handling for a run that ends by liquidation. Their orchestrator
     runs the shared shape, so 50 subagents inheriting `MOGWAI-001` would take each
@@ -1067,6 +1081,18 @@ Theirs, not ours. One item is genuinely ours and is called out first.
     with a terminal `Expired` status where it reported `OrderCanceled`.
     Exhaustive matching stops compiling; loose matching stops seeing `Day` and
     `Gtd` orders end at all, which is the dangerous reading.
+  - The third break, C4: `POST /control/divergence` no longer takes the
+    divergence tag flattened into the request body. What they must send now is
+    `{"kind": "<Tag>", "args": {<the tag's fields>}}`, with the optional
+    `account` and `symbol` staying where they were, at the top level beside
+    `kind`. Unknown top-level fields are refused rather than ignored, so the old
+    `{"type": ..., <fields>}` body takes a `422` and arms nothing - it does not
+    degrade quietly, and a scenario that posted it would run on believing a
+    fault was armed. The refusals and the acks are JSON objects now too: a
+    refusal is `{"error": "<reason>"}` and an ack is `{"status": "accepted"}`,
+    carrying `detail` and the shed `evicted` divergence when an arm evicted one,
+    where both used to be a bare text body. Their poll-heal end-to-end test
+    drives this plane directly, so it is the run most likely to notice.
   - In their favour, same message: trailing stops, the full order-type surface
     including `TrailingStopLimit`, order lists and `RejectNextCancel` are all
     served, so their three unrun scenario files can now be written.

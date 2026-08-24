@@ -392,7 +392,13 @@ async fn ships_venue_havoc() {
         let bodies = state.control_bodies.lock().expect("control bodies mutex");
         let reject: Vec<Divergence> = bodies
             .iter()
-            .filter_map(|body| serde_json::from_str(body).ok())
+            .filter_map(|body| {
+                let mut request: serde_json::Value = serde_json::from_str(body).ok()?;
+                let kind = request.get_mut("kind")?.take();
+                let mut args = request.get_mut("args")?.take().as_object()?.clone();
+                args.insert("type".into(), kind);
+                serde_json::from_value(serde_json::Value::Object(args)).ok()
+            })
             .collect();
         assert!(
             reject.iter().any(|d| matches!(

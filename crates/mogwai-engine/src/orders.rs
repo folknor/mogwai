@@ -1431,8 +1431,10 @@ impl Engine {
     ///
     /// 1. Release. Every held child of this order becomes live, whatever rule
     ///    the parent carries - a child waits on its parent's execution, not on a
-    ///    contingency value. Releasing emits no wire frame: the child was
-    ///    accepted when it was submitted and its status does not change.
+    ///    contingency value. Release emits an `OrderUpdated`: status stays
+    ///    accepted, but scan eligibility, the hold and the order's revision all
+    ///    change, so silence would leave a wire consumer unable to tell held
+    ///    from live.
     /// 2. The rule. `Oco` cancels every named sibling still resting; `Ouo`
     ///    shrinks each by the quantity just filled and cancels the ones that
     ///    reach zero. `Oto` and `NoContingency` do neither - an OTO parent's
@@ -1449,7 +1451,9 @@ impl Engine {
     ) -> Vec<VenueMessage> {
         let mut out = Vec::new();
         for child in self.held_children_of(&order.client_order_id) {
-            self.release_child(&child, ts);
+            if let Some(released) = self.release_child(&child, ts) {
+                out.push(released);
+            }
         }
         let Some(link) = order.link.as_ref() else {
             return out;
@@ -1562,10 +1566,8 @@ impl Engine {
     /// at submit is not one a child sitting out its parent's execution kept, and
     /// the scan frontier starts at the release instant: the span before it was
     /// walked against an order that could not fill.
-    fn release_child(&mut self, client_order_id: &str, ts: u64) {
-        let Some(pos) = self.open.position(client_order_id) else {
-            return;
-        };
+    fn release_child(&mut self, client_order_id: &str, ts: u64) -> Option<VenueMessage> {
+        let pos = self.open.position(client_order_id)?;
         let before = self.open[pos].clone();
         let increment = self
             .instruments
@@ -1605,6 +1607,16 @@ impl Engine {
         }
         self.refresh_open_hold(pos, &before);
         tracing::debug!(child = %client_order_id, "order-list child released by its parent's fill");
+        let child = &self.open[pos];
+        Some(VenueMessage::OrderUpdated {
+            client_order_id: child.submit.client_order_id.clone(),
+            venue_order_id: child.venue_order_id.clone(),
+            quantity: child.submit.quantity,
+            price: child.submit.price,
+            trigger_price: child.submit.trigger_price,
+            leaves_qty: child.leaves_qty,
+            ts_event: ts,
+        })
     }
 
     /// Freeze a terminal order into the truth store and reap the held children
@@ -2502,14 +2514,14 @@ impl Engine {
                             // cash-versus-margin distinction and not a funding
                             // question - so it is refused by name rather than
                             // as an insufficient balance.
-                            let Some(_policy) = policy else {
+                            if policy.is_none() {
                                 return Err(format!(
                                     "a cash equity account cannot sell {symbol} short; shorting \
                                      needs a margin account, which is a margin policy on this \
                                      symbol",
                                     symbol = order.symbol
                                 ));
-                            };
+                            }
                             // The locate. A venue that states a borrow has a
                             // finite one, and a name it states as zero cannot be
                             // shorted at all.

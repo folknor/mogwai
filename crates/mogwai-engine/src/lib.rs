@@ -8,10 +8,10 @@
 //! The engine is intentionally synchronous and side-effect free: `process` takes
 //! a [`Command`] and returns the [`VenueMessage`]s to send. The venue
 //! owns sockets, timers and the clock; the engine owns order and account state.
-//! Fills are synthetic - mogwai never matches against a book or a market - so
-//! the fill an order gets is whatever the armed divergences dictate, defaulting
-//! to an immediate full fill at the order's own price. This keeps the divergence
-//! behaviour deterministic and unit-testable.
+//! Fills are synthetic - mogwai never matches against a book - but they are
+//! priced and made marketable from the tape reading the caller supplies. Armed
+//! divergences reshape that deterministic default without replacing its market
+//! reference.
 //!
 //! The implementation is split by concern: [`account`] owns the ledger and
 //! `AccountState` snapshot, [`orders`] owns the submit/cancel/modify lifecycle,
@@ -277,8 +277,9 @@ impl MarginPolicy {
 ///   passes the caller's settlement price through with no guard of its own.
 ///   Answering zero says the position contributed no mark-to-market, which is
 ///   the conservative reading; treating it as overflow credited `Decimal::MAX`
-///   to the balance. Whether the venue should instead refuse a zero price on an inverse
-///   instrument is a product question, filed in `notes/todo.md`.
+///   to the balance. Booking rather than refusing that fill was ruled on
+///   2026-08-20: the tape has already printed the price, so the serving path
+///   stays alive and records it loudly.
 fn position_unrealized_checked(
     def: &mogwai_protocol::InstrumentDef,
     qty: Decimal,
@@ -7810,7 +7811,15 @@ mod tests {
         );
 
         let scans = e.pending_scans();
-        e.apply_scans(&[result(&scans[0], true, 5)], 5);
+        let (released, _) = e.apply_scans(&[result(&scans[0], true, 5)], 5);
+        assert!(
+            released.iter().any(|event| matches!(
+                event,
+                VenueMessage::OrderUpdated { client_order_id, .. }
+                    if client_order_id == "EXIT"
+            )),
+            "the transition from held to live is declared on the wire: {released:?}"
+        );
 
         assert!(
             e.open

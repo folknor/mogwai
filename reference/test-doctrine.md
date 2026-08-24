@@ -253,6 +253,19 @@ These govern how much a green anything is worth.
   whose findings were already fixed in the tree they were written against.
   Measure the disputed thing in the disputed lane before conceding or
   dismissing.
+- A green workspace suite says nothing about the layer above the code the
+  tests import. The scripts in `scripts/` drive the venue as a consumer does,
+  through its wire, and no Rust test imports them - so a wire change can move
+  every Rust caller with it, take the whole suite green, and leave a script
+  posting a body the venue now refuses. That is not hypothetical: it happened
+  to the divergence control plane, and underneath it `scripts/smoke.py` had
+  been pinning a readiness-record version two bumps stale, which killed every
+  mode of it at boot with nothing to notice because nothing ran it. A change to
+  a wire shape therefore owes a sweep of the scripts, not only of the crates.
+  The standing gate is `brokkr`'s `control-plane-shapes` script check, which
+  boots a venue and posts a body for every divergence kind - the point being
+  that it sends the thing rather than grepping for it, since the question is
+  what the venue accepts and only the venue can answer that.
 - The carry-forward is the artifact most likely to be skipped, because the
   agent that lands the code and the report is the last hand on both and no
   agent in the loop reads the carry-forward back. A round whose lesson is

@@ -32,12 +32,16 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from smoke import Venue  # noqa: E402  (the launcher contract lives there)
+from smoke import (  # noqa: E402  (the launcher contract lives there)
+    Venue,
+    WsClient,
+    divergence_body,
+)
 
 CAP = 1024
 
 
-def arm(addr: str, payload: dict) -> tuple[int, str]:
+def arm(addr: str, payload: dict) -> tuple[int, dict]:
     request = urllib.request.Request(
         f"http://{addr}/control/divergence",
         data=json.dumps(payload).encode(),
@@ -45,31 +49,57 @@ def arm(addr: str, payload: dict) -> tuple[int, str]:
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as resp:
-        return resp.status, resp.read().decode()
+        body = resp.read().decode()
+    return resp.status, json.loads(body) if body else {}
 
 
 def partial(client_order_id: str) -> dict:
-    return {
-        "type": "PartialFillNext",
-        "client_order_id": client_order_id,
-        "fraction": "0.5",
-    }
+    return divergence_body(
+        "PartialFillNext", client_order_id=client_order_id, fraction="0.5"
+    )
 
 
 def main() -> None:
     with Venue(config=None, duration=None) as venue:
-        for index in range(CAP):
-            if index % 128 == 0:
-                print(f"  armed {index}/{CAP}", flush=True)
-            status, body = arm(venue.addr, partial(f"O-{index}"))
-            assert status == 202, f"arm {index} answered {status}"
-            assert body == "", f"arm {index} below the cap reported an eviction: {body}"
-        status, body = arm(venue.addr, partial("OVERFLOW"))
-        assert status == 202, f"the over-cap arm answered {status}"
-        assert "discarded" in body, f"the over-cap arm hid its eviction: {body!r}"
-        assert '"O-0"' in body, f"the shed entry is not the oldest: {body!r}"
-        print("PASS: an evicting arm acks 202 and names the discarded divergence")
-        print(f"  body: {body}")
+        # Board before arming, and stay boarded for the whole walk. The armed
+        # queue whose cap this probes lives on an ACCOUNT's engine, and accounts
+        # are minted when a socket presents one - so a probe that armed against
+        # a venue nobody had connected to was arming into the run's replay
+        # record and no engine at all. `Run::arm` reports an eviction only from
+        # an engine it actually armed, so with no account every arm answered
+        # "accepted" with nothing shed, the over-cap arm included, and the
+        # probe's entire subject was unobservable. It read as a failing
+        # assertion rather than a vacuous one only by luck.
+        ws = WsClient(venue.addr, venue.symbol)
+        try:
+            walk(venue)
+        finally:
+            ws.close()
+
+
+def walk(venue: Venue) -> None:
+    for index in range(CAP):
+        if index % 128 == 0:
+            print(f"  armed {index}/{CAP}", flush=True)
+        status, body = arm(venue.addr, partial(f"O-{index}"))
+        assert status == 202, f"arm {index} answered {status}"
+        assert body == {"status": "accepted"}, (
+            f"arm {index} below the cap reported an eviction: {body}"
+        )
+    status, body = arm(venue.addr, partial("OVERFLOW"))
+    assert status == 202, f"the over-cap arm answered {status}"
+    # The ack is a JSON object now rather than a prose body: `detail` says an
+    # eviction happened and `evicted` carries the shed divergence itself, so the
+    # identity of the oldest entry is read from a field instead of scraped out
+    # of a `Debug` rendering that happened to contain it.
+    assert "discarded" in body.get("detail", ""), (
+        f"the over-cap arm hid its eviction: {body!r}"
+    )
+    assert body.get("evicted", {}).get("client_order_id") == "O-0", (
+        f"the shed entry is not the oldest: {body!r}"
+    )
+    print("PASS: an evicting arm acks 202 and names the discarded divergence")
+    print(f"  body: {body}")
 
 
 if __name__ == "__main__":

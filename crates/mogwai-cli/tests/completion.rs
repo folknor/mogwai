@@ -474,7 +474,7 @@ fn a_faulted_venue_exits_nonzero_and_an_exhausted_one_does_not() {
     let (status, body) = http_post_json(
         &format!("http://{}", faulted.addr()),
         "/control/divergence",
-        r#"{"type":"FaultTape"}"#,
+        r#"{"kind":"FaultTape","args":{}}"#,
     );
     assert_eq!(status, 202, "the venue accepted the fault arm: {body}");
     let deadline = common::wall_deadline(Duration::from_secs(10));

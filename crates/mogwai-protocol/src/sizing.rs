@@ -132,15 +132,15 @@ pub const SNAPSHOT_ENVELOPE_MAX_BYTES: usize = 128 + ESC * MAX_ECHOED_ID_LEN;
 
 /// What one executed order's linkage can add to the batch it fills in.
 ///
-/// Every sibling a filling order names produces at most one order-shaped frame:
-/// an `OrderCanceled` under `Oco`, or one `OrderUpdated` (or the cancel a shrink
-/// to zero becomes) under `Ouo`. Never both for one sibling, because a sibling
-/// cancelled is off the book. Releasing an OTO child emits nothing at all - the
-/// child was accepted when it was submitted - so it costs no bytes here.
+/// Every sibling a filling order names produces at most two order-shaped
+/// frames: the `OrderUpdated` that declares a held child live, then an
+/// `OrderCanceled` under `Oco` or one further `OrderUpdated` (or the cancel a
+/// shrink to zero becomes) under `Ouo`. Ordinary siblings produce only the
+/// rule's frame, and an `Oto` child produces only its release.
 ///
 /// `MAX_LINKED_ORDERS` is what makes this computable in advance, and is the
 /// whole reason the linkage is capped rather than open-ended.
-pub const LINKAGE_MAX_BYTES: usize = MAX_LINKED_ORDERS * ORDER_EVENT_MAX_BYTES;
+pub const LINKAGE_MAX_BYTES: usize = 2 * MAX_LINKED_ORDERS * ORDER_EVENT_MAX_BYTES;
 
 /// A protocol-boundary refusal produces exactly one order-shaped frame and no
 /// `AccountState`, so its worst case is a constant - which is what lets the two

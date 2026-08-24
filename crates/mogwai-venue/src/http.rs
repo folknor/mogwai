@@ -33,6 +33,7 @@ use crate::run::{Run, VenueArm};
 use crate::source;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DivergenceRequest {
     #[serde(default)]
     symbol: Option<String>,
@@ -47,8 +48,73 @@ pub(crate) struct DivergenceRequest {
     /// reaches everyone reading it whatever account they trade.
     #[serde(default)]
     account: Option<String>,
-    #[serde(flatten)]
-    divergence: Divergence,
+    kind: String,
+    #[serde(default)]
+    args: serde_json::Map<String, serde_json::Value>,
+}
+
+impl DivergenceRequest {
+    fn divergence(&self) -> Result<Divergence, String> {
+        let allowed: &[&str] = match self.kind.as_str() {
+            "PartialFillNext" => &["client_order_id", "fraction"],
+            "RejectNextSubmit" | "RejectNextCancel" => &["reason"],
+            "DelayAcks" | "GoDark" | "StallData" => &["ms"],
+            "CommandLatency" => &[
+                "submit_act_ms",
+                "modify_act_ms",
+                "cancel_act_ms",
+                "submit_ack_ms",
+                "modify_ack_ms",
+                "cancel_ack_ms",
+            ],
+            "DuplicateNextFill" | "DropNextAccountUpdate" | "FaultTape" => &[],
+            "FeeSurcharge" => &["mult", "window_ms"],
+            "CancelOpenOrderSilently" => &["client_order_id"],
+            other => return Err(format!("unknown divergence kind {other}")),
+        };
+        if let Some(unknown) = self
+            .args
+            .keys()
+            .find(|key| !allowed.contains(&key.as_str()))
+        {
+            return Err(format!(
+                "unknown field args.{unknown} for divergence kind {}",
+                self.kind
+            ));
+        }
+        let mut value = self.args.clone();
+        value.insert(
+            "type".to_owned(),
+            serde_json::Value::String(self.kind.clone()),
+        );
+        serde_json::from_value(serde_json::Value::Object(value))
+            .map_err(|err| format!("invalid args for divergence kind {}: {err}", self.kind))
+    }
+}
+
+#[derive(Serialize)]
+struct DivergenceAccepted {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evicted: Option<Divergence>,
+}
+
+fn divergence_accepted(detail: Option<String>, evicted: Option<Divergence>) -> Response {
+    (
+        StatusCode::ACCEPTED,
+        Json(DivergenceAccepted {
+            status: "accepted",
+            detail,
+            evicted,
+        }),
+    )
+        .into_response()
+}
+
+fn divergence_refused(status: StatusCode, reason: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": reason }))).into_response()
 }
 
 /// The accounts one control-plane request applies to: the named account, or
@@ -1020,13 +1086,16 @@ impl AppState {
 pub(crate) async fn arm_divergence(
     State(state): State<AppState>,
     Json(request): Json<DivergenceRequest>,
-) -> impl IntoResponse {
-    let div = request.divergence;
+) -> Response {
+    let div = match request.divergence() {
+        Ok(div) => div,
+        Err(err) => return divergence_refused(StatusCode::BAD_REQUEST, &err),
+    };
     // Reject an invalid control payload before anything is stored. A typo must
     // be a no-op.
     if let Err(err) = validate_divergence(&div) {
         tracing::warn!(?div, err, "rejecting out-of-range divergence");
-        return (StatusCode::BAD_REQUEST, err.to_string());
+        return divergence_refused(StatusCode::BAD_REQUEST, err);
     }
     let target = match arm_target(request.account.as_deref()) {
         Ok(target) => target,
@@ -1036,7 +1105,7 @@ pub(crate) async fn arm_divergence(
                 err,
                 "rejecting divergence against an unusable account"
             );
-            return (StatusCode::BAD_REQUEST, err);
+            return divergence_refused(StatusCode::BAD_REQUEST, &err);
         }
     };
     let run = &state.run;
@@ -1179,14 +1248,14 @@ pub(crate) async fn arm_divergence(
                 }
                 .unwrap_or_else(|| "unknown order".to_owned());
                 tracing::warn!(%client_order_id, reason, "refusing silent cancel");
-                return (StatusCode::NOT_FOUND, reason);
+                return divergence_refused(StatusCode::NOT_FOUND, &reason);
             };
             if let Some(request_symbol) = request.symbol.as_deref()
                 && request_symbol != order_symbol.as_ref()
             {
-                return (
+                return divergence_refused(
                     StatusCode::BAD_REQUEST,
-                    format!(
+                    &format!(
                         "silent cancel names symbol {request_symbol}, but order {client_order_id} rests on {order_symbol}"
                     ),
                 );
@@ -1205,7 +1274,7 @@ pub(crate) async fn arm_divergence(
                 .cancel_open_order_silently(&client_order_id, ts)
             {
                 tracing::warn!(%client_order_id, reason, "refusing silent cancel");
-                return (StatusCode::NOT_FOUND, reason);
+                return divergence_refused(StatusCode::NOT_FOUND, &reason);
             }
             tracing::info!(%client_order_id, "silently canceled resting order venue-side");
         }
@@ -1238,25 +1307,24 @@ pub(crate) async fn arm_divergence(
             // venue is how an operator ends up killing a run they meant to
             // perturb one ledger of.
             if request.account.is_some() {
-                return (
+                return divergence_refused(
                     StatusCode::BAD_REQUEST,
-                    "FaultTape takes down the whole venue and cannot be scoped to one account"
-                        .to_string(),
+                    "FaultTape takes down the whole venue and cannot be scoped to one account",
                 );
             }
             if !run.fault_venue() {
                 // Not an error. The receiver is gone, which means the venue is
                 // already tearing down - the state the arm was asking for.
                 tracing::info!("FaultTape arrived while the venue was already ending");
-                return (
-                    StatusCode::ACCEPTED,
-                    "the venue was already tearing down when this arrived".to_string(),
+                return divergence_accepted(
+                    Some("the venue was already tearing down when this arrived".to_string()),
+                    None,
                 );
             }
             tracing::warn!("FaultTape armed: the venue will report a fault and exit nonzero");
-            return (
-                StatusCode::ACCEPTED,
-                "the venue is faulting and will exit nonzero".to_string(),
+            return divergence_accepted(
+                Some("the venue is faulting and will exit nonzero".to_string()),
+                None,
             );
         }
         engine_div @ (Divergence::PartialFillNext { .. }
@@ -1293,16 +1361,16 @@ pub(crate) async fn arm_divergence(
             // older one is holding.
             let evicted = run.arm(None, VenueArm::Engine(engine_div.clone())).await;
             if let Some(shed) = evicted {
-                let body = format!(
+                let detail = format!(
                     "armed; the engine queue was at its {MAX_ARMED_DIVERGENCES}-entry cap, \
-                     so the oldest armed divergence was discarded to make room: {shed:?}"
+                     so the oldest armed divergence was discarded to make room"
                 );
                 tracing::warn!(?shed, "arming ack reports an evicted divergence");
-                return (StatusCode::ACCEPTED, body);
+                return divergence_accepted(Some(detail), Some(shed));
             }
         }
     }
-    (StatusCode::ACCEPTED, String::new())
+    divergence_accepted(None, None)
 }
 
 /// Every shape this run configured, union every symbol it has since

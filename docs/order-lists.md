@@ -128,8 +128,9 @@ cannot execute must not tie up funds the parent's own fill needs.
 
 Its parent's first fill releases it: it takes the resting state it would have
 been given at submit, draws a fresh fill-band trigger, starts its scan from the
-release instant, and places its hold then. Release emits no wire frame -
-the child was already accepted and its status has not changed.
+release instant, and places its hold then. Release emits an `OrderUpdated`
+frame. The child remains accepted, but the frame declares that its hold and
+scan eligibility are now live rather than leaving that transition invisible.
 
 A child of a parent that has already filled is live at once. That is the
 fast-market bracket: a market entry that filled on arrival leaves its exits
