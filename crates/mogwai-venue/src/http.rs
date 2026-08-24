@@ -21,9 +21,8 @@ use mogwai_engine::MAX_ARMED_DIVERGENCES;
 use mogwai_protocol::{
     AccountState, AdmissionSubject, Command, CommandClass, DEFAULT_HISTORY_LIMIT, InstrumentDef,
     MAX_HISTORY_LIMIT, OrderType, QuoteTick, SimClock, TradeTick, VenueClock, VenueMessage,
-    control::Divergence, trades_through, truncate_echoed_id, truncate_reason,
-    validate_client_order_id, validate_divergence, validate_modify_order, validate_request_id,
-    validate_submit_order,
+    control::Divergence, truncate_echoed_id, truncate_reason, validate_client_order_id,
+    validate_divergence, validate_modify_order, validate_request_id, validate_submit_order,
 };
 use serde::{Deserialize, Serialize};
 
@@ -746,25 +745,34 @@ pub(crate) async fn process_order_cmd(
             ts,
         );
     }
-    if let Some(order) = submitted_orders(&order_cmd).iter().find(|order| {
-        // The resolved shape's calendar, not the configured map's: a symbol
-        // nobody configured is served on a resolved bundle whose tape is
-        // generated with that calendar, so its orders owe the same
-        // session-closed refusal.
-        state
-            .rivers
-            .resolve_profile(&order.symbol)
-            .ok()
-            .and_then(|profile| profile.calendar.clone())
-            .is_some_and(|calendar| reject_while_closed(&calendar, ts, order, market_px))
-    }) {
-        return refuse_all(
-            &order_cmd,
-            lanes,
-            &order.client_order_id.clone(),
-            "market closed",
+    // The engine query lives inside the search, not after it. A group is
+    // refused when ANY member would execute off the stale print, so a search
+    // that stops at the first session-closed member and asks about only that
+    // one admits a group whose first member rests and whose second fills -
+    // exactly the hole this guard exists to close. Every closed candidate is
+    // therefore put to the engine before the group is admitted.
+    let closed_candidate = {
+        let engine = account_state.engine.lock().await;
+        first_stale_print_taker(
+            submitted_orders(&order_cmd),
             ts,
-        );
+            // The resolved shape's calendar, not the configured map's: a symbol
+            // nobody configured is served on a resolved bundle whose tape is
+            // generated with that calendar, so its orders owe the same
+            // session-closed refusal.
+            |symbol| {
+                state
+                    .rivers
+                    .resolve_profile(symbol)
+                    .ok()
+                    .and_then(|profile| profile.calendar.clone())
+            },
+            |order| engine.marketable_on_arrival(order, market_px),
+        )
+        .map(|order| order.client_order_id.clone())
+    };
+    if let Some(client_order_id) = closed_candidate {
+        return refuse_all(&order_cmd, lanes, &client_order_id, "market closed", ts);
     }
     let mut engine = account_state.engine.lock().await;
     let shape = engine.book_shape();
@@ -792,6 +800,32 @@ pub(crate) async fn process_order_cmd(
     }
 }
 
+/// The first submitted order that would execute off a print its session
+/// closure has made stale, or `None` when the whole command may be admitted.
+///
+/// The two questions are asked together, per member, in one pass. Splitting
+/// them - find the first session-closed member, then ask about that one alone -
+/// is a real regression that was written and caught in review: a group whose
+/// first member is a non-marketable limit and whose second is marketable stops
+/// the search at the first, gets an admit verdict for it, and carries the
+/// second past the guard into the engine, where it fills against the stale
+/// print. Every closed candidate owes a verdict before any of them is admitted.
+///
+/// `verdict` returning `None` is the engine declining to answer, and this fails
+/// closed: the order is treated as a stale-print taker and refused, because a
+/// guard that admits on a verdict nobody established is not a guard.
+fn first_stale_print_taker(
+    orders: &[mogwai_protocol::SubmitOrder],
+    ts: u64,
+    calendar_of: impl Fn(&str) -> Option<mogwai_data::SessionCalendar>,
+    verdict: impl Fn(&mogwai_protocol::SubmitOrder) -> Option<bool>,
+) -> Option<&mogwai_protocol::SubmitOrder> {
+    orders.iter().find(|order| {
+        calendar_of(&order.symbol).is_some_and(|calendar| reject_while_closed(&calendar, ts, order))
+            && verdict(order).unwrap_or(true)
+    })
+}
+
 /// Would this order execute off a print the closure has made stale?
 ///
 /// This enumerates order types, so a type whose semantics change owes this
@@ -803,21 +837,13 @@ pub(crate) async fn process_order_cmd(
 /// filled against a stale reading, which is the one thing this guard exists to
 /// prevent.
 ///
-/// Marketability is judged against the stated price, while the engine judges it
-/// against the band-drawn trigger. The two can disagree by up to the band, so
-/// this is an approximation in both directions: an order admitted here as
-/// non-marketable can be marketable to the engine (and fill off the stale
-/// print this guard exists to refuse), and one refused here can be one the
-/// engine would have rested. The engine's `draw_trigger` needs the order's
-/// `band_ticks` and the run's `fill_seed`, neither of which this boundary
-/// holds, so closing the gap means asking the engine the question rather than
-/// re-deriving it. It is the pre-existing `Limit` behaviour and is not made
-/// worse by sharing it.
+/// This function selects the order types for which marketability matters. The
+/// caller asks the engine for the verdict itself, because the engine owns both
+/// the fill seed and the band width needed to reproduce its trigger draw.
 fn reject_while_closed(
     calendar: &mogwai_data::SessionCalendar,
     ts: u64,
     order: &mogwai_protocol::SubmitOrder,
-    market_px: Option<mogwai_engine::MarketReading>,
 ) -> bool {
     // A market order takes whatever the tape last said, so a closure refuses it
     // outright. Every type that states a limit - the limit itself and the
@@ -828,13 +854,7 @@ fn reject_while_closed(
         order.order_type,
         OrderType::Limit | OrderType::MarketToLimit
     );
-    !calendar.is_open(ts)
-        && (order.order_type == OrderType::Market
-            || (states_a_limit
-                && order.price.is_some_and(|price| {
-                    market_px
-                        .is_some_and(|reading| trades_through(order.side, price, reading.last_px))
-                })))
+    !calendar.is_open(ts) && (order.order_type == OrderType::Market || states_a_limit)
 }
 
 /// The router's share of the run. Deliberately thin: the clock, the history
@@ -3196,33 +3216,28 @@ mod calendar_tests {
             expire_time: None,
             link: None,
         };
-        let reading = Some(mogwai_engine::MarketReading {
-            last_px: Decimal::from(21_000),
-            ts_ns: 0,
-            band_ticks: 0,
-        });
         let closed = 2 * 60_000_000_000;
         let open = 30_000_000_000;
-        assert!(reject_while_closed(&calendar, closed, &order, reading));
+        assert!(reject_while_closed(&calendar, closed, &order));
 
         // The three negative cases, without which the assertion above passes
         // for a predicate that answers `true` unconditionally.
         assert!(
-            !reject_while_closed(&calendar, open, &order, reading),
+            !reject_while_closed(&calendar, open, &order),
             "an open market must not refuse a market order"
         );
         let mut resting = order.clone();
         resting.order_type = OrderType::Limit;
         resting.price = Some(Decimal::from(1));
         assert!(
-            !reject_while_closed(&calendar, closed, &resting, reading),
-            "a non-marketable limit rests through a closure rather than being refused"
+            reject_while_closed(&calendar, closed, &resting),
+            "a limit needs the engine's marketability verdict while the market is closed"
         );
         let mut marketable = resting.clone();
         marketable.price = Some(Decimal::from(30_000));
         assert!(
-            reject_while_closed(&calendar, closed, &marketable, reading),
-            "a limit marketable against the stale print is refused with the market orders"
+            reject_while_closed(&calendar, closed, &marketable),
+            "a limit's stated price must not change whether the engine is consulted"
         );
 
         // A market-to-limit takes the market, so it owes the same refusal as the
@@ -3233,14 +3248,87 @@ mod calendar_tests {
         let mut mtl_resting = resting.clone();
         mtl_resting.order_type = OrderType::MarketToLimit;
         assert!(
-            !reject_while_closed(&calendar, closed, &mtl_resting, reading),
-            "a market-to-limit short of the stale print rests through a closure"
+            reject_while_closed(&calendar, closed, &mtl_resting),
+            "a market-to-limit needs the engine's marketability verdict"
         );
         let mut mtl_marketable = mtl_resting.clone();
         mtl_marketable.price = Some(Decimal::from(30_000));
         assert!(
-            reject_while_closed(&calendar, closed, &mtl_marketable, reading),
-            "a marketable market-to-limit would fill off the stale print and must be refused"
+            reject_while_closed(&calendar, closed, &mtl_marketable),
+            "the boundary must not re-derive the market-to-limit verdict from its price"
+        );
+    }
+
+    /// A group is refused when any member would take the stale print, not when
+    /// its first session-closed member would.
+    ///
+    /// The shape this pins is the one a split search admits: the first member
+    /// is a closed-session limit the engine says rests, the second is one the
+    /// engine says fills. A search that stops at the first closed member and
+    /// asks the engine about that one alone gets `false` and lets the second
+    /// through to fill against a print the closure made stale.
+    #[test]
+    fn a_group_is_refused_for_a_later_marketable_member() {
+        let calendar = SessionCalendar {
+            utc_offset_minutes: 0,
+            open_windows: vec![WeeklyWindow {
+                start_minute: 5_760,
+                end_minute: 5_761,
+            }],
+            settlement_minute_of_day: None,
+        };
+        let closed = 2 * 60_000_000_000;
+        let limit = |id: &str, price: i64| SubmitOrder {
+            client_order_id: id.into(),
+            symbol: "MNQ".into(),
+            position_id: None,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            quantity: Decimal::ONE,
+            price: Some(Decimal::from(price)),
+            trigger_price: None,
+            trail_offset: None,
+            limit_offset: None,
+            reduce_only: false,
+            post_only: false,
+            time_in_force: TimeInForce::Gtc,
+            expire_time: None,
+            link: None,
+        };
+        let group = vec![limit("RESTS", 1), limit("FILLS", 30_000)];
+        let calendar_of = |_: &str| Some(calendar.clone());
+        // Stands in for the engine's band-drawn verdict: the low limit rests,
+        // the high one is marketable against the stale print.
+        let verdict = |order: &SubmitOrder| Some(order.price == Some(Decimal::from(30_000)));
+
+        let taker = first_stale_print_taker(&group, closed, calendar_of, verdict)
+            .expect("the marketable second member must refuse the whole group");
+        assert_eq!(
+            taker.client_order_id.as_str(),
+            "FILLS",
+            "the guard must name the member that would have filled"
+        );
+
+        // Without this the assertion above passes for a search that refuses
+        // every closed group regardless of any member's verdict.
+        let all_resting = vec![limit("RESTS", 1), limit("ALSO-RESTS", 2)];
+        assert!(
+            first_stale_print_taker(&all_resting, closed, calendar_of, verdict).is_none(),
+            "a group no member of which takes the stale print rests through the closure"
+        );
+
+        // An engine that cannot answer fails closed, on a member that is not
+        // the first, so the fail-closed arm is reached through the same search.
+        assert!(
+            first_stale_print_taker(&group, closed, calendar_of, |order| {
+                if order.client_order_id.as_str() == "FILLS" {
+                    None
+                } else {
+                    Some(false)
+                }
+            })
+            .is_some(),
+            "an unanswerable verdict must refuse rather than admit"
         );
     }
 

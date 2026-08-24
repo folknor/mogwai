@@ -2456,6 +2456,43 @@ impl Engine {
         }
     }
 
+    /// Whether this order is marketable against `reading` on its first engine
+    /// pass, using the same fill-band draw that [`Engine::process_with_market`]
+    /// will use.
+    ///
+    /// `None` means the engine cannot answer: the order names no registered
+    /// instrument, carries no usable stated price, or is of a type whose first
+    /// pass this does not model. A boundary using this as a safety guard must
+    /// treat `None` as marketable rather than admit on an answer the engine
+    /// could not establish - which is why the unmodelled types answer `None`
+    /// and not `Some(false)`. No caller selects them today, so the arm is
+    /// unreachable and costs nothing; the day one does, it fails closed instead
+    /// of silently admitting on a verdict this function never computed.
+    #[must_use]
+    pub fn marketable_on_arrival(
+        &self,
+        order: &SubmitOrder,
+        reading: Option<MarketReading>,
+    ) -> Option<bool> {
+        if order.order_type == OrderType::Market {
+            return Some(true);
+        }
+        if !matches!(
+            order.order_type,
+            OrderType::Limit | OrderType::MarketToLimit
+        ) {
+            return None;
+        }
+        let stated_px = order.price?;
+        let increment = self.instruments.get(&order.symbol)?.price_increment;
+        let band_ticks = reading.map_or(0, |value| value.band_ticks);
+        let trigger_px =
+            orders::draw_trigger(self.fill_seed, order, stated_px, increment, band_ticks, 0);
+        Some(reading.is_some_and(|value| {
+            mogwai_protocol::trades_through(order.side, trigger_px, value.last_px)
+        }))
+    }
+
     pub fn positions(&self) -> Vec<Position> {
         let mut positions: Vec<Position> = self
             .account
@@ -4684,6 +4721,34 @@ mod tests {
             !at_touch
                 .iter()
                 .any(|event| matches!(event, VenueMessage::OrderFilled(_)))
+        );
+    }
+
+    #[test]
+    fn arrival_marketability_uses_the_same_band_draw_as_submit() {
+        let mut engine = banded(42);
+        let mut order = (0..1_000)
+            .map(|n| limit_order(&format!("arrival-query-{n}"), 1))
+            .find(|order| crate::orders::draw_offset(42, order, Decimal::from(100), 200, 0) > 4)
+            .expect("the deterministic stream supplies a trigger below the 99 print");
+        let reading = reading(200);
+        assert_eq!(
+            engine.marketable_on_arrival(&order, Some(reading)),
+            Some(false)
+        );
+        let events =
+            engine.process_with_market(Command::SubmitOrder(order.clone()), 1, Some(reading));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, VenueMessage::OrderFilled(_))),
+            "the query said the order rests, so the real submit must not fill"
+        );
+
+        order.order_type = OrderType::MarketToLimit;
+        assert_eq!(
+            engine.marketable_on_arrival(&order, Some(reading)),
+            Some(false)
         );
     }
 

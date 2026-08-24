@@ -219,6 +219,17 @@ opening balance every account is funded with when its consumer names none - not
 the balance of one shared ledger. A consumer that wants its own size opens an
 account with `POST /accounts`, naming an id and its balances; a connection that
 never does is served under the default account on these values.
+
+An empty `[balances]` table deliberately selects an unfunded, permissive
+default account. Its ledger starts at zero and fills may drive balances
+negative; submits and amends are not refused for insufficient funds. Any
+non-empty balance table selects the funded mode for the whole account, where
+the engine enforces available funds in every currency. This choice is fixed
+when the account is constructed: later fills creating balance rows do not turn
+an unfunded account into a funded one. Accounts opened through `POST /accounts`
+cannot select the permissive mode because that route requires at least one
+funded currency.
+
 `oms_type` is `netting` (the default) or `hedging`; the venue supports both
 styles, one per run - every account inherits the run's choice, per
 `docs/oms-types.md` - it refuses a consumer over neither, and `/health` reports

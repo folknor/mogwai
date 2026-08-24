@@ -59,38 +59,6 @@ Whatever is done here must not break what round 1 established: the incremental
 
 ## C. Venue and protocol
 
-### C1. `reject_while_closed` judges marketability against the wrong price
-
-It judges against the stated price while the engine judges against the
-band-drawn trigger, so the two can disagree by up to the fill band in either
-direction: an order the server admits as non-marketable can be marketable to the
-engine and fill off the stale print the guard exists to refuse, and one the
-server refuses can be one the engine would have rested.
-
-The engine's `draw_trigger` needs the order's `band_ticks` and the run's
-`fill_seed`, neither of which the HTTP boundary holds, so closing this means
-asking the engine rather than re-deriving. `Engine::worst_case_leaves` is the
-precedent shape. Affects `Market` and `MarketToLimit`.
-
-### C2. The account-claim path in `ws.rs` leaves an abandoned ride behind
-
-Safe by a reachability argument rather than a guard, where every other path
-releases through `Drop`. The frontier family in reverse.
-
-### C3. Engine-arm application order is unordered across concurrent control requests
-
-`Run::arm` records under the passenger map lock but applies the engine half after
-both locks drop, because the engine sits behind an async mutex, so two
-`POST /control/divergence` requests in flight at once can land on two seated
-ledgers in opposite orders. Unreachable in practice - the control plane is an
-operator surface, serialized in every scenario the venue is driven from - and
-closing it costs a second lock on a path that has never contended.
-
-### C5. `enforce_funds` is an invisible whole-account mode
-
-Inferred from an empty balance map at engine construction, invisible from the
-wire and undocumented anywhere durable.
-
 ### C7. Refusal texts spell their bounds out instead of naming the constant
 
 Re-verified against the code 2026-08-24 and the entry as filed was half stale.
@@ -109,14 +77,6 @@ production sites, since the module's tests carry the same strings as expected
 values. Both refusals return `&'static str`, so fixing means changing the return
 type or reaching for a `const` formatter, which is why neither was fixed in
 passing.
-
-### C15. The `max_position` cap is applied to one symbol of a pending list
-
-Filed 2026-08-24 from round 1. `projected_qty`'s caller in `http.rs` takes the
-symbol from `pending.first()` and applies the cap to that symbol alone.
-Pre-existing and harmless while order lists are single-symbol, but nothing in
-the code or the docs states that they are, so the guard is one multi-symbol
-list away from checking the wrong book.
 
 ### C8. The launcher kills one process, not a process group
 
