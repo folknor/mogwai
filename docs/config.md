@@ -183,12 +183,22 @@ request and out of the run's declared duration, for every river alike. A malform
 or unfunded `[symbols.*]` table refuses startup even when nothing ever asks for
 that label, so a typo cannot wait to surface as a runtime rejection.
 
-A `[symbols.NAME.class]` table names one of five `kind` values, and the choice
+A `[symbols.NAME.class]` table names one of six `kind` values, and the choice
 decides how holding the instrument moves the ledger rather than merely how it is
 labelled:
 
 - `spot` with `base` and `quote`. Credits the base asset as a currency balance,
   which is right for crypto spot where the base is money you can spend.
+- `forex` with `base`, `quote`, `multiplier`, `pip_size`, `point_size`,
+  `rollover_minute_utc`, `swap_long` and `swap_short`. It is a marked leveraged
+  position and requires a notional margin table. Point size must divide pip
+  size exactly. At each crossed rollover minute, the venue credits absolute
+  notional at the mark times the side's own swap rate; a negative rate is a
+  charge. The rate carries the whole sign, and the position's does not enter it
+  a second time: `swap_short` is what a short is paid or charged, so a negative
+  `swap_short` debits a short rather than crediting it. This is the opposite of
+  the perpetual funding convention below, where one rate has to debit a long
+  and credit a short and therefore rides on signed notional.
 - `equity` with `currency` and an optional `multiplier` (one share per contract
   by default). Held as a position, paid for in cash. Not a spot pair with the
   ticker as its base: that puts shares in the ledger as money.
@@ -214,7 +224,9 @@ is how CME states a performance bond. Notional is a fraction of notional, so the
 requirement moves with the price - ten-times leverage is `initial = 0.1`. That is
 the leveraged account forex, crypto margin and Reg-T equity margin need.
 
-`[regime]` selects the single run-wide market regime. `[balances]` is the
+`[regime]` selects the single run-wide baseline regime. A passenger can fork a
+separate river with the `surge_*` websocket keys in `docs/havoc.md`; the arm is
+part of river identity and changes no shared water. `[balances]` is the
 opening balance every account is funded with when its consumer names none - not
 the balance of one shared ledger. A consumer that wants its own size opens an
 account with `POST /accounts`, naming an id and its balances; a connection that
@@ -322,6 +334,25 @@ consumer can POST: `currency` (required whenever any rule is set),
 optional `lock_at_equity`, `on_breach`), `daily_loss_limit` (`amount`,
 `on_breach`), `overall_drawdown` (`amount`, `on_breach`), `max_position`
 (`quantity`), and `reset_minute_utc` (default 1320, 22:00 UTC).
+
+A registered programme may also carry
+`[account_policies.<name>.opening_balances]`. When `POST /accounts` omits
+`balances`, that table funds the new ledger; explicit request balances win.
+The run-wide `[balances]` table still funds the default account.
+
+A policed account opens only in its policy currency, whichever of the two
+tables funds it. Equity is computed in that currency alone and the venue holds
+no exchange rate, so funding a USD policy with USD and EUR together has no
+honest reading: summing them at parity would anchor the account above any
+equity it can ever observe, and its first mark would read as a loss of the
+whole foreign leg and could liquidate it before it traded. The venue refuses
+the configuration by name rather than converting or quietly dropping a leg. An
+unpoliced account enforces nothing and values nothing, so it may hold any mix.
+
+A daily-loss policy may bind only to a footprint containing its UTC reset
+minute. The websocket upgrade refuses an absent boundary by name instead of
+silently turning a daily limit into a run-lifetime limit. An always-open
+instrument contains every reset minute.
 
 `max_position` is refused at order entry rather than flattened after the fact.
 It is the largest position the book can carry after this order, given worst-case
@@ -468,6 +499,19 @@ knob" in `docs/presets.md`. Each override is logged with both values. Every pres
 entry per knob it sets - `fitted`, `derived` or `declared` with a rationale -
 and boot refuses a preset that leaves any knob undeclared. `mogwai presets`
 lists them; `mogwai presets MNQ` prints one with its provenance.
+
+Register another preset under `[instrument_presets.<name>]`, with the same
+`instrument` and `provenance` tables printed by `mogwai presets <name>`. Names
+are case-insensitive, a runtime registration shadows a shipped name, and an
+inheritance parent may be either kind. Boot validates the full registry and
+provenance before serving. This is the end of instrument intake: onboarding a
+fitted instrument needs a config file and no method edit.
+
+Perpetual funding is evaluated by the fill sweeper. A boundary crossed between
+passes is charged exactly once on the first pass after it, using that pass's
+mark, and the account snapshot carries the pass timestamp. Its maximum wall
+delay is one `fill_sweep_interval_ms`; acceleration expands the corresponding
+simulated span.
 
 The replay and admission settings remain run-wide defaults. `fanout_depth` is
 applied to each boat's own ring; the remaining settings are run-wide:

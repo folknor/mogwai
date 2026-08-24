@@ -170,6 +170,22 @@ async fn serve_async(
     launch_symbol: Option<String>,
 ) -> anyhow::Result<()> {
     let cfg = Config::load(config)?;
+    // A launcher names the only symbol its consumer will bind, so its funding
+    // refusal belongs before the wider reachable-preset audit. Besides being
+    // the earliest knowable answer, this keeps the actionable line at the head
+    // of bounded launcher stderr even when a full backtrace follows it.
+    if let Some(symbol) = launch_symbol.as_deref() {
+        let profile = crate::config::profile_for(&cfg, Some(symbol))?;
+        let currency = profile.def.class.settlement_currency();
+        if !cfg.balances.is_empty() && !cfg.balances.contains_key(currency) {
+            return Err(anyhow::anyhow!(
+                crate::source::ResolveRefusal::FundingBarred {
+                    symbol: symbol.to_owned(),
+                    currency: currency.to_owned(),
+                }
+            ));
+        }
+    }
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
     let instrument = if let Some(symbol) = launch_symbol.as_deref() {
         profiles

@@ -1603,6 +1603,7 @@ pub(crate) struct OpenAccountRequest {
     /// below stay number-tolerant on purpose: they are thresholds and fractions
     /// that are also spelled in TOML.
     #[serde(with = "mogwai_protocol::decimal::str_map")]
+    #[serde(default)]
     balances: std::collections::HashMap<String, rust_decimal::Decimal>,
     /// The rules the venue enforces against this account, stated inline.
     /// Absent means unpoliced unless `policy_preset` names one.
@@ -1631,16 +1632,6 @@ pub(crate) async fn open_account(
             );
         }
     };
-    if request.balances.is_empty() {
-        // An account funded in nothing can hold no position and would meet a
-        // funds rejection on its first order, which reads as depletion. Naming
-        // it here keeps a configuration mistake distinguishable from a trading
-        // outcome, which is the whole reason the two refusals are kept apart.
-        return (
-            StatusCode::BAD_REQUEST,
-            "an account must open with at least one funded currency".to_owned(),
-        );
-    }
     let policy = match state
         .run
         .resolve_policy(request.policy_preset.as_deref(), request.policy)
@@ -1655,16 +1646,37 @@ pub(crate) async fn open_account(
     if let Err(error) = policy.validate() {
         return (StatusCode::BAD_REQUEST, error);
     }
+    let balances = opening_balances(request.balances, &policy);
+    if balances.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "an account must open with at least one funded currency, either in balances or in its policy".to_owned(),
+        );
+    }
     let policed = !policy.is_unpoliced();
-    match state
-        .run
-        .open_account(&account_id, request.balances, policy)
-    {
+    match state.run.open_account(&account_id, balances, policy) {
         Ok(()) => {
             tracing::info!(account = %account_id.as_str(), policed, "opened an account");
             (StatusCode::CREATED, String::new())
         }
+        // A foreign opening balance is a malformed request, not a collision
+        // with something already open, so it does not wear the conflict code
+        // the other two refusals share.
+        Err(refusal @ crate::run::AccountRefusal::ForeignOpeningBalance { .. }) => {
+            (StatusCode::BAD_REQUEST, refusal.to_string())
+        }
         Err(refusal) => (StatusCode::CONFLICT, refusal.to_string()),
+    }
+}
+
+fn opening_balances(
+    explicit: std::collections::HashMap<String, rust_decimal::Decimal>,
+    policy: &mogwai_protocol::risk::AccountPolicy,
+) -> std::collections::HashMap<String, rust_decimal::Decimal> {
+    if explicit.is_empty() {
+        policy.opening_balances.clone()
+    } else {
+        explicit
     }
 }
 
@@ -3075,6 +3087,26 @@ mod calendar_tests {
         assert_eq!(
             request.policy.max_position.map(|cap| cap.quantity),
             Some(rust_decimal::Decimal::from(5))
+        );
+    }
+
+    #[test]
+    fn a_policy_supplies_balances_only_when_the_request_omits_them() {
+        let policy = mogwai_protocol::risk::AccountPolicy {
+            opening_balances: std::collections::HashMap::from([(
+                "USD".to_owned(),
+                Decimal::from(50_000),
+            )]),
+            ..Default::default()
+        };
+        assert_eq!(
+            opening_balances(Default::default(), &policy).get("USD"),
+            Some(&Decimal::from(50_000))
+        );
+        let explicit = std::collections::HashMap::from([("USD".to_owned(), Decimal::from(75_000))]);
+        assert_eq!(
+            opening_balances(explicit, &policy).get("USD"),
+            Some(&Decimal::from(75_000))
         );
     }
 

@@ -102,6 +102,22 @@ fn funding_instants(from_ns: u64, to_ns: u64, interval_ns: u64) -> u64 {
     (to_ns / interval_ns).saturating_sub(from_ns / interval_ns)
 }
 
+fn daily_instants(from_ns: u64, to_ns: u64, minute_utc: u32) -> u64 {
+    const DAY_NS: u64 = 86_400_000_000_000;
+    let offset = u64::from(minute_utc).saturating_mul(60_000_000_000);
+    if to_ns <= from_ns || offset >= DAY_NS {
+        return 0;
+    }
+    let through = |instant: u64| {
+        if instant >= offset {
+            (instant - offset) / DAY_NS + 1
+        } else {
+            0
+        }
+    };
+    through(to_ns).saturating_sub(through(from_ns))
+}
+
 /// A resting order tracked by the venue.
 #[derive(Debug, Clone)]
 pub struct OpenOrder {
@@ -1672,6 +1688,58 @@ impl Engine {
             let Some(def) = self.instruments.get(&symbol) else {
                 continue;
             };
+            if let mogwai_protocol::InstrumentClass::Forex {
+                rollover_minute_utc,
+                swap_long,
+                swap_short,
+                ..
+            } = &def.class
+            {
+                let instants = daily_instants(from_ns, to_ns, *rollover_minute_utc);
+                if instants != 0 {
+                    let currency = def.class.settlement_currency().to_owned();
+                    let mut owed = Decimal::ZERO;
+                    for position in self
+                        .account
+                        .positions
+                        .iter()
+                        .filter(|((position_symbol, _), _)| *position_symbol == symbol)
+                        .map(|(_, position)| position)
+                    {
+                        if position.qty.is_zero() {
+                            continue;
+                        }
+                        // Absolute notional, unlike the perpetual funding walk
+                        // below. There the sign of the payment comes from the
+                        // position, because one rate has to debit a long and
+                        // credit a short. Here the side has already chosen the
+                        // rate, so a signed notional would apply the sign
+                        // twice: a short on a negative `swap_short` would be
+                        // paid the carry it owes.
+                        let Some(notional) = def.notional(position.qty.abs(), position.mark_px)
+                        else {
+                            continue;
+                        };
+                        let rate = if position.qty.is_sign_positive() {
+                            *swap_long
+                        } else {
+                            *swap_short
+                        };
+                        if let Some(payment) = notional
+                            .checked_mul(rate)
+                            .and_then(|per| per.checked_mul(Decimal::from(instants)))
+                        {
+                            owed = owed.saturating_add(payment);
+                        }
+                    }
+                    if !owed.is_zero() {
+                        let total = self.account.balances.entry(currency).or_default();
+                        *total = total.saturating_add(owed);
+                        paid = true;
+                    }
+                }
+                continue;
+            }
             let Some(terms) = def.class.funding() else {
                 continue;
             };
@@ -8485,6 +8553,107 @@ mod tests {
             price_increment: Decimal::new(1, 2),
             size_increment: Decimal::ONE,
         }
+    }
+
+    fn forex(swap_long: Decimal, swap_short: Decimal) -> InstrumentDef {
+        InstrumentDef {
+            symbol: "EURUSD".into(),
+            class: InstrumentClass::Forex {
+                base: "EUR".into(),
+                quote: "USD".into(),
+                multiplier: Decimal::from(100_000),
+                pip_size: Decimal::new(1, 4),
+                point_size: Decimal::new(1, 5),
+                rollover_minute_utc: 1_320,
+                swap_long,
+                swap_short,
+            },
+            price_precision: 5,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 5),
+            size_increment: Decimal::ONE,
+        }
+    }
+
+    #[test]
+    fn forex_rollover_credits_the_configured_side_rate_once() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![forex(Decimal::new(1, 6), -Decimal::new(2, 6))],
+            balances: HashMap::from([("USD".to_string(), Decimal::from(100_000))]),
+            fill_seed: 0,
+        });
+        e.set_margin_policy(
+            "EURUSD".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: MarginBreachAction::Refuse,
+                basis: MarginBasis::Notional,
+            },
+        );
+        e.process(
+            Command::SubmitOrder(order_with(
+                "FX1",
+                Side::Buy,
+                "EURUSD",
+                1,
+                Some(Decimal::new(110_000, 5)),
+            )),
+            1,
+        );
+        e.mark(&[("EURUSD".into(), Decimal::new(120_000, 5))], 2);
+        let before = *e.account.balances.get("USD").expect("funded");
+        let boundary = 1_320 * 60_000_000_000_u64;
+        e.apply_funding(boundary - 1, boundary + 1, 3);
+        let after = *e.account.balances.get("USD").expect("funded");
+        assert_eq!(after - before, Decimal::new(12, 2));
+    }
+
+    /// The asymmetric half of the rollover, and the reason it is a separate
+    /// test: the long case passes under either sign convention, because a
+    /// positive quantity times a positive rate is a credit either way. Only a
+    /// short says whether the position's sign is being applied on top of a rate
+    /// that already encodes the side. A negative `swap_short` is carry the
+    /// short owes, so it must debit.
+    #[test]
+    fn forex_rollover_debits_a_short_owing_a_negative_swap() {
+        let mut e = Engine::build(EngineConfig {
+            account_id: test_account_id(),
+            instruments: vec![forex(Decimal::new(1, 6), -Decimal::new(2, 6))],
+            balances: HashMap::from([("USD".to_string(), Decimal::from(100_000))]),
+            fill_seed: 0,
+        });
+        e.set_margin_policy(
+            "EURUSD".into(),
+            MarginPolicy {
+                initial_per_contract: Decimal::ZERO,
+                maintenance_per_contract: Decimal::ZERO,
+                breach_action: MarginBreachAction::Refuse,
+                basis: MarginBasis::Notional,
+            },
+        );
+        e.process(
+            Command::SubmitOrder(order_with(
+                "FX2",
+                Side::Sell,
+                "EURUSD",
+                1,
+                Some(Decimal::new(110_000, 5)),
+            )),
+            1,
+        );
+        e.mark(&[("EURUSD".into(), Decimal::new(120_000, 5))], 2);
+        let before = *e.account.balances.get("USD").expect("funded");
+        let boundary = 1_320 * 60_000_000_000_u64;
+        e.apply_funding(boundary - 1, boundary + 1, 3);
+        let after = *e.account.balances.get("USD").expect("funded");
+        assert_eq!(
+            after - before,
+            -Decimal::new(24, 2),
+            "a short on a negative swap rate pays the carry; a positive delta here \
+             means the position sign was applied on top of the rate"
+        );
     }
 
     /// A perpetual has no expiry to converge at, so funding is the only thing

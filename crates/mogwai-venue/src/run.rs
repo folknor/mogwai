@@ -823,7 +823,10 @@ impl Run {
         if let Some(pending) = &pending {
             pending.open_engine(&mut engine);
         }
-        let opening = opening_equity(&self.account_opening_terms.opening_balances);
+        let opening = opening_equity(
+            &self.account_opening_terms.opening_balances,
+            &mogwai_protocol::risk::AccountPolicy::default(),
+        );
         let minted = Arc::new(Account {
             account_id: account_id.clone(),
             engine: AsyncMutex::new(engine),
@@ -899,7 +902,10 @@ impl Run {
         );
         let ledger = crate::risk::RiskLedger::new(
             mogwai_protocol::risk::AccountPolicy::default(),
-            opening_equity(&self.account_opening_terms.opening_balances),
+            opening_equity(
+                &self.account_opening_terms.opening_balances,
+                &mogwai_protocol::risk::AccountPolicy::default(),
+            ),
             self.started_ns,
         );
         (engine, ledger)
@@ -1227,7 +1233,7 @@ impl Run {
         named: Option<&str>,
         inline: mogwai_protocol::risk::AccountPolicy,
     ) -> Result<mogwai_protocol::risk::AccountPolicy, AccountRefusal> {
-        if !inline.is_unpoliced() {
+        if !inline.is_unpoliced() || !inline.opening_balances.is_empty() {
             return Ok(inline);
         }
         let Some(name) = named else {
@@ -1245,6 +1251,27 @@ impl Run {
     /// The account a connection naming none claims.
     pub(crate) fn default_account_id(&self) -> mogwai_protocol::AccountId {
         self.default_account_id.clone()
+    }
+
+    pub(crate) fn daily_reset_minute(
+        &self,
+        account_id: &mogwai_protocol::AccountId,
+        resetting: bool,
+    ) -> Option<u32> {
+        if resetting {
+            return None;
+        }
+        let account = self
+            .accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(account_id.as_str())
+            .cloned()?;
+        account
+            .risk
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .daily_reset_minute()
     }
 
     /// Open an account with a consumer-named opening balance, before anything
@@ -1282,7 +1309,27 @@ impl Run {
         if accounts.contains_key(account_id.as_str()) {
             return Err(AccountRefusal::AlreadyOpen);
         }
-        let opening = opening_equity(&balances);
+        // A policed account may hold only the currency its thresholds are
+        // stated in, and that starts at the opening funding. The policy
+        // validator says the same thing about `opening_balances`; this is the
+        // other door into the same ledger, the request's own explicit
+        // `balances`, and it must be shut too or the refusal is decorative.
+        // Funding a USD policy with USD and EUR would anchor the account at a
+        // number no observation can reach - the first mark reads as a loss of
+        // the whole foreign balance and can liquidate immediately - and there
+        // is no rate surface to convert with, so the configuration is refused
+        // rather than coerced.
+        if let Some(policy_currency) = policy.currency.as_ref().filter(|_| !policy.is_unpoliced())
+            && let Some(other) = balances
+                .keys()
+                .find(|currency| currency.as_str() != policy_currency.as_str())
+        {
+            return Err(AccountRefusal::ForeignOpeningBalance {
+                currency: other.clone(),
+                policy_currency: policy_currency.clone(),
+            });
+        }
+        let opening = opening_equity(&balances, &policy);
         let mut engine = self.engine_from_account_opening_terms(account_id, balances);
         // Under the `accounts` lock this call already holds, in the same lock
         // order `Run::arm` takes, so an arm racing this open lands in exactly
@@ -1923,7 +1970,30 @@ impl Run {
 
 /// Equity at open, before anything is marked: the funded balances summed.
 /// Positions cannot exist yet, so there is no unrealized half.
-fn opening_equity(balances: &std::collections::HashMap<String, Decimal>) -> Decimal {
+/// The equity a fresh ledger is anchored at, in the currency its rules are
+/// stated in.
+///
+/// The policy is a parameter rather than the balances alone because summing
+/// across currencies is the one thing this must never do. Every rule downstream
+/// values the policy currency and nothing else, and the venue owns no rate
+/// surface - so an anchor that counted a EUR balance toward a USD policy would
+/// open the account above any equity it can ever observe, and the first honest
+/// reading would look like a loss of exactly the foreign balance. That is a
+/// liquidation with no cause. `open_account` refuses such a configuration by
+/// name; this signature is what keeps the refusal from being the only thing
+/// standing between the two, since a caller here cannot reach the balances
+/// without stating the policy that gives them meaning.
+///
+/// An unpoliced policy names no currency and enforces nothing, so its anchor is
+/// read by no rule; the sum is retained there because it is the number the
+/// account's own opening report has always carried.
+fn opening_equity(
+    balances: &std::collections::HashMap<String, Decimal>,
+    policy: &mogwai_protocol::risk::AccountPolicy,
+) -> Decimal {
+    if let Some(currency) = policy.currency.as_ref().filter(|_| !policy.is_unpoliced()) {
+        return balances.get(currency.as_str()).copied().unwrap_or_default();
+    }
     balances.values().fold(Decimal::ZERO, |sum, total| {
         sum.checked_add(*total).unwrap_or(sum)
     })
@@ -1939,6 +2009,12 @@ pub(crate) enum AccountRefusal {
     /// than falling through to unpoliced, which would be a run that believes it
     /// is enforced and is not.
     UnknownPolicy { name: String },
+    /// Opening funding in a currency the policy's rules cannot value. Refused
+    /// rather than converted at parity: see `open_account`.
+    ForeignOpeningBalance {
+        currency: String,
+        policy_currency: String,
+    },
 }
 
 impl std::fmt::Display for AccountRefusal {
@@ -1953,6 +2029,17 @@ impl std::fmt::Display for AccountRefusal {
                 "no account policy is registered or shipped under {name}; shipped names are {}, \
                  and an operator registers more under [account_policies] in the venue config",
                 mogwai_protocol::risk::SHIPPED_POLICIES.join(", ")
+            ),
+            Self::ForeignOpeningBalance {
+                currency,
+                policy_currency,
+            } => write!(
+                f,
+                "this account opens with {currency} under a policy stated in {policy_currency}; a \
+                 policed account may hold only its policy currency, because equity is computed in \
+                 that currency alone and the venue has no exchange rate - counting the two \
+                 together would anchor the account above any equity it can observe and liquidate \
+                 it on its first mark"
             ),
         }
     }
@@ -2967,6 +3054,57 @@ mod tests {
             "a consumer-opened ledger must hold the venue's armed queue, at the cap with the \
              ledgers that already existed"
         );
+    }
+
+    /// The other door into the same ledger. `AccountPolicy::validate` refuses a
+    /// policy whose own `opening_balances` leave the policy currency, but a
+    /// request may state `balances` explicitly and those take precedence, so
+    /// the refusal has to live where the two converge or it guards only half
+    /// the path. A USD policy funded 50,000 USD plus 50,000 EUR would anchor at
+    /// 100,000 under a parity sum, then read its first honest observation -
+    /// 50,000, the USD leg alone - as a 50,000 loss and liquidate an account
+    /// that has not traded. The venue holds no rate surface to value the EUR
+    /// with, so the configuration is refused by name.
+    #[tokio::test]
+    async fn a_policed_account_may_not_open_outside_its_policy_currency() {
+        let run = run(1_000, 400, None);
+        let policy = mogwai_protocol::risk::AccountPolicy {
+            currency: Some("USD".to_owned()),
+            overall_drawdown: Some(mogwai_protocol::risk::OverallDrawdown {
+                amount: Decimal::from(5_000),
+                on_breach: mogwai_protocol::risk::BreachAction::Terminate,
+            }),
+            ..Default::default()
+        };
+        let mixed = mogwai_protocol::AccountId::parse("MIXED-001").unwrap();
+        let refusal = run
+            .open_account(
+                &mixed,
+                std::collections::HashMap::from([
+                    ("USD".to_owned(), Decimal::from(50_000)),
+                    ("EUR".to_owned(), Decimal::from(50_000)),
+                ]),
+                policy.clone(),
+            )
+            .expect_err("a policed account may not open in a currency its rules cannot value");
+        assert!(
+            matches!(refusal, AccountRefusal::ForeignOpeningBalance { .. }),
+            "the refusal must name the currency mismatch, got {refusal:?}"
+        );
+        assert!(
+            run.peek_account(&mixed).is_none(),
+            "a refused open must leave no ledger behind"
+        );
+
+        // The same policy in its own currency opens, and anchors at exactly the
+        // funding rather than at anything summed.
+        let clean = mogwai_protocol::AccountId::parse("CLEAN-001").unwrap();
+        run.open_account(
+            &clean,
+            std::collections::HashMap::from([("USD".to_owned(), Decimal::from(50_000))]),
+            policy,
+        )
+        .expect("opening in the policy currency alone is the supported shape");
     }
 
     /// An arm against an account that has not connected must not cost that

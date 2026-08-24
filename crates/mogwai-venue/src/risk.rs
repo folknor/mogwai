@@ -111,6 +111,13 @@ impl RiskLedger {
         self.policy.max_position.as_ref().map(|cap| cap.quantity)
     }
 
+    pub(crate) fn daily_reset_minute(&self) -> Option<u32> {
+        self.policy
+            .daily_loss_limit
+            .as_ref()
+            .map(|_| self.policy.reset_minute_utc)
+    }
+
     /// Fold one equity reading in, and say what it costs.
     ///
     /// Order matters here. The day boundary is crossed first, so a reading in a

@@ -137,6 +137,11 @@ pub struct MaxPosition {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountPolicy {
+    /// Opening funding carried by a funded-account programme. An account
+    /// request's explicit balances take precedence; these are used when that
+    /// request omits balances.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub opening_balances: std::collections::HashMap<String, Decimal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailing_drawdown: Option<TrailingDrawdown>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,6 +208,13 @@ impl AccountPolicy {
     /// the venue, so a nonsense rule is a refused request rather than an
     /// account that behaves strangely hours later.
     pub fn validate(&self) -> Result<(), String> {
+        for (currency, amount) in &self.opening_balances {
+            crate::validate_currency_code(currency)
+                .map_err(|why| format!("opening_balances.{currency}: {why}"))?;
+            if *amount <= Decimal::ZERO {
+                return Err(format!("opening_balances.{currency} must be positive"));
+            }
+        }
         if let Some(trailing) = &self.trailing_drawdown
             && trailing.amount <= Decimal::ZERO
         {
@@ -247,6 +259,26 @@ impl AccountPolicy {
         // discovered from a liquidation that had no cause.
         if let Some(currency) = &self.currency {
             crate::validate_currency_code(currency)?;
+        }
+        // Opening funding in a currency the rules cannot see is refused, not
+        // converted. Equity is summed over the policy currency alone and the
+        // venue owns no rate surface, so a policy anchored at 50,000 USD plus
+        // 50,000 EUR would open at 100,000 and read its first honest
+        // observation as a 50,000 loss - a liquidation with no cause, before
+        // the account has traded. There is no parity shortcut available: see
+        // the one-hop limit recorded against account valuation.
+        if !self.is_unpoliced()
+            && let Some(policy_currency) = &self.currency
+            && let Some(other) = self
+                .opening_balances
+                .keys()
+                .find(|currency| *currency != policy_currency)
+        {
+            return Err(format!(
+                "opening_balances.{other} is not the policy currency {policy_currency}; a policed \
+                 account may open only in the currency its thresholds are stated in, because \
+                 equity is computed in that currency alone and the venue has no exchange rate"
+            ));
         }
         Ok(())
     }
@@ -396,6 +428,7 @@ pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
     let usd = || Some("USD".to_owned());
     match name {
         "intraday-trail" => Some(AccountPolicy {
+            opening_balances: Default::default(),
             currency: usd(),
             trailing_drawdown: Some(TrailingDrawdown {
                 amount: Decimal::from(2_000),
@@ -412,6 +445,7 @@ pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
             reset_minute_utc: default_reset_minute(),
         }),
         "eod-trail" => Some(AccountPolicy {
+            opening_balances: Default::default(),
             currency: usd(),
             trailing_drawdown: Some(TrailingDrawdown {
                 amount: Decimal::from(2_000),
@@ -425,6 +459,7 @@ pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
             reset_minute_utc: default_reset_minute(),
         }),
         "daily-limit-only" => Some(AccountPolicy {
+            opening_balances: Default::default(),
             currency: usd(),
             trailing_drawdown: None,
             daily_loss_limit: Some(DailyLossLimit {
@@ -439,6 +474,7 @@ pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
         // follows the account up. 5,000 off a 50k start is the 10 percent
         // overall many forex programmes advertise, with a 2,500 daily lock.
         "static-drawdown" => Some(AccountPolicy {
+            opening_balances: Default::default(),
             currency: usd(),
             trailing_drawdown: None,
             daily_loss_limit: Some(DailyLossLimit {
@@ -457,6 +493,7 @@ pub fn shipped_policy(name: &str) -> Option<AccountPolicy> {
         // strategy can pass the dollar rules at a size no firm would have
         // let it carry.
         "intraday-trail-sized" => Some(AccountPolicy {
+            opening_balances: Default::default(),
             currency: usd(),
             trailing_drawdown: Some(TrailingDrawdown {
                 amount: Decimal::from(2_000),
@@ -689,6 +726,51 @@ mod tests {
         AccountPolicy::default()
             .validate()
             .expect("an unpoliced account needs no currency");
+    }
+
+    /// Opening funding outside the policy currency, which is the shape that
+    /// liquidates an account before it trades. A USD policy funded with 50,000
+    /// USD and 50,000 EUR would anchor at 100,000 if the two were summed, then
+    /// read its first honest observation - 50,000, the USD balance alone - as a
+    /// loss of the whole EUR leg. The venue has no rate surface to value the
+    /// EUR with, so the only two honest answers are refuse the configuration or
+    /// silently ignore half the funding, and a refusal by name is the one that
+    /// tells the operator what they got wrong.
+    #[test]
+    fn policed_opening_balances_may_not_leave_the_policy_currency() {
+        let funded = |opening: Vec<(&str, i64)>| {
+            policed(|policy| {
+                policy.trailing_drawdown = Some(trailing(Decimal::from(5_000)));
+                policy.opening_balances = opening
+                    .into_iter()
+                    .map(|(code, amount)| (code.to_owned(), Decimal::from(amount)))
+                    .collect();
+            })
+        };
+        let refusal = funded(vec![("USD", 50_000), ("EUR", 50_000)])
+            .validate()
+            .expect_err("a policed account may not open in two currencies");
+        assert!(
+            refusal.contains("EUR") && refusal.contains("USD"),
+            "the refusal must name the offending currency and the policy one, got {refusal:?}"
+        );
+        funded(vec![("USD", 50_000)])
+            .validate()
+            .expect("opening in the policy currency alone is the supported shape");
+
+        // An unpoliced policy enforces nothing and values nothing, so its
+        // opening funding is not policed into one currency: no rule ever reads
+        // the anchor, and refusing here would refuse a shape that has always
+        // worked.
+        AccountPolicy {
+            opening_balances: std::collections::HashMap::from([
+                ("USD".to_owned(), Decimal::from(50_000)),
+                ("EUR".to_owned(), Decimal::from(50_000)),
+            ]),
+            ..Default::default()
+        }
+        .validate()
+        .expect("an unpoliced account is anchored by nothing and may hold anything");
     }
 
     /// The inverse of `every_shipped_policy_is_usable`: a name this build does

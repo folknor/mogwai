@@ -45,6 +45,18 @@ pub enum InstrumentClass {
         base: String,
         quote: String,
     },
+    /// Leveraged foreign exchange. Exposure is a marked position rather than
+    /// spendable base currency, and rollover pays once per crossed UTC day.
+    Forex {
+        base: String,
+        quote: String,
+        multiplier: Decimal,
+        pip_size: Decimal,
+        point_size: Decimal,
+        rollover_minute_utc: u32,
+        swap_long: Decimal,
+        swap_short: Decimal,
+    },
     /// A share. Held as a position, paid for in `currency`.
     ///
     /// Not `Spot { base: "AAPL", quote: "USD" }`, which was the only way to say
@@ -201,7 +213,7 @@ impl InstrumentClass {
     #[must_use]
     pub fn settlement_currency(&self) -> &str {
         match self {
-            Self::Spot { quote, .. } => quote,
+            Self::Spot { quote, .. } | Self::Forex { quote, .. } => quote,
             Self::Equity { currency, .. } => currency,
             Self::Future {
                 settlement_currency,
@@ -222,7 +234,8 @@ impl InstrumentClass {
     pub fn multiplier(&self) -> Decimal {
         match self {
             Self::Spot { .. } => Decimal::ONE,
-            Self::Equity { multiplier, .. }
+            Self::Forex { multiplier, .. }
+            | Self::Equity { multiplier, .. }
             | Self::Future { multiplier, .. }
             | Self::Perpetual { multiplier, .. }
             | Self::Inverse { multiplier, .. } => *multiplier,
@@ -254,6 +267,7 @@ impl InstrumentClass {
         matches!(
             self,
             Self::Equity { .. }
+                | Self::Forex { .. }
                 | Self::Future { .. }
                 | Self::Perpetual { .. }
                 | Self::Inverse { .. }
@@ -269,7 +283,10 @@ impl InstrumentClass {
     pub const fn is_future(&self) -> bool {
         matches!(
             self,
-            Self::Future { .. } | Self::Perpetual { .. } | Self::Inverse { .. }
+            Self::Forex { .. }
+                | Self::Future { .. }
+                | Self::Perpetual { .. }
+                | Self::Inverse { .. }
         )
     }
 

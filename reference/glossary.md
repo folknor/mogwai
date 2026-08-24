@@ -109,8 +109,10 @@ Only the owner adds an entry.
 ## The instruments
 
 - **Instrument class**: the settlement shape an instrument takes, which is what
-  decides how holding it moves the ledger. Five: `spot` (a base/quote pair -
-  the base is held as a currency balance), `equity` (a share - held as a
+  decides how holding it moves the ledger. Six: `spot` (a base/quote pair -
+  the base is held as a currency balance), `forex` (a marked leveraged
+  base/quote position carrying pip, point and daily swap conventions),
+  `equity` (a share - held as a
   position, paid for in one currency, carrying lot size, borrowability and a
   settlement period), `future` (cash-settled, continuous, no expiry or roll),
   `perpetual` (a future that pays funding between long and short at an

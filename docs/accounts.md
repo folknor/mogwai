@@ -59,7 +59,8 @@ The body is JSON and unknown fields are refused:
 ```
 
 `balances` is the opening balance by currency, and every amount is spelled as a
-string. A bare JSON number decodes through `f64`, so a wide balance would be
+string. It may be omitted when the selected policy carries `opening_balances`;
+an explicit request table wins. A bare JSON number decodes through `f64`, so a wide balance would be
 silently rounded and `1e-30` would fund the account with nothing; a numeric
 spelling is refused. `policy` carries risk knobs inline instead of naming a
 preset, and its thresholds stay number-tolerant, because a policy is also
@@ -69,10 +70,18 @@ A successful open answers `201` with an empty body. The refusals, with the text
 the venue actually sends:
 
 - `400 account id is not usable: ...`, naming what is wrong with the id.
-- `400 an account must open with at least one funded currency`. An account
+- `400 an account must open with at least one funded currency, either in
+  balances or in its policy`. An account
   funded in nothing would meet a funds rejection on its first order, which
   reads as depletion; naming it here keeps a configuration mistake apart from a
   trading outcome.
+- `400 this account opens with <currency> under a policy stated in
+  <policy currency>: ...`. A policed account may hold only its policy currency,
+  because equity is computed in that currency alone and the venue has no
+  exchange rate. Counting a foreign balance toward the anchor would open the
+  account above any equity it can observe and liquidate it on its first mark,
+  so the configuration is refused rather than converted at parity. An unpoliced
+  account is anchored by nothing and may hold any mix.
 - `400` naming an unusable policy field - `trailing_drawdown.amount must be
   positive`, `reset_minute_utc must be a minute of the day, 0 to 1439`, and the
   rest - so a nonsense rule is a refused request rather than an account that
@@ -260,8 +269,9 @@ The rules, all optional, and an account naming none is unpoliced:
 
 `reset_minute_utc` (default 1320, which is 22:00 UTC) is the minute of the UTC
 day the daily budget resets. The account defines its day, not the instrument.
-The reset fires whenever sim time crosses it, so a loop that never contains the
-instant never resets, and a daily limit silently becomes a run-lifetime limit.
+The reset fires whenever sim time crosses it. A socket cannot bind such a
+policy to a footprint that never contains the instant: the upgrade refuses the
+pair by name, so a daily limit cannot silently become a run-lifetime limit.
 
 `currency` is required whenever any rule is set, and refused for absence with
 `a policy with any rule must name the currency its thresholds are stated in;

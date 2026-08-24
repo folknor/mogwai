@@ -400,12 +400,14 @@ until 2026-08-18, on the argument that no consumer matched the difference; that
 is the argument the order-type completeness ruling overturned, since the venue's
 surface is not sized against a consumer's current catalog.
 
-The ledger models five instrument classes, split by settlement shape rather
+The ledger models six instrument classes, split by settlement shape rather
 than by asset class, because the shape is what decides how holding one moves the
 ledger.
 
 - `Spot` credits the base asset as a currency balance. Right for crypto spot,
   where the base genuinely is money you can spend on the next pair.
+- `Forex` carries a marked leveraged position and pays the configured long or
+  short swap when its daily rollover boundary is crossed.
 - `Equity` credits a position and never a balance. A share is not money, and
   modelling it as `Spot { base: "AAPL" }` put it on the same footing as USD -
   which is what made short sales, settlement periods and round lots

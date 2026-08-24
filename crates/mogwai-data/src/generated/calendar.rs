@@ -81,6 +81,20 @@ impl SessionCalendar {
         })
     }
 
+    /// Whether this weekly footprint contains a given UTC minute-of-day on at
+    /// least one day. Daily account rules cannot silently become run-lifetime
+    /// rules merely because their reset instant is absent from the water.
+    #[must_use]
+    pub fn contains_utc_minute_of_day(&self, minute_utc: u32) -> bool {
+        if minute_utc >= MINUTES_PER_DAY as u32 {
+            return false;
+        }
+        const NS_PER_DAY: u64 = 86_400_000_000_000;
+        (0..7).any(|day| {
+            self.is_open(day * NS_PER_DAY + u64::from(minute_utc).saturating_mul(NS_PER_MINUTE))
+        })
+    }
+
     #[must_use]
     pub fn next_open_ns(&self, clock_ns: u64) -> u64 {
         if self.is_open(clock_ns) {
@@ -190,6 +204,22 @@ mod tests {
             value.validate(),
             Err(CalendarError("settlement_minute_of_day"))
         );
+    }
+
+    #[test]
+    fn a_daily_reset_absent_from_the_footprint_is_detectable() {
+        let asia = SessionCalendar {
+            utc_offset_minutes: 0,
+            open_windows: (0..7)
+                .map(|day| WeeklyWindow {
+                    start_minute: day * 1_440 + 1_200,
+                    end_minute: day * 1_440 + 1_380,
+                })
+                .collect(),
+            settlement_minute_of_day: None,
+        };
+        assert!(asia.contains_utc_minute_of_day(1_320));
+        assert!(!asia.contains_utc_minute_of_day(1_020));
     }
 
     #[test]

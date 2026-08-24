@@ -352,7 +352,7 @@ pub(crate) fn instrument_any(
     // panicking `From<&str>` impl off this path entirely.
     let symbol = id.symbol;
     match &def.class {
-        InstrumentClass::Spot { base, quote } => {
+        InstrumentClass::Spot { base, quote } | InstrumentClass::Forex { base, quote, .. } => {
             let base = Currency::from_str(base).with_context(|| format!("unknown base {base}"))?;
             let quote =
                 Currency::from_str(quote).with_context(|| format!("unknown quote {quote}"))?;

@@ -222,6 +222,10 @@ pub struct Config {
     /// overlay shape as `instrument`, including its own `preset` and `override`
     /// sub-table, and applied after it. Keyed case-insensitively.
     pub symbols: HashMap<String, toml::Table>,
+    /// Operator-registered instrument presets. Names are case-insensitive and
+    /// registered entries shadow shipped presets.
+    #[serde(default)]
+    pub instrument_presets: HashMap<String, toml::Table>,
     /// Market regime for this run's tape. Formerly the one knob a consumer
     /// picked for itself per subscription; with no subscriptions left it is
     /// boot config, chosen by whoever launches the run. Absent means the
@@ -289,6 +293,7 @@ impl Default for Config {
             symbol: None,
             instrument: None,
             symbols: HashMap::new(),
+            instrument_presets: HashMap::new(),
             regime: None,
             balances: default_balances(),
             account_policies: HashMap::new(),
@@ -549,6 +554,7 @@ impl Config {
         validate_fill_band(&cfg)?;
         validate_speed(&cfg)?;
         validate_symbol_keys(&cfg)?;
+        validate_instrument_preset_keys(&cfg)?;
         // Unlike every neighbouring count knob, 0 is not "unbounded" here:
         // `broadcast::channel(0)` panics, so the key is named in a load error
         // rather than crashing the first subscribe.
@@ -684,9 +690,44 @@ fn flatten_knobs(
 }
 
 fn effective_preset(name: &str) -> anyhow::Result<(toml::Table, toml::Table)> {
-    let text =
-        preset_text(name).ok_or_else(|| anyhow::anyhow!("unknown instrument preset {name}"))?;
-    let raw: toml::Table = toml::from_str(text)?;
+    effective_preset_from(None, name)
+}
+
+fn effective_preset_from(
+    cfg: Option<&Config>,
+    name: &str,
+) -> anyhow::Result<(toml::Table, toml::Table)> {
+    effective_preset_walk(cfg, name, &mut Vec::new())
+}
+
+fn effective_preset_walk(
+    cfg: Option<&Config>,
+    name: &str,
+    stack: &mut Vec<String>,
+) -> anyhow::Result<(toml::Table, toml::Table)> {
+    if stack
+        .iter()
+        .any(|ancestor| ancestor.eq_ignore_ascii_case(name))
+    {
+        stack.push(name.to_owned());
+        anyhow::bail!(
+            "instrument preset inheritance cycle: {}",
+            stack.join(" -> ")
+        );
+    }
+    stack.push(name.to_owned());
+    let raw: toml::Table = if let Some(table) = cfg.and_then(|cfg| {
+        cfg.instrument_presets
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, table)| table.clone())
+    }) {
+        table
+    } else {
+        let text =
+            preset_text(name).ok_or_else(|| anyhow::anyhow!("unknown instrument preset {name}"))?;
+        toml::from_str(text)?
+    };
     let mut instrument = raw
         .get("instrument")
         .and_then(toml::Value::as_table)
@@ -700,7 +741,7 @@ fn effective_preset(name: &str) -> anyhow::Result<(toml::Table, toml::Table)> {
         let parent = parent
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("preset {name} instrument.preset must be a string"))?;
-        effective_preset(parent)?
+        effective_preset_walk(cfg, parent, stack)?
     } else {
         (toml::Table::new(), toml::Table::new())
     };
@@ -720,6 +761,7 @@ fn effective_preset(name: &str) -> anyhow::Result<(toml::Table, toml::Table)> {
         provenance.insert(path.clone(), value.clone());
     }
     validate_provenance(name, &merged, &provenance)?;
+    stack.pop();
     Ok((merged, provenance))
 }
 
@@ -838,17 +880,31 @@ pub fn preset_document(name: &str) -> Option<&'static str> {
 /// matches the symbol, then [`DEFAULT_PRESET`]. Total over symbol strings.
 /// This is the one spelling of the precedence; `base_bundle` and every message
 /// naming the chosen bundle read it from here so the two cannot disagree.
-fn bundle_name<'a>(symbol: Option<&'a str>, operator_preset: Option<&'a str>) -> &'a str {
+fn bundle_name<'a>(
+    cfg: Option<&Config>,
+    symbol: Option<&'a str>,
+    operator_preset: Option<&'a str>,
+) -> &'a str {
     operator_preset
-        .or_else(|| symbol.filter(|symbol| preset_text(symbol).is_some()))
+        .or_else(|| {
+            symbol.filter(|symbol| {
+                preset_text(symbol).is_some()
+                    || cfg.is_some_and(|cfg| {
+                        cfg.instrument_presets
+                            .keys()
+                            .any(|name| name.eq_ignore_ascii_case(symbol))
+                    })
+            })
+        })
         .unwrap_or(DEFAULT_PRESET)
 }
 
 fn base_bundle(
+    cfg: Option<&Config>,
     symbol: Option<&str>,
     operator_preset: Option<&str>,
 ) -> anyhow::Result<(toml::Table, toml::Table)> {
-    effective_preset(bundle_name(symbol, operator_preset))
+    effective_preset_from(cfg, bundle_name(cfg, symbol, operator_preset))
 }
 
 /// Resolves anonymous overlays - the outermost is the `[instrument]` default
@@ -871,10 +927,11 @@ fn resolve_instrument(
             (source.to_owned(), overlay)
         })
         .collect();
-    resolve_instrument_named(symbol, named)
+    resolve_instrument_named(None, symbol, named)
 }
 
 fn resolve_instrument_named(
+    cfg: Option<&Config>,
     symbol: Option<&str>,
     overlays: Vec<(String, toml::Table)>,
 ) -> anyhow::Result<toml::Table> {
@@ -910,8 +967,8 @@ fn resolve_instrument_named(
         prepared.push((source, overlay));
     }
     let requested_symbol = symbol.map(str::to_owned);
-    let bundle = bundle_name(symbol, operator_preset.as_deref());
-    let (mut merged, _provenance) = base_bundle(symbol, operator_preset.as_deref())?;
+    let bundle = bundle_name(cfg, symbol, operator_preset.as_deref());
+    let (mut merged, _provenance) = base_bundle(cfg, symbol, operator_preset.as_deref())?;
     for (source, overlay) in prepared {
         apply_overlay(&mut merged, overlay, bundle, symbol, &source)?;
     }
@@ -1055,6 +1112,18 @@ pub(crate) enum ConfiguredClass {
         base: String,
         quote: String,
     },
+    Forex {
+        base: String,
+        quote: String,
+        multiplier: Decimal,
+        pip_size: Decimal,
+        point_size: Decimal,
+        rollover_minute_utc: u32,
+        #[serde(default)]
+        swap_long: Decimal,
+        #[serde(default)]
+        swap_short: Decimal,
+    },
     /// A share, held as a position and paid for in `currency`. NOT a spot pair
     /// with the ticker as its base: see `InstrumentClass::Equity`.
     /// `lot_size` is the round lot an order must be a multiple of, `borrowable`
@@ -1183,6 +1252,25 @@ impl ConfiguredInstrument {
                     base: base.clone(),
                     quote: quote.clone(),
                 },
+                ConfiguredClass::Forex {
+                    base,
+                    quote,
+                    multiplier,
+                    pip_size,
+                    point_size,
+                    rollover_minute_utc,
+                    swap_long,
+                    swap_short,
+                } => InstrumentClass::Forex {
+                    base: base.clone(),
+                    quote: quote.clone(),
+                    multiplier: *multiplier,
+                    pip_size: *pip_size,
+                    point_size: *point_size,
+                    rollover_minute_utc: *rollover_minute_utc,
+                    swap_long: *swap_long,
+                    swap_short: *swap_short,
+                },
                 ConfiguredClass::Future {
                     underlying,
                     settlement_currency,
@@ -1256,6 +1344,7 @@ impl ConfiguredInstrument {
 /// looks like a trading outcome, which the funding ruling forbids.
 pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::InstrumentProfiles> {
     validate_symbol_keys(cfg)?;
+    validate_instrument_preset_keys(cfg)?;
     // The boot shape leads. With no `symbol` key that is `None`, which resolves
     // the default bundle, so the default shape is swept exactly when it is the
     // shape the run can reach. Configured keys follow in a stable order, so a
@@ -1291,8 +1380,22 @@ pub fn build_instrument_profiles(cfg: &Config) -> anyhow::Result<source::Instrum
     // there would refuse binds for a currency the engine never charges.
     let mut funding_barred = std::collections::HashSet::new();
     if !cfg.balances.is_empty() {
-        let reachable = preset_names()
+        let mut preset_names = preset_names()
             .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut registered = cfg.instrument_presets.keys().cloned().collect::<Vec<_>>();
+        registered.sort_by_key(|name| name.to_ascii_uppercase());
+        for name in registered {
+            if !preset_names
+                .iter()
+                .any(|shipped| shipped.eq_ignore_ascii_case(&name))
+            {
+                preset_names.push(name);
+            }
+        }
+        let reachable = preset_names
+            .iter()
             .map(|name| {
                 profile_for(cfg, Some(name))
                     .with_context(|| format!("reachable preset shape {name} is invalid"))
@@ -1322,6 +1425,21 @@ fn validate_symbol_keys(cfg: &Config) -> anyhow::Result<()> {
                 "symbols tables {previous:?} and {key:?} differ only in case; symbol table keys must be unique case-insensitively"
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_instrument_preset_keys(cfg: &Config) -> anyhow::Result<()> {
+    let mut normalized = HashMap::<String, &str>::new();
+    for key in cfg.instrument_presets.keys() {
+        let folded = key.to_ascii_uppercase();
+        if let Some(previous) = normalized.insert(folded, key) {
+            anyhow::bail!(
+                "instrument_presets tables {previous:?} and {key:?} differ only in case; preset names must be unique case-insensitively"
+            );
+        }
+        effective_preset_from(Some(cfg), key)
+            .with_context(|| format!("instrument preset {key} is invalid"))?;
     }
     Ok(())
 }
@@ -1477,7 +1595,7 @@ pub fn profile_for(
     cfg: &Config,
     symbol: Option<&str>,
 ) -> anyhow::Result<source::InstrumentProfile> {
-    let merged = resolve_instrument_named(symbol, cfg.overlays_for(symbol))?;
+    let merged = resolve_instrument_named(Some(cfg), symbol, cfg.overlays_for(symbol))?;
     profile_from_merged(merged)
 }
 
@@ -1640,10 +1758,16 @@ fn validate_instrument_options(
     def: &InstrumentDef,
 ) -> anyhow::Result<()> {
     match (&def.class, &configured.margin) {
+        // Not "only for a future" any more: forex is margined too, and it is
+        // spot alone that has no margin because its base is spendable money
+        // rather than a marked position.
         (InstrumentClass::Spot { .. }, Some(_)) => anyhow::bail!(
-            "instrument {} margin is valid only for a future",
+            "instrument {} is spot and holds no margin; margin belongs to a marked position",
             def.symbol
         ),
+        (InstrumentClass::Forex { .. }, None) => {
+            anyhow::bail!("instrument {} forex requires a margin table", def.symbol)
+        }
         (InstrumentClass::Future { .. }, None) => {
             anyhow::bail!("instrument {} future requires a margin table", def.symbol)
         }
@@ -1734,6 +1858,33 @@ pub(crate) fn validate_instrument_def(def: &InstrumentDef) -> anyhow::Result<()>
             }
             if let Err(why) = mogwai_protocol::validate_currency_code(quote) {
                 anyhow::bail!("instrument {} quote: {why}", def.symbol);
+            }
+        }
+        InstrumentClass::Forex {
+            base,
+            quote,
+            multiplier,
+            pip_size,
+            point_size,
+            rollover_minute_utc,
+            ..
+        } => {
+            for (field, currency) in [("base", base), ("quote", quote)] {
+                if let Err(why) = mogwai_protocol::validate_currency_code(currency) {
+                    anyhow::bail!("instrument {} {field}: {why}", def.symbol);
+                }
+            }
+            if multiplier <= &Decimal::ZERO
+                || pip_size <= &Decimal::ZERO
+                || point_size <= &Decimal::ZERO
+                || point_size > pip_size
+                || pip_size % point_size != Decimal::ZERO
+                || *rollover_minute_utc >= 1_440
+            {
+                anyhow::bail!(
+                    "instrument {} forex multiplier, pip_size, point_size and rollover_minute_utc are invalid",
+                    def.symbol
+                );
             }
         }
         InstrumentClass::Future {
@@ -2908,6 +3059,16 @@ mod tests {
     }
 
     #[test]
+    fn a_runtime_preset_shadows_a_shipped_name() {
+        let raw: toml::Table = toml::from_str(preset_text("BTCUSDT").unwrap()).unwrap();
+        let mut cfg = Config::default();
+        cfg.instrument_presets.insert("mnq".into(), raw);
+        let profile = profile_for(&cfg, Some("MNQ")).unwrap();
+        assert!(matches!(profile.def.class, InstrumentClass::Spot { .. }));
+        assert_eq!(profile.def.symbol.as_ref(), "MNQ");
+    }
+
+    #[test]
     fn a_preset_with_incomplete_provenance_refuses_boot() {
         let instrument: toml::Table =
             toml::from_str("symbol = \"MNQ\"\nprice_precision = 2").unwrap();
@@ -2916,6 +3077,117 @@ mod tests {
                 .unwrap();
         let error = validate_provenance("BROKEN", &instrument, &provenance).unwrap_err();
         assert!(error.to_string().contains("price_precision"), "{error}");
+    }
+
+    /// Runtime registration makes preset inheritance a graph an operator
+    /// writes, so the cycle refusal is load-bearing rather than theoretical:
+    /// without it `effective_preset_walk` recurses until the stack is gone, and
+    /// a stack overflow at boot names nothing an operator can act on. The
+    /// self-loop is the shortest case and the two-step is the one a single-name
+    /// guard would miss, so both are here.
+    #[test]
+    fn a_runtime_preset_inheritance_cycle_refuses_boot() {
+        // The provenance table is not decoration here: it is checked before the
+        // parent is resolved, so a fixture without one is refused for the wrong
+        // reason and never reaches the guard this test is about.
+        let inheriting = |parent: &str| {
+            toml::from_str::<toml::Table>(&format!(
+                "[instrument]\npreset = \"{parent}\"\n[provenance]\n"
+            ))
+            .unwrap()
+        };
+        for edges in [
+            vec![("loop", "loop")],
+            vec![("first", "second"), ("second", "first")],
+        ] {
+            let mut cfg = Config::default();
+            for (name, parent) in &edges {
+                cfg.instrument_presets
+                    .insert((*name).to_owned(), inheriting(parent));
+            }
+            // The alternate Display renders the whole context chain. The outer
+            // frame only says which registered name is invalid; the cycle
+            // itself, with the path that closed it, is the frame underneath,
+            // and that is the half an operator needs.
+            let error = format!(
+                "{:#}",
+                validate_instrument_preset_keys(&cfg)
+                    .expect_err("a preset inheritance cycle must refuse boot")
+            );
+            assert!(
+                error.contains("cycle"),
+                "the refusal must name the cycle, got {error}"
+            );
+        }
+    }
+
+    /// The forex validator's negative half. Each of these is a shape that
+    /// reaches the rollover arithmetic and the pip conventions, and none of
+    /// them is caught by anything downstream: a zero multiplier makes every
+    /// notional zero, a point coarser than a pip inverts the two conventions,
+    /// and a rollover minute past the end of the day is a swap that never pays.
+    #[test]
+    fn a_malformed_forex_class_refuses_boot() {
+        let forex = |mutate: fn(&mut InstrumentClass)| {
+            let mut class = InstrumentClass::Forex {
+                base: "EUR".into(),
+                quote: "USD".into(),
+                multiplier: Decimal::from(100_000),
+                pip_size: Decimal::new(1, 4),
+                point_size: Decimal::new(1, 5),
+                rollover_minute_utc: 1_320,
+                swap_long: Decimal::ZERO,
+                swap_short: Decimal::ZERO,
+            };
+            mutate(&mut class);
+            InstrumentDef {
+                symbol: "EURUSD".into(),
+                class,
+                price_precision: 5,
+                size_precision: 0,
+                price_increment: Decimal::new(1, 5),
+                size_increment: Decimal::ONE,
+            }
+        };
+        validate_instrument_def(&forex(|_| {})).expect("the well-formed shape is accepted");
+        type Case = (&'static str, fn(&mut InstrumentClass));
+        let cases: [Case; 5] = [
+            ("a zero multiplier", |class| {
+                if let InstrumentClass::Forex { multiplier, .. } = class {
+                    *multiplier = Decimal::ZERO;
+                }
+            }),
+            ("a negative pip", |class| {
+                if let InstrumentClass::Forex { pip_size, .. } = class {
+                    *pip_size = -Decimal::new(1, 4);
+                }
+            }),
+            ("a point coarser than a pip", |class| {
+                if let InstrumentClass::Forex { point_size, .. } = class {
+                    *point_size = Decimal::new(1, 3);
+                }
+            }),
+            ("a pip that is not a whole number of points", |class| {
+                if let InstrumentClass::Forex { point_size, .. } = class {
+                    *point_size = Decimal::new(3, 5);
+                }
+            }),
+            ("a rollover past the end of the day", |class| {
+                if let InstrumentClass::Forex {
+                    rollover_minute_utc,
+                    ..
+                } = class
+                {
+                    *rollover_minute_utc = 1_440;
+                }
+            }),
+        ];
+        for (what, mutate) in cases {
+            assert!(
+                validate_instrument_def(&forex(mutate)).is_err(),
+                "{what} must refuse boot"
+            );
+        }
     }
 
     #[test]

@@ -359,6 +359,16 @@ pub(crate) async fn ws_upgrade(
     let resetting = state
         .run
         .claim_discards_ledger(&account_id, claimed, callsign);
+    if let Some(reset) = state.run.daily_reset_minute(&account_id, resetting)
+        && let Some(reason) = daily_reset_refusal(
+            account_id.as_str(),
+            &symbol,
+            profile.calendar.as_ref(),
+            reset,
+        )
+    {
+        return (StatusCode::BAD_REQUEST, reason).into_response();
+    }
     if !state
         .run
         .funded_in(&account_id, resetting, settlement)
@@ -544,6 +554,42 @@ pub(crate) async fn ws_upgrade(
     ws.max_message_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
         .max_frame_size(mogwai_protocol::MAX_INBOUND_MESSAGE_BYTES)
         .on_upgrade(move |socket| handle_socket(socket, state, passenger))
+}
+
+fn daily_reset_refusal(
+    account: &str,
+    symbol: &str,
+    calendar: Option<&mogwai_data::SessionCalendar>,
+    reset: u32,
+) -> Option<String> {
+    calendar
+        .is_some_and(|calendar| !calendar.contains_utc_minute_of_day(reset))
+        .then(|| {
+            format!(
+                "account {account} resets its daily loss limit at UTC minute {reset}, which the {symbol} footprint never contains"
+            )
+        })
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+
+    #[test]
+    fn a_daily_policy_is_refused_when_its_footprint_omits_the_reset() {
+        let calendar = mogwai_data::SessionCalendar {
+            utc_offset_minutes: 0,
+            open_windows: vec![mogwai_data::WeeklyWindow {
+                start_minute: 1_200,
+                end_minute: 1_380,
+            }],
+            settlement_minute_of_day: None,
+        };
+        let refusal = daily_reset_refusal("WYRD-1", "ASIA", Some(&calendar), 1_020)
+            .expect("the absent boundary must refuse");
+        assert!(refusal.contains("WYRD-1") && refusal.contains("ASIA"));
+        assert!(daily_reset_refusal("WYRD-1", "ASIA", None, 1_020).is_none());
+    }
 }
 
 fn send_admission(lanes: &ExecLanes, msg: VenueMessage) -> Result<(), CloseSpec> {

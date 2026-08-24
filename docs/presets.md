@@ -138,6 +138,16 @@ MNQ); that nesting is internal to how the presets are authored; from the
 operator's config, `preset = "MES"` behaves identically to any other preset
 name.
 
+## Registering a preset at runtime
+
+Copy the full `instrument` and `provenance` tables printed by `mogwai presets
+<name>` beneath `[instrument_presets.<new-name>]` in the venue config, then
+replace the values and provenance with the intake result. Runtime names are
+case-insensitive and shadow shipped names, and `instrument.preset` may inherit
+from either kind. Both meet the same completeness and diagnostic gates. The
+config file is the onboarding boundary: a new instrument needs no Rust table
+entry and no generator-method edit.
+
 ## Serving a symbol without a preset
 
 Every wire-legal string is served. An unmatched symbol gets the BTCUSDT preset's

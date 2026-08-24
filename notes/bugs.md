@@ -133,6 +133,18 @@ time than a short warmup nobody notices.
 
 ---
 
+### C16. The venue no longer receives a terminal interrupt
+
+Filed 2026-08-24 from round 4, as the stated cost of the C8 process-group fix.
+Putting the child in its own process group took the venue out of the launcher's
+group, so a terminal Ctrl-C no longer reaches `mogwai serve` run interactively.
+`PR_SET_PDEATHSIG` still kills it with its launcher and the SIGTERM path is
+unaffected, so nothing is leaked; what is lost is the interactive stop.
+
+Recorded as a deliberate trade rather than an oversight, and documented at the
+site. Open only as the question of whether the interactive case deserves a
+forwarded signal.
+
 ## D. Data and generator
 
 ### D1. Generator defects inherited from the closed measure-and-fit arc
@@ -299,44 +311,10 @@ Cadence-impact analysis is required before anyone touches it.
 
 ## E. Instruments and account policy
 
-### E1. Funding is paid on the fill sweeper's cadence
-
-A funding instant is honoured on the pass that crosses it rather than at the
-instant itself.
-
-### E2. A footprint that never contains the daily reset instant never resets
-
-An Asia-only loop, 8pm to 3am ET, under a 17:00 ET reset never resets the daily
-budget, so a daily loss limit silently becomes a run-lifetime limit. Flagged, not
-solved.
-
 ### E3. Nothing has been fitted for equity, perpetual or inverse
 
 A symbol configured as one is served the default tape wearing a different shape;
 the intake sequence is what makes a preset honest and none has been run.
-
-### E4. `[balances]` and `[account_policies]` are separate tables
-
-No named policy can state its own opening equity, which is what a funded-account
-programme is.
-
-### E5. `[regime]` is run-wide
-
-A per-passenger generator arm has no operator expression. A config-schema gap.
-
-### E6. Forex conventions
-
-Leverage landed with the notional margin basis, and the 24/5 session
-`[instrument.calendar]` already expresses. Still missing: pip and point
-conventions, and rollover or swap charged on a position held across the daily
-boundary. Open question whether that needs a `Forex` arm on `InstrumentClass` or
-rides `Spot` plus a margin policy.
-
-### E7. Instrument presets are compile-time
-
-`include_str!` against a fixed table in `config.rs`. They could gain the runtime
-registration account policies have. Recorded so the symmetry is not rediscovered;
-not a precondition of anything.
 
 ### E8. Undecided, listed so they are not re-derived
 
@@ -728,6 +706,19 @@ Wants a passenger submitting into a scheduled close over a real socket and
 reading the refusal frame, including the group case with a marketable member
 behind a non-marketable one.
 
+### G18. A test awaiting `connect()` bare cannot fail, only time out
+
+Filed 2026-08-24 from round 4. A bite-check there failed by exhausting the 20s
+per-test budget rather than by assertion, because `connect()` never returns when
+the connection task abandons itself. That test is now bounded, but the shape is
+suspected across the socket suites: a test that awaits `connect()` without its
+own deadline cannot distinguish never-connected from slow, so it reports a
+watchdog timeout where it should report a named failure.
+
+Sweep for the shape. This is the same ceiling G1 is about, from the other side:
+a test that waits on a condition with a generous deadline is both fast and
+diagnostic, and one that waits on nothing in particular is neither.
+
 ## H. Measurement and method owed
 
 ### H1. The price-span-per-inferred-match-event measurement
@@ -845,6 +836,13 @@ Flagged in its own comment in the adapter. If sim speed is ever pushed hard, tha
 constant is the first wall.
 
 ---
+
+### I5. `nix` is an unconditional dependency of `mogwai-protocol`
+
+Filed 2026-08-24 from round 4. Every use of it is behind `cfg(unix)`, but it is
+declared in plain `[dependencies]` rather than under
+`[target.'cfg(unix)'.dependencies]`. Harmless while nothing builds this on
+Windows, and exactly the shape that bites the first time something does.
 
 ## J. Documentation owed
 
