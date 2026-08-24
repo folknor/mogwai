@@ -119,6 +119,39 @@ under one id acts on that one ledger whatever symbol it bound, so a consumer
 trading two instruments under one id is trading one book. Positions are keyed
 within it by the run's `oms_type`; see `docs/oms-types.md`.
 
+## What one account may run
+
+Three shapes come up, and only the third is outside what mogwai supports.
+
+**Many strategies, different symbols, one account.** Supported, and it is the
+design. This is the many-rivers shape: each strategy boards its own passenger
+onto its own river, and all of them settle onto the one ledger the account id
+names. Fifty of these under `MOGWAI-001` is server mode working as intended.
+
+**Many strategies, the same symbol, one account.** Permitted, and the venue does
+not care. Whether they land on one river or on several - a different seed or a
+different generator arm gives a different river key - is immaterial to it. It is
+usually an operator mistake rather than a plan, because those strategies share
+one ledger and so net against each other, and because a ledger carries one
+cadence per river. Neither is a ground for refusal: mogwai serves what is asked
+for and leaves the arrangement to the operator.
+
+**One strategy reading several symbols.** Not supported. This is the
+cross-symbol thesis - BTC and ETH read together, or an MNQ/MES divergence trade
+- where what the strategy trades is the relationship between two instruments
+rather than either one alone. A strategy here is single-instrument by settled
+premise, and the reason is the water: per-symbol tapes are generated
+independently and carry no cross-instrument correlation, so such a strategy
+would be trading a relationship that does not exist in the tape. It would not
+fail loudly; it would return a number that means nothing.
+
+Nothing in the venue enforces the third case, because the venue never sees a
+strategy at all - it sees an account and its passengers, and one strategy
+holding two passengers is indistinguishable from two strategies holding one
+each. The premise is the consumer's to keep. `mogwai-adapter` keeps the local
+half of it by binding one data client to one river and refusing any further
+subscription. See the Strategy and Account entries in `reference/glossary.md`.
+
 ## Callsigns, coexistence and eviction
 
 `/ws?callsign=` carries the identity a socket presents: 1 to 64 characters of

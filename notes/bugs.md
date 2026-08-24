@@ -1,0 +1,1114 @@
+# Bug report: the actionable backlog
+
+Extracted from `notes/todo.md` on 2026-08-24 for the bug-hunt orchestration loop.
+Every entry below is work that can be done in this tree. Items owed by another
+repository, or that are pure owner rulings with no code to write, are collected
+in the appendix at the end and are out of scope for the loop.
+
+## Mandatory reads, every agent, every round
+
+Before touching anything in this document, read `reference/north-star.md` and
+`reference/glossary.md`, then whichever other reference and docs pages the round
+rides on.
+
+Both of those two are exempt from the must-be-true rule and state the end state
+rather than the present. Where either and the code disagree, the code owes the
+change: the entry is not stale, the tree is behind. Correcting either to match
+current behaviour is the one edit that is always wrong there, and only the owner
+changes what they aim at. Glossary entries are admitted by the owner alone, so an
+agent meeting an undefined load-bearing word escalates and never adds one.
+
+Each finding carries the symptom, where it lives, and what closing it means.
+Confidence and hedging from the source document is preserved verbatim in spirit:
+where the source says a thing is unreproduced, unruled, or merely suspected, so
+does this document. Verify before fixing.
+
+Ordering inside a section is roughly by dependency, not by severity. Where an
+entry cannot start until another lands, it says so under Blocked by.
+
+---
+
+## B. Engine correctness
+
+### B3. `MarketToLimit` fills the whole quantity at its own limit, off the tape
+
+An open engine defect documented on the wire type and nowhere actionable: the
+fill takes the whole quantity at the order's own limit with no reference to the
+tape, and a divergence-manufactured remainder rests `Inert` - unable to fill,
+unable to expire, ended only by a consumer cancel. `Resting::Inert`'s doc
+describes the mechanism and neither side points at the other.
+
+### B4. A linkage release emits no wire frame
+
+A consumer watching bracket exit legs waits forever. Stated only in doc comments;
+it is either a protocol gap to close or a refusal to state on the wire.
+
+### B7. Account valuation residue
+
+None of it blocking:
+
+- One hop only. An asset is valued through an instrument quoting it directly in
+  the policy currency, so holding ETH under a USD policy with only ETHUSDT and
+  BTCUSD listed leaves the account unvaluable rather than valued through a chain.
+  A rate surface would fix it and buys cross-currency accounts too.
+- The mark is as stale as the last sweep, inherited from the margin ledger.
+- The ledger-generality ruling still wants shares, leverage and funding payments;
+  each needs a holding valued in a currency it is not denominated in, so this
+  machinery is the part of that which now exists.
+
+### B8. A zero-price fill is booked, not refused
+
+`warn_zero_px` warns and books, so a position can carry `mark_px == 0` if the
+tape produces one. `position_unrealized_checked`'s zero answer is the backstop
+for exactly that case. Refusing at the fill was considered and rejected in the
+2026-08-20 ruling, because by then the tape has already produced the print and
+aborting the serving path over it is the one thing no venue does. Open only as a
+known-covered case - listed so it is not re-filed as new.
+
+---
+
+## C. Venue and protocol
+
+### C1. `reject_while_closed` judges marketability against the wrong price
+
+It judges against the stated price while the engine judges against the
+band-drawn trigger, so the two can disagree by up to the fill band in either
+direction: an order the server admits as non-marketable can be marketable to the
+engine and fill off the stale print the guard exists to refuse, and one the
+server refuses can be one the engine would have rested.
+
+The engine's `draw_trigger` needs the order's `band_ticks` and the run's
+`fill_seed`, neither of which the HTTP boundary holds, so closing this means
+asking the engine rather than re-deriving. `Engine::worst_case_leaves` is the
+precedent shape. Affects `Market` and `MarketToLimit`.
+
+### C2. The account-claim path in `ws.rs` leaves an abandoned ride behind
+
+Safe by a reachability argument rather than a guard, where every other path
+releases through `Drop`. The frontier family in reverse.
+
+### C3. Engine-arm application order is unordered across concurrent control requests
+
+`Run::arm` records under the passenger map lock but applies the engine half after
+both locks drop, because the engine sits behind an async mutex, so two
+`POST /control/divergence` requests in flight at once can land on two seated
+ledgers in opposite orders. Unreachable in practice - the control plane is an
+operator surface, serialized in every scenario the venue is driven from - and
+closing it costs a second lock on a path that has never contended.
+
+### C4. `DivergenceRequest` accepts and ignores unknown fields
+
+Serde flatten blocks `deny_unknown_fields`, so the fix is structural: a kind/args
+request shape. Related and unruled: its 202 body is empty, English prose, or
+prose containing a Rust `{:?}` render, on the one route an automated scenario
+driver uses most.
+
+### C5. `enforce_funds` is an invisible whole-account mode
+
+Inferred from an empty balance map at engine construction, invisible from the
+wire and undocumented anywhere durable.
+
+### C7. Refusal texts spell their bounds out instead of naming the constant
+
+Re-verified against the code 2026-08-24 and the entry as filed was half stale.
+`messages::validate_wire_symbol` refuses with "symbols are 1 to 32 bytes" and
+carries a comment saying exactly why bytes and not characters, so the
+units half of the finding is closed. A test in the same module already pins the
+refusal text against `MAX_SYMBOL_LEN` by asserting the refusal contains the
+constant's value, so moving the constant fails loudly rather than silently.
+
+What is left is narrower than filed: the bound is still spelled `32` inline
+rather than named, on the refusal a client sees at the venue's front door since
+order entry routes through it. Cosmetic now that the test stands behind it.
+
+Four divergence texts in the same module have the shape too; count at the
+production sites, since the module's tests carry the same strings as expected
+values. Both refusals return `&'static str`, so fixing means changing the return
+type or reaching for a `const` formatter, which is why neither was fixed in
+passing.
+
+### C8. The launcher kills one process, not a process group
+
+`launch`'s timeout arm issues `child.kill()` and does not join the readiness
+reader, which is what makes the readiness bound unconditional. The kill closes
+stdout only while the child holds the write end, so a `binary` naming a wrapper
+script that starts the venue without `exec`, or a venue that ever grows a helper
+subprocess, leaves a grandchild holding an inherited copy and strands that reader
+thread for the life of the process. One leaked thread per timed-out launch is the
+deliberate trade.
+
+The robust form is putting the child in its own process group and `killpg`ing it,
+which also collects a helper the venue itself spawned, but not a wrapper's
+grandchild that has left the group - so it narrows the hole rather than closing
+it, and it is a real change to the launcher's process model. Latent today:
+`mogwai serve` spawns nothing, and `docs/cli.md` states the supported shape.
+
+### C9. `BoatKey` carries no placement nonce
+
+Boat identity across lifetimes is unrepresentable: a boat placed over a river
+again is the same key and `is_seated_on` still passes. `ws.rs`'s stale-seat
+hazard is held off by drop ordering rather than by identity, and is the remaining
+consumer if a nonce is ever wanted.
+
+Recorded so it is not re-filed: whether an eviction-reconnect should retire the
+book it takes over was withdrawn as unanswerable. It needs the venue to tell a
+returning client from a stranger presenting the same id, and a session id is
+self-asserted with no auth behind it.
+
+### C10. A per-passenger duration end is reported as a whole-run completion
+
+A passenger whose own duration ends is sent a `RunComplete` frame before the
+`close::DURATION_COMPLETE` close, identically to the whole-run arm
+(`crates/mogwai-venue/src/ws.rs`). A client classifying on the text frame reads a
+duration end as a run completion, and the close behind it is the only accurate
+statement. Nothing breaks today, since both readings stop the client, and the
+imprecision is documented at all three sites.
+
+The fix is either a distinct per-passenger completion frame or dropping the frame
+on that arm and letting the close carry it - both protocol changes with consumers
+to consider. Nothing detects it regressing further, because the two arms are
+correct in isolation.
+
+### C11. `RunComplete` reports slightly less than the declared duration
+
+Nothing on the wire lets a consumer tell that from a short run. The deadline is
+judged on the venue clock while `ws.rs` re-derives every announcement on the
+receiving socket's boat clock, so the announcement trails by the placement gap
+times `speed`. Both halves are deliberate and stated in `reference/clock.md`.
+
+What is open is whether a consumer should be able to distinguish "the run served
+its whole duration and my boat was placed late" from "the run was cut short":
+shipping the boat's epoch, or the venue's own elapsed alongside the socket's,
+would close it. A wire change nobody has asked for, and the same missing field as
+C10.
+
+### C13. Named tape windows have no wire at all
+
+Owed, not optional. `reference/north-star.md`'s settled premises make a named
+window on a shared exchange one of the two ways a path is reproduced, so this is
+an end-state commitment the tree is behind on rather than a feature request.
+
+`SocketQuery` carries no start or end: every cursor is placed at the fixed
+`run_start_ns` origin and `duration_ms` is length-from-boarding. This is the half
+most strategies will use, because a named window is what makes a forward-test
+claim bindable: a run becomes a pure function of `(seed, config, symbol, start,
+end)` with no boarding instant and no wall-clock input anywhere, and replication
+pairs dealt the same window trade identical water by construction rather than
+approximately.
+
+A named window always gets its own river even against an identical request
+already running, because the first requester is by then some N of sim-time ahead
+and a window means being served from its start. Sharing therefore only happens
+for the unnamed form - a preset plus a duration - which is the request that says
+"wherever you are is fine".
+
+One constraint to design for up front: a strategy needs warmup before its
+requested start, so `[T1, T2]` asks for materialization from `T1 - warmup_ns`,
+and that floor must sit at or above `TAPE_ORIGIN_NS`. A window requested too near
+the tape origin cannot carry its own warmup. Better as a named refusal at request
+time than a short warmup nobody notices.
+
+### C14. A boot symbol supplied at launch would move the funding refusal to boot
+
+Today a config funding only USDT boots happily and refuses `MNQ` at first bind,
+because only configured shapes are funding-checked at boot while presets and the
+fallback are merely recorded as barred. The transient launcher knows its one
+symbol up front, so it is the one caller that could be told at boot rather than
+at first use.
+
+---
+
+## D. Data and generator
+
+### D1. Generator defects inherited from the closed measure-and-fit arc
+
+Recorded 2026-08-23 as a transcription from that arc's deleted documents, with
+the evidence in `notes/tape-research-v1.md`. Re-verified against the code
+2026-08-24, and the entry as filed was substantially stale: of the three defects
+it named, one was already repaired, one is now gated with a stated residual, and
+one is live but was mischaracterized. What follows is the verified state. Treat
+anything else inherited from that arc with the same suspicion.
+
+**Closed. The `children_mean` clamp.** The mechanism was real: sweep size per
+parent event is `children_mean`, scaled per state by `ARRIVAL_QUIET_CHILDREN_MULT`
+0.20 and `ARRIVAL_ACTIVE_CHILDREN_MULT` 1.4308, the pair chosen so the weighted
+mean is preserved exactly. A sweep cannot hold fewer than one child, so at MNQ's
+observed mean of 1.1711 the quiet state wants 0.234 children, clamps to one, the
+identity collapses, and realized mean lands near 1.44 whatever is configured.
+
+`begin_event` now branches on exactly that condition and switches to a
+floor-aware solve that re-derives both active parameters from the unconditional
+targets at the current effective mean. The branch selects on the base configured
+mean rather than the surge-effective one, so no runtime path crosses between the
+two arithmetics, and `GeneratorScalars::validate` refuses a configuration whose
+floor-branch solve is not expressible. The comment at the branch names the July
+MNQ fit failure and the 1.44 figure - it is this defect and its repair. Nothing
+is owed here; it is recorded so the finding is not re-filed from the old note.
+
+**Gated, with a residual. `ARRIVAL_MEAN_CAL = 0.944` reaching the integrated
+frame.** The constant corrects the shipped sampling scheme's realized-mean
+inflation and is derived by bisection, not fitted. The integrated frame draws
+from an exact time change and has no such inflation, so a correction leaking into
+it would be a uniform 1/0.944 = 1.0593 rate excess on every integrated river.
+
+`the_arrival_mean_calibration_stays_off_the_integrated_frame` now pins the
+integrated mean to the declared mean bit for bit, and the 2026-08-09 calibration
+amendment rests on the frame staying bare. That test states its own limit: it
+gates the bare side only, because the corrected side is composed inline in
+`GeneratedSource::new` and lands in a private field, so no observable of it is
+reachable without replaying a whole generation. A source-side accessor for the
+composed active mean is what would let the other half be asserted.
+
+Unverified, and the part of the original finding that may still stand: the claim
+that the shipped path carries a 5.5 to 7.0 percent absolute-rate conflict against
+the observed July month. That is a question about the shipped scheme's rate, not
+about the leak, and the leak's gate says nothing about it. A Jensen-gap
+explanation for it was refuted in closed form. Establish whether it reproduces
+before acting on it.
+
+**Live. The calendar has no daylight rule.** Not hardcoded, which is what the old
+note said: `utc_offset_minutes` is a validated calendar field, and the MNQ preset
+declares `-300`, a CDT summer offset. The defect is that the model carries one
+scalar with no daylight transition, so a river fitted in July and walked through
+November is an hour out of place.
+
+The measured symptoms: twelve of twenty-four Stage M control walks, exactly the
+winter rotation, collapsed the local-hour-22 stratum to zero variance, and
+November put 840,315 rows outside declared sessions, 3.8 percent against
+September's 0.5. Any regression suite over this needs one daylight, one standard
+and one transition month, because single-month validation is structurally blind
+to it.
+
+It is disclosed rather than hidden: the preset's provenance table carries
+`calendar.utc_offset_minutes` as `kind = "declared"` with the rationale
+"permanent CDT model clock; DST transitions unmodelled, so CST sessions sit one
+UTC hour later than this table places them". So the cost is not a constant edit.
+Giving the calendar a daylight rule is a schema change reaching every preset, and
+that is the decision this finding actually carries.
+
+### D2. Nine deleted Python scripts are still referenced about forty times
+
+`analysis/mnq_fit.py` alone has roughly thirty references across `mogwai-lab` and
+`mogwai-cli`; `characterize.py`, `build_fingerprint.py`, `select_windows.py`,
+`build_cadence.py`, `run_corpus.py`, `fit_session_profile.py`,
+`check_cadence_feasible.py` and `tick_composition_ratios.py` account for the
+rest, across doc comments, `docs/cli.md`, `AGENTS.md` and `Cargo.toml`.
+
+One is not prose: `mogwai-lab/src/fingerprint.rs` emits the runtime error
+"analysis/cadence.json is required; run build_cadence.py first", instructing the
+user to run a script deleted in the Rust port.
+
+`scripts/retire_note_citations.py` is the existing tool for this sweep but is
+scoped to `crates/` and `brokkr.toml`.
+
+### D3. Generator havoc must fork the river
+
+The tape machinery deliberately mutates a canonical boatless river instead, with
+the pinned control-boundary snapshot, the coarsen exemption and the walk-back
+floor built to make non-forking correct, so the gap has known size and known work
+to undo. The seated-boat refusal standing in for the fork names a remedy no route
+exposes, and its gate reads boat presence in the non-awaiting form, so it is
+vacuous against a concurrent board - the vacuous-gate family.
+
+### D4. `SegmentSource` overrides neither `seek_to` nor `fault`
+
+An effectively infinite source inherits the O(distance) default walk that
+`mogwai-data`'s own `TickSource` doc warns about - the shape `GeneratedSource`
+needed `CheckpointIndex` for - harmless today only because
+`mogwai segments compose` walks forward from the origin and never seeks. It
+becomes a hang the moment anything serves a composed river or asks it for a
+window.
+
+`fault` is the harder half: the composer's one terminal condition, clock
+exhaustion, has no `TickFault` variant and is reported only through the inherent
+`SegmentSource::clock_exhausted`, which a `dyn TickSource` consumer cannot see,
+and adding a variant ripples into `mogwai-venue`'s `http.rs` fault rendering.
+
+The same item owns `emit_price`'s panic: a named panic inside
+`TickSource::next_tick` in a library crate, which becomes a serving-path abort
+the moment a composed river is served, where `GeneratedSource`'s equivalent
+failures go through `TickFault`. Giving the composer a `TickFault` closes both
+halves at once.
+
+### D5. The 86 MB and 57 MB build tax, and the dead protocol code
+
+`analysis/mnq-measure-12a.json` is 86 MB and is `include_str!`d at five sites,
+two of them outside `cfg(test)`, so it is baked into the shipped binary.
+`analysis/mnq-arrival-screen.json` is 57 MB and is parsed in full by
+`arrival_envelope_diagnostic.rs`'s test, which is not ignored, so every
+`brokkr check` reads it.
+
+Both are terminal outputs of the closed 12b protocol. They cannot be removed
+without deciding the larger question they sit inside: roughly 25,000 lines across
+`mogwai-lab` and `mogwai-cli` are the compiled machinery of the closed arc (the
+arrival screen, control and envelope family, `measure12a`, `aggregate`,
+`stage_m` and its Tier 2 limb, `count_curve`, `ordered_counts`, `slow_geometry`,
+`tick_composition`, `select_windows`), and the binary still advertises them as
+supported subcommands.
+
+Owner call, deferred until v2's shape is known, since a successor may want some
+of the corpus-side machinery. Do not delete without a ruling.
+
+### D6. The synthetic top of book is uncalibrated
+
+Quoted width, top sizes and trade displacement are placeholder constants pending
+CME TBBO. The layer exists since tape protocol 7; what is absent is the
+calibration.
+
+### D7. Numerical stability in `AutoCorr`
+
+`crates/mogwai-lab/src/characterize/mod.rs`. Its `acf()` guards zero variance
+with `if var <= 0.0 { return vec![0.0; self.k] }`, which catches zero and any
+negative residue but not a positive one, so a series constant at an irrational
+value - the fixture case is `abs(log return)` constant at ln2 - can leave a tiny
+positive residue from `sumsq / n - mean * mean`, slip the guard, and return an
+ACF that came out of catastrophic cancellation rather than measurement. Which
+side of zero the residue lands on is not something the caller controls. Both
+branches substitute a number where the honest answer is that the quantity is
+undefined for a constant series.
+
+Deliberately not fixed. `AutoCorr` also computes the F1 duration ACFs and is
+bit-exact against `analysis/cadence.json` (`duration_acf_lag1`
+0.32204142581620676, `duration_acf_lag5` 0.22388204486699373), which is the
+lineage the fingerprint's cadence half rests on, and changing the estimator
+invalidates that equivalence.
+
+A fix returns an explicit unavailable rather than zeros, uses a relative rather
+than absolute variance floor, and probably a two-pass or Welford accumulation -
+all of which move numbers, so the work is the analysis of what moves in the
+cadence targets and whether the fingerprint must be refitted. Real monthly series
+carry positive return variance and come nowhere near the degenerate case.
+Cadence-impact analysis is required before anyone touches it.
+
+---
+
+## E. Instruments and account policy
+
+### E1. Funding is paid on the fill sweeper's cadence
+
+A funding instant is honoured on the pass that crosses it rather than at the
+instant itself.
+
+### E2. A footprint that never contains the daily reset instant never resets
+
+An Asia-only loop, 8pm to 3am ET, under a 17:00 ET reset never resets the daily
+budget, so a daily loss limit silently becomes a run-lifetime limit. Flagged, not
+solved.
+
+### E3. Nothing has been fitted for equity, perpetual or inverse
+
+A symbol configured as one is served the default tape wearing a different shape;
+the intake sequence is what makes a preset honest and none has been run.
+
+### E4. `[balances]` and `[account_policies]` are separate tables
+
+No named policy can state its own opening equity, which is what a funded-account
+programme is.
+
+### E5. `[regime]` is run-wide
+
+A per-passenger generator arm has no operator expression. A config-schema gap.
+
+### E6. Forex conventions
+
+Leverage landed with the notional margin basis, and the 24/5 session
+`[instrument.calendar]` already expresses. Still missing: pip and point
+conventions, and rollover or swap charged on a position held across the daily
+boundary. Open question whether that needs a `Forex` arm on `InstrumentClass` or
+rides `Spot` plus a margin policy.
+
+### E7. Instrument presets are compile-time
+
+`include_str!` against a fixed table in `config.rs`. They could gain the runtime
+registration account policies have. Recorded so the symmetry is not rediscovered;
+not a precondition of anything.
+
+### E8. Undecided, listed so they are not re-derived
+
+- Whether a havoc-induced disconnect should behave differently from a real one.
+  The venue armed the blackout so it knows the client is merely blinded, and
+  `GoDark` is arguably toothless if the world stops while it is armed.
+  Freeze-and-resume covers it for now and nothing is blocked.
+- Whether a strategy should see its own remaining budget in order to size against
+  it. It can derive peak and threshold from its own fills and marks, so blind
+  trading is workable. Decide it when one asks.
+- Whether an order-list release should carry a market reading. A standalone
+  `MarketToLimit` takes the market, while the same type released as an order-list
+  child rests at its stated price, because `Engine::release_child` runs inside
+  `apply_linkage_after_fill` with no `MarketReading` to price against. Resting is
+  the consistent behaviour and the carve-out is stated in `docs/oms-types.md`, so
+  nothing is broken. Deciding yes would make a released `MarketToLimit` execute
+  on arrival and would reopen whether a `Market` child can be admitted too.
+- A trigger-act latency havoc arm, if a scenario ever needs a trigger fired later
+  than the sweep interval already allows. Deliberately not built: the sweep
+  interval already bounds trigger lateness, and a per-trigger delay knob is a new
+  arm rather than an extension of an existing one.
+
+---
+
+## F. Adapter
+
+### F1. `MogwaiDataClient::sink` drops ticks and bars when connected but not started
+
+`sink` is an `Option` filled in `start()`, and several delivery sites are
+`if let Ok(sink) = self.sink()`, so a data client connected without being started
+drops ticks and bars with no error - the exec side's finding-1 family on the data
+leg. The symmetric guard would have to be checked against the
+`data_client_transport` binary's own start/connect orderings first.
+`get_data_event_sender()` panics rather than returning `None`, so the
+start-with-no-runner case is at least loud; it is the connect-without-start case
+that is silent.
+
+### F2. The adapter reads the wrong clock
+
+`fetch_clock` hits bare `GET /clock` with neither symbol nor speed, so every
+timestamp, havoc deadline, quota interval and backoff sits on the venue axis. The
+envelope's `boat_clock` flag has no reader in the crate.
+
+### F3. The adapter cannot name a speed or a duration
+
+`ws_url` emits neither, both configs carry no field for them, and the venue reads
+both. Related, the venue's second-cadence refusal reaches the adapter as a failed
+upgrade retried forever with backoff - a configuration error handled as a
+transient outage, unlike the identity mismatch, which refuses terminally.
+
+The second-cadence refusal is permanent by design: a ledger carries one cadence,
+per `reference/glossary.md`'s Boat and Account entries, and the venue is right to
+refuse. So the adapter's retry ladder is waiting on a condition that will never
+clear. Handle it terminally, the way the identity mismatch already is. Do not
+close this by asking the venue to relax the refusal.
+
+### F4. `ship_server_havoc` serializes each divergence bare
+
+Transport arms default venue-wide instead of riding the configured account, and
+generator arms lose their symbol scope.
+
+### F5. `for_run` discards `account_ttl_ms` and `reset_account_on_reconnect`
+
+The adapter's reconnect loop can back off past a freeze TTL blind.
+
+### F6. `HavocSpec.data` appears to have no reader
+
+`Option<MarketRegime>`, now that the `Subscribe` carrier is retired, so an
+operator setting `[havoc.data]` may be arming a field nothing consumes - the
+looks-armed-and-is-not shape. Wants a verdict: route it or refuse it. Verify the
+"no reader" claim before acting on it.
+
+### F7. `await_account_registered` and `wait_connected` are busy-wait shims
+
+Both inside `connect()`, both polling on a 10 ms sleep, roughly 500 wakeups on a
+slow boot, and both wall time rather than sim-scaled, so under an accelerated
+clock they are the only wall-time waits in the boot path. Wall is correct for
+what they wait on - a websocket upgrade and a cache registration are host work -
+so what is left is the polling. Both want a notifier: the connected flag is the
+adapter's own and could carry a `tokio::sync::Notify` beside it, and the cache
+poll wants nautilus to signal registration. `await_account_registered` also still
+carries its own 5 s bound.
+
+### F8. The equity conversion drops three facts
+
+Lot size, borrowability and settlement period all pass as `None` in `convert.rs`.
+
+### F9. The many-rivers shape is not expressible through the adapter's public API
+
+One data client binds one river and refuses every other subscription, and nothing
+presents multi-pair composition as supported.
+
+Narrowed 2026-08-24, and read the narrowing before working this. The
+one-river-per-client refusal is not the defect: a strategy is single-instrument
+by settled premise, the venue structurally cannot see a strategy at all, and the
+adapter is the only layer that can enforce the premise. The refusal is that
+enforcement and it stays.
+
+What is actually open is the account-level shape the glossary does describe: one
+account carrying several single-instrument strategies, each its own passenger on
+its own river. Whether several data clients can be driven cleanly under one
+account is the question. Do not close this by letting one client bind two
+rivers.
+
+### F10. `fetch_account` id mismatch is only a cosmetic log line
+
+The adapter's `fetch_account` names the configured account, but what a
+reported-id mismatch should mean under the per-account venue is still only
+`note_account_label`. Whether it should ever be treated as an error is undecided.
+
+### F11. Reconciliation proves the adapter would answer, not that the node asks
+
+`crates/mogwai-adapter/tests/reconciliation.rs` seeds venue truth and pins each
+granular generator, `query_order` and their mass-status composition over both
+query carriers. The silent-degrade property is a class, shared by every report
+path mogwai relies on. Known limitation, recorded rather than closed.
+
+### F12. Owner call: `DuplicateNextFill` certifies nothing against a nautilus host
+
+Verified 2026-08-23 against the pinned version - `mogwai-adapter` pins nautilus
+0.62.0 (an earlier note said 0.61) and `research/nautilus_trader` is at 0.62.0,
+so the read is at the pin rather than at HEAD. `commit_fill` emits
+`fill.clone()`, `trade_id` included. `ExecutionEngine::validate_fill_for_order`
+calls `Order::is_duplicate_fill`, which matches `trade_id`, `order_side`,
+`last_qty` and `last_px` together - all four identical - and bails with a warning
+before `Position::apply`, whose own `check_predicate_true` on a repeated trade id
+would panic. The suppression is not keyed on `causation_id`, as the original note
+had it.
+
+What is left is not a bug report but a choice, and the two options inject
+different lies:
+
+- Keeping the shared id models a retransmitting venue and makes the arm a test of
+  the consumer's deduplication, which nautilus passes in silence and which
+  nothing observes.
+- Minting a fresh `trade_id` per emitted fill models a phantom execution, which a
+  correct consumer books twice - the divergence the arm's own doc comments
+  describe ("doubles the wire event, not the truth"). Minting also shifts every
+  subsequent venue trade id, so it owes a re-bless of the exact-equality
+  transcripts.
+
+The verdict and both readings are recorded at the emission site in
+`mogwai-engine`'s `commit_fill`.
+
+---
+
+## G. Tests and tooling
+
+### G1. Triage every test for parallel safety, and kill every fixed duration and wait
+
+`[test.profiles.gate]` sits at `test_threads = 8`, which is a measured compromise
+rather than a resolution: at 16 the run goes red as a wrong answer rather than a
+watchdog timeout, so the ceiling is set by our least robust test rather than by
+the machine, and every fixed wall-clock wait in the suite is a piece of that
+ceiling.
+
+What the measurement found. Serial, the gate spent 164s executing 1,608 tests,
+and the top 20 of them were 54 percent of it while the other 1,451 came to 3.8s
+combined. Almost none of that concentration is computation: the lifecycle gates
+spend a declared `--duration` in wall time and the reconnect ladders spend their
+attempts the same way. The genuinely CPU-bound tests are the tape walks, and they
+are the minority.
+
+The work is triage before repair. For every test ask two things: can it run
+beside its siblings, and does it wait on a duration rather than on a condition. A
+test that waits for a state to be reached, with a generous deadline as the
+failure path, is both parallel-safe and fast; a test that sleeps a fixed span is
+neither, and it silently prices the whole gate. The lifecycle family is the
+obvious start - `completion.rs`, `serving.rs`, `lifecycle.rs` and the adapter's
+four socket binaries - but the sweep is every test, because the point is a
+property of the suite.
+
+Check the fixed-path unit tests while triaging too: nothing collides today, since
+every one writes a distinct `target/...` name and ports are kernel-assigned, but
+that is convention rather than structure and one duplicated literal breaks it
+only under load.
+
+What it unlocks: `test_threads` can go to 0 (num_cpus) with the cliff gone rather
+than merely avoided. What is not the answer, already measured and rejected in
+`brokkr.toml`: a serial lane for the socket-backed tests floors at 74s against
+the flat setting's 53s, because those tests are the best parallel citizens in the
+suite precisely by being idle.
+
+Anything called settled here needs repeated runs. `test_threads = 8` went red
+after three green runs at 8, having already gone red at 16; three passes are not
+evidence about an intermittent race, a failure rate is. The parked list is empty
+as of 2026-08-19.
+
+**Blocked by:** G2 for the last of the fixed sleeps.
+
+### G2. The venue counts sweep passes for nobody
+
+This is the missing observable behind the last fixed sleeps. Wanted: a monotonic
+count of completed sweep passes per river, readable from a route that already
+exists - a field on `/clock` or `/health` would do - so a test can read it, wait
+for it to advance by N, and say exactly what it waited for.
+
+Nothing on the wire carries it today; the sweeper is internal to `mogwai-venue`'s
+fill path and emits no frame, counter or log a test can consume.
+
+Blocked on it:
+`serving::the_tape_is_identical_with_and_without_a_resting_stop` polls sim-clock
+advance as a proxy, sound only because that config's clock is wall-affine, and
+`serving::a_perpetual_position_pays_funding_across_an_interval` still bets on a
+wall sleep, the same poll having been found vacuous at `speed = 0.0`.
+
+### G3. Nothing on the wire says whether a submit took a market reading
+
+Which forces
+`serving::a_market_submit_takes_a_reading_on_both_the_priced_and_priceless_paths`
+to key on the venue's log. When `read_market` refuses - a cold volatility
+estimator, a truncated walk - the engine falls back to the order's stated price
+and logs a warn, and on a price-less market order the venue stamps the last print
+either way, so the fill lands on the tape whether a reading was taken or not.
+That is exactly the path the venue used to get wrong.
+
+What the venue would have to ship: the reading's own instant, or a bare "reading
+taken" flag, on `OrderFilled`. Two things follow. The gate stops reading logs,
+and the adverse-slippage invariant - a market buy fills at or above the print the
+venue read - becomes an exact per-fill statement instead of the bracket it is
+now. The bracket exists only because the reading instant is unidentifiable from
+outside: it is neither the acceptance instant nor the fill instant, and
+`MarketReadingCache` buckets it further.
+
+### G4. History-splice clamp has no test for the case that motivated it
+
+The cutoff is the tighter of the run clock and the asking passenger's own boat
+clock, so a slow boat is no longer served its own future, but every socket test
+runs at the venue's default speed where the two clocks agree, so nothing
+exercises the branch where they differ. Wants a passenger on a deliberately slow
+boat reading history past the point its own tape has reached, with the boat's
+frontier as an observable rather than a sleep. Filed 2026-08-23: the code is
+right, the coverage is a hole, and this is the shape that passes for the wrong
+reason later.
+
+### G5. The abandoned-upgrade path has no socket-level test
+
+No client behaviour found so far reaches it. `Passenger::attachments` exists for
+the upgrade a client walks away from before `handle_socket` runs - no lane bound,
+no lane released - pinned only by `run.rs` unit tests that drop an `Attach`
+directly.
+
+Sixteen connections writing a well-formed upgrade request and then resetting with
+`SO_LINGER` at zero all landed on the handled path instead: on loopback the venue
+has read the request, written the 101 and started the handler before the reset
+arrives. The race is inside hyper's upgrade handoff, so parameterizing an
+interval has nothing to take hold of. Closing it needs a seam the venue does not
+have, most plausibly a test-only delay or counter between the response and the
+handoff.
+
+### G6. `run_b1`'s build-identity guard has no test
+
+`crates/mogwai-cli/src/arrival_control.rs`. The `bugs-cli` round-3 fix pass
+refused the binary split partly on the strength of that guard. It bails unless
+`current_exe()` ends with `target/release/mogwai`, so B1's byte comparison is
+generated by the binary under test - the property the refusal record names as the
+reason `gen` and `arrival-control` must stay in one executable.
+
+Nothing asserts it: a test binary's `current_exe` is never
+`target/release/mogwai`, so only the refusal arm is reachable. Wants a seam that
+lets the accepted path be supplied. Low priority, since the guard is three lines
+and its consequence is a refusal rather than a wrong answer.
+
+### G7. `mogwai gen --type trace` has no end-to-end CLI coverage
+
+The one test sits at the `write_trace` seam in `gen.rs`; nothing drives the argv
+through the shipped binary the way `presets_cli.rs` does for `presets` -
+`--trace-from` and `--trace-until` parsing, the four-part window validation, the
+`--interval` and `--burn-in` rejections. The window validation admits
+`until == end`, which is the case the truncated-`child_count` defect lived in,
+and no test states that it is legal.
+
+### G8. The roll conformance fixture's Python half is manual
+
+`python3 analysis/roll_estimator.py conformance` is run by no lane, so its
+fixture-version guard fires only for a human who thinks to invoke it. The dwell
+pair has automated tests on both sides; this pair does not, because a Rust test
+may not spawn Python.
+
+### G9. Neither shared conformance fixture detects a quietly widened `tolerance`
+
+The fixture version is a schema version, and a tolerance edit weakens both
+implementations at once, so the second implementation - whose whole purpose is to
+catch a one-sided drift - is structurally blind to it. Unlike the arrival vectors
+there is no re-derivation to compare against; a fix needs an independently
+derived bound on the tolerance itself.
+
+### G10. Nothing routes a new wall-clock budget into the `timing` sweep
+
+`brokkr.toml` states the policy - a latency assertion is `#[ignore]`d at the
+source, listed in the gate's `skip`, and named in the `timing` sweep's `only` -
+and the tool enforces it in one direction only: an `only` entry the gate does not
+skip is an orphaned pair, and a filter matching nothing is dead. The converse,
+that every budget-carrying test appears in some `only` filter, is not a syntactic
+property and is therefore not checkable, so a plain `#[test]` asserting 50 ms in
+the parallel dev lane is admitted silently.
+
+Where the quantity is a parameter, inflating the interval under test is the
+better answer; where it is not, there is no answer. An owner-level question if
+anyone wants it mechanised - a source scan for `Duration::from_` inside an
+`assert!` is the crude form, and would have to justify its false-positive rate
+against a repository full of legitimate loose bounds.
+
+### G11. The no-shouting textlint is blind to several classes
+
+Shouted words survive in three places at once. Check the lint's coverage before
+sweeping by hand, because a hand sweep will miss whatever the lint misses next
+time.
+
+- Rust comments it does not reach. The `run.rs` and `http.rs` survivors were
+  swept 2026-08-23; `mogwai-venue`'s `config.rs` still carries `RESOLVED`, `ASK`,
+  `CASH`, `PER BOAT` and `NOT`, and `account.rs` was never checked. All are
+  single words that rewrite cleanly.
+- Test fixture headers, which are `.toml` rather than Rust and were never in
+  scope: `crates/mogwai-cli/tests/configs/` wants a sweep, one file having been
+  de-shouted in passing.
+- Assertion and panic message strings, which read to a human exactly like prose
+  (`the venue CLOSED the perpetual socket`, `never fully WATCHED a run` in
+  `serving.rs` and `completion.rs`). Whether the rule covers them is worth
+  deciding once rather than per site.
+
+### G12. Open lead, not reproduced and not closed: the SIGTERM shutdown test
+
+`sigterm_stops_the_venue_within_the_shutdown_grace` in
+`crates/mogwai-cli/tests/lifecycle.rs` failed one full `brokkr check --gate` run
+on 2026-08-19 and passed the identical tree's second, with the tree's changes
+nowhere near the serving or shutdown path. Hunted twice on the harness that did
+fire the completion-path race: 20 rounds at 16 threads and 30 at 32, both under
+64 busy processes, zero failures.
+
+Read the new output before theorising. The original failure message folded two
+opposite verdicts into one sentence, because `Venue::wait_for_exit` clamps its
+bound to the test's remaining wall budget, so the wait may have been far shorter
+than the 10 s it reported; the helper now reports how long it waited and which
+bound produced that. Host contention is the boring reading to rule out first.
+
+If the clamp is not it, the two candidates are `spawn_blocking` work in flight at
+signal time - the sweeper's tape walk and the boatyard's `worker.join()` both run
+there, and a dropped tokio runtime waits for blocking tasks that have started -
+and the boat worker's responsiveness to its cancel flag. The completion-path
+session wait does not touch this: a signal deliberately does not wait for
+sessions. When it fires it aborts the instrumented sweep and the gate then
+reports every `mogwai-data` test as orphaned; the tell is the orphan count
+equalling the missing sweep's pass count.
+
+### G13. Watch the first live `mogwai measure` run
+
+Against the tightened `session_dates_are_23_sorted_unique` gate in
+`crates/mogwai-cli/src/measure.rs`. It has only ever executed under its unit
+test, because the gate sits mid-way through a multi-minute walk driver behind a
+Brick G cache that no test sweep in this workspace populates.
+
+---
+
+## H. Measurement and method owed
+
+### H1. The price-span-per-inferred-match-event measurement
+
+Triggered stops and plain market orders slip by the existing fill band, reused
+rather than separately fitted, and how wide that band should be for a triggered
+stop is a scale question that has never been computed. The sweep tail quoted
+elsewhere - up to 2,213 aggTrade rows in one inferred event on BTC - counts rows
+rather than distinct prices, so it does not establish how far a marketable order
+actually walks. One probe extension over archives already on disk would settle
+it; until then the slippage magnitude is an unquantified mechanism shared by
+every order type that slips.
+
+### H2. Build a positive dead-feed watchdog
+
+Formerly sweep item AD12. No liveness timer, tick counter or "0 ticks in N s" log
+exists on either transport. The negative diagnostics are all in place, but
+nothing positively proves a subscribed feed is alive rather than genuinely quiet.
+
+`idle_timeout_ms` does not cover it: it defaults to 0, and even armed the idle
+clock resets on any application frame, so a data-silent-but-frame-active socket
+never trips it - deliberately, since that is what reproduces the 4255 case. The
+threshold comes from the landed default-tape dwell bound (the realism gate's
+era-windowed p999 gap, empty-hour fraction and longest empty-hour run), and an
+armed LiquidityDrought legitimately silences the feed while remaining visible via
+the control plane, so the watchdog can account for it.
+
+Priority note: a real venue failure mostly shows up as a crashed or stalled PID
+rather than a protocol event, and the silent-but-socket-alive failure this was
+designed for was largely a property of the deleted long-lived daemon. Useful, not
+structural.
+
+### H3. The cadence document invalidated a green gate without naming a successor
+
+The 0.1603 duration ACF anchor. That debt belongs to whichever spec descends from
+it.
+
+### H4. Per-instrument fitting belongs to whoever builds each preset
+
+Whether BTC and ETH genuinely differ enough to warrant different values - the
+measured 2.8x dispersion across three crypto majors suggests so, and one month of
+one venue cannot settle it. The evidence asymmetry stays relevant to preset
+authors: BTC, ETH and SOL have trade-level archives while MNQ and MES had
+15-second bars and nothing else, so a CME preset's cadence is derived arithmetic
+and its clustering comes from nowhere. Each preset says where its numbers came
+from. Re-derive the asymmetry from the DBN bulk download now on disk before
+repeating it.
+
+Candidate symbols for the missing session classes: a perp like ETHUSDT.P, a
+second CME future like MGC, and AAPL for cash-equity hours. Terabytes of DBN data
+are already downloaded on another host, and the Databento account additionally
+holds about twelve months of MNQ/ES/MES tbbo plus mbp-1 server-side, re-fetchable
+by job id at no new cost.
+
+### H5. Decide whether the protocol-12b Stage A refinement pass should run at all
+
+Deferred by the owner 2026-08-09 rather than settled, so the frozen pass stands
+and the budgets were raised to fund it.
+
+For cutting: refinement is 29,200 s of the 35,526 s Stage A cost model, 82
+percent, and its entire product is a finer loss ordering over cells that Stage B
+then truncates to `STAGE_B_CELL_CAP = 24` per family. It cannot rescue a family
+whose coarse admissible region is empty - the outcome that would close the
+landing - because it subdivides around that region's own boundary cells. And
+`SELECTION_INDIFFERENCE = 0.01` already declares losses inside that margin as not
+separating candidates, so a half-spacing lattice buys precision the selection is
+defined not to use. Cutting drops Stage A to about 6,326 s.
+
+Against: the selected parameter point would sit on the coarse lattice, and nobody
+has shown the coarse spacing is fine enough for the mechanism to be found at all.
+
+Not the same question as `STAGE_B_CELL_CAP`, which earns its place: a Stage B
+cell is a full month-scale walk per seed at about 250 s, so an uncapped
+1,508-cell region genuinely is tens of hours. Changing `REFINEMENT_DEPTH` or
+`REFINEMENT_CELL_CAP` is a section 17 amendment against the contract of record.
+
+### H6. Reconcile the protocol-12b section 5.5 rescale with the shipped preset convention
+
+That section freezes the negative control's re-centring as "rescale the 24 values
+to sum to 1, which the `SessionProfile` schema requires", and the schema requires
+no such thing: nothing in `config.rs` or `session.rs` enforces sum-to-one, and the
+shipped MNQ `intensity_hour` sums to 23.862306, a mean-one curve.
+
+It moves no generated rate either way, since `SessionModulator::new` divides by an
+exposure-weighted normalizer so a common factor cancels at every instant, and the
+control's committed `new_curve` is therefore a correct re-centring on a different
+scale from its own `old_curve`. What it cost is readability, and it will cost the
+same again at any later reader who compares the two curves elementwise. Fixing
+the frozen sentence is a section 17 amendment through review, not an edit.
+
+---
+
+## I. Values that want to become named constants or knobs
+
+### I1. `default_instruments()` BTCUSDT seed is seven inline literals
+
+`mogwai-protocol`. Duplicated verbatim in two of that crate's own tests, and the
+smoke test's fixed order shape depends on it implicitly. Its own doc comment
+signposts multi-instrument growth.
+
+### I2. HTTP route strings have no shared registry
+
+`mogwai-venue`'s route strings are inline literals with no shared registry against
+the adapter's route segments, so a renamed route breaks the pair silently.
+
+### I3. `arrival_screen`'s `DEFAULT_MAX_JOBS` carries no comment naming its measurement
+
+And `arrival_envelope_diagnostic` applies no 16-job cap at all while
+`arrival_screen` caps its default at 16 for a measured SMT regression. Whether the
+diagnostic should share the cap is open.
+
+### I4. `MIN_WALL_REQUEST_TIMEOUT_SECS` is the tightest cap on usable sim speed
+
+Flagged in its own comment in the adapter. If sim speed is ever pushed hard, that
+constant is the first wall.
+
+---
+
+## J. Documentation owed
+
+Each of these is a durable-prose gap, not a note. All ride with a code commit.
+
+### J1. Durable prose for the account, river and passenger design
+
+These notes carry no truth guarantee and nothing durable may cite them, so any
+part of the design whose reasoning lives only here is invisible to a user.
+
+Owed: the symbol as a label rather than an identity; the three-step resolution
+and its total third step; river identity and what forks a river; one clock per
+river; the exogeneity that gives passengers non-interference and the
+no-queue-competition contract that follows; and the boot-versus-runtime split on
+funding.
+
+Durable prose states river and passenger and never the boat, which is a cache
+with no semantics, and states the two properties a passenger is owed separately.
+`docs/presets.md` and `docs/config.md` are where a user looks;
+`reference/architecture.md` is where the why belongs.
+
+### J2. Half of `mogwai --help` is protocol jargon resolving to retired notes
+
+"Brick B4", "Stage M", "Amendment 2" reach an operator who has no way to look them
+up.
+
+### J3. `docs/cli.md` cites "the storage policy" three times
+
+A named authority no document defines.
+
+### J4. Structural proposals recorded and unadopted
+
+`reference/architecture.md` is about 1,300 lines doing four jobs, and its
+contradictions have all sat where one job's old text survived another's landing;
+`docs/havoc.md` was patched rather than rewritten.
+
+Adjacent and real: that document's version narrative walks 5 through 18 and then
+asserts the current identity, six unnarrated bumps.
+
+### J5. Glossary and vocabulary standing rules
+
+Glossary entries are admitted by the owner alone, so an agent that meets an
+undefined load-bearing word escalates and never adds an entry. Vocabularies that
+want definitions want them in `reference/`, not in the glossary. Listed here so
+no agent in the loop edits the glossary.
+
+---
+
+## K. Vocabulary and naming, owner-ruled
+
+These need a ruling before code moves. An agent may prepare the change and state
+the recommendation, but must not land a rename the owner has not admitted.
+
+### K1. `Balance.locked` conflates three things
+
+Order holds, maintenance collateral and unsettled credits in one wire number with
+opposite remedies. Two scopes recommend a split; `Account::unsettled`'s doc in
+`mogwai-engine` argues the conflation is fine.
+
+### K2. The evidence toolbox's place on the binary's top level
+
+Eighteen subcommands for one audience beside three for another - and the repeated
+leaf names inside it: `preflight` is three different commands and `fit` is two,
+all operator-typed, all producing plausible evidence output, with no collision
+warning in `docs/cli.md`.
+
+### K3. Whether `leg` gets a glossary entry
+
+One of the two connections a nautilus consumer necessarily holds under one
+account.
+
+### K4. The tape-identity vocabulary
+
+River is the sequence, tape the delivery, and the process the version constant
+identifies has no name.
+
+### K5. The `held` collision
+
+`exec_held_budget_bytes` and the "held lane" use the word for the outbound
+byte-budget sense that kept `reservation`, at a consumer-visible config key.
+
+### K6. `mogwai-engine`'s fourth sense of admission
+
+Acceptance of an order onto the book, about 60 sites, is unruled and must not be
+swept as retired.
+
+### K7. A sixth sense of ledger, and a misfiled oracle
+
+`stage_m_tier2.rs`'s append-only candidate ledger is an unruled sixth sense of
+ledger, and `mogwai_lab::delivery` still owns the git-cleanliness oracle
+(`TreeOracle` and kin), a second unrelated job under a module named for the
+delivery manifest.
+
+---
+
+## L. Infrastructure
+
+### L1. The CLA check is not yet a required status check
+
+cla-assistant.io is wired up and its webhook delivers, but nothing blocks an
+unsigned merge until a repository ruleset requires the check by name.
+
+The trap: an owner-authored PR produces no status at all, since the CLA assigns
+copyright to the owner and the bot correctly has nothing to ask, which means the
+check cannot be picked from the suggestion list and cannot be validated against a
+real run. Type the context name in by hand and leave the rule in evaluate mode
+until an outside PR confirms it, because a required check that never reports
+blocks every merge with no visible cause.
+
+Not a code change - repository settings, owner-only.
+
+---
+
+# Appendix: not actionable in this tree
+
+Kept so the ledger is complete. No round works these.
+
+## Open upstream: nautilus_trader
+
+Read the source from `research/nautilus_trader`; build against the pinned
+crates.io release. Nothing here can be fixed from this tree.
+
+- **`ExecutionEventEmitter` cannot share its sender**, so this adapter can only
+  refuse rather than heal. The emitter derives `Clone` and owns
+  `sender: Option<UnboundedSender<ExecutionEvent>>` by value, installed once from
+  `try_get_exec_event_sender()`, which reads a `thread_local!` in
+  `nautilus_common::live::runner` set on the runner's thread. Every clone taken
+  after that point freezes the sender state of the instant it was taken, and
+  `send_order_event` on a sender-less clone only logs a warning. Our workaround
+  is a refusal, not a repair.
+
+- **No channel for a declared feed gap.** `VenueMessage::FeedLagged` carries
+  `skipped` and `sim_now_ns` and the adapter has nowhere to put it. No
+  `DataEvent` variant means "the stream you are aggregating has a hole", the
+  client is handed to the host boxed as `dyn DataClient` so an adapter-owned
+  counter or health accessor is unreachable, and `is_connected` is true
+  throughout because the socket never broke. The execution socket cannot self-heal
+  either: the frame translator that sees `FeedLagged` runs as `handler(msg).await`
+  inside the reader's own frame loop, so a venue-truth query issued there
+  deadlocks by construction, and the client is `!Send` so spawning it off is
+  unavailable. Until nautilus ships a data-side degradation signal and a
+  client-initiated reconciliation request, a host driving mogwai should treat an
+  error from `mogwai-adapter` mentioning a feed gap or a refused frame as a
+  reconcile-and-distrust-the-window signal.
+
+- **The Rust trait default for mass status does not compose** the way the Python
+  base does. Queued in the maintainer's PR tracker. Not a substitute for our own
+  reconciliation guard: mogwai overrides the method, so this protects the next
+  adapter author rather than this repo.
+
+- **Tape sparsity has no attribution channel.** An empty historical window is
+  correct behaviour here - the fitted ACD arrival process is persistent and
+  heavy-tailed, so a short window can legitimately hold zero trades and `/trades`
+  correctly answers `200 []` - but it still costs the consumer a fatal halt, and
+  one of the two fixes is blocked on the same gap as `FeedLagged`: an empty
+  historical response carries no feed identity, so it cannot be attributed.
+
+## Open at broadarrow
+
+Theirs, not ours. One item is genuinely ours and is called out first.
+
+- **Owed by us: tell them, in one message. Nobody has.** The whole account
+  surface moved under them and several entries below are stale in their favour.
+  This is a message to write, not code to change.
+  - The break: they set no `account_type`, inherit `MOGWAI-001`, POST no account,
+    and have no handling for a run that ends by liquidation. Their orchestrator
+    runs the shared shape, so 50 subagents inheriting `MOGWAI-001` would take each
+    other's ledger in turn; the id belongs in their per-subagent account TOMLs.
+    The account-id contract is in `docs/config.md`. That break is designed, but
+    designed-to-break only works if the other side is told it is coming.
+  - The second break: an expired order now reports `VenueMessage::OrderExpired`
+    with a terminal `Expired` status where it reported `OrderCanceled`.
+    Exhaustive matching stops compiling; loose matching stops seeing `Day` and
+    `Gtd` orders end at all, which is the dangerous reading.
+  - In their favour, same message: trailing stops, the full order-type surface
+    including `TrailingStopLimit`, order lists and `RejectNextCancel` are all
+    served, so their three unrun scenario files can now be written.
+    `translate_trailing_exit` can emit the limit form as well as the market one;
+    the venue derives the limit price from a `limit_offset`, so they send an
+    offset and not a price.
+
+- Item 4 of the strategy-search route, consuming the multi-instrument venue.
+  `run_prep::mogwai_facts` refuses a `/instruments` answer of anything but exactly
+  one instrument, precisely so a relaxed mogwai breaks their build loudly.
+- `POST /accounts` at run-prep preflight. Nothing here blocks it.
+- Their profile row becomes `AtomicOuo` and brick 3 of
+  `notes/venue-order-list-oco-spec.md` lands. Carve-out they must read before
+  citing the group-admission guarantee: a member whose funds an earlier member's
+  fill consumed is rejected on the second pass with its earlier siblings already
+  accepted.
+- Whether a refusal marked `RETRYABLE_REJECT_PREFIX` should be treated as
+  retryable at all.
+- Boot-storm pacing for concurrent `/trades` and `/quotes` warmup.
+- `submit_order_list` is the only route that emits a group frame, so a consumer
+  wanting an atomic group by any other route has no API for it. None is owed
+  until one is wanted.
+- Their own repo: the feed-stale message hard-codes the issue-4255 hypothesis as
+  fact even when the venue process is dead; `reference/mogwai.md` and
+  `ba man mogwai` still describe the venue as unfundable; stored scenario TOMLs
+  setting `transport_profile` no longer parse and want a sweep.
+
+### Runs owed against mogwai
+
+Theirs to run, not ours to build, but each is a venue exercise that would surface
+mogwai defects, and several have been owed for weeks.
+
+- The restart run, the realized-PnL baseline, legs 1 to 3: serve durably, trade to
+  a non-zero realized figure, SIGKILL the worker, re-run against the same
+  `[attach]` scenario, verify the carried baseline, the brake mark, and no
+  duplicate booking. Leg 3 is load-bearing and rests on a verdict reached by
+  reading the dependency rather than by observing a reconciliation, landed as an
+  explicit operator override of its own gate - a known-unrun verification on a
+  capital bound.
+- `go_live` restart de-duplication.
+- The futures run against a `preset = "MNQ"` venue.
+- The conditional half of the fed-fill path.
+- Flip plus pyramid plus partial in one bar, end to end.
+- Gate B, the anchored-warmup overlap drop.
+- The poll-heal end-to-end test, which drives our control plane directly.

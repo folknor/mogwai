@@ -219,10 +219,15 @@ Only the owner adds an entry.
   return. Bounded by `account_ttl_ms`: an account nobody reclaims inside it is
   collected.
 - **Strategy**: the consumer's unit of work - one trading program, driving one
-  account over one instrument (single-instrument by settled premise). The venue
-  never sees a strategy; it sees an account and its passengers, which is why
-  everything a strategy needs must be expressible per account or per
-  passenger.
+  account over one instrument. Single-instrument by settled premise, and the
+  constraint is on the strategy and never on the account: an account carries as
+  many single-instrument strategies as its consumer launches, over as many
+  symbols. What has no forward test here is the other shape - one strategy
+  reading two instruments together, a BTC/ETH or MNQ/MES relationship trade -
+  because independent per-symbol tapes carry no cross-instrument correlation for
+  such a strategy to trade. The venue never sees a strategy; it sees an account
+  and its passengers, which is why everything a strategy needs must be
+  expressible per account or per passenger.
 
 ## Havoc
 

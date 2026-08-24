@@ -716,7 +716,7 @@ impl Engine {
     /// window that already closed in its past.
     pub(crate) fn fee_surcharge_multiplier_for(&self, sim: SimClock, ts: u64) -> Decimal {
         self.fee_surcharge.map_or(Decimal::ONE, |window| {
-            let opening = sim.sim_ns(window.wall_armed_ns).max(sim.sim_epoch_ns);
+            let opening = sim.window_opening(window.wall_armed_ns);
             if ts >= opening && ts < opening.saturating_add(window.sim_span_ns) {
                 window.mult
             } else {
@@ -1048,9 +1048,10 @@ impl Engine {
     /// misreport the requirement and under-reserve the admission budget.
     ///
     /// `maintenance` is what the open positions require; `initial` is what the
-    /// resting non-reduce-only orders require, taken from each order's OWN
-    /// hold. Reduce-only orders place no hold and appear here as
-    /// nothing.
+    /// resting non-reduce-only orders require. Ordinary orders contribute their
+    /// own hold; margin-equity sells contribute the same aggregate allocation
+    /// used by the balance cache. Reduce-only orders place no hold and appear
+    /// here as nothing.
     ///
     /// What reconciles, exactly. Every `initial` row here is a settlement-
     /// currency term `held_balances` also folds, computed by the same
@@ -1132,6 +1133,24 @@ impl Engine {
             }
             let row = rows.entry(symbol).or_default();
             row.0 = row.0.saturating_add(amount);
+        }
+        for (symbol, def) in &self.instruments {
+            if !def.class.is_equity() || !self.margin.contains_key(symbol) {
+                continue;
+            }
+            let aggregate = self.margin_equity_sell_hold_with_pending(symbol, &[]);
+            if !aggregate.is_zero() {
+                // Added, never assigned. The loop above has already folded every
+                // ordinary hold on this symbol - a resting margin-equity BUY
+                // posts its own initial requirement there - and the sell
+                // aggregate is a further term of the same sum, not a
+                // replacement for it. Assigning here reported only the sell
+                // requirement on an account holding both, while `held_balances`
+                // locked both, so the reconciliation this function documents
+                // was false on exactly the mixed case.
+                let row = rows.entry(symbol).or_default();
+                row.0 = row.0.saturating_add(aggregate);
+            }
         }
         let mut margins: Vec<_> = rows
             .into_iter()
@@ -2372,8 +2391,8 @@ impl Engine {
             .fold(total, |sum, qty| sum.saturating_add(*qty))
     }
 
-    /// How large a position in `symbol` this account can carry if `additional`
-    /// (already signed: buy positive, sell negative) joins the live book.
+    /// How large a position in `symbol` this account can carry if `pending`
+    /// joins the live book.
     ///
     /// The cap is a size, not a net. A long ten plus a working sell ten plus
     /// an incoming buy ten can reach twenty long if the buy fills first; summing
@@ -2399,22 +2418,15 @@ impl Engine {
     ///
     /// Held children and mutually exclusive legs are handled by
     /// [`Engine::worst_case_leaves`], which is the one home of what "worst-case
-    /// fill order" means; `additional` is added on top of it because the caller
-    /// hands this function a bare quantity and not the order it came from, so
-    /// an incoming order that is itself one leg of an exclusive pair is still
-    /// counted additively here. That is conservative for a magnitude cap - it
-    /// can only make the projection larger - and is stated rather than hidden.
+    /// fill order" means. The pending orders retain their linkage here, so an
+    /// incoming exclusive leg is counted in its group's max instead of being
+    /// added once more on top of that same group.
     #[must_use]
-    pub fn projected_qty(&self, symbol: &str, additional: Decimal) -> Decimal {
-        let (mut buys, mut sells) = (
-            self.worst_case_leaves(symbol, Side::Buy, &[]),
-            self.worst_case_leaves(symbol, Side::Sell, &[]),
+    pub fn projected_qty(&self, symbol: &str, pending: &[SubmitOrder]) -> Decimal {
+        let (buys, sells) = (
+            self.worst_case_leaves(symbol, Side::Buy, pending),
+            self.worst_case_leaves(symbol, Side::Sell, pending),
         );
-        if additional > Decimal::ZERO {
-            buys += additional;
-        } else {
-            sells += -additional;
-        }
         match self.oms_type {
             mogwai_protocol::OmsType::Netting => {
                 let net: Decimal = self
@@ -8687,7 +8699,8 @@ mod tests {
         let mut rest = order_with("W1", Side::Buy, "BTCUSDT", 10, Some(Decimal::from(90)));
         rest.order_type = OrderType::Limit;
         rest_limit(&mut e, rest, 100, 1);
-        assert_eq!(e.projected_qty("BTCUSDT", Decimal::ONE), Decimal::from(11));
+        let incoming = order_with("I", Side::Buy, "BTCUSDT", 1, Some(Decimal::from(100)));
+        assert_eq!(e.projected_qty("BTCUSDT", &[incoming]), Decimal::from(11));
     }
 
     /// A reduce-only leave cannot grow a side, so it is not a sell for the
@@ -8718,7 +8731,7 @@ mod tests {
         ro.reduce_only = true;
         rest_limit(&mut e, ro, 100, 2);
         assert_eq!(
-            e.projected_qty("BTCUSDT", Decimal::ZERO),
+            e.projected_qty("BTCUSDT", &[]),
             Decimal::from(10),
             "counting the leave would project a short twenty the book cannot reach"
         );
@@ -8744,7 +8757,16 @@ mod tests {
         sell.order_type = OrderType::Limit;
         rest_limit(&mut e, sell, 100, 2);
         assert_eq!(
-            e.projected_qty("BTCUSDT", Decimal::from(10)),
+            e.projected_qty(
+                "BTCUSDT",
+                &[order_with(
+                    "I",
+                    Side::Buy,
+                    "BTCUSDT",
+                    10,
+                    Some(Decimal::from(100))
+                )],
+            ),
             Decimal::from(20)
         );
     }
@@ -8765,7 +8787,16 @@ mod tests {
             1,
         );
         assert_eq!(
-            e.projected_qty("BTCUSDT", Decimal::from(-15)),
+            e.projected_qty(
+                "BTCUSDT",
+                &[order_with(
+                    "I",
+                    Side::Sell,
+                    "BTCUSDT",
+                    15,
+                    Some(Decimal::from(100))
+                )],
+            ),
             Decimal::from(10)
         );
     }
@@ -8778,7 +8809,34 @@ mod tests {
         e.set_oms_type(mogwai_protocol::OmsType::Hedging);
         fill_future(&mut e, "L", Side::Buy, 10, 21_000);
         fill_future(&mut e, "S", Side::Sell, 10, 21_000);
-        assert_eq!(e.projected_qty("MNQ", Decimal::from(10)), Decimal::from(20));
+        assert_eq!(
+            e.projected_qty("MNQ", &[mnq_order("I", Side::Buy, 10, 21_000)]),
+            Decimal::from(20)
+        );
+    }
+
+    #[test]
+    fn projected_qty_counts_an_incoming_oco_leg_inside_its_group() {
+        let mut e = funded(1_000_000);
+        let mut first = order_with("O1", Side::Buy, "BTCUSDT", 10, Some(Decimal::from(90)));
+        first.order_type = OrderType::Limit;
+        first = linked(
+            first,
+            link_of(mogwai_protocol::Contingency::Oco, &["O2"], None),
+        );
+        rest_limit(&mut e, first, 100, 1);
+
+        let mut second = order_with("O2", Side::Buy, "BTCUSDT", 10, Some(Decimal::from(80)));
+        second.order_type = OrderType::Limit;
+        second = linked(
+            second,
+            link_of(mogwai_protocol::Contingency::Oco, &["O1"], None),
+        );
+        assert_eq!(
+            e.projected_qty("BTCUSDT", &[second]),
+            Decimal::from(10),
+            "the incoming sibling belongs inside the group's maximum"
+        );
     }
 
     /// A notional margin basis is what makes a leveraged account expressible:
@@ -11456,6 +11514,131 @@ mod tests {
                 .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
             "an Oco exit pair is one short's worth, not two: {out:?}"
         );
+    }
+
+    #[test]
+    fn margin_equity_sells_allocate_covered_shares_once() {
+        let mut e = equity_engine(&Shares {
+            cash: 50_000,
+            margin: Some(reg_t()),
+            borrowable: Some(Decimal::from(1_000)),
+            ..Shares::default()
+        });
+        trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
+        for (id, price) in [("S1", 150), ("S2", 200)] {
+            let mut sell = order_with(id, Side::Sell, "AAPL", 100, Some(Decimal::from(price)));
+            sell.order_type = OrderType::Limit;
+            let out = trade(&mut e, sell, 2);
+            assert!(
+                !out.iter()
+                    .any(|event| matches!(event, VenueMessage::OrderRejected { .. })),
+                "both sells are legal on the margin account: {out:?}"
+            );
+        }
+        let state = e.account_snapshot(3);
+        let usd = balance(&state, "USD");
+        assert_eq!(
+            usd.locked,
+            Decimal::from(12_500),
+            "10,000 initial at the conservative 200 sell price plus 2,500 maintenance"
+        );
+        let margin = state
+            .margins
+            .iter()
+            .find(|row| row.symbol.as_ref() == "AAPL")
+            .expect("the equity has a margin row");
+        assert_eq!(margin.initial, Decimal::from(10_000));
+        e.reconcile_order_holds();
+    }
+
+    #[test]
+    fn an_equity_fill_reallocates_cover_across_resting_sells() {
+        let mut e = equity_engine(&Shares {
+            cash: 50_000,
+            margin: Some(reg_t()),
+            borrowable: Some(Decimal::from(1_000)),
+            ..Shares::default()
+        });
+        let mut sell = order_with("S1", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        sell.order_type = OrderType::Limit;
+        trade(&mut e, sell, 1);
+        assert_eq!(
+            balance(&e.account_snapshot(1), "USD").locked,
+            Decimal::from(10_000)
+        );
+
+        trade(&mut e, share_order("BUY", Side::Buy, 100), 2);
+        assert_eq!(
+            balance(&e.account_snapshot(2), "USD").locked,
+            Decimal::from(2_500),
+            "the new long covers the resting sell, leaving only position maintenance"
+        );
+        e.reconcile_order_holds();
+    }
+
+    #[test]
+    fn a_cheaper_sell_cannot_underfund_an_existing_expensive_short() {
+        let mut e = equity_engine(&Shares {
+            cash: 18_000,
+            margin: Some(reg_t()),
+            borrowable: Some(Decimal::from(1_000)),
+            ..Shares::default()
+        });
+        trade(&mut e, share_order("BUY", Side::Buy, 100), 1);
+        let mut expensive = order_with("S1", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        expensive.order_type = OrderType::Limit;
+        trade(&mut e, expensive, 2);
+        let mut cheap = order_with("S2", Side::Sell, "AAPL", 100, Some(Decimal::from(100)));
+        cheap.order_type = OrderType::Limit;
+        let out = trade(&mut e, cheap, 3);
+        assert!(
+            out.iter().any(|event| matches!(
+                event,
+                VenueMessage::OrderRejected { reason, .. } if reason == "insufficient USD balance"
+            )),
+            "the cheap order would expose the expensive sell as the short: {out:?}"
+        );
+    }
+
+    /// The reconciliation `margin_requirement` documents - every `initial` row
+    /// is a settlement-currency term `held_balances` also folds - is an equality
+    /// on an account whose whole locked balance comes from margined marked
+    /// symbols with nothing unsettled. This is exactly such an account, and it is
+    /// the mixed case: one resting buy and one uncovered resting sell on the same
+    /// equity. The aggregate sell allocation must be added to the buy's own
+    /// initial margin, never assigned over it.
+    #[test]
+    fn a_resting_equity_buy_and_an_uncovered_sell_both_reach_the_margin_row() {
+        let mut e = equity_engine(&Shares {
+            cash: 100_000,
+            margin: Some(reg_t()),
+            borrowable: Some(Decimal::from(1_000)),
+            ..Shares::default()
+        });
+        let mut buy = order_with("B1", Side::Buy, "AAPL", 100, Some(Decimal::from(90)));
+        buy.order_type = OrderType::Limit;
+        trade(&mut e, buy, 1);
+        let mut sell = order_with("S1", Side::Sell, "AAPL", 100, Some(Decimal::from(200)));
+        sell.order_type = OrderType::Limit;
+        trade(&mut e, sell, 2);
+
+        let state = e.account_snapshot(3);
+        assert_eq!(
+            balance(&state, "USD").locked,
+            Decimal::from(14_500),
+            "4,500 for the resting buy at 90 plus 10,000 for the uncovered sell at 200"
+        );
+        let row = state
+            .margins
+            .iter()
+            .find(|row| row.symbol.as_ref() == "AAPL")
+            .expect("the equity has a margin row");
+        assert_eq!(
+            row.initial + row.maintenance,
+            balance(&state, "USD").locked,
+            "posted margin and the locked balance must agree on this account"
+        );
+        e.reconcile_order_holds();
     }
 
     /// `settle` always declines a non-positive price on an inverse instrument, and

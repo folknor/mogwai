@@ -91,13 +91,6 @@ undone. Neither is urgent; both modes must eventually be supported.
 
 ## Venue and protocol
 
-- Serve a second cadence on one river rather than refusing it. The rule is per
-  river and stays there (owner, 2026-08-23), so what is open is only the looser
-  direction: two cadences over one river share the checkpoint chain underneath,
-  so a second speed is a second cursor rather than a second river. Serving it
-  means giving the engine per-cursor temporal ownership of orders and marks,
-  which is the real prerequisite and the reason it is refused today.
-
 - A passenger whose own duration ends is sent a `RunComplete` frame before the
   `close::DURATION_COMPLETE` close, identically to the whole-run arm
   (`crates/mogwai-venue/src/ws.rs`). A client classifying on the text frame reads
@@ -158,10 +151,6 @@ undone. Neither is urgent; both modes must eventually be supported.
   whether an eviction-reconnect should retire the book it takes over. It needs
   the venue to tell a returning client from a stranger presenting the same id,
   and a session id is self-asserted with no auth behind it.)
-
-- `GoDark` swallows the startup mass-status query, so a client armed with it can
-  never complete boot and never reaches command sequencing. Decide whether that
-  is correct by design - it is a blackout - or an arm too broad to be useful.
 
 - Refusal texts spell their bounds out instead of naming the constant.
   `messages::validate_wire_symbol` refuses with "symbols are 1 to 32 characters"
@@ -290,16 +279,6 @@ undone. Neither is urgent; both modes must eventually be supported.
   boundary. Open question whether that needs a `Forex` arm on `InstrumentClass`
   or rides `Spot` plus a margin policy.
 
-- Futures expiry and roll. The continuous cash-settled `Future` forecloses
-  anything keyed to expiry, and any strategy whose horizon crosses a roll is
-  tested against a contract that never rolls. Recorded, not pressed.
-
-- Options are excluded on the owner's stated ground that they are not understood
-  well enough to specify. Revisitable for the same reason the order-type
-  exclusions were reversed: "the owner does not need it" stopped being the
-  scoping rule when mogwai went public. It stands until someone who understands
-  them argues it in.
-
 - `[balances]` and `[account_policies]` are separate tables, so no named policy
   can state its own opening equity, which is what a funded-account programme is.
 
@@ -321,29 +300,44 @@ undone. Neither is urgent; both modes must eventually be supported.
 
 ## Data and generator
 
-- **Three generator defects inherited from the closed measure-and-fit arc.**
-  Recorded 2026-08-23 when that arc's documents were deleted; the evidence for
-  each is in `notes/tape-research-v1.md`, and each is live regardless of what
-  tape research v2 turns out to be.
+- **Generator defects inherited from the closed measure-and-fit arc.** Recorded
+  2026-08-23 as a transcription from that arc's deleted documents, with the
+  evidence in `notes/tape-research-v1.md`. Re-verified against the code
+  2026-08-24: of the three named, one was already repaired, one is now gated with
+  a stated residual, and one is live but was mischaracterized. Treat anything
+  else inherited from that arc with the same suspicion.
 
-  `ARRIVAL_MEAN_CAL = 0.944` corrects the shipped sampling scheme's realized-mean
-  inflation. The integrated frame has no such inflation, so applying it there
-  double counts by exactly 1.05932 and the shipped path carries a 5.5 to 7.0
-  percent absolute-rate conflict against the observed July month. It is a derived
-  constant, not a fitted one, and a Jensen-gap explanation was refuted in closed
-  form.
+  Closed: the `children_mean` clamp. `begin_event` branches on
+  `children_mean * ARRIVAL_QUIET_CHILDREN_MULT <= 1.0` and switches to a
+  floor-aware solve re-deriving both active parameters from the unconditional
+  targets, selected on the base configured mean so no runtime path crosses
+  between the two arithmetics; `GeneratorScalars::validate` refuses a config
+  whose floor-branch solve is not expressible. The comment at the branch names
+  the July MNQ fit failure and the 1.44 figure. Recorded so it is not re-filed
+  from the old note.
 
-  The generator hardcodes a July-style UTC offset. Twelve of twenty-four Stage M
-  control walks, exactly the winter rotation, collapsed the local-hour-22 stratum
-  to zero variance, and the frozen daylight offset applied to November put
-  840,315 rows outside declared sessions, 3.8 percent against September's 0.5.
-  Any regression suite over this needs one daylight, one standard and one
-  transition month, because single-month validation is structurally blind to it.
+  Gated with a residual: `ARRIVAL_MEAN_CAL = 0.944` reaching the integrated
+  frame. `the_arrival_mean_calibration_stays_off_the_integrated_frame` pins the
+  integrated mean to the declared mean bit for bit, and the 2026-08-09
+  calibration amendment rests on the frame staying bare. The test states its own
+  limit: it gates the bare side only, because the corrected side is composed
+  inline in `GeneratedSource::new` into a private field. A source-side accessor
+  for the composed active mean would let the other half be asserted. Still
+  unverified, and separate from the leak: the claim that the shipped path carries
+  a 5.5 to 7.0 percent absolute-rate conflict against the observed July month. A
+  Jensen-gap explanation for it was refuted in closed form.
 
-  The `children_mean` clamp: at an observed mean of 1.1711 the quiet-state
-  multiplier draws an impossible sub-one mean, `SweepShape` clamps it to one, and
-  the mean-preserving identity breaks. Realized mean inflates to about 1.44 at
-  any configured value, so the parameter is silently a constant.
+  Live: the calendar has no daylight rule. Not hardcoded - `utc_offset_minutes`
+  is a validated calendar field and the MNQ preset declares `-300`, a CDT summer
+  offset, with the model carrying one scalar and no transition. Twelve of
+  twenty-four Stage M control walks, exactly the winter rotation, collapsed the
+  local-hour-22 stratum to zero variance, and November put 840,315 rows outside
+  declared sessions, 3.8 percent against September's 0.5. Any regression suite
+  needs one daylight, one standard and one transition month. It is disclosed:
+  the preset's provenance carries `calendar.utc_offset_minutes` as declared, with
+  the rationale naming the unmodelled transitions. Giving the calendar a daylight
+  rule is a schema change reaching every preset, which is the decision this
+  actually carries.
 
 - **The 86 MB and 57 MB build tax, and whether the dead protocol code goes.**
   `analysis/mnq-measure-12a.json` is 86 MB and is `include_str!`d at five sites,
@@ -812,9 +806,6 @@ undone. Neither is urgent; both modes must eventually be supported.
   ledger, and `mogwai_lab::delivery` still owns the git-cleanliness oracle
   (`TreeOracle` and kin), a second unrelated job under a module named for the
   delivery manifest.
-- `reference/glossary.md`'s Strategy entry says "single-instrument by settled
-  premise", which sits oddly beside the Account entry's many-rivers model. The
-  glossary is owner-only, so this is a question rather than an edit.
 
 ## Documentation owed
 

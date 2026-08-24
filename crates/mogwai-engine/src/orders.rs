@@ -1986,10 +1986,20 @@ impl Engine {
     /// `validate_fill_funds` adds back before it compares. Zero for a
     /// reduce-only order (which places no hold) and zero for a spot sell
     /// (whose hold is base currency, and whose settlement-side check is about
-    /// commission rather than the hold). Derived from the same
-    /// `order_hold` the snapshot folds, so the add-back can never be a
-    /// different shape from the hold it is canceling.
+    /// commission rather than the hold). Ordinary orders derive from the same
+    /// `order_hold` the snapshot folds. A margin-equity sell reads its marginal
+    /// contribution to the aggregate, since covered shares cannot be allocated
+    /// correctly by a per-order formula.
     fn hold_for(&self, order: &SubmitOrder, leaves: Decimal, price: Decimal) -> Decimal {
+        if order.side == Side::Sell
+            && self.margin.contains_key(&order.symbol)
+            && self
+                .instruments
+                .get(&order.symbol)
+                .is_some_and(|instrument| instrument.class.is_equity())
+        {
+            return self.margin_equity_sell_hold_for(&order.client_order_id);
+        }
         let mut clipped = false;
         match self.order_hold(order, leaves, price, &mut clipped) {
             crate::account::Hold::Settlement(amount) => amount,
@@ -2492,7 +2502,7 @@ impl Engine {
                             // cash-versus-margin distinction and not a funding
                             // question - so it is refused by name rather than
                             // as an insufficient balance.
-                            let Some(policy) = policy else {
+                            let Some(_policy) = policy else {
                                 return Err(format!(
                                     "a cash equity account cannot sell {symbol} short; shorting \
                                      needs a margin account, which is a margin policy on this \
@@ -2512,7 +2522,11 @@ impl Engine {
                                     symbol = order.symbol
                                 ));
                             }
-                            policy.initial(instrument, short, price)
+                            let current =
+                                self.margin_equity_sell_hold_with_pending(&order.symbol, &[]);
+                            let prospective =
+                                self.margin_equity_sell_hold_with_pending(&order.symbol, &pending);
+                            prospective.saturating_sub(current)
                         }
                     }
                 };

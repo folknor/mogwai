@@ -66,6 +66,14 @@ impl SimClock {
         self.sim_epoch_ns.saturating_add(scaled)
     }
 
+    /// Opening instant for a wall-armed simulated window on this clock.
+    /// A reader whose epoch is later than the arm receives the full window
+    /// from its own epoch instead of inheriting a window in its past.
+    #[must_use]
+    pub fn window_opening(&self, wall_armed_ns: u64) -> u64 {
+        self.sim_ns(wall_armed_ns).max(self.sim_epoch_ns)
+    }
+
     /// Return the wall instant at which the clock reaches `sim_ns`.
     #[must_use]
     pub fn wall_ns(&self, sim_ns: u64) -> u64 {

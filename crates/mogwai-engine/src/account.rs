@@ -13,8 +13,8 @@ use rust_decimal::Decimal;
 use crate::Engine;
 
 /// What one resting order holds, and in which of the instrument's two
-/// currencies. Returned by `Engine::order_hold`, the single derivation
-/// both the account snapshot and the order-path funds checks read.
+/// currencies. Margin-equity sells are the exception: their shared cover is
+/// allocated by the aggregate fold rather than by this per-order shape.
 pub(crate) enum Hold {
     /// Nothing is held: a reduce-only order, or a future with no margin policy.
     None,
@@ -73,17 +73,31 @@ pub(crate) struct Warned {
 
 impl Engine {
     pub(crate) fn rest_open(&mut self, order: crate::OpenOrder) {
+        let aggregate_sell_hold = self.is_margin_equity_sell(&order);
         self.add_order_hold(&order);
         self.open.push(order);
+        if aggregate_sell_hold {
+            self.rebuild_order_holds_excluding(None);
+        }
     }
 
     pub(crate) fn take_open(&mut self, pos: usize) -> crate::OpenOrder {
         let order = self.open.remove(pos);
-        self.remove_order_hold(&order);
+        if self.is_margin_equity_sell(&order) {
+            self.rebuild_order_holds_excluding(None);
+        } else {
+            self.remove_order_hold(&order);
+        }
         order
     }
 
     pub(crate) fn refresh_open_hold(&mut self, pos: usize, before: &crate::OpenOrder) {
+        let aggregate_sell_hold =
+            self.is_margin_equity_sell(before) || self.is_margin_equity_sell(&self.open[pos]);
+        if aggregate_sell_hold {
+            self.rebuild_order_holds_excluding(None);
+            return;
+        }
         self.remove_order_hold(before);
         let after = self.open[pos].clone();
         self.add_order_hold(&after);
@@ -99,6 +113,13 @@ impl Engine {
         // The hold appears at release, through the same `refresh_open_hold`
         // any other state change goes through.
         if matches!(order.resting, crate::Resting::Held) {
+            return None;
+        }
+        // Covered equity sells share one finite pool of long shares. Their hold
+        // is therefore derived once by `margin_equity_sell_hold`, never once per
+        // order here. Giving every sell `net_position` independently handed the
+        // same shares to every resting order.
+        if self.is_margin_equity_sell(order) {
             return None;
         }
         let instrument = self.instruments.get(&order.submit.symbol)?;
@@ -185,7 +206,161 @@ impl Engine {
                 clipped_currencies.insert(currency);
             }
         }
+        for (currency, amount, mut clipped) in self.margin_equity_sell_holds(excluded) {
+            let total = holds.entry(currency.clone()).or_default();
+            *total = add_clamped(*total, amount, &mut clipped);
+            if clipped {
+                clipped_currencies.insert(currency);
+            }
+        }
         (holds, clipped_currencies)
+    }
+
+    fn is_margin_equity_sell(&self, order: &crate::OpenOrder) -> bool {
+        order.submit.side == Side::Sell
+            && !order.submit.reduce_only
+            && !matches!(order.resting, crate::Resting::Held)
+            && self.margin.contains_key(&order.submit.symbol)
+            && self
+                .instruments
+                .get(&order.submit.symbol)
+                .is_some_and(|instrument| instrument.class.is_equity())
+    }
+
+    /// Aggregate hold for executable sells on margin equities.
+    ///
+    /// Long shares cover the aggregate worst-case leaves exactly once. The
+    /// uncovered remainder is priced at the highest resting sell price. That is
+    /// deliberately conservative: another sell may consume the shares first,
+    /// and using the highest price keeps the account safe under that fill order.
+    ///
+    /// Why the highest price is the sound bound, not merely a cautious one.
+    /// Under either margin basis the requirement is nondecreasing in the price
+    /// the short is established at, and which sells end up uncovered is not
+    /// something the account controls - the fill order does. The worst
+    /// assignment is therefore the one where the cheapest sells consume the long
+    /// shares and the dearest are left short, and pricing the whole uncovered
+    /// quantity at the maximum resting price is an upper bound over every
+    /// assignment, that one included. The uncovered quantity itself is already
+    /// the worst-case one, since it folds exclusive groups by their maximum leg.
+    ///
+    /// The cost is real and it is consumer-visible, not merely internal: when
+    /// resting sell prices differ the excess over an exact allocation appears in
+    /// the `Balance.locked` a consumer reads, and in the matching `initial`
+    /// margin row. An account resting a sell at 150 and one at 200 against 100
+    /// covered shares locks the 200 price on the whole uncovered remainder.
+    /// Locking too much only ever refuses an order that a finer allocation would
+    /// have admitted, which is the direction a venue may err in; locking too
+    /// little admits a short the account cannot carry, which it may not.
+    fn margin_equity_sell_holds(&self, excluded: Option<&str>) -> Vec<(String, Decimal, bool)> {
+        let mut by_symbol: HashMap<&str, (Decimal, HashMap<&str, Decimal>, Decimal)> =
+            HashMap::new();
+        for order in self.open.iter().filter(|order| {
+            excluded != Some(order.submit.client_order_id.as_str())
+                && self.is_margin_equity_sell(order)
+        }) {
+            let Some(price) = order.submit.price.or(order.submit.trigger_price) else {
+                continue;
+            };
+            let entry = by_symbol.entry(order.submit.symbol.as_ref()).or_default();
+            entry.2 = entry.2.max(price);
+            match order.submit.link.as_ref().filter(|link| {
+                matches!(
+                    link.contingency,
+                    mogwai_protocol::Contingency::Oco | mogwai_protocol::Contingency::Ouo
+                )
+            }) {
+                Some(link) => {
+                    let slot = entry
+                        .1
+                        .entry(link.order_list_id.as_str())
+                        .or_insert(Decimal::ZERO);
+                    *slot = (*slot).max(order.leaves_qty);
+                }
+                None => entry.0 = entry.0.saturating_add(order.leaves_qty),
+            }
+        }
+
+        let mut totals: HashMap<String, (Decimal, bool)> = HashMap::new();
+        for (symbol, (additive, exclusive, max_price)) in by_symbol {
+            let instrument = &self.instruments[symbol];
+            let policy = &self.margin[symbol];
+            let worst = exclusive
+                .values()
+                .fold(additive, |sum, qty| sum.saturating_add(*qty));
+            let uncovered =
+                (worst - self.net_position(symbol).max(Decimal::ZERO)).max(Decimal::ZERO);
+            if uncovered.is_zero() {
+                continue;
+            }
+            let total = totals
+                .entry(instrument.class.settlement_currency().to_owned())
+                .or_default();
+            total.0 = add_clamped(
+                total.0,
+                policy.initial(instrument, uncovered, max_price),
+                &mut total.1,
+            );
+        }
+        totals
+            .into_iter()
+            .map(|(currency, (amount, clipped))| (currency, amount, clipped))
+            .collect()
+    }
+
+    pub(crate) fn margin_equity_sell_hold_for(&self, client_order_id: &str) -> Decimal {
+        let current = self
+            .margin_equity_sell_holds(None)
+            .into_iter()
+            .fold(Decimal::ZERO, |sum, (_, amount, _)| {
+                sum.saturating_add(amount)
+            });
+        let excluded = self
+            .margin_equity_sell_holds(Some(client_order_id))
+            .into_iter()
+            .fold(Decimal::ZERO, |sum, (_, amount, _)| {
+                sum.saturating_add(amount)
+            });
+        current.saturating_sub(excluded)
+    }
+
+    pub(crate) fn margin_equity_sell_hold_with_pending(
+        &self,
+        symbol: &str,
+        pending: &[SubmitOrder],
+    ) -> Decimal {
+        let Some(instrument) = self.instruments.get(symbol) else {
+            return Decimal::ZERO;
+        };
+        let Some(policy) = self.margin.get(symbol) else {
+            return Decimal::ZERO;
+        };
+        let worst = self.worst_case_leaves(symbol, Side::Sell, pending);
+        let uncovered = (worst - self.net_position(symbol).max(Decimal::ZERO)).max(Decimal::ZERO);
+        let max_price = self
+            .open
+            .iter()
+            .filter(|order| {
+                self.is_margin_equity_sell(order) && order.submit.symbol.as_ref() == symbol
+            })
+            .filter_map(|order| order.submit.price.or(order.submit.trigger_price))
+            .chain(
+                pending
+                    .iter()
+                    .filter(|order| {
+                        order.symbol.as_ref() == symbol
+                            && order.side == Side::Sell
+                            && !order.reduce_only
+                            && order
+                                .link
+                                .as_ref()
+                                .is_none_or(|link| link.parent_order_id.is_none())
+                    })
+                    .filter_map(|order| order.price.or(order.trigger_price)),
+            )
+            .max()
+            .unwrap_or_default();
+        policy.initial(instrument, uncovered, max_price)
     }
 
     /// Compare the fast aggregate with a fresh fold through the authoritative
@@ -233,6 +408,14 @@ impl Engine {
             .cloned()
             .unwrap_or_default();
         self.apply_position(fill);
+        if self.margin.contains_key(&fill.symbol)
+            && self
+                .instruments
+                .get(&fill.symbol)
+                .is_some_and(|instrument| instrument.class.is_equity())
+        {
+            self.rebuild_order_holds_excluding(None);
+        }
 
         // Defense-in-depth, unreachable through `process` today: a fill's
         // `last_px` is `order.price`, which `validate_submit` already proved
@@ -528,11 +711,9 @@ impl Engine {
         sub_clamped(total, held, &mut clipped)
     }
 
-    /// The hold one resting order contributes, as a currency kind and
-    /// an amount. The single authority on the shape of an open order's hold:
-    /// `held_balances` folds it into the account totals and `hold_for` adds
-    /// the same number back before a funds check, so the two cannot disagree
-    /// about branch order. A future posts initial margin in settlement cash on
+    /// The hold one ordinary resting order contributes, as a currency kind and
+    /// an amount. Margin-equity sells are folded as one aggregate because their
+    /// cover is shared. A future posts initial margin in settlement cash on
     /// either side (and needs a margin policy to post anything at all); a spot
     /// buy holds quote notional, a spot sell holds base quantity. The
     /// instrument class is consulted before the margin map, so a margin policy

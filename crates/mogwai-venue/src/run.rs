@@ -80,7 +80,7 @@ impl HavocWindow {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some_and(|span| {
-                let opening = sim.sim_ns(span.wall_armed_ns).max(sim.sim_epoch_ns);
+                let opening = sim.window_opening(span.wall_armed_ns);
                 sim_at_ns >= opening && sim_at_ns < opening.saturating_add(span.sim_span_ns)
             })
     }
@@ -2843,9 +2843,9 @@ mod tests {
     /// wording rests on - "every ledger holds the same arms and hits the cap
     /// together" - rather than only the fact of a replay.
     ///
-    /// The fee surcharge is applied by the line beside the queue replay in
-    /// `ArmRecord::open_engine` and is not asserted here: the engine exposes no
-    /// reader for it, and inventing one for a test is not worth a public API.
+    /// The fee surcharge is observed through a real fill on the late ledger,
+    /// which keeps the engine's private window private while pinning the value a
+    /// consumer actually receives.
     #[tokio::test]
     async fn a_ledger_minted_after_a_venue_wide_arm_carries_it() {
         let run = run(1_000, 400, None);
@@ -2874,6 +2874,55 @@ mod tests {
             "the minted ledger must open holding the venue's armed queue, at the cap with the \
              ledgers that already existed"
         );
+        run.ensure_instrument(&late, "BTCUSDT")
+            .await
+            .expect("the late ledger can trade the boot symbol");
+        {
+            let mut engine = late.engine.lock().await;
+            engine.set_fee_schedule(
+                "BTCUSDT".into(),
+                mogwai_engine::FeeSchedule {
+                    maker: mogwai_engine::FeeRate::PerContract {
+                        amount: Decimal::ONE,
+                    },
+                    taker: mogwai_engine::FeeRate::PerContract {
+                        amount: Decimal::ONE,
+                    },
+                },
+            );
+            let clock = SimClock {
+                sim_epoch_ns: 10_000,
+                wall_anchor_ns: 2_000,
+                speed: 1.0,
+            };
+            let events = engine.process_with_market_on_clock(
+                mogwai_protocol::Command::SubmitOrder(mogwai_protocol::SubmitOrder {
+                    client_order_id: "LATE-FEE".into(),
+                    symbol: "BTCUSDT".into(),
+                    position_id: None,
+                    side: mogwai_protocol::Side::Buy,
+                    order_type: mogwai_protocol::OrderType::Market,
+                    quantity: Decimal::ONE,
+                    price: Some(Decimal::from(100)),
+                    trigger_price: None,
+                    trail_offset: None,
+                    limit_offset: None,
+                    reduce_only: false,
+                    post_only: false,
+                    time_in_force: mogwai_protocol::TimeInForce::Gtc,
+                    expire_time: None,
+                    link: None,
+                }),
+                clock.sim_epoch_ns,
+                None,
+                clock,
+            );
+            let commission = events.iter().find_map(|event| match event {
+                mogwai_protocol::VenueMessage::OrderFilled(fill) => Some(fill.commission),
+                _ => None,
+            });
+            assert_eq!(commission, Some(Decimal::from(3)), "{events:?}");
+        }
     }
 
     /// The second mint site owes the same replay. `POST /accounts` builds its own
@@ -3051,6 +3100,15 @@ mod tests {
         )
         .await;
         run.arm(None, VenueArm::DelayAcks { ms: 37 }).await;
+        run.arm(
+            None,
+            VenueArm::FeeSurcharge {
+                mult: Decimal::from(3),
+                armed_ns: 1_000,
+                span_ns: 5_000,
+            },
+        )
+        .await;
         for _ in 0..mogwai_engine::MAX_ARMED_DIVERGENCES {
             let shed = run
                 .arm(

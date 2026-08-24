@@ -598,22 +598,15 @@ pub(crate) async fn process_order_cmd(
     // same worst-case-fill-order reading the cap already takes of a working
     // book. Reduce-only members contribute nothing, since they never grow it.
     if let Some(cap) = position_cap {
-        let additional: rust_decimal::Decimal = submitted_orders(&order_cmd)
-            .iter()
-            .filter(|order| !order.reduce_only)
-            .map(|order| match order.side {
-                mogwai_protocol::Side::Buy => order.quantity,
-                mogwai_protocol::Side::Sell => -order.quantity,
-            })
-            .sum();
-        if let Some(order) = submitted_orders(&order_cmd).first()
-            && !additional.is_zero()
+        let pending = submitted_orders(&order_cmd);
+        if let Some(order) = pending.first()
+            && pending.iter().any(|order| !order.reduce_only)
         {
             let projected = account_state
                 .engine
                 .lock()
                 .await
-                .projected_qty(&order.symbol, additional);
+                .projected_qty(&order.symbol, pending);
             if projected > cap {
                 return refuse_all(
                     &order_cmd,
