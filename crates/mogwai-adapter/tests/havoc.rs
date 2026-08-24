@@ -1559,3 +1559,87 @@ async fn havoc_reaches_the_order_a_trigger_produces() {
          one of them is misfiled as market data"
     );
 }
+
+/// The venue's second-cadence refusal is conditional, so the client must still
+/// be dialling when it lifts.
+///
+/// `docs/accounts.md`: the rule holds while any of the account's passengers is
+/// riding that river and lifts once the last leaves. The incumbent need not be
+/// ours - any process naming this account id may hold that river - so nothing
+/// this client does clears it and nothing it can observe proves it never will.
+/// A round-4 fix pass read the refusal as permanent and disabled reconnect on
+/// it, which loses the run for good the moment the incumbent disconnects.
+///
+/// The stub answers the first two upgrades with the venue's real 400, marker
+/// and all, then serves the third. This exercises the transition rather than
+/// the classifier: what is asserted is that the connection the client finally
+/// gets is a working one, which is only reachable through the retry ladder.
+#[tokio::test]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn a_cadence_conflict_is_retried_until_the_incumbent_leaves() {
+    let state = Arc::new(StubState::default());
+    state.cadence_refusals.store(2, Ordering::Relaxed);
+    state
+        .ws_trades
+        .lock()
+        .expect("ws trades mutex")
+        .push(trade_json(11, "101.00"));
+    let base_url = bound_stub(Arc::clone(&state)).await;
+
+    let (sink_tx, mut rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(sink_tx);
+    let config = MogwaiDataClientConfig {
+        account_id: AccountId::from("MOGWAI-001"),
+        base_url,
+        symbol: None,
+        callsign: None,
+        // A flat, short backoff. The property is that the ladder survives the
+        // refusals at all; the default one-second ladder would only make the
+        // test slower for no extra evidence. The attempt cap stays at its
+        // default, well above the two refusals, so an exhausted cap cannot be
+        // mistaken for the terminal behaviour this test forbids.
+        havoc: Some(conn_havoc(ConnHavoc {
+            reconnect_delay_initial_ms: 20,
+            reconnect_delay_max_ms: 20,
+            ..ConnHavoc::default()
+        })),
+        expected_run_seed: None,
+        ..Default::default()
+    };
+    let mut client =
+        MogwaiDataClient::new(ClientId::from("MOGWAI-DATA"), config).expect("client builds");
+    client.start().expect("start grabs sink");
+
+    // `connect()` returns once a transport is up, so it is the assertion. It is
+    // bounded rather than awaited: a client that treats the refusal as terminal
+    // abandons the connection task and readiness never arrives, and this must
+    // fail by name rather than by hanging out the runner's per-test budget. The
+    // ladder here is three loopback dials and two 20 ms backoffs, so five
+    // seconds is a failure deadline and not a budget the passing path spends.
+    tokio::time::timeout(Duration::from_secs(5), client.connect())
+        .await
+        .expect(
+            "the client stopped dialling on a cadence refusal: it is conditional and lifts \
+             when the incumbent passenger leaves",
+        )
+        .expect("connect opens transports once the conflict clears");
+    subscribe(&mut client);
+    state.push_gate.open();
+
+    // It got there by re-dialling, rather than by the stub having served the
+    // first upgrade after all.
+    let handshakes = state.ws_handshakes.load(Ordering::Relaxed);
+    assert!(
+        handshakes >= 3,
+        "two refusals then a served upgrade is three dials; saw {handshakes}"
+    );
+
+    // And the connection it finally got is a real one, not merely an accepted
+    // socket: the seeded trade crosses it.
+    let trade = next_trade(&mut rx).await;
+    assert_eq!(
+        trade.price,
+        nautilus_model::types::Price::from("101.00"),
+        "the post-conflict connection must carry the tape like any other"
+    );
+}

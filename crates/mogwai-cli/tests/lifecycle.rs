@@ -414,6 +414,32 @@ fn a_boot_failure_reports_no_record_and_says_why() {
     );
 }
 
+/// An ephemeral launcher already knows the only symbol its consumer will bind.
+/// Funding it cannot serve is therefore a launch error, not a later websocket
+/// refusal that looks like a transport outage to the consumer.
+#[test]
+#[ignore = "spawns the venue binary"]
+fn a_launch_symbol_is_funding_checked_before_readiness() {
+    // `RUST_BACKTRACE` is deliberately left inherited. An earlier shape of this
+    // test pinned it to `0`, which dodged rather than exercised the capture: a
+    // long backtrace used to evict the error line from the launcher's bounded
+    // stderr ring. The ring now keeps its head, so this assertion holds whatever
+    // the surrounding process exported, and it fails if that regresses.
+    let spec = LaunchSpec {
+        symbol: Some("MNQ".to_owned()),
+        ..common::spec(&["--config", &fast_config()])
+    };
+    let error = launch(spec).expect_err("the USDT-only fixture cannot launch an MNQ consumer");
+    let LaunchError::NoRecord { stderr } = error else {
+        panic!("expected a missing-record boot refusal, got {error:?}");
+    };
+    let log = stderr.join("\n");
+    assert!(
+        log.contains("MNQ") && log.contains("USD") && log.contains("does not fund"),
+        "the launch refusal must name the requested shape and missing currency: {log}"
+    );
+}
+
 /// The ready read blocks for as long as warmup generation takes, so a launcher
 /// that does not bound it hangs forever on a venue that will never answer. The
 /// shipped launcher bounds it and names the knob.

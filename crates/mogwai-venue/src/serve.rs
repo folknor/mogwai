@@ -146,6 +146,7 @@ fn arm_parent_death_signal(expected: Option<i32>) -> anyhow::Result<()> {
 pub fn serve(
     config: Option<PathBuf>,
     duration: Option<Duration>,
+    symbol: Option<String>,
     launcher_pid: Option<i32>,
 ) -> anyhow::Result<()> {
     arm_parent_death_signal(launcher_pid)?;
@@ -160,16 +161,25 @@ pub fn serve(
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve_async(config, duration_ns))
+        .block_on(serve_async(config, duration_ns, symbol))
 }
 
 async fn serve_async(
     config: Option<PathBuf>,
     duration_override_ns: Option<Option<u64>>,
+    launch_symbol: Option<String>,
 ) -> anyhow::Result<()> {
     let cfg = Config::load(config)?;
     let profiles = Arc::new(build_instrument_profiles(&cfg)?);
-    let instrument = profiles.default_symbol_def(cfg.default_symbol())?;
+    let instrument = if let Some(symbol) = launch_symbol.as_deref() {
+        profiles
+            .resolve(symbol)
+            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?
+            .def
+            .clone()
+    } else {
+        profiles.default_symbol_def(cfg.default_symbol())?
+    };
     let seeds = mogwai_protocol::RunSeeds::from_run_seed(
         cfg.seed.unwrap_or_else(|| rand::random::<u64>() >> 1),
     );

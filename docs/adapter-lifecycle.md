@@ -68,7 +68,6 @@ client. Three things stop that permanently, and each writes one log line:
   newer connection presented this client's account id under a different or
   absent callsign. Redialling would evict the claimant in turn, forever, so the
   client stops.
-
 Everything else is a transport event and is redialled, including any other WS
 1000. That matters because 1000 is the ordinary code for any graceful close: a
 proxy retiring an idle socket sends it, and so does a venue restarting. The
@@ -81,6 +80,18 @@ each correctly from the frame and the close behind it agrees rather than
 refining it. Until those frames split, both completions sent one frame and an
 ordinary duration end was logged, and reported, as a finished run. Eviction has
 no frame ahead of it and was always exact.
+
+One refusal reads as if it belonged on that list and does not: the venue's
+second-cadence refusal, an HTTP 400 at the upgrade whose body ends `a ledger
+carries one cadence`. It is conditional. Per `docs/accounts.md` the rule holds
+while any of the account's passengers is riding that river and lifts once the
+last leaves, and the passenger holding it need not be this client's - any
+process naming the same account id may be the incumbent. So the client keeps
+dialling, and it writes its own `warn` line rather than a generic dial failure,
+because a silent backoff loop against a cadence conflict looks exactly like a
+transport outage and is nothing like one. If the line repeats forever, the cause
+is almost always this client's two legs configured with different `speed`
+values; configure them alike.
 
 ## A command your host submitted is not a command the venue saw
 

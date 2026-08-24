@@ -45,11 +45,6 @@ use crate::{
     tape::{Tape, TapeSpawn},
 };
 
-/// The largest speed the sharing key can carry, in micro-multiples: one
-/// million times real time, which is already far past any paced use. The bound
-/// exists to keep the quantization honest rather than to express a policy.
-const MAX_SPEED_MICROS: u64 = 1_000_000_000_000;
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct BoatKey {
     river: RiverKey,
@@ -61,18 +56,14 @@ pub(crate) struct BoatKey {
 /// to find it.
 ///
 /// Micro-multiples, so the key is `Hash` and `Eq` and two consumers writing
-/// `100` and `100.0000001` share a boat. Bounded first: a float cast saturates
-/// rather than wrapping, so an absurd speed would otherwise be silently
-/// replaced by a different one and then paced at it.
+/// `100` and `100.0000001` share a boat. Bounded first, by
+/// `mogwai_protocol::control::validate_delivery_speed`, which is the one place
+/// the bound is written: `mogwai-adapter` refuses the same values against the
+/// same function, so a config cannot pass its own validation and then take this
+/// 400 forever.
 pub(crate) fn quantize_speed(speed: f64) -> anyhow::Result<u64> {
-    if !speed.is_finite() || speed < 0.0 {
-        anyhow::bail!("speed must be finite and non-negative");
-    }
-    if speed * 1_000_000.0 > MAX_SPEED_MICROS as f64 {
-        anyhow::bail!(
-            "speed {speed} is beyond the quantization range; the maximum is {}",
-            MAX_SPEED_MICROS / 1_000_000
-        );
+    if let Err(refusal) = mogwai_protocol::control::validate_delivery_speed(speed) {
+        anyhow::bail!(refusal);
     }
     Ok((speed * 1_000_000.0).round() as u64)
 }

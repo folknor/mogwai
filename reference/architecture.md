@@ -154,6 +154,16 @@ this account is genuinely owed a scan over. Asking the state directly needs no
 new identity and closes the case whatever produced it; a placement nonce on the
 boat would instead repair the freeze proxy, and was not taken for that reason.
 
+The remaining identity-shaped use is teardown, and it is closed by ownership
+ordering rather than by widening `BoatKey`. A passenger releases its registry
+ride before its ticket can remove the last boat. Until that release it still
+owns the ticket, so another placement under the same key cannot exist; after
+the release there is no stale seat to match. `Passenger::drop` states and
+enforces that order for an upgrade abandoned before its socket handler runs.
+Reversing the order, or adding a path that removes a boat without first retiring
+every registry ride holding its ticket, invalidates the argument and would make
+a placement nonce necessary.
+
 What the account held off the joined river is retired at that moment - resting
 orders cancelled, positions closed at their last mark. A returning socket may
 name a different symbol than the account was trading, and carrying that forward
@@ -1127,10 +1137,18 @@ The protocol crate owns every JSON type shared by venue and adapter. The adapter
 uses its websocket for market data, execution and history alike: warmup and backfill
 are pulled with `QueryHistory` on the socket that boarded, in bounded pages
 resumed by an opaque continuation. It makes no HTTP history call at all, which
-is what stops it reading a label's water instead of its own. Each adapter consumer names its river with an optional `symbol` in its
-own config, which becomes `/ws?symbol=`; it carries no `speed` or
-`duration_ms`, so the data and execution consumers of one host board the same
-boat at the venue's configured speed. The adapter holds no served-symbol guard
+is what stops it reading a label's water instead of its own. Each adapter
+consumer names its river with an optional `symbol` in its own config, which
+becomes `/ws?symbol=`, and optional `speed` and `duration_ms` alongside it,
+which become the rest of the upgrade query. All three default to absent, which
+takes the venue's own defaults, so a host that configures none has its data and
+execution consumers board the same boat at the venue's configured speed - and a
+host that configures them must configure both legs alike, because one ledger
+carries one cadence and the second leg's upgrade would otherwise be refused.
+`speed` is judged before the dial against
+`mogwai_protocol::control::validate_delivery_speed`, the same function the
+venue's boat quantization judges it with, so a value the venue would refuse is a
+config error rather than a permanent dial failure. The adapter holds no served-symbol guard
 of its own any more: since resolution became total there is no set to guard
 against, so both clients re-read `/instruments` after binding - binding is what
 registers an unconfigured symbol, so only a read taken after the socket is up

@@ -83,6 +83,13 @@ pub struct MogwaiDataClientConfig {
     /// symbol for compatibility with clients predating the carrier.
     #[serde(default)]
     pub symbol: Option<String>,
+    /// Delivery speed named on `/ws?speed=`. `None` takes the venue default.
+    #[serde(default)]
+    pub speed: Option<f64>,
+    /// This passenger's simulated lifetime in milliseconds. `None` is
+    /// indefinite and is independent of the venue's run-wide duration.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     /// Havoc to arm on connect. `None` is a clean adapter.
     #[serde(default)]
     pub havoc: Option<HavocSpec>,
@@ -119,6 +126,8 @@ impl Default for MogwaiDataClientConfig {
             account_id: AccountId::from(DEFAULT_ACCOUNT_ID),
             base_url: String::new(),
             symbol: None,
+            speed: None,
+            duration_ms: None,
             havoc: None,
             callsign: default_callsign(),
             expected_run_seed: None,
@@ -193,6 +202,14 @@ impl MogwaiDataClientConfig {
         self
     }
 
+    /// Name this socket's delivery speed and passenger duration.
+    #[must_use]
+    pub fn with_cadence(mut self, speed: Option<f64>, duration_ms: Option<u64>) -> Self {
+        self.speed = speed;
+        self.duration_ms = duration_ms;
+        self
+    }
+
     /// Arm havoc on this config, for the builder-ish call sites that want one
     /// expression.
     #[must_use]
@@ -223,6 +240,7 @@ impl MogwaiDataClientConfig {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
+        validate_speed(self.speed)?;
         validate_callsign(self.callsign.as_deref())?;
         validate_havoc(&self.havoc)
     }
@@ -243,6 +261,8 @@ impl MogwaiDataClientConfig {
         ws_url(
             &self.base_url,
             self.symbol.as_deref(),
+            self.speed,
+            self.duration_ms,
             &self.account_id,
             self.callsign.as_deref(),
         )
@@ -280,6 +300,12 @@ pub struct MogwaiExecClientConfig {
     /// River named on the websocket upgrade. `None` takes the venue default.
     #[serde(default)]
     pub symbol: Option<String>,
+    /// Delivery speed named on `/ws?speed=`. `None` takes the venue default.
+    #[serde(default)]
+    pub speed: Option<f64>,
+    /// This passenger's simulated lifetime in milliseconds. `None` is indefinite.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     /// Account type reported to nautilus.
     pub account_type: AccountType,
     /// Order-management-system type the venue presents to nautilus. Defaults to
@@ -327,6 +353,8 @@ impl Default for MogwaiExecClientConfig {
             account_id: AccountId::from(DEFAULT_ACCOUNT_ID),
             base_url: String::new(),
             symbol: None,
+            speed: None,
+            duration_ms: None,
             account_type: AccountType::Cash,
             oms_type: default_oms_type(),
             havoc: None,
@@ -372,6 +400,14 @@ impl MogwaiExecClientConfig {
     #[must_use]
     pub fn with_symbol(mut self, symbol: impl Into<String>) -> Self {
         self.symbol = Some(symbol.into());
+        self
+    }
+
+    /// Name this socket's delivery speed and passenger duration.
+    #[must_use]
+    pub fn with_cadence(mut self, speed: Option<f64>, duration_ms: Option<u64>) -> Self {
+        self.speed = speed;
+        self.duration_ms = duration_ms;
         self
     }
 
@@ -425,6 +461,7 @@ impl MogwaiExecClientConfig {
         validate_base_url(&self.base_url)?;
         validate_account_id(&self.account_id)?;
         validate_symbol(self.symbol.as_deref())?;
+        validate_speed(self.speed)?;
         validate_callsign(self.callsign.as_deref())?;
         validate_havoc(&self.havoc)
     }
@@ -438,6 +475,8 @@ impl MogwaiExecClientConfig {
         ws_url(
             &self.base_url,
             self.symbol.as_deref(),
+            self.speed,
+            self.duration_ms,
             &self.account_id,
             self.callsign.as_deref(),
         )
@@ -470,6 +509,8 @@ impl MogwaiExecClientConfig {
 fn ws_url(
     base_url: &str,
     symbol: Option<&str>,
+    speed: Option<f64>,
+    duration_ms: Option<u64>,
     account_id: &AccountId,
     callsign: Option<&str>,
 ) -> String {
@@ -478,10 +519,30 @@ fn ws_url(
     if let Some(symbol) = symbol {
         url.push_str(&format!("&symbol={symbol}"));
     }
+    if let Some(speed) = speed {
+        url.push_str(&format!("&speed={speed}"));
+    }
+    if let Some(duration_ms) = duration_ms {
+        url.push_str(&format!("&duration_ms={duration_ms}"));
+    }
     if let Some(callsign) = callsign {
         url.push_str(&format!("&callsign={callsign}"));
     }
     url
+}
+
+/// Refuse a speed the venue would refuse, against the venue's own rule rather
+/// than a restatement of it. An adapter bound looser than the venue's would let
+/// a config validate cleanly and then take a 400 on every dial for the life of
+/// the client, which reads as an outage rather than as the configuration
+/// mistake it is.
+fn validate_speed(speed: Option<f64>) -> anyhow::Result<()> {
+    if let Some(speed) = speed
+        && let Err(refusal) = mogwai_protocol::control::validate_delivery_speed(speed)
+    {
+        anyhow::bail!(refusal);
+    }
+    Ok(())
 }
 
 /// Refuse a callsign id the `/ws` URL cannot carry, by the rule the venue
@@ -650,6 +711,56 @@ mod tests {
             config.ws_url(),
             "ws://127.0.0.1:1/ws?account=MOGWAI-001&symbol=MNQ"
         );
+    }
+
+    #[test]
+    fn ws_url_carries_speed_and_passenger_duration_on_both_legs() {
+        let data = MogwaiDataClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            callsign: None,
+            ..MogwaiDataClientConfig::default()
+        }
+        .with_cadence(Some(12.5), Some(45_000));
+        let exec = MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            callsign: None,
+            ..MogwaiExecClientConfig::default()
+        }
+        .with_cadence(Some(12.5), Some(45_000));
+        let suffix = "&speed=12.5&duration_ms=45000";
+        assert!(data.ws_url().ends_with(suffix), "{}", data.ws_url());
+        assert!(exec.ws_url().ends_with(suffix), "{}", exec.ws_url());
+    }
+
+    /// Every speed the venue's upgrade refuses, refused here instead. The
+    /// over-range arm is the one that was missing: it is the only illegal speed
+    /// a plausible config actually reaches for, and admitting it produced a
+    /// client that dialled a 400 forever.
+    #[test]
+    fn config_refuses_a_speed_the_venue_would_refuse() {
+        let over_range = mogwai_protocol::control::MAX_DELIVERY_SPEED * 2.0;
+        for speed in [f64::NAN, f64::INFINITY, -1.0, over_range] {
+            let config = MogwaiDataClientConfig {
+                base_url: "ws://127.0.0.1:1".into(),
+                speed: Some(speed),
+                ..MogwaiDataClientConfig::default()
+            };
+            assert!(
+                config.validate().is_err(),
+                "adapter accepted venue-illegal speed {speed}"
+            );
+        }
+        for speed in [0.0, 1.0, mogwai_protocol::control::MAX_DELIVERY_SPEED] {
+            let config = MogwaiExecClientConfig {
+                base_url: "ws://127.0.0.1:1".into(),
+                speed: Some(speed),
+                ..MogwaiExecClientConfig::default()
+            };
+            assert!(
+                config.validate().is_ok(),
+                "adapter refused venue-legal speed {speed}"
+            );
+        }
     }
 
     #[test]

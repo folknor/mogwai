@@ -227,6 +227,37 @@ pub(crate) struct Passenger {
     pub(crate) alive: tokio::sync::watch::Receiver<()>,
 }
 
+impl Drop for Passenger {
+    fn drop(&mut self) {
+        // Release the registry ride before `ticket` can remove the last boat.
+        //
+        // This impl exists only to impose that order, and it is load-bearing
+        // rather than defensive: `ticket` is declared above `attach`, so
+        // without it Rust's declaration-order field drop would run the two the
+        // wrong way round. `handle_socket` gives the ride up at the same
+        // earlier boundary by hand; this arm covers an upgrade abandoned before
+        // that handler ever runs.
+        //
+        // What the order buys is the argument that `BoatKey` needs no
+        // per-placement nonce. A registry match can only name a boat while this
+        // passenger still owns its ticket, and the ticket is what keeps that
+        // boat placed - so while a stale ride could still be matched, no new
+        // boat can have taken the key, and once the key is free there is no
+        // ride left to match it. Reverse the order and both halves fail at
+        // once: the boat winds down, a newcomer places a fresh one under the
+        // identical `(river, speed)` key, and the ride still sitting here
+        // matches it. That is precisely the case a nonce would have to
+        // distinguish.
+        //
+        // The argument therefore rests on one condition and is invalidated by
+        // any change that breaks it: no path may remove a boat without first
+        // retiring every registry ride whose ticket holds it. A new teardown
+        // route that drops a ticket while some ride survives owes either this
+        // ordering or the nonce.
+        drop(self.attach.take());
+    }
+}
+
 /// Bind one socket to one river, or refuse before the 101.
 ///
 /// A refusal is a status, not a close code: an unserved symbol on `/trades` is
@@ -393,10 +424,11 @@ pub(crate) async fn ws_upgrade(
             return (
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "account {account} is already seated on {symbol} at speed {held_speed}; a \
-                     ledger carries one cadence",
+                    "account {account} is already seated on {symbol} at speed {held_speed}; \
+                     {marker}",
                     account = account_id.as_str(),
                     held_speed = held.speed(),
+                    marker = mogwai_protocol::control::CADENCE_CONFLICT_MARKER,
                 ),
             )
                 .into_response();

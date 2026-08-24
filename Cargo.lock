@@ -1904,6 +1904,7 @@ dependencies = [
 name = "mogwai-protocol"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "rust_decimal",
  "serde",
  "serde_json",

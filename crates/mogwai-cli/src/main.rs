@@ -132,6 +132,10 @@ struct ServeArgs {
     /// `serve_argv_parses_in_the_venues_own_grammar` below.
     #[arg(long, value_name = "DURATION")]
     duration: Option<humantime::Duration>,
+    /// Ephemeral launcher's known bind symbol. It becomes the unnamed socket's
+    /// default and is funding-checked before readiness.
+    #[arg(long, value_name = "SYMBOL")]
+    symbol: Option<String>,
     /// The launcher's own pid, so the venue can prove it still has the owner it
     /// was started by.
     ///
@@ -166,6 +170,7 @@ fn main() -> anyhow::Result<()> {
         Command::Serve(args) => mogwai_venue::serve(
             args.config,
             args.duration.map(std::convert::Into::into),
+            args.symbol,
             args.launcher_pid,
         ),
         Command::Gen(args) => r#gen::run(*args),
@@ -317,6 +322,21 @@ mod tests {
                 "the venue must read back the duration the launcher rendered, from {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn serve_argv_carries_the_ephemeral_consumers_symbol() {
+        let spec = LaunchSpec {
+            symbol: Some("MNQ".to_owned()),
+            ..LaunchSpec::default()
+        };
+        let mut argv = vec![std::ffi::OsString::from("mogwai")];
+        argv.extend(serve_argv(&spec, std::process::id()));
+        let cli = Cli::try_parse_from(&argv).expect("the venue parses the launcher's symbol");
+        let Command::Serve(args) = cli.command else {
+            panic!("serve_argv must render serve");
+        };
+        assert_eq!(args.symbol.as_deref(), Some("MNQ"));
     }
 
     /// The companion refusal, so the test above cannot be read as "any parser

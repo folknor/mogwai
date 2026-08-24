@@ -78,34 +78,6 @@ values. Both refusals return `&'static str`, so fixing means changing the return
 type or reaching for a `const` formatter, which is why neither was fixed in
 passing.
 
-### C8. The launcher kills one process, not a process group
-
-`launch`'s timeout arm issues `child.kill()` and does not join the readiness
-reader, which is what makes the readiness bound unconditional. The kill closes
-stdout only while the child holds the write end, so a `binary` naming a wrapper
-script that starts the venue without `exec`, or a venue that ever grows a helper
-subprocess, leaves a grandchild holding an inherited copy and strands that reader
-thread for the life of the process. One leaked thread per timed-out launch is the
-deliberate trade.
-
-The robust form is putting the child in its own process group and `killpg`ing it,
-which also collects a helper the venue itself spawned, but not a wrapper's
-grandchild that has left the group - so it narrows the hole rather than closing
-it, and it is a real change to the launcher's process model. Latent today:
-`mogwai serve` spawns nothing, and `docs/cli.md` states the supported shape.
-
-### C9. `BoatKey` carries no placement nonce
-
-Boat identity across lifetimes is unrepresentable: a boat placed over a river
-again is the same key and `is_seated_on` still passes. `ws.rs`'s stale-seat
-hazard is held off by drop ordering rather than by identity, and is the remaining
-consumer if a nonce is ever wanted.
-
-Recorded so it is not re-filed: whether an eviction-reconnect should retire the
-book it takes over was withdrawn as unanswerable. It needs the venue to tell a
-returning client from a stranger presenting the same id, and a session id is
-self-asserted with no auth behind it.
-
 ### C10. A per-passenger duration end is reported as a whole-run completion
 
 A passenger whose own duration ends is sent a `RunComplete` frame before the
@@ -158,14 +130,6 @@ requested start, so `[T1, T2]` asks for materialization from `T1 - warmup_ns`,
 and that floor must sit at or above `TAPE_ORIGIN_NS`. A window requested too near
 the tape origin cannot carry its own warmup. Better as a named refusal at request
 time than a short warmup nobody notices.
-
-### C14. A boot symbol supplied at launch would move the funding refusal to boot
-
-Today a config funding only USDT boots happily and refuses `MNQ` at first bind,
-because only configured shapes are funding-checked at boot while presets and the
-fallback are merely recorded as barred. The transient launcher knows its one
-symbol up front, so it is the one caller that could be told at boot rather than
-at first use.
 
 ---
 
@@ -416,18 +380,21 @@ that is silent.
 timestamp, havoc deadline, quota interval and backoff sits on the venue axis. The
 envelope's `boat_clock` flag has no reader in the crate.
 
-### F3. The adapter cannot name a speed or a duration
+### F3b. A cadence conflict that will never clear is indistinguishable from one that will
 
-`ws_url` emits neither, both configs carry no field for them, and the venue reads
-both. Related, the venue's second-cadence refusal reaches the adapter as a failed
-upgrade retried forever with backoff - a configuration error handled as a
-transient outage, unlike the identity mismatch, which refuses terminally.
+Filed 2026-08-24 from round 4, as the residue of F3. The adapter now retries the
+venue's second-cadence refusal, which is right: the rule lifts when the
+incumbent passenger leaves, and the incumbent need not be ours. What it cannot
+do is recognize the one case that really is permanent - this client's own two
+legs configured with different `speed` values - because the venue names the
+seated speed but not who is seated at it, and the data and exec clients are
+separate objects with no handle on each other. So a misconfigured pair dials
+its cap out behind a repeated `warn` line rather than failing at construction.
 
-The second-cadence refusal is permanent by design: a ledger carries one cadence,
-per `reference/glossary.md`'s Boat and Account entries, and the venue is right to
-refuse. So the adapter's retry ladder is waiting on a condition that will never
-clear. Handle it terminally, the way the identity mismatch already is. Do not
-close this by asking the venue to relax the refusal.
+The cheap close is upstream of the dial: a host builds both configs, so a
+constructor that took the pair, or a shared cadence value both legs read, could
+refuse the mismatch before either socket exists. That is a public API shape
+change on `mogwai-adapter` and wants a decision, not a patch.
 
 ### F4. `ship_server_havoc` serializes each divergence bare
 
@@ -747,6 +714,19 @@ test, because the gate sits mid-way through a multi-minute walk driver behind a
 Brick G cache that no test sweep in this workspace populates.
 
 ---
+
+### G17. The closed-market refusal has no end-to-end socket coverage
+
+Filed 2026-08-24 from round 3. Every assertion on this guard is unit-level,
+against the predicate or the boundary helper. The path from `process_order_cmd`
+through `refuse_all` to a consumer-visible market-closed frame is untested, which
+is why a boundary-level regression in that guard landed green: the round 3 fix
+pass admitted a whole order group whenever its first closed-session member was
+non-marketable, and a full gate could not see it.
+
+Wants a passenger submitting into a scheduled close over a real socket and
+reading the refusal frame, including the group case with a marketable member
+behind a non-marketable one.
 
 ## H. Measurement and method owed
 

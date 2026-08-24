@@ -85,6 +85,21 @@ const READY_LINE_MAX_BYTES: u64 = 4096;
 /// How many stderr lines are retained to explain a boot failure.
 const STDERR_RING: usize = 64;
 
+/// How many of those lines are the first ones, kept whatever follows.
+///
+/// A plain tail loses the wrong end. The venue inherits `RUST_BACKTRACE` from
+/// whoever launched it, and a host that exports it turns one boot error into an
+/// error line followed by tens of frames - which, on a pure tail, evicts the
+/// error line and leaves the caller a stack with no statement of what failed.
+/// The first lines are the diagnosis and the last lines are what the venue was
+/// doing when it stopped, so both ends are kept and the middle is what gives
+/// way.
+const STDERR_HEAD: usize = 12;
+
+/// Stands in for the lines dropped between the retained head and tail, so a
+/// caller reading a snapshot cannot mistake a gap for adjacency.
+const STDERR_ELIDED: &str = "... (earlier venue stderr elided)";
+
 /// How often the owning thread wakes to notice the venue exited on its own.
 const OWNER_POLL: Duration = Duration::from_millis(200);
 
@@ -144,6 +159,11 @@ pub struct LaunchSpec {
     /// leaves the config's duration alone, `Some(ZERO)` overrides it to
     /// indefinite, and only a positive value declares a completion.
     pub duration: Option<Duration>,
+    /// The one symbol an ephemeral consumer will bind. When set, the venue
+    /// resolves it and checks its settlement funding before readiness, then
+    /// uses it as the default for an unnamed socket. A shared venue leaves this
+    /// unset because its instrument set remains open.
+    pub symbol: Option<String>,
     /// Bound on the readiness read. Unset means [`DEFAULT_READY_TIMEOUT`].
     pub ready_timeout: Option<Duration>,
     /// What to do with the venue's log stream.
@@ -676,6 +696,10 @@ pub fn serve_argv(spec: &LaunchSpec, launcher_pid: u32) -> Vec<OsString> {
         argv.push(OsString::from("--duration"));
         argv.push(OsString::from(format_duration(duration)));
     }
+    if let Some(symbol) = &spec.symbol {
+        argv.push(OsString::from("--symbol"));
+        argv.push(OsString::from(symbol));
+    }
     argv
 }
 
@@ -703,6 +727,26 @@ fn format_duration(duration: Duration) -> String {
         Ok(nanos) => format!("{nanos}ns"),
         Err(_) => format!("{}s", duration.as_secs()),
     }
+}
+
+/// Add one drained stderr line to the bounded ring, keeping both ends.
+///
+/// The head window is never evicted; the middle is. See `STDERR_HEAD` for why a
+/// plain tail loses exactly the line a caller needs.
+fn record_stderr_line(ring: &mut VecDeque<String>, line: String) {
+    if ring.len() == STDERR_RING {
+        ring.remove(STDERR_HEAD);
+        // The marker is placed on the first eviction and then persists, costing
+        // one further line exactly once rather than on every eviction.
+        if ring
+            .get(STDERR_HEAD)
+            .is_none_or(|kept| kept != STDERR_ELIDED)
+        {
+            ring.remove(STDERR_HEAD);
+            ring.insert(STDERR_HEAD, STDERR_ELIDED.to_owned());
+        }
+    }
+    ring.push_back(line);
 }
 
 fn snapshot(ring: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
@@ -745,6 +789,31 @@ fn own_venue(
         } else {
             Stdio::inherit()
         });
+    // The launched child leads a fresh process group, and teardown signals the
+    // group rather than the one process.
+    //
+    // What that collects: helpers the venue itself spawns, and a wrapper script
+    // that starts the venue without `exec`, whose grandchild stays in the
+    // inherited group. Both used to survive a `child.kill()` holding an
+    // inherited copy of stdout, stranding the readiness reader for the life of
+    // the process.
+    //
+    // What it does not collect: a descendant that deliberately leaves the group
+    // with `setsid` or its own `setpgid`. Leaving is a thing only that process
+    // can do and nothing here can prevent, so the readiness bound remains a
+    // promise about the launcher - it reports on time regardless - and not a
+    // promise to reap an arbitrary binary's escapees.
+    //
+    // The cost, stated because it is a real behaviour change: the venue is no
+    // longer in the launcher's process group, so a terminal's Ctrl-C reaches
+    // the launcher alone and no longer signals the venue directly. Nothing
+    // depended on that path. `PR_SET_PDEATHSIG` covers the launcher dying, and
+    // the ordinary teardown below signals the group explicitly.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -770,10 +839,7 @@ fn own_venue(
                     // exiting; there is nothing left to drain.
                     let Ok(line) = line else { return };
                     if let Ok(mut ring) = ring.lock() {
-                        if ring.len() == STDERR_RING {
-                            ring.pop_front();
-                        }
-                        ring.push_back(line.clone());
+                        record_stderr_line(&mut ring, line.clone());
                     }
                     if let StderrSink::Lines(callback) = &mut sink {
                         callback(line);
@@ -828,7 +894,7 @@ fn own_venue(
                 Err(RecvTimeoutError::Timeout) => {
                     // Kill first, which closes stdout and releases the reader in
                     // every case where the child itself holds the write end.
-                    drop(child.kill());
+                    drop(kill_child_group(&mut child));
                     Err(LaunchError::Timeout {
                         waited: ready_timeout,
                         stderr: snapshot(stderr_ring),
@@ -928,7 +994,7 @@ fn own_venue(
     // reaped above makes both of these fail harmlessly, which is why the record
     // is only kept when nothing was reaped.
     let reaped = exit.lock().is_ok_and(|exit| exit.is_some());
-    let killed = child.kill();
+    let killed = kill_child_group(&mut child);
     let waited = child.wait();
     if !reaped {
         let failure = match (killed, waited) {
@@ -949,6 +1015,21 @@ fn own_venue(
     // closed and the thread ends on its own; a callback that never returns is
     // then one leaked thread rather than a hung process.
     drop(drain);
+}
+
+fn kill_child_group(child: &mut std::process::Child) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let pgid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).map_err(|_| {
+            std::io::Error::other("venue pid does not fit the platform process id type")
+        })?);
+        nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL)
+            .map_err(std::io::Error::other)
+    }
+    #[cfg(not(unix))]
+    {
+        child.kill()
+    }
 }
 
 /// Read and validate the single readiness line off the child's stdout.
@@ -1593,6 +1674,107 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "launch must return on its own bound, took {elapsed:?}"
         );
+    }
+
+    /// The boot error survives its own backtrace.
+    ///
+    /// A venue inherits `RUST_BACKTRACE`, so one failure can be an error line
+    /// followed by tens of frames. Against a pure tail the error line is
+    /// evicted and the caller is handed a stack that never says what failed,
+    /// which is the whole diagnostic value of the capture.
+    #[test]
+    fn the_stderr_ring_keeps_the_first_lines_under_a_long_backtrace() {
+        let mut ring = VecDeque::new();
+        record_stderr_line(&mut ring, "Error: venue refused to boot: no MNQ".into());
+        for frame in 0..500 {
+            record_stderr_line(&mut ring, format!("   {frame}: core::panicking::frame"));
+        }
+
+        assert_eq!(
+            ring.front().map(String::as_str),
+            Some("Error: venue refused to boot: no MNQ"),
+            "the first line is the diagnosis and must not be evicted"
+        );
+        assert!(
+            ring.len() <= STDERR_RING,
+            "the ring stays bounded; held {}",
+            ring.len()
+        );
+        assert_eq!(
+            ring.iter().filter(|line| *line == STDERR_ELIDED).count(),
+            1,
+            "one elision marker, placed once, not one per eviction"
+        );
+        // The tail is still the tail: what the venue was doing when it stopped
+        // is the other half of the capture, and keeping a head must not cost it.
+        assert_eq!(
+            ring.back().map(String::as_str),
+            Some("   499: core::panicking::frame")
+        );
+    }
+
+    /// Under the bound nothing is elided and nothing is reordered, so the head
+    /// window costs an ordinary short capture nothing at all.
+    #[test]
+    fn a_short_stderr_capture_is_kept_whole() {
+        let mut ring = VecDeque::new();
+        for line in 0..STDERR_HEAD {
+            record_stderr_line(&mut ring, format!("line {line}"));
+        }
+        let kept: Vec<String> = ring.iter().cloned().collect();
+        assert_eq!(
+            kept,
+            (0..STDERR_HEAD)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A timeout signals the launch group, so a helper which inherited stdout
+    /// cannot outlive the venue child and strand the readiness reader. This
+    /// covers helpers and ordinary wrappers which stay in the group. A process
+    /// which leaves the group remains outside the launcher's reach by design.
+    #[test]
+    fn a_ready_timeout_collects_a_helper_in_the_childs_process_group() {
+        let pid_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("mogwai-helper-{}.pid", std::process::id()));
+        let script = write_venue_script(
+            "group-helper",
+            &format!(
+                "#!/bin/sh\nsleep 60 &\nprintf '%s' $! > '{}'\nwait\n",
+                pid_path.display()
+            ),
+        );
+        let (outcome, _, _) = launch_serialized(|| LaunchSpec {
+            binary: Some(script.binary()),
+            ready_timeout: Some(Duration::from_millis(400)),
+            stderr: StderrSink::Discard,
+            ..LaunchSpec::default()
+        });
+        assert!(matches!(outcome, Err(LaunchError::Timeout { .. })));
+        let helper: i32 = std::fs::read_to_string(&pid_path)
+            .expect("the wrapper recorded its helper")
+            .parse()
+            .expect("helper pid");
+        drop(std::fs::remove_file(&pid_path));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while nix::sys::signal::kill(nix::unistd::Pid::from_raw(helper), None).is_ok()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let still_alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(helper), None).is_ok();
+        if still_alive {
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(helper),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(()) | Err(_) => {}
+            }
+        }
+        assert!(!still_alive, "the venue helper survived its launch timeout");
     }
 
     /// A venue that closes stdout without speaking is a boot failure even

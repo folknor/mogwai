@@ -400,6 +400,13 @@ pub struct StubState {
     /// modelling a venue that refuses the socket. The handshake is still counted
     /// so the attempt-cap test can pin the count.
     pub refuse_ws: AtomicBool,
+    /// How many further upgrades `serve_ws` answers with the venue's real
+    /// second-cadence 400, decremented on each. Models an incumbent passenger
+    /// riding this river at another speed and then leaving: once the count
+    /// reaches zero the upgrade is served normally, which is the transition the
+    /// contract in `docs/accounts.md` promises and the only way to test that the
+    /// client is still dialling when it happens.
+    pub cadence_refusals: AtomicUsize,
     /// When set, the WS leg suppresses application frames sent within this many
     /// ms of the subscribe instant, modelling a `GoDark` blackout window.
     pub dark_ms: AtomicUsize,
@@ -876,6 +883,29 @@ pub async fn serve_ws(stream: &mut TcpStream, head: String, state: Arc<StubState
     // above) but the WebSocket upgrade never completes, so the client treats the
     // dial as failed and backs off into its reconnect loop.
     if state.refuse_ws.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // The venue's second-cadence refusal, spoken as the venue speaks it: a 400
+    // with the marker in its body, not a dropped socket. Each refusal consumes
+    // one of the armed count, so the incumbent "leaves" after that many dials.
+    if state
+        .cadence_refusals
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
+    {
+        let body = format!(
+            "account MOGWAI-001 is already seated on BTCUSDT at speed 1; {}",
+            mogwai_protocol::control::CADENCE_CONFLICT_MARKER
+        );
+        let refusal = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        drop(stream.write_all(refusal.as_bytes()).await);
+        drop(stream.flush().await);
         return;
     }
 

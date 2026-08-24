@@ -542,6 +542,11 @@ account has to disconnect for it. Duration is simulated milliseconds from
 boarding and belongs to the passenger, not the boat, so passengers with
 different durations share.
 
+`MogwaiDataClientConfig` and `MogwaiExecClientConfig` expose the same choices as
+`speed: Option<f64>` and `duration_ms: Option<u64>`. Configure both legs alike;
+the adapter appends present values to each websocket URL, and absent values keep
+the venue defaults above.
+
 Generator admission is based on mechanism constraints: positive finite values,
 grid representability, coherent sweep probabilities, size units compatible with
 the minimum tradable quantity, and volatility headroom below the GARCH cap.

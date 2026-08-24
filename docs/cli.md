@@ -153,6 +153,12 @@ consults the working directory. `--duration DURATION` overrides
 ends it. It briefly meant the opposite here, producing a venue that announced
 readiness and exited before anyone could connect.
 
+`--symbol SYMBOL` is the transient launcher's known bind symbol. It makes that
+label the unnamed socket's default and resolves its funding before readiness,
+so a one-consumer run cannot boot successfully and fail its first bind over a
+missing settlement currency. A shared `mogwai serve` leaves it unset and keeps
+the open instrument-set policy described above.
+
 `--duration` is humantime, and it is the only duration on this binary that is.
 It reads `0s`, `1500ms` and `1ns`, which is what lets the shipped launcher
 render any `Duration` it holds. `gen`'s `--length`, `--interval` and
@@ -206,13 +212,17 @@ child's status whenever the guard reaps one, including on the shutdown path, so
 a bounded run that completed just before teardown reports its successful exit
 rather than `None`; a `None` from a guard that has been shut down means the venue
 was killed while still serving. And the readiness bound holds even against a
-child that misbehaves: on expiry the launcher reports the timeout without waiting
-on its own reader thread, so a `LaunchSpec::binary` naming a wrapper script that
-starts the venue without `exec` - leaving a grandchild holding the inherited
-stdout - costs a leaked thread rather than a launcher hung immediately after
-deciding to report a timeout. Point it at the binary, or at a wrapper that
-`exec`s it, all the same: only then does killing the child close stdout, and only
-then is the readiness read released by the kill rather than by the timeout.
+child that misbehaves: the launcher places its child in a new process group and
+signals the group on expiry, which collects helpers the venue spawns and wrapper
+grandchildren that remain in the inherited group. It cannot collect a
+grandchild which deliberately leaves that group while retaining stdout. The
+launcher still reports the timeout without joining its reader, so that narrower
+case costs a leaked reader thread rather than a launcher hung after deciding to
+report a timeout. The group has one consequence worth knowing: the venue is no
+longer a member of the launcher's process group, so a terminal's Ctrl-C reaches
+the launcher and not the venue. Teardown signals the group explicitly and
+`PR_SET_PDEATHSIG` covers the launcher dying outright, so nothing is left
+relying on that path.
 
 The venue otherwise inherits the launcher's environment. `LaunchSpec::env` sets
 variables on top of it, and the one that usually wants setting is `RUST_LOG`: the

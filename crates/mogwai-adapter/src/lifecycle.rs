@@ -517,6 +517,29 @@ async fn run_ws_connection_inner<
         let ws = match tokio::time::timeout(dial_timeout, connect_async(&ws_url)).await {
             Ok(Ok((ws, _))) => ws,
             outcome => {
+                // A cadence conflict is a failed dial like any other and stays
+                // on the retry ladder. It gets its own line because the cause
+                // is nothing like a transport outage and the operator would
+                // otherwise read a silent backoff loop as one.
+                if let Ok(Err(error)) = &outcome
+                    && let Some(reason) = cadence_conflict_refusal(error)
+                {
+                    tracing::warn!(
+                        socket = label,
+                        url = %ws_url,
+                        attempt,
+                        %reason,
+                        "venue refused this socket's cadence; another passenger of this account \
+                         is riding this river at a different speed. Retrying: the refusal lifts \
+                         when that passenger leaves. If it never lifts, the two legs of this \
+                         client are configured with different speeds"
+                    );
+                    connected.store(false, Ordering::Relaxed);
+                    if backoff_or_exhausted(&policy, &mut attempt, &mut rng, label).await {
+                        return;
+                    }
+                    continue;
+                }
                 let error = match outcome {
                     Ok(Err(error)) => error.to_string(),
                     // The upgrade did not complete inside the deadline. On a cold
@@ -869,6 +892,41 @@ async fn run_ws_connection_inner<
     }
 }
 
+/// Recognize the venue's second-cadence refusal in a failed upgrade, and return
+/// its text.
+///
+/// This classifies for logging only. The refusal is conditional, not permanent:
+/// `docs/accounts.md` states the rule holds while any of the account's
+/// passengers is riding that river and lifts once the last leaves. The
+/// conflicting passenger need not belong to this client at all - any process
+/// naming the same account id may hold that river - and even one that does can
+/// reach its own `duration_ms` or be stopped by its host. So the admissible
+/// window opens without anything happening on this side, and a client that
+/// disabled reconnect here would sit out a run it could have joined.
+///
+/// The terminal reading was tried and rejected for that reason. It is not
+/// merely unproven in general: it is unprovable from here even in the case that
+/// looks provable, where the conflicting cadence is held by this client's other
+/// leg. The venue names the seated speed but not who is seated at it, the two
+/// legs are separate client objects with no handle on each other, and a leg's
+/// own passenger duration can end at any time. There is no expression available
+/// in this task that distinguishes a conflict which will clear from one which
+/// will not, so every conflict is retried and the log line names the
+/// misconfiguration that is the likely cause when it never clears.
+fn cadence_conflict_refusal(error: &tokio_tungstenite::tungstenite::Error) -> Option<String> {
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        return None;
+    };
+    if response.status() != tokio_tungstenite::tungstenite::http::StatusCode::BAD_REQUEST {
+        return None;
+    }
+    let body = response.body().as_deref()?;
+    let reason = std::str::from_utf8(body).ok()?;
+    reason
+        .contains(mogwai_protocol::control::CADENCE_CONFLICT_MARKER)
+        .then(|| reason.to_owned())
+}
+
 async fn recv_command<Cmd>(rx: &mut Option<UnboundedReceiver<Cmd>>) -> Option<Cmd> {
     match rx {
         Some(rx) => rx.recv().await,
@@ -1056,6 +1114,40 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+
+    /// The classifier alone, on hand-built responses. It says only that the
+    /// marker is read out of a 400 body and that a neighbouring 400 is not
+    /// mistaken for one. What the connection does with that answer is a
+    /// lifecycle question and is covered over a real socket by
+    /// `a_cadence_conflict_is_retried_until_the_incumbent_leaves` in
+    /// `tests/havoc.rs`; this test cannot see it.
+    #[test]
+    fn a_cadence_conflict_is_read_out_of_the_venues_400_body() {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(tokio_tungstenite::tungstenite::http::StatusCode::BAD_REQUEST)
+            .body(Some(
+                format!(
+                    "account A is already seated on MNQ at speed 1; {}",
+                    mogwai_protocol::control::CADENCE_CONFLICT_MARKER
+                )
+                .into_bytes(),
+            ))
+            .unwrap();
+        let error = tokio_tungstenite::tungstenite::Error::Http(Box::new(response));
+        assert!(cadence_conflict_refusal(&error).is_some());
+
+        let other = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(tokio_tungstenite::tungstenite::http::StatusCode::BAD_REQUEST)
+            .body(Some(b"speed must be finite and non-negative".to_vec()))
+            .unwrap();
+        assert!(
+            cadence_conflict_refusal(&tokio_tungstenite::tungstenite::Error::Http(Box::new(
+                other
+            )))
+            .is_none(),
+            "an unrelated 400 must not be reported as a cadence conflict"
+        );
+    }
 
     fn a_cancel(id: &str) -> Command {
         Command::CancelOrder {

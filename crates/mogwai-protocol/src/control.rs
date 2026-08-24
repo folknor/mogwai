@@ -72,6 +72,51 @@ divergence_bound!("3600000");
 /// Fixed-point scale for a generator multiplier: parts per million.
 pub const GENERATOR_MULT_SCALE: u64 = 1_000_000;
 
+/// The largest delivery speed `/ws?speed=` accepts: one million times real
+/// time, which is already far past any paced use.
+///
+/// It lives here rather than beside the venue's boat quantization because both
+/// ends judge it. The venue refuses an over-range speed with a 400 at the
+/// upgrade; `mogwai-adapter` refuses the same value in `validate()`, before a
+/// config that could only ever take a 400 is handed to a host. A bound spelled
+/// twice is the shape that drifts, and a drift here is silent in the direction
+/// that matters: an adapter admitting more than the venue does turns a config
+/// mistake into a permanent dial failure at run time.
+pub const MAX_DELIVERY_SPEED: f64 = 1_000_000.0;
+
+/// The machine-readable tail of the venue's second-cadence upgrade refusal.
+///
+/// The venue writes it into the 400 body and `mogwai-adapter` matches on it to
+/// tell a cadence conflict from any other failed dial. It is the same
+/// arrangement the close reasons use: match the marker rather than the
+/// sentence, and keep the marker in one place so rewording the sentence cannot
+/// silently stop the consumer recognizing it.
+pub const CADENCE_CONFLICT_MARKER: &str = "a ledger carries one cadence";
+
+/// Judge a delivery speed by the one rule both ends hold, returning the refusal
+/// text on rejection so the two ends also cannot word it differently.
+///
+/// Non-finite and negative are refused because they are not cadences. The upper
+/// bound is refused because the venue's fixed-point key is `u64` micros and a
+/// float cast saturates rather than wrapping, so an absurd speed would
+/// otherwise be silently replaced by a different one and then paced at it.
+///
+/// # Errors
+///
+/// Returns the refusal text when `speed` is not a cadence the venue can pace.
+pub fn validate_delivery_speed(speed: f64) -> Result<(), String> {
+    if !speed.is_finite() || speed < 0.0 {
+        return Err("speed must be finite and non-negative".to_owned());
+    }
+    if speed > MAX_DELIVERY_SPEED {
+        return Err(format!(
+            "speed {speed} is beyond the quantization range; the maximum is {}",
+            MAX_DELIVERY_SPEED as u64
+        ));
+    }
+    Ok(())
+}
+
 /// A generator arm in the form river identity is keyed on.
 ///
 /// Generator havoc changes the water rather than one passenger's view of it, so
