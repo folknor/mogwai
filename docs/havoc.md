@@ -1,7 +1,16 @@
 # mogwai havoc
 
-Transport and engine havoc is armed per account - a request naming none arms
-every account - and never per connection.
+Havoc is armed per account or per run, never per connection, and which of the
+two a given arm takes is the arm's own property rather than its family's. The
+four transport controls take the request's `account` and corrupt only that
+account's view; a silent cancel searches the named account's book. The engine
+one-shots and `FeeSurcharge` are recorded on the run whatever the request names,
+because they are statements about the venue's matching and its fees - which is
+also what makes a ledger opened later carry them. `FaultTape` refuses an account
+scope outright. The per-arm detail is below. Naming an account on an arm the
+venue records against the run is accepted and then ignored, which is worth
+knowing before writing a scenario that believes it scoped one: read the arm's own
+entry rather than assuming the field applies because the request carries it.
 Order-path divergences operate on the account's ledger; data-path divergences
 operate on the selected river or on the account's view. Admission and execution
 lanes remain connection-local memory bounds. Order-path arms apply only to

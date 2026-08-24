@@ -182,6 +182,131 @@ async fn both_legs_disclose_one_process_callsign_on_the_upgrade() {
     );
 }
 
+/// One account rides several rivers, as several data clients - the shape the
+/// glossary's Account entry describes and the one a finding claimed the public
+/// API could not express.
+///
+/// The finding was closed on the argument that this is expressible, and the
+/// argument is not the same thing as it working, so it is measured here. The
+/// enforcement that stays is per client: one `MogwaiDataClient` binds one river
+/// and refuses every other subscription, because a strategy is single-instrument
+/// by settled premise and the adapter is the only layer that can see a strategy
+/// at all. What must also be true, or an account carrying two strategies has no
+/// forward test, is that a second client under the same account is a second
+/// passenger rather than a replacement.
+///
+/// The callsign is what makes that so, and it is left at its default on purpose:
+/// stating one would test the fixture. `process_callsign` mints one per process,
+/// sockets sharing a callsign coexist, and a different or absent one evicts the
+/// incumbent - so the property being measured is that two independently built
+/// clients disclose one identity while naming two rivers under one ledger. State
+/// a distinct callsign on either and the venue throws the other off, which is
+/// invisible from either client's own side.
+///
+/// The eviction rule itself is the venue's and is pinned against a real venue in
+/// `mogwai-cli`'s socket suite; this stub admits everyone, so what is assertable
+/// here is exactly what crossed the wire. That split is stated rather than left
+/// to be rediscovered: an assertion here that the second client "was not evicted"
+/// would be a claim about the stub.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a real TCP listener; run in a socket-capable environment"]
+async fn one_account_rides_two_rivers_as_two_data_clients() {
+    let state = Arc::new(StubState::default());
+    let base_url = bound_stub(Arc::clone(&state)).await;
+    let (data_tx, _data_rx) = unbounded_channel::<DataEvent>();
+    replace_data_event_sender(data_tx);
+
+    let account = AccountId::from("MOGWAI-001");
+    let mut clients = Vec::new();
+    for (client_id, symbol) in [("MOGWAI-DATA-1", "BTCUSDT"), ("MOGWAI-DATA-2", "ETHUSDT")] {
+        let mut client = MogwaiDataClient::new(
+            ClientId::from(client_id),
+            MogwaiDataClientConfig {
+                account_id: account,
+                base_url: base_url.clone(),
+                symbol: Some(symbol.to_owned()),
+                ..MogwaiDataClientConfig::default()
+            },
+        )
+        .unwrap_or_else(|err| panic!("{client_id} builds: {err}"));
+        client
+            .start()
+            .unwrap_or_else(|err| panic!("{client_id} grabs the data-event sink: {err}"));
+        client
+            .connect()
+            .await
+            .unwrap_or_else(|err| panic!("{client_id} connects: {err}"));
+        clients.push(client);
+    }
+
+    // Polled rather than read on the next line, for the reason
+    // `both_legs_disclose_one_process_callsign_on_the_upgrade` states: the
+    // request lines are written by the stub's per-connection handler tasks, so a
+    // short list means "not recorded yet" as readily as "never sent".
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let requests = loop {
+        let seen = state.ws_requests.lock().expect("ws request mutex").clone();
+        if seen.len() >= 2 || Instant::now() >= deadline {
+            break seen;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        requests.len() >= 2,
+        "both clients must have upgraded, or there is no pair to compare: {requests:?}"
+    );
+
+    let rivers: Vec<String> = requests
+        .iter()
+        .map(|line| {
+            query_value(line, "symbol")
+                .unwrap_or_else(|| panic!("every upgrade names its river: {line}"))
+        })
+        .collect();
+    assert!(
+        rivers.contains(&"BTCUSDT".to_owned()) && rivers.contains(&"ETHUSDT".to_owned()),
+        "the two clients must board two different rivers, saw {rivers:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|line| query_value(line, "account").as_deref() == Some("MOGWAI-001")),
+        "both rivers are ridden under the one ledger the orders land on: {requests:?}"
+    );
+    let callsigns: Vec<String> = requests
+        .iter()
+        .map(|line| {
+            callsign_query_value(line)
+                .unwrap_or_else(|| panic!("every upgrade discloses a callsign: {line}"))
+        })
+        .collect();
+    let first = &callsigns[0];
+    assert!(
+        callsigns.iter().all(|callsign| callsign == first),
+        "two clients of one process present one identity, or the venue evicts one with \
+         the other and the account rides one river after all: {callsigns:?}"
+    );
+
+    drop(clients);
+}
+
+/// Reads one `/ws` query parameter out of a recorded request line, exact on the
+/// key. The sibling of `callsign_query_value`, and exact for the same reason: a
+/// future parameter whose name merely contains this one must not stand in for
+/// it.
+fn query_value(request_line: &str, key: &str) -> Option<String> {
+    request_line
+        .split_whitespace()
+        .nth(1)?
+        .split_once('?')?
+        .1
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| value.to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 /// Reads `callsign=` out of a recorded `/ws` request line. Deliberately exact on
 /// the key rather than a substring search for the word: a future query
 /// parameter merely containing it must not stand in for the disclosure.

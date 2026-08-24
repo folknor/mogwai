@@ -231,10 +231,22 @@ impl GeneratorArm {
 /// a different river. View changes ride the passenger and leave the river
 /// shareable, which is what keeps one generated tape serving many consumers.
 ///
-/// Transport havoc was once thought to need an account or connection scope of
-/// its own. Under this rule it needs none: it is passenger-local by
-/// construction, the same family as the fill fanout, and both are closed with
-/// the passenger rather than with a second mechanism.
+/// Scope is per variant, not per family, and the control plane is where it is
+/// decided: `arm_divergence` passes the request's `account` through for the four
+/// transport arms - `DelayAcks`, `CommandLatency`, `GoDark`, `StallData` - which
+/// blur one account's view of the venue and must not black out a whole batch on
+/// a shared exchange. The engine arms and `FeeSurcharge` are recorded against
+/// the run whatever the request named, because they are statements about the
+/// venue's matching and its fees rather than about one trader's connection, and
+/// recording them on the run is what makes a ledger opened later carry them too.
+/// `CancelOpenOrderSilently` is scoped by the account holding the order, since
+/// client order ids are unique within a book and not across the venue's.
+/// `FaultTape` refuses an account scope outright.
+///
+/// An earlier reading here said transport havoc needed no scope at all, being
+/// passenger-local by construction. That was true of a one-account venue and
+/// stopped being true when a run started carrying tens of ledgers; the venue and
+/// `docs/havoc.md` both describe the per-account routing above.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Divergence {

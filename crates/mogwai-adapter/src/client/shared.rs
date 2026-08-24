@@ -628,17 +628,47 @@ pub(crate) fn now_unix_nanos(sim: SimClock) -> UnixNanos {
 ///
 /// Wall time, never sim-scaled: synthesis and the websocket upgrade are host
 /// work, and an accelerated clock does not make them finish sooner.
+/// How long `wait_connected` will sit on the connection notification before
+/// re-reading the flag anyway. See the loop for why a notifier still wants a
+/// backstop; it is deliberately far coarser than the 10 ms poll it replaced.
+const NOTIFY_BACKSTOP: Duration = Duration::from_millis(250);
+
 pub(crate) async fn wait_connected(
     connected: &Arc<AtomicBool>,
+    notify: &Arc<tokio::sync::Notify>,
     ws_url: &str,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if connected.load(Ordering::Relaxed) {
-            return Ok(());
+    let wait = async {
+        loop {
+            // Register before checking the flag, so a notification published
+            // between the load and the await cannot be lost. `enable` is what
+            // makes the registration happen here rather than at first poll.
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if connected.load(Ordering::Relaxed) {
+                return;
+            }
+            // Bounded, and the bound is a backstop rather than a poll interval.
+            // The notification is what wakes this on the normal path - that is
+            // the whole reason it replaced a 10 ms sleep loop, which spent
+            // roughly five hundred wakeups on a slow boot. What the bound buys
+            // is that the flag has exactly one publisher today
+            // (`run_ws_connection_inner`, which stores and notifies in adjacent
+            // statements) and nothing makes it stay that way: a future store
+            // that forgets to notify wedges this until `timeout` expires and
+            // fails a connect that had already succeeded. That is not
+            // hypothetical - deleting the `notify_waiters` call is how this
+            // wait was bite-checked, and every socket test hung rather than
+            // failing on anything that named the cause. Re-reading the flag a
+            // few times a second costs nothing measurable and turns that class
+            // of mistake into a late connect instead of a dead client.
+            drop(tokio::time::timeout(NOTIFY_BACKSTOP, notified).await);
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    if tokio::time::timeout(timeout, wait).await.is_ok() {
+        return Ok(());
     }
     anyhow::bail!(
         "connect websocket {ws_url} timed out after {secs}s; a venue synthesizing a cold river \

@@ -244,6 +244,7 @@ pub(crate) struct WsConnectionConfig {
     pub(crate) conn: ConnHavoc,
     pub(crate) seed: Option<u64>,
     pub(crate) connected: Arc<AtomicBool>,
+    pub(crate) connected_notify: Arc<tokio::sync::Notify>,
     pub(crate) sim: SimClock,
     /// Names this socket in the connection-lifecycle log lines ("data" /
     /// "exec"). A venue outage hits both sockets concurrently, so without the
@@ -473,6 +474,7 @@ async fn run_ws_connection_inner<
         conn,
         seed,
         connected,
+        connected_notify,
         sim,
         label,
         identity,
@@ -604,6 +606,7 @@ async fn run_ws_connection_inner<
         // uses - so unproven connect/teardown cycles keep walking the
         // exponential ladder toward the cap.
         connected.store(true, Ordering::Relaxed);
+        connected_notify.notify_waiters();
         let (mut writer, mut reader) = ws.split();
         let (out_tx, mut out_rx) = unbounded_channel::<(u64, Message)>();
         // The receipt book for commands accepted onto `out_tx` and not yet on
@@ -1572,6 +1575,7 @@ mod tests {
                 conn,
                 seed: Some(1),
                 connected: Arc::new(AtomicBool::new(false)),
+                connected_notify: Arc::new(tokio::sync::Notify::new()),
                 sim: SimClock::identity(),
                 label: "test",
                 identity: None,

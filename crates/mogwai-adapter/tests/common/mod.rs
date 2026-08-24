@@ -747,14 +747,72 @@ async fn handle_connection(stream: &mut TcpStream, state: Arc<StubState>) {
         }
     } else if path.starts_with("/control/divergence") {
         state.control_hits.fetch_add(1, Ordering::Relaxed);
+        let raw = String::from_utf8_lossy(&body).to_string();
         state
             .control_bodies
             .lock()
             .expect("control bodies mutex")
-            .push(String::from_utf8_lossy(&body).to_string());
-        respond_json(stream, "202 Accepted", "").await;
+            .push(raw.clone());
+        let (status, answer) = divergence_answer(&raw);
+        respond_json(stream, status, &answer).await;
     } else {
         respond_json(stream, "200 OK", "[]").await;
+    }
+}
+
+/// What this stub answers one `POST /control/divergence` body with, mirroring
+/// `mogwai_venue::http::arm_divergence` rather than what a test would find
+/// convenient.
+///
+/// It used to answer `202 Accepted` to every request, whatever was in the body,
+/// and that is the double-diverging-from-the-endpoint shape `test-doctrine.md`
+/// names: a test built on it proves the adapter can encode a request, never that
+/// the venue would take it. It cost this suite a live one. A round of the bug
+/// loop added `CancelOpenOrderSilently` to a connect-time `HavocSpec` and the
+/// coverage read as real, but that arm is an immediate book action - during
+/// `connect()` nothing is resting yet, so a real venue answers `404 unknown
+/// order` and the adapter's `ensure!` on the status turns it into a failed
+/// connect. The blanket `202` hid a configuration that cannot work.
+///
+/// What is modelled, and it is the venue's own ordering: a body that is not a
+/// JSON object, or that names no `kind`, is a `400`; a malformed `account` is a
+/// `400`; `FaultTape` carrying an account scope is a `400`; and
+/// `CancelOpenOrderSilently` is a `404`, because this stub holds no book and an
+/// id that rests nowhere is exactly what the venue refuses. Everything else is
+/// `202` with the venue's own accepted body.
+///
+/// What is not modelled, stated so the next reader does not mistake this for the
+/// venue: the divergence payloads themselves are not range-validated (the venue
+/// runs `validate_divergence` and answers `400`), and nothing here has a ledger,
+/// so no arm has an effect to observe. A test that needs either wants a real
+/// venue, which this crate cannot spawn - the venue binary lives behind
+/// `mogwai-cli`'s `CARGO_BIN_EXE_mogwai`.
+pub fn divergence_answer(raw: &str) -> (&'static str, String) {
+    let refused = |reason: &str| serde_json::json!({ "error": reason }).to_string();
+    let Ok(serde_json::Value::Object(request)) = serde_json::from_str::<serde_json::Value>(raw)
+    else {
+        return ("400 Bad Request", refused("divergence: malformed request"));
+    };
+    let Some(kind) = request.get("kind").and_then(serde_json::Value::as_str) else {
+        return ("400 Bad Request", refused("divergence: missing kind"));
+    };
+    let account = request.get("account").and_then(serde_json::Value::as_str);
+    if let Some(account) = account
+        && let Err(err) = mogwai_protocol::AccountId::parse(account)
+    {
+        return ("400 Bad Request", refused(&format!("account: {err}")));
+    }
+    match kind {
+        "FaultTape" if account.is_some() => (
+            "400 Bad Request",
+            refused("FaultTape takes down the whole venue and cannot be scoped to one account"),
+        ),
+        "CancelOpenOrderSilently" => ("404 Not Found", refused("unknown order")),
+        _ => (
+            "202 Accepted",
+            serde_json::json!({ "status": "accepted", "detail": null, "evicted": null })
+                .to_string(),
+        ),
     }
 }
 

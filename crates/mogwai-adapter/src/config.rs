@@ -5,7 +5,7 @@ use std::any::Any;
 
 use anyhow::ensure;
 use mogwai_protocol::{
-    HavocSpec, validate_conn_havoc, validate_divergence, validate_inbound_havoc,
+    HavocSpec, control, validate_conn_havoc, validate_divergence, validate_inbound_havoc,
 };
 use nautilus_common::factories::ClientConfig;
 use nautilus_model::{
@@ -659,6 +659,36 @@ fn validate_havoc(havoc: &Option<HavocSpec>) -> anyhow::Result<()> {
         validate_conn_havoc(&havoc.conn).map_err(anyhow::Error::msg)?;
         for divergence in &havoc.venue {
             validate_divergence(divergence).map_err(anyhow::Error::msg)?;
+            // `havoc.venue` has exactly one carrier: `ship_venue_havoc` posts
+            // every entry once, from inside `connect()`. That is fine for an
+            // arm, which waits for a trigger, and impossible for an immediate
+            // book action. `CancelOpenOrderSilently` cancels a resting order the
+            // moment it is posted, and at connect this client has submitted
+            // nothing - so the venue finds no such order, answers `404 unknown
+            // order` by design, and the shipping loop's status check turns that
+            // into a failed connect. Every run configured this way dies on
+            // boot, for a reason whose message names an order id rather than the
+            // configuration that could never have worked.
+            //
+            // Refused here rather than tolerated in the shipper, because the
+            // alternatives are both worse: swallowing the 404 would arm nothing
+            // and say nothing, and deferring the post to the first resting order
+            // would invent a trigger the divergence does not have. A scenario
+            // that wants this arm posts it to `/control/divergence` itself, once
+            // the order it names is on the book.
+            //
+            // Not in `validate_divergence`: that is the shared protocol check,
+            // and the venue's own control plane serves this arm perfectly well.
+            // What cannot carry it is this config field.
+            if let control::Divergence::CancelOpenOrderSilently { client_order_id } = divergence {
+                anyhow::bail!(
+                    "havoc.venue cannot carry CancelOpenOrderSilently (order {client_order_id}): \
+                     it is an immediate cancel of a resting order, and this list is posted during \
+                     connect, before this client has submitted anything - the venue would refuse \
+                     it as an unknown order and the connect would fail. Post it to \
+                     /control/divergence once the order is resting."
+                );
+            }
         }
     }
     Ok(())
@@ -831,6 +861,69 @@ mod tests {
                 .to_string()
                 .contains("carried directly")
         );
+    }
+
+    /// `havoc.venue` refuses the one arm its carrier cannot deliver, and takes
+    /// the ones it can.
+    ///
+    /// The negative half is the finding: a `CancelOpenOrderSilently` here is
+    /// posted during `connect()`, before this client has submitted anything, so
+    /// the venue answers `404 unknown order` and the connect fails. It read as
+    /// working coverage for a round because the adapter's socket stub answered
+    /// `202` to every control body regardless - which is why the stub now serves
+    /// the venue's refusals and why this check lives at config time, where the
+    /// message can name the configuration instead of an order id.
+    ///
+    /// The positive half is not decoration. A refusal written as a blanket "no
+    /// venue arm may be an immediate action" would take the four transport
+    /// windows and both engine one-shots with it and still pass a
+    /// negative-only test, so the arms that must keep working are asserted
+    /// beside the one that must not.
+    #[test]
+    fn havoc_venue_refuses_a_connect_time_silent_cancel() {
+        let with_venue = |venue: Vec<control::Divergence>| MogwaiExecClientConfig {
+            base_url: "ws://127.0.0.1:1".into(),
+            havoc: Some(HavocSpec {
+                venue,
+                ..HavocSpec::default()
+            }),
+            ..MogwaiExecClientConfig::default()
+        };
+
+        let refusal = with_venue(vec![control::Divergence::CancelOpenOrderSilently {
+            client_order_id: mogwai_protocol::ClientOrderId::from("cancel-me"),
+        }])
+        .validate()
+        .expect_err("an immediate book action cannot ride the connect-time list")
+        .to_string();
+        assert!(
+            refusal.contains("CancelOpenOrderSilently") && refusal.contains("cancel-me"),
+            "the refusal must name the arm and the order it was written for: {refusal}"
+        );
+        assert!(
+            refusal.contains("/control/divergence"),
+            "the refusal must name the carrier that does serve this arm: {refusal}"
+        );
+
+        with_venue(vec![
+            control::Divergence::GoDark { ms: 250 },
+            control::Divergence::DelayAcks { ms: 10 },
+            control::Divergence::StallData { ms: 10 },
+            control::Divergence::CommandLatency {
+                submit_act_ms: 1,
+                modify_act_ms: 0,
+                cancel_act_ms: 0,
+                submit_ack_ms: 0,
+                modify_ack_ms: 0,
+                cancel_ack_ms: 0,
+            },
+            control::Divergence::RejectNextSubmit {
+                reason: "nope".into(),
+            },
+            control::Divergence::DropNextAccountUpdate,
+        ])
+        .validate()
+        .expect("every arm the connect-time carrier can deliver stays legal");
     }
 
     #[test]

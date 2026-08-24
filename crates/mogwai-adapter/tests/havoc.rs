@@ -332,14 +332,79 @@ async fn submit_stop_exec_client(
     (client, sink_rx)
 }
 
+/// The control-plane stub answers as `mogwai_venue::http::arm_divergence` does,
+/// on the cases the tests in these four binaries rest on.
+///
+/// This pins the double, not the adapter, and it is here because the seam is
+/// where a whole suite goes confidently wrong at once. The stub answered `202
+/// Accepted` to every control body whatever was in it, which made "the adapter
+/// posted this and the venue took it" unfalsifiable - and it cost exactly that:
+/// a connect-time `CancelOpenOrderSilently` looked like new coverage while a
+/// real venue would have answered `404` and failed the connect.
+///
+/// Binds no socket, so it is not `#[ignore]`d like its neighbours: the answer is
+/// a pure function of the request body and that is the point of having split it
+/// out.
+#[test]
+fn the_control_stub_refuses_what_the_venue_refuses() {
+    let status = |raw: &str| common::divergence_answer(raw).0;
+    assert_eq!(
+        status(r#"{"kind":"GoDark","args":{"ms":10},"account":"MOGWAI-001"}"#),
+        "202 Accepted"
+    );
+    assert_eq!(
+        status(r#"{"kind":"DropNextAccountUpdate","args":{}}"#),
+        "202 Accepted"
+    );
+    // The one that matters: no order rests here, and an id that rests nowhere is
+    // what the venue refuses. A stub that took this is a stub that certifies a
+    // configuration which cannot connect.
+    assert_eq!(
+        status(r#"{"kind":"CancelOpenOrderSilently","args":{"client_order_id":"cancel-me"}}"#),
+        "404 Not Found"
+    );
+    assert_eq!(
+        status(r#"{"kind":"FaultTape","args":{},"account":"MOGWAI-001"}"#),
+        "400 Bad Request",
+        "FaultTape takes the venue down and cannot be scoped to one ledger"
+    );
+    assert_eq!(
+        status(r#"{"kind":"GoDark","args":{"ms":10},"account":"not an id"}"#),
+        "400 Bad Request",
+        "an account the venue cannot parse is refused, never armed at nothing"
+    );
+    assert_eq!(status("not json at all"), "400 Bad Request");
+    assert_eq!(status(r#"{"args":{}}"#), "400 Bad Request");
+    // The accepted body is the venue's, so a caller reading `status` off the ack
+    // is reading the same field either side of the seam.
+    let (_, accepted) = common::divergence_answer(r#"{"kind":"DuplicateNextFill","args":{}}"#);
+    let ack: serde_json::Value = serde_json::from_str(&accepted).expect("the ack is JSON");
+    assert_eq!(
+        ack.get("status").and_then(serde_json::Value::as_str),
+        Some("accepted")
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a real TCP listener; run in a socket-capable environment"]
 async fn ships_venue_havoc() {
     let state = Arc::new(StubState::default());
     let base_url = bound_stub(Arc::clone(&state)).await;
-    // Engine-side single-shots only: this spec rides HTTP transport profiles
-    // below, and validate() now refuses a venue temporal window (GoDark,
-    // DelayAcks, StallData under polling) the chosen carrier cannot deliver.
+    // Two engine one-shots and one transport window, chosen so the per-arm
+    // account scoping below has both sides to compare. `GoDark` is routed to
+    // the request's account by `arm_divergence`; the two engine arms are
+    // recorded on the run whatever the request names, so the adapter sends them
+    // no account at all rather than a field their reader discards.
+    //
+    // What is deliberately absent is `CancelOpenOrderSilently`, and it is worth
+    // a sentence because a round of the bug loop put it here. It is an immediate
+    // cancel of a resting order, this list is posted from inside `connect()`,
+    // and at connect this client has submitted nothing - so the venue answers
+    // `404 unknown order` and the connect fails. `validate_havoc` now refuses it
+    // at config time and `havoc_venue_refuses_a_connect_time_silent_cancel`
+    // pins that; the stub, which used to answer `202` to every control body and
+    // so made the whole thing look like working coverage, now answers as the
+    // venue does.
     let havoc = HavocSpec {
         inbound: InboundHavoc::default(),
         venue: vec![
@@ -347,6 +412,7 @@ async fn ships_venue_havoc() {
                 reason: "nope".into(),
             },
             Divergence::DropNextAccountUpdate,
+            Divergence::GoDark { ms: 250 },
         ],
         data: None,
         conn: ConnHavoc::default(),
@@ -384,12 +450,57 @@ async fn ships_venue_havoc() {
         .await
         .expect("exec connect ships havoc");
 
-    assert_eq!(state.control_hits.load(Ordering::Relaxed), 2);
+    assert_eq!(state.control_hits.load(Ordering::Relaxed), 3);
     // The control bodies must round-trip the actual payload values, not merely
     // contain the type-name: a serialization bug shipping an empty reason or the
     // wrong duration would pass a substring-only check.
     {
         let bodies = state.control_bodies.lock().expect("control bodies mutex");
+        // The account scope, asserted per kind rather than over all three. A
+        // blanket "every body names the ledger" reads stronger and is weaker:
+        // the venue routes only the transport arms to the named account and
+        // passes `None` for the engine ones, so asserting the field everywhere
+        // would pin the adapter to sending a scope its reader discards - and
+        // would go green whether or not the arm that genuinely needs one has it.
+        let scoped: Vec<(String, Option<String>)> = bodies
+            .iter()
+            .map(|body| {
+                let request: serde_json::Value =
+                    serde_json::from_str(body).expect("control request");
+                (
+                    request
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .expect("every control request names a kind")
+                        .to_owned(),
+                    request
+                        .get("account")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                )
+            })
+            .collect();
+        let account_of = |kind: &str| {
+            scoped
+                .iter()
+                .find(|(seen, _)| seen == kind)
+                .unwrap_or_else(|| panic!("{kind} was never posted: {scoped:?}"))
+                .1
+                .clone()
+        };
+        assert_eq!(
+            account_of("GoDark"),
+            Some("MOGWAI-001".to_owned()),
+            "a transport window is routed to the account it names, so an unscoped one \
+             blacks out every ledger on a shared venue rather than this strategy"
+        );
+        assert_eq!(
+            account_of("RejectNextSubmit"),
+            None,
+            "an engine arm is recorded on the run whatever the request names, so sending \
+             an account states a scope the venue discards"
+        );
+        assert_eq!(account_of("DropNextAccountUpdate"), None);
         let reject: Vec<Divergence> = bodies
             .iter()
             .filter_map(|body| {
@@ -438,18 +549,18 @@ async fn ships_venue_havoc() {
     // the stub's handler tasks, so an immediate read cannot distinguish "the
     // data client shipped nothing" from "the data client's POST has not landed
     // yet" - a regression shipping divergences asynchronously would pass. The
-    // assertion is that the count stays at 2 for a window, which is the same
+    // assertion is that the count stays at 3 for a window, which is the same
     // discipline `an_order_list_reaches_the_wire_as_linked_legs` uses.
     let deadline = Instant::now() + Duration::from_millis(400);
     while Instant::now() < deadline {
         assert_eq!(
             state.control_hits.load(Ordering::Relaxed),
-            2,
+            3,
             "the data client must never ship divergences; only the exec leg arms the venue"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(state.control_hits.load(Ordering::Relaxed), 2);
+    assert_eq!(state.control_hits.load(Ordering::Relaxed), 3);
 }
 
 #[tokio::test(flavor = "current_thread")]

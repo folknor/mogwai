@@ -8,7 +8,7 @@ use mogwai_protocol::{
     AggressorSide as MogwaiAggressorSide, InstrumentClass, InstrumentDef, Side, WireAssetClass,
     WireOrderStatus,
 };
-use nautilus_core::UnixNanos;
+use nautilus_core::{Params, UnixNanos};
 use nautilus_model::{
     data::{QuoteTick as NautilusQuoteTick, TradeTick as NautilusTradeTick},
     enums::{
@@ -441,9 +441,28 @@ pub(crate) fn instrument_any(
         // A share is `Equity`, not a currency pair. Nautilus carries the type,
         // so the venue's distinction survives the seam rather than being
         // flattened back into "base over quote" at the last step.
-        InstrumentClass::Equity { currency, .. } => {
+        InstrumentClass::Equity {
+            currency,
+            lot_size,
+            borrowable,
+            settlement_ns,
+            ..
+        } => {
             let currency = Currency::from_str(currency)
                 .with_context(|| format!("unknown equity currency {currency}"))?;
+            // Nautilus has a first-class round-lot field, but no canonical
+            // borrow or settlement-period fields. Preserve those venue facts
+            // in the instrument's public metadata instead of erasing them at
+            // the adapter seam. Decimal values stay strings so no precision is
+            // lost through JSON's numeric representation.
+            let mut info = Params::new();
+            info.insert(
+                "mogwai_borrowable".into(),
+                borrowable.map_or(serde_json::Value::Null, |value| {
+                    serde_json::Value::String(value.to_string())
+                }),
+            );
+            info.insert("mogwai_settlement_ns".into(), (*settlement_ns).into());
             let equity = nautilus_model::instruments::Equity::new_checked(
                 id,
                 symbol,
@@ -451,7 +470,7 @@ pub(crate) fn instrument_any(
                 currency,
                 def.price_precision,
                 price(def.price_increment, def.price_precision)?,
-                Some(quantity(def.size_increment, def.size_precision)?),
+                Some(quantity(*lot_size, lot_size.scale() as u8)?),
                 None,
                 None,
                 None,
@@ -461,7 +480,7 @@ pub(crate) fn instrument_any(
                 None,
                 None,
                 None,
-                None,
+                Some(info),
                 UnixNanos::from(0),
                 ts_init,
             )
@@ -644,6 +663,37 @@ mod tests {
         };
         let error = instrument_any(&def, UnixNanos::from(7)).unwrap_err();
         assert!(error.to_string().contains("whole-contract sizing"));
+    }
+
+    #[test]
+    fn equity_conversion_preserves_venue_terms() {
+        let def = InstrumentDef {
+            symbol: "AAPL".into(),
+            class: InstrumentClass::Equity {
+                currency: "USD".into(),
+                multiplier: Decimal::ONE,
+                lot_size: Decimal::from(100),
+                borrowable: Some(Decimal::new(125, 1)),
+                settlement_ns: 172_800_000_000_000,
+            },
+            price_precision: 2,
+            size_precision: 0,
+            price_increment: Decimal::new(1, 2),
+            size_increment: Decimal::ONE,
+        };
+
+        let InstrumentAny::Equity(equity) =
+            instrument_any(&def, UnixNanos::from(7)).expect("equity converts")
+        else {
+            panic!("equity definition converted to another instrument class");
+        };
+        assert_eq!(equity.lot_size, Some(Quantity::from(100)));
+        let info = equity.info.expect("mogwai equity terms stay attached");
+        assert_eq!(info.get_str("mogwai_borrowable"), Some("12.5"));
+        assert_eq!(
+            info.get_u64("mogwai_settlement_ns"),
+            Some(172_800_000_000_000)
+        );
     }
 
     #[test]

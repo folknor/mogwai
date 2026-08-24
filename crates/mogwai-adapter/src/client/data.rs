@@ -67,6 +67,7 @@ pub struct MogwaiDataClient {
     client_id: ClientId,
     config: MogwaiDataClientConfig,
     connected: Arc<AtomicBool>,
+    connected_notify: Arc<tokio::sync::Notify>,
     sink: Option<UnboundedSender<DataEvent>>,
     http: HttpClient,
     http_quota: HttpQuota,
@@ -143,6 +144,7 @@ impl MogwaiDataClient {
             http_quota: HttpQuota::from_conn(&conn_havoc(&config.havoc), SimClock::identity()),
             config,
             connected: Arc::new(AtomicBool::new(false)),
+            connected_notify: Arc::new(tokio::sync::Notify::new()),
             sink: None,
             http,
             sim: SimClock::identity(),
@@ -173,6 +175,7 @@ impl MogwaiDataClient {
     /// correctness property.
     fn retire_connected_flag(&mut self) {
         self.connected = Arc::new(AtomicBool::new(false));
+        self.connected_notify = Arc::new(tokio::sync::Notify::new());
     }
 
     fn subscribe_symbol(&self, symbol: Symbol, kind: SubKind) -> anyhow::Result<()> {
@@ -499,6 +502,7 @@ impl DataClient for MogwaiDataClient {
             "data",
         );
         let dial_timeout = std::time::Duration::from_secs(self.config.dial_timeout_secs);
+        let connected_notify = Arc::clone(&self.connected_notify);
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
                 WsConnectionConfig {
@@ -506,6 +510,7 @@ impl DataClient for MogwaiDataClient {
                     conn,
                     seed: inbound_havoc.seed,
                     connected,
+                    connected_notify,
                     sim,
                     label: "data",
                     identity,
@@ -578,7 +583,14 @@ impl DataClient for MogwaiDataClient {
         // `connected` flag, so a retry would spawn a second reader racing the
         // first. Abort the task and clear the stale handle and ws_cmd before
         // propagating, leaving the client cleanly disconnected for retry.
-        if let Err(err) = wait_connected(&self.connected, &ws_url, dial_timeout).await {
+        if let Err(err) = wait_connected(
+            &self.connected,
+            &self.connected_notify,
+            &ws_url,
+            dial_timeout,
+        )
+        .await
+        {
             abort_tasks(&self.task_handles);
             self.retire_connected_flag();
             return Err(err);

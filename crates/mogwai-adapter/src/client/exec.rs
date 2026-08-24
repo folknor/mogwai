@@ -190,10 +190,27 @@ fn note_account_label(state: &mogwai_protocol::AccountState, configured: Account
         );
     }
 }
+/// Posts every arm in `spec.venue` to the venue's control plane, once, at
+/// connect.
+///
+/// The account scope is per arm rather than blanket, because the venue routes
+/// per arm and a scope it does not route is accepted and ignored - the failure
+/// mode this workspace's carriers exist to prevent. `arm_divergence` passes the
+/// request's account through to `Run::arm` for exactly the four transport arms:
+/// `DelayAcks`, `CommandLatency`, `GoDark` and `StallData` blur one account's
+/// view, so on a shared venue an unscoped one blacks out the whole batch rather
+/// than this strategy. The engine arms and `FeeSurcharge` pass `None` whatever
+/// the request named - they are statements about the venue's matching and its
+/// fees, and the wire has never routed one to a single ledger - and `FaultTape`
+/// refuses an account outright with a `400`, since there is no venue left to
+/// scope. `CancelOpenOrderSilently` is the one scoped arm this carrier cannot
+/// deliver at all; `validate_havoc` refuses it at config time, so nothing here
+/// has to decide what to do with it.
 async fn ship_venue_havoc(
     http: &HttpClient,
     http_base: &str,
     spec: &HavocSpec,
+    account_id: AccountId,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
     let url = join_url(http_base, "control/divergence");
@@ -206,11 +223,25 @@ async fn ship_venue_havoc(
         let kind = encoded
             .remove("type")
             .expect("Divergence serialization carries its tag");
-        let body = serde_json::to_vec(&serde_json::json!({
+        let mut request = serde_json::json!({
             "kind": kind,
             "args": encoded,
-        }))
-        .context("encode divergence request")?;
+        });
+        // Named rather than defaulted, and the set is the one this function's
+        // doc derives from `arm_divergence`: only these four are routed to the
+        // named account, so only these four carry one. A `_` arm here would
+        // silently start scoping the next variant somebody adds, which is how a
+        // field gets sent to a reader that ignores it.
+        if matches!(
+            divergence,
+            mogwai_protocol::control::Divergence::DelayAcks { .. }
+                | mogwai_protocol::control::Divergence::CommandLatency { .. }
+                | mogwai_protocol::control::Divergence::GoDark { .. }
+                | mogwai_protocol::control::Divergence::StallData { .. }
+        ) {
+            request["account"] = serde_json::Value::String(account_id.to_string());
+        }
+        let body = serde_json::to_vec(&request).context("encode divergence request")?;
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         let response = http
@@ -238,6 +269,7 @@ pub struct MogwaiExecutionClient {
     config: MogwaiExecClientConfig,
     emitter: ExecutionEventEmitter,
     connected: Arc<AtomicBool>,
+    connected_notify: Arc<tokio::sync::Notify>,
     http: HttpClient,
     http_quota: HttpQuota,
     sim: SimClock,
@@ -288,6 +320,7 @@ impl MogwaiExecutionClient {
             config,
             emitter,
             connected: Arc::new(AtomicBool::new(false)),
+            connected_notify: Arc::new(tokio::sync::Notify::new()),
             http,
             sim: SimClock::identity(),
             ws_cmd: None,
@@ -312,6 +345,7 @@ impl MogwaiExecutionClient {
     /// correctness property.
     fn retire_connected_flag(&mut self) {
         self.connected = Arc::new(AtomicBool::new(false));
+        self.connected_notify = Arc::new(tokio::sync::Notify::new());
     }
 
     /// The status this client's reconciliation mirror currently holds for one
@@ -1078,7 +1112,14 @@ impl ExecutionClient for MogwaiExecutionClient {
             // Same scaled timeout as dispatch_order: the configured
             // conn.request_timeout_secs, not the default (AD25).
             let timeout_secs = request_timeout_secs(&self.config.havoc, sim);
-            ship_venue_havoc(&self.http, &http_base_url, havoc, timeout_secs).await?;
+            ship_venue_havoc(
+                &self.http,
+                &http_base_url,
+                havoc,
+                self.config.account_id,
+                timeout_secs,
+            )
+            .await?;
         }
         // Seed the bridge's account row before any order is worked. Pull the
         // venue's current snapshot and forward it through the same exec dispatch
@@ -1188,6 +1229,7 @@ impl ExecutionClient for MogwaiExecutionClient {
             "exec",
         );
         let dial_timeout = std::time::Duration::from_secs(self.config.dial_timeout_secs);
+        let connected_notify = Arc::clone(&self.connected_notify);
         let reader_handle = tokio::spawn(async move {
             run_ws_connection(
                 WsConnectionConfig {
@@ -1195,6 +1237,7 @@ impl ExecutionClient for MogwaiExecutionClient {
                     conn,
                     seed: inbound_havoc.seed,
                     connected,
+                    connected_notify,
                     sim,
                     label: "exec",
                     identity,
@@ -1243,7 +1286,14 @@ impl ExecutionClient for MogwaiExecutionClient {
         // See MogwaiDataClient::connect: a timed-out connect must abort the
         // just-spawned reader and clear the stale handle/ws_cmd so a retry does
         // not orphan the first task racing on the shared `connected` flag.
-        if let Err(err) = wait_connected(&self.connected, &ws_url, dial_timeout).await {
+        if let Err(err) = wait_connected(
+            &self.connected,
+            &self.connected_notify,
+            &ws_url,
+            dial_timeout,
+        )
+        .await
+        {
             abort_tasks(&self.task_handles);
             self.retire_connected_flag();
             self.ws_cmd = None;

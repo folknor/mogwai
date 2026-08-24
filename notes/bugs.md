@@ -339,24 +339,28 @@ the intake sequence is what makes a preset honest and none has been run.
 
 ---
 
+### E9. A preset cycle test written the obvious way passes vacuously
+
+Filed 2026-08-24 from round 5. The provenance check runs before the parent is
+resolved, so a preset missing `[provenance]` is refused for that reason rather
+than for the cycle it declares. The cycle guard itself is real and does refuse,
+but a fixture written the natural way never reaches it and goes green without
+testing anything - the vacuous-gate family, in a guard landed the same day.
+
+Either resolve the parent chain before validating provenance, or make the
+refusal name which check fired so a fixture cannot pass for the wrong reason.
+
+Related, and the reason an operator would not notice: the cycle detail lands in
+the anyhow context chain rather than the top line, so what is seen is "instrument
+preset X is invalid" unless the renderer walks the chain.
+
+### E10. `effective_preset_walk` does not pop its stack on an error return
+
+Filed 2026-08-24 from round 5. The frontier shape, and harmless today only
+because the stack is abandoned along with the error. It stops being harmless the
+moment the walk is reused across attempts.
+
 ## F. Adapter
-
-### F1. `MogwaiDataClient::sink` drops ticks and bars when connected but not started
-
-`sink` is an `Option` filled in `start()`, and several delivery sites are
-`if let Ok(sink) = self.sink()`, so a data client connected without being started
-drops ticks and bars with no error - the exec side's finding-1 family on the data
-leg. The symmetric guard would have to be checked against the
-`data_client_transport` binary's own start/connect orderings first.
-`get_data_event_sender()` panics rather than returning `None`, so the
-start-with-no-runner case is at least loud; it is the connect-without-start case
-that is silent.
-
-### F2. The adapter reads the wrong clock
-
-`fetch_clock` hits bare `GET /clock` with neither symbol nor speed, so every
-timestamp, havoc deadline, quota interval and backoff sits on the venue axis. The
-envelope's `boat_clock` flag has no reader in the crate.
 
 ### F3b. A cadence conflict that will never clear is indistinguishable from one that will
 
@@ -374,11 +378,6 @@ constructor that took the pair, or a shared cadence value both legs read, could
 refuse the mismatch before either socket exists. That is a public API shape
 change on `mogwai-adapter` and wants a decision, not a patch.
 
-### F4. `ship_server_havoc` serializes each divergence bare
-
-Transport arms default venue-wide instead of riding the configured account, and
-generator arms lose their symbol scope.
-
 ### F5. `for_run` discards `account_ttl_ms` and `reset_account_on_reconnect`
 
 The adapter's reconnect loop can back off past a freeze TTL blind.
@@ -390,37 +389,40 @@ operator setting `[havoc.data]` may be arming a field nothing consumes - the
 looks-armed-and-is-not shape. Wants a verdict: route it or refuse it. Verify the
 "no reader" claim before acting on it.
 
-### F7. `await_account_registered` and `wait_connected` are busy-wait shims
+### F7. `await_account_registered` is a busy-wait shim
 
-Both inside `connect()`, both polling on a 10 ms sleep, roughly 500 wakeups on a
-slow boot, and both wall time rather than sim-scaled, so under an accelerated
-clock they are the only wall-time waits in the boot path. Wall is correct for
-what they wait on - a websocket upgrade and a cache registration are host work -
-so what is left is the polling. Both want a notifier: the connected flag is the
-adapter's own and could carry a `tokio::sync::Notify` beside it, and the cache
-poll wants nautilus to signal registration. `await_account_registered` also still
-carries its own 5 s bound.
+`wait_connected` now sleeps on an adapter-owned notification, with a 250 ms
+backstop re-read of the flag and its wall-time bound unchanged. The backstop is
+not a leftover poll: bite-checking the notification by deleting
+`notify_waiters` hung every socket test for the full dial timeout rather than
+failing on anything that named the cause, so a latch with one publisher and no
+fallback was trading five hundred cheap wakeups for a wedge. The cache half
+remains: `await_account_registered` polls every 10 ms until nautilus's
+runner has consumed the forwarded account event and inserted the row, with its
+own 5 s wall bound. The pinned nautilus cache exposes no registration
+notification, and notifying when the adapter forwards the event would be too
+early: forwarding only queues it. Closing this residue needs a signal at the
+nautilus cache insertion boundary rather than another adapter-side latch.
 
-### F8. The equity conversion drops three facts
+### F12. An account named on a run-scoped arm is accepted and ignored
 
-Lot size, borrowability and settlement period all pass as `None` in `convert.rs`.
+Filed 2026-08-24 from round 6, found while establishing what F4's account
+scoping is actually worth. `arm_divergence` takes the request's `account` and
+passes it to `Run::arm` for the four transport arms and the silent cancel, and
+passes `None` for the five engine one-shots and `FeeSurcharge` whatever the
+request named. Both routings are deliberate and documented. What is not
+defensible is the answer: a request scoping a `PartialFillNext` to one ledger
+gets a `202` and arms every ledger on the venue, which is the
+accepted-and-ignored shape `ClockQuery`'s `deny_unknown_fields` exists to
+prevent one route over. On a single-account venue nothing is visible; on the
+shared exchange the north star describes, an operator perturbing one subagent
+perturbs the batch and is told it worked.
 
-### F9. The many-rivers shape is not expressible through the adapter's public API
-
-One data client binds one river and refuses every other subscription, and nothing
-presents multi-pair composition as supported.
-
-Narrowed 2026-08-24, and read the narrowing before working this. The
-one-river-per-client refusal is not the defect: a strategy is single-instrument
-by settled premise, the venue structurally cannot see a strategy at all, and the
-adapter is the only layer that can enforce the premise. The refusal is that
-enforcement and it stays.
-
-What is actually open is the account-level shape the glossary does describe: one
-account carrying several single-instrument strategies, each its own passenger on
-its own river. Whether several data clients can be driven cleanly under one
-account is the question. Do not close this by letting one client bind two
-rivers.
+The adapter no longer contributes to it - `ship_venue_havoc` sends an account
+only on the arms the venue routes by it - but the wire still accepts one from
+any other caller. The fix is a `400` naming the arm as run-scoped, and it is a
+wire change: `scripts/` posts these bodies and the standing
+`control-plane-shapes` check sends one per kind, so both move with it.
 
 ### F10. `fetch_account` id mismatch is only a cosmetic log line
 
