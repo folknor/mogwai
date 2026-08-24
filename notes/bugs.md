@@ -404,7 +404,7 @@ notification, and notifying when the adapter forwards the event would be too
 early: forwarding only queues it. Closing this residue needs a signal at the
 nautilus cache insertion boundary rather than another adapter-side latch.
 
-### F12. An account named on a run-scoped arm is accepted and ignored
+### F13. An account named on a run-scoped arm is accepted and ignored
 
 Filed 2026-08-24 from round 6, found while establishing what F4's account
 scoping is actually worth. `arm_divergence` takes the request's `account` and
@@ -423,6 +423,15 @@ only on the arms the venue routes by it - but the wire still accepts one from
 any other caller. The fix is a `400` naming the arm as run-scoped, and it is a
 wire change: `scripts/` posts these bodies and the standing
 `control-plane-shapes` check sends one per kind, so both move with it.
+
+One reading of `reference/glossary.md` bears on which fix is right, noted
+2026-08-24 by the close pass. The glossary's Divergence entry says engine arms
+"queue one-shot execution divergences on the account's own ledger" and calls
+`FeeSurcharge` an account-side arm - which on the shared exchange reads as
+per-account scoping being the end state, not merely a refusal of the field.
+If so, the `400` is the interim honesty fix and the eventual close is routing
+the request's account to that ledger's queue, the way the transport arms
+already route. Owner call which of the two this finding is asking for.
 
 ### F10. `fetch_account` id mismatch is only a cosmetic log line
 

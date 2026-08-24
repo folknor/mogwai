@@ -170,12 +170,15 @@ just the intended ones. And a pending record is retained, never guaranteed: the
 venue holds arms for a bounded number of unopened names and sheds the oldest, so
 arms posted for unrelated accounts can drop one that was already waiting.
 
-An arm does not wait for a connection, in either spelling. Naming an account
-that has not connected yet records the arm against that name, and the account's
-first ledger - whether it is minted by a socket or by the consumer's own
-`POST /accounts` - opens carrying it. Naming none records the arm on the run itself, so
-every ledger opened afterwards carries it too, engine divergences and the fee
-surcharge included. Both used to reach only the accounts that happened to exist
+An arm does not wait for a connection, in either spelling - with the lede's
+caveat that the named spelling reaches only the arms the venue routes by
+account. Naming an account that has not connected yet records a transport arm
+against that name, and the account's first ledger - whether it is minted by a
+socket or by the consumer's own `POST /accounts` - opens carrying it. Naming
+none records the arm on the run itself, so every ledger opened afterwards
+carries it too, engine divergences and the fee surcharge included - and since
+the venue records those against the run whatever the request names, naming none
+is also the only spelling that arms one for a future account. Both used to reach only the accounts that happened to exist
 at the instant of the request while answering `202` either way, so arming a
 subagent before starting it did nothing and said nothing. An `account` the venue
 cannot parse as an id is now a `400` rather than a `202` that arms nothing.

@@ -57,9 +57,9 @@ next bug hunter re-derives from scratch.
 ## The shared-exchange mode
 
 The default mode - one venue owned by one run, serving N tapes to one account at
-one placement - is complete. The optional shared-exchange mode has two axes still
-open, both removed by the one-venue-per-run rewrite and only one of them since
-undone. Neither is urgent; both modes must eventually be supported.
+one placement - is complete. The optional shared-exchange mode has one axis
+still open, removed by the one-venue-per-run rewrite and not since undone. Not
+urgent; both modes must eventually be supported.
 
 - **Named tape windows.** `SocketQuery` carries no start or end: every cursor is
   placed at the fixed `run_start_ns` origin and `duration_ms` is
@@ -81,13 +81,6 @@ undone. Neither is urgent; both modes must eventually be supported.
   and that floor must sit at or above `TAPE_ORIGIN_NS`. A window requested too
   near the tape origin cannot carry its own warmup. Better as a named refusal at
   request time than a short warmup nobody notices.
-
-- A boot symbol supplied at launch would move the transient path's funding
-  refusal to boot. Today a config funding only USDT boots happily and refuses
-  `MNQ` at first bind, because only configured shapes are funding-checked at
-  boot while presets and the fallback are merely recorded as barred. The
-  transient launcher knows its one symbol up front, so it is the one caller that
-  could be told at boot rather than at first use.
 
 ## Venue and protocol
 
@@ -113,108 +106,18 @@ undone. Neither is urgent; both modes must eventually be supported.
   would close it. A wire change nobody has asked for, and the same missing field
   as the item above.
 
-- `reject_while_closed` judges marketability against the stated price while the
-  engine judges it against the band-drawn trigger, so the two can disagree by up
-  to the fill band in either direction: an order the server admits as
-  non-marketable can be marketable to the engine and fill off the stale print the
-  guard exists to refuse, and one the server refuses can be one the engine would
-  have rested. The engine's `draw_trigger` needs the order's `band_ticks` and the
-  run's `fill_seed`, neither of which the HTTP boundary holds, so closing this
-  means asking the engine rather than re-deriving - `Engine::worst_case_leaves`
-  is the precedent shape. Affects `Market` and `MarketToLimit`.
-
-- Engine-arm application order is unordered across concurrent control requests.
-  `Run::arm` records under the passenger map lock but applies the engine half
-  after both locks drop, because the engine sits behind an async mutex, so two
-  `POST /control/divergence` requests in flight at once can land on two seated
-  ledgers in opposite orders. Unreachable in practice - the control plane is an
-  operator surface, serialized in every scenario the venue is driven from - and
-  closing it costs a second lock on a path that has never contended.
-
-- `DivergenceRequest` accepts and ignores unknown fields: serde flatten blocks
-  `deny_unknown_fields`, so the fix is structural, a kind/args request shape.
-  Related and unruled: its 202 body is empty, English prose, or prose containing
-  a Rust `{:?}` render, on the one route an automated scenario driver uses most.
-
-- `enforce_funds` is a whole account mode inferred from an empty balance map at
-  engine construction, invisible from the wire and undocumented anywhere durable.
-
-- The account-claim path in `ws.rs` leaves an abandoned ride behind, safe by a
-  reachability argument rather than a guard, where every other path releases
-  through `Drop`. The frontier family in reverse.
-
-- `BoatKey` carries no placement nonce, so boat identity across lifetimes is
-  unrepresentable: a boat placed over a river again is the same key and
-  `is_seated_on` still passes. `ws.rs`'s stale-seat hazard is held off by drop
-  ordering rather than by identity, and is the remaining consumer if a nonce is
-  ever wanted. (Withdrawn as unanswerable and recorded so it is not re-filed:
-  whether an eviction-reconnect should retire the book it takes over. It needs
-  the venue to tell a returning client from a stranger presenting the same id,
-  and a session id is self-asserted with no auth behind it.)
-
 - Refusal texts spell their bounds out instead of naming the constant.
-  `messages::validate_wire_symbol` refuses with "symbols are 1 to 32 characters"
-  while comparing against `MAX_SYMBOL_LEN`, and says characters where the check
-  is `symbol.len()` in bytes - harmless only because the arm below admits ASCII
-  alone. This one is what a client sees at the venue's front door, since order
-  entry routes through it. Four divergence texts in the same module have the
-  shape too; count at the production sites, since the module's tests carry the
-  same strings as expected values. Both refusals return `&'static str`, so fixing
-  means changing the return type or reaching for a `const` formatter, which is
-  why neither was fixed in passing.
-
-- The launcher kills one process, not a process group. `launch`'s timeout arm
-  issues `child.kill()` and does not join the readiness reader, which is what
-  makes the readiness bound unconditional. The kill closes stdout only while the
-  child holds the write end, so a `binary` naming a wrapper script that starts
-  the venue without `exec`, or a venue that ever grows a helper subprocess,
-  leaves a grandchild holding an inherited copy and strands that reader thread
-  for the life of the process. One leaked thread per timed-out launch is the
-  deliberate trade. The robust form is putting the child in its own process group
-  and `killpg`ing it, which also collects a helper the venue itself spawned, but
-  not a wrapper's grandchild that has left the group - so it narrows the hole
-  rather than closing it, and it is a real change to the launcher's process
-  model. Latent today: `mogwai serve` spawns nothing, and `docs/cli.md` states
-  the supported shape.
+  Re-verified 2026-08-24 and half of the original finding is closed:
+  `messages::validate_wire_symbol` now says bytes and a test pins the refusal
+  text against `MAX_SYMBOL_LEN`, so moving the constant fails loudly. What is
+  left is cosmetic: the bound is still spelled `32` inline on the refusal a
+  client sees at the venue's front door, and four divergence texts in the same
+  module have the shape too - count at the production sites, since the module's
+  tests carry the same strings as expected values. Both refusals return
+  `&'static str`, so fixing means changing the return type or reaching for a
+  `const` formatter, which is why neither was fixed in passing.
 
 ## Engine
-
-- An equity sell's hold hands the same held shares to every resting sell.
-  `Engine::order_hold`'s margin-equity sell arm computes `uncovered = leaves -
-  max(0, net_position)`, so a margin account holding 100 shares with two resting
-  sells of 100 posts collateral for neither, where the worst fill order leaves it
-  short 100. Admission is already safe, since `validate_submit`'s short check
-  reads `Engine::worst_case_leaves`; what is left is the hold carried between
-  acceptance and fill.
-
-  The obvious fix breaks a different invariant. `order_hold` is per-order by
-  construction: the incremental `order_holds` cache adds and removes one order's
-  entry at a time, and `reconcile_order_holds` panics on any drift from a fresh
-  fold, so any formula reading the other resting sells makes one order's hold a
-  function of the book. Closing it properly means moving the cover allocation out
-  of the per-order derivation into the aggregate, which is a redesign of the
-  cache. The report's own suggested expression does not do it either, since
-  summing `leaves - max(0, net - other_sells)` over both sells holds for 200.
-  There is a product call inside it too: what a venue should hold against a
-  covered sell that another resting sell might consume first.
-
-- `projected_qty` takes a bare `Decimal`, so an incoming order that is itself one
-  leg of an `Oco` pair is counted additively against the exclusive group it
-  belongs to. The resting book is counted correctly by
-  `Engine::worst_case_leaves` - held children contribute nothing, an exclusive
-  group contributes its max - but the `additional` argument cannot be, because
-  the caller does not pass the order. The effect is a conservative
-  over-projection in `mogwai-venue`'s optional `max_position` cap: it can refuse
-  an order the book could not actually have reached, never admit one it could.
-  Fixing it means giving `projected_qty` the `SubmitOrder` rather than a
-  `Decimal`, a signature change through `http.rs`.
-
-- `MarketToLimit` is an open engine defect documented on the wire type and
-  nowhere actionable: the fill takes the whole quantity at the order's own limit
-  with no reference to the tape, and a divergence-manufactured remainder rests
-  `Inert` - unable to fill, unable to expire, ended only by a consumer cancel.
-  `Resting::Inert`'s doc describes the mechanism and neither side points at the
-  other.
 
 - A zero-price fill is still warned about and booked by `warn_zero_px`, so a
   position can carry `mark_px == 0` if the tape produces one.
@@ -223,13 +126,6 @@ undone. Neither is urgent; both modes must eventually be supported.
   ruling, because by then the tape has already produced the print and aborting
   the serving path over it is the one thing no venue does. Open only as a
   known-covered case.
-
-- The venue-wide fee surcharge replay in `ArmRecord::open_engine` has no direct
-  assertion. It is covered only by its neighbour, the engine-queue replay,
-  biting, because `fee_surcharge_multiplier_for` is `pub(crate)` and
-  `mogwai-engine` exposes no reader outside its own crate. Closing it means
-  either a public accessor or a socket-level test that fills on a late-connecting
-  account and reads the commission.
 
 - Account valuation residue, none of it blocking:
   - One hop only. An asset is valued through an instrument quoting it directly in
@@ -241,26 +137,12 @@ undone. Neither is urgent; both modes must eventually be supported.
     payments; each needs a holding valued in a currency it is not denominated in,
     so this machinery is the part of that which now exists.
 
-- The late-boarder rule is open-coded twice with nothing shared: the fee
-  surcharge window in `mogwai-engine` and the FlowSurge branch of
-  `arm_divergence` in `mogwai-venue`.
-
-- A linkage release emits no wire frame, so a consumer watching bracket exit legs
-  waits forever. Stated only in doc comments; it is either a protocol gap to
-  close or a refusal to state on the wire.
-
 ## Instruments and account policy
 
 - Account policy and the new instrument classes, still open:
-  - Funding is paid on the fill sweeper's cadence, so a funding instant is
-    honoured on the pass that crosses it rather than at the instant itself.
   - Nothing has been fitted for equity, perpetual or inverse. A symbol configured
     as one is served the default tape wearing a different shape; the intake
     sequence is what makes a preset honest and none has been run.
-  - A footprint that never contains the policy's daily reset instant - an
-    Asia-only loop, 8pm to 3am ET, under a 17:00 ET reset - never resets the
-    daily budget, so a daily loss limit silently becomes a run-lifetime limit.
-    Flagged, not solved.
   - Not answered: whether a havoc-induced disconnect should behave differently
     from a real one. The venue armed the blackout so it knows the client is
     merely blinded, and `GoDark` is arguably toothless if the world stops while
@@ -268,22 +150,6 @@ undone. Neither is urgent; both modes must eventually be supported.
   - Open and small: whether a strategy should see its own remaining budget in
     order to size against it. It can derive peak and threshold from its own fills
     and marks, so blind trading is workable. Decide it when one asks.
-  - Recorded so the symmetry is not rediscovered: instrument presets are still
-    compile-time (`include_str!` against a fixed table in `config.rs`) and could
-    gain the runtime registration account policies have. Not a precondition of
-    anything.
-
-- Forex conventions. Leverage landed with the notional margin basis, and the 24/5
-  session `[instrument.calendar]` already expresses. Still missing: pip and point
-  conventions, and rollover or swap charged on a position held across the daily
-  boundary. Open question whether that needs a `Forex` arm on `InstrumentClass`
-  or rides `Spot` plus a margin policy.
-
-- `[balances]` and `[account_policies]` are separate tables, so no named policy
-  can state its own opening equity, which is what a funded-account programme is.
-
-- `[regime]` is run-wide, so a per-passenger generator arm has no operator
-  expression. A config-schema gap.
 
 - Owner call: should an order-list release carry a market reading? A standalone
   `MarketToLimit` takes the market, while the same type released as an order-list
@@ -439,46 +305,23 @@ undone. Neither is urgent; both modes must eventually be supported.
   re-bless of the exact-equality transcripts. The verdict and both readings are
   recorded at the emission site in `mogwai-engine`'s `commit_fill`.
 
-- `MogwaiDataClient::sink` is an `Option` filled in `start()`, and several
-  delivery sites are `if let Ok(sink) = self.sink()`, so a data client connected
-  without being started drops ticks and bars with no error - the exec side's
-  finding-1 family on the data leg. The symmetric guard would have to be checked
-  against the `data_client_transport` binary's own start/connect orderings first.
-  `get_data_event_sender()` panics rather than returning `None`, so the
-  start-with-no-runner case is at least loud; it is the connect-without-start
-  case that is silent.
+- `await_account_registered` still polls the nautilus cache every 10 ms inside
+  `connect()`, with its own 5 s wall bound. The `wait_connected` half was closed
+  2026-08-24 with an adapter-owned notification plus a 250 ms backstop re-read;
+  the cache half remains because the pinned nautilus cache exposes no
+  registration notification, and notifying when the adapter forwards the event
+  would be too early - forwarding only queues it. Closing the residue needs a
+  signal at the nautilus cache insertion boundary.
 
-- `await_account_registered` and `wait_connected` are busy-wait shims inside
-  `connect()`. Both poll on a 10 ms sleep, roughly 500 wakeups on a slow boot,
-  and both are wall time rather than sim-scaled, so under an accelerated clock
-  they are the only wall-time waits in the boot path. Wall is correct for what
-  they wait on - a websocket upgrade and a cache registration are host work - so
-  what is left is the polling. Both want a notifier: the connected flag is the
-  adapter's own and could carry a `tokio::sync::Notify` beside it, and the cache
-  poll wants nautilus to signal registration. `await_account_registered` also
-  still carries its own 5 s bound.
-
-- The adapter cannot name a speed or a duration: `ws_url` emits neither, both
-  configs carry no field for them, and the venue reads both. Related, the venue's
-  second-cadence refusal reaches the adapter as a failed upgrade retried forever
-  with backoff - a configuration error handled as a transient outage, unlike the
-  identity mismatch, which refuses terminally.
-
-- The adapter reads the wrong clock: `fetch_clock` hits bare `GET /clock` with
-  neither symbol nor speed, so every timestamp, havoc deadline, quota interval
-  and backoff sits on the venue axis. The envelope's `boat_clock` flag has no
-  reader in the crate.
-
-- The many-rivers shape is not expressible through the adapter's public API: one
-  data client binds one river and refuses every other subscription, and nothing
-  presents multi-pair composition as supported.
-
-- The equity conversion drops the three facts an equity carries: lot size,
-  borrowability and settlement period all pass as `None` in `convert.rs`.
-
-- `ship_server_havoc` serializes each divergence bare, so transport arms default
-  venue-wide instead of riding the configured account, and generator arms lose
-  their symbol scope.
+- A cadence conflict that will never clear is indistinguishable from one that
+  will. The adapter now retries the venue's second-cadence refusal, which is
+  right - the rule lifts when the incumbent passenger leaves, and the incumbent
+  need not be ours - but the one case that really is permanent, this client's
+  own two legs configured with different `speed` values, dials its cap out
+  behind a repeated `warn` line rather than failing at construction. The cheap
+  close is upstream of the dial: a constructor that takes the pair, or a shared
+  cadence value both legs read. A public API shape change on `mogwai-adapter`,
+  wanting a decision rather than a patch.
 
 - `for_run` discards `account_ttl_ms` and `reset_account_on_reconnect`, so the
   adapter's reconnect loop can back off past a freeze TTL blind.
@@ -903,8 +746,14 @@ crates.io release. Nothing here can be fixed from this tree.
 
 ## Open at broadarrow
 
-- **Owed: tell them, in one message. Nobody has.** The whole account surface
-  moved under them and several entries below are stale in their favour.
+- **Owed: tell them, in one message. Nobody has.** Three breaking changes now,
+  not two: the whole account surface moved under them, `OrderExpired` replaced
+  `OrderCanceled` for expiries, and the divergence control plane changed request
+  shape (`POST /control/divergence` now takes `{"kind": "<Tag>", "args":
+  {<fields>}}` with `account` and `symbol` beside `kind`; unknown top-level
+  fields are refused, so the old flattened body takes a `422` and arms nothing,
+  and refusals and acks are JSON objects). Several entries below are stale in
+  their favour.
   - The break: they set no `account_type`, inherit `MOGWAI-001`, POST no account,
     and have no handling for a run that ends by liquidation. Their orchestrator
     runs the shared shape, so 50 subagents inheriting `MOGWAI-001` would take

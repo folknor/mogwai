@@ -266,6 +266,13 @@ These govern how much a green anything is worth.
   boots a venue and posts a body for every divergence kind - the point being
   that it sends the thing rather than grepping for it, since the question is
   what the venue accepts and only the venue can answer that.
+- A finding transcribed from an older note is a hypothesis, not a defect: in
+  the 2026-08-24 bugs arc eleven ledger entries proved stale on contact with
+  the code, having been carried forward from notes the tree had already
+  overtaken. The rate is structural - the ledger is edited when findings are
+  filed, and the tree moves whether or not anyone edits the ledger - so verify
+  every entry at its site before fixing it, and reconcile the ledger in the
+  same commit that closes the work rather than in a later sweep.
 - The carry-forward is the artifact most likely to be skipped, because the
   agent that lands the code and the report is the last hand on both and no
   agent in the loop reads the carry-forward back. A round whose lesson is
