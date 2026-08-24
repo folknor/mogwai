@@ -26,6 +26,67 @@ does this document. Verify before fixing.
 Ordering inside a section is roughly by dependency, not by severity. Where an
 entry cannot start until another lands, it says so under Blocked by.
 
+## How much to trust an entry
+
+Eleven of the entries transcribed into this document proved stale on first
+contact with the code during the 2026-08-24 arc: already fixed, already gated, or
+describing an API that had been retired. That is roughly a quarter of what was
+transcribed, and it is the single most useful thing to know before starting.
+
+So the first move on any finding is to read the code it names and decide whether
+it still describes the tree. If it does not, correct the entry to what actually
+remains and leave the code alone. Several entries have already been narrowed once
+and say so; that does not mean they cannot be narrower again.
+
+Some entries carry an explicit instruction about how not to close them, because a
+plausible-looking fix would undo something deliberate. Those are not suggestions.
+
+## Machinery this document rests on
+
+Six rounds of fixes landed on 2026-08-24. An agent working any finding may build
+on these and must not break them:
+
+- The incremental `order_holds` cache and a fresh fold must stay in exact
+  agreement, because `reconcile_order_holds` panics on any drift.
+- The divergence request is a `kind` plus `args` shape that refuses unknown
+  fields. A post-test script check named `control-plane-shapes` boots a real venue
+  and posts a body for every divergence kind; if what the venue accepts changes,
+  that check moves in the same commit, and so do the senders in `scripts/`.
+- The closed-market guard asks the engine for a band-drawn marketability verdict
+  over every closed-session member of a group in one pass. Do not split the
+  calendar lookup from the engine query, and do not let the guard become more
+  permissive than it is.
+- The delivery-speed bound and its refusal wording live once, in
+  `mogwai_protocol::control::validate_delivery_speed`, read by both the venue
+  boatyard and the adapter validator. Follow that precedent rather than
+  duplicating a bound across crates.
+- The adapter retries a cadence conflict rather than treating it as terminal,
+  because the venue names the seated speed but never who is seated at it. The
+  refusal lifts when the last of the account's passengers leaves that river.
+- One data client binds one river and refuses any further subscription. That is
+  the single-instrument strategy premise being enforced at the only layer that
+  can see it, not a limitation to remove.
+- The adapter test stub mirrors the venue's real refusals. A stub that answers
+  success to everything makes every test built on it confidently wrong, which is
+  how one round shipped vacuous coverage.
+
+## What went wrong last time
+
+The cold review found a real correctness defect in every one of the six rounds,
+and every one had already passed a full unscoped green gate. The recurring
+shapes, worth checking your own work against:
+
+- a value assigned where it should have been accumulated;
+- a migration that left callers behind, in a layer no test imports;
+- a restructured search that stopped visiting every element it used to;
+- a conditional refusal treated as permanent;
+- a rate applied to a signed quantity that wanted a magnitude;
+- a test that passed only because its double accepted everything.
+
+A green suite is not evidence that a fix is correct. Ask what each fix does to
+its callers, and whether the invariant you are relying on is asserted anywhere at
+all.
+
 ---
 
 ## B. Engine correctness

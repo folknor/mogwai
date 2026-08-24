@@ -632,11 +632,11 @@ fn scalars_validate() {
 // closeness: an inherited correction reproduces the same product this test
 // forms, bit for bit.
 //
-// This gates the bare side only. The corrected side is composed inline in
-// `GeneratedSource::new` and lands in a private field, so no observable of it
-// is reachable from here without replaying a whole generation; a source-side
-// accessor for the composed active mean is what would let this test assert
-// the other half.
+// This gates both sides. The corrected side is composed inline in
+// `GeneratedSource::new` and lands in a private field, which once put it out
+// of reach from here without replaying a whole generation; `active_mean_s` is
+// the test-only accessor that closed that gap, and the last assertion below
+// uses it to state the corrected half as exactly as the bare half.
 #[test]
 fn the_arrival_mean_calibration_stays_off_the_integrated_frame() {
     let fp = Fingerprint::from_repo_json();

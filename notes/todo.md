@@ -169,29 +169,18 @@ urgent; both modes must eventually be supported.
 - **Generator defects inherited from the closed measure-and-fit arc.** Recorded
   2026-08-23 as a transcription from that arc's deleted documents, with the
   evidence in `notes/tape-research-v1.md`. Re-verified against the code
-  2026-08-24: of the three named, one was already repaired, one is now gated with
-  a stated residual, and one is live but was mischaracterized. Treat anything
-  else inherited from that arc with the same suspicion.
+  2026-08-24: of the three named, two are closed and one is live but was
+  mischaracterized. Treat anything else inherited from that arc with the same
+  suspicion.
 
-  Closed: the `children_mean` clamp. `begin_event` branches on
-  `children_mean * ARRIVAL_QUIET_CHILDREN_MULT <= 1.0` and switches to a
-  floor-aware solve re-deriving both active parameters from the unconditional
-  targets, selected on the base configured mean so no runtime path crosses
-  between the two arithmetics; `GeneratorScalars::validate` refuses a config
-  whose floor-branch solve is not expressible. The comment at the branch names
-  the July MNQ fit failure and the 1.44 figure. Recorded so it is not re-filed
-  from the old note.
-
-  Gated with a residual: `ARRIVAL_MEAN_CAL = 0.944` reaching the integrated
-  frame. `the_arrival_mean_calibration_stays_off_the_integrated_frame` pins the
-  integrated mean to the declared mean bit for bit, and the 2026-08-09
-  calibration amendment rests on the frame staying bare. The test states its own
-  limit: it gates the bare side only, because the corrected side is composed
-  inline in `GeneratedSource::new` into a private field. A source-side accessor
-  for the composed active mean would let the other half be asserted. Still
-  unverified, and separate from the leak: the claim that the shipped path carries
-  a 5.5 to 7.0 percent absolute-rate conflict against the observed July month. A
-  Jensen-gap explanation for it was refuted in closed form.
+  Still unverified, and all that survives of the `ARRIVAL_MEAN_CAL = 0.944`
+  half: the claim that the shipped path carries a 5.5 to 7.0 percent
+  absolute-rate conflict against the observed July month. That is a question
+  about the shipped sampling scheme's rate, not about the calibration leaking
+  into the integrated frame, which
+  `the_arrival_mean_calibration_stays_off_the_integrated_frame` now gates on
+  both sides. A Jensen-gap explanation for it was refuted in closed form, so
+  establish whether it reproduces before acting on it.
 
   Live: the calendar has no daylight rule. Not hardcoded - `utc_offset_minutes`
   is a validated calendar field and the MNQ preset declares `-300`, a CDT summer
@@ -225,7 +214,9 @@ urgent; both modes must eventually be supported.
   and `mogwai-cli`; `characterize.py`, `build_fingerprint.py`, `select_windows.py`,
   `build_cadence.py`, `run_corpus.py`, `fit_session_profile.py`,
   `check_cadence_feasible.py` and `tick_composition_ratios.py` account for the
-  rest, across doc comments, `docs/cli.md`, `AGENTS.md` and `Cargo.toml`. One is
+  rest, across doc comments, `docs/cli.md`, `crates/mogwai-venue/presets/mnq.toml`
+  and `mogwai-lab`'s `Cargo.toml`. Re-checked 2026-08-24: `AGENTS.md` is clean
+  now, the rest are not. One is
   not prose: `mogwai-lab/src/fingerprint.rs` emits the runtime error
   "analysis/cadence.json is required; run build_cadence.py first", instructing the
   user to run a script deleted in the Rust port. `scripts/retire_note_citations.py`
@@ -421,9 +412,14 @@ urgent; both modes must eventually be supported.
   later.
 
 - The abandoned-upgrade path has no socket-level test, and no client behaviour
-  found so far reaches it. `Passenger::attachments` exists for the upgrade a
-  client walks away from before `handle_socket` runs - no lane bound, no lane
-  released - pinned only by `run.rs` unit tests that drop an `Attach` directly.
+  found so far reaches it. The mechanism is no longer `Passenger::attachments`,
+  which the 2026-08-24 one-derived-registry rewrite retired: it is now `Attach`
+  in `crates/mogwai-venue/src/run.rs`, an RAII guard whose `Drop` calls
+  `ConnectionRegistry::release`, and its doc names this very case - an upgrade
+  abandoned after the 101 never reaches `handle_socket`, so a connection left
+  registered forever leaves its account never frozen, never TTL-collected and
+  swept while riding no boat. Still pinned only by `run.rs` unit tests that drop
+  an `Attach` directly.
   Sixteen connections writing a well-formed upgrade request and then resetting
   with `SO_LINGER` at zero all landed on the handled path instead: on loopback
   the venue has read the request, written the 101 and started the handler before
@@ -615,10 +611,12 @@ urgent; both modes must eventually be supported.
 - `mogwai-venue`'s HTTP route strings are inline literals with no shared registry
   against the adapter's route segments, so a renamed route breaks the pair
   silently.
-- `arrival_screen`'s `DEFAULT_MAX_JOBS` carries no comment naming the measurement
-  behind it, and `arrival_envelope_diagnostic` applies no 16-job cap at all while
-  `arrival_screen` caps its default at 16 for a measured SMT regression. Whether
-  the diagnostic should share the cap is open.
+- `arrival_envelope_diagnostic` applies no job cap at all - it takes
+  `available_parallelism` whole - while `arrival_screen` caps its default at 16
+  for a measured SMT regression past which the run gets slower rather than
+  faster. Whether the diagnostic should share the cap is open. The other half of
+  this item is closed: `DEFAULT_MAX_JOBS` now carries a comment naming the
+  measurement and citing `reference/performance.md`.
 - `MIN_WALL_REQUEST_TIMEOUT_SECS` in the adapter is flagged in its own comment as
   the tightest cap on usable sim speed. If sim speed is ever pushed hard, that
   constant is the first wall.
